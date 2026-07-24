@@ -1,0 +1,12 @@
+FORMAL DUCKDB HASH
+==================
+Algorithm: SHA256
+File: data/valuedashboard.duckdb
+Size: 1986801664 bytes
+Staged: NO (data/ excluded from allowlist)
+Purpose: Defense-in-depth evidence - pre-existing DB state before S1 baseline commit.
+
+Hash: 5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6
+Incident expected: 5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6
+Comparison: MATCH
+Computed: 2026-07-24

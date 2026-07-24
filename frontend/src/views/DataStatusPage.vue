@@ -1,0 +1,216 @@
+<script setup lang="ts">
+import { ref, onMounted } from 'vue'
+import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert } from 'naive-ui'
+import axios from 'axios'
+import type { DataQualityStatus } from '../types'
+
+interface DataSummary {
+  stock_count: number
+  price_raw_count: number
+  price_qfq_count: number
+  price_backfill?: { earliest_date: string | null; latest_date: string | null; stock_count: number; total_rows: number }
+  balance_sheet_count: number
+  balance_sheet_range?: { earliest: string | null; latest: string | null }
+  income_statement_count: number
+  cash_flow_count: number
+  indicator_snapshot_count: number
+  sw_industry_count: number
+  retry_count: number
+  missing_count: number
+  last_update: string | null
+  recent_jobs?: any[]
+  pdf_tasks?: { cnt: number; pending: number }
+  backup?: { cnt: number; latest: string | null; full_count: number }
+  readonly data_quality: DataQualityStatus
+}
+
+const summary = ref<DataSummary | null>(null)
+const loading = ref(true)
+const error = ref('')
+const retryList = ref<any[]>([])
+const missingList = ref<any[]>([])
+
+async function fetchData() {
+  loading.value = true
+  try {
+    const [sumResp, retryResp, missResp] = await Promise.all([
+      axios.get('/api/data-status/summary'),
+      axios.get('/api/data-status/retry-list'),
+      axios.get('/api/data-status/missing-list'),
+    ])
+    summary.value = sumResp.data
+    retryList.value = retryResp.data.items || []
+    missingList.value = missResp.data.items || []
+  } catch (e: any) {
+    error.value = e.message || '加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+onMounted(fetchData)
+</script>
+
+<template>
+  <div>
+    <n-space align="center" justify="space-between" style="margin-bottom: 16px;">
+      <h2 style="margin: 0;">数据状态</h2>
+      <n-button :loading="loading" @click="fetchData">刷新</n-button>
+    </n-space>
+    <n-spin :show="loading">
+      <n-alert v-if="error" type="error" title="加载失败" style="margin-bottom: 16px;">
+        {{ error }}
+      </n-alert>
+      <div v-else-if="summary">
+        <p style="color: #999; margin-bottom: 16px;">
+          最近更新: {{ summary.last_update || '尚未初始化' }}
+        </p>
+
+        <!-- 数据质量警告 -->
+        <n-alert
+          v-if="summary.data_quality.warning_codes.length > 0"
+          type="warning"
+          style="margin-bottom: 16px;"
+        >
+          <template #header>
+            数据质量警告（{{ summary.data_quality.warning_codes.length }}）
+          </template>
+          <n-space vertical :size="8">
+            <n-space align="center" :size="8">
+              <span>警告代码：</span>
+              <n-tag
+                v-for="code in summary.data_quality.warning_codes"
+                :key="code"
+                type="warning"
+                size="small"
+              >
+                {{ code }}
+              </n-tag>
+            </n-space>
+            <n-descriptions :column="2" size="small" label-placement="left" bordered>
+              <n-descriptions-item label="价格日期">
+                {{ summary.data_quality.dates.price || '—' }}
+              </n-descriptions-item>
+              <n-descriptions-item label="资产负债表最新完整期">
+                {{ summary.data_quality.dates.balance_sheet.latest_complete || '—' }}
+              </n-descriptions-item>
+              <n-descriptions-item label="利润表最新完整期">
+                {{ summary.data_quality.dates.income_statement.latest_complete || '—' }}
+              </n-descriptions-item>
+              <n-descriptions-item label="现金流量表最新完整期">
+                {{ summary.data_quality.dates.cash_flow.latest_complete || '—' }}
+              </n-descriptions-item>
+              <n-descriptions-item label="指标快照最新完整期">
+                {{ summary.data_quality.dates.indicator_snapshot.latest_complete || '—' }}
+              </n-descriptions-item>
+              <n-descriptions-item label="指标快照计算时间">
+                {{ summary.data_quality.dates.indicator_snapshot.calculated_at || '—' }}
+              </n-descriptions-item>
+            </n-descriptions>
+          </n-space>
+        </n-alert>
+
+        <!-- 覆盖统计 -->
+        <n-grid :cols="4" :x-gap="16" :y-gap="16" style="margin-bottom: 16px;">
+          <n-grid-item><n-card><n-statistic label="股票总数" :value="summary.stock_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="Raw价格覆盖" :value="summary.price_raw_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="Qfq价格覆盖" :value="summary.price_qfq_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="申万行业覆盖" :value="summary.sw_industry_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="资产负债表" :value="summary.balance_sheet_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="利润表" :value="summary.income_statement_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="现金流量表" :value="summary.cash_flow_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="指标快照" :value="summary.indicator_snapshot_count" /></n-card></n-grid-item>
+        </n-grid>
+
+        <!-- 回填状态 -->
+        <n-card title="价格回填状态" size="small" style="margin-bottom: 16px;" v-if="summary.price_backfill">
+          <n-descriptions :column="4" size="small">
+            <n-descriptions-item label="最早日期">{{ summary.price_backfill.earliest_date || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="最新日期">{{ summary.price_backfill.latest_date || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="覆盖股票">{{ summary.price_backfill.stock_count }}</n-descriptions-item>
+            <n-descriptions-item label="总行数">{{ summary.price_backfill.total_rows }}</n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+
+        <!-- 财务覆盖范围 -->
+        <n-card title="财务报表覆盖范围" size="small" style="margin-bottom: 16px;" v-if="summary.balance_sheet_range">
+          <n-descriptions :column="3" size="small">
+            <n-descriptions-item label="资产负债表">{{ summary.balance_sheet_range?.earliest }} ~ {{ summary.balance_sheet_range?.latest }}</n-descriptions-item>
+            <n-descriptions-item label="利润表">{{ summary.income_statement_count }} 只</n-descriptions-item>
+            <n-descriptions-item label="现金流量表">{{ summary.cash_flow_count }} 只</n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+
+        <!-- 任务状态 -->
+        <n-grid :cols="3" :x-gap="16" style="margin-bottom: 16px;">
+          <n-grid-item>
+            <n-card size="small">
+              <n-statistic label="待重试" :value="summary.retry_count">
+                <template #suffix><n-tag v-if="summary.retry_count > 0" type="warning" size="small">需关注</n-tag></template>
+              </n-statistic>
+            </n-card>
+          </n-grid-item>
+          <n-grid-item>
+            <n-card size="small">
+              <n-statistic label="缺失字段" :value="summary.missing_count">
+                <template #suffix><n-tag v-if="summary.missing_count > 0" type="info" size="small">记录中</n-tag></template>
+              </n-statistic>
+            </n-card>
+          </n-grid-item>
+          <n-grid-item>
+            <n-card size="small">
+              <n-statistic label="PDF失败任务" :value="summary.pdf_tasks?.pending || 0">
+                <template #suffix><n-tag v-if="(summary.pdf_tasks?.pending || 0) > 0" type="error" size="small">待处理</n-tag></template>
+              </n-statistic>
+            </n-card>
+          </n-grid-item>
+        </n-grid>
+
+        <!-- 备份摘要 -->
+        <n-card title="备份摘要" size="small" style="margin-bottom: 16px;" v-if="summary.backup">
+          <n-descriptions :column="3" size="small">
+            <n-descriptions-item label="备份总数">{{ summary.backup?.cnt || 0 }}</n-descriptions-item>
+            <n-descriptions-item label="全量备份">{{ summary.backup?.full_count || 0 }}</n-descriptions-item>
+            <n-descriptions-item label="最近备份">{{ summary.backup?.latest || '—' }}</n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+
+        <!-- 重试列表 -->
+        <n-card title="重试列表" size="small" style="margin-bottom: 16px;" v-if="retryList.length > 0">
+          <n-data-table
+            size="small"
+            striped
+            :columns="[
+              {title:'股票',key:'stock_code',width:100},
+              {title:'数据类型',key:'data_type',width:120},
+              {title:'适配器',key:'adapter',width:120},
+              {title:'错误',key:'error'},
+              {title:'重试次数',key:'retry_count',width:80},
+            ]"
+            :data="retryList"
+            :pagination="{ pageSize: 10 }"
+          />
+        </n-card>
+
+        <!-- 缺失列表 -->
+        <n-card title="缺失列表" size="small" v-if="missingList.length > 0">
+          <n-data-table
+            size="small"
+            striped
+            :columns="[
+              {title:'股票',key:'stock_code',width:100},
+              {title:'字段',key:'field_name',width:150},
+              {title:'原因码',key:'reason_code',width:120},
+            ]"
+            :data="missingList"
+            :pagination="{ pageSize: 10 }"
+          />
+        </n-card>
+
+        <n-card v-if="summary.stock_count === 0" style="margin-top: 16px;">
+          <n-empty description="尚未初始化数据。请运行: python -m app.cli.main data init" />
+        </n-card>
+      </div>
+    </n-spin>
+  </div>
+</template>

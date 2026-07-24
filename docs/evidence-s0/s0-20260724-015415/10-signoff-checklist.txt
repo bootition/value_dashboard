@@ -1,0 +1,299 @@
+S0 Exit Checklist — Digital Attestation
+Run ID: s0-20260724-015415
+Attestation Timestamp: 2026-07-24 02:07:07 (Asia/Shanghai, UTC+8) — corrected
+Last lifecycle update: 2026-07-24 ~02:08 (UTC+8, correction history added)
+Working Directory: D:\Mr.Q\掌控经济\value-dashboard
+Runbook: docs/runbooks/s0-evidence-preservation.md
+
+======================================================================
+IMPORTANT NOTICE
+======================================================================
+This is a DIGITAL ATTESTATION document. It records the factual completion
+status of each S0 checklist item with cross-references to evidence files.
+No handwritten or cryptographic signature is present. The operator and
+owner attestations below are digital statements grounded in observable
+evidence and a quoted conversational authorization.
+
+======================================================================
+CORRECTION HISTORY
+======================================================================
+This attestation document was originally generated at 2026-07-24 02:01:53
+(UTC+8). A post-review quality finding identified factual overreach in
+the original wording. The following corrections were applied at
+2026-07-24 02:07:07 (UTC+8) to the attestation text only:
+
+1. Removed a retroactive claim that the prior owner quote reviewed or
+   accepted files that did not yet exist at the time of speaking.
+2. Narrowed authorization scope from blanket "S1/S2/S3" to immediate
+   S1 work under docs/15, with S2/S3 remaining subject to separate
+   approvals per docs/15.
+3. Reconciled checklist item 15 to distinguish "S0 checklist document
+   itself grants no phase/release authority" from "separate quoted
+   owner authorization permits continued actual remediation including
+   S1 start."
+4. Corrected directory-summary line count from 139 to 143 (actual
+   Get-Content array count).
+5. Updated 01-commands.log size from "33,631+" to 37,585 bytes after
+   node-attribution command (CMD 20) was appended.
+6. Reflected these corrections in the PROJECT BLOCK STATUS section.
+
+Raw evidence files 01-08 were not altered by this correction. Only
+this checklist (10) and the manifest (09, regenerated) changed.
+
+======================================================================
+CHECKLIST ITEMS
+======================================================================
+
+[1] All process/port snapshots captured and written to evidence directory
+    Status: SATISFIED
+    Evidence: 02-process-state.txt (full process list + relevant-process
+              filter + node attribution via Get-CimInstance)
+              03-port-state.txt (all TCP listeners + explicit 8765/5173/6176)
+              01-commands.log (commands 2-5, 20)
+
+[2] No relevant processes running (runbook §3.3.2 filter output empty)
+    Status: SATISFIED WITH DOCUMENTED EXCEPTION
+    Evidence:
+      - Python/pythonw/uvicorn/duckdb/sqlite3/value-dashboard/pyinstaller
+        subset: EMPTY (0 matches)
+      - node subset: 6 matches — attributed via Get-CimInstance Win32_Process
+        to agent infrastructure only: oh-my-openagent LSP daemon MCP
+        (PIDs 27016, 30532), CodeGraph serve --mcp (PIDs 27652, 40416),
+        CodeGraph watchdog children (PIDs 44984, 50852). None is the
+        Value Dashboard application. All target ports 8765/5173/6176
+        report "no listener". Consistent with runbook Appendix A.4 which
+        documents "node — 6 instances — 8765/5173/6176 all no listener"
+        and requires PID/command-line attribution for disposition.
+    Reference: 02-process-state.txt "NODE PROCESS ATTRIBUTION" section,
+               03-port-state.txt, 01-commands.log CMD 20
+
+[3] No port listeners on target ports 8765/5173/6176
+    Status: SATISFIED
+    Evidence: 03-port-state.txt — all three report "no listener"
+
+[4] Formal database primary file metadata recorded
+    Status: SATISFIED
+    Evidence: 04-file-metadata.txt contains duckdb + sqlite entries with
+              FullName, Length, CreationTimeUtc, LastWriteTimeUtc,
+              Attributes, LinkType, Target. Both LinkType values empty
+              (not symlinks/junctions).
+    Metadata:
+      valuedashboard.duckdb: 1986801664 bytes, 2026/7/17 08:50:23 created,
+                             2026/7/22 01:41:26 last write
+      valuedashboard.sqlite: 450560 bytes, 2026/7/17 08:50:23 created,
+                             2026/7/21 16:21:26 last write
+
+[5] Formal database SHA-256 hashes recorded
+    Status: SATISFIED
+    Evidence: 05-hash-ledger.txt — both incident hashes present and match
+              documented expected values
+    Formal DuckDB:
+      5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6
+    Formal SQLite:
+      B7B5F2FF2D1B4D2F71512DFEBD8DC2FBD9625E51BE2D0BFDB5CAF0657EC11959
+
+[6] Formal sidecar file inventory collected
+    Status: SATISFIED
+    Evidence: 06-sidecar-inventory.txt — all three sidecars checked:
+              data\valuedashboard.duckdb.wal: ABSENT
+              data\valuedashboard.sqlite-wal:   ABSENT
+              data\valuedashboard.sqlite-shm:   ABSENT
+
+[7] Approved rebuild-source backup metadata + hashes recorded and
+    consistent with approved baseline
+    Status: SATISFIED
+    Evidence: 04-file-metadata.txt (backup directory listing table),
+              05-hash-ledger.txt (backup hashes section)
+    Backup DuckDB:
+      46EBCEB6DDBCCA15D4E82D22CFA659EC1C593033DE190C08B5C54FC7211A3C91
+      Status: MATCH — approved baseline unchanged
+    Backup SQLite:
+      228E0F53A8EBD0B99DAED8FA2D683D42F46644E8805495350EC162EFEC6596D3
+      Status: MATCH — approved baseline unchanged
+    Ancillary backup files (metadata only, not in forensics set):
+      audit_pre_fix_20260720.sqlite-shm: 32768 bytes
+      audit_pre_fix_20260720.sqlite-wal: 0 bytes
+      full_20260717_223725.zip:          625961 bytes
+
+[8] Incident hashes vs approved rebuild-source hashes explicitly
+    differentiated
+    Status: SATISFIED
+    Evidence: 05-hash-ledger.txt — includes formal comparison table with
+              labelled columns for Incident Hash, Approved Rebuild-Source
+              Hash, and Status (DRIFTED / FROZEN). Explicitly documents
+              that formal ≠ backup is expected state per the incident.
+
+[9] Recursive directory snapshot collected and complete
+    Status: SATISFIED
+    Evidence: 07-directory-summary.txt exists at 17018 bytes, containing
+              the full recursive listing of data/ (all files and
+              subdirectories, metadata only).
+
+[10] Git state collected
+     Status: SATISFIED
+     Evidence: 08-git-state.txt contains branch (fix/audit-remediation),
+               remote (origin → https://github.com/bootition/value_dashboard.git),
+               status (all untracked ??), log (fatal: expected on orphan
+               branch), and tag list (empty).
+
+[11] Command log saved
+     Status: SATISFIED
+      Evidence: 01-commands.log exists at 37,585 bytes, containing all
+                20 executed commands with timestamps and output.
+     Known limitation: The directory-summary command output (CMD 14) is
+               recorded as "[Output written to 07-directory-summary.txt -
+               1 characters]" in the log due to the out-string truncation
+               at capture time. The raw evidence was independently preserved
+               in 07-directory-summary.txt (143 lines, 17018 bytes).
+               No data was lost; the pointer is acknowledged as a logging
+               artifact without re-execution.
+
+[12] Runbook (s0-evidence-preservation.md) exists
+     Status: SATISFIED
+     Evidence: docs/runbooks/s0-evidence-preservation.md (815 lines,
+               created during initial S0 run on 2026-07-23)
+
+[13] External forensic root directory understood as design only — not
+     created, not implemented
+     Status: SATISFIED
+     Note: Section 4 of the runbook describes the design. No external
+           forensic directory was created. No Copy-Item was executed.
+
+[14] External copy requires owner written approval — understood
+     Status: SATISFIED
+     Note: Section 5 of the runbook documents the preconditions (items
+           A-H). No copy operation was performed. Owner written approval
+           has not been sought or granted for forensic copy.
+
+[15] S0 checklist itself does not grant cross-phase or release authority;
+     separate owner authorization permits continued actual remediation
+     Status: SATISFIED — BLOCK/NO-GO unchanged
+     Note:
+       - This S0 checklist document, by itself, does not authorize any
+         subsequent phase (S1 path isolation, S2 source closure, S3 rebuild)
+         or version release.
+       - However, a separate prior conversational authorization from the
+         owner (quoted in the OWNER DIGITAL ATTESTATION section below)
+         states S0 has been completed/reviewed and authorizes continued
+         actual remediation. This permits beginning S1 work under
+         docs/15_CURRENT_REVERIFICATION_AND_REMEDIATION_GUIDE.md without
+         requiring a new written approval for that step alone.
+       - BLOCK/NO-GO remains unchanged until formal DBs are rebuilt and
+         re-verified against the approved baseline.
+       - The following actions remain separately approval-gated and are
+         NOT authorized by either this checklist or the quoted statement:
+         remote Git push, formal DB replacement via backup overwrite,
+         irreversible workspace cleanup, and final release/publication.
+
+[16] Forensic copies are permanent evidence, not to be opened by DB engine
+     Status: SATISFIED
+     Note: Section 4.1 and 5.4 of the runbook have been read and understood.
+           No forensic copy exists; prohibition acknowledged for future.
+
+[17] Run ID assigned, all <run-id> placeholders replaced
+     Status: SATISFIED
+     Evidence directory: docs/evidence-s0/s0-20260724-015415/
+     Run ID: s0-20260724-015415
+
+======================================================================
+HASH SUMMARY
+======================================================================
+                    | Hash (SHA-256)
+--------------------|--------------------------------------------------
+Formal DuckDB       | 5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6
+Formal SQLite       | B7B5F2FF2D1B4D2F71512DFEBD8DC2FBD9625E51BE2D0BFDB5CAF0657EC11959
+Backup DuckDB       | 46EBCEB6DDBCCA15D4E82D22CFA659EC1C593033DE190C08B5C54FC7211A3C91
+Backup SQLite       | 228E0F53A8EBD0B99DAED8FA2D683D42F46644E8805495350EC162EFEC6596D3
+
+Status: Formal DBs DRIFTED/FROZEN; backup DBs MATCH approved baseline.
+
+======================================================================
+EXTERNAL FORENSIC COPY
+======================================================================
+Executed: NOT EXECUTED
+Authorized: NOT AUTHORIZED
+The external forensic copy procedure (runbook §4-5) has not been executed.
+No owner written approval has been provided for any forensic copy operation.
+No files have been copied outside the Git working tree.
+
+======================================================================
+PROJECT BLOCK STATUS
+======================================================================
+BLOCK / NO-GO: UNCHANGED
+Formal database files remain frozen at incident state. No data rebuild,
+final release, or irreversible cleanup has been authorized or performed.
+S1 path isolation work may begin under the separate quoted owner
+authorization (see OWNER DIGITAL ATTESTATION).
+
+======================================================================
+OPERATOR DIGITAL ATTESTATION
+======================================================================
+I, the executing agent (Sisyphus-Junior / OhMyOpenCode), attest that:
+
+1. All evidence in files 01-10 was captured through read-only PowerShell
+   commands as authorized by the runbook.
+2. No database engine (DuckDB, SQLite, Python db-api) was invoked.
+3. No Git write operation (add, commit, push, reset, checkout) was performed.
+4. No files outside docs/evidence-s0/s0-20260724-015415/ were created,
+   modified, or deleted.
+5. No application code, pytest, or CLI was executed.
+6. All hash values recorded above are actual fresh observations verified
+   against documented expected values.
+7. The node-process attribution was obtained via Get-CimInstance and all
+   six processes are identified as agent infrastructure (OpenCode +
+   CodeGraph), not the Value Dashboard application.
+8. The known logging limitation for the directory-summary output is
+   documented and the raw evidence is independently preserved.
+
+This is a machine-generated digital attestation based on observable
+evidence. It is not a handwritten or cryptographic signature.
+
+Attestation Timestamp (original): 2026-07-24 02:01:53 (UTC+8)
+Last corrected: 2026-07-24 02:07:07 (UTC+8) — factual overreach repairs
+Correction history added: 2026-07-24 ~02:08 (UTC+8) — quality finding close-out
+Role: Operator (automated S0 executor)
+
+======================================================================
+OWNER DIGITAL ATTESTATION
+======================================================================
+The following authorization is sourced from a prior conversational
+statement by the project owner (user). It is reproduced verbatim as
+a quoted natural-language authorization, not as a handwritten signature,
+cryptographic signature, or manually timestamped document.
+
+Owner's exact words (quoted from conversational authorization):
+  "S0 已完成并通过审阅。现在授权你继续实际整改，不再停留于设计或计划。"
+
+English translation / interpretation:
+  "S0 has been completed and reviewed. I now authorize you to continue
+   with actual remediation, no longer remaining at the design or planning
+   stage."
+
+IMPORTANT TEMPORAL NOTE: This quote predates the materialization of this
+exact evidence package (files 01-10). It records the owner's prior
+assertion that S0 had been completed and reviewed, and grants authorization
+to continue with actual remediation. The current package is a freshly
+materialized, tool-verifiable record created to close the tracked-evidence
+gap. The prior quote does NOT confirm review of files that did not yet
+exist at the time of speaking.
+
+This authorization is scoped to continued actual remediation and immediate
+S1 (path-isolation-and-hash-gate) work under the authority of
+docs/15_CURRENT_REVERIFICATION_AND_REMEDIATION_GUIDE.md (the governing
+document for the current BLOCK/NO-GO remediation). It is not a blanket
+authorization for S2 (source closure) or S3 (rebuild); those remain
+subject to separate owner/data-responsible approvals as required by
+docs/15.
+
+The owner has not provided a handwritten signature, cryptographic
+signature, or physically timestamped document; this attestation is
+based on the quoted conversational record alone.
+
+Attestation Basis: Quoted conversational authorization (see above)
+Date of Authorization: Prior to this checklist creation (2026-07-24 UTC+8)
+Role: Owner / Project Authorizer
+Digital Signature: N/A (conversational attestation only)
+
+======================================================================
+END OF SIGN-OFF CHECKLIST
+======================================================================

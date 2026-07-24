@@ -1,0 +1,1 @@
+import{i as e,n as t,r as n,t as r}from"./index-0jFLf2Fr.js";var i=n({__name:`ScreeningPage`,setup(n){return(n,i)=>(e(),t(`div`,null,[...i[0]||=[r(`h2`,null,`筛选`,-1),r(`p`,{style:{color:`#999`}},`筛选页将在 M3 里程碑实现：可视化 AND/OR 规则编辑器、基础股票池开关、结果表格。`,-1)]]))}});export{i as default};

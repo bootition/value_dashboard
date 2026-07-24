@@ -1,0 +1,1 @@
+import{_ as e,j as t,p as n,u as r}from"./runtime-core.esm-bundler-K0sMz1Pv.js";var i=e({__name:`ScreeningPage`,setup(e){return(e,i)=>(t(),n(`div`,null,[...i[0]||=[r(`h2`,null,`筛选`,-1),r(`p`,{style:{color:`#999`}},`筛选页将在 M3 里程碑实现：可视化 AND/OR 规则编辑器、基础股票池开关、结果表格。`,-1)]]))}});export{i as default};

@@ -1,0 +1,42 @@
+S0 Evidence Package Manifest
+Run ID: s0-20260724-015415
+Generated: 2026-07-24 02:17:45 (Asia/Shanghai, UTC+8)
+Working Directory: D:\Mr.Q\掌控经济\value-dashboard
+Evidence Directory: docs/evidence-s0/s0-20260724-015415/
+
+======================================================================
+FILE MANIFEST
+======================================================================
+Each entry lists the relative filename, byte length (as reported by
+Get-ChildItem), and SHA-256 hash (as reported by Get-FileHash).
+
+Note: This manifest file (09-manifest.txt) does NOT include a hash of
+itself because recursive self-hashing is undefined. To verify this file,
+compute its hash independently as:
+  Get-FileHash -LiteralPath 'docs/evidence-s0/s0-20260724-015415/09-manifest.txt' -Algorithm SHA256
+
+
+File                     Bytes SHA-256
+----                     ----- -------
+01-commands.log          37585 473450E18E848294382490D23C144F2FBE5B64B42964C682316124E987C8B849
+02-process-state.txt     27280 5D35C57AF2EE54A20F702A71C8B8931F3B8C3C9767042F016B6CC25B9B4BD9B5
+03-port-state.txt         2480 B7F60914B94D0E8E382232981AEF58623651877C4B991B842DD386BA1566EDA1
+04-file-metadata.txt      2179 2B3855518F2874D9D4F4E3DD9340A21294DC8493357055F80024C6EB07C3330A
+05-hash-ledger.txt        3568 26D4AF27247D6021FC2CF3AECC5630AD0BC9C7FAB11CB9C4B87BBDA2922AA22B
+06-sidecar-inventory.txt   751 34770B76E92927F0A34010E560287BE1C4250BE43AE75BEF61E3A6575E444A56
+07-directory-summary.txt 17018 9951E7A04E0D40CD1A1A1460B4FA931A382B187CF2401E1EDDB0AC7779DC9FF2
+08-git-state.txt          1381 7C9A3DAE88B5D4C213FDA4C60ED664845B05EC6488D68335510AE3BAEE99081E
+10-signoff-checklist.txt 15272 E392793E60E21546A83EE8D34A0A8459119697335F08D19D5F2A2CCE3F3978E7
+
+
+
+======================================================================
+HASH VERIFICATION NOTES
+======================================================================
+- All hashes in this manifest were computed fresh at manifest generation time
+  using Get-FileHash -Algorithm SHA256.
+- Formal database hashes are documented in 05-hash-ledger.txt and should be
+  cross-referenced with this manifest for evidence package integrity.
+- File 09 (this file) is excluded from its own manifest by design.
+- To verify the entire package, recompute hashes for each file and compare
+  to the values above.

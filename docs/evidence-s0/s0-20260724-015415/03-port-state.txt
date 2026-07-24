@@ -1,0 +1,64 @@
+S0 Port State Snapshot
+Run ID: s0-20260724-015415
+Timestamp: 2026-07-24 01:55:26
+Working Directory: D:\Mr.Q\掌控经济\value-dashboard
+
+========================================
+ALL TCP LISTENERS
+========================================
+
+LocalAddress LocalPort OwningProcess  State
+------------ --------- -------------  -----
+0.0.0.0            135          2020 Listen
+::                 135          2020 Listen
+192.168.12.5       139             4 Listen
+::                 445             4 Listen
+0.0.0.0            902          6188 Listen
+0.0.0.0            912          6188 Listen
+0.0.0.0           5040         13576 Listen
+::                5432          8308 Listen
+0.0.0.0           5432          8308 Listen
+::                7680         31220 Listen
+127.0.0.1         9080          6096 Listen
+0.0.0.0           9197          6124 Listen
+127.0.0.1         9996          6384 Listen
+192.168.12.5     10191          6124 Listen
+::               13688          5972 Listen
+0.0.0.0          13688          5972 Listen
+0.0.0.0          27138         23624 Listen
+127.0.0.1        27222          7808 Listen
+::1              32071         21748 Listen
+127.0.0.1        32071         21748 Listen
+192.168.12.5     32071         21748 Listen
+127.0.0.1        36058         21532 Listen
+0.0.0.0          36677         22184 Listen
+::               36699         22184 Listen
+::1              42050         20220 Listen
+::               49664          1760 Listen
+0.0.0.0          49664          1760 Listen
+::               49665          1660 Listen
+0.0.0.0          49665          1660 Listen
+0.0.0.0          49666          2592 Listen
+::               49666          2592 Listen
+0.0.0.0          49667          4092 Listen
+::               49667          4092 Listen
+0.0.0.0          49671          5524 Listen
+::               49671          5524 Listen
+0.0.0.0          49736          1732 Listen
+::               49736          1732 Listen
+127.0.0.1        52695         46036 Listen
+127.0.0.1        55040          7808 Listen
+127.0.0.1        56467         42152 Listen
+192.168.12.5     56628          7808 Listen
+0.0.0.0          56631          7808 Listen
+127.0.0.1        63451          1752 Listen
+
+
+
+========================================
+TARGET APPLICATION PORTS
+Ports checked: 8765 (app server), 5173 (Vite dev), 6176 (test runner)
+Port 8765: no listener
+Port 5173: no listener
+Port 6176: no listener
+

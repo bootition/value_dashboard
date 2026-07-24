@@ -1,0 +1,925 @@
+STAGED WHITESPACE CHECK
+=======================
+Date: 2026-07-24
+Branch: fix/audit-remediation
+Staged files: 216
+Command: git diff --cached --check
+
+Purpose: Record ALL whitespace issues in the incident snapshot.
+These are preserved as-is (historical/minified/assets) - no normalization
+before the root tag.
+
+NOTE: This evidence file itself is written in a single block to avoid
+generating new whitespace violations. Findings below are raw output.
+
+app/core/adapters/tdx_adapter.py:698: new blank line at EOF.
+app/web/static/assets/DataStatusPage-B3RsXfk1.js:37: trailing whitespace.
++ transition: 
+app/web/static/assets/DataStatusPage-B3RsXfk1.js:112: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:18: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:155: trailing whitespace.
++ visibility: hidden; 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:181: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:185: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:189: trailing whitespace.
++ grid-area: text; 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:191: trailing whitespace.
++ grid-area: mark; 
+app/web/static/assets/ScreeningPage--c5Kr9XS.js:306: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:120: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:598: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:801: trailing whitespace.
++ `),q(`active`,[X(`&::after`,` 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1022: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1159: trailing whitespace.
++ visibility: hidden; 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1185: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1189: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1193: trailing whitespace.
++ grid-area: text; 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1195: trailing whitespace.
++ grid-area: mark; 
+app/web/static/assets/ScreeningPage-BDGpSgEK.js:1310: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:74: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:82: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:252: trailing whitespace.
++ white-space: nowrap; 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:451: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:938: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1223: trailing whitespace.
++ `),q(`active`,[Z(`&::after`,` 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1444: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1581: trailing whitespace.
++ visibility: hidden; 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1607: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1611: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1615: trailing whitespace.
++ grid-area: text; 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1617: trailing whitespace.
++ grid-area: mark; 
+app/web/static/assets/ScreeningPage-CTsBsE7X.js:1732: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:95: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:490: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:693: trailing whitespace.
++ `),G(`active`,[X(`&::after`,` 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:914: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:1051: trailing whitespace.
++ visibility: hidden; 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:1077: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:1081: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:1085: trailing whitespace.
++ grid-area: text; 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:1087: trailing whitespace.
++ grid-area: mark; 
+app/web/static/assets/ScreeningPage-DPyppB8f.js:1202: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:18: trailing whitespace.
++ transition: 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:155: trailing whitespace.
++ visibility: hidden; 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:181: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:185: trailing whitespace.
++ grid-template-areas: 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:189: trailing whitespace.
++ grid-area: text; 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:191: trailing whitespace.
++ grid-area: mark; 
+app/web/static/assets/ScreeningPage-DZOgks3d.js:306: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/Scrollbar-BLF6svB1.js:135: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-top); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:136: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-top); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:137: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:138: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-top); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:140: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:141: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:142: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:143: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:151: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-left); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:152: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-left); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:153: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:154: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-left); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:156: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-right); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:157: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-right); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:158: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+app/web/static/assets/Scrollbar-BLF6svB1.js:159: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-right); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:135: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-top); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:136: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-top); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:137: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:138: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-top); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:140: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:141: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:142: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:143: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:151: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-left); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:152: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-left); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:153: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:154: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-left); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:156: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-right); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:157: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-right); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:158: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+app/web/static/assets/Scrollbar-CnuoQI0d.js:159: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-right); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:135: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-top); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:136: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-top); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:137: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:138: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-top); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:140: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:141: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:142: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:143: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:151: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-left); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:152: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-left); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:153: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:154: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-left); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:156: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-right); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:157: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-right); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:158: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+app/web/static/assets/Scrollbar-Dr44NkBa.js:159: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-right); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:135: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-top); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:136: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-top); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:137: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:138: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-top); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:140: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:141: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:142: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:143: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:151: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-left); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:152: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-left); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:153: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:154: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-left); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:156: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-right); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:157: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-right); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:158: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+app/web/static/assets/Scrollbar-XF8rxoY5.js:159: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-right); 
+app/web/static/assets/Space-BdP1JExR.js:68: trailing whitespace.
++ transition: 
+app/web/static/assets/Space-BdP1JExR.js:76: trailing whitespace.
++ transition: 
+app/web/static/assets/Space-BdP1JExR.js:246: trailing whitespace.
++ white-space: nowrap; 
+app/web/static/assets/Space-Bnx8WTH5.js:68: trailing whitespace.
++ transition: 
+app/web/static/assets/Space-Bnx8WTH5.js:76: trailing whitespace.
++ transition: 
+app/web/static/assets/Space-Bnx8WTH5.js:246: trailing whitespace.
++ white-space: nowrap; 
+app/web/static/assets/Space-wdJpCsvC.js:68: trailing whitespace.
++ transition: 
+app/web/static/assets/Space-wdJpCsvC.js:76: trailing whitespace.
++ transition: 
+app/web/static/assets/Space-wdJpCsvC.js:246: trailing whitespace.
++ white-space: nowrap; 
+app/web/static/assets/StockDetailPage-Bcd9fA8y.js:25: trailing whitespace.
++ padding: var(--n-tab-padding-vertical); 
+app/web/static/assets/StockDetailPage-Bcd9fA8y.js:125: trailing whitespace.
++ overflow-y: auto; 
+app/web/static/assets/StockDetailPage-Bcd9fA8y.js:298: trailing whitespace.
++ flex-direction: column; 
+app/web/static/assets/StockDetailPage-C6yL413u.js:98: trailing whitespace.
++ padding: var(--n-tab-padding-vertical); 
+app/web/static/assets/StockDetailPage-C6yL413u.js:198: trailing whitespace.
++ overflow-y: auto; 
+app/web/static/assets/StockDetailPage-C6yL413u.js:371: trailing whitespace.
++ flex-direction: column; 
+app/web/static/assets/StockDetailPage-CBKUEMkX.js:25: trailing whitespace.
++ padding: var(--n-tab-padding-vertical); 
+app/web/static/assets/StockDetailPage-CBKUEMkX.js:125: trailing whitespace.
++ overflow-y: auto; 
+app/web/static/assets/StockDetailPage-CBKUEMkX.js:298: trailing whitespace.
++ flex-direction: column; 
+app/web/static/assets/StockDetailPage-Dqc9fCS8.js:98: trailing whitespace.
++ padding: var(--n-tab-padding-vertical); 
+app/web/static/assets/StockDetailPage-Dqc9fCS8.js:198: trailing whitespace.
++ overflow-y: auto; 
+app/web/static/assets/StockDetailPage-Dqc9fCS8.js:371: trailing whitespace.
++ flex-direction: column; 
+app/web/static/assets/axios-BGo-glI3.js:37: trailing whitespace.
++ transition: 
+app/web/static/assets/axios-BGo-glI3.js:112: trailing whitespace.
++ transition: 
+app/web/static/assets/axios-VgfTcLKy.js:37: trailing whitespace.
++ transition: 
+app/web/static/assets/axios-VgfTcLKy.js:112: trailing whitespace.
++ transition: 
+app/web/static/assets/axios-nAMj50zR.js:37: trailing whitespace.
++ transition: 
+app/web/static/assets/axios-nAMj50zR.js:112: trailing whitespace.
++ transition: 
+app/web/static/assets/index-0jFLf2Fr.js:135: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-top); 
+app/web/static/assets/index-0jFLf2Fr.js:136: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-top); 
+app/web/static/assets/index-0jFLf2Fr.js:137: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+app/web/static/assets/index-0jFLf2Fr.js:138: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-top); 
+app/web/static/assets/index-0jFLf2Fr.js:140: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+app/web/static/assets/index-0jFLf2Fr.js:141: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+app/web/static/assets/index-0jFLf2Fr.js:142: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+app/web/static/assets/index-0jFLf2Fr.js:143: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+app/web/static/assets/index-0jFLf2Fr.js:151: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-left); 
+app/web/static/assets/index-0jFLf2Fr.js:152: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-left); 
+app/web/static/assets/index-0jFLf2Fr.js:153: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+app/web/static/assets/index-0jFLf2Fr.js:154: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-left); 
+app/web/static/assets/index-0jFLf2Fr.js:156: trailing whitespace.
++ top: var(--n-scrollbar-rail-top-vertical-right); 
+app/web/static/assets/index-0jFLf2Fr.js:157: trailing whitespace.
++ right: var(--n-scrollbar-rail-right-vertical-right); 
+app/web/static/assets/index-0jFLf2Fr.js:158: trailing whitespace.
++ bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+app/web/static/assets/index-0jFLf2Fr.js:159: trailing whitespace.
++ left: var(--n-scrollbar-rail-left-vertical-right); 
+app/web/static/assets/use-message-Cfhr2zOz.js:89: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/use-message-Cfhr2zOz.js:484: trailing whitespace.
++ transition: 
+app/web/static/assets/use-message-Cfhr2zOz.js:687: trailing whitespace.
++ `),o(`active`,[R(`&::after`,` 
+app/web/static/assets/use-message-SW4ddddD.js:89: trailing whitespace.
++ align-items: center; 
+app/web/static/assets/use-message-SW4ddddD.js:484: trailing whitespace.
++ transition: 
+app/web/static/assets/use-message-SW4ddddD.js:687: trailing whitespace.
++ `),o(`active`,[R(`&::after`,` 
+docs/05_MILESTONE_REVIEWS.md:381: trailing whitespace.
++  
+docs/05_MILESTONE_REVIEWS.md:404: trailing whitespace.
++      
+docs/05_MILESTONE_REVIEWS.md:407: trailing whitespace.
++      
+docs/05_MILESTONE_REVIEWS.md:411: trailing whitespace.
++      
+docs/05_MILESTONE_REVIEWS.md:418: trailing whitespace.
++      
+docs/11_RED_TEAM_AUDIT_V2.md:5: trailing whitespace.
++> 瀹℃煡瀵硅薄锛歚value-dashboard` 褰撳墠婧愮爜銆佸綋鍓?DuckDB/SQLite 鏁版嵁鏂囦欢鍙婄幇鏈夋祴璇曚綋绯? 
+docs/11_RED_TEAM_AUDIT_V2.md:6: trailing whitespace.
++> 璇佹嵁鏃堕棿锛?026-07-20锛孉sia/Shanghai  
+docs/11_RED_TEAM_AUDIT_V2.md:7: trailing whitespace.
++> 鎶ュ憡鎬ц川锛氬綋鍓嶇姸鎬佺粓瀹°€佹暟鎹湡瀹炴€т笌瀹屾暣鎬т笓椤硅皟鏌? 
+docs/11_RED_TEAM_AUDIT_V2.md:8: trailing whitespace.
++> 鍘嗗彶鍩虹嚎锛歔`docs/10_RED_TEAM_AUDIT.md`](10_RED_TEAM_AUDIT.md)锛?026-07-18锛? 
+docs/11_RED_TEAM_AUDIT_V2.md:212: trailing whitespace.
++**绾у埆锛歅0 / BLOCK**  
+docs/11_RED_TEAM_AUDIT_V2.md:288: trailing whitespace.
++**绾у埆锛歅0 / BLOCK**  
+docs/11_RED_TEAM_AUDIT_V2.md:337: trailing whitespace.
++**绾у埆锛歅0 / BLOCK**  
+docs/11_RED_TEAM_AUDIT_V2.md:407: trailing whitespace.
++**绾у埆锛歅0 / BLOCK**  
+docs/11_RED_TEAM_AUDIT_V2.md:462: trailing whitespace.
++**绾у埆锛歅1 / HIGH**  
+docs/11_RED_TEAM_AUDIT_V2.md:503: trailing whitespace.
++**绾у埆锛歅1 / HIGH**  
+docs/11_RED_TEAM_AUDIT_V2.md:544: trailing whitespace.
++**绾у埆锛歅1 / HIGH**  
+docs/11_RED_TEAM_AUDIT_V2.md:575: trailing whitespace.
++**绾у埆锛歅1 / HIGH**  
+docs/11_RED_TEAM_AUDIT_V2.md:615: trailing whitespace.
++**绾у埆锛歅2 / MEDIUM**  
+docs/11_RED_TEAM_AUDIT_V2.md:660: trailing whitespace.
++**绾у埆锛歅2 / MEDIUM**  
+docs/11_RED_TEAM_AUDIT_V2.md:694: trailing whitespace.
++**绾у埆锛歅2 / MEDIUM**  
+docs/11_RED_TEAM_AUDIT_V2.md:733: trailing whitespace.
++**绾у埆锛歅2 / MEDIUM**  
+docs/11_RED_TEAM_AUDIT_V2.md:776: trailing whitespace.
++**绾у埆锛歅2 / MEDIUM**  
+docs/11_RED_TEAM_AUDIT_V2.md:795: trailing whitespace.
++**绾у埆锛歅2 / MEDIUM**  
+docs/11_RED_TEAM_AUDIT_V2.md:821: trailing whitespace.
++**鐩爣**锛氭寚鏍囪绠椼€佹祴璇曞拰瀹炴椂鎶撳彇涓嶅啀鐮村潖鎴栬鍐欐寮忔暟鎹€? 
+docs/11_RED_TEAM_AUDIT_V2.md:822: trailing whitespace.
++**宸ヤ綔閲忕瓑绾?*锛歁  
+docs/11_RED_TEAM_AUDIT_V2.md:837: trailing whitespace.
++**鐩爣**锛氭秷闄ゅ３琛屻€佸崰浣嶆棩鏈熷拰浼函婧愩€? 
+docs/11_RED_TEAM_AUDIT_V2.md:838: trailing whitespace.
++**宸ヤ綔閲忕瓑绾?*锛歀  
+docs/11_RED_TEAM_AUDIT_V2.md:853: trailing whitespace.
++**鐩爣**锛氱浉鍚屽悕绉板湪 API銆丏SL銆佹暟鎹簱鍜岄〉闈腑鍏锋湁鍚屼竴璇箟銆? 
+docs/11_RED_TEAM_AUDIT_V2.md:862: trailing whitespace.
++**鐩爣**锛氭寮?SQLite 涓嶅啀娣峰叆娴嬭瘯宸ヤ欢鎴栨棤鏁堣繍琛屾€併€? 
+docs/11_RED_TEAM_AUDIT_V2.md:871: trailing whitespace.
++**鐩爣**锛氬悓绫婚棶棰樹笉鑳藉啀娆¤繘鍏ユ寮忔暟鎹€? 
+docs/11_RED_TEAM_AUDIT_V2.md:895: trailing whitespace.
++**鍥炴粴**锛氬仠姝㈣繘绋嬪悗鎭㈠鏂囦欢鍓湰銆? 
+docs/11_RED_TEAM_AUDIT_V2.md:918: trailing whitespace.
++**鍥炴粴**锛氫粠闅旂 Parquet 鎸変富閿仮澶嶃€? 
+docs/11_RED_TEAM_AUDIT_V2.md:1183: trailing whitespace.
++瀹℃煡鏃ユ湡锛?026-07-20  
+docs/11_RED_TEAM_AUDIT_V2.md:1184: trailing whitespace.
++瀹℃煡瑙掕壊锛氭暟鎹畬鏁存€х孩闃?/ 褰撳墠鐘舵€佸鏍? 
+docs/14_PRODUCTION_OPS_AUDIT.md:3: trailing whitespace.
++**鏃ユ湡:** 2026-07-22  
+docs/14_PRODUCTION_OPS_AUDIT.md:4: trailing whitespace.
++**瀹℃煡绫诲瀷:** 鍙鐢熶骇杩愮淮銆佹枃妗ｃ€佹祦绋?婧簮鍏ㄧ淮搴﹀璁? 
+docs/14_PRODUCTION_OPS_AUDIT.md:5: trailing whitespace.
++**Verdict:** **BLOCK** 鈥?涓嶅彲鐢ㄤ簬鐢熶骇閮ㄧ讲鎴栧垎鍙戠粰浠讳綍鐢ㄦ埛锛堝寘鎷釜浜烘湰鍦扮敓浜т娇鐢級  
+docs/14_PRODUCTION_OPS_AUDIT.md:6: trailing whitespace.
++**椤圭洰澹版槑鐢ㄩ€?** 涓汉鏈湴鐮旂┒宸ュ叿锛岄潪澶氱敤鎴?鍙啀鍒嗗彂浜у搧  
+docs/14_PRODUCTION_OPS_AUDIT.md:365: trailing whitespace.
++                    鈹?          
+docs/14_PRODUCTION_OPS_AUDIT.md:366: trailing whitespace.
++              褰撳墠鍦ㄨ繖閲?            
+docs/15_CURRENT_REVERIFICATION_AND_REMEDIATION_GUIDE.md:369: trailing whitespace.
++   
+docs/contracts/path-isolation-contract.md:3: trailing whitespace.
++**鏂囨。鐘舵€侊細** DRAFT / DESIGNED 鈥?璁捐绾у畾涔夛紝闈炲疄鐜帮紝闈為獙璇併€? 
+docs/contracts/path-isolation-contract.md:12: trailing whitespace.
++**闂ㄧ绛夌骇锛?* BLOCK / NO-GO 鈥?鏈悎绾︾害瀹氱殑闅旂鏈揪鎴愬墠锛屼换浣?Python 鍛戒护涓嶅緱鎵ц銆? 
+docs/contracts/path-isolation-contract.md:13: trailing whitespace.
++**绛剧讲鍓嶆彁锛?* 鎵€鏈夎€呮壒鍑?S0锛堟寮忔枃浠跺搱甯屽浐瀹氫负褰撳墠宸插亸绂荤姸鎬侊級鍜屾湰 S1 璁捐銆? 
+docs/contracts/path-isolation-contract.md:83: trailing whitespace.
++**璺緞锛?* `app/core/storage/path_policy.py`  
+docs/evidence-s0/s0-20260724-015415/01-commands.log:12: trailing whitespace.
++7     6          
+docs/evidence-s0/s0-20260724-015415/01-commands.log:390: trailing whitespace.
++LinkType         : 
+docs/evidence-s0/s0-20260724-015415/01-commands.log:391: trailing whitespace.
++Target           : 
+docs/evidence-s0/s0-20260724-015415/01-commands.log:405: trailing whitespace.
++LinkType         : 
+docs/evidence-s0/s0-20260724-015415/01-commands.log:406: trailing whitespace.
++Target           : 
+docs/evidence-s0/s0-20260724-015415/01-commands.log:417: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.duckdb     1986801664 2026/7/20 5:02:05  2026/7/20 2:23:44     Archive          
+docs/evidence-s0/s0-20260724-015415/01-commands.log:418: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite         446464 2026/7/20 5:02:07  2026/7/20 2:30:41     Archive          
+docs/evidence-s0/s0-20260724-015415/01-commands.log:419: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-shm      32768 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s0/s0-20260724-015415/01-commands.log:420: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-wal          0 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s0/s0-20260724-015415/01-commands.log:421: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\full_20260717_223725.zip              625961 2026/7/17 14:37:26 2026/7/17 14:37:26    Archive          
+docs/evidence-s0/s0-20260724-015415/01-commands.log:619: new blank line at EOF.
+docs/evidence-s0/s0-20260724-015415/03-port-state.txt:64: new blank line at EOF.
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:17: trailing whitespace.
++LinkType         : 
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:18: trailing whitespace.
++Target           : 
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:28: trailing whitespace.
++LinkType         : 
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:29: trailing whitespace.
++Target           : 
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:41: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.duckdb     1986801664 2026/7/20 5:02:05  2026/7/20 2:23:44     Archive          
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:42: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite         446464 2026/7/20 5:02:07  2026/7/20 2:30:41     Archive          
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:43: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-shm      32768 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:44: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-wal          0 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:45: trailing whitespace.
++D:\Mr.Q\鎺屾帶缁忔祹\value-dashboard\data\backup\full_20260717_223725.zip              625961 2026/7/17 14:37:26 2026/7/17 14:37:26    Archive          
+docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt:46: new blank line at EOF.
+docs/evidence-s0/s0-20260724-015415/07-directory-summary.txt:142: new blank line at EOF.
+docs/evidence-s1/baseline-commit/git-status.txt:223: new blank line at EOF.
+docs/evidence-s1/baseline-commit/staged-extensions.txt:21: new blank line at EOF.
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:22: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:24: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:26: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:28: trailing whitespace.
++VIOLATION: + visibility: hidden; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:30: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:32: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:34: trailing whitespace.
++VIOLATION: + grid-area: text; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:36: trailing whitespace.
++VIOLATION: + grid-area: mark; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:38: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:40: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:42: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:44: trailing whitespace.
++VIOLATION: + `),q(`active`,[X(`&::after`,` 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:46: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:48: trailing whitespace.
++VIOLATION: + visibility: hidden; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:50: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:52: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:54: trailing whitespace.
++VIOLATION: + grid-area: text; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:56: trailing whitespace.
++VIOLATION: + grid-area: mark; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:58: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:60: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:62: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:64: trailing whitespace.
++VIOLATION: + white-space: nowrap; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:66: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:68: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:70: trailing whitespace.
++VIOLATION: + `),q(`active`,[Z(`&::after`,` 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:72: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:74: trailing whitespace.
++VIOLATION: + visibility: hidden; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:76: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:78: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:80: trailing whitespace.
++VIOLATION: + grid-area: text; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:82: trailing whitespace.
++VIOLATION: + grid-area: mark; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:84: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:86: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:88: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:90: trailing whitespace.
++VIOLATION: + `),G(`active`,[X(`&::after`,` 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:92: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:94: trailing whitespace.
++VIOLATION: + visibility: hidden; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:96: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:98: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:100: trailing whitespace.
++VIOLATION: + grid-area: text; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:102: trailing whitespace.
++VIOLATION: + grid-area: mark; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:104: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:106: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:108: trailing whitespace.
++VIOLATION: + visibility: hidden; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:110: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:112: trailing whitespace.
++VIOLATION: + grid-template-areas: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:114: trailing whitespace.
++VIOLATION: + grid-area: text; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:116: trailing whitespace.
++VIOLATION: + grid-area: mark; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:118: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:120: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:122: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:124: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:126: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:128: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:130: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:132: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:134: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:136: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:138: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:140: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:142: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:144: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:146: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:148: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:150: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:152: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:154: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:156: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:158: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:160: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:162: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:164: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:166: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:168: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:170: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:172: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:174: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:176: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:178: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:180: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:182: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:184: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:186: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:188: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:190: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:192: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:194: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:196: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:198: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:200: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:202: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:204: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:206: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:208: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:210: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:212: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:214: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:216: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:218: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:220: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:222: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:224: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:226: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:228: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:230: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:232: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:234: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:236: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:238: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:240: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:242: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:244: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:246: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:248: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:250: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:252: trailing whitespace.
++VIOLATION: + white-space: nowrap; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:254: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:256: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:258: trailing whitespace.
++VIOLATION: + white-space: nowrap; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:260: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:262: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:264: trailing whitespace.
++VIOLATION: + white-space: nowrap; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:266: trailing whitespace.
++VIOLATION: + padding: var(--n-tab-padding-vertical); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:268: trailing whitespace.
++VIOLATION: + overflow-y: auto; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:270: trailing whitespace.
++VIOLATION: + flex-direction: column; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:272: trailing whitespace.
++VIOLATION: + padding: var(--n-tab-padding-vertical); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:274: trailing whitespace.
++VIOLATION: + overflow-y: auto; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:276: trailing whitespace.
++VIOLATION: + flex-direction: column; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:278: trailing whitespace.
++VIOLATION: + padding: var(--n-tab-padding-vertical); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:280: trailing whitespace.
++VIOLATION: + overflow-y: auto; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:282: trailing whitespace.
++VIOLATION: + flex-direction: column; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:284: trailing whitespace.
++VIOLATION: + padding: var(--n-tab-padding-vertical); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:286: trailing whitespace.
++VIOLATION: + overflow-y: auto; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:288: trailing whitespace.
++VIOLATION: + flex-direction: column; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:290: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:292: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:294: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:296: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:298: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:300: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:302: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:304: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:306: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:308: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-top); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:310: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:312: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:314: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:316: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-horizontal-bottom); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:318: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:320: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:322: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:324: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-left); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:326: trailing whitespace.
++VIOLATION: + top: var(--n-scrollbar-rail-top-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:328: trailing whitespace.
++VIOLATION: + right: var(--n-scrollbar-rail-right-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:330: trailing whitespace.
++VIOLATION: + bottom: var(--n-scrollbar-rail-bottom-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:332: trailing whitespace.
++VIOLATION: + left: var(--n-scrollbar-rail-left-vertical-right); 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:334: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:336: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:338: trailing whitespace.
++VIOLATION: + `),o(`active`,[R(`&::after`,` 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:340: trailing whitespace.
++VIOLATION: + align-items: center; 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:342: trailing whitespace.
++VIOLATION: + transition: 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:344: trailing whitespace.
++VIOLATION: + `),o(`active`,[R(`&::after`,` 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:346: trailing whitespace.
++VIOLATION: +  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:348: trailing whitespace.
++VIOLATION: +      
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:350: trailing whitespace.
++VIOLATION: +      
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:352: trailing whitespace.
++VIOLATION: +      
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:354: trailing whitespace.
++VIOLATION: +      
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:356: trailing whitespace.
++VIOLATION: +> 鐎光剝鐓＄€电钖勯敍姝歷alue-dashboard` 瑜版挸澧犲┃鎰垳閵嗕礁缍嬮崜?DuckDB/SQLite 閺佺増宓侀弬鍥︽閸欏﹦骞囬張澶嬬ゴ鐠囨洑缍嬬化? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:358: trailing whitespace.
++VIOLATION: +> 鐠囦焦宓侀弮鍫曟？閿?026-07-20閿涘瓑sia/Shanghai  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:360: trailing whitespace.
++VIOLATION: +> 閹躲儱鎲￠幀褑宸濋敍姘秼閸撳秶濮搁幀浣虹矒鐎孤扳偓浣规殶閹诡喚婀＄€圭偞鈧傜瑢鐎瑰本鏆ｉ幀褌绗撴い纭呯殶閺? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:362: trailing whitespace.
++VIOLATION: +> 閸樺棗褰堕崺铏瑰殠閿涙瓟`docs/10_RED_TEAM_AUDIT.md`](10_RED_TEAM_AUDIT.md)閿?026-07-18閿? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:364: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍0 / BLOCK**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:366: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍0 / BLOCK**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:368: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍0 / BLOCK**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:370: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍0 / BLOCK**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:372: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍1 / HIGH**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:374: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍1 / HIGH**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:376: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍1 / HIGH**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:378: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍1 / HIGH**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:380: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍2 / MEDIUM**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:382: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍2 / MEDIUM**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:384: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍2 / MEDIUM**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:386: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍2 / MEDIUM**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:388: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍2 / MEDIUM**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:390: trailing whitespace.
++VIOLATION: +**缁狙冨焼閿涙瓍2 / MEDIUM**  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:392: trailing whitespace.
++VIOLATION: +**閻╊喗鐖?*閿涙碍瀵氶弽鍥吀缁犳ぜ鈧焦绁寸拠鏇炴嫲鐎圭偞妞傞幎鎾冲絿娑撳秴鍟€閻潙娼栭幋鏍嚖閸愭瑦顒滃蹇旀殶閹诡喓鈧? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:394: trailing whitespace.
++VIOLATION: +**瀹搞儰缍旈柌蹇曠搼缁?*閿涙瓉  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:396: trailing whitespace.
++VIOLATION: +**閻╊喗鐖?*閿涙碍绉烽梽銈咃紦鐞涘被鈧礁宕版担宥嗘）閺堢喎鎷版导顏呭嚱濠ф劑鈧? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:398: trailing whitespace.
++VIOLATION: +**瀹搞儰缍旈柌蹇曠搼缁?*閿涙瓈  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:400: trailing whitespace.
++VIOLATION: +**閻╊喗鐖?*閿涙氨娴夐崥灞芥倳缁夋澘婀?API閵嗕笍SL閵嗕焦鏆熼幑顔肩氨閸滃矂銆夐棃顫厬閸忛攱婀侀崥灞肩鐠囶厺绠熼妴? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:402: trailing whitespace.
++VIOLATION: +**閻╊喗鐖?*閿涙碍顒滃?SQLite 娑撳秴鍟€濞ｅ嘲鍙嗗ù瀣槸瀹搞儰娆㈤幋鏍ㄦ￥閺佸牐绻嶇悰灞锯偓浣碘偓? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:404: trailing whitespace.
++VIOLATION: +**閻╊喗鐖?*閿涙艾鎮撶猾濠氭６妫版ü绗夐懗钘夊晙濞喡ょ箻閸忋儲顒滃蹇旀殶閹诡喓鈧? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:406: trailing whitespace.
++VIOLATION: +**閸ョ偞绮?*閿涙艾浠犲銏ｇ箻缁嬪鎮楅幁銏狀槻閺傚洣娆㈤崜顖涙拱閵? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:408: trailing whitespace.
++VIOLATION: +**閸ョ偞绮?*閿涙矮绮犻梾鏃傤瀲 Parquet 閹稿瀵岄柨顔戒划婢跺秲鈧? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:410: trailing whitespace.
++VIOLATION: +鐎光剝鐓￠弮銉︽埂閿?026-07-20  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:412: trailing whitespace.
++VIOLATION: +鐎光剝鐓＄憴鎺曞閿涙碍鏆熼幑顔肩暚閺佸瓨鈧呭闂?/ 瑜版挸澧犻悩鑸碘偓浣割槻閺? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:414: trailing whitespace.
++VIOLATION: +**閺冦儲婀?** 2026-07-22  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:416: trailing whitespace.
++VIOLATION: +**鐎光剝鐓＄猾璇茬€?** 閸欘亣顕伴悽鐔堕獓鏉╂劗娣妴浣规瀮濡楋絻鈧焦绁︾粙?濠ь垱绨崗銊ф樊鎼达箑顓哥拋? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:418: trailing whitespace.
++VIOLATION: +**Verdict:** **BLOCK** 閳?娑撳秴褰查悽銊ょ艾閻㈢喍楠囬柈銊ц閹存牕鍨庨崣鎴犵舶娴犺缍嶉悽銊﹀煕閿涘牆瀵橀幏顑块嚋娴滅儤婀伴崷鎵晸娴溠傚▏閻㈩煉绱? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:420: trailing whitespace.
++VIOLATION: +**妞ゅ湱娲版竟鐗堟閻劑鈧?** 娑擃亙姹夐張顒€婀撮惍鏃傗敀瀹搞儱鍙块敍宀勬姜婢舵氨鏁ら幋?閸欘垰鍟€閸掑棗褰傛禍褍鎼? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:422: trailing whitespace.
++VIOLATION: +                    閳?          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:424: trailing whitespace.
++VIOLATION: +              瑜版挸澧犻崷銊ㄧ箹闁?            
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:426: trailing whitespace.
++VIOLATION: +   
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:428: trailing whitespace.
++VIOLATION: +**閺傚洦銆傞悩鑸碘偓渚婄窗** DRAFT / DESIGNED 閳?鐠佹崘顓哥痪褍鐣炬稊澶涚礉闂堢偛鐤勯悳甯礉闂堢偤鐛欑拠浣碘偓? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:430: trailing whitespace.
++VIOLATION: +**闂傘劎顩︾粵澶岄獓閿?* BLOCK / NO-GO 閳?閺堫剙鎮庣痪锔惧鐎规氨娈戦梾鏃傤瀲閺堫亣鎻幋鎰閿涘奔鎹㈡担?Python 閸涙垝鎶ゆ稉宥呯繁閹笛嗩攽閵? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:432: trailing whitespace.
++VIOLATION: +**缁涘墽璁查崜宥嗗絹閿?* 閹碘偓閺堝鈧懏澹掗崙?S0閿涘牊顒滃蹇旀瀮娴犺泛鎼辩敮灞芥祼鐎规矮璐熻ぐ鎾冲瀹告彃浜哥粋鑽ゅЦ閹緤绱氶崪灞炬拱 S1 鐠佹崘顓搁妴? 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:434: trailing whitespace.
++VIOLATION: +**鐠侯垰绶為敍?* `app/core/storage/path_policy.py`  
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:436: trailing whitespace.
++VIOLATION: +7     6          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:438: trailing whitespace.
++VIOLATION: +LinkType         : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:440: trailing whitespace.
++VIOLATION: +Target           : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:442: trailing whitespace.
++VIOLATION: +LinkType         : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:444: trailing whitespace.
++VIOLATION: +Target           : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:446: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.duckdb     1986801664 2026/7/20 5:02:05  2026/7/20 2:23:44     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:448: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite         446464 2026/7/20 5:02:07  2026/7/20 2:30:41     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:450: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-shm      32768 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:452: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-wal          0 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:454: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\full_20260717_223725.zip              625961 2026/7/17 14:37:26 2026/7/17 14:37:26    Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:458: trailing whitespace.
++VIOLATION: +LinkType         : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:460: trailing whitespace.
++VIOLATION: +Target           : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:462: trailing whitespace.
++VIOLATION: +LinkType         : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:464: trailing whitespace.
++VIOLATION: +Target           : 
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:466: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.duckdb     1986801664 2026/7/20 5:02:05  2026/7/20 2:23:44     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:468: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite         446464 2026/7/20 5:02:07  2026/7/20 2:30:41     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:470: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-shm      32768 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:472: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-wal          0 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+docs/evidence-s1/baseline-commit/staged-whitespace.txt:474: trailing whitespace.
++VIOLATION: +D:\Mr.Q\閹哄本甯剁紒蹇旂ス\value-dashboard\data\backup\full_20260717_223725.zip              625961 2026/7/17 14:37:26 2026/7/17 14:37:26    Archive          

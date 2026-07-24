@@ -1,0 +1,58 @@
+[project]
+name = "value-dashboard"
+version = "0.1.0"
+description = "A股价值投资研究与筛选工具 - 个人本地研究工具"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "httpx",
+    "duckdb",
+    "typer",
+    "lark",
+    "cryptography",
+    "pyarrow",
+    "PyYAML",
+    "pandas>=2.0",
+    "pypinyin",
+]
+
+[project.optional-dependencies]
+data-sources = [
+    "akshare",
+    "easy-tdx",
+    "baostock",
+]
+windows = [
+    "pywin32;platform_system=='Windows'",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "ruff",
+]
+
+[project.scripts]
+vd = "app.cli.main:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests/regression"]
+addopts = "--strict-config --strict-markers"
+markers = [
+    "integration: uses isolated local service or database integration",
+    "data_dependent: requires an explicit read-only data fixture",
+]

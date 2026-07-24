@@ -1,0 +1,1 @@
+import{M as e,_ as t,p as n,u as r}from"./runtime-core.esm-bundler-C-_igBqR.js";var i=t({__name:`WatchlistPage`,setup(t){return(t,i)=>(e(),n(`div`,null,[...i[0]||=[r(`h2`,null,`自选列表`,-1),r(`p`,{style:{color:`#999`}},`自选列表将在 M6 里程碑实现：分组、排序、自定义列、来源记录。`,-1)]]))}});export{i as default};

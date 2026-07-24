@@ -1,0 +1,143 @@
+S0 Data Directory Summary
+Run ID: s0-20260724-015415
+Timestamp: 2026-07-24 01:56:27
+Working Directory: D:\Mr.Q\掌控经济\value-dashboard
+
+========================================
+RECURSIVE DATA DIRECTORY LISTING
+========================================
+
+FullName                                                                         Length     LastWriteTimeUtc   Attributes
+--------                                                                         ------     ----------------   ----------
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept                                        2026/7/21 16:21:30  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept\balance_sheet.parquet       42491096   2026/7/20 1:55:14     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept\cash_flow.parquet           29587464   2026/7/20 1:55:15     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept\income_statement.parquet    24561625   2026/7/20 1:55:15     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept\indicator_snapshot.parquet  1229880    2026/7/20 1:55:15     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept\price_daily_raw.parquet     495015676  2026/7/21 16:21:30    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_accept\tmp_balance_sheet.parquet   0          2026/7/21 16:21:30    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf                                           2026/7/17 14:59:44  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf_e2e                                       2026/7/17 14:59:03  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf_e2e\600519                                2026/7/17 14:59:03  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf_e2e\600519\1225431263.PDF.pdf  67261      2026/7/17 14:59:02    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf_test                                      2026/7/17 14:27:29  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf_test\600519                               2026/7/17 14:27:29  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf_test\600519\1225431263.PDF.pdf 67261      2026/7/17 14:27:26    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf\600519                                    2026/7/17 14:59:44  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_pdf\600519\1225431263.PDF.pdf      67261      2026/7/17 14:59:43    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_s2                                            2026/7/18 5:12:59   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_s2\balance_sheet.parquet           48014900   2026/7/18 5:12:59     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_s2\cash_flow.parquet               33772957   2026/7/18 5:12:59     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_s2\income_statement.parquet        27649289   2026/7/18 5:12:59     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_s2\indicator_snapshot.parquet      1329244    2026/7/18 5:12:59     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_s2\price_daily_raw.parquet         188322275  2026/7/18 5:12:58     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_uat                                           2026/7/18 7:09:29   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_uat\balance_sheet.parquet          48014900   2026/7/18 7:09:28     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_uat\cash_flow.parquet              33772957   2026/7/18 7:09:29     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_uat\income_statement.parquet       27649289   2026/7/18 7:09:29     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_uat\indicator_snapshot.parquet     1329244    2026/7/18 7:09:29     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\archive_uat\price_daily_raw.parquet        214579335  2026/7/18 7:09:28     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\backup                                                2026/7/20 5:04:38   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\backup_accept                                         2026/7/21 16:21:25  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\backup_accept\full_20260722_002046.zip     1045228924 2026/7/21 16:21:25    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\backup_s2                                             2026/7/18 7:09:27   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.duckdb       1986801664 2026/7/20 2:23:44     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite       446464     2026/7/20 2:30:41     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-shm   32768      2026/7/20 5:04:38     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-wal   0          2026/7/20 5:04:38     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\full_20260717_223725.zip            625961     2026/7/17 14:37:26    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\cache                                                 2026/7/17 5:26:24   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\logs                                                  2026/7/19 4:35:24   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_20260718_133823.err.log      116302     2026/7/18 7:01:40     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_20260718_133823.out.log      0          2026/7/18 5:38:23     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_current.pid                  12         2026/7/18 7:10:09     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_fast_20260718_194020.err.log 8102       2026/7/18 12:58:25    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_fast_20260718_194020.out.log 97         2026/7/18 12:58:28    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_fast_current.pid             8          2026/7/18 11:40:20    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_full_20260718_174201.err.log 57901      2026/7/18 10:55:29    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_full_20260718_174201.out.log 0          2026/7/18 9:42:01     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_full_current.pid             8          2026/7/18 9:42:02     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_par_20260718_185712.err.log  427        2026/7/18 10:59:49    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_par_20260718_185712.out.log  0          2026/7/18 10:57:12    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_par_current.pid              8          2026/7/18 10:57:12    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v3_20260718_210124.err.log   203        2026/7/18 13:34:42    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v3_20260718_210124.out.log   0          2026/7/18 13:01:24    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v3_current.pid               8          2026/7/18 13:01:24    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v3b_20260718_230818.err.log  149        2026/7/18 15:08:23    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v3b_20260718_230818.out.log  0          2026/7/18 15:08:19    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v3b_current.pid              7          2026/7/18 15:08:19    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v4_20260718_232247.err.log   264        2026/7/18 15:22:49    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v4_20260718_232247.out.log   0          2026/7/18 15:22:47    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v4_current.pid               7          2026/7/18 15:22:47    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v5_20260718_233441.err.log   296        2026/7/18 15:45:18    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v5_20260718_233441.out.log   0          2026/7/18 15:34:41    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v5_current.pid               7          2026/7/18 15:34:41    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v6_20260718_235439.err.log   146        2026/7/18 15:54:40    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v6_20260718_235439.out.log   0          2026/7/18 15:54:39    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v6_current.pid               7          2026/7/18 15:54:39    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v7_20260719_000940.err.log   312        2026/7/18 16:09:42    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v7_20260719_000940.out.log   0          2026/7/18 16:09:40    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v7_current.pid               7          2026/7/18 16:09:40    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v8_20260719_002707.err.log   602        2026/7/18 16:50:28    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v8_20260719_002707.out.log   0          2026/7/18 16:27:07    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v8_current.pid               7          2026/7/18 16:27:07    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v8b_20260719_005817.err.log  9408       2026/7/18 19:23:14    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v8b_20260719_005817.out.log  2322       2026/7/18 19:23:14    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v8b_current.pid              7          2026/7/18 16:58:17    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v9_20260719_052141.err.log   4735       2026/7/18 22:01:22    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v9_20260719_052141.out.log   2008       2026/7/18 22:01:22    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill_v9_current.pid               7          2026/7/18 21:21:41    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill2_20260718_151008.err.log     9598       2026/7/18 7:16:05     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\backfill2_20260718_151008.out.log     0          2026/7/18 7:10:08     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_20260717_234405.err.log     214        2026/7/17 15:44:05    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_20260717_234405.out.log     0          2026/7/17 15:44:05    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_20260717_234525.err.log     432038     2026/7/17 16:31:23    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_20260717_234525.out.log     0          2026/7/17 15:45:25    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_20260718_003127.err.log     4943       2026/7/17 16:32:10    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_20260718_003127.out.log     425        2026/7/17 16:32:10    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\data_init_current.pid                 188        2026/7/17 16:31:27    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\debug_s7.err.log                      8262       2026/7/18 9:16:52     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\fin_backfill_20260719_100914.err.log  507        2026/7/19 4:33:29     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\fin_backfill_20260719_100914.out.log  0          2026/7/19 2:09:14     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\fin_backfill_current.pid              7          2026/7/19 2:09:14     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\fin_backfill2_20260719_123524.err.log 6600       2026/7/19 9:58:50     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\fin_backfill2_20260719_123524.out.log 170803     2026/7/19 9:58:50     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\price_fetch_20260718_010558.err.log   3532669    2026/7/18 1:35:37     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\price_fetch_20260718_010558.out.log   365610     2026/7/18 1:35:37     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\price_fetch_current.pid               191        2026/7/17 17:05:58    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\qfq_backfill_20260719_032352.err.log  11812      2026/7/18 21:20:39    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\qfq_backfill_20260719_032352.out.log  2907       2026/7/18 21:20:39    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\qfq_backfill_current.pid              7          2026/7/18 19:23:52    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\qfq_backfill2_20260719_060214.err.log 9548       2026/7/18 22:34:58    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\qfq_backfill2_20260719_060214.out.log 2379       2026/7/18 22:34:58    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\qfq_backfill2_current.pid             7          2026/7/18 22:02:14    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute_20260718_111724.err.log     7157       2026/7/18 3:31:10     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute_20260718_111724.out.log     130        2026/7/18 3:31:10     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute_current.pid                 184        2026/7/18 3:17:24     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute2_20260718_113428.err.log    7157       2026/7/18 3:50:16     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute2_20260718_113428.out.log    130        2026/7/18 3:50:16     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute3_20260718_123217.err.log    7157       2026/7/18 4:46:30     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\recompute3_20260718_123217.out.log    130        2026/7/18 4:46:30     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\server_debug.err.log                  4632       2026/7/18 5:51:10     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\smoke_test.err.log                    2080       2026/7/18 7:42:59     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\smoke6.err.log                        2080       2026/7/18 7:43:52     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\smoke6b.err.log                       2079       2026/7/18 7:44:28     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\smoke6c.err.log                       680        2026/7/18 9:12:27     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\smoke6d.err.log                       2016       2026/7/18 9:16:20     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\verify_s7.err.log                     203        2026/7/18 9:17:42     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\logs\verify_s7b.err.log                    203        2026/7/18 9:18:12     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet                                               2026/7/17 5:26:24   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet_test                                          2026/7/17 14:23:44  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet_test\balance_sheet.parquet         268765     2026/7/17 14:23:44    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet_test\cash_flow.parquet             231032     2026/7/17 14:23:44    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet_test\income_statement.parquet      161400     2026/7/17 14:23:44    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet_test\indicator_snapshot.parquet    4671       2026/7/17 14:23:44    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\parquet_test\price_daily_raw.parquet       2151       2026/7/17 14:23:44    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\pdf                                                   2026/7/17 14:27:26  Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\pdf\600519                                            2026/7/18 4:58:26   Directory
+D:\Mr.Q\掌控经济\value-dashboard\data\pdf\600519\1225431263.PDF.pdf              67261      2026/7/17 14:59:43    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\test_results.json                          41         2026/7/17 14:47:48    Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\valuedashboard.duckdb                      1986801664 2026/7/22 1:41:26     Archive
+D:\Mr.Q\掌控经济\value-dashboard\data\valuedashboard.sqlite                      450560     2026/7/21 16:21:26    Archive
+
+

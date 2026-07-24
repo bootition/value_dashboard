@@ -1,0 +1,531 @@
+"""AKShare 适配器 — 封装 akshare (Eastmoney) 数据源
+
+支持的数据类型:
+  - stock_list        全市场 A 股股票列表 (SSE/SZSE/BSE)
+  - listing_info      上市信息 (上市日期/ST/停牌/拼音)
+  - price_daily       日线行情 (raw/qfq/hfq)
+  - balance_sheet     资产负债表
+  - income_statement  利润表
+  - cash_flow         现金流量表
+  - dividends         分红记录 (CNINFO)
+  - trading_dates     交易日历
+
+符号格式约定:
+  - stock_list / listing_info / trading_dates  — 不需要 stock_code
+  - price_daily                                — 纯代码 "600519" (无前缀)
+  - balance_sheet / income_statement / cash_flow — 带前缀 "SH600519"
+  - dividends                                  — 纯代码 "600519" (CNINFO 格式)
+"""
+
+from __future__ import annotations
+
+import datetime
+import logging
+from typing import Any, Callable
+
+import pandas as pd
+
+from app.core.adapters.base import (
+    BaseAdapter,
+    DataType,
+    FetchRequest,
+    FetchResult,
+)
+
+logger = logging.getLogger(__name__)
+
+# ─── 可选依赖: akshare / pypinyin ────────────────────────────────────
+
+try:
+    import akshare as ak
+
+    _AKSHARE_AVAILABLE: bool = True
+    _AKSHARE_VERSION: str | None = getattr(ak, "__version__", "unknown")
+except ImportError:  # pragma: no cover
+    ak = None  # type: ignore[assignment]
+    _AKSHARE_AVAILABLE = False
+    _AKSHARE_VERSION = None
+
+try:
+    from pypinyin import lazy_pinyin
+
+    _PYPINYIN_AVAILABLE: bool = True
+except ImportError:  # pragma: no cover
+    lazy_pinyin = None  # type: ignore[assignment]
+    _PYPINYIN_AVAILABLE = False
+
+
+# ─── 中文字段 → 英文标准字段映射 ─────────────────────────────────────
+
+_PRICE_DAILY_FIELD_MAP: dict[str, str] = {
+    "日期": "trade_date",
+    "股票代码": "stock_code",
+    "开盘": "open",
+    "收盘": "close",
+    "最高": "high",
+    "最低": "low",
+    "成交量": "volume",
+    "成交额": "turnover",
+    "振幅": "amplitude",
+    "涨跌幅": "pct_change",
+    "涨跌额": "change",
+    "换手率": "turnover_rate",
+}
+
+_DIVIDEND_FIELD_MAP: dict[str, str] = {
+    "实施方案公告日期": "announce_date",
+    "分红类型": "dividend_type",
+    "送股比例": "bonus_share_ratio",
+    "转增比例": "capitalization_ratio",
+    "派息比例": "cash_dividend_ratio",
+    "股权登记日": "record_date",
+    "除权日": "ex_date",
+    "派息日": "pay_date",
+    "股份到账日": "share_arrival_date",
+    "实施方案分红说明": "description",
+    "报告时间": "report_period",
+}
+
+# 财报接口 (stock_balance_sheet_by_report_em 等) 已返回英文字段名，
+# 无需映射；仅补充 stock_code / 规范化 REPORT_DATE 时间部分。
+
+
+# ─── 辅助函数 ───────────────────────────────────────────────────────
+
+
+def _infer_exchange(code: str) -> str:
+    """从 6 位股票代码推断交易所: SSE / SZSE / BSE"""
+    code = code.strip()
+    if not code:
+        return ""
+    first = code[0]
+    if first == "6":
+        return "SSE"
+    if first in ("0", "3"):
+        return "SZSE"
+    if first in ("4", "8", "9"):
+        return "BSE"
+    return ""
+
+
+def _to_em_symbol(code: str) -> str:
+    """转换为 Eastmoney 财报接口所需的带前缀代码
+
+    接受 "600519" / "SH600519" / "600519.SH" → "SH600519"
+    """
+    code = code.strip().upper()
+    if code.startswith(("SH", "SZ", "BJ")):
+        return code
+    if "." in code:
+        base, suffix = code.split(".", 1)
+        prefix = {"SH": "SH", "SZ": "SZ", "BJ": "BJ"}.get(suffix.upper())
+        if prefix:
+            return prefix + base
+    exchange = _infer_exchange(code)
+    prefix = {"SSE": "SH", "SZSE": "SZ", "BSE": "BJ"}.get(exchange, "")
+    return prefix + code if prefix else code
+
+
+def _strip_code(code: str) -> str:
+    """去除交易所前缀/后缀，返回纯 6 位代码
+
+    "SH600519" / "600519.SH" / "600519" → "600519"
+    """
+    code = code.strip().upper()
+    if code.startswith(("SH", "SZ", "BJ")):
+        return code[2:]
+    if "." in code:
+        return code.split(".")[0]
+    return code
+
+
+def _clean_value(v: Any) -> Any:
+    """清洗单个值: NaN/NaT → None, Timestamp/date → 'YYYY-MM-DD'"""
+    if v is None:
+        return None
+    try:
+        if pd.isna(v):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, pd.Timestamp):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, datetime.date):
+        return v.strftime("%Y-%m-%d")
+    # Strip time from datetime strings like "2026-03-31 00:00:00"
+    if isinstance(v, str) and len(v) >= 19 and v[10] == " ":
+        return v[:10]
+    # Convert numpy scalar → Python native
+    if hasattr(v, "item"):
+        try:
+            return v.item()
+        except (AttributeError, ValueError):
+            pass
+    return v
+
+
+def _df_to_records(
+    df: pd.DataFrame | None,
+    field_map: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """DataFrame → list[dict]: NaN→None, 可选字段重命名"""
+    if df is None or len(df) == 0:
+        return []
+    if field_map:
+        df = df.rename(columns=field_map)
+    records: list[dict[str, Any]] = []
+    for rec in df.to_dict("records"):
+        records.append({k: _clean_value(v) for k, v in rec.items()})
+    return records
+
+
+def _generate_pinyin(name: str) -> str:
+    """生成无声调全拼: '平安银行' → 'pinganyinhang'"""
+    if not _PYPINYIN_AVAILABLE or not name:
+        return ""
+    try:
+        return "".join(lazy_pinyin(name))
+    except Exception:
+        return ""
+
+
+# ─── 适配器 ─────────────────────────────────────────────────────────
+
+
+class AKShareAdapter(BaseAdapter):
+    """AKShare (Eastmoney) 数据源适配器
+
+    封装 akshare 库获取 A 股行情、财报、分红、交易日历等数据。
+    构造无需参数，rate_limit 默认 0.5s (config/default.yaml)。
+    """
+
+    _SUPPORTED: set[DataType] = {
+        "stock_list",
+        "listing_info",
+        "price_daily",
+        "balance_sheet",
+        "income_statement",
+        "cash_flow",
+        "dividends",
+        "trading_dates",
+    }
+
+    def __init__(self, rate_limit: float = 0.5) -> None:
+        super().__init__(
+            name="akshare_eastmoney",
+            supported=self._SUPPORTED,
+            rate_limit=rate_limit,
+        )
+
+    # ─── dispatch ───────────────────────────────────────────────
+
+    def fetch(self, request: FetchRequest) -> FetchResult:
+        if not _AKSHARE_AVAILABLE:
+            return self._make_empty_result("akshare 未安装")
+
+        handler: Callable[[FetchRequest], FetchResult] | None = {
+            "stock_list": self._fetch_stock_list,
+            "listing_info": self._fetch_listing_info,
+            "price_daily": self._fetch_price_daily,
+            "balance_sheet": self._fetch_balance_sheet,
+            "income_statement": self._fetch_income_statement,
+            "cash_flow": self._fetch_cash_flow,
+            "dividends": self._fetch_dividends,
+            "trading_dates": self._fetch_trading_dates,
+        }.get(request.data_type)
+
+        if handler is None:
+            return self._make_empty_result(f"不支持的数据类型: {request.data_type}")
+
+        try:
+            return handler(request)
+        except Exception as e:
+            logger.exception(f"AKShare fetch {request.data_type} 失败")
+            return self._make_empty_result(f"{type(e).__name__}: {e}")
+
+    # ─── handlers ───────────────────────────────────────────────
+
+    def _fetch_stock_list(self, request: FetchRequest) -> FetchResult:
+        """全市场股票列表: SSE + SZSE (stock_info_a_code_name) + BSE (stock_info_bj_name_code)"""
+        records: list[dict[str, Any]] = []
+
+        # SSE + SZSE
+        try:
+            self._wait_rate_limit()
+            df = ak.stock_info_a_code_name()
+            for _, row in df.iterrows():
+                code = str(row["code"]).strip()
+                records.append(
+                    {
+                        "stock_code": code,
+                        "name": str(row["name"]).strip(),
+                        "exchange": _infer_exchange(code),
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"stock_info_a_code_name 失败: {e}")
+
+        # BSE
+        try:
+            self._wait_rate_limit()
+            df_bj = ak.stock_info_bj_name_code()
+            for _, row in df_bj.iterrows():
+                code = str(row["证券代码"]).strip()
+                records.append(
+                    {
+                        "stock_code": code,
+                        "name": str(row["证券简称"]).strip(),
+                        "exchange": "BSE",
+                    }
+                )
+        except Exception as e:
+            logger.warning(f"stock_info_bj_name_code 失败: {e}")
+
+        if not records:
+            return self._make_empty_result("无法获取股票列表")
+
+        return self._make_result(
+            data=records,
+            confidence="strict",
+            api_version=_AKSHARE_VERSION,
+        )
+
+    def _fetch_listing_info(self, request: FetchRequest) -> FetchResult:
+        """上市信息: 上市日期 / ST / 停牌 / 拼音
+
+        流程: stock_info_a_code_name() 取名称 → stock_individual_info_em(symbol) 取上市日期
+        BSE 上市日期直接从 stock_info_bj_name_code() 获取。
+        """
+        name_map: dict[str, str] = {}
+        bj_listing_map: dict[str, str] = {}
+
+        # SSE + SZSE 名称
+        try:
+            self._wait_rate_limit()
+            df = ak.stock_info_a_code_name()
+            for _, row in df.iterrows():
+                name_map[str(row["code"]).strip()] = str(row["name"]).strip()
+        except Exception as e:
+            logger.warning(f"stock_info_a_code_name 失败: {e}")
+
+        # BSE 名称 + 上市日期
+        try:
+            self._wait_rate_limit()
+            df_bj = ak.stock_info_bj_name_code()
+            for _, row in df_bj.iterrows():
+                code = str(row["证券代码"]).strip()
+                name_map[code] = str(row["证券简称"]).strip()
+                bj_listing_map[code] = _clean_value(row.get("上市日期"))
+        except Exception as e:
+            logger.warning(f"stock_info_bj_name_code 失败: {e}")
+
+        # 确定目标股票
+        if request.stock_codes:
+            targets = [_strip_code(c) for c in request.stock_codes]
+        else:
+            targets = list(name_map.keys())
+
+        if not targets:
+            return self._make_empty_result("无法获取股票列表")
+
+        records: list[dict[str, Any]] = []
+        for code in targets:
+            name = name_map.get(code, "")
+
+            # 上市日期: BSE 直接取；其他调 stock_individual_info_em
+            listing_date: str | None = bj_listing_map.get(code)
+            if listing_date is None:
+                try:
+                    self._wait_rate_limit()
+                    info_df = ak.stock_individual_info_em(symbol=code)
+                    if info_df is not None and len(info_df) > 0:
+                        items = dict(
+                            zip(
+                                info_df.iloc[:, 0].astype(str).tolist(),
+                                info_df.iloc[:, 1].tolist(),
+                            )
+                        )
+                        for key in ("上市时间", "上市日期"):
+                            if key in items:
+                                listing_date = _clean_value(items[key])
+                                break
+                except Exception as e:
+                    logger.debug(f"stock_individual_info_em({code}) 失败: {e}")
+
+            # P0#2修复: is_st 用 startswith 而非 in, 避免误匹配 BEST/STONE 等
+            upper_name = name.upper()
+            is_st = upper_name.startswith(("ST", "*ST"))
+            # P0#3修复: is_suspended 暂无法从免费源可靠获取, 标记为 None 而非 False
+            # (PRD §9.3: 字段缺失时返回 null + 原因码, 而非默认值)
+            is_suspended = None
+
+            records.append(
+                {
+                    "stock_code": code,
+                    "name": name,
+                    "listing_date": listing_date,
+                    "is_st": is_st,
+                    "is_suspended": is_suspended,
+                    "pinyin": _generate_pinyin(name),
+                }
+            )
+
+        if not records:
+            return self._make_empty_result("无法获取上市信息")
+
+        return self._make_result(
+            data=records,
+            confidence="approximate",
+            api_version=_AKSHARE_VERSION,
+        )
+
+    def _fetch_price_daily(self, request: FetchRequest) -> FetchResult:
+        """日线行情 (raw/qfq/hfq)"""
+        if not request.stock_codes:
+            return self._make_empty_result("price_daily 需要 stock_codes")
+
+        # 日期格式转换: YYYY-MM-DD → YYYYMMDD
+        start = (request.start_date or "").replace("-", "")
+        end = (request.end_date or "").replace("-", "")
+
+        # adjust 映射: raw→"" / qfq→"qfq" / hfq→"hfq"
+        adjust_map: dict[str, str] = {"raw": "", "qfq": "qfq", "hfq": "hfq"}
+        adjust = adjust_map.get(request.adjust, "")
+
+        all_records: list[dict[str, Any]] = []
+        for code in request.stock_codes:
+            plain_code = _strip_code(code)
+            try:
+                self._wait_rate_limit()
+                kwargs: dict[str, Any] = {
+                    "symbol": plain_code,
+                    "period": "daily",
+                    "adjust": adjust,
+                }
+                if start:
+                    kwargs["start_date"] = start
+                if end:
+                    kwargs["end_date"] = end
+                df = ak.stock_zh_a_hist(**kwargs)
+                all_records.extend(_df_to_records(df, _PRICE_DAILY_FIELD_MAP))
+            except Exception as e:
+                logger.warning(f"stock_zh_a_hist({plain_code}) 失败: {e}")
+
+        if not all_records:
+            return self._make_empty_result("无法获取日线行情")
+
+        return self._make_result(
+            data=all_records,
+            confidence="strict",
+            api_version=_AKSHARE_VERSION,
+        )
+
+    def _fetch_balance_sheet(self, request: FetchRequest) -> FetchResult:
+        """资产负债表 — symbol 需带交易所前缀 (SH600519)"""
+        return self._fetch_financial_statement(
+            request=request,
+            api_func=ak.stock_balance_sheet_by_report_em,
+            data_type_name="balance_sheet",
+        )
+
+    def _fetch_income_statement(self, request: FetchRequest) -> FetchResult:
+        """利润表 — symbol 需带交易所前缀 (SH600519)"""
+        return self._fetch_financial_statement(
+            request=request,
+            api_func=ak.stock_profit_sheet_by_report_em,
+            data_type_name="income_statement",
+        )
+
+    def _fetch_cash_flow(self, request: FetchRequest) -> FetchResult:
+        """现金流量表 — symbol 需带交易所前缀 (SH600519)"""
+        return self._fetch_financial_statement(
+            request=request,
+            api_func=ak.stock_cash_flow_sheet_by_report_em,
+            data_type_name="cash_flow",
+        )
+
+    def _fetch_financial_statement(
+        self,
+        request: FetchRequest,
+        api_func: Callable[..., pd.DataFrame],
+        data_type_name: str,
+    ) -> FetchResult:
+        """通用财报抓取 (三大报表共用)
+
+        akshare 财报接口已返回英文字段名 (TOTAL_ASSETS 等)，
+        无需中英文映射；仅补充 stock_code 并规范化 REPORT_DATE。
+        """
+        if not request.stock_codes:
+            return self._make_empty_result(f"{data_type_name} 需要 stock_codes")
+
+        all_records: list[dict[str, Any]] = []
+        for code in request.stock_codes:
+            em_symbol = _to_em_symbol(code)
+            plain_code = _strip_code(code)
+            try:
+                self._wait_rate_limit()
+                df = api_func(symbol=em_symbol)
+                records = _df_to_records(df)
+                for rec in records:
+                    # 确保有 stock_code
+                    if "stock_code" not in rec:
+                        rec["stock_code"] = plain_code
+                    # 规范化 REPORT_DATE: "2026-03-31 00:00:00" → "2026-03-31"
+                    rd = rec.get("REPORT_DATE")
+                    if isinstance(rd, str) and len(rd) >= 19 and rd[10] == " ":
+                        rec["REPORT_DATE"] = rd[:10]
+                all_records.extend(records)
+            except Exception as e:
+                logger.warning(f"{data_type_name}({em_symbol}) 失败: {e}")
+
+        if not all_records:
+            return self._make_empty_result(f"无法获取{data_type_name}数据")
+
+        return self._make_result(
+            data=all_records,
+            confidence="strict",
+            api_version=_AKSHARE_VERSION,
+        )
+
+    def _fetch_dividends(self, request: FetchRequest) -> FetchResult:
+        """分红记录 (CNINFO) — symbol 为纯代码 (600519)"""
+        if not request.stock_codes:
+            return self._make_empty_result("dividends 需要 stock_codes")
+
+        all_records: list[dict[str, Any]] = []
+        for code in request.stock_codes:
+            plain_code = _strip_code(code)
+            try:
+                self._wait_rate_limit()
+                df = ak.stock_dividend_cninfo(symbol=plain_code)
+                records = _df_to_records(df, _DIVIDEND_FIELD_MAP)
+                for rec in records:
+                    rec["stock_code"] = plain_code
+                all_records.extend(records)
+            except Exception as e:
+                logger.warning(f"stock_dividend_cninfo({plain_code}) 失败: {e}")
+
+        if not all_records:
+            return self._make_empty_result("无法获取分红记录")
+
+        return self._make_result(
+            data=all_records,
+            confidence="strict",
+            api_version=_AKSHARE_VERSION,
+        )
+
+    def _fetch_trading_dates(self, request: FetchRequest) -> FetchResult:
+        """交易日历 (Sina)"""
+        try:
+            self._wait_rate_limit()
+            df = ak.tool_trade_date_hist_sina()
+            records = _df_to_records(df)
+            if not records:
+                return self._make_empty_result("交易日历为空")
+            return self._make_result(
+                data=records,
+                confidence="strict",
+                api_version=_AKSHARE_VERSION,
+            )
+        except Exception as e:
+            return self._make_empty_result(f"tool_trade_date_hist_sina 失败: {e}")

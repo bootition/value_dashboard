@@ -1,0 +1,243 @@
+On branch fix/audit-remediation
+
+No commits yet
+
+Changes to be committed:
+  (use "git rm --cached <file>..." to unstage)
+	new file:   .gitignore
+	new file:   README.md
+	new file:   _pytest_policy.py
+	new file:   app/__init__.py
+	new file:   app/cli/__init__.py
+	new file:   app/cli/main.py
+	new file:   app/cli/opencode_skill.md
+	new file:   app/cli/protocol.py
+	new file:   app/core/__init__.py
+	new file:   app/core/adapters/__init__.py
+	new file:   app/core/adapters/akshare_adapter.py
+	new file:   app/core/adapters/baostock_adapter.py
+	new file:   app/core/adapters/base.py
+	new file:   app/core/adapters/cninfo_adapter.py
+	new file:   app/core/adapters/manager.py
+	new file:   app/core/adapters/tdx_adapter.py
+	new file:   app/core/backfill.py
+	new file:   app/core/backup/__init__.py
+	new file:   app/core/backup/manager.py
+	new file:   app/core/config.py
+	new file:   app/core/data_quality.py
+	new file:   app/core/dsl/__init__.py
+	new file:   app/core/dsl/ast_nodes.py
+	new file:   app/core/dsl/codegen.py
+	new file:   app/core/dsl/engine.py
+	new file:   app/core/dsl/grammar.lark
+	new file:   app/core/dsl/parser.py
+	new file:   app/core/dsl/registry.py
+	new file:   app/core/dsl/validator.py
+	new file:   app/core/indicators/calculator.py
+	new file:   app/core/init.py
+	new file:   app/core/job_status.py
+	new file:   app/core/pdf/__init__.py
+	new file:   app/core/pdf/correction.py
+	new file:   app/core/pdf/manager.py
+	new file:   app/core/screening/engine.py
+	new file:   app/core/storage/__init__.py
+	new file:   app/core/storage/duckdb_store.py
+	new file:   app/core/storage/schema.py
+	new file:   app/core/storage/sqlite_store.py
+	new file:   app/core/update.py
+	new file:   app/web/__init__.py
+	new file:   app/web/api/data_status.py
+	new file:   app/web/api/screening.py
+	new file:   app/web/api/stock_detail.py
+	new file:   app/web/api/watchlist.py
+	new file:   app/web/main.py
+	new file:   app/web/static/assets/Add-B-UPIUxg.js
+	new file:   app/web/static/assets/DataStatusPage-B3RsXfk1.js
+	new file:   app/web/static/assets/DataStatusPage-C0_nZCmo.js
+	new file:   app/web/static/assets/DataStatusPage-CbNlPAYZ.js
+	new file:   app/web/static/assets/DataStatusPage-ZXSBkX_-.js
+	new file:   app/web/static/assets/DataStatusPage-uN_retlk.js
+	new file:   app/web/static/assets/Popover-BmyPBG5g.js
+	new file:   app/web/static/assets/Popover-CQjj8Z1r.js
+	new file:   app/web/static/assets/Popover-DaAcamKQ.js
+	new file:   app/web/static/assets/ScreeningPage--c5Kr9XS.js
+	new file:   app/web/static/assets/ScreeningPage-BDGpSgEK.js
+	new file:   app/web/static/assets/ScreeningPage-CTsBsE7X.js
+	new file:   app/web/static/assets/ScreeningPage-D5aFXg_d.js
+	new file:   app/web/static/assets/ScreeningPage-DPyppB8f.js
+	new file:   app/web/static/assets/ScreeningPage-DZOgks3d.js
+	new file:   app/web/static/assets/ScreeningPage-DtvnE_Ez.js
+	new file:   app/web/static/assets/Scrollbar-BLF6svB1.js
+	new file:   app/web/static/assets/Scrollbar-CnuoQI0d.js
+	new file:   app/web/static/assets/Scrollbar-Dr44NkBa.js
+	new file:   app/web/static/assets/Scrollbar-XF8rxoY5.js
+	new file:   app/web/static/assets/Space-BdP1JExR.js
+	new file:   app/web/static/assets/Space-Bnx8WTH5.js
+	new file:   app/web/static/assets/Space-wdJpCsvC.js
+	new file:   app/web/static/assets/Spin-IFlUhrbS.js
+	new file:   app/web/static/assets/Spin-j3tv6xqU.js
+	new file:   app/web/static/assets/StockDetailPage-BIdfr1Vi.js
+	new file:   app/web/static/assets/StockDetailPage-BK9Kda6N.js
+	new file:   app/web/static/assets/StockDetailPage-Bcd9fA8y.js
+	new file:   app/web/static/assets/StockDetailPage-C6yL413u.js
+	new file:   app/web/static/assets/StockDetailPage-CBKUEMkX.js
+	new file:   app/web/static/assets/StockDetailPage-Dqc9fCS8.js
+	new file:   app/web/static/assets/StockDetailPage-GTXhuYLS.js
+	new file:   app/web/static/assets/WatchlistPage-ARY0YwQB.js
+	new file:   app/web/static/assets/WatchlistPage-B-aLVGl8.js
+	new file:   app/web/static/assets/WatchlistPage-B8d1E6CZ.js
+	new file:   app/web/static/assets/WatchlistPage-CH8SeSMA.js
+	new file:   app/web/static/assets/WatchlistPage-uXhQavOu.js
+	new file:   app/web/static/assets/WatchlistPage-z8zRQQ25.js
+	new file:   app/web/static/assets/axios-BGo-glI3.js
+	new file:   app/web/static/assets/axios-VgfTcLKy.js
+	new file:   app/web/static/assets/axios-nAMj50zR.js
+	new file:   app/web/static/assets/index-0jFLf2Fr.js
+	new file:   app/web/static/assets/index-9O7Ce6vI.js
+	new file:   app/web/static/assets/index-BqDen4ty.js
+	new file:   app/web/static/assets/index-ByEHj39Q.js
+	new file:   app/web/static/assets/index-CMFPTLuo.js
+	new file:   app/web/static/assets/index-CoR7EbSs.js
+	new file:   app/web/static/assets/index-CsUDhMuy.css
+	new file:   app/web/static/assets/index-tcRB-HwK.js
+	new file:   app/web/static/assets/index.esm-typ-WjS5.js
+	new file:   app/web/static/assets/runtime-core.esm-bundler-C-_igBqR.js
+	new file:   app/web/static/assets/runtime-core.esm-bundler-CGoGTtpb.js
+	new file:   app/web/static/assets/runtime-core.esm-bundler-K0sMz1Pv.js
+	new file:   app/web/static/assets/use-message-Cfhr2zOz.js
+	new file:   app/web/static/assets/use-message-SW4ddddD.js
+	new file:   app/web/static/favicon.svg
+	new file:   app/web/static/icons.svg
+	new file:   app/web/static/index.html
+	new file:   config/default.yaml
+	new file:   config/field_mapping/akshare.yaml
+	new file:   config/field_mapping/baostock.yaml
+	new file:   config/field_mapping/cninfo.yaml
+	new file:   config/field_mapping/tdx.yaml
+	new file:   config/host_spec.yaml
+	new file:   config/sw_industry_fallback_result.json
+	new file:   conftest.py
+	new file:   docs/01_PRODUCT_REQUIREMENTS_V1.md
+	new file:   docs/02_TECH_CONSTRAINTS.md
+	new file:   docs/03_TECH_PLAN_V1.md
+	new file:   docs/04_TECH_PLAN_REVIEW_V1.md
+	new file:   docs/05_MILESTONE_REVIEWS.md
+	new file:   docs/06_DELIVERY_PLAN.md
+	new file:   docs/07_PROGRESS_REVIEW.md
+	new file:   docs/08_PROGRESS_REVIEW_V2.md
+	new file:   docs/09_PROGRESS_REVIEW_V3.md
+	new file:   docs/10_RED_TEAM_AUDIT.md
+	new file:   docs/11_RED_TEAM_AUDIT_V2.md
+	new file:   docs/12_AUDIT_REMEDIATION_REPORT.md
+	new file:   docs/13_CURRENT_BLOCKERS_INVESTIGATION.md
+	new file:   docs/14_PRODUCTION_OPS_AUDIT.md
+	new file:   docs/15_CURRENT_REVERIFICATION_AND_REMEDIATION_GUIDE.md
+	new file:   docs/archive/cninfo_products_snapshot.md
+	new file:   docs/archive/phase4_feasibility.md
+	new file:   docs/archive/phase5_coverage_matrix.md
+	new file:   docs/archive/swsresearch_snapshot.md
+	new file:   docs/contracts/path-isolation-contract.md
+	new file:   docs/evidence-s0/s0-20260724-015415/01-commands.log
+	new file:   docs/evidence-s0/s0-20260724-015415/02-process-state.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/03-port-state.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/04-file-metadata.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/05-hash-ledger.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/06-sidecar-inventory.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/07-directory-summary.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/08-git-state.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/09-manifest.txt
+	new file:   docs/evidence-s0/s0-20260724-015415/10-signoff-checklist.txt
+	new file:   docs/evidence-s1/baseline-commit/formal-duckdb-hash.txt
+	new file:   docs/evidence-s1/baseline-commit/formal-sqlite-hash.txt
+	new file:   docs/evidence-s1/baseline-commit/git-check-ignore.txt
+	new file:   docs/evidence-s1/baseline-commit/git-status.txt
+	new file:   docs/evidence-s1/baseline-commit/staged-extensions.txt
+	new file:   docs/evidence-s1/baseline-commit/staged-files.txt
+	new file:   docs/evidence-s1/baseline-commit/staged-secret-scan.txt
+	new file:   docs/evidence-s1/baseline-commit/staged-size.txt
+	new file:   docs/evidence-s1/baseline-commit/staged-stat.txt
+	new file:   docs/evidence-s1/baseline-commit/staged-whitespace.txt
+	new file:   docs/runbooks/s0-evidence-preservation.md
+	new file:   docs/superpowers/plans/2026-07-20-audit-remediation.md
+	new file:   docs/superpowers/plans/2026-07-23-s1-path-isolation.md
+	new file:   docs/superpowers/specs/2026-07-20-audit-remediation-design.md
+	new file:   frontend/.gitignore
+	new file:   frontend/DESIGN.md
+	new file:   frontend/README.md
+	new file:   frontend/index.html
+	new file:   frontend/package-lock.json
+	new file:   frontend/package.json
+	new file:   frontend/public/favicon.svg
+	new file:   frontend/public/icons.svg
+	new file:   frontend/src/App.vue
+	new file:   frontend/src/assets/hero.png
+	new file:   frontend/src/assets/vite.svg
+	new file:   frontend/src/assets/vue.svg
+	new file:   frontend/src/components/DataFreshnessCard.vue
+	new file:   frontend/src/components/DataTraceability.vue
+	new file:   frontend/src/components/FinancialTrendCard.vue
+	new file:   frontend/src/components/HelloWorld.vue
+	new file:   frontend/src/components/IndicatorTabs.vue
+	new file:   frontend/src/components/RuleConditionRow.vue
+	new file:   frontend/src/components/ScreeningResultsPanel.vue
+	new file:   frontend/src/components/ScreeningRuleEditor.vue
+	new file:   frontend/src/helpers/screening-quality.ts
+	new file:   frontend/src/main.ts
+	new file:   frontend/src/style.css
+	new file:   frontend/src/types/data-quality.ts
+	new file:   frontend/src/types/index.ts
+	new file:   frontend/src/types/screening.ts
+	new file:   frontend/src/types/stock-detail.ts
+	new file:   frontend/src/utils/formatters.ts
+	new file:   frontend/src/views/DataStatusPage.vue
+	new file:   frontend/src/views/NotFoundPage.vue
+	new file:   frontend/src/views/ScreeningPage.vue
+	new file:   frontend/src/views/StockDetailPage.vue
+	new file:   frontend/src/views/WatchlistPage.vue
+	new file:   frontend/tests/data-quality.test.ts
+	new file:   frontend/tests/screening-quality.test.ts
+	new file:   frontend/tests/stock-detail.test.ts
+	new file:   frontend/tsconfig.app.json
+	new file:   frontend/tsconfig.json
+	new file:   frontend/tsconfig.node.json
+	new file:   frontend/vite.config.ts
+	new file:   pyproject.toml
+	new file:   start.bat
+	new file:   tests/conftest.py
+	new file:   tests/regression/__init__.py
+	new file:   tests/regression/test_adapter_configuration.py
+	new file:   tests/regression/test_announcement_check.py
+	new file:   tests/regression/test_cli_quality_integration.py
+	new file:   tests/regression/test_cli_truthfulness.py
+	new file:   tests/regression/test_collection_safety.py
+	new file:   tests/regression/test_data_quality_status.py
+	new file:   tests/regression/test_dividend_atomicity.py
+	new file:   tests/regression/test_indicator_data_quality.py
+	new file:   tests/regression/test_job_status_aggregation.py
+	new file:   tests/regression/test_manual_overrides.py
+	new file:   tests/regression/test_period_semantics.py
+	new file:   tests/regression/test_retry_persistence.py
+	new file:   tests/regression/test_snapshot_atomicity.py
+	new file:   tests/regression/test_storage_and_ingestion.py
+	new file:   value-dashboard.spec
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   docs/evidence-s1/baseline-commit/staged-extensions.txt
+	modified:   docs/evidence-s1/baseline-commit/staged-files.txt
+	modified:   docs/evidence-s1/baseline-commit/staged-secret-scan.txt
+	modified:   docs/evidence-s1/baseline-commit/staged-size.txt
+	modified:   docs/evidence-s1/baseline-commit/staged-stat.txt
+	modified:   docs/evidence-s1/baseline-commit/staged-whitespace.txt
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	.omo/
+	.opencode/
+	.vite/
+	_legacy/
+	frontend/test-results/
+	frontend/tests/evidence/
+	opencode.json
+

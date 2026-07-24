@@ -1,0 +1,24 @@
+GIT CHECK-IGNORE REPORT
+========================
+Date: 2026-07-24
+Branch: fix/audit-remediation
+Staged files: 216
+
+Purpose: Verify that git check-ignore --no-index correctly identifies the
+one git-ignored path that was force-added to the staged index.
+
+NOTE: git check-ignore --no-index shows what WOULD be ignored by .gitignore
+if not already tracked. Since no commit exists, --no-index is the relevant mode.
+
+IGNORED paths force-added to index:
+docs/evidence-s0/s0-20260724-015415/01-commands.log
+
+Total ignored (force-added): 1
+Total not-ignored (explicitly added): 215
+
+SUMMARY:
+- 215 paths are NOT in .gitignore scope
+- 1 path is in .gitignore scope but force-added:
+  docs/evidence-s0/s0-20260724-015415/01-commands.log
+  (covered by .gitignore rule: docs/evidence-s0/*.log)
+- All staged paths are verified: the 216-path index is as intended.

@@ -1,0 +1,94 @@
+/**
+ * Screening-page view contracts.
+ *
+ * These types model the exact shapes exchanged between ScreeningPage and
+ * the backend endpoints under /api/screening/* and /api/data-status/summary.
+ *
+ * They are intentionally narrow (view-facing) and do not duplicate the
+ * domain contracts in data-quality.ts.
+ */
+import type { DataQualityStatus, WarningCode } from './data-quality.ts'
+
+/** Indicator entry from GET /api/screening/indicators. */
+export interface ScreeningIndicator {
+  readonly name: string
+  readonly rankable: boolean
+}
+
+/** Leaf condition in a screening rule tree. */
+export interface ScreeningRuleCondition {
+  field: string
+  op: string
+  value: number | null
+}
+
+/** Recursive AND/OR group in a screening rule tree. */
+export interface ScreeningRuleNode {
+  logic: 'AND' | 'OR'
+  rules: Array<ScreeningRuleNode | ScreeningRuleCondition>
+}
+
+/** Known fields in a screening result row (from the backend columns list). */
+export interface ScreeningResultKnownFields {
+  readonly stock_code: string
+  readonly name: string
+  readonly exchange: string
+  readonly sw_level1: string
+  readonly latest_close: number
+  readonly pe_ttm: number | null
+  readonly pb_mrq: number | null
+  readonly roe: number | null
+  readonly gross_margin: number | null
+  readonly net_margin: number | null
+  readonly debt_ratio: number | null
+  readonly revenue_yoy: number | null
+  readonly dividend_yield: number | null
+  readonly _entry_explanation?: string
+}
+
+/** A single screening result row. Known fields are typed; dynamic columns are also allowed. */
+export type ScreeningResult = Readonly<ScreeningResultKnownFields> &
+  Readonly<Record<string, string | number | null | undefined>>
+
+/** Response from POST /api/screening/run. */
+export interface ScreeningRunResponse {
+  readonly results: ReadonlyArray<ScreeningResult>
+  readonly total: number
+  readonly execution_time_ms: number
+  readonly base_pool_size: number
+  readonly data_date: string | null
+}
+
+/** Response from GET /api/data-status/summary (only the quality slice we need). */
+export interface DataStatusSummaryResponse {
+  readonly data_quality: DataQualityStatus
+}
+
+/** Re-export for convenience. */
+export type { WarningCode }
+
+/** Response from POST /api/screening/save. */
+export interface ScreeningSaveResponse {
+  readonly id: number
+  readonly title: string
+}
+
+/** Response from POST /api/screening/export_csv. */
+export interface ScreeningExportResponse {
+  readonly csv: string
+  readonly rows: number
+}
+
+/** Response from POST /api/screening/add_to_watchlist. */
+export interface ScreeningWatchlistResponse {
+  readonly added: number
+  readonly duplicates: number
+  readonly errors: number
+}
+
+/** Type guard: is the given rule item a nested group (vs a leaf condition)? */
+export function isRuleNode(
+  item: ScreeningRuleNode | ScreeningRuleCondition,
+): item is ScreeningRuleNode {
+  return 'logic' in item && (item.logic === 'AND' || item.logic === 'OR')
+}

@@ -1,0 +1,22 @@
+
+Extension  Count
+---------  -----
+60	.py
+54	.js
+28	.md
+19	.txt
+14	.vue
+11	.ts
+6	.json
+6	.svg
+6	.yaml
+2	.css
+2	.gitignore
+2	.html
+1	.bat
+1	.lark
+1	.log
+1	.png
+1	.spec
+1	.toml
+

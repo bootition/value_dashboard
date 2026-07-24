@@ -1,0 +1,132 @@
+# AKShare (Eastmoney) 字段映射配置
+# Eastmoney API 返回大写英文字段名，映射到项目标准化小写列名
+# 此文件用于文档化和维护字段映射，实际映射逻辑在 init.py 的 _upsert_financial_row() 中
+
+# ─── 资产负债表 (stock_balance_sheet_by_report_em) ──────────────────
+balance_sheet:
+  # 流动资产
+  MONETARY_FUNDS: monetary_funds              # 货币资金
+  TRADING_FIN_ASSETS: trading_financial_assets # 交易性金融资产
+  NOTES_RECEIVABLE: notes_receivable          # 应收票据
+  ACCOUNTS_RECE: accounts_receivable          # 应收账款
+  PREPAYMENTS: prepayments                     # 预付款项
+  OTHER_RECEIVABLES: other_receivables         # 其他应收款
+  INVENTORY: inventory                         # 存货
+  CONTRACT_ASSETS: contract_assets             # 合同资产
+  TOTAL_CURRENT_ASSETS: total_current_assets   # 流动资产合计
+  # 非流动资产
+  LONG_TERM_EQUITY_INVEST: long_term_equity_investment # 长期股权投资
+  FIXED_ASSETS: fixed_assets                   # 固定资产
+  CONSTRUCTION_IN_PROGRESS: construction_in_progress  # 在建工程
+  RIGHT_OF_USE_ASSETS: right_of_use_assets     # 使用权资产
+  INTANGIBLE_ASSETS: intangible_assets         # 无形资产
+  GOODWILL: goodwill                           # 商誉
+  DEFERRED_TAX_ASSETS: deferred_tax_assets     # 递延所得税资产
+  TOTAL_NON_CURRENT_ASSETS: total_non_current_assets  # 非流动资产合计
+  TOTAL_ASSETS: total_assets                   # 资产总计
+  # 流动负债
+  SHORT_TERM_LOANS: short_term_loans           # 短期借款
+  NOTES_PAYABLE: notes_payable                 # 应付票据
+  ACCOUNTS_PAYABLE: accounts_payable           # 应付账款
+  PREPAYMENTS_RECEIVED: prepayments_received   # 预收款项
+  CONTRACT_LIABILITIES: contract_liabilities   # 合同负债
+  EMPLOYEE_BENEFITS_PAYABLE: employee_benefits_payable  # 应付职工薪酬
+  TAXES_PAYABLE: taxes_payable                 # 应交税费
+  TOTAL_CURRENT_LIAB: total_current_liabilities  # 流动负债合计
+  # 非流动负债
+  LONG_TERM_LOANS: long_term_loans             # 长期借款
+  BONDS_PAYABLE: bonds_payable                 # 应付债券
+  LEASE_LIABILITIES: lease_liabilities         # 租赁负债
+  TOTAL_NON_CURRENT_LIAB: total_non_current_liabilities  # 非流动负债合计
+  TOTAL_LIABILITIES: total_liabilities         # 负债合计
+  # 所有者权益
+  PAID_IN_CAPITAL: paid_in_capital             # 实收资本(股本)
+  CAPITAL_RESERVE: capital_reserve             # 资本公积
+  SURPLUS_RESERVE: surplus_reserve             # 盈余公积
+  UNDIST_PROFIT: undistributed_profit          # 未分配利润
+  MINORITY_INTEREST: minority_interest         # 少数股东权益
+  TOTAL_EQUITY: total_equity                   # 所有者权益合计
+  TOTAL_EQUITY_PARENT: total_equity_parent     # 归属于母公司所有者权益
+
+# ─── 利润表 (stock_profit_sheet_by_report_em) ────────────────────────
+income_statement:
+  TOTAL_OPERATE_INCOME: total_operating_revenue  # 营业总收入
+  OPERATE_INCOME: revenue                       # 营业收入
+  TOTAL_OPERATE_COST: total_operating_cost      # 营业总成本
+  OPERATE_COST: cost_of_revenue                 # 营业成本
+  TAXES_SURCHARGES: taxes_and_surcharges        # 税金及附加
+  SELLING_EXPENSES: selling_expenses            # 销售费用
+  ADMINISTRATIVE_EXPENSES: administrative_expenses  # 管理费用
+  RD_EXPENSES: rd_expenses                      # 研发费用
+  FINANCIAL_EXPENSES: financial_expenses        # 财务费用
+  INTEREST_EXPENSE: interest_expense            # 利息费用
+  INTEREST_INCOME: interest_income              # 利息收入
+  ASSET_IMPAIRMENT_LOSS: asset_impairment_loss  # 资产减值损失
+  CREDIT_IMPAIRMENT_LOSS: credit_impairment_loss # 信用减值损失
+  EXCHANGE_GAIN: exchange_gain                  # 公允价值变动收益
+  INVESTMENT_INCOME: investment_income          # 投资收益
+  OPERATE_PROFIT: operating_profit              # 营业利润
+  NON_OPERATE_INCOME: non_operating_income      # 营业外收入
+  NON_OPERATE_EXPENSES: non_operating_expenses  # 营业外支出
+  TOTAL_PROFIT: total_profit                    # 利润总额
+  INCOME_TAX: income_tax                        # 所得税费用
+  NETPROFIT: net_profit                         # 净利润
+  PARENT_NETPROFIT: parent_net_profit           # 归母净利润
+  MINORITY_SHAREHOLDER_PROFIT: minority_shareholder_profit  # 少数股东损益
+  DEDUCTED_NET_PROFIT: deducted_net_profit      # 扣非归母净利润
+  BASIC_EPS: basic_eps                          # 基本每股收益
+  DILUTED_EPS: diluted_eps                      # 稀释每股收益
+
+# ─── 现金流量表 (stock_cash_flow_sheet_by_report_em) ─────────────────
+cash_flow:
+  CASH_RECEIVED_SALES: cash_received_sales      # 销售商品提供劳务收到的现金
+  TAXES_REFUNDED: taxes_refunded                # 收到的税费返还
+  OTHER_OPERATING_CF_IN: other_operating_cf_in  # 收到其他与经营活动有关的现金
+  TOTAL_OPERATING_CF_IN: total_operating_cf_in  # 经营活动现金流入小计
+  CASH_PAID_GOODS: cash_paid_goods              # 购买商品接受劳务支付的现金
+  CASH_PAID_EMPLOYEES: cash_paid_employees      # 支付给职工以及为职工支付的现金
+  CASH_PAID_TAXES: cash_paid_taxes              # 支付的各项税费
+  OTHER_OPERATING_CF_OUT: other_operating_cf_out  # 支付其他与经营活动有关的现金
+  TOTAL_OPERATING_CF_OUT: total_operating_cf_out  # 经营活动现金流出小计
+  NETCASH_OPERATE: cf_from_operating            # 经营活动产生的现金流量净额
+  NETCASH_INVEST: cf_from_investing             # 投资活动产生的现金流量净额
+  NETCASH_FINANCE: cf_from_financing            # 筹资活动产生的现金流量净额
+  EXCHANGE_RATE_EFFECT: exchange_rate_effect    # 汇率变动对现金的影响
+  CASH_NET_INCREASE: cf_net                     # 现金及现金等价物净增加额
+  CASH_BEGINNING: cash_beginning                # 期初现金及现金等价物余额
+  CASH_ENDING: cash_ending                      # 期末现金及现金等价物余额
+
+# ─── 日线行情 (stock_zh_a_hist) ──────────────────────────────────────
+price_daily:
+  日期: trade_date
+  股票代码: stock_code
+  开盘: open
+  收盘: close
+  最高: high
+  最低: low
+  成交量: volume
+  成交额: turnover
+  振幅: amplitude
+  涨跌幅: pct_change
+  涨跌额: change
+  换手率: turnover_rate
+
+# ─── 分红记录 (stock_dividend_cninfo) ────────────────────────────────
+dividends:
+  实施方案公告日期: announce_date
+  分红类型: dividend_type
+  送股比例: bonus_share_ratio
+  转增比例: capitalization_ratio
+  派息比例: cash_dividend_ratio
+  股权登记日: record_date
+  除权日: ex_date
+  派息日: pay_date
+  股份到账日: share_arrival_date
+  实施方案分红说明: description
+  报告时间: report_period
+
+# ─── 公共字段 ─────────────────────────────────────────────────────────
+common:
+  SECURITY_CODE: stock_code
+  REPORT_DATE: report_date
+  REPORT_TYPE: report_type

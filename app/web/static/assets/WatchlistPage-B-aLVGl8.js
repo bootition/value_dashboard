@@ -1,0 +1,1 @@
+import{i as e,n as t,r as n,t as r}from"./index-0jFLf2Fr.js";var i=n({__name:`WatchlistPage`,setup(n){return(n,i)=>(e(),t(`div`,null,[...i[0]||=[r(`h2`,null,`自选列表`,-1),r(`p`,{style:{color:`#999`}},`自选列表将在 M6 里程碑实现：分组、排序、自定义列、来源记录。`,-1)]]))}});export{i as default};

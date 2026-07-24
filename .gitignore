@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Build output
+build/
+dist/
+*.spec.bak
+
+# Runtime data and credentials
+data/
+uat_password_*/
+*.log
+*.out
+*.err
+
+# Local tooling and generated state
+.codegraph/
+.playwright-mcp/
+.omo/run-continuation/
+.omo/ulw-research/
+.omo/*.log
+.omo/*.json
+.omo/*.txt
+
+# Planning session files kept locally
+task_plan.md
+findings.md
+progress.md
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

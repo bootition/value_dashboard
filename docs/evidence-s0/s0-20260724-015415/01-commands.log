@@ -1,0 +1,619 @@
+S0 Evidence Command Log
+Run ID: s0-20260724-015415
+Asia/Shanghai Timestamp: 2026-07-24 01:55:16
+Working Directory: D:\Mr.Q\掌控经济\value-dashboard
+PowerShell Version: 7.6..
+
+
+=== 2026-07-24 01:55:16 ===
+COMMAND: $PSVersionTable.PSVersion
+OUTPUT:
+Major  Minor  Build  Revision
+7     6          
+--- END ---
+
+=== 2026-07-24 01:55:16 ===
+COMMAND: Get-Process | Select-Object Id, ProcessName, StartTime, Responding, CPU, PagedMemoryMB | Sort-Object ProcessName | Format-Table -AutoSize -Wrap
+OUTPUT:
+
+   Id ProcessName                  StartTime          Responding CPU    PagedMemoryMB
+   -- -----------                  ---------          ---------- ---    -------------
+ 3076 AggregatorHost                                        True                 4.27
+ 4084 amdfendrsr                                            True                 2.49
+13944 amdow                        2026/7/23 23:37:17       True 0.12            2.58
+ 5948 AmdPpkgSvc                                            True                 1.04
+12932 AMDRSServ                    2026/7/23 23:37:17       True 2.27            7.07
+ 2720 AMDRSSrcExt                  2026/7/23 23:37:17       True 6.64          157.30
+26024 ApplicationFrameHost         2026/7/23 23:37:28       True 0.23           62.18
+ 4128 atieclxx                                              True                 5.64
+ 4076 atiesrxx                                              True                 3.86
+ 4892 audiodg                      2026/7/23 23:36:47       True 130.58          8.88
+11080 ChsIME                       2026/7/23 23:36:50       True 0.03            1.61
+ 6508 cmd                          2026/7/24 1:35:46        True 0.11            4.60
+27328 cmd                          2026/7/24 1:50:08        True 0.12            7.48
+24768 cncmd                        2026/7/23 23:37:17       True 0.00            1.79
+55152 conhost                      2026/7/24 1:55:15        True 0.00            1.23
+45196 conhost                      2026/7/24 1:35:46        True 0.02            1.21
+30816 conhost                      2026/7/24 1:50:08        True 0.02            1.27
+27276 conhost                      2026/7/24 1:50:08        True 0.00            1.25
+ 9628 conhost                      2026/7/24 1:35:46        True 0.02            1.18
+ 8352 conhost                                               True                 1.59
+ 7512 crashpad_handler                                      True                 1.27
+ 9508 crashpad_handler                                      True                 1.50
+10916 crashpad_handler                                      True                 1.51
+15320 crashpad_handler             2026/7/23 23:37:10       True 0.05            1.77
+14308 CrossDeviceResume            2026/7/23 23:36:53       True 1.22           54.53
+15980 CrossDeviceService           2026/7/23 23:36:54       True 27.42          27.82
+ 1456 csrss                                                 True                 3.04
+ 1668 csrss                                                 True                 3.35
+ 9836 ctfmon                       2026/7/23 23:36:48       True 9.86           16.32
+ 2200 dwm                                                   True               432.26
+23624 emule                        2026/7/23 23:37:09       True 21.58          10.84
+ 6020 Everything                                            True                 2.14
+13724 explorer                     2026/7/23 23:36:53       True 63.23         808.64
+ 2104 fontdrvhost                                           True                 9.98
+ 1896 fontdrvhost                                           True                 3.69
+17920 GameViewer                   2026/7/23 23:37:08       True 25.09          24.11
+ 7124 GameViewerHealthd                                     True                 3.56
+ 7808 GameViewerServer                                      True                53.04
+ 6036 GameViewerService                                     True                 2.09
+ 5972 GCUBridge                                             True                51.75
+10760 GCUService                                            True               150.73
+20360 identity_helper              2026/7/24 1:36:39        True 0.16           10.20
+    0 Idle                                                  True                 0.06
+17776 LockApp                      2026/7/23 23:36:57       True 0.80           60.62
+ 6060 logi_lamparray_service.AMD64                          True                 4.27
+ 1740 LsaIso                                                True                 1.13
+ 1760 lsass                                                 True                13.88
+ 4272 Memory Compression                                    True                 0.51
+ 5452 MpDefenderCoreService                                 True                16.71
+ 6080 MRAfterSaleService                                    True                21.58
+47092 msedge                       2026/7/24 1:36:39        True 0.06            3.14
+45872 msedge                       2026/7/24 1:36:39        True 5.50           71.43
+13564 msedge                       2026/7/24 1:36:39        True 1.31           74.44
+13928 msedge                       2026/7/24 1:36:39        True 0.42           19.70
+44964 msedge                       2026/7/24 1:36:39        True 0.12            9.74
+22348 msedgewebview2               2026/7/23 23:37:05       True 1.78           83.88
+29880 msedgewebview2               2026/7/23 23:37:58       True 7.83          133.50
+27048 msedgewebview2               2026/7/23 23:37:58       True 0.17           11.56
+25580 msedgewebview2               2026/7/23 23:37:10       True 105.52         25.20
+25360 msedgewebview2               2026/7/23 23:37:10       True 0.19            9.39
+25324 msedgewebview2               2026/7/23 23:37:10       True 0.83           14.62
+25316 msedgewebview2               2026/7/23 23:37:10       True 201.08        105.39
+25080 msedgewebview2               2026/7/23 23:37:10       True 0.11            3.29
+25036 msedgewebview2               2026/7/23 23:37:10       True 4.08           48.35
+22612 msedgewebview2               2026/7/23 23:37:05       True 0.86           36.46
+22452 msedgewebview2               2026/7/23 23:37:05       True 0.12            9.41
+22108 msedgewebview2               2026/7/23 23:37:57       True 4.39          348.45
+22364 msedgewebview2               2026/7/23 23:37:05       True 0.42           13.60
+21696 msedgewebview2               2026/7/23 23:37:05       True 0.09            3.30
+21872 msedgewebview2               2026/7/23 23:37:57       True 1.14           15.36
+21656 msedgewebview2               2026/7/23 23:37:05       True 2.98           41.39
+20340 msedgewebview2               2026/7/23 23:36:58       True 0.16           10.07
+20172 msedgewebview2               2026/7/23 23:36:58       True 0.77           14.28
+20144 msedgewebview2               2026/7/23 23:36:58       True 0.55           72.41
+19628 msedgewebview2               2026/7/23 23:36:58       True 0.86           60.28
+19444 msedgewebview2               2026/7/23 23:36:57       True 0.14            2.89
+19384 msedgewebview2               2026/7/23 23:36:57       True 5.09           47.89
+ 8160 msedgewebview2               2026/7/23 23:37:57       True 3.12           44.82
+ 3116 msedgewebview2               2026/7/23 23:37:57       True 0.12            3.26
+ 2120 msedgewebview2               2026/7/23 23:37:52       True 0.30           32.12
+ 6116 MsMpEng                                               True               446.70
+ 6104 MSOfficePLUSService                                   True                36.97
+ 6140 mtkbtsvc                                              True                 1.22
+26492 Nahimic3                     2026/7/23 23:37:28      False 0.39           62.37
+15708 NahimicAPO4Volume            2026/7/23 23:36:55       True 0.22            1.44
+ 3864 nahimicNotifSys              2026/7/23 23:37:19       True 0.72           41.56
+ 6096 NahimicService                                        True                10.89
+15472 NahimicSvc32                 2026/7/23 23:36:55       True 1.88            4.96
+14204 NahimicSvc64                 2026/7/23 23:36:55       True 13.44          59.07
+ 1752 NetSignCNG                   2026/7/23 23:36:52       True 0.48            1.71
+ 6044 NetSignCNGGuardService                                True                 1.64
+21188 NisSrv                                                True                 5.12
+50852 node                         2026/7/24 1:50:08        True 0.11           18.83
+44984 node                         2026/7/24 1:35:46        True 0.27           21.02
+40416 node                         2026/7/24 1:35:46        True 3.72           71.15
+27652 node                         2026/7/24 1:50:08        True 0.30           27.10
+27016 node                         2026/7/24 1:50:08        True 0.06           25.00
+30532 node                         2026/7/24 1:35:46        True 0.06           24.06
+ 9996 nvcontainer                  2026/7/23 23:36:49       True 5.05           10.88
+ 6068 nvcontainer                                           True                12.97
+ 9880 nvcontainer                                           True                14.04
+10080 nvcontainer                  2026/7/23 23:36:49       True 24.42          60.77
+ 5020 NVDisplay.Container                                   True                34.36
+ 3768 NVDisplay.Container                                   True                29.46
+ 9612 NVIDIA Overlay               2026/7/23 23:36:50       True 16.70         162.84
+10880 NVIDIA Overlay               2026/7/23 23:36:51       True 1.81           11.53
+11152 NVIDIA Overlay               2026/7/23 23:36:51       True 9.03          124.67
+11276 NVIDIA Overlay               2026/7/23 23:36:51       True 0.48            9.21
+11852 NVIDIA Overlay               2026/7/23 23:36:51       True 2.03           47.95
+ 9796 nvsphelper64                 2026/7/23 23:36:50       True 14.52           4.21
+ 5988 OfficeClickToRun                                      True                34.11
+20220 OneDrive.Sync.Service        2026/7/23 23:44:21       True 12.91          65.93
+42152 opencode                     2026/7/24 1:50:01        True 92.83        1861.14
+46036 opencode                     2026/7/24 1:35:39        True 570.30      -1913.56
+23888 OpenConsole                  2026/7/24 1:49:56        True 0.30            2.93
+42072 OpenConsole                  2026/7/24 1:35:37        True 1.47            3.17
+24668 OSDTpDetect                  2026/7/23 23:37:10       True 4.11           40.44
+ 5712 pg_ctl                                                True                 1.45
+23612 PicList                      2026/7/23 23:37:05       True 0.52           13.63
+22736 PicList                      2026/7/23 23:37:05       True 6.98          148.43
+22184 PicList                      2026/7/23 23:37:02       True 7.05          175.29
+ 9188 postgres                                              True                 3.12
+ 9428 postgres                                              True                 3.62
+ 9420 postgres                                              True                 3.11
+ 9488 postgres                                              True                 3.62
+ 9156 postgres                                              True                 3.07
+ 6240 postgres                                              True                 3.80
+ 8976 postgres                                              True                 2.75
+ 8308 postgres                                              True                 3.89
+ 7440 postgres                                              True                 3.16
+ 9136 postgres                                              True                 3.11
+42988 powershell                   2026/7/24 1:35:37        True 0.59           59.11
+51504 powershell                   2026/7/24 1:49:56        True 0.52           59.02
+54132 pwsh                         2026/7/24 1:55:15        True 0.52           30.44
+21748 qbittorrent                  2026/7/23 23:37:00       True 4.23           33.59
+26088 RadeonSoftware               2026/7/23 23:37:14       True 19.34         417.05
+  376 Registry                                              True                 6.41
+19800 RuntimeBroker                2026/7/23 23:36:58       True 0.95           11.26
+51656 RuntimeBroker                2026/7/24 1:49:50        True 0.20            6.68
+17508 RuntimeBroker                2026/7/23 23:36:55       True 0.12            2.41
+ 6220 RuntimeBroker                2026/7/23 23:37:57       True 0.09            1.62
+ 2460 RuntimeBroker                2026/7/23 23:37:29       True 0.06            4.48
+15300 RuntimeBroker                2026/7/23 23:36:55       True 1.72            9.79
+16960 SearchHost                   2026/7/23 23:36:55       True 4.39           83.71
+12724 SearchIndexer                                         True                30.51
+14800 SearchProtocolHost                                    True                 3.83
+  332 Secure System                                         True                 0.17
+21392 SecurityHealthService                                 True                13.75
+21364 SecurityHealthSystray        2026/7/23 23:36:59       True 0.08            2.23
+14132 SenaryAudioApp               2026/7/23 23:36:53       True 1.62           58.10
+ 6088 SenaryAudioApp.Svc                                    True                23.97
+ 1732 services                                              True                 6.62
+36120 ShellExperienceHost          2026/7/24 1:49:50        True 0.77           62.68
+27156 ShellHost                    2026/7/24 0:41:49        True 0.25           52.30
+12816 sihost                       2026/7/23 23:36:52       True 7.17            8.49
+ 1148 smss                                                  True                 1.13
+ 5524 spoolsv                                               True                 5.88
+16968 StartMenuExperienceHost      2026/7/23 23:36:55       True 4.75          121.24
+13972 svchost                                               True                 1.91
+14008 svchost                                               True                 2.26
+13576 svchost                                               True                 5.89
+14448 svchost                                               True                 3.80
+ 6164 svchost                                               True                 4.96
+15128 svchost                                               True                 9.31
+15208 svchost                                               True                18.43
+13172 svchost                                               True                 4.15
+14960 svchost                                               True                 2.91
+13056 svchost                      2026/7/23 23:36:52       True 1.56            9.30
+ 6268 svchost                                               True                 3.91
+12884 svchost                      2026/7/23 23:36:52       True 17.61          12.45
+12876 svchost                      2026/7/23 23:36:52       True 0.14            2.15
+12368 svchost                                               True                 1.80
+12360 svchost                                               True                 1.89
+10512 svchost                                               True                 2.30
+10104 svchost                                               True                 8.14
+ 6668 svchost                                               True                 2.65
+15292 svchost                      2026/7/23 23:36:55       True 0.27            4.12
+ 6052 svchost                                               True                 3.09
+12984 svchost                      2026/7/23 23:36:52       True 0.03            2.08
+15996 svchost                      2026/7/23 23:36:54       True 0.67            8.33
+27404 svchost                                               True                 5.55
+19952 svchost                                               True                 1.54
+53616 svchost                                               True                 1.78
+52028 svchost                                               True                 5.24
+47128 svchost                                               True                 1.70
+31852 svchost                                               True                50.79
+31396 svchost                                               True                 2.16
+31220 svchost                                               True                 9.34
+30984 svchost                                               True                22.30
+29752 svchost                                               True                 1.36
+29628 svchost                                               True                 3.43
+18036 svchost                                               True                 5.35
+29380 svchost                                               True                 2.76
+28492 svchost                                               True                 1.82
+28012 svchost                                               True                 3.46
+27868 svchost                                               True                 3.61
+ 6028 svchost                                               True                 2.79
+25912 svchost                                               True                 7.88
+24824 svchost                                               True                 2.66
+21580 svchost                                               True                 2.01
+21040 svchost                                               True                 2.30
+20444 svchost                      2026/7/23 23:36:58       True 1.00            3.14
+28580 svchost                      2026/7/23 23:37:44       True 0.05            1.90
+ 6012 svchost                                               True                40.13
+ 6156 svchost                                               True                 1.38
+ 5760 svchost                                               True                10.52
+ 3196 svchost                                               True                 7.56
+ 3032 svchost                                               True                 1.95
+ 3016 svchost                                               True                 1.56
+ 2924 svchost                                               True                 3.13
+ 2916 svchost                                               True                 8.34
+ 2812 svchost                                               True                 1.83
+ 2648 svchost                                               True                 3.85
+ 2628 svchost                                               True                 2.48
+ 2624 svchost                                               True                 6.21
+ 5980 svchost                                               True                37.64
+ 2604 svchost                                               True                 3.57
+ 2592 svchost                                               True                 6.41
+ 2520 svchost                                               True                 2.70
+ 2344 svchost                                               True                 7.92
+ 2336 svchost                                               True                 4.47
+ 2328 svchost                                               True                 2.34
+ 2316 svchost                                               True                 6.87
+ 2292 svchost                                               True                 1.32
+ 2020 svchost                                               True                10.36
+ 1888 svchost                                               True                11.61
+ 1296 svchost                                               True                 3.54
+ 3264 svchost                                               True                 3.19
+ 3296 svchost                                               True                 2.13
+ 2612 svchost                                               True                 2.42
+ 3608 svchost                                               True                 1.94
+ 3600 svchost                                               True                 3.72
+ 5412 svchost                                               True                15.64
+ 5268 svchost                                               True                 2.12
+ 5240 svchost                                               True                 2.90
+ 5192 svchost                                               True                 1.63
+ 5184 svchost                                               True                 1.50
+ 4980 svchost                                               True                12.14
+ 4928 svchost                                               True                 2.82
+ 4668 svchost                                               True                27.72
+ 4504 svchost                                               True                 2.16
+ 4472 svchost                                               True                 4.43
+ 4396 svchost                                               True                 2.21
+ 4388 svchost                                               True                 2.95
+ 4340 svchost                                               True                 2.11
+ 4152 svchost                                               True                 1.48
+ 4144 svchost                                               True                 2.06
+ 4136 svchost                                               True                 4.07
+ 4092 svchost                                               True                17.85
+ 3940 svchost                                               True                 7.58
+ 5664 svchost                                               True                 1.85
+ 5716 svchost                                               True                 1.50
+    4 System                                                True                 0.06
+26000 SystrayComponent             2026/7/23 23:37:13       True 4.34           23.87
+ 9892 TabTip                       2026/7/23 23:36:49       True 1.64           56.65
+ 5884 taskhostw                    2026/7/23 23:36:52       True 1.23            7.14
+22560 TextInputHost                2026/7/23 23:37:05       True 6.72           69.27
+22192 TrafficMonitor               2026/7/23 23:37:03       True 45.83          11.48
+26528 unsecapp                                              True                 1.73
+ 6124 vivoesService_x64                                     True                12.96
+ 6384 vivoSyncService                                       True                16.70
+ 6328 vmnat                                                 True                 2.36
+ 6132 vmnetdhcp                                             True                 7.73
+ 6188 vmware-authd                                          True                 7.46
+ 7624 vmware-tray                  2026/7/23 23:37:16       True 0.08            4.24
+ 6340 vmware-usbarbitrator64                                True                 2.82
+21532 VocoType                     2026/7/23 23:37:04       True 3.92         1263.69
+17260 Widgets                      2026/7/23 23:36:55       True 3.25           13.72
+17572 WidgetService                2026/7/23 23:36:55       True 1.72            5.67
+45256 WindowsTerminal              2026/7/24 1:35:36        True 20.42         103.95
+ 1660 wininit                                               True                 1.70
+ 1136 winlogon                                              True                 2.94
+13304 wlanext                                               True                 1.51
+ 5568 WmiPrvSE                                              True                19.40
+ 9904 WmiPrvSE                                              True                 4.11
+ 6280 wslservice                                            True                 5.67
+ 1956 WUDFHost                                              True                 2.11
+ 3856 XiaobaoService                                        True                 4.95
+
+
+--- END ---
+
+=== 2026-07-24 01:55:16 ===
+COMMAND: Get-Process | Where-Object { ProcessName -in ('python','pythonw','uvicorn','duckdb','sqlite3','value-dashboard','pyinstaller','node') } | Select-Object Id, ProcessName, StartTime, Responding | Format-Table -AutoSize
+OUTPUT:
+
+   Id ProcessName StartTime         Responding
+   -- ----------- ---------         ----------
+27016 node        2026/7/24 1:50:08       True
+27652 node        2026/7/24 1:50:08       True
+30532 node        2026/7/24 1:35:46       True
+40416 node        2026/7/24 1:35:46       True
+44984 node        2026/7/24 1:35:46       True
+50852 node        2026/7/24 1:50:08       True
+
+
+--- END ---
+
+=== 2026-07-24 01:55:26 ===
+COMMAND: Get-NetTCPConnection -State Listen | Select-Object LocalAddress, LocalPort, OwningProcess, State | Sort-Object LocalPort | Format-Table -AutoSize
+OUTPUT:
+
+LocalAddress LocalPort OwningProcess  State
+------------ --------- -------------  -----
+0.0.0.0            135          2020 Listen
+::                 135          2020 Listen
+192.168.12.5       139             4 Listen
+::                 445             4 Listen
+0.0.0.0            902          6188 Listen
+0.0.0.0            912          6188 Listen
+0.0.0.0           5040         13576 Listen
+::                5432          8308 Listen
+0.0.0.0           5432          8308 Listen
+::                7680         31220 Listen
+127.0.0.1         9080          6096 Listen
+0.0.0.0           9197          6124 Listen
+127.0.0.1         9996          6384 Listen
+192.168.12.5     10191          6124 Listen
+::               13688          5972 Listen
+0.0.0.0          13688          5972 Listen
+0.0.0.0          27138         23624 Listen
+127.0.0.1        27222          7808 Listen
+::1              32071         21748 Listen
+127.0.0.1        32071         21748 Listen
+192.168.12.5     32071         21748 Listen
+127.0.0.1        36058         21532 Listen
+0.0.0.0          36677         22184 Listen
+::               36699         22184 Listen
+::1              42050         20220 Listen
+::               49664          1760 Listen
+0.0.0.0          49664          1760 Listen
+::               49665          1660 Listen
+0.0.0.0          49665          1660 Listen
+0.0.0.0          49666          2592 Listen
+::               49666          2592 Listen
+0.0.0.0          49667          4092 Listen
+::               49667          4092 Listen
+0.0.0.0          49671          5524 Listen
+::               49671          5524 Listen
+0.0.0.0          49736          1732 Listen
+::               49736          1732 Listen
+127.0.0.1        52695         46036 Listen
+127.0.0.1        55040          7808 Listen
+127.0.0.1        56467         42152 Listen
+192.168.12.5     56628          7808 Listen
+0.0.0.0          56631          7808 Listen
+127.0.0.1        63451          1752 Listen
+
+
+--- END ---
+
+=== 2026-07-24 01:55:27 ===
+COMMAND: Test ports 8765, 5173, 6176
+OUTPUT:
+Port 8765: no listener
+Port 5173: no listener
+Port 6176: no listener
+
+--- END ---
+
+=== 2026-07-24 01:55:39 ===
+COMMAND: Get-ChildItem data\valuedashboard.duckdb | Select-Object FullName, Length, CreationTimeUtc, LastWriteTimeUtc, Attributes, LinkType, Target | Format-List
+OUTPUT:
+
+FullName         : D:\Mr.Q\掌控经济\value-dashboard\data\valuedashboard.duckdb
+Length           : 1986801664
+CreationTimeUtc  : 2026/7/17 8:50:23
+LastWriteTimeUtc : 2026/7/22 1:41:26
+Attributes       : Archive
+LinkType         : 
+Target           : 
+
+
+--- END ---
+
+=== 2026-07-24 01:55:39 ===
+COMMAND: Get-ChildItem data\valuedashboard.sqlite | Select-Object FullName, Length, CreationTimeUtc, LastWriteTimeUtc, Attributes, LinkType, Target | Format-List
+OUTPUT:
+
+FullName         : D:\Mr.Q\掌控经济\value-dashboard\data\valuedashboard.sqlite
+Length           : 450560
+CreationTimeUtc  : 2026/7/17 8:50:23
+LastWriteTimeUtc : 2026/7/21 16:21:26
+Attributes       : Archive
+LinkType         : 
+Target           : 
+
+
+--- END ---
+
+=== 2026-07-24 01:55:39 ===
+COMMAND: Get-ChildItem data\backup\* | Select-Object FullName, Length, CreationTimeUtc, LastWriteTimeUtc, Attributes, LinkType, Target | Sort-Object FullName | Format-Table
+OUTPUT:
+
+FullName                                                                           Length CreationTimeUtc    LastWriteTimeUtc   Attributes LinkType Target
+--------                                                                           ------ ---------------    ----------------   ---------- -------- ------
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.duckdb     1986801664 2026/7/20 5:02:05  2026/7/20 2:23:44     Archive          
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite         446464 2026/7/20 5:02:07  2026/7/20 2:30:41     Archive          
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-shm      32768 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\audit_pre_fix_20260720.sqlite-wal          0 2026/7/20 5:04:38  2026/7/20 5:04:38     Archive          
+D:\Mr.Q\掌控经济\value-dashboard\data\backup\full_20260717_223725.zip              625961 2026/7/17 14:37:26 2026/7/17 14:37:26    Archive          
+
+
+--- END ---
+
+=== 2026-07-24 01:55:56 ===
+COMMAND: Get-FileHash -LiteralPath data\valuedashboard.duckdb -Algorithm SHA256
+OUTPUT:
+
+Algorithm       Hash                                                                   Path
+---------       ----                                                                   ----
+SHA256          5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6       D:\Mr.Q\掌控经济\value-dashboard…
+
+
+--- END ---
+
+=== 2026-07-24 01:55:59 ===
+COMMAND: Get-FileHash -LiteralPath data\valuedashboard.sqlite -Algorithm SHA256
+OUTPUT:
+
+Algorithm       Hash                                                                   Path
+---------       ----                                                                   ----
+SHA256          B7B5F2FF2D1B4D2F71512DFEBD8DC2FBD9625E51BE2D0BFDB5CAF0657EC11959       D:\Mr.Q\掌控经济\value-dashboard…
+
+
+--- END ---
+
+=== 2026-07-24 01:55:59 ===
+COMMAND: Get-FileHash -LiteralPath data\backup\audit_pre_fix_20260720.duckdb -Algorithm SHA256
+OUTPUT:
+
+Algorithm       Hash                                                                   Path
+---------       ----                                                                   ----
+SHA256          46EBCEB6DDBCCA15D4E82D22CFA659EC1C593033DE190C08B5C54FC7211A3C91       D:\Mr.Q\掌控经济\value-dashboard…
+
+
+--- END ---
+
+=== 2026-07-24 01:56:02 ===
+COMMAND: Get-FileHash -LiteralPath data\backup\audit_pre_fix_20260720.sqlite -Algorithm SHA256
+OUTPUT:
+
+Algorithm       Hash                                                                   Path
+---------       ----                                                                   ----
+SHA256          228E0F53A8EBD0B99DAED8FA2D683D42F46644E8805495350EC162EFEC6596D3       D:\Mr.Q\掌控经济\value-dashboard…
+
+
+--- END ---
+
+=== 2026-07-24 01:56:18 ===
+COMMAND: Check formal sidecar files (duckdb.wal, sqlite-wal, sqlite-shm)
+OUTPUT:
+SIDECAR ABSENT: data\valuedashboard.duckdb.wal
+SIDECAR ABSENT: data\valuedashboard.sqlite-wal
+SIDECAR ABSENT: data\valuedashboard.sqlite-shm
+--- END ---
+
+=== 2026-07-24 01:56:27 ===
+COMMAND: Get-ChildItem -LiteralPath data -Recurse -Force | Select-Object FullName, Length, LastWriteTimeUtc, Attributes | Sort-Object FullName | Format-Table
+OUTPUT:
+[Output written to 07-directory-summary.txt - 1 characters]
+--- END ---
+
+=== 2026-07-24 01:56:38 ===
+COMMAND: git -C 'D:\Mr.Q\掌控经济\value-dashboard' branch --show-current
+OUTPUT:
+fix/audit-remediation
+
+--- END ---
+
+=== 2026-07-24 01:56:38 ===
+COMMAND: git -C 'D:\Mr.Q\掌控经济\value-dashboard' remote -v
+OUTPUT:
+origin	https://github.com/bootition/value_dashboard.git (fetch)
+origin	https://github.com/bootition/value_dashboard.git (push)
+
+--- END ---
+
+=== 2026-07-24 01:56:39 ===
+COMMAND: git -C 'D:\Mr.Q\掌控经济\value-dashboard' status --short
+OUTPUT:
+?? .gitignore
+?? .omo/
+?? .opencode/
+?? .vite/
+?? README.md
+?? _legacy/
+?? _pytest_policy.py
+?? app/
+?? config/
+?? conftest.py
+?? docs/
+?? frontend/
+?? pyproject.toml
+?? start.bat
+?? tests/
+?? value-dashboard.spec
+
+--- END ---
+
+=== 2026-07-24 01:56:39 ===
+COMMAND: git -C 'D:\Mr.Q\掌控经济\value-dashboard' log --oneline -5
+OUTPUT:
+fatal: your current branch 'fix/audit-remediation' does not have any commits yet
+
+--- END ---
+
+=== 2026-07-24 01:56:39 ===
+COMMAND: git -C 'D:\Mr.Q\掌控经济\value-dashboard' tag --list
+OUTPUT:
+
+--- END ---
+
+
+=== 2026-07-24 02:00:41 ===
+COMMAND: Get-CimInstance Win32_Process per PID for: 27016,27652,30532,40416,44984,50852
+OUTPUT:
+
+ProcessId       : 27016
+Name            : node.exe
+CommandLine     : D:\softwork\node.exe D:\RelocatedHomeData\.cache\opencode\packages\oh-my-openagent@4.18.2\node_modules\oh-my-openagent\packages\lsp-daemon\dist\cli.js mcp
+ParentProcessId : 42152
+CreationDate    : 2026/7/24 1:50:08
+
+
+
+ProcessId       : 27652
+Name            : node.exe
+CommandLine     : "C:\Users\qhdjxgm\.omo\codegraph\bin\..\node.exe"  --liftoff-only "C:\Users\qhdjxgm\.omo\codegraph\bin\..\lib\dist\bin\codegraph.js" "serve" "--mcp"
+ParentProcessId : 27328
+CreationDate    : 2026/7/24 1:50:08
+
+
+
+ProcessId       : 30532
+Name            : node.exe
+CommandLine     : D:\softwork\node.exe D:\RelocatedHomeData\.cache\opencode\packages\oh-my-openagent@4.18.2\node_modules\oh-my-openagent\packages\lsp-daemon\dist\cli.js mcp
+ParentProcessId : 46036
+CreationDate    : 2026/7/24 1:35:46
+
+
+
+ProcessId       : 40416
+Name            : node.exe
+CommandLine     : "C:\Users\qhdjxgm\.omo\codegraph\bin\..\node.exe"  --liftoff-only "C:\Users\qhdjxgm\.omo\codegraph\bin\..\lib\dist\bin\codegraph.js" "serve" "--mcp"
+ParentProcessId : 6508
+CreationDate    : 2026/7/24 1:35:46
+
+
+
+ProcessId       : 44984
+Name            : node.exe
+CommandLine     : C:\Users\qhdjxgm\.omo\codegraph\node.exe -e "
+                  const fs = require('fs');
+                  const parentPid = Number(process.argv[1]);
+                  const timeoutMs = Number(process.argv[2]);
+                  const secs = Math.round(timeoutMs / 1000);
+                  const MSG = Buffer.from('[CodeGraph] Main thread unresponsive for ~' + secs + 's — killing the wedged process so a fresh one can start (#850). Disable with CODEGRAPH_NO_WATCHDOG=1.\n');
+                  function kill() {
+                    try { fs.writeSync(2, MSG); } catch (e) {}
+                    try { process.kill(parentPid, 'SIGKILL'); } catch (e) {}
+                    process.exit(0);
+                  }
+                  let timer = setTimeout(kill, timeoutMs);
+                  process.stdin.on('data', () => { clearTimeout(timer); timer = setTimeout(kill, timeoutMs); });
+                  process.stdin.on('end', () => process.exit(0));   // parent closed the pipe (exited) -> no orphan
+                  process.stdin.on('error', () => process.exit(0)); // pipe broke -> parent gone
+                  process.stdin.resume();
+                  " 40416 60000
+ParentProcessId : 40416
+CreationDate    : 2026/7/24 1:35:46
+
+
+
+ProcessId       : 50852
+Name            : node.exe
+CommandLine     : C:\Users\qhdjxgm\.omo\codegraph\node.exe -e "
+                  const fs = require('fs');
+                  const parentPid = Number(process.argv[1]);
+                  const timeoutMs = Number(process.argv[2]);
+                  const secs = Math.round(timeoutMs / 1000);
+                  const MSG = Buffer.from('[CodeGraph] Main thread unresponsive for ~' + secs + 's — killing the wedged process so a fresh one can start (#850). Disable with CODEGRAPH_NO_WATCHDOG=1.\n');
+                  function kill() {
+                    try { fs.writeSync(2, MSG); } catch (e) {}
+                    try { process.kill(parentPid, 'SIGKILL'); } catch (e) {}
+                    process.exit(0);
+                  }
+                  let timer = setTimeout(kill, timeoutMs);
+                  process.stdin.on('data', () => { clearTimeout(timer); timer = setTimeout(kill, timeoutMs); });
+                  process.stdin.on('end', () => process.exit(0));   // parent closed the pipe (exited) -> no orphan
+                  process.stdin.on('error', () => process.exit(0)); // pipe broke -> parent gone
+                  process.stdin.resume();
+                  " 27652 60000
+ParentProcessId : 27652
+CreationDate    : 2026/7/24 1:50:08
+
+
+--- END ---
+

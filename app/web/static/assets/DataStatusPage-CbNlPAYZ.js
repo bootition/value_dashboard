@@ -1,0 +1,1 @@
+import{i as e,n as t,r as n,t as r}from"./index-0jFLf2Fr.js";var i=n({__name:`DataStatusPage`,setup(n){return(n,i)=>(e(),t(`div`,null,[...i[0]||=[r(`h2`,null,`数据状态`,-1),r(`p`,{style:{color:`#999`}},`数据状态页将在 M6 里程碑实现：更新时间、覆盖状态、回填状态、重试/缺失摘要。`,-1)]]))}});export{i as default};
