@@ -45,6 +45,14 @@
 | `VD_ENV` | `formal`, `test`, `staging` | **无默认，缺失为致命错误** | 运行环境标识。pytest 必须为 `test`；`formal` 禁止在 pytest 进程中出现。 |
 | `VD_FORMAL_ACK` | `confirmed` | **无默认** | formal 访问确认令牌。**start.bat 不得自动设置此变量**；它仅检查变量值是否为 `confirmed`。若非 `confirmed` → 拒绝启动。pytest 内如果出现此变量（无论值是什么），`pytest_configure` 拒绝整个 session。 |
 
+### 2.1a 正式数据根变量
+
+S1 包装器向 Python 进程注入 `VD_FORMAL_DATA_ROOT` 环境变量，使 Python 端的 `resolve_and_validate_paths()` / `from_env()` 可以惰性读取正式数据根，而无需硬编码路径。这是外层包装器（PowerShell）与内层 Python 路径策略之间的唯一定向合约。
+
+| 变量 | 设定者 | 说明 |
+|---|---|---|
+| `VD_FORMAL_DATA_ROOT` | `s1-pytest.ps1` 包装器 | Python 进程启动前设置。值为**正式数据根的规范化绝对路径**（如 `D:\Mr.Q\掌控经济\value-dashboard\data`）。Python 端的 `path_policy.formal_data_root()` 将**只通过此环境变量**解析，不再硬编码 `_DATA_ROOT`。包装器从 `-FormalDataRoot` 参数获取此值；若省略，则默认为 `$PSScriptRoot\..\data`（脚本派生绝对路径）。 |
+
 ### 2.2 路径变量
 
 所有 DB 路径变量（`VD_DUCKDB_PATH`, `VD_SQLITE_PATH`）在所有 profile（formal/test/staging）下均为**强制绝对路径**。
@@ -411,6 +419,7 @@ self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
 **`scripts/s1-path-preflight.ps1`** — 纯 PowerShell 状态捕获。支持 `Before` 和 `After` 两个阶段：
 
+- **`-FormalDataRoot`** 可选参数。指定正式数据根路径（包含 `valuedashboard.duckdb` 和 `valuedashboard.sqlite` 的目录）。若省略，则默认使用 `$PSScriptRoot\..\data`（脚本派生绝对路径）。在脱离 worktree 中，由于 worktree 的 `data/` 下不含正式 DB 文件，省略此参数将导致 Before 阶段失败；调用方必须显式传递主仓库的正式数据根。
 - **Before 阶段**（`-Phase Before`）：验证环境并捕获执行前状态。运行根必须不存在。
 - **After 阶段**（`-Phase After`）：仅捕获执行后状态并返回。不假设运行根状态（可能已由包装器创建）。
 
@@ -443,17 +452,20 @@ param(
 ```
 param(
     [switch]$PolicyOnly,
+    [string]$FormalDataRoot = "",
+    [string]$EvidenceDir = "docs/evidence-s1",
+    [switch]$PreflightOnly,
     [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$PytestArgs,
-    [string]$EvidenceDir = "docs/evidence-s1"
+    [string[]]$PytestArgs
 )
 ```
 
 **两种模式共同的启动步骤：**
 1. 确认当前目录是仓库根，并确认 `VD_FORMAL_ACK` 不存在；若存在则拒绝，不得清除后继续。
-2. 生成唯一 run ID、外部且尚不存在的 `VD_TEST_RUN_ROOT`，并将 `VD_DUCKDB_PATH`/`VD_SQLITE_PATH` 设置为该根下的 sibling 文件。
-3. 设置 `VD_ENV=test` 和本次唯一的 `VD_TEST_EVIDENCE_ROOT`。这些是 test wrapper 变量，不是 formal gate 变量。
-4. 调用 `Preflight Before`。若发现 run root 已存在，不得自动删除；保留现场并失败。
+2. 设置 `VD_FORMAL_DATA_ROOT`（从 `-FormalDataRoot` 或默认 `$PSScriptRoot\..\data` 解析）。此环境变量是 Python 端的唯一正式根来源；Python `path_policy.formal_data_root()` 将只通过 `os.environ["VD_FORMAL_DATA_ROOT"]` 惰性解析，不再硬编码 `_DATA_ROOT` 常量。生产代码中不存在硬编码主仓库路径。
+3. 生成唯一 run ID、外部且尚不存在的 `VD_TEST_RUN_ROOT`，并将 `VD_DUCKDB_PATH`/`VD_SQLITE_PATH` 设置为该根下的 sibling 文件。
+4. 设置 `VD_ENV=test` 和本次唯一的 `VD_TEST_EVIDENCE_ROOT`。这些是 test wrapper 变量，不是 formal gate 变量。
+5. 调用 `Preflight Before`。若发现 run root 已存在，不得自动删除；保留现场并失败。
 
 **PolicyOnly 模式**（`-PolicyOnly`，运行根始终不存在）：
 1. **Preflight Before** 捕获状态 → 验证运行根不存在。

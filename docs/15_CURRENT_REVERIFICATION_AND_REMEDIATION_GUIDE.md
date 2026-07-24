@@ -385,6 +385,13 @@ S7 (晋级前回滚演练 → 预构建工件 → 候选签名 → 停止服务 
 **3. 创建路径隔离合约：**
    设计并实施路径隔离：所有 pytest/CLI/app 通过环境变量或配置开关指向隔离路径；项目正式库路径在代码层写保护。
 
+   **正式根合约（S1 关键澄清）：**
+   - S1 PowerShell 包装器（`s1-pytest.ps1`）始终设置 `VD_FORMAL_DATA_ROOT` 环境变量，值为解析后的正式数据根绝对路径。
+   - Python 端 `path_policy.formal_data_root()`（未来 Phase D 实现） 将**只通过 `os.environ["VD_FORMAL_DATA_ROOT"]` 惰性读取**此变量，不再硬编码 `_DATA_ROOT` 常量。生产代码中不存在硬编码的主仓库路径。
+   - `s1-path-preflight.ps1` 接受 `-FormalDataRoot` 参数（可选，默认 `$PSScriptRoot\..\data`（脚本派生路径）），在 Before 阶段验证正式根存在且包含 `valuedashboard.duckdb` 和 `valuedashboard.sqlite` 常规文件。
+   - 在脱离 worktree 中，由于 worktree 的 `data/` 不含正式 DB 文件，必须显式传递主仓库正式根（如 `-FormalDataRoot "D:\Mr.Q\掌控经济\value-dashboard\data"`），否则 Before 阶段将因缺少所需文件而失败。
+   - 两个 DB 文件必须存在于 Before 阶段之前（即 Python 进程启动前）。此检查由 PowerShell 预检执行，不依赖 Python。
+
 **4. 提交 S1 隔离与哈希门禁实现：**
    - 将步骤 1-3 的 `.gitignore`、哈希清单、测试门禁和隔离合约作为新的整改提交记录在步骤 0 的事故标签之后。
    - 不得 amend、移动或删除 `incident-2026-07-22` 标签；后续修复均使用新提交保留因果链。

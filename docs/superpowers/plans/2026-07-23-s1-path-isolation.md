@@ -329,9 +329,16 @@
       [Parameter(Mandatory = $true)]
       [ValidateSet("Before", "After")]
       [string]$Phase,
+      [string]$FormalDataRoot = "",
       [string]$EvidenceDir = "docs/evidence-s1"
   )
   ```
+
+  **正式数据根（FormalDataRoot）：**
+  - 可选参数，指定正式数据库目录（包含 `valuedashboard.duckdb` 和 `valuedashboard.sqlite`）。
+  - 若省略，则默认使用 `$PSScriptRoot\..\data`（脚本派生绝对路径）。
+  - **Worktree 使用约束：** 在脱离工作区（worktree）中，由于 worktree 的 `data/` 不含正式 DB 文件，省略此参数将导致 Before 阶段失败。调用方必须显式传递主仓库正式数据根，例如 `-FormalDataRoot "D:\Mr.Q\掌控经济\value-dashboard\data"`。
+  - 每个 Before/After 捕获的证据 JSON 中包含 `formal_data_root` 字段，确保前后使用的正式根一致。
 
   1. **进程检查：** `Get-Process -Name python* -ErrorAction SilentlyContinue` — 如存在则抛出 "Python process(es) running: <pids> — freeze S1"。
   2. **环境变量检查：** 必须为 `VD_ENV=test`；必须存在 `VD_DUCKDB_PATH`、`VD_SQLITE_PATH`、`VD_TEST_RUN_ROOT`；`VD_FORMAL_ACK` 必须不存在。任一不满足则抛出。
@@ -353,11 +360,18 @@
   ```powershell
   param(
       [switch]$PolicyOnly,
+      [string]$FormalDataRoot = "",
+      [string]$EvidenceDir = "docs/evidence-s1",
+      [switch]$PreflightOnly,
       [Parameter(ValueFromRemainingArguments = $true)]
-      [string[]]$PytestArgs,
-      [string]$EvidenceDir = "docs/evidence-s1"
+      [string[]]$PytestArgs
   )
   ```
+
+  **正式数据根与 `VD_FORMAL_DATA_ROOT` 环境变量：**
+  - 包装器始终设置 `$env:VD_FORMAL_DATA_ROOT` 为解析后的正式数据根，确保 Python 进程可通过 `os.environ["VD_FORMAL_DATA_ROOT"]` 读取。
+  - 此环境变量是 Python 端 `path_policy.formal_data_root()` 的唯一正式根来源；Python 代码不再硬编码 `_DATA_ROOT` 常量。
+  - `PreflightOnly` 开关用于在不调用 Python 的情况下验证 preflight/comparator 逻辑（通过将 `-FormalDataRoot` 指向临时目录进行合成文件测试）。
 
   **主逻辑（伪代码精确）：**
 
@@ -368,6 +382,11 @@
   $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "vd-s1-$runId"
   if (Test-Path -LiteralPath $runRoot) { throw "Generated run root unexpectedly exists: $runRoot" }
   if (Test-Path Env:VD_FORMAL_ACK) { throw "VD_FORMAL_ACK is forbidden in the test wrapper" }
+
+  # Set VD_FORMAL_DATA_ROOT from explicit parameter or default
+  $resolvedFdr = if ($FormalDataRoot) { (Get-Item $FormalDataRoot).FullName }
+                 else { Get-CanonicalPath (Join-Path $scriptRepoRoot "data") }
+  $env:VD_FORMAL_DATA_ROOT = $resolvedFdr
 
   $env:VD_ENV = "test"
   $env:VD_TEST_RUN_ROOT = $runRoot
@@ -586,7 +605,7 @@
   def project_root() -> Path:
       """Return the resolved project root (4 levels up from path_policy.py)."""
 
-  def data_root() -> Path:
+  def formal_data_root() -> Path:  # 未来 Phase D 实现
       """Return project_root() / 'data'."""
 
   # Path predicates（在 validate() 中被调用，执行语法检查，不 resolve）
