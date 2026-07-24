@@ -111,8 +111,27 @@ function Invoke-S1PytestWrapper ($PolicyOnly, $PreflightOnly, $PytestArgs, $reso
         $pythonExe = (Get-Command python -ErrorAction Stop).Source
         Set-Location $scriptRepoRoot
         Write-Host "[Wrapper] Running: & $pythonExe -m pytest @effectiveArgs (cwd=$scriptRepoRoot)"
-        & $pythonExe -m pytest @effectiveArgs *>&1 | ForEach-Object { Write-Host $_ }
+        $pytestStartedAt = (Get-Date).ToString("o")
+        $pytestOutputFile = Join-Path $runDir "pytest-output.log"
+        & $pythonExe -m pytest @effectiveArgs *>&1 | ForEach-Object {
+            Write-Host $_
+            $_ | Out-String -NoNewline | Add-Content -LiteralPath $pytestOutputFile -Encoding utf8NoBom
+        }
         $pytestExit = $LASTEXITCODE
+        $pytestExitFile = Join-Path $runDir "pytest-exit.json"
+        $pytestExitFileDir = Split-Path -Path $pytestExitFile -Parent
+        if (-not (Test-Path -LiteralPath $pytestExitFileDir)) {
+            New-Item -ItemType Directory -Path $pytestExitFileDir -Force -ErrorAction Stop | Out-Null
+        }
+        $pytestExitObj = [ordered]@{
+            schema_version     = 1
+            invoked_executable = $pythonExe
+            effective_args     = @($effectiveArgs | Where-Object { $_ -ne $null })
+            started_at         = $pytestStartedAt
+            finished_at        = (Get-Date).ToString("o")
+            exit_code          = $pytestExit
+        }
+        Set-Content -LiteralPath $pytestExitFile -Value ($pytestExitObj | ConvertTo-Json -Depth 10) -Encoding utf8 -ErrorAction Stop
     } catch { Write-HostError "Step failed: $_"; $pytestExit=98 }
     finally {
         if ($PWD.Path -ne $origInner) { Set-Location $origInner -ErrorAction SilentlyContinue }
