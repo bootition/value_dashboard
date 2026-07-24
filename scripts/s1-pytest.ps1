@@ -111,7 +111,7 @@ function Invoke-S1PytestWrapper ($PolicyOnly, $PreflightOnly, $PytestArgs, $reso
         $pythonExe = (Get-Command python -ErrorAction Stop).Source
         Set-Location $scriptRepoRoot
         Write-Host "[Wrapper] Running: & $pythonExe -m pytest @effectiveArgs (cwd=$scriptRepoRoot)"
-        & $pythonExe -m pytest @effectiveArgs
+        & $pythonExe -m pytest @effectiveArgs *>&1 | ForEach-Object { Write-Host $_ }
         $pytestExit = $LASTEXITCODE
     } catch { Write-HostError "Step failed: $_"; $pytestExit=98 }
     finally {
@@ -148,7 +148,7 @@ finally {
     foreach ($k in $envKeys) {
         $info = $origEnv[$k]
         if ($info -and $info.exists) { [Environment]::SetEnvironmentVariable($k, $info.value, "Process") }
-        else { [Environment]::SetEnvironmentVariable($k, $null, "Process") }
+        else { Remove-Item "Env:\$k" -Force -ErrorAction SilentlyContinue }
     }
     if ($PWD.Path -ne $origCwd) { Set-Location $origCwd -ErrorAction SilentlyContinue }
 }
