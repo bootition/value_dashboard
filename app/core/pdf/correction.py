@@ -19,6 +19,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -54,9 +55,28 @@ class CorrectionManager:
     生命周期 (PRD §17): 草稿→校验→影响预览→确认发布
     """
 
-    def __init__(self) -> None:
-        self.duck = DuckDBStore()
-        self.sqlite = SQLiteStore()
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("CorrectionManager requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("CorrectionManager stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.duck = duck
+        self.sqlite = sqlite
 
     def create_from_json(self, template_json: str) -> dict[str, Any]:
         """从 JSON 创建校正模板草稿

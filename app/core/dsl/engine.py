@@ -22,6 +22,8 @@ from app.core.dsl.codegen import CodeGen
 from app.core.dsl.registry import ExpressionRegistry, STATUS_PUBLISHED
 from app.core.dsl.ast_nodes import FIELD_METADATA, INDICATOR_METADATA, ASTNode
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -103,11 +105,36 @@ def expand_shorthand(expression: str) -> str:
 class DSLEngine:
     """DSL 引擎: 解析→校验→预览→发布 完整流程"""
 
-    def __init__(self) -> None:
-        self.registry = ExpressionRegistry()
-        self.validator = Validator(self.registry)
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+        registry: ExpressionRegistry | None = None,
+        validator: Validator | None = None,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("DSLEngine requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("DSLEngine stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.registry = registry or ExpressionRegistry(sqlite=sqlite)
+        if self.registry.sqlite is not sqlite:
+            raise PathIsolationError("DSLEngine registry must use the injected SQLite store")
+        self.validator = validator or Validator(self.registry, sqlite=sqlite)
+        if self.validator._registry is not self.registry or self.validator._sqlite is not sqlite:
+            raise PathIsolationError("DSLEngine validator must share its registry and SQLite store")
         self.codegen = CodeGen()
-        self.duck = DuckDBStore()
+        self.duck = duck
 
     def create(self, name: str, expression: str,
                description: str = "", direction: str = "none") -> dict[str, Any]:

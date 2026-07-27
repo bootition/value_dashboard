@@ -1,42 +1,37 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from app.cli.main import data_diagnose, data_status
 from app.core.config import Config
+from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 
 
-def _configure_temp_databases(tmp_path: Path, monkeypatch) -> None:
-    duck_path = tmp_path / "cli.duckdb"
-    sqlite_path = tmp_path / "cli.sqlite"
-    config = Config(
-        {
-            "database": {
-                "duckdb_path": str(duck_path),
-                "sqlite_path": str(sqlite_path),
-            }
-        }
-    )
+def _configure_temp_databases(database_paths: DatabasePathSet, monkeypatch) -> None:
+    config = Config({}, paths=database_paths)
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
     monkeypatch.setattr(Config, "_instance", config)
     monkeypatch.setattr(
         Config,
         "load",
-        classmethod(lambda cls, config_dir=None: config),
+        classmethod(lambda cls, config_dir=None, paths=None: config),
     )
-    init_duckdb_schema(DuckDBStore(duck_path))
-    init_sqlite_schema(SQLiteStore(sqlite_path))
+    monkeypatch.setattr("app.core.storage.duckdb_store.DuckDBStore", lambda: duck)
+    monkeypatch.setattr("app.core.storage.sqlite_store.SQLiteStore", lambda: sqlite)
+    init_duckdb_schema(duck)
+    init_sqlite_schema(sqlite)
 
 
 def test_data_status_includes_structured_quality(
-    tmp_path: Path,
+    database_paths: DatabasePathSet,
     monkeypatch,
     capsys,
 ) -> None:
-    _configure_temp_databases(tmp_path, monkeypatch)
+    _configure_temp_databases(database_paths, monkeypatch)
 
     data_status()
 
@@ -45,11 +40,11 @@ def test_data_status_includes_structured_quality(
 
 
 def test_data_diagnose_is_unhealthy_when_quality_warnings_exist(
-    tmp_path: Path,
+    database_paths: DatabasePathSet,
     monkeypatch,
     capsys,
 ) -> None:
-    _configure_temp_databases(tmp_path, monkeypatch)
+    _configure_temp_databases(database_paths, monkeypatch)
 
     data_diagnose()
 

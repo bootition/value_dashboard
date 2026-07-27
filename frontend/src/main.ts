@@ -44,6 +44,12 @@ const router = createRouter({
   ],
 })
 
+// 路由导航后更新页面标题
+router.afterEach((to) => {
+  const title = to.meta.title as string
+  document.title = title ? `${title} - Value Dashboard` : 'Value Dashboard'
+})
+
 const app = createApp(App)
 app.use(router)
 app.mount('#app')

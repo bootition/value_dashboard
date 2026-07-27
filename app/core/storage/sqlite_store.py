@@ -11,19 +11,25 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
-from app.core.config import Config
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 
 class SQLiteStore:
     """SQLite 操作库连接管理器"""
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        cfg = Config.current()
-        self._db_path = db_path or cfg.get_path("database", "sqlite_path")
+    def __init__(self, *, paths: DatabasePathSet) -> None:
+        validated = paths.validate()
+        self._path_set = validated
+        self._db_path = validated.sqlite_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._revalidate()
 
-        # 启动时确保 WAL 模式
         self._init_wal()
+
+    def _revalidate(self) -> None:
+        validated = self._path_set.validate()
+        if validated.sqlite_path != self._db_path:
+            raise PathIsolationError("SQLite path identity changed after validation")
 
     def _init_wal(self) -> None:
         """初始化 WAL 模式和基本 PRAGMA"""
@@ -37,6 +43,7 @@ class SQLiteStore:
             conn.close()
 
     def _raw_connect(self) -> sqlite3.Connection:
+        self._revalidate()
         conn = sqlite3.connect(str(self._db_path), timeout=5.0)
         conn.row_factory = sqlite3.Row
         return conn
@@ -57,6 +64,8 @@ class SQLiteStore:
     def transaction(self) -> Iterator[sqlite3.Connection]:
         """获取一个事务连接，提交或回滚"""
         conn = self._raw_connect()
+        conn.execute("PRAGMA busy_timeout=5000")
+        conn.execute("PRAGMA foreign_keys=ON")
         try:
             yield conn
             conn.commit()

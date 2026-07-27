@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +69,25 @@ class ScreeningEngine:
     接收规则 JSON，生成并执行 DuckDB SQL，返回筛选结果。
     """
 
-    def __init__(self) -> None:
-        self.duck = DuckDBStore()
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
+        if duck is None and paths is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if duck is None and paths is None:
+            raise PathIsolationError("ScreeningEngine requires a DuckDB store or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            if duck.db_path != validated.duckdb_path:
+                raise PathIsolationError("ScreeningEngine store does not match injected paths")
+
+        assert duck is not None
+        self.duck = duck
 
     def run(
         self,

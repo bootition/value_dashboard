@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { NTag, NSelect, NButton, NSpace } from 'naive-ui'
-import { isRuleNode } from '../types/screening.ts'
+import { isRuleNode, generateRuleId } from '../types/screening.ts'
 import type { ScreeningRuleNode } from '../types/screening.ts'
 import RuleConditionRow from './RuleConditionRow.vue'
 
@@ -43,7 +43,7 @@ function addCondition(): void {
     emit('warn', '最多20个条件')
     return
   }
-  props.node.rules.push({ field: 'pe_ttm', op: '>', value: 0 })
+  props.node.rules.push({ id: generateRuleId(), field: 'pe_ttm', op: '>', value: 0 })
 }
 
 function addGroup(): void {
@@ -51,7 +51,7 @@ function addGroup(): void {
     emit('warn', '逻辑嵌套最多3层')
     return
   }
-  props.node.rules.push({ logic: 'AND', rules: [] })
+  props.node.rules.push({ id: generateRuleId(), logic: 'AND', rules: [] })
 }
 
 function removeAt(idx: number): void {
@@ -94,7 +94,7 @@ function updateValue(idx: number, value: number): void {
 
     <div
       v-for="(item, idx) in node.rules"
-      :key="idx"
+      :key="item.id"
       style="padding-left: 16px; margin-bottom: 4px"
     >
       <template v-if="isRuleNode(item)">

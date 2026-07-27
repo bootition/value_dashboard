@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -36,9 +37,24 @@ class IndicatorCalculator:
         self,
         duck: DuckDBStore | None = None,
         sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
     ) -> None:
-        self.duck = duck or DuckDBStore()
-        self.sqlite = sqlite or SQLiteStore()
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("IndicatorCalculator requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("IndicatorCalculator stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.duck = duck
+        self.sqlite = sqlite
 
     def compute_all_for_stock(self, stock_code: str) -> dict[str, Any]:
         """计算单只股票的全部内建指标
@@ -87,7 +103,7 @@ class IndicatorCalculator:
         result.update(self._calc_safety(financials, ttm))
 
         # ─── 5. 股东回报 ──────────────────────────────────────────
-        result.update(self._calc_shareholder_return(stock_code, financials, dividends, ttm))
+        result.update(self._calc_shareholder_return(stock_code, financials, dividends, ttm, total_shares))
 
         # ─── 6. 行情指标 ──────────────────────────────────────────
         result.update(self._calc_technical(stock_code))
@@ -160,7 +176,7 @@ class IndicatorCalculator:
                     failed,
                 )
 
-            if failed == 0:
+            if success > 0:
                 self._publish_snapshot(staging_table, expected_count=success)
 
             logger.info("指标快照计算完成: 成功 %s, 失败 %s", success, failed)
@@ -257,14 +273,22 @@ class IndicatorCalculator:
     def _get_shares(self, stock_code: str, financials: dict) -> dict[str, Any]:
         """获取总股本和流通股本
 
-        总股本从资产负债表的 paid_in_capital (实收资本/股本) 获取。
-        流通股本暂用总股本（精确的流通股本需要额外数据源）。
+        从 stock_meta 表获取真实的总股本和流通股本（单位：股）。
         """
-        total_shares = financials.get("paid_in_capital")
-        return {
-            "total_shares": total_shares,
-            "circ_shares": total_shares,  # 简化：流通股本=总股本
-        }
+        rows = self.duck.read_query("""
+            SELECT total_shares, circ_shares
+            FROM stock_meta
+            WHERE stock_code = ?
+        """, [stock_code])
+
+        if rows:
+            total_shares = rows[0].get("total_shares")
+            circ_shares = rows[0].get("circ_shares")
+            return {
+                "total_shares": total_shares,
+                "circ_shares": circ_shares or total_shares,
+            }
+        return {"total_shares": None, "circ_shares": None}
 
     def _get_ttm_data(self, stock_code: str) -> dict[str, Any]:
         """计算TTM（滚动十二个月）数据
@@ -679,7 +703,7 @@ class IndicatorCalculator:
         return result
 
     def _calc_shareholder_return(
-        self, stock_code: str, financials: dict, dividends: dict, ttm: dict
+        self, stock_code: str, financials: dict, dividends: dict, ttm: dict, total_shares: float | None
     ) -> dict[str, Any]:
         """5. 股东回报指标"""
         result: dict[str, Any] = {}
@@ -690,7 +714,7 @@ class IndicatorCalculator:
         if dps is None:
             dps = dividends.get("max_dps")  # 回退到max（兼容旧数据）
         eps = ttm.get("parent_net_profit")
-        shares = financials.get("paid_in_capital")
+        shares = total_shares
         if dps and eps and shares and shares > 0:
             ttm_eps = eps / shares
             if ttm_eps and ttm_eps > 0:
@@ -930,7 +954,7 @@ class IndicatorCalculator:
     def _write_batch(self, records: list[dict], table_name: str = "indicator_snapshot") -> None:
         """批量写入指标快照
 
-        P2修复: 使用executemany批量INSERT（比逐条快10倍+）
+        使用executemany批量INSERT（比逐条快10倍+）
         """
         if not records:
             return
@@ -942,13 +966,17 @@ class IndicatorCalculator:
         )
         available_cols = {c["column_name"] for c in cols_info}
 
+        # 使用第一条记录确定字段（假设所有记录结构相同）
+        fields = [k for k in records[0] if k in available_cols]
+        if not fields:
+            return
+
+        placeholders = ", ".join(["?"] * len(fields))
+        field_str = ", ".join(fields)
+        sql = f'INSERT INTO "{table_name}" ({field_str}) VALUES ({placeholders})'
+
+        # 提取所有记录的值
+        all_values = [[rec.get(k) for k in fields] for rec in records]
+
         with self.duck.write_connection() as conn:
-            for rec in records:
-                fields = [k for k in rec if k in available_cols]
-                values = [rec[k] for k in fields]
-                placeholders = ", ".join(["?"] * len(fields))
-                field_str = ", ".join(fields)
-                conn.execute(
-                    f'INSERT INTO "{table_name}" ({field_str}) VALUES ({placeholders})',
-                    values,
-                )
+            conn.executemany(sql, all_values)

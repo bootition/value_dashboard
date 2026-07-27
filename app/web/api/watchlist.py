@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
@@ -33,13 +33,10 @@ class MoveGroupRequest(BaseModel):
 
 
 @router.get("/list")
-async def list_watchlist(group: str | None = None) -> dict:
+async def list_watchlist(request: Request, group: str | None = None) -> dict:
     """列出自选股票 (PRD §13: 分组/排序/自定义列/来源记录)"""
-    from app.core.storage.sqlite_store import SQLiteStore
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    sqlite = SQLiteStore()
-    duck = DuckDBStore()
+    sqlite = request.app.state.sqlite
+    duck = request.app.state.duck
 
     # 查询自选列表
     if group:
@@ -65,21 +62,21 @@ async def list_watchlist(group: str | None = None) -> dict:
         stock_info = duck.read_query(
             f"""SELECT m.stock_code, m.name, m.exchange, m.sw_level1,
                        s.latest_close, s.pe_ttm, s.pb_mrq, s.roe,
-                       s.gross_margin, s.debt_ratio, s.revenue_yoy
-                FROM stock_meta m
-                LEFT JOIN LATERAL (
-                    SELECT * FROM indicator_snapshot s2
-                    WHERE s2.stock_code = m.stock_code
-                    ORDER BY s2.report_date DESC LIMIT 1
-                ) s ON true
-                WHERE m.stock_code IN ({placeholders})""",
+                       s.gross_margin, s.net_margin, s.debt_ratio,
+                       s.revenue_yoy, s.net_profit_yoy, s.dividend_yield
+                 FROM stock_meta m
+                 LEFT JOIN LATERAL (
+                     SELECT * FROM indicator_snapshot s2
+                     WHERE s2.stock_code = m.stock_code
+                     ORDER BY s2.report_date DESC LIMIT 1
+                 ) s ON true
+                 WHERE m.stock_code IN ({placeholders})""",
             stock_codes,
         )
         info_map = {r["stock_code"]: r for r in stock_info}
     except Exception:
         info_map = {}
 
-    # 合并数据
     items = []
     for row in rows:
         code = row["stock_code"]
@@ -98,8 +95,11 @@ async def list_watchlist(group: str | None = None) -> dict:
             "pb_mrq": info.get("pb_mrq"),
             "roe": info.get("roe"),
             "gross_margin": info.get("gross_margin"),
+            "net_margin": info.get("net_margin"),
             "debt_ratio": info.get("debt_ratio"),
             "revenue_yoy": info.get("revenue_yoy"),
+            "net_profit_yoy": info.get("net_profit_yoy"),
+            "dividend_yield": info.get("dividend_yield"),
         })
 
     # 获取分组列表
@@ -112,11 +112,9 @@ async def list_watchlist(group: str | None = None) -> dict:
 
 
 @router.post("/add")
-async def add_to_watchlist(req: AddStockRequest) -> dict:
+async def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     """添加股票到自选 (PRD §13: 手动保留)"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     with sqlite.transaction() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO watchlist
@@ -128,11 +126,9 @@ async def add_to_watchlist(req: AddStockRequest) -> dict:
 
 
 @router.delete("/remove")
-async def remove_from_watchlist(req: RemoveRequest) -> dict:
+async def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
     """从自选移除 (PRD §13: 手动移除)"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     if req.group_name:
         sqlite.execute(
             "DELETE FROM watchlist WHERE stock_code = ? AND group_name = ?",
@@ -147,11 +143,9 @@ async def remove_from_watchlist(req: RemoveRequest) -> dict:
 
 
 @router.post("/move")
-async def move_group(req: MoveGroupRequest) -> dict:
+async def move_group(req: MoveGroupRequest, request: Request) -> dict:
     """移动到其他分组"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     sqlite.execute(
         "UPDATE watchlist SET group_name = ? WHERE stock_code = ? AND group_name = ?",
         [req.to_group, req.stock_code, req.from_group],
@@ -161,11 +155,9 @@ async def move_group(req: MoveGroupRequest) -> dict:
 
 
 @router.get("/groups")
-async def list_groups() -> dict:
+async def list_groups(request: Request) -> dict:
     """列出所有分组"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     groups = sqlite.query(
         "SELECT group_name, COUNT(*) as cnt "
         "FROM watchlist GROUP BY group_name ORDER BY group_name"

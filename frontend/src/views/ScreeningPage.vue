@@ -4,6 +4,7 @@ import { NCard, NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, useMess
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
+import DslIndicatorManager from '../components/DslIndicatorManager.vue'
 import type {
   ScreeningIndicator,
   ScreeningRuleNode,
@@ -12,6 +13,7 @@ import type {
   DataStatusSummaryResponse,
   WarningCode,
 } from '../types/screening.ts'
+import { generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 
 const message = useMessage()
@@ -25,18 +27,39 @@ const warningCodes = ref<readonly WarningCode[]>([])
 const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
 
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
+const strictOnly = ref(false)
+
+interface SavedRule {
+  id: number
+  name: string
+  version: number
+  rule_json: { conditions: ScreeningRuleNode; sort?: SortRule[]; columns?: string[] }
+  locked_indicators: Record<string, any>
+  status: string
+  created_at: string
+}
+
+const savedRules = ref<SavedRule[]>([])
+const selectedRuleId = ref<number>(0)
 
 const ruleTree = reactive<ScreeningRuleNode>({
+  id: generateRuleId(),
   logic: 'AND',
   rules: [
-    { field: 'pe_ttm', op: '>', value: 0 },
-    { field: 'pe_ttm', op: '<', value: 100 },
-    { field: 'roe', op: '>', value: 0.1 },
+    { id: generateRuleId(), field: 'pe_ttm', op: '>', value: 0 },
+    { id: generateRuleId(), field: 'pe_ttm', op: '<', value: 100 },
+    { id: generateRuleId(), field: 'roe', op: '>', value: 0.1 },
   ],
 })
 
-const sortField = ref('pe_ttm')
-const sortDirection = ref<'asc' | 'desc'>('asc')
+interface SortRule {
+  field: string
+  direction: 'asc' | 'desc'
+}
+
+const sortRules = ref<SortRule[]>([
+  { field: 'pe_ttm', direction: 'asc' },
+])
 
 const opOptions = [
   { label: '>', value: '>' },
@@ -46,6 +69,7 @@ const opOptions = [
   { label: '=', value: '=' },
   { label: '!=', value: '!=' },
   { label: '不为空', value: 'is_not_null' },
+  { label: '为空', value: 'is_null' },
 ]
 
 const indicatorOptions = computed(() =>
@@ -62,11 +86,23 @@ const ruleFields = computed(() => collectRuleFields(ruleTree))
 const untrustedFields = computed(() =>
   computeUntrustedFields({
     ruleFields: ruleFields.value,
-    sortField: sortField.value,
+    sortField: sortRules.value[0]?.field || '',
     resultColumns: resultColumns.value,
     warningCodes: warningCodes.value,
   }),
 )
+
+function addSortRule() {
+  if (sortRules.value.length >= 5) {
+    message.warning('最多支持5个排序规则')
+    return
+  }
+  sortRules.value.push({ field: indicatorOptions.value[0]?.value || '', direction: 'asc' })
+}
+
+function removeSortRule(index: number) {
+  sortRules.value.splice(index, 1)
+}
 
 async function runScreening() {
   loading.value = true
@@ -74,7 +110,7 @@ async function runScreening() {
     const resp = await axios.post<ScreeningRunResponse>('/api/screening/run', {
       rule: {
         conditions: ruleTree,
-        sort: [{ field: sortField.value, direction: sortDirection.value }],
+        sort: sortRules.value,
         columns: [
           'stock_code', 'name', 'exchange', 'sw_level1', 'latest_close',
           'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'net_margin',
@@ -98,12 +134,63 @@ async function runScreening() {
   }
 }
 
+async function loadSavedRules() {
+  try {
+    const resp = await axios.get<{ rules: SavedRule[] }>('/api/screening/rules')
+    savedRules.value = resp.data.rules
+  } catch {
+    message.warning('无法加载已保存的规则')
+  }
+}
+
+function loadRule(ruleId: number) {
+  if (!ruleId || ruleId === 0) return
+  
+  const rule = savedRules.value.find(r => r.id === ruleId)
+  if (!rule) return
+  
+  // Load the rule conditions
+  if (rule.rule_json.conditions) {
+    Object.assign(ruleTree, rule.rule_json.conditions)
+  }
+  
+  // Load sort rules
+  if (rule.rule_json.sort && rule.rule_json.sort.length > 0) {
+    sortRules.value = [...rule.rule_json.sort]
+  }
+  
+  message.success(`已加载规则: ${rule.name} v${rule.version}`)
+}
+
+const ruleOptions = computed(() => {
+  const options: Array<{ label: string; value: number }> = [
+    { label: '选择已保存的规则...', value: 0 },
+  ]
+  for (const r of savedRules.value) {
+    options.push({
+      label: `${r.name} v${r.version}`,
+      value: r.id,
+    })
+  }
+  return options
+})
+
 onMounted(async () => {
+  // Load saved rules
+  await loadSavedRules()
+  
   try {
     const resp = await axios.get<{ indicators: readonly ScreeningIndicator[] }>(
       '/api/screening/indicators',
     )
     indicators.value = resp.data.indicators
+    // 确保 sortRules 的第一个字段在可用指标列表中
+    if (indicators.value.length > 0 && sortRules.value.length > 0) {
+      const firstField = sortRules.value[0].field
+      if (!indicators.value.find(i => i.name === firstField)) {
+        sortRules.value[0].field = indicators.value[0].name
+      }
+    }
   } catch {
     message.warning('无法加载指标列表')
   }
@@ -122,6 +209,22 @@ onMounted(async () => {
 <template>
   <div>
     <h2>筛选</h2>
+    
+    <n-card title="加载规则" size="small" style="margin-bottom: 16px">
+      <n-space align="center">
+        <span>已保存的规则:</span>
+        <n-select
+          v-model:value="selectedRuleId"
+          :options="ruleOptions"
+          size="small"
+          style="width: 250px"
+          @update:value="loadRule"
+        />
+      </n-space>
+    </n-card>
+
+    <DslIndicatorManager style="margin-bottom: 16px" />
+    
     <n-card title="基础股票池" size="small" style="margin-bottom: 16px">
       <n-space>
         <n-switch v-model:value="basePool.exclude_st">
@@ -142,6 +245,18 @@ onMounted(async () => {
       </n-space>
     </n-card>
 
+    <n-card title="数据质量" size="small" style="margin-bottom: 16px">
+      <n-space>
+        <n-switch v-model:value="strictOnly">
+          <template #checked>仅查看 strict</template>
+          <template #unchecked>包含 approximate</template>
+        </n-switch>
+        <span style="color: #999; font-size: 12px;">
+          {{ strictOnly ? '仅显示所有使用字段均为 strict 置信度的股票' : '显示所有股票，包括 approximate 置信度' }}
+        </span>
+      </n-space>
+    </n-card>
+
     <n-card title="筛选条件" size="small" style="margin-bottom: 16px">
       <ScreeningRuleEditor
         :node="ruleTree"
@@ -156,29 +271,37 @@ onMounted(async () => {
     </n-card>
 
     <n-card title="排序" size="small" style="margin-bottom: 16px">
-      <n-space>
-        <n-select
-          v-model:value="sortField"
-          :options="indicatorOptions"
-          size="small"
-          style="width: 180px"
-          filterable
-        />
-        <n-select
-          v-model:value="sortDirection"
-          :options="[
-            { label: '升序', value: 'asc' },
-            { label: '降序', value: 'desc' },
-          ]"
-          size="small"
-          style="width: 100px"
-        />
-        <n-button type="primary" :loading="loading" @click="runScreening">运行筛选</n-button>
+      <n-space vertical>
+        <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
+          <span>优先级 {{ index + 1 }}:</span>
+          <n-select
+            v-model:value="rule.field"
+            :options="indicatorOptions"
+            size="small"
+            style="width: 180px"
+            filterable
+          />
+          <n-select
+            v-model:value="rule.direction"
+            :options="[
+              { label: '升序', value: 'asc' },
+              { label: '降序', value: 'desc' },
+            ]"
+            size="small"
+            style="width: 100px"
+          />
+          <n-button size="tiny" type="error" @click="removeSortRule(index)">删除</n-button>
+        </n-space>
+        <n-space>
+          <n-button size="tiny" @click="addSortRule">+ 添加排序规则</n-button>
+          <n-button type="primary" :loading="loading" @click="runScreening">运行筛选</n-button>
+        </n-space>
       </n-space>
     </n-card>
 
     <ScreeningResultsPanel
       :results="results"
+      :strict-only="strictOnly"
       :execution-time="executionTime"
       :base-pool-size="basePoolSize"
       :data-date="dataDate"
@@ -186,8 +309,8 @@ onMounted(async () => {
       :untrusted-fields="untrustedFields"
       :quality-status="qualityStatus"
       :rule-tree="ruleTree"
-      :sort-field="sortField"
-      :sort-direction="sortDirection"
+      :sort-field="sortRules[0]?.field || ''"
+      :sort-direction="sortRules[0]?.direction || 'asc'"
     />
 
     <n-empty v-if="results.length === 0" description="运行筛选后显示结果" style="padding: 40px" />

@@ -22,6 +22,7 @@ from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -34,10 +35,30 @@ class IncrementalUpdater:
     PRD §7.4: 失败时保留旧值，生成重试列表与缺失列表。
     """
 
-    def __init__(self) -> None:
-        self.adapter_mgr = AdapterManager()
-        self.duck = DuckDBStore()
-        self.sqlite = SQLiteStore()
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+        adapter_mgr: AdapterManager | None = None,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("IncrementalUpdater requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("IncrementalUpdater stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.adapter_mgr = adapter_mgr or AdapterManager()
+        self.duck = duck
+        self.sqlite = sqlite
 
     def run_incremental_check(self) -> dict[str, Any]:
         """执行增量检查，返回检查报告
@@ -229,6 +250,7 @@ class IncrementalUpdater:
 
         success_count = 0
         fail_count = 0
+        all_rows = []
 
         for i, stock in enumerate(target_stocks):
             code = stock["stock_code"]
@@ -250,22 +272,27 @@ class IncrementalUpdater:
                                       result.metadata.error or "empty")
                 continue
 
+            for row in result.data:
+                all_rows.append([
+                    code, row.get("trade_date"), row.get("open"),
+                    row.get("high"), row.get("low"), row.get("close"),
+                    row.get("volume"), row.get("turnover"),
+                ])
+            success_count += 1
+
+        # 批量写入数据库（单次连接，单次事务）
+        if all_rows:
             try:
                 with self.duck.write_connection() as conn:
-                    # 增量插入（不删除旧数据，只添加新日期）
-                    for row in result.data:
-                        conn.execute(
-                            """INSERT OR REPLACE INTO price_daily_raw
-                               (stock_code, trade_date, open, high, low, close, volume, turnover)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                            [code, row.get("trade_date"), row.get("open"),
-                             row.get("high"), row.get("low"), row.get("close"),
-                             row.get("volume"), row.get("turnover")],
-                        )
-                success_count += 1
+                    conn.executemany(
+                        """INSERT OR REPLACE INTO price_daily_raw
+                           (stock_code, trade_date, open, high, low, close, volume, turnover)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                        all_rows,
+                    )
             except Exception as e:
-                fail_count += 1
-                self._record_failure(code, "price_daily", "duckdb", str(e))
+                logger.error(f"批量写入价格数据失败: {e}")
+                return {"status": "failed", "error": str(e)}
 
         logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
         return {

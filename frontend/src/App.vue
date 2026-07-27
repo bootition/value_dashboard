@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { NConfigProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NMessageProvider, NDialogProvider } from 'naive-ui'
+import { NConfigProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
 import { h } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
@@ -27,7 +27,7 @@ const activeKey = computed(() => route.name as string)
 </script>
 
 <template>
-  <n-config-provider>
+  <n-config-provider :locale="zhCN" :date-locale="dateZhCN">
     <n-message-provider>
       <n-dialog-provider>
         <n-layout position="absolute">

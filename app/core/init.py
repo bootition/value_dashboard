@@ -24,6 +24,7 @@ from app.core.adapters.base import FetchRequest, FetchResult
 from app.core.adapters.manager import AdapterManager
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -42,10 +43,30 @@ class DataInitializer:
     将数据写入 DuckDB 分析库，将任务日志写入 SQLite 操作库。
     """
 
-    def __init__(self) -> None:
-        self.adapter_mgr = AdapterManager()
-        self.duck = DuckDBStore()
-        self.sqlite = SQLiteStore()
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+        adapter_mgr: AdapterManager | None = None,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("DataInitializer requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("DataInitializer stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.adapter_mgr = adapter_mgr or AdapterManager()
+        self.duck = duck
+        self.sqlite = sqlite
         self._batch_id = str(uuid.uuid4())
 
     def run_full_init(self, skip_prices: bool = False, skip_financials: bool = False) -> dict[str, Any]:
@@ -145,14 +166,16 @@ class DataInitializer:
                 "listing_date": row.get("listing_date"),
                 "is_st": row.get("is_st"),
                 "is_suspended": row.get("is_suspended"),
+                "total_shares": row.get("total_shares"),
+                "circ_shares": row.get("circ_shares"),
             })
 
         # PRD §7.4 L1: 保留旧值，不以空值覆盖旧值。
         with self.duck.write_connection() as conn:
             conn.executemany(
                 """INSERT INTO stock_meta
-                   (stock_code, name, pinyin, exchange, listing_date, is_st, is_suspended)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)
+                   (stock_code, name, pinyin, exchange, listing_date, is_st, is_suspended, total_shares, circ_shares)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (stock_code) DO UPDATE SET
                        name = excluded.name,
                        pinyin = COALESCE(excluded.pinyin, stock_meta.pinyin),
@@ -160,9 +183,12 @@ class DataInitializer:
                        listing_date = COALESCE(excluded.listing_date, stock_meta.listing_date),
                        is_st = COALESCE(excluded.is_st, stock_meta.is_st),
                        is_suspended = COALESCE(excluded.is_suspended, stock_meta.is_suspended),
+                       total_shares = COALESCE(excluded.total_shares, stock_meta.total_shares),
+                       circ_shares = COALESCE(excluded.circ_shares, stock_meta.circ_shares),
                        updated_at = now()""",
                 [(r["stock_code"], r["name"], r["pinyin"], r["exchange"],
-                  r["listing_date"], r["is_st"], r["is_suspended"]) for r in records],
+                  r["listing_date"], r["is_st"], r["is_suspended"],
+                  r["total_shares"], r["circ_shares"]) for r in records],
             )
 
         # 记录批次溯源
@@ -199,18 +225,25 @@ class DataInitializer:
         # PRD 审查问题2: SW industry 无备用适配器
         # 从本地缓存加载（用户手动下载的 SWS 分类文件）
         from app.core.config import Config
+        import json
 
         cfg = Config.current()
-        sw_file = cfg.project_root / "config" / "sw_industry_cache.csv"
+        sw_json = cfg.project_root / "config" / "sw_industry_cache.json"
+        sw_csv = cfg.project_root / "config" / "sw_industry_cache.csv"
 
-        if sw_file.exists():
+        records = []
+        if sw_json.exists():
+            with open(sw_json, encoding="utf-8") as f:
+                data = json.load(f)
+                records = data if isinstance(data, list) else data.get("data", [])
+        elif sw_csv.exists():
             import csv
-            records = []
-            with open(sw_file, encoding="utf-8") as f:
+            with open(sw_csv, encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     records.append(row)
 
+        if records:
             # 更新 stock_meta 的行业字段
             with self.duck.write_connection() as conn:
                 for r in records:
@@ -227,9 +260,9 @@ class DataInitializer:
         else:
             # 无缓存文件，所有股票行业为 NULL（PRD §12.4: 不阻止全市场排名）
             logger.warning(
-                "[Step 3] 申万行业分类缓存文件不存在 (config/sw_industry_cache.csv)。"
+                "[Step 3] 申万行业分类缓存文件不存在 (config/sw_industry_cache.json 或 .csv)。"
                 "行业排名将为 NULL，全市场排名仍可用。"
-                "请手动从 swsresearch.com 下载分类文件。"
+                "请手动从 swsresearch.com 下载分类文件并保存为 config/sw_industry_cache.json。"
             )
             return {
                 "status": "missing",

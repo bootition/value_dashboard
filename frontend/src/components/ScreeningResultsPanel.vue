@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NCard,
   NButton,
@@ -14,6 +14,7 @@ import {
   NGridItem,
   NStatistic,
   NAlert,
+  NSelect,
   useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -22,6 +23,7 @@ import axios, { isAxiosError } from 'axios'
 
 const props = defineProps<{
   results: readonly ScreeningResult[]
+  strictOnly: boolean
   executionTime: number
   basePoolSize: number
   dataDate: string | null
@@ -55,27 +57,103 @@ const durableActionsDisabled = computed(
   () => (hasUntrustedFields.value || qualityUnavailable.value) && props.results.length > 0,
 )
 
-const tableColumns = computed(() => {
-  if (!props.results.length) return []
-  const firstRow = props.results[0]
-  const keys = Object.keys(firstRow).filter((k) => !k.startsWith('_'))
-  const cols: DataTableColumns<ScreeningResult> = keys.map((key) => ({
-    title: key,
-    key,
-    sorter: 'default',
-    render(row) {
-      const v = row[key]
-      if (v === null || v === undefined) return '—'
-      if (typeof v === 'number') {
-        return Math.abs(v) < 0.01 && v !== 0
-          ? v.toExponential(2)
-          : Math.abs(v) >= 1000
-            ? v.toFixed(0)
-            : v.toFixed(4)
-      }
-      return String(v)
-    },
+const ruleFieldsSet = computed(() => {
+  const fields = new Set<string>()
+  const walk = (n: import('../types/screening.ts').ScreeningRuleNode) => {
+    for (const item of n.rules) {
+      if ('logic' in item) walk(item)
+      else if (item.field) fields.add(item.field)
+    }
+  }
+  walk(props.ruleTree)
+  return fields
+})
+
+const filteredResults = computed(() => {
+  if (!props.strictOnly) return props.results
+  return props.results.filter(result => {
+    for (const field of ruleFieldsSet.value) {
+      const v = result[field]
+      if (v === null || v === undefined) return false
+    }
+    for (const field of props.untrustedFields) {
+      const v = result[field]
+      if (v === null || v === undefined) return false
+    }
+    return true
+  })
+})
+
+const allAvailableColumns = computed(() => {
+  if (!filteredResults.value.length) return []
+  const firstRow = filteredResults.value[0]
+  return Object.keys(firstRow).filter((k) => !k.startsWith('_'))
+})
+
+const selectedColumns = ref<string[]>([])
+
+watch(allAvailableColumns, (newCols) => {
+  if (selectedColumns.value.length === 0 && newCols.length > 0) {
+    selectedColumns.value = [...newCols]
+  }
+}, { immediate: true })
+
+const columnOptions = computed(() => {
+  const labelMap: Record<string, string> = {
+    stock_code: '股票代码',
+    name: '名称',
+    exchange: '交易所',
+    sw_level1: '申万一级',
+    latest_close: '最新价',
+    pe_ttm: 'PE-TTM',
+    pb_mrq: 'PB-MRQ',
+    ps_ttm: 'PS-TTM',
+    pcf_ttm: 'PCF-TTM',
+    dividend_yield: '股息率',
+    total_market_cap: '总市值',
+    roe: 'ROE',
+    roa: 'ROA',
+    gross_margin: '毛利率',
+    net_margin: '净利率',
+    debt_ratio: '资产负债率',
+    current_ratio: '流动比率',
+    quick_ratio: '速动比率',
+    revenue_yoy: '营收同比',
+    net_profit_yoy: '净利润同比',
+  }
+  return allAvailableColumns.value.map(col => ({
+    label: labelMap[col] || col,
+    value: col,
   }))
+})
+
+const tableColumns = computed(() => {
+  if (!filteredResults.value.length) return []
+  const firstRow = filteredResults.value[0]
+  const cols: DataTableColumns<ScreeningResult> = []
+  
+  for (const key of selectedColumns.value) {
+    if (key in firstRow) {
+      cols.push({
+        title: columnOptions.value.find(o => o.value === key)?.label || key,
+        key,
+        sorter: 'default',
+        render(row) {
+          const v = row[key]
+          if (v === null || v === undefined) return '—'
+          if (typeof v === 'number') {
+            return Math.abs(v) < 0.01 && v !== 0
+              ? v.toExponential(2)
+              : Math.abs(v) >= 1000
+                ? v.toFixed(0)
+                : v.toFixed(4)
+          }
+          return String(v)
+        },
+      })
+    }
+  }
+  
   if (firstRow._entry_explanation !== undefined) {
     cols.push({
       title: '入选解释',
@@ -201,12 +279,26 @@ async function addToWatchlist() {
     <n-space style="margin-bottom: 16px">
       <n-button id="save-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button>
       <n-button id="export-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="exportCSV">导出CSV</n-button>
-      <n-button @click="addToWatchlist">加入自选</n-button>
+      <n-button id="watchlist-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="addToWatchlist">加入自选</n-button>
     </n-space>
+
+    <n-card size="small" style="margin-bottom: 16px">
+      <n-space align="center">
+        <span>显示列:</span>
+        <n-select
+          v-model:value="selectedColumns"
+          :options="columnOptions"
+          multiple
+          size="small"
+          style="width: 400px"
+          placeholder="选择要显示的列"
+        />
+      </n-space>
+    </n-card>
 
     <n-data-table
       :columns="tableColumns"
-      :data="[...results]"
+      :data="[...filteredResults]"
       :max="5000"
       :pagination="{ pageSize: 50 }"
       :scroll-x="1200"

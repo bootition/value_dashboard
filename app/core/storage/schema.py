@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -32,6 +33,8 @@ CREATE TABLE IF NOT EXISTS stock_meta (
     sw_level2      VARCHAR,            -- 申万二级
     sw_level1_code VARCHAR,
     sw_level2_code VARCHAR,
+    total_shares   BIGINT,             -- 总股本（股）
+    circ_shares    BIGINT,             -- 流通股本（股）
     updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -400,6 +403,7 @@ CREATE TABLE IF NOT EXISTS plans (
     plan_summary    TEXT NOT NULL,      -- JSON
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at      TIMESTAMP NOT NULL,
+    confirmed_at    TIMESTAMP,
     status          TEXT DEFAULT 'pending'  -- pending/executed/expired/cancelled
 );
 
@@ -490,8 +494,20 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         connection.execute(
             "ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS data_version VARCHAR"
         )
-        connection.execute("ALTER TABLE stock_meta ALTER COLUMN is_st DROP DEFAULT")
-        connection.execute("ALTER TABLE stock_meta ALTER COLUMN is_suspended DROP DEFAULT")
+        try:
+            connection.execute("ALTER TABLE stock_meta ALTER COLUMN is_st DROP DEFAULT")
+        except Exception:
+            logger.debug("stock_meta.is_st DROP DEFAULT skipped (may already be applied)")
+        try:
+            connection.execute("ALTER TABLE stock_meta ALTER COLUMN is_suspended DROP DEFAULT")
+        except Exception:
+            logger.debug("stock_meta.is_suspended DROP DEFAULT skipped (may already be applied)")
+        connection.execute(
+            "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS total_shares BIGINT"
+        )
+        connection.execute(
+            "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS circ_shares BIGINT"
+        )
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -503,6 +519,13 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (3, 'Indicator calculation timestamp and data version')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (4, 'Add total_shares and circ_shares to stock_meta')
             ON CONFLICT (version) DO NOTHING
             """
         )
@@ -583,11 +606,52 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             )
             logger.info("SQLite schema v3 已应用")
 
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 4"
+        ).fetchone()
+        if row is None:
+            plan_columns = {
+                column[1] for column in conn.execute("PRAGMA table_info(plans)").fetchall()
+            }
+            if "confirmed_at" not in plan_columns:
+                conn.execute("ALTER TABLE plans ADD COLUMN confirmed_at TIMESTAMP")
+            conn.execute(
+                """
+                INSERT INTO schema_migrations (version, description)
+                VALUES (?, ?)
+                """,
+                (4, "危险操作计划添加 confirmed_at 列"),
+            )
+            logger.info("SQLite schema v4 已应用")
 
-def init_all_schema() -> None:
-    """初始化所有数据库 schema（启动时调用）"""
-    duckdb_store = DuckDBStore()
-    sqlite_store = SQLiteStore()
+
+def init_all_schema(
+    duckdb_store: DuckDBStore | None = None,
+    sqlite_store: SQLiteStore | None = None,
+    *,
+    paths: DatabasePathSet | None = None,
+) -> None:
+    """Initialize both schemas through an explicit validated boundary.
+
+    If no arguments are provided, this function will attempt to create
+    paths from environment variables (VD_ENV, VD_DUCKDB_PATH, VD_SQLITE_PATH).
+    This is a convenience for CLI commands that run after _ensure_formal_env_vars().
+    """
+    if paths is None and duckdb_store is None and sqlite_store is None:
+        from app.core.storage.path_policy import resolve_and_validate_paths
+        paths = resolve_and_validate_paths()
+    if paths is None and (duckdb_store is None or sqlite_store is None):
+        raise PathIsolationError("init_all_schema requires both stores or validated paths")
+    if paths is not None:
+        validated = paths.validate()
+        duckdb_store = duckdb_store or DuckDBStore(paths=validated)
+        sqlite_store = sqlite_store or SQLiteStore(paths=validated)
+        if duckdb_store.db_path != validated.duckdb_path:
+            raise PathIsolationError("DuckDB store does not match injected paths")
+        if sqlite_store.db_path != validated.sqlite_path:
+            raise PathIsolationError("SQLite store does not match injected paths")
+
+    assert duckdb_store is not None and sqlite_store is not None
 
     init_duckdb_schema(duckdb_store)
     init_sqlite_schema(sqlite_store)

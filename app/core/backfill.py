@@ -28,6 +28,7 @@ from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -43,10 +44,30 @@ class PriceBackfiller:
     同时回填 dividends 表的送股/转增字段 (baostock 源)。
     """
 
-    def __init__(self) -> None:
-        self.adapter_mgr = AdapterManager()
-        self.duck = DuckDBStore()
-        self.sqlite = SQLiteStore()
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+        adapter_mgr: AdapterManager | None = None,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("PriceBackfiller requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("PriceBackfiller stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.adapter_mgr = adapter_mgr or AdapterManager()
+        self.duck = duck
+        self.sqlite = sqlite
         self._batch_id = str(uuid.uuid4())
 
     def run_full_backfill(

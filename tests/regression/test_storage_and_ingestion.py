@@ -3,12 +3,15 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
+
+from fastapi import Request
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.backfill import PriceBackfiller
-from app.core.config import Config
 from app.core.init import DataInitializer
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import get_kline
@@ -39,8 +42,8 @@ def _result(
     )
 
 
-def test_old_qfq_schema_is_upgraded_idempotently(tmp_path: Path) -> None:
-    store = DuckDBStore(tmp_path / "old.duckdb")
+def test_old_qfq_schema_is_upgraded_idempotently(database_paths: DatabasePathSet) -> None:
+    store = DuckDBStore(paths=database_paths)
     store.write_query(
         """
         CREATE TABLE price_daily_qfq (
@@ -66,11 +69,9 @@ def test_old_qfq_schema_is_upgraded_idempotently(tmp_path: Path) -> None:
 
 
 def test_qfq_api_supports_schema_before_turnover_rate_migration(
-    tmp_path: Path,
-    monkeypatch,
+    database_paths: DatabasePathSet,
 ) -> None:
-    db_path = tmp_path / "legacy-api.duckdb"
-    store = DuckDBStore(db_path)
+    store = DuckDBStore(paths=database_paths)
     store.execute_script(
         """
         CREATE TABLE price_daily_qfq (
@@ -87,20 +88,11 @@ def test_qfq_api_supports_schema_before_turnover_rate_migration(
             ('600519', '2026-07-17', 1400, 1510, 1390, 1500, 100, 150000);
         """
     )
-    monkeypatch.setattr(
-        Config,
-        "_instance",
-        Config(
-            {
-                "database": {
-                    "duckdb_path": str(db_path),
-                    "sqlite_path": str(tmp_path / "unused.sqlite"),
-                }
-            }
-        ),
+    request = Request(
+        {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(duck=store))}
     )
 
-    result = asyncio.run(get_kline("600519", adjust="qfq", days=250))
+    result = asyncio.run(get_kline("600519", request=request, adjust="qfq", days=250))
 
     assert result["count"] == 1
     assert result["candles"][0]["turnover_rate"] is None

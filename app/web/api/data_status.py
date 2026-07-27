@@ -6,19 +6,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
 
 @router.get("/summary")
-async def get_summary() -> dict:
+async def get_summary(request: Request) -> dict:
     """数据状态摘要 (PRD §15 DS2)"""
-    from app.core.storage.duckdb_store import DuckDBStore
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    duck = DuckDBStore()
-    sqlite = SQLiteStore()
+    duck = request.app.state.duck
+    sqlite = request.app.state.sqlite
 
     summary: dict = {}
 
@@ -218,11 +215,9 @@ async def get_summary() -> dict:
 
 
 @router.get("/retry-list")
-async def get_retry_list(limit: int = 50) -> dict:
+async def get_retry_list(request: Request, limit: int = 50) -> dict:
     """重试列表摘要"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     try:
         rows = sqlite.query(
             "SELECT stock_code, data_type, adapter, error, retry_count "
@@ -235,11 +230,9 @@ async def get_retry_list(limit: int = 50) -> dict:
 
 
 @router.get("/missing-list")
-async def get_missing_list(limit: int = 50) -> dict:
+async def get_missing_list(request: Request, limit: int = 50) -> dict:
     """缺失列表摘要"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     try:
         rows = sqlite.query(
             "SELECT stock_code, field_name, reason_code "

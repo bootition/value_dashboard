@@ -4,8 +4,9 @@ import { useRoute } from 'vue-router'
 import {
   NCard, NSpace, NTag, NSelect, NRadioGroup, NRadioButton,
   NEmpty, NSpin, NDescriptions, NDescriptionsItem, NResult,
+  useMessage,
 } from 'naive-ui'
-import axios from 'axios'
+import axios, { isAxiosError } from 'axios'
 import { dispose, init } from 'klinecharts'
 import type { Chart, KLineData } from 'klinecharts'
 import IndicatorTabs from '../components/IndicatorTabs.vue'
@@ -23,6 +24,7 @@ import type {
 import type { WarningCode } from '../types/data-quality.ts'
 
 const route = useRoute()
+const message = useMessage()
 
 const stockCode = computed(() => {
   const code = route.params.code
@@ -42,6 +44,7 @@ const adjustMode = ref<'raw' | 'qfq'>('raw')
 const klineDays = ref(250)
 const klineRef = ref<HTMLElement>()
 const chartInstance = ref<Chart | null>(null)
+const klineAbortController = ref<AbortController | null>(null)
 
 // 财务趋势配置
 const trendPeriod = ref<'annual' | 'quarterly' | 'ttm'>('annual')
@@ -68,8 +71,10 @@ async function fetchStockInfo() {
   try {
     const resp = await axios.get<StockInfo>(`/api/stock/${stockCode.value}/info`)
     stockInfo.value = resp.data
-  } catch {
+  } catch (e) {
     stockInfo.value = null
+    const detail = isAxiosError(e) ? e.response?.data?.detail : null
+    message.warning(`加载股票信息失败: ${detail || '网络错误'}`)
   }
 }
 
@@ -77,20 +82,31 @@ async function fetchIndicators() {
   try {
     const resp = await axios.get<IndicatorsResponse>(`/api/stock/${stockCode.value}/indicators`)
     indicators.value = resp.data
-  } catch {
+  } catch (e) {
     indicators.value = null
+    const detail = isAxiosError(e) ? e.response?.data?.detail : null
+    message.warning(`加载指标数据失败: ${detail || '网络错误'}`)
   }
 }
 
 async function fetchKline() {
+  // 取消之前的请求，避免竞态条件
+  if (klineAbortController.value) {
+    klineAbortController.value.abort()
+  }
+  klineAbortController.value = new AbortController()
   try {
     const resp = await axios.get<KlineResponse>(`/api/stock/${stockCode.value}/kline`, {
       params: { adjust: adjustMode.value, days: klineDays.value },
+      signal: klineAbortController.value.signal,
     })
     klineData.value = resp.data
     renderKline()
-  } catch {
+  } catch (e) {
+    if (axios.isCancel(e)) return
     klineData.value = { candles: [] }
+    const detail = isAxiosError(e) ? e.response?.data?.detail : null
+    message.warning(`加载K线数据失败: ${detail || '网络错误'}`)
   }
 }
 
@@ -100,8 +116,10 @@ async function fetchTrend() {
       params: { period: trendPeriod.value, years: trendYears.value },
     })
     trendData.value = resp.data
-  } catch {
+  } catch (e) {
     trendData.value = { trend: [], period: 'annual', count: 0 }
+    const detail = isAxiosError(e) ? e.response?.data?.detail : null
+    message.warning(`加载财务趋势失败: ${detail || '网络错误'}`)
   }
 }
 
@@ -109,8 +127,10 @@ async function fetchAudit() {
   try {
     const resp = await axios.get<AuditResponse>(`/api/stock/${stockCode.value}/source-audit`)
     auditData.value = resp.data
-  } catch {
+  } catch (e) {
     auditData.value = { field_audit: [], batch_audit: [] }
+    const detail = isAxiosError(e) ? e.response?.data?.detail : null
+    message.warning(`加载溯源信息失败: ${detail || '网络错误'}`)
   }
 }
 
@@ -134,11 +154,59 @@ function renderKline() {
     chartInstance.value = null
   }
 
-  const chart = init(klineRef.value)
+  const chart = init(klineRef.value, {
+    styles: {
+      grid: {
+        show: true,
+        horizontal: {
+          color: 'rgba(0,0,0,0.05)',
+        },
+        vertical: {
+          color: 'rgba(0,0,0,0.05)',
+        },
+      },
+      candle: {
+        priceMark: {
+          last: {
+            show: true,
+          },
+        },
+        bar: {
+          upColor: '#ef5350',
+          downColor: '#26a69a',
+          upBorderColor: '#ef5350',
+          downBorderColor: '#26a69a',
+          upWickColor: '#ef5350',
+          downWickColor: '#26a69a',
+        },
+      },
+      indicator: {
+        lines: [
+          { color: '#ff9800' },
+          { color: '#2196f3' },
+          { color: '#9c27b0' },
+          { color: '#4caf50' },
+          { color: '#f44336' },
+          { color: '#00bcd4' },
+        ],
+      },
+      xAxis: {
+        tickText: {
+          color: '#666',
+        },
+      },
+      yAxis: {
+        tickText: {
+          color: '#666',
+        },
+      },
+    },
+  })
+  
   if (!chart) return
   chartInstance.value = chart
 
-  const candles: KLineData[] = klineData.value.candles.map((c) => ({
+  const candles: KLineData[] = klineData.value.candles.map((c: any) => ({
     timestamp: new Date(c.trade_date).getTime(),
     open: c.open,
     high: c.high,
@@ -146,13 +214,18 @@ function renderKline() {
     close: c.close,
     volume: c.volume,
     turnover: c.turnover,
+    // Add MA data if available
+    ma5: c.ma5,
+    ma10: c.ma10,
+    ma20: c.ma20,
+    ma60: c.ma60,
+    ma120: c.ma120,
+    ma250: c.ma250,
   }))
 
   chart.setDataLoader({
     getBars: ({ type, callback }) => callback(type === 'init' ? candles : [], false),
   })
-  chart.setSymbol({ ticker: stockCode.value, pricePrecision: 2, volumePrecision: 0 })
-  chart.setPeriod({ type: 'day', span: 1 })
   chart.createIndicator('MA')
 }
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from app.core.data_quality import _data_dates, build_data_quality_status
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
 
 
@@ -32,9 +33,9 @@ def test_data_quality_status_exposes_untrusted_and_stale_data(
 
 
 def test_data_dates_supports_snapshot_schema_before_freshness_migration(
-    tmp_path,
+    database_paths: DatabasePathSet,
 ) -> None:
-    duck = DuckDBStore(tmp_path / "legacy.duckdb")
+    duck = DuckDBStore(paths=database_paths)
     duck.execute_script(
         """
         CREATE TABLE price_daily_raw (trade_date DATE);

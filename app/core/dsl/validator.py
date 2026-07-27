@@ -15,6 +15,8 @@ from app.core.dsl.ast_nodes import (
     ASTNode, Literal, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp,
     FIELD_METADATA, INDICATOR_METADATA,
 )
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +39,27 @@ class ValidationError(Exception):
 class Validator:
     """DSL 表达式验证器"""
 
-    def __init__(self, registry=None) -> None:
+    def __init__(
+        self,
+        registry=None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
+        if sqlite is None and registry is not None:
+            sqlite = getattr(registry, "sqlite", None)
+        if sqlite is None and paths is None:
+            raise PathIsolationError("Validator requires a SQLite store or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("Validator store does not match injected paths")
+
+        assert sqlite is not None
         # registry 用于解析已发布指标的依赖
         self._registry = registry
+        self._sqlite = sqlite
         self._errors: list[str] = []
         self._warnings: list[str] = []
 
@@ -220,20 +240,18 @@ class Validator:
             # P1-20修复: 递归检查依赖的依赖
             # 查找registry中已发布的同名指标，获取其依赖
             try:
-                from app.core.storage.sqlite_store import SQLiteStore
-                sqlite = SQLiteStore()
                 # dep格式: "indicator_name" 或 "indicator_name@version"
                 dep_parts = dep.split("@")
                 dep_name = dep_parts[0]
                 dep_version = int(dep_parts[1]) if len(dep_parts) > 1 else None
 
                 if dep_version:
-                    rows = sqlite.query(
+                    rows = self._sqlite.query(
                         "SELECT dependencies_json FROM dsl_expressions WHERE name=? AND version=? AND status='published'",
                         [dep_name, dep_version],
                     )
                 else:
-                    rows = sqlite.query(
+                    rows = self._sqlite.query(
                         "SELECT dependencies_json FROM dsl_expressions WHERE name=? AND status='published' ORDER BY version DESC LIMIT 1",
                         [dep_name],
                     )

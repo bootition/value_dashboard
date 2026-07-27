@@ -24,6 +24,7 @@ from typing import Any
 
 from app.core.config import Config
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError, VdEnv
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -245,12 +246,42 @@ class BackupManager:
         "fetch_batch", "source_audit",
     ]
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("BackupManager requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("BackupManager stores do not match injected paths")
+        else:
+            assert duck is not None and sqlite is not None
+            duck_paths = duck._path_set.validate()
+            sqlite_paths = sqlite._path_set.validate()
+            if duck_paths != sqlite_paths:
+                raise PathIsolationError("BackupManager stores must share one database path set")
+            validated = duck_paths
+
+        assert duck is not None and sqlite is not None
         cfg = Config.current()
         self._project_root = cfg.project_root
-        self._duck = DuckDBStore()
-        self._sqlite = SQLiteStore()
-        self._backup_dir = self._project_root / "data" / "backup"
+        self._duck = duck
+        self._sqlite = sqlite
+        self._backup_dir = (
+            self._project_root / "data" / "backup"
+            if validated.env is VdEnv.FORMAL
+            else validated.run_root / "backup"
+        )
 
     def create_full_backup(
         self,
@@ -457,10 +488,11 @@ class BackupManager:
                     logger.warning(f"  跳过可疑表名: {table}")
                     continue
                 try:
-                    self._duck.execute_script(
-                        f"DELETE FROM {table}; "
-                        f"COPY {table} FROM '{parquet_file}' (FORMAT PARQUET);"
-                    )
+                    with self._duck.transaction() as conn:
+                        conn.execute(f"DELETE FROM {table}")
+                        conn.execute(
+                            f"COPY {table} FROM '{parquet_file}' (FORMAT PARQUET)"
+                        )
                     result["restored"].append({"table": table, "category": "public"})
                     logger.info(f"  恢复公共数据: {table}")
                 except Exception as e:

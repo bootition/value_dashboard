@@ -5,6 +5,8 @@ from typing import Any
 
 import yaml
 
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+
 import os
 import sys
 
@@ -50,11 +52,22 @@ class Config:
     _instance: "Config | None" = None
     _data: dict[str, Any]
 
-    def __init__(self, data: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        data: dict[str, Any],
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
         self._data = data
+        self._paths = paths.validate() if paths is not None else None
 
     @classmethod
-    def load(cls, config_dir: Path | None = None) -> "Config":
+    def load(
+        cls,
+        config_dir: Path | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> "Config":
         """加载配置：先读 default.yaml，再用 user.yaml 覆盖"""
         cfg_dir = config_dir or _CONFIG_DIR
         default_path = cfg_dir / "default.yaml"
@@ -70,8 +83,16 @@ class Config:
                 user_data = yaml.safe_load(f) or {}
             data = _deep_merge(data, user_data)
 
-        cls._instance = cls(data)
+        cls._instance = cls(data, paths=paths)
         return cls._instance
+
+    @classmethod
+    def load_with_paths(
+        cls,
+        paths: DatabasePathSet,
+        config_dir: Path | None = None,
+    ) -> "Config":
+        return cls.load(config_dir, paths=paths)
 
     @classmethod
     def current(cls) -> "Config":
@@ -86,6 +107,16 @@ class Config:
 
     def get_path(self, *keys: str) -> Path:
         """获取配置中的相对路径，返回绝对 Path"""
+        if keys[:1] == ("database",):
+            if self._paths is None:
+                raise PathIsolationError(
+                    "Database paths require an injected DatabasePathSet"
+                )
+            if keys == ("database", "duckdb_path"):
+                return self._paths.duckdb_path
+            if keys == ("database", "sqlite_path"):
+                return self._paths.sqlite_path
+            raise PathIsolationError(f"Unknown database path key: {keys!r}")
         raw: str = self._data
         for k in keys:
             raw = raw[k]

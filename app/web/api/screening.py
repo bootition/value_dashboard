@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/screening", tags=["screening"])
@@ -38,12 +38,26 @@ class SaveResultRequest(BaseModel):
     base_pool_config: dict[str, Any] | None = None
 
 
+class ExportCsvRequest(BaseModel):
+    """导出 CSV 请求"""
+    results: list[dict[str, Any]]
+    columns: list[str]
+    data_date: str = ""
+
+
+class AddToWatchlistRequest(BaseModel):
+    """加入自选列表请求"""
+    stock_codes: list[str]
+    group: str = "default"
+    result_id: int | None = None
+
+
 @router.post("/run")
-async def run_screening(req: ScreeningRequest) -> dict:
+async def run_screening(req: ScreeningRequest, request: Request) -> dict:
     """运行筛选 (PRD §12.2 SC8: 手动运行, 以最新数据为准)"""
     from app.core.screening.engine import ScreeningEngine
 
-    engine = ScreeningEngine()
+    engine = ScreeningEngine(duck=request.app.state.duck)
     result = engine.run(
         rule=req.rule,
         include_st=req.include_st,
@@ -62,11 +76,9 @@ async def run_screening(req: ScreeningRequest) -> dict:
 
 
 @router.post("/save")
-async def save_result(req: SaveResultRequest) -> dict:
+async def save_result(req: SaveResultRequest, request: Request) -> dict:
     """保存筛选结果 (PRD §12.5 SC14-15)"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
 
     # 生成规则ID (如果规则不存在)
     rule_id = None
@@ -98,11 +110,9 @@ async def save_result(req: SaveResultRequest) -> dict:
 
 
 @router.get("/results")
-async def list_saved_results(limit: int = Query(20, ge=1, le=500)) -> dict:
+async def list_saved_results(request: Request, limit: int = Query(20, ge=1, le=500)) -> dict:
     """列出已保存的筛选结果"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     rows = sqlite.query(
         "SELECT id, title, note, data_date, created_at "
         "FROM screening_results ORDER BY created_at DESC LIMIT ?",
@@ -112,11 +122,9 @@ async def list_saved_results(limit: int = Query(20, ge=1, le=500)) -> dict:
 
 
 @router.get("/results/{result_id}")
-async def get_saved_result(result_id: str) -> dict:
+async def get_saved_result(result_id: str, request: Request) -> dict:
     """获取已保存的筛选结果详情"""
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = request.app.state.sqlite
     rows = sqlite.query(
         "SELECT * FROM screening_results WHERE id = ?",
         [result_id],
@@ -132,14 +140,16 @@ async def get_saved_result(result_id: str) -> dict:
 
 
 @router.post("/export_csv")
-async def export_csv(req: dict) -> dict:
+async def export_csv(req: ExportCsvRequest) -> dict:
     """导出 CSV (PRD §12.5 SC16: 含数据日期/规则版本/指标版本/置信度/来源)"""
-    results = req.get("results", [])
-    columns = req.get("columns", [])
-    data_date = req.get("data_date", "")
+    results = req.results
+    columns = req.columns
+    data_date = req.data_date
 
     if not results:
         raise HTTPException(status_code=400, detail="no results to export")
+    if len(results) > 10000:
+        raise HTTPException(status_code=400, detail="too many results to export (max 10000)")
 
     output = io.StringIO()
     writer = csv.writer(output)
@@ -160,14 +170,15 @@ async def export_csv(req: dict) -> dict:
 
 
 @router.post("/add_to_watchlist")
-async def add_to_watchlist(req: dict) -> dict:
+async def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
     """将筛选结果加入自选列表 (PRD §12.5 SC17)"""
-    from app.core.storage.sqlite_store import SQLiteStore
+    sqlite = request.app.state.sqlite
+    stock_codes = req.stock_codes
+    group_name = req.group
+    result_id = req.result_id
 
-    sqlite = SQLiteStore()
-    stock_codes = req.get("stock_codes", [])
-    group_name = req.get("group", "default")
-    result_id = req.get("result_id")
+    if len(stock_codes) > 10000:
+        raise HTTPException(status_code=400, detail="too many stocks (max 10000)")
 
     added = 0
     with sqlite.transaction() as conn:
@@ -195,3 +206,89 @@ async def list_available_indicators() -> dict:
             "rankable": col in RANKABLE_INDICATORS,
         })
     return {"indicators": indicators, "count": len(indicators)}
+
+
+class SaveRuleRequest(BaseModel):
+    """保存筛选规则请求"""
+    name: str
+    rule_json: dict[str, Any]
+    locked_indicators: dict[str, Any] | None = None
+    status: str = "draft"
+
+
+@router.post("/rules/save")
+async def save_rule(req: SaveRuleRequest, request: Request) -> dict:
+    """保存筛选规则 (PRD §12.2: 规则编辑必须版本化)"""
+    sqlite = request.app.state.sqlite
+
+    with sqlite.transaction() as conn:
+        # Check if rule with same name exists
+        existing = conn.execute(
+            "SELECT MAX(version) as max_version FROM screening_rules WHERE name = ?",
+            [req.name],
+        ).fetchone()
+
+        if existing and existing[0] is not None:
+            version = existing[0] + 1
+        else:
+            version = 1
+
+        cursor = conn.execute(
+            """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
+               VALUES (?, ?, ?, ?, ?)""",
+            [
+                req.name,
+                version,
+                json.dumps(req.rule_json, ensure_ascii=False),
+                json.dumps(req.locked_indicators or {}, ensure_ascii=False),
+                req.status,
+            ],
+        )
+        rule_id = cursor.lastrowid
+
+    return {"status": "ok", "rule_id": rule_id, "version": version}
+
+
+@router.get("/rules")
+async def list_rules(request: Request, limit: int = Query(50, ge=1, le=200)) -> dict:
+    """列出已保存的筛选规则"""
+    sqlite = request.app.state.sqlite
+
+    rows = sqlite.query(
+        """SELECT id, name, version, rule_json, locked_indicators, status, created_at
+           FROM screening_rules
+           ORDER BY created_at DESC
+           LIMIT ?""",
+        [limit],
+    )
+
+    rules = []
+    for row in rows:
+        rule = dict(row)
+        rule["rule_json"] = json.loads(rule["rule_json"]) if rule.get("rule_json") else {}
+        rule["locked_indicators"] = json.loads(rule["locked_indicators"]) if rule.get("locked_indicators") else {}
+        rules.append(rule)
+
+    return {"rules": rules, "count": len(rules)}
+
+
+@router.get("/rules/{rule_id}")
+async def get_rule(rule_id: int, request: Request) -> dict:
+    """获取单个筛选规则"""
+    sqlite = request.app.state.sqlite
+
+    rows = sqlite.query(
+        """SELECT id, name, version, rule_json, locked_indicators, status, created_at
+           FROM screening_rules
+           WHERE id = ?""",
+        [rule_id],
+    )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="rule not found")
+
+    rule = dict(rows[0])
+    rule["rule_json"] = json.loads(rule["rule_json"]) if rule.get("rule_json") else {}
+    rule["locked_indicators"] = json.loads(rule["locked_indicators"]) if rule.get("locked_indicators") else {}
+
+    return rule

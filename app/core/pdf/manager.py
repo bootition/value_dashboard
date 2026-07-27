@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from app.core.config import Config
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -32,12 +32,25 @@ _HEADERS = {
 class PDFManager:
     """PDF 下载/归档/恢复管理器"""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
+        if sqlite is None and paths is None:
+            raise PathIsolationError("PDFManager requires a SQLite store or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("PDFManager store does not match injected paths")
+
+        assert sqlite is not None
         cfg = Config.current()
         self._project_root = cfg.project_root
         self._hot_dir = self._project_root / "data" / "pdf"
-        self._duck = DuckDBStore()
-        self._sqlite = SQLiteStore()
+        self._sqlite = sqlite
 
     @property
     def hot_dir(self) -> Path:
@@ -83,13 +96,11 @@ class PDFManager:
             ct = resp.headers.get("content-type", "")
             if "pdf" not in ct and "octet-stream" not in ct:
                 return {"error": f"非PDF内容: {ct}"}
-            # P2修复: 大小限制50MB
             if len(content) > 50 * 1024 * 1024:
                 return {"error": "文件过大(>50MB)"}
-                local_path.write_bytes(content)
 
-                # 计算 SHA256
-                pdf_hash = hashlib.sha256(content).hexdigest()
+            local_path.write_bytes(content)
+            pdf_hash = hashlib.sha256(content).hexdigest()
 
             logger.info(f"PDF 下载成功: {stock_code} → {local_path} ({len(content)} bytes)")
 
@@ -235,11 +246,32 @@ class PDFManager:
             filename: PDF 文件名
             archive_dir: 冷归档目录
         """
-        archive_path = self._project_root / archive_dir / stock_code / filename
+        import re
+
+        if not re.match(r"^\d{6}$", stock_code):
+            return {"error": "Invalid stock code"}
+        if not re.match(r"^[a-zA-Z0-9_.\-]+\.pdf$", filename, re.IGNORECASE):
+            return {"error": "Invalid filename"}
+        if ".." in filename or "/" in filename or "\\" in filename:
+            return {"error": "Invalid filename"}
+
+        archive_root = (self._project_root / archive_dir).resolve()
+        archive_path = (archive_root / stock_code / filename).resolve()
+        try:
+            archive_path.relative_to(archive_root)
+        except ValueError:
+            return {"error": "Path traversal detected"}
+
         if not archive_path.exists():
             return {"error": f"PDF not found in archive: {archive_path}"}
 
-        hot_path = self._hot_dir / stock_code / filename
+        hot_dir_resolved = self._hot_dir.resolve()
+        hot_path = (self._hot_dir / stock_code / filename).resolve()
+        try:
+            hot_path.relative_to(hot_dir_resolved)
+        except ValueError:
+            return {"error": "Path traversal detected"}
+
         hot_path.parent.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(str(archive_path), str(hot_path))

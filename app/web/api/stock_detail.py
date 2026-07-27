@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse
 from typing import Literal
 
@@ -134,11 +134,9 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
 
 
 @router.get("/{stock_code}/info")
-async def get_stock_info(stock_code: str) -> dict:
+async def get_stock_info(stock_code: str, request: Request) -> dict:
     """股票基本信息 (PRD §14 SD1: 代码/名称/拼音/最近收盘价/价格日期)"""
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = request.app.state.duck
     rows = duck.read_query(
         "SELECT stock_code, name, pinyin, exchange, listing_date, "
         "is_st, is_suspended, sw_level1, sw_level2 "
@@ -170,13 +168,12 @@ async def get_stock_info(stock_code: str) -> dict:
 @router.get("/{stock_code}/kline")
 async def get_kline(
     stock_code: str,
+    request: Request,
     adjust: Literal["raw", "qfq"] = "raw",
     days: int = Query(250, ge=1, le=2000),
 ) -> dict:
     """K线数据 (PRD §14 SD2: 日K/成交量/均线/raw与qfq切换)"""
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = request.app.state.duck
     table = "price_daily_raw" if adjust == "raw" else "price_daily_qfq"
     columns = duck.read_query(
         """
@@ -221,11 +218,9 @@ async def get_kline(
 
 
 @router.get("/{stock_code}/indicators")
-async def get_indicators(stock_code: str) -> dict:
+async def get_indicators(stock_code: str, request: Request) -> dict:
     """指标摘要 (PRD §14 SD3: 估值/盈利/成长/安全/股东回报)"""
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = request.app.state.duck
     rows = duck.read_query(
         """SELECT * FROM indicator_snapshot
            WHERE stock_code = ?
@@ -303,6 +298,7 @@ async def get_indicators(stock_code: str) -> dict:
 @router.get("/{stock_code}/financial-trend")
 async def get_financial_trend(
     stock_code: str,
+    request: Request,
     period: Literal["annual", "quarterly", "ttm"] = "annual",
     years: int = Query(5, ge=1, le=99),
 ) -> dict:
@@ -310,9 +306,7 @@ async def get_financial_trend(
 
     years=99 表示全部历史数据。
     """
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = request.app.state.duck
     limit = 999 if years >= 99 else (years * 4 if period in ("quarterly", "ttm") else years)
 
     if period == "annual":
@@ -401,22 +395,24 @@ async def get_financial_trend(
 
 
 @router.get("/{stock_code}/source-audit")
-async def get_source_audit(stock_code: str, limit: int = Query(20, ge=1, le=100)) -> dict:
+async def get_source_audit(
+    stock_code: str,
+    request: Request,
+    limit: int = Query(20, ge=1, le=100),
+) -> dict:
     """溯源信息 (PRD §14 SD8-SD10: 报告期/来源/置信度/公式)
 
     M4-问题5修复: 补充生效日期/数据版本/公式/as_reported差异
     """
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = request.app.state.duck
 
     # 关键字段溯源 (补充 effective_date/data_version/formula)
     audit_rows = duck.read_query(
         """SELECT field_name, report_date, value, source,
                   fetch_time, confidence, reason_code, is_override,
                   api_version,
-                  fetch_time AS effective_date,
-                  api_version AS data_version,
+                  report_date AS effective_date,
+                  'latest_restated' AS data_version,
                   '' AS formula,
                   NULL AS as_reported_value,
                   NULL AS latest_restated_diff
@@ -509,6 +505,7 @@ CUSTOM_TREND_FIELDS: dict[str, str] = {
 @router.get("/{stock_code}/custom-trend")
 async def get_custom_trend(
     stock_code: str,
+    request: Request,
     fields: str = Query("revenue,parent_net_profit,gross_margin,roe"),
     years: int = Query(5, ge=1, le=99),
 ) -> dict:
@@ -516,9 +513,7 @@ async def get_custom_trend(
 
     用户可选择任意标准化财务字段查看趋势。
     """
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = request.app.state.duck
     field_list = [f.strip() for f in fields.split(",") if f.strip()]
     limit = 999 if years >= 99 else years
 
@@ -595,14 +590,17 @@ async def get_available_fields() -> dict:
 # ─── M4-问题3: PDF 浏览器打开（最小实现） ──────────────────────────
 
 @router.get("/{stock_code}/pdf/{filename}", response_model=None)
-async def serve_pdf(stock_code: str, filename: str) -> FileResponse | dict:
+async def serve_pdf(
+    stock_code: str,
+    filename: str,
+    request: Request,
+) -> FileResponse | dict:
     """打开已恢复到本地的 PDF (PRD §14 SD9)
 
     M8-问题2修复: 热数据找不到时检查冷归档, 返回归档位置与恢复指引 (PRD §18.2 AR6)
     P0#14修复: 防止路径遍历攻击 (stock_code/filename 只允许字母数字/下划线/点)
     """
     import re
-    from app.core.config import Config
 
     # P0#14修复: 白名单验证 stock_code 和 filename, 防止路径遍历
     # stock_code: 6位数字; filename: 字母数字+下划线+点+连字符, 以.pdf结尾
@@ -614,7 +612,7 @@ async def serve_pdf(stock_code: str, filename: str) -> FileResponse | dict:
     if ".." in filename or "/" in filename or "\\" in filename:
         return {"error": "Invalid filename"}
 
-    cfg = Config.current()
+    cfg = request.app.state.config
     pdf_dir = cfg.project_root / "data" / "pdf" / stock_code
     pdf_path = (pdf_dir / filename).resolve()
 
@@ -633,7 +631,7 @@ async def serve_pdf(stock_code: str, filename: str) -> FileResponse | dict:
 
     # M8-问题2: 检查冷归档 (PRD §18.2 AR6: 显示归档位置与恢复指引)
     from app.core.pdf.manager import PDFManager
-    mgr = PDFManager()
+    mgr = PDFManager(sqlite=request.app.state.sqlite)
     if mgr.is_in_archive(stock_code, filename):
         archive_path = cfg.project_root / "data" / "archive_pdf" / stock_code / filename
         return {
@@ -652,11 +650,9 @@ async def serve_pdf(stock_code: str, filename: str) -> FileResponse | dict:
 
 
 @router.get("/{stock_code}/pdf-list")
-async def list_pdfs(stock_code: str) -> dict:
+async def list_pdfs(stock_code: str, request: Request) -> dict:
     """列出已下载的 PDF 文件"""
-    from app.core.config import Config
-
-    cfg = Config.current()
+    cfg = request.app.state.config
     pdf_dir = cfg.project_root / "data" / "pdf" / stock_code
 
     if not pdf_dir.exists():

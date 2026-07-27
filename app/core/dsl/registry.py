@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +30,22 @@ STATUS_PUBLISHED = "published"
 class ExpressionRegistry:
     """版本化表达式注册表"""
 
-    def __init__(self) -> None:
-        self.sqlite = SQLiteStore()
+    def __init__(
+        self,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+    ) -> None:
+        if sqlite is None and paths is None:
+            raise PathIsolationError("ExpressionRegistry requires a SQLite store or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("ExpressionRegistry store does not match injected paths")
+
+        assert sqlite is not None
+        self.sqlite = sqlite
 
     def create(
         self,

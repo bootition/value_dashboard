@@ -19,7 +19,7 @@ from typing import Any, Iterator
 
 import duckdb
 
-from app.core.config import Config
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -47,13 +47,19 @@ class DuckDBStore:
     - write_transaction(): 获取写锁后执行写操作
     """
 
-    def __init__(self, db_path: Path | None = None) -> None:
-        cfg = Config.current()
-        self._db_path = db_path or cfg.get_path("database", "duckdb_path")
+    def __init__(self, *, paths: DatabasePathSet) -> None:
+        validated = paths.validate()
+        self._path_set = validated
+        self._db_path = validated.duckdb_path
         self._lock_path = self._db_path.parent / ".duckdb.write.lock"
 
-        # 确保数据目录存在
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._revalidate()
+
+    def _revalidate(self) -> None:
+        validated = self._path_set.validate()
+        if validated.duckdb_path != self._db_path:
+            raise PathIsolationError("DuckDB path identity changed after validation")
 
     @contextlib.contextmanager
     def read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -62,6 +68,7 @@ class DuckDBStore:
         open-per-query 模式：DuckDB 嵌入式打开开销 ~1ms，
         不持有长期连接，避免阻塞 CLI 写操作。
         """
+        self._revalidate()
         conn = duckdb.connect(str(self._db_path), read_only=True)
         try:
             yield conn
@@ -87,6 +94,7 @@ class DuckDBStore:
         修复: 锁文件增加时间戳, 超过 _LOCK_MAX_AGE_SEC 秒视为过期锁。
         """
         _LOCK_MAX_AGE_SEC = 3600  # 锁最大存活 1 小时, 超过视为过期
+        self._revalidate()
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
 
@@ -142,6 +150,7 @@ class DuckDBStore:
     def write_connection(self, timeout: float = 30.0) -> Iterator[duckdb.DuckDBPyConnection]:
         """获取写锁后打开写连接，用完关闭并释放锁"""
         with self._write_lock(timeout):
+            self._revalidate()
             conn = duckdb.connect(str(self._db_path))
             try:
                 yield conn
@@ -152,6 +161,7 @@ class DuckDBStore:
     def transaction(self, timeout: float = 30.0) -> Iterator[duckdb.DuckDBPyConnection]:
         """Run all statements on one connection and roll back unless commit succeeds."""
         with self._write_lock(timeout):
+            self._revalidate()
             conn = duckdb.connect(str(self._db_path))
             committed = False
             conn.begin()

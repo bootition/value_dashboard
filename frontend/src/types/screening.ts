@@ -17,6 +17,7 @@ export interface ScreeningIndicator {
 
 /** Leaf condition in a screening rule tree. */
 export interface ScreeningRuleCondition {
+  readonly id: string
   field: string
   op: string
   value: number | null
@@ -24,8 +25,14 @@ export interface ScreeningRuleCondition {
 
 /** Recursive AND/OR group in a screening rule tree. */
 export interface ScreeningRuleNode {
+  readonly id: string
   logic: 'AND' | 'OR'
   rules: Array<ScreeningRuleNode | ScreeningRuleCondition>
+}
+
+/** Generate a unique ID for rule conditions and nodes. */
+export function generateRuleId(): string {
+  return crypto.randomUUID()
 }
 
 /** Known fields in a screening result row (from the backend columns list). */
