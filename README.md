@@ -1,8 +1,10 @@
 # Value Dashboard — A股价值投资研究与筛选工具
 
-**Verdict: BLOCK** — 详见阻断状态章节。
+**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论：代码层通过，数据重建（P0-1 股本）已完成，最终诊断与 30 股外部真值抽样确认中。
 
-个人本地研究工具，用于 A 股基本面分析、指标计算、DSL 筛选和投资决策支持。当前处理审计修复阶段，代码门禁已改进，但正式数据未重建。
+CLI 使用 `vd.bat <command>`。该启动器显式建立 formal profile；直接 `vd`/`python -m app.cli.main` 在没有 profile 时会拒绝数据库操作。
+
+个人本地研究工具，用于 A 股基本面分析、指标计算、DSL 筛选和投资决策支持。当前处于审计修复收尾与自动数据更新实施阶段；正式数据已重建（2026-07-31）。
 
 ---
 
@@ -29,7 +31,7 @@
 | `tests/regression/` | 回归测试与采集安全门禁（最近一次 worker 运行报告 61 项） |
 | `tests/conftest.py` | 测试配置与 fixture |
 | `tests/collection_probe/` | 测试采集探针 |
-| `docs/` | 审计、ADR、产品文档 |
+| `docs/` | 文档中心：STATUS / decisions / reports / runbooks / contracts / evidence / archive（地图见 [docs/README.md](docs/README.md)） |
 | `_legacy/` | 归档式遗留文件（见[下文](#legacy)） |
 
 ---
@@ -157,28 +159,26 @@ Get-FileHash -LiteralPath `
   "data\valuedashboard.sqlite" -Algorithm SHA256
 ```
 
-**冻结说明：** 当前禁止运行 Python、pytest、应用、CLI 和任何 DuckDB/SQLite
-命令。2026-07-21/22 的两次验证运行已改变正式数据库文件；在测试路径与正式库
-完成强隔离并重新取得批准前，`pytest`（包括 `--collect-only`）不再列为安全命令。
+**冻结说明（历史）：** 2026-07-21/22 的两次验证运行曾改变正式数据库文件，此后建立了 S1 路径隔离（`scripts/s1-pytest.ps1`）并在 2026-07-31 完成全市场数据重建。正式库写操作必须经 CLI/维护脚本且单写者串行，详见 [docs/runbooks/s0-evidence-preservation.md](docs/runbooks/s0-evidence-preservation.md) 与 [docs/STATUS.md](docs/STATUS.md)。
 
 ---
 
-## 阻断状态（BLOCK）
+## 当前状态
 
-总体审计结论：**BLOCK**。
+**项目状态唯一权威见 [docs/STATUS.md](docs/STATUS.md)**。要点（2026-07-31）：
 
-- 代码门禁已有实质改进：DUCKDB 快照使用 staging + 事务发布、测试采集隔离、适配器限流配置接线、旧 schema 只读兼容。
-- 但**正式数据未重建**：财务壳行、占位分红、合成 lineage、raw/QFQ 分裂、元数据缺失、操作测试工件仍存在。
-- Cycle 2 期间正式 DuckDB/SQLite 已偏离批准基线；未经明确批准没有使用备份覆盖现库。正式库继续冻结，不能把当前文件视为已验收数据。
-- UI 展示已实现：DataStatusPage 展示结构化警告码与各数据日期；StockDetail 展示六个 freshness 字段和四个分红指标"数据未验证"标签；筛选面板对相关字段不可信时门禁保存/导出，纯操作警告不阻断。以上 UI 展示不修复底层数据，正式数据重建仍待执行。
-- G22（用户可见性）与 G23（外部真值 30 股抽样）**未通过**。
-- 详细分析见以下报告：
+- 代码层门禁全部通过（S1 隔离回归、前端 lint/build/46 合约、uv lock、性能 <5s）。
+- 数据层 P0-1（股本单位混用）已关闭：5,534 只股本重建，`circ_shares > total_shares` 1,215 → 0；价格、分红、财务 lineage 重建完成（`docs/reports/29`）。
+- 待确认：最终诊断（LINEAGE_INVALID 消除）、30 股外部真值抽样、回归验证。
+- 历史审计结论（BLOCK 等）已被 `docs/reports/29` 与 `docs/STATUS.md` 取代，**请勿再引用为当前结论**。
+
+历史审计链（仅追溯用，均 superseded）：
 
 | 文档 | 内容 |
 |---|---|
-| [docs/11_RED_TEAM_AUDIT_V2.md](docs/11_RED_TEAM_AUDIT_V2.md) | 原始红队审计 14 项问题 |
-| [docs/12_AUDIT_REMEDIATION_REPORT.md](docs/12_AUDIT_REMEDIATION_REPORT.md) | Code Fix 阶段整改报告 |
-| [docs/13_CURRENT_BLOCKERS_INVESTIGATION.md](docs/13_CURRENT_BLOCKERS_INVESTIGATION.md) | 当前阻塞项深度调查（含解除门禁） |
+| [docs/reports/11_RED_TEAM_AUDIT_V2.md](docs/reports/11_RED_TEAM_AUDIT_V2.md) | 原始红队审计 14 项问题 |
+| [docs/reports/12_AUDIT_REMEDIATION_REPORT.md](docs/reports/12_AUDIT_REMEDIATION_REPORT.md) | Code Fix 阶段整改报告 |
+| [docs/reports/13_CURRENT_BLOCKERS_INVESTIGATION.md](docs/reports/13_CURRENT_BLOCKERS_INVESTIGATION.md) | 当前阻塞项深度调查（含解除门禁） |
 
 ---
 
@@ -192,7 +192,7 @@ Get-FileHash -LiteralPath `
 | `data/valuedashboard.duckdb` | `46EBCEB6DDBCCA15D4E82D22CFA659EC1C593033DE190C08B5C54FC7211A3C91` | `5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6` | `DRIFTED / FROZEN` |
 | `data/valuedashboard.sqlite` | `228E0F53A8EBD0B99DAED8FA2D683D42F46644E8805495350EC162EFEC6596D3` | `B7B5F2FF2D1B4D2F71512DFEBD8DC2FBD9625E51BE2D0BFDB5CAF0657EC11959` | `DRIFTED / FROZEN` |
 
-**注意：** 没有 `data/.hashes` 锁文件。哈希记录在 `docs/13_CURRENT_BLOCKERS_INVESTIGATION.md` 和 `findings.md` 中。
+**注意：** 没有 `data/.hashes` 锁文件。哈希记录见 [docs/reports/13_CURRENT_BLOCKERS_INVESTIGATION.md](docs/reports/13_CURRENT_BLOCKERS_INVESTIGATION.md)（历史）与 `docs/evidence/` 中各证据 JSON（当前基线）。
 
 备份位于 `data/backup/audit_pre_fix_20260720.duckdb` / `.sqlite`，当前复核仍与批准基线一致。恢复会覆盖现库，未经用户明确批准不得执行。
 
@@ -235,4 +235,4 @@ Vue / TypeScript 语言服务器 (LSP) 在当前工作区未配置且已拒绝�
 
 本项目使用 DuckDB 作为分析型存储、SQLite 作为操作型状态存储。财务数据、价格数据、分红事件和元数据的数据源/适配器包括 AKShare/Eastmoney、BaoStock、CNINFO、TDX 所列公开来源及历史 CSMAR 商业导入。重复使用与许可条件取决于各来源条款。本工具仅用于**个人本地研究**，不构成投资建议。
 
-数据准确性和完整性依赖于上游数据源及当前审计修复阶段。详见 `docs/` 中各报告。
+数据准确性和完整性依赖于上游数据源及当前审计修复阶段。当前状态与剩余缺口见 [docs/STATUS.md](docs/STATUS.md)。

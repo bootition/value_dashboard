@@ -1,3 +1,10 @@
+---
+title: swsresearch_snapshot
+status: archived
+category: archive
+last-reviewed: 2026-07-26
+---
+
 - generic [ref=e3]:
   - generic [ref=e5]:
     - menu [ref=e7]:

@@ -1,0 +1,87 @@
+{
+  "captured_at": "2026-07-30T16:04:57.973156+00:00",
+  "formal_database_sha256": "21ce1cd890428e15714d4698a51653cc9c0e98e2a3faf09bd120db15c2de4c70",
+  "method": "DuckDB read_only=True aggregate queries against data/valuedashboard.duckdb",
+  "share_coverage_by_exchange": [
+    {
+      "exchange": "BSE",
+      "listed": 332,
+      "total_positive": 332,
+      "circ_positive": 332,
+      "incomplete": 0,
+      "circ_exceeds_total": 0
+    },
+    {
+      "exchange": "SSE",
+      "listed": 2310,
+      "total_positive": 2283,
+      "circ_positive": 2310,
+      "incomplete": 27,
+      "circ_exceeds_total": 1215,
+      "min_float_ratio": 0.001268,
+      "median_float_ratio": 1.000004,
+      "max_float_ratio": 16459.419511
+    },
+    {
+      "exchange": "SZSE",
+      "listed": 2892,
+      "total_positive": 2892,
+      "circ_positive": 2892,
+      "incomplete": 0,
+      "circ_exceeds_total": 0
+    }
+  ],
+  "sse_float_ratio_distribution": {
+    "comparable": 2283,
+    "plausible_at_most_one": 1068,
+    "impossible_above_one": 1215,
+    "near_five_times": 37,
+    "near_ten_times": 4,
+    "above_ten_times": 13
+  },
+  "sse_missing_total_shares": 27,
+  "snapshot_state_for_share_ready_stocks": [
+    {
+      "exchange": "BSE",
+      "share_ready": 332,
+      "total_market_cap_null": 0,
+      "circ_market_cap_null": 0
+    },
+    {
+      "exchange": "SSE",
+      "share_ready": 2283,
+      "total_market_cap_null": 2283,
+      "circ_market_cap_null": 2283
+    },
+    {
+      "exchange": "SZSE",
+      "share_ready": 2892,
+      "total_market_cap_null": 2892,
+      "circ_market_cap_null": 2892
+    }
+  ],
+  "share_field_audit_rows": {
+    "total_shares": 0,
+    "circ_shares": 0
+  },
+  "selected_extreme_examples": [
+    {
+      "stock_code": "688428",
+      "total_shares": 23494,
+      "circ_shares": 386697602,
+      "float_ratio": 16459.419511
+    },
+    {
+      "stock_code": "689009",
+      "total_shares": 48432,
+      "circ_shares": 227272727,
+      "float_ratio": 4692.614945
+    },
+    {
+      "stock_code": "688728",
+      "total_shares": 200434,
+      "circ_shares": 683060109,
+      "float_ratio": 3407.90539
+    }
+  ]
+}

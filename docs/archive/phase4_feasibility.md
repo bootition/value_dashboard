@@ -1,3 +1,10 @@
+---
+title: Phase 4: PIT / Restatement / Revision Feasibility & Legal Boundaries
+status: archived
+category: archive
+last-reviewed: 2026-07-26
+---
+
 # Phase 4: PIT / Restatement / Revision Feasibility & Legal Boundaries
 
 > Synthesized from Phase 2 (library deep-inspection) and Phase 3 (official source deep-inspection) evidence.

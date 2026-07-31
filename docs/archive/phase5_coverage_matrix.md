@@ -1,3 +1,10 @@
+---
+title: Phase 5: Coverage Matrix & Free-Only Feasibility Assessment
+status: archived
+category: archive
+last-reviewed: 2026-07-26
+---
+
 # Phase 5: Coverage Matrix & Free-Only Feasibility Assessment
 
 > Final research deliverable. Synthesized from Phase 2 (libraries), Phase 3 (official sources), and Phase 4 (PIT/legal analysis).

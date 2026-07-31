@@ -1,3 +1,10 @@
+---
+title: S1 路径隔离合约：DatabasePathSet 与 fail-closed 边界
+status: approved
+category: contracts
+last-reviewed: 2026-07-26
+---
+
 # S1 路径隔离合约：DatabasePathSet 与 fail-closed 边界
 
 **文档状态：** DRAFT / DESIGNED — 设计级定义，非实现，非验证。  
@@ -57,7 +64,7 @@
 | `VD_STAGING_ROOT` | staging | 绝对路径，staging 副本根。必须位于 repo 外（S1 合约的最简安全规则）。 |
 | `VD_FORENSIC_ROOTS` | (引擎拒绝) | 分号分隔的绝对路径列表。DB 引擎在任何环境下都拒绝写入或读取这些路径下的 DB 文件。Forensic **不是**可运行/只读 DB profile。 |
 | `VD_REBUILD_SOURCE_ROOT` | (S1 拒绝) | 绝对路径，指向重建来源备份（正式数据库的已知正确副本）。S1 测试期间 DB 引擎拒绝任何对该路径的读写。 |
-| `VD_TEST_EVIDENCE_ROOT` | test | 可选。显式非 DB 证据目录。包装器将哈希证据、日志、前后快照写入此目录而非 `data/`。缺省时使用默认路径 `docs/evidence-s1/<run-id>`。 |
+| `VD_TEST_EVIDENCE_ROOT` | test | 可选。显式非 DB 证据目录。包装器将哈希证据、日志、前后快照写入此目录而非 `data/`。缺省时使用默认路径 `docs/evidence/evidence-s1/<run-id>`。 |
 
 ### 2.3 路径约束
 
@@ -419,7 +426,7 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidateSet("Before", "After")]
     [string]$Phase,
-    [string]$EvidenceDir = "docs/evidence-s1"
+    [string]$EvidenceDir = "docs/evidence/evidence-s1"
 )
 ```
 
@@ -428,7 +435,7 @@ param(
 2. 确认 `VD_DUCKDB_PATH` 和 `VD_SQLITE_PATH` 已设置且为绝对路径。
 3. 确认 `VD_TEST_RUN_ROOT` 已设置且**当前不存在**。如发现过期残留，记录路径并退出 1；不得自动删除后继续。
 4. 确认 `VD_FORMAL_ACK` **不**存在（如果存在 → 退出 1，因为 pytest 内禁止 formal）。
-5. 确认 `VD_TEST_EVIDENCE_ROOT` 或使用默认 `docs/evidence-s1/<run-id>`。
+5. 确认 `VD_TEST_EVIDENCE_ROOT` 或使用默认 `docs/evidence/evidence-s1/<run-id>`。
 6. 捕获正式 5 文件集（DuckDB、SQLite、3 sidecars）的 exists/length/SHA256 → 证据目录 pre/。
    - Sidecar 不存在时记录 exists=false, length=null, sha256=null。
 7. 以上证据写入**证据目录**，**不写入 `data/.hashes`**。
@@ -445,7 +452,7 @@ param(
     [switch]$PolicyOnly,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$PytestArgs,
-    [string]$EvidenceDir = "docs/evidence-s1"
+    [string]$EvidenceDir = "docs/evidence/evidence-s1"
 )
 ```
 
@@ -767,16 +774,16 @@ released-formal-seed:sha256:valuedashboard.sqlite = null
 
 包装器将每次运行的哈希证据写入：
 
-- `docs/evidence-s1/<run-id>/pre/` — 执行前的正式文件状态
-- `docs/evidence-s1/<run-id>/post/` — 执行后的正式文件状态
-- `docs/evidence-s1/<run-id>/summary.json` — 前后比较摘要
+- `docs/evidence/evidence-s1/<run-id>/pre/` — 执行前的正式文件状态
+- `docs/evidence/evidence-s1/<run-id>/post/` — 执行后的正式文件状态
+- `docs/evidence/evidence-s1/<run-id>/summary.json` — 前后比较摘要
 
 **包装器不写入 `data/.hashes`。**
 
 ### 12.4 Python 进程级别（防御纵深 — 非权威门禁）
 
 - `pytest_configure`：记录 PID、开始时间、VD_ENV。
-- `pytest_unconfigure`：在全部 teardown 后，**不使用 DB 引擎**，通过纯文件 I/O（`open` + `hashlib`）计算正式文件哈希。写入 `docs/evidence-s1/<run-id>/pytest-inner/post/`。
+- `pytest_unconfigure`：在全部 teardown 后，**不使用 DB 引擎**，通过纯文件 I/O（`open` + `hashlib`）计算正式文件哈希。写入 `docs/evidence/evidence-s1/<run-id>/pytest-inner/post/`。
 - Python 进程**不得写入 `data/` 下的任何文件**（包括 `data/.hashes`）。
 
 ### 12.5 哈希比对规则
@@ -869,7 +876,7 @@ released-formal-seed:sha256:valuedashboard.sqlite = null
 8. [ ] preflight 模拟运行：设置 → 哈希捕获 → 自检通过 → 摘要输出正确（人工观察）。
 9. [ ] 包装器模拟运行：preflight + pytest（纯策略阶段）→ 哈希一致 → PASS（人工观察）。
 10. [ ] 完整 `tests/regression/` 通过包装器：所有测试通过，前后正式哈希一致。
-11. [ ] evidence 目录 `docs/evidence-s1/<run-id>/` 包含 pre/、post/ 和 summary.json。
+11. [ ] evidence 目录 `docs/evidence/evidence-s1/<run-id>/` 包含 pre/、post/ 和 summary.json。
 12. [ ] `pytest_unconfigure` 防御纵深日志存在于 evidence 目录中（无 DB 引擎）。
 13. [ ] AST 静态守卫扩展后无假阳性/假阴性问题。
 14. [ ] `start.bat` 代码审查确认 `VD_FORMAL_ACK` 只检查不自动设置。

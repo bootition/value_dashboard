@@ -1,3 +1,10 @@
+---
+title: S0 证据保全运行手册
+status: approved
+category: runbooks
+last-reviewed: 2026-07-26
+---
+
 # S0 证据保全运行手册
 
 ## 1 概述
@@ -40,7 +47,7 @@ S0 **不负责** 后续阶段：
 本文档创建于 **2026-07-23 UTC+8**，是当前 S0 运行的产物。本次运行：
 - ✅ 在本工作区内执行了文档化所列的全部只读观察命令（进程、端口、元数据、哈希、目录、Git）；
 - ✅ 创建了本文档 `docs/runbooks/s0-evidence-preservation.md`；
-- ❌ **未创建** `docs/evidence-s0/` 目录；
+- ❌ **未创建** `docs/evidence/evidence-s0/` 目录；
 - ❌ **未执行** 任何数据库文件副本；
 - ❌ **未完成或签署** S0 退出检查表。
 
@@ -699,7 +706,7 @@ $verifyResults | Export-Csv -LiteralPath "${targetRoot}\01-COPY-VERIFICATION.txt
 ## 7 退出检查表
 
 > **S0 完成条件**（根据 docs/15 §6 S0 退出证据）：
-> 1. 小型证据包已创建（`docs/evidence-s0/<run-id>/` 含全部预期文件）；
+> 1. 小型证据包已创建（`docs/evidence/evidence-s0/<run-id>/` 含全部预期文件）；
 > 2. S1 路径隔离合约草稿已完成（`docs/contracts/path-isolation-contract.md`）；
 > 3. 所有者签署退出检查表。
 >

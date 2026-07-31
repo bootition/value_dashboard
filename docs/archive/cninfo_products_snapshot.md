@@ -1,3 +1,10 @@
+---
+title: cninfo_products_snapshot
+status: archived
+category: archive
+last-reviewed: 2026-07-26
+---
+
 - generic [ref=e312]:
   - generic [ref=e313]: 推荐数据包
   - list [ref=e315]:
