@@ -226,23 +226,34 @@ class CNINFOAdapter(BaseAdapter):
 
     def _query_announcements(
         self,
-        stock_code: str,
+        stock_code: str | None,
         category: str | None,
         start_date: str | None,
         end_date: str | None,
         page_size: int = 50,
         max_pages: int = 20,
+        column: str | None = None,
     ) -> list[dict[str, Any]]:
         """调用 CNINFO 公告搜索 API，自动翻页。
 
-        返回规范化后的公告条目列表。orgId 无法解析时抛 ValueError。
-        """
-        org_id = self._resolve_org_id(stock_code)
-        if not org_id:
-            raise ValueError(f"无法解析股票 {stock_code} 的 orgId（不在 CNINFO 股票列表中）")
+        返回规范化后的公告条目列表。stock_code 为 None 时执行全市场
+        按日期段查询（不带 stock 参数），column 必须显式指定。
 
+        单股查询 orgId 无法解析时抛 ValueError。
+        """
         se_date = self._format_se_date(start_date, end_date)
-        column = _column_for_code(stock_code)
+
+        # 单股查询需要 orgId；全市场查询不需要 stock 参数
+        if stock_code is None:
+            if column is None:
+                raise ValueError("全市场公告查询必须指定 column（sse/szse/bj）")
+            stock_param: str = ""
+        else:
+            org_id = self._resolve_org_id(stock_code)
+            if not org_id:
+                raise ValueError(f"无法解析股票 {stock_code} 的 orgId（不在 CNINFO 股票列表中）")
+            column = column or _column_for_code(stock_code)
+            stock_param = f"{stock_code},{org_id}"
 
         results: list[dict[str, Any]] = []
         client = self._get_client()
@@ -253,7 +264,7 @@ class CNINFOAdapter(BaseAdapter):
                 "pageSize": str(page_size),
                 "column": column,
                 "tabName": "fulltext",
-                "stock": f"{stock_code},{org_id}",
+                "stock": stock_param,
                 "category": category or "",
                 "seDate": se_date,
                 "isHLtitle": "true",
@@ -280,7 +291,7 @@ class CNINFOAdapter(BaseAdapter):
             except (httpx.HTTPError, ValueError) as e:
                 logger.error(
                     "CNINFO 公告查询失败 stock=%s page=%d: %s",
-                    stock_code, page_num, e,
+                    stock_code or "market", page_num, e,
                 )
                 break
 
@@ -310,9 +321,13 @@ class CNINFOAdapter(BaseAdapter):
 
     @staticmethod
     def _normalize_announcement(
-        raw: dict[str, Any], stock_code: str,
+        raw: dict[str, Any], stock_code: str | None,
     ) -> dict[str, Any]:
-        """将 CNINFO 原始公告条目规范化为统一字段名"""
+        """将 CNINFO 原始公告条目规范化为统一字段名
+
+        全市场查询（stock_code=None）时以响应内的 secCode 作为股票代码。
+        """
+        resolved_code = stock_code or raw.get("secCode") or ""
         ann_time_ms = raw.get("announcementTime") or 0
         ann_dt: datetime | None = None
         if ann_time_ms:
@@ -322,8 +337,8 @@ class CNINFOAdapter(BaseAdapter):
         pdf_url = f"{_PDF_BASE}/{adjunct_url.lstrip('/')}" if adjunct_url else None
 
         return {
-            "stock_code": stock_code,
-            "sec_code": raw.get("secCode") or stock_code,
+            "stock_code": resolved_code,
+            "sec_code": raw.get("secCode") or resolved_code,
             "sec_name": raw.get("secName"),
             "announcement_id": raw.get("announcementId"),
             "title": raw.get("announcementTitle"),
@@ -339,11 +354,6 @@ class CNINFOAdapter(BaseAdapter):
 
     def _fetch_announcements(self, request: FetchRequest) -> FetchResult:
         codes = request.stock_codes
-        if not codes:
-            return self._make_empty_result(
-                reason="CNINFO 公告查询需要至少一个 stock_code（全市场扫描不支持）",
-                confidence="missing",
-            )
 
         # category 可直接传 CNINFO 原始值，也可传 CATEGORY_MAP 别名
         category_raw = request.extra_params.get("category")
@@ -351,8 +361,39 @@ class CNINFOAdapter(BaseAdapter):
         page_size = int(request.extra_params.get("page_size", 50))
         max_pages = int(request.extra_params.get("max_pages", 20))
 
-        all_data: list[dict[str, Any]] = []
-        errors: list[str] = []
+        # 全市场查询：不带 stock 参数，按交易所板块各查一次。
+        # 这是自动更新"发现新公告/财报"的高效路径（PRD §7.7），
+        # 避免逐股轮询 5000+ 股票。
+        if not codes:
+            all_data: list[dict[str, Any]] = []
+            errors: list[str] = []
+            for column in ("sse", "szse", "bj"):
+                try:
+                    items = self._query_announcements(
+                        stock_code=None,
+                        category=category,
+                        start_date=request.start_date,
+                        end_date=request.end_date,
+                        page_size=page_size,
+                        max_pages=max_pages,
+                        column=column,
+                    )
+                    all_data.extend(items)
+                except Exception as e:
+                    logger.exception("全市场公告查询异常 column=%s", column)
+                    errors.append(f"{column}: {e}")
+            if errors:
+                prefix = "all_boards_failed" if len(errors) >= 3 else "partial_boards_failed"
+                errors = [f"{prefix}: {'; '.join(errors)}"]
+            return self._finalize_result(
+                data=all_data,
+                label="announcements",
+                stock_count=0,
+                errors=errors or None,
+            )
+
+        all_data = []
+        errors = []
 
         for code in codes:
             try:
