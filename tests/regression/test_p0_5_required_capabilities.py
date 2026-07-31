@@ -47,7 +47,7 @@ def test_financial_sector_fields_are_migrated_catalogued_mapped_and_reasoned(
     assert dsl.validate("bank_capital_ratio", created["version"])["valid"] is True
 
     duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, sw_level1)
+        """INSERT INTO stock_meta (stock_code, name, exchange, csrc_l1)
            VALUES ('600000', 'bank', 'SSE', '银行')"""
     )
     initializer = DataInitializer.__new__(DataInitializer)

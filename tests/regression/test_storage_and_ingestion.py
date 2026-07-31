@@ -136,7 +136,7 @@ def test_stock_refresh_preserves_known_optional_metadata(
     duckdb_store.write_query(
         """
         INSERT INTO stock_meta
-            (stock_code, name, exchange, listing_date, is_st, is_suspended, sw_level1)
+            (stock_code, name, exchange, listing_date, is_st, is_suspended, csrc_l1)
         VALUES ('600519', 'old', 'SSE', '2001-08-27', FALSE, TRUE, '食品饮料')
         """
     )
@@ -152,7 +152,7 @@ def test_stock_refresh_preserves_known_optional_metadata(
 
     rows = duckdb_store.read_query(
         """
-        SELECT name, listing_date, is_st, is_suspended, sw_level1
+        SELECT name, listing_date, is_st, is_suspended, csrc_l1
         FROM stock_meta WHERE stock_code = '600519'
         """
     )
@@ -160,7 +160,7 @@ def test_stock_refresh_preserves_known_optional_metadata(
     assert str(rows[0]["listing_date"]) == "2001-08-27"
     assert rows[0]["is_st"] is False
     assert rows[0]["is_suspended"] is True
-    assert rows[0]["sw_level1"] == "食品饮料"
+    assert rows[0]["csrc_l1"] == "食品饮料"
 
 
 def test_stock_refresh_marks_absent_historical_codes_not_listed(

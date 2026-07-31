@@ -7,7 +7,7 @@ from app.core.storage.duckdb_store import DuckDBStore
 def _seed_screening_data(duck: DuckDBStore) -> None:
     duck.write_query(
         """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_st, is_suspended, sw_level1, sw_level2)
+           (stock_code, name, exchange, listing_date, is_st, is_suspended, csrc_l1, csrc_l2)
            VALUES
            ('000001', 'Strict One', 'SZSE', '2020-01-01', false, false, 'Finance', 'Bank'),
            ('000002', 'Approx Two', 'SZSE', '2020-01-01', false, false, 'Finance', 'Insurance'),
