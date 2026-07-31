@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS stock_meta (
     pinyin         VARCHAR,
     exchange       VARCHAR NOT NULL,   -- SSE / SZSE / BSE
     listing_date   DATE,
+    is_listed      BOOLEAN DEFAULT TRUE,
     is_st          BOOLEAN,
     is_suspended   BOOLEAN,
     sw_level1      VARCHAR,            -- 申万一级（缺失为 NULL）
@@ -114,6 +115,13 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
     minority_interest          DOUBLE,   -- 少数股东权益
     total_equity               DOUBLE,   -- 所有者权益合计
     total_equity_parent        DOUBLE,   -- 归属于母公司所有者权益
+    -- 金融行业监管指标（不适用或来源不可得时保留 NULL，并在 missing_list 记录原因）
+    core_tier1_capital_adequacy_ratio DOUBLE, -- 核心一级资本充足率(%)
+    tier1_capital_adequacy_ratio      DOUBLE, -- 一级资本充足率(%)
+    capital_adequacy_ratio            DOUBLE, -- 资本充足率(%)
+    non_performing_loan_ratio         DOUBLE, -- 不良贷款率(%)
+    provision_coverage_ratio          DOUBLE, -- 拨备覆盖率(%)
+    risk_coverage_ratio               DOUBLE, -- 证券公司风险覆盖率(%)
     -- 完整原始数据（JSON列存储Eastmoney/TDX返回的全部500+字段）
     raw_data                   JSON,
     PRIMARY KEY (stock_code, report_date)
@@ -241,6 +249,8 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     revenue_cagr5     DOUBLE,
     net_profit_cagr3  DOUBLE,
     net_profit_cagr5  DOUBLE,
+    deducted_profit_cagr3 DOUBLE,
+    deducted_profit_cagr5 DOUBLE,
     -- 安全
     debt_ratio       DOUBLE,
     current_ratio    DOUBLE,
@@ -262,6 +272,10 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     latest_close     DOUBLE,
     latest_price_date DATE,
     turnover_rate    DOUBLE,            -- 换手率(最近20日平均%)
+    avg_volume       DOUBLE,
+    period_return    DOUBLE,
+    annualized_volatility DOUBLE,
+    max_drawdown     DOUBLE,
     calculated_at    TIMESTAMP,
     data_version     VARCHAR,
     PRIMARY KEY (stock_code, report_date)
@@ -302,6 +316,55 @@ CREATE TABLE IF NOT EXISTS source_audit (
     override_id       BIGINT,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Legacy records removed from active research remain available as evidence.
+CREATE TABLE IF NOT EXISTS source_audit_quarantine (
+    id                BIGINT PRIMARY KEY,
+    stock_code        VARCHAR NOT NULL,
+    field_name        VARCHAR NOT NULL,
+    report_date       DATE,
+    value             DOUBLE,
+    source            VARCHAR NOT NULL,
+    fetch_batch_id    VARCHAR NOT NULL,
+    fetch_time        TIMESTAMP NOT NULL,
+    raw_response_hash VARCHAR NOT NULL,
+    confidence        VARCHAR NOT NULL,
+    reason_code       VARCHAR,
+    api_version       VARCHAR,
+    is_override       BOOLEAN DEFAULT FALSE,
+    override_id       BIGINT,
+    created_at        TIMESTAMP,
+    effective_date    DATE,
+    data_version      VARCHAR,
+    formula           VARCHAR,
+    quarantine_reason VARCHAR NOT NULL,
+    quarantined_at    TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dividends_quarantine (
+    stock_code        VARCHAR NOT NULL,
+    ex_date           DATE,
+    announcement_date DATE,
+    dividend_per_share DOUBLE,
+    stock_dividend     DOUBLE,
+    transfer_share     DOUBLE,
+    rights_issue       DOUBLE,
+    rights_issue_price DOUBLE,
+    quarantine_reason  VARCHAR NOT NULL,
+    quarantined_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, ex_date)
+);
+
+-- Immutable source material retained by content hash for traceability and repair.
+CREATE TABLE IF NOT EXISTS raw_response_archive (
+    raw_response_hash VARCHAR PRIMARY KEY,
+    source            VARCHAR NOT NULL,
+    fetch_time        TIMESTAMP NOT NULL,
+    payload           BLOB,
+    api_version       VARCHAR,
+    integrity_verified BOOLEAN DEFAULT FALSE,
+    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -321,7 +384,7 @@ CREATE TABLE IF NOT EXISTS dsl_expressions (
     version         INTEGER NOT NULL,
     expression_text TEXT NOT NULL,
     ast_json        TEXT,
-    status          TEXT NOT NULL DEFAULT 'draft',  -- draft/validated/previewed/published
+    status          TEXT NOT NULL DEFAULT 'draft',  -- draft/validated/single_previewed/previewed/published
     description     TEXT,
     direction       TEXT,                             -- higher_is_better / lower_is_better / none
     historical_capable BOOLEAN,
@@ -404,7 +467,7 @@ CREATE TABLE IF NOT EXISTS plans (
     created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     expires_at      TIMESTAMP NOT NULL,
     confirmed_at    TIMESTAMP,
-    status          TEXT DEFAULT 'pending'  -- pending/executed/expired/cancelled
+    status          TEXT DEFAULT 'pending'  -- pending/executed/consumed/expired/cancelled
 );
 
 -- 任务日志
@@ -494,6 +557,21 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         connection.execute(
             "ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS data_version VARCHAR"
         )
+        for column in (
+            "avg_volume DOUBLE",
+            "period_return DOUBLE",
+            "annualized_volatility DOUBLE",
+            "max_drawdown DOUBLE",
+            "deducted_profit_cagr3 DOUBLE",
+            "deducted_profit_cagr5 DOUBLE",
+        ):
+            connection.execute(f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {column}")
+        for column in (
+            "effective_date DATE",
+            "data_version VARCHAR",
+            "formula VARCHAR",
+        ):
+            connection.execute(f"ALTER TABLE source_audit ADD COLUMN IF NOT EXISTS {column}")
         try:
             connection.execute("ALTER TABLE stock_meta ALTER COLUMN is_st DROP DEFAULT")
         except Exception:
@@ -508,6 +586,19 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         connection.execute(
             "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS circ_shares BIGINT"
         )
+        connection.execute(
+            "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS is_listed BOOLEAN"
+        )
+        for column in (
+            "core_tier1_capital_adequacy_ratio DOUBLE",
+            "tier1_capital_adequacy_ratio DOUBLE",
+            "capital_adequacy_ratio DOUBLE",
+            "non_performing_loan_ratio DOUBLE",
+            "provision_coverage_ratio DOUBLE",
+            "risk_coverage_ratio DOUBLE",
+        ):
+            connection.execute(f"ALTER TABLE balance_sheet ADD COLUMN IF NOT EXISTS {column}")
+        connection.execute("UPDATE stock_meta SET is_listed = TRUE WHERE is_listed IS NULL")
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -526,6 +617,30 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (4, 'Add total_shares and circ_shares to stock_meta')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (5, 'Track whether a stock is present in the current listed universe')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (6, 'Financial-sector regulatory screening fields')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        connection.execute(
+            "ALTER TABLE raw_response_archive ADD COLUMN IF NOT EXISTS integrity_verified BOOLEAN DEFAULT FALSE"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (7, 'Pre-computed archive integrity flag to avoid full-payload re-hashing')
             ON CONFLICT (version) DO NOTHING
             """
         )
@@ -623,6 +738,180 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 (4, "危险操作计划添加 confirmed_at 列"),
             )
             logger.info("SQLite schema v4 已应用")
+
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 5"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_drafts (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    draft_json TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (5, "筛选页单一草稿自动保存和恢复"),
+            )
+            logger.info("SQLite schema v5 已应用")
+
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 6"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pdf_archive_manifest (
+                    stock_code TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    archive_path TEXT NOT NULL,
+                    checksum TEXT NOT NULL,
+                    archived_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (stock_code, filename)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (6, "PDF 冷归档文件清单和 SHA-256 恢复校验"),
+            )
+            logger.info("SQLite schema v6 已应用")
+
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 7"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screening_runs (
+                    run_id TEXT PRIMARY KEY,
+                    rule_id INTEGER NOT NULL,
+                    rule_version INTEGER NOT NULL,
+                    result_json TEXT NOT NULL,
+                    columns_json TEXT NOT NULL,
+                    sort_json TEXT NOT NULL,
+                    data_date TEXT,
+                    base_pool_config TEXT NOT NULL,
+                    strict_only BOOLEAN NOT NULL,
+                    confidence_summary TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (rule_id) REFERENCES screening_rules(id)
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (7, "服务端筛选运行记录，保存结果不可由浏览器伪造"),
+            )
+            logger.info("SQLite schema v7 已应用")
+
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 8"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS announcement_registry (
+                    announcement_id TEXT PRIMARY KEY,
+                    stock_code TEXT NOT NULL,
+                    announcement_time TEXT NOT NULL,
+                    title TEXT,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (8, "CNINFO 公告差分和增量财务更新登记"),
+            )
+            logger.info("SQLite schema v8 已应用")
+
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 9"
+        ).fetchone()
+        if row is None:
+            result_columns = {
+                column[1] for column in conn.execute("PRAGMA table_info(screening_results)").fetchall()
+            }
+            if "base_pool_config" not in result_columns:
+                conn.execute("ALTER TABLE screening_results ADD COLUMN base_pool_config TEXT")
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (9, "保存筛选结果绑定运行时基础池和用户列配置"),
+            )
+            logger.info("SQLite schema v9 已应用")
+
+        # Historical v1-v9 databases can claim a schema version while missing
+        # columns introduced in later source files, so repair shape idempotently.
+        retry_columns = {column[1] for column in conn.execute("PRAGMA table_info(retry_list)").fetchall()}
+        if "max_retries" not in retry_columns:
+            conn.execute("ALTER TABLE retry_list ADD COLUMN max_retries INTEGER DEFAULT 5")
+        if "next_retry_at" not in retry_columns:
+            conn.execute("ALTER TABLE retry_list ADD COLUMN next_retry_at TIMESTAMP")
+        missing_columns = {column[1] for column in conn.execute("PRAGMA table_info(missing_list)").fetchall()}
+        if "resolved_at" not in missing_columns:
+            conn.execute("ALTER TABLE missing_list ADD COLUMN resolved_at TIMESTAMP")
+        conn.execute("UPDATE retry_list SET extra_json = '{}' WHERE extra_json IS NULL")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_retry_list_request "
+            "ON retry_list(stock_code, data_type, adapter, extra_json)"
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
+            "ON CONFLICT(version) DO NOTHING",
+            (10, "Repair retry and missing-list columns and enforce request uniqueness"),
+        )
+        # The calendar is a durable numerical-input dependency, not a
+        # transient cache created only after a successful initialization.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS trading_dates (trade_date TEXT PRIMARY KEY)"
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
+            "ON CONFLICT(version) DO NOTHING",
+            (11, "Persisted trading calendar required for technical indicators"),
+        )
+        duplicate_watchlist_rows = conn.execute(
+            "SELECT COUNT(*) FROM ("
+            "SELECT stock_code, group_name FROM watchlist "
+            "GROUP BY stock_code, group_name HAVING COUNT(*) > 1"
+            ")"
+        ).fetchone()[0]
+        if duplicate_watchlist_rows:
+            raise RuntimeError(
+                "watchlist contains duplicate stock/group rows; reconcile them before schema migration"
+            )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_watchlist_stock_group "
+            "ON watchlist(stock_code, group_name)"
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
+            "ON CONFLICT(version) DO NOTHING",
+            (12, "自选股票和分组唯一，防止重试重复写入"),
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS screening_drafts (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                draft_json TEXT NOT NULL,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        draft_columns = {
+            column[1] for column in conn.execute("PRAGMA table_info(screening_drafts)").fetchall()
+        }
+        if "revision" not in draft_columns:
+            conn.execute("ALTER TABLE screening_drafts ADD COLUMN revision INTEGER DEFAULT 0")
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
+            "ON CONFLICT(version) DO NOTHING",
+            (13, "筛选草稿 revision 版本号，支持并发冲突检测"),
+        )
 
 
 def init_all_schema(

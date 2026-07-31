@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -18,7 +19,13 @@ class PathIsolationError(Exception):
     pass
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Frozen binaries keep code/resources under _internal but must retain mutable
+# formal data beside the launcher, not inside the bundle.
+_PROJECT_ROOT = (
+    Path(sys.executable).resolve().parent
+    if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parents[3]
+)
 _DATA_ROOT = _PROJECT_ROOT / "data"
 _FORMAL_DUCKDB = _DATA_ROOT / "valuedashboard.duckdb"
 _FORMAL_SQLITE = _DATA_ROOT / "valuedashboard.sqlite"
@@ -68,25 +75,10 @@ class DatabasePathSet:
     @classmethod
     def from_env(cls) -> DatabasePathSet:
         """Create paths from environment variables.
-
-        If no environment variables are set, this method will automatically
-        configure defaults for the 'formal' (production) environment.
-        This is a convenience for users who run the application without
-        manually setting environment variables.
         """
         env_raw = os.environ.get("VD_ENV")
         duckdb_raw = os.environ.get("VD_DUCKDB_PATH")
         sqlite_raw = os.environ.get("VD_SQLITE_PATH")
-
-        if not env_raw and not duckdb_raw and not sqlite_raw:
-            project_root = _PROJECT_ROOT
-            os.environ["VD_ENV"] = "formal"
-            os.environ["VD_DUCKDB_PATH"] = str(project_root / "data" / "valuedashboard.duckdb")
-            os.environ["VD_SQLITE_PATH"] = str(project_root / "data" / "valuedashboard.sqlite")
-            os.environ["VD_FORMAL_ACK"] = "confirmed"
-            env_raw = "formal"
-            duckdb_raw = os.environ["VD_DUCKDB_PATH"]
-            sqlite_raw = os.environ["VD_SQLITE_PATH"]
 
         missing = [
             name
@@ -183,3 +175,8 @@ def resolve_and_validate_paths(env: VdEnv | None = None) -> DatabasePathSet:
     if env is not None and paths.env is not env:
         raise PathIsolationError(f"Expected VD_ENV={env.value}, got {paths.env.value}")
     return paths
+
+
+def require_formal_maintenance_paths() -> DatabasePathSet:
+    """Return the explicit formal profile required by repository maintenance tools."""
+    return resolve_and_validate_paths(VdEnv.FORMAL)

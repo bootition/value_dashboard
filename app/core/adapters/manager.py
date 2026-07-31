@@ -22,15 +22,15 @@ logger = logging.getLogger(__name__)
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
 KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"akshare_eastmoney", "baostock", "cninfo", "tdx", "local_cache"}
+    {"akshare_eastmoney", "baostock", "cninfo", "tdx", "tencent", "sina", "local_cache"}
 )
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
     "listing_info": ["akshare_eastmoney"],
-    "price_daily": ["baostock", "tdx", "akshare_eastmoney"],
-    "balance_sheet": ["akshare_eastmoney", "tdx"],
-    "income_statement": ["akshare_eastmoney", "tdx"],
-    "cash_flow": ["akshare_eastmoney", "tdx"],
+    "price_daily": ["baostock", "tdx", "tencent", "akshare_eastmoney"],
+    "balance_sheet": ["sina", "tdx", "akshare_eastmoney"],
+    "income_statement": ["sina", "tdx", "akshare_eastmoney"],
+    "cash_flow": ["sina", "tdx", "akshare_eastmoney"],
     "dividends": ["cninfo", "akshare_eastmoney", "baostock"],
     "xdxr": ["tdx"],
     "announcements": ["cninfo"],
@@ -42,6 +42,8 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "cninfo": 1.5,
     "baostock": 0.1,
     "tdx": 0.1,
+    "tencent": 0.2,
+    "sina": 0.35,
 }
 
 
@@ -217,6 +219,24 @@ class AdapterManager:
             logger.warning(f"TDX 适配器未安装: {e}")
         except Exception as e:
             logger.warning(f"TDX 适配器初始化失败: {e}")
+
+        # Tencent 适配器（北交所前复权日线的免费回退源）
+        try:
+            from app.core.adapters.tencent_adapter import TencentAdapter
+            self.register(TencentAdapter(self._rate_limits["tencent"]))
+        except ImportError as e:
+            logger.warning(f"Tencent 适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"Tencent 适配器初始化失败: {e}")
+
+        # Sina 适配器（免费财务三表的主数据源）
+        try:
+            from app.core.adapters.sina_adapter import SinaAdapter
+            self.register(SinaAdapter(self._rate_limits["sina"]))
+        except ImportError as e:
+            logger.warning(f"Sina 适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"Sina 适配器初始化失败: {e}")
 
         self._initialized = True
         logger.info(f"适配器管理器初始化完成: {list(self._adapters.keys())}")

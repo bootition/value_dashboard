@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import logging
+import os
+import secrets
+import sys
+import threading
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
-from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.core.config import Config
+from app.core.config import Config, is_frozen_runtime
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import (
     DatabasePathSet,
@@ -23,6 +30,87 @@ from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
+# P1-6修复: 模块级互斥, 保证每个 app 实例的启动维护至多一个在运行
+_STARTUP_MAINTENANCE_LOCK = threading.Lock()
+
+
+def _server_host(server_config: dict) -> str:
+    """The unauthenticated research service is always loopback-only."""
+    if is_frozen_runtime():
+        return "127.0.0.1"
+    host = server_config.get("host", "127.0.0.1")
+    if host not in {"127.0.0.1", "::1", "localhost"}:
+        raise PathIsolationError("server.host must be a loopback address")
+    return host
+
+
+def _run_startup_maintenance(
+    duck: DuckDBStore, sqlite: SQLiteStore, startup_readiness: dict,
+) -> dict:
+    """Run network-backed first-start work after the local web server binds."""
+    from app.core.data_quality import minimum_data_readiness
+
+    current = startup_readiness
+    try:
+        if current["stock_count"] == 0:
+            from app.core.init import DataInitializer
+
+            logger.info("检测到空数据库，后台开始最小可用初始化...")
+            init_report = DataInitializer(duck=duck, sqlite=sqlite).run_full_init()
+            current = minimum_data_readiness(duck)
+            current["initialization"] = init_report
+    except Exception as error:
+        current = {
+            "ready": False,
+            "stock_count": 0,
+            "missing": {"initialization": [str(error)]},
+            "missing_counts": {"initialization": 1},
+        }
+        logger.warning("后台最小初始化失败: %s", error)
+
+    try:
+        from app.core.update import IncrementalUpdater
+
+        check_report = IncrementalUpdater(duck=duck, sqlite=sqlite).run_incremental_check(
+            include_announcements=False
+        )
+        if check_report["needs_update"]:
+            logger.info("增量检查: 需要更新，详情见数据状态页")
+        else:
+            logger.info("增量检查: 数据已是最新")
+    except Exception as error:
+        logger.warning("后台增量检查失败(非致命): %s", error)
+    return current
+
+
+def _start_startup_maintenance(
+    app: FastAPI, duck: DuckDBStore, sqlite: SQLiteStore, startup_readiness: dict,
+) -> None:
+    """Publish an immediately responsive server before slow remote work begins."""
+    def worker() -> None:
+        try:
+            current = _run_startup_maintenance(duck, sqlite, startup_readiness)
+        except Exception as error:
+            logger.warning("启动维护线程失败: %s", error)
+            app.state.startup_maintenance = {"status": "failed", "error": str(error)}
+            return
+        app.state.startup_readiness = current
+        init_errors = current.get("missing", {}).get("initialization", [])
+        if init_errors:
+            app.state.startup_maintenance = {
+                "status": "failed", "error": "; ".join(str(item) for item in init_errors),
+            }
+        else:
+            app.state.startup_maintenance = {"status": "done", "error": None}
+
+    with _STARTUP_MAINTENANCE_LOCK:
+        state = getattr(app.state, "startup_maintenance", None) or {}
+        if state.get("status") == "running":
+            logger.info("启动维护已在运行，跳过重复启动")
+            return
+        app.state.startup_maintenance = {"status": "running", "error": None}
+        threading.Thread(target=worker, name="vd-startup-maintenance", daemon=True).start()
+
 
 def create_app(
     *,
@@ -30,6 +118,7 @@ def create_app(
     config: Config | None = None,
     duck: DuckDBStore | None = None,
     sqlite: SQLiteStore | None = None,
+    startup_readiness: dict | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用实例"""
     if paths is None:
@@ -55,10 +144,35 @@ def create_app(
         description="A股价值投资研究与筛选工具",
         version="0.1.0",
     )
+    # Loopback binding is not an origin boundary: reject hostile Host headers
+    # and require this per-launch token for every browser-originated mutation.
+    allowed_hosts = ["127.0.0.1", "localhost", "[::1]"]
+    if validated.env.value in {"test", "staging"}:
+        allowed_hosts.append("testserver")
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
     app.state.paths = paths
     app.state.config = cfg
     app.state.duck = duck_store
     app.state.sqlite = sqlite_store
+    app.state.startup_readiness = startup_readiness
+    app.state.startup_maintenance = {"status": "idle", "error": None}
+    app.state.write_token = secrets.token_urlsafe(32)
+
+    @app.middleware("http")
+    async def require_local_write_token(request: Request, call_next):
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/"):
+            origin = request.headers.get("origin")
+            if origin:
+                parsed_origin = urlsplit(origin)
+                if parsed_origin.scheme != "http" or parsed_origin.netloc != request.headers.get("host", ""):
+                    return JSONResponse(status_code=403, content={"detail": "cross-origin API write rejected"})
+            if request.headers.get("x-vd-write-token") != request.app.state.write_token:
+                return JSONResponse(status_code=403, content={"detail": "local write token required"})
+        return await call_next(request)
+
+    @app.get("/api/session")
+    async def session_token(request: Request) -> dict[str, str]:
+        return {"write_token": request.app.state.write_token}
 
     # ─── 注册 API 路由 ──────────────────────────────────────────────
     from app.web.api.data_status import router as data_status_router
@@ -74,12 +188,17 @@ def create_app(
 
     # ─── 健康检查 ──────────────────────────────────────────────────
     @app.get("/api/health")
-    async def health_check() -> dict:
-        return {
-            "status": "ok",
-            "version": "0.1.0",
-            "config_loaded": True,
-        }
+    async def health_check(request: Request) -> dict:
+        """Report ready only after both profile databases accept a read probe."""
+        try:
+            request.app.state.duck.read_query("SELECT 1 AS ready")
+            request.app.state.sqlite.query("SELECT 1 AS ready")
+        except Exception as error:
+            raise HTTPException(
+                status_code=503,
+                detail={"status": "unavailable", "error": str(error)},
+            ) from error
+        return {"status": "ok", "version": "0.1.0", "config_loaded": True}
 
     # ─── 数据库状态 ──────────────────────────────────────────────
     @app.get("/api/db/status")
@@ -110,7 +229,7 @@ def create_app(
         except Exception as e:
             logger.warning(f"SQLite 状态检查失败: {e}")
 
-        return {
+        payload = {
             "duckdb": {
                 "connected": duck_ok,
                 "path": str(duck.db_path),
@@ -122,14 +241,47 @@ def create_app(
                 "tables": sqlite_tables,
             },
         }
+        if not duck_ok or not sqlite_ok:
+            raise HTTPException(status_code=503, detail=payload)
+        return payload
+
+    @app.get("/api/readiness")
+    def readiness(request: Request) -> dict:
+        from app.core.data_quality import minimum_data_readiness
+
+        try:
+            current = minimum_data_readiness(request.app.state.duck, request.app.state.sqlite)
+        except Exception as error:
+            raise HTTPException(status_code=503, detail={"ready": False, "error": str(error)}) from error
+        if not current["ready"]:
+            raise HTTPException(status_code=503, detail=current)
+        return current
+
+    @app.get("/api/maintenance/status")
+    def maintenance_status(request: Request) -> dict:
+        """P1-6修复: 暴露启动维护的生命周期状态 (idle/running/done/failed)"""
+        return getattr(
+            request.app.state, "startup_maintenance", {"status": "idle", "error": None}
+        )
 
     # ─── 前端静态资源托管 ────────────────────────────────────────
-    static_dir = cfg.project_root / "app" / "web" / "static"
+    static_dir = (
+        Path(sys._MEIPASS) / "app" / "web" / "static"
+        if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+        else cfg.project_root / "app" / "web" / "static"
+    )
     if static_dir.exists():
         # P2修复: 检查assets目录存在
         _assets_dir = static_dir / "assets"
         if _assets_dir.exists():
             app.mount("/assets", StaticFiles(directory=str(_assets_dir)), name="assets")
+
+        @app.get("/favicon.svg", include_in_schema=False)
+        async def serve_favicon() -> FileResponse:
+            favicon_path = static_dir / "favicon.svg"
+            if not favicon_path.exists():
+                raise HTTPException(status_code=404, detail="favicon not found")
+            return FileResponse(favicon_path, media_type="image/svg+xml")
 
         @app.get("/{full_path:path}")
         async def serve_spa(full_path: str) -> HTMLResponse:
@@ -137,74 +289,43 @@ def create_app(
             index_path = static_dir / "index.html"
             if index_path.exists():
                 return HTMLResponse(index_path.read_text(encoding="utf-8"))
-            return HTMLResponse(
-                "<h1>Value Dashboard</h1><p>前端尚未构建。请运行 <code>cd frontend && npm run build</code></p>",
-                status_code=200,
-            )
+            raise HTTPException(status_code=503, detail="frontend static bundle is incomplete")
     else:
         @app.get("/")
-        async def root() -> HTMLResponse:
-            return HTMLResponse(
-                "<h1>Value Dashboard</h1><p>前端尚未构建。请运行 <code>cd frontend && npm run build</code></p>",
-            )
+        def root() -> HTMLResponse:
+            raise HTTPException(status_code=503, detail="frontend static bundle is unavailable")
 
     return app
 
 
-def _ensure_formal_env_vars() -> None:
-    """Set default environment variables for formal (production) use.
-
-    This is a convenience for users who run ``start.bat`` or ``python -m app.web.main``
-    without manually configuring the path-isolation environment.  If the variables
-    are already set (e.g. by tests or CI), this function does nothing.
-    """
-    import os
-
-    if os.environ.get("VD_ENV"):
-        return
-
-    project_root = Path(__file__).resolve().parent.parent.parent
-    os.environ["VD_ENV"] = "formal"
-    os.environ["VD_DUCKDB_PATH"] = str(project_root / "data" / "valuedashboard.duckdb")
-    os.environ["VD_SQLITE_PATH"] = str(project_root / "data" / "valuedashboard.sqlite")
-    os.environ["VD_FORMAL_ACK"] = "confirmed"
-
-
 def run_server() -> None:
     """启动 Web 服务器（一键启动入口）"""
-    _ensure_formal_env_vars()
     paths = resolve_and_validate_paths()
     cfg = Config.load_with_paths(paths)
-    duck = DuckDBStore(paths=paths)
-    sqlite = SQLiteStore(paths=paths)
-
     # 配置日志
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # 初始化数据库 schema
+    from app.core.backup.manager import recover_pending_restore
+
+    # A previous process may have been killed between DuckDB and SQLite restore
+    # commits. Complete its durable rollback before any schema writer opens.
+    recover_pending_restore(paths)
+
+    duck = DuckDBStore(paths=paths)
+    sqlite = SQLiteStore(paths=paths)
     logger.info("正在初始化数据库...")
     init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
 
-    # PRD §7.3: 启动时执行简单增量检查
-    try:
-        from app.core.update import IncrementalUpdater
-        updater = IncrementalUpdater(duck=duck, sqlite=sqlite)
-        check_report = updater.run_incremental_check()
-        if check_report["needs_update"]:
-            logger.info(f"增量检查: 需要更新 (新交易日={len(check_report['new_trading_days'])}, "
-                        f"待重试={len(check_report['retry_tasks'])})")
-            logger.info("提示: 运行 'python -m app.cli.main data update' 执行增量更新")
-        else:
-            logger.info("增量检查: 数据已是最新")
-    except Exception as e:
-        logger.warning(f"增量检查失败(非致命): {e}")
+    from app.core.data_quality import minimum_data_readiness
+
+    startup_readiness = minimum_data_readiness(duck)
 
     # 启动服务器
     server_cfg = cfg["server"]
-    host = server_cfg["host"]
+    host = _server_host(server_cfg)
     port = server_cfg["port"]
 
     if server_cfg.get("open_browser", True):
@@ -213,7 +334,18 @@ def run_server() -> None:
         webbrowser.open(url)
 
     logger.info(f"Value Dashboard 启动中... http://{host}:{port}")
-    app = create_app(paths=paths, config=cfg, duck=duck, sqlite=sqlite)
+    app = create_app(
+        paths=paths, config=cfg, duck=duck, sqlite=sqlite,
+        startup_readiness=startup_readiness,
+    )
+    skip_maintenance = (
+        paths.env.value in {"test", "staging"}
+        and os.environ.get("VD_SKIP_STARTUP_MAINTENANCE") == "1"
+    )
+    if not skip_maintenance:
+        _start_startup_maintenance(app, duck, sqlite, startup_readiness)
+    else:
+        logger.info("隔离 profile 已显式跳过启动维护")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 

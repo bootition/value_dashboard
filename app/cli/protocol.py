@@ -18,6 +18,7 @@ from app.core.storage.sqlite_store import SQLiteStore
 SCHEMA_VERSION = "1.0"
 PLAN_EXPIRY_MINUTES = 15  # PRD §16.3 CL11
 
+
 # 稳定错误码
 ERROR_CODES: dict[str, str] = {
     "E001": "invalid_arguments",
@@ -28,6 +29,7 @@ ERROR_CODES: dict[str, str] = {
     "E101": "plan_not_found",
     "E102": "plan_expired",
     "E103": "plan_already_executed",
+    "E104": "plan_already_consumed",
     "E201": "backup_failed",
     "E202": "restore_failed",
     "E301": "screening_rule_not_found",
@@ -73,11 +75,13 @@ def _derive_result_status(data: Any) -> str:
     """Map domain-level outcomes to the stable CLI protocol status."""
     if not isinstance(data, dict):
         return "ok"
+    if data.get("error"):
+        return "error"
     if data.get("healthy") is False:
         return "error"
 
     domain_status = data.get("status")
-    if domain_status in {"failed", "error"}:
+    if domain_status in {"failed", "error", "blocked"}:
         return "error"
     if domain_status in {"partial", "missing"}:
         return "partial"
@@ -100,6 +104,8 @@ DANGEROUS_OPERATIONS: set[str] = {
     "backup.restore",
     "archive.clean",
     "data.refetch",  # 大范围重抓
+    "data.reconcile_jobs",
+    "data.quarantine_legacy_records",
 }
 
 
@@ -111,6 +117,8 @@ def is_dangerous(operation: str) -> bool:
 def create_plan(
     operation: str,
     plan_summary: dict[str, Any],
+    *,
+    sqlite: SQLiteStore,
 ) -> dict[str, Any]:
     """创建危险操作计划 (第一步)
 
@@ -120,7 +128,6 @@ def create_plan(
     plan_id = str(uuid.uuid4())[:12]
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=PLAN_EXPIRY_MINUTES)
 
-    sqlite = SQLiteStore()
     with sqlite.transaction() as conn:
         conn.execute(
             """INSERT INTO plans (plan_id, operation, plan_summary, expires_at, status)
@@ -140,53 +147,45 @@ def create_plan(
     )
 
 
-def confirm_plan(plan_id: str) -> dict[str, Any]:
+def confirm_plan(plan_id: str, *, sqlite: SQLiteStore) -> dict[str, Any]:
     """确认危险操作 (第二步)
 
     PRD §16.3 CL11: 在有效期内基于 plan_id 确认执行
     """
-    sqlite = SQLiteStore()
-    rows = sqlite.query(
-        "SELECT * FROM plans WHERE plan_id = ?",
-        [plan_id],
-    )
-
-    if not rows:
-        return make_response(
-            command="plan.confirm",
-            error_code="E101",
-            error_message=f"plan_id {plan_id} 不存在",
+    now = datetime.now(timezone.utc)
+    with sqlite.transaction() as conn:
+        plan = conn.execute("SELECT * FROM plans WHERE plan_id = ?", [plan_id]).fetchone()
+        if plan is None:
+            return make_response(
+                command="plan.confirm",
+                error_code="E101",
+                error_message=f"plan_id {plan_id} 不存在",
+            )
+        if plan["status"] != "pending":
+            return make_response(
+                command="plan.confirm",
+                error_code="E103",
+                error_message=f"plan_id {plan_id} is no longer pending",
+            )
+        expires_at = datetime.fromisoformat(plan["expires_at"])
+        if now > expires_at:
+            conn.execute("UPDATE plans SET status = 'expired' WHERE plan_id = ?", [plan_id])
+            return make_response(
+                command="plan.confirm",
+                error_code="E102",
+                error_message=f"plan_id {plan_id} 已过期 (有效期 {PLAN_EXPIRY_MINUTES} 分钟)",
+            )
+        cursor = conn.execute(
+            """UPDATE plans SET status = 'executed', confirmed_at = ?
+               WHERE plan_id = ? AND status = 'pending'""",
+            [now.isoformat(), plan_id],
         )
-
-    plan = rows[0]
-
-    # 检查状态
-    if plan["status"] == "executed":
-        return make_response(
-            command="plan.confirm",
-            error_code="E103",
-            error_message=f"plan_id {plan_id} 已执行",
-        )
-
-    # 检查过期
-    expires_at = datetime.fromisoformat(plan["expires_at"])
-    if datetime.now(timezone.utc) > expires_at:
-        # 标记为过期
-        sqlite.execute(
-            "UPDATE plans SET status = 'expired' WHERE plan_id = ?",
-            [plan_id],
-        )
-        return make_response(
-            command="plan.confirm",
-            error_code="E102",
-            error_message=f"plan_id {plan_id} 已过期 (有效期 {PLAN_EXPIRY_MINUTES} 分钟)",
-        )
-
-    # 标记为已执行
-    sqlite.execute(
-        "UPDATE plans SET status = 'executed' WHERE plan_id = ?",
-        [plan_id],
-    )
+        if cursor.rowcount != 1:
+            return make_response(
+                command="plan.confirm",
+                error_code="E103",
+                error_message=f"plan_id {plan_id} is no longer pending",
+            )
 
     plan_summary = json.loads(plan["plan_summary"]) if plan["plan_summary"] else {}
     return make_response(
@@ -200,28 +199,45 @@ def confirm_plan(plan_id: str) -> dict[str, Any]:
     )
 
 
-def require_confirmed_plan(operation: str) -> dict[str, Any] | None:
-    """P0#16修复: 验证危险操作已被 plan confirm 确认
+def consume_confirmed_plan(
+    operation: str,
+    *,
+    plan_id: str,
+    sqlite: SQLiteStore,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Atomically consume one confirmed plan and return its immutable summary.
 
-    在危险操作执行前调用。如果未确认, 返回错误响应 dict。
-    如果已确认, 返回 None 表示可以继续执行。
+    A successful confirmation authorizes exactly one execution attempt. The
+    conditional update occurs in the same SQLite transaction as the summary
+    read, preventing concurrent callers from replaying an irreversible plan.
     """
-    sqlite = SQLiteStore()
-    # 查找最近一个已确认的、未过期的、匹配操作的 plan
-    rows = sqlite.query(
-        """SELECT * FROM plans
-           WHERE operation = ? AND status = 'executed'
-           AND expires_at > ?
-           ORDER BY confirmed_at DESC LIMIT 1""",
-        [operation, datetime.now(timezone.utc).isoformat()],
-    )
-    if not rows:
-        return make_response(
-            command=operation,
-            error_code="E101",
-            error_message=f"操作 {operation} 需要先执行 plan confirm (PRD §16.3 CL10)",
+    now = datetime.now(timezone.utc).isoformat()
+    with sqlite.transaction() as conn:
+        row = conn.execute(
+            """SELECT plan_summary FROM plans
+               WHERE plan_id = ? AND operation = ? AND status = 'executed'
+               AND expires_at > ?""",
+            [plan_id, operation, now],
+        ).fetchone()
+        if row is None:
+            return make_response(
+                command=operation,
+                error_code="E101",
+                error_message=f"操作 {operation} 需要确认有效的 plan_id (PRD §16.3 CL10)",
+            ), None
+        cursor = conn.execute(
+            """UPDATE plans SET status = 'consumed'
+               WHERE plan_id = ? AND operation = ? AND status = 'executed'
+               AND expires_at > ?""",
+            [plan_id, operation, now],
         )
-    return None
+        if cursor.rowcount != 1:
+            return make_response(
+                command=operation,
+                error_code="E104",
+                error_message=f"plan_id {plan_id} was already consumed",
+            ), None
+    return None, json.loads(row["plan_summary"]) if row["plan_summary"] else {}
 
 
 def get_capabilities() -> dict[str, Any]:
@@ -232,10 +248,10 @@ def get_capabilities() -> dict[str, Any]:
             "discover": ["schema", "capabilities", "examples", "fields", "indicators", "functions", "reason_codes"],
             "indicator": ["create", "validate", "preview_single", "preview_sample", "publish", "list", "discover"],
             "screening": ["create", "run", "save_result", "export_csv", "add_to_watchlist", "list"],
-            "data": ["init", "update", "status", "compute_indicators", "diagnose", "switch_source", "refetch", "download_pdf", "list_pdfs", "archive_pdfs", "restore_pdf", "backfill_prices"],
+            "data": ["init", "refresh_universe", "update", "replenish_missing_core_data", "status", "compute_indicators", "diagnose", "switch_source", "refetch", "refetch_execute", "reconcile_jobs", "reconcile_jobs_execute", "quarantine_legacy_records", "quarantine_legacy_records_execute", "download_pdf", "list_pdfs", "archive_pdfs", "restore_pdf", "backfill_prices"],
             "override": ["list_conflicts", "submit", "revoke", "submit_template", "validate_template", "preview_template", "publish_template", "list_templates"],
             "backup": ["create", "restore", "restore_execute", "list", "store_credential", "retrieve_credential"],
-            "archive": ["create", "verify", "clean"],
+            "archive": ["create", "verify", "clean", "clean_execute"],
             "plan": ["confirm"],
         },
         "dangerous_operations": list(DANGEROUS_OPERATIONS),
@@ -251,7 +267,7 @@ def get_schema() -> dict[str, Any]:
             "schema_version": "string (e.g. '1.0')",
             "command": "string",
             "result": {
-                "status": "'ok' | 'error'",
+                "status": "'ok' | 'partial' | 'missing' | 'error'",
                 "data": "any (command-specific)",
                 "error_code": "string | null (e.g. 'E001')",
                 "error_message": "string | null",

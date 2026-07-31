@@ -73,7 +73,7 @@ _PRICE_DAILY_FIELD_MAP: dict[str, str] = {
 }
 
 _DIVIDEND_FIELD_MAP: dict[str, str] = {
-    "实施方案公告日期": "announce_date",
+    "实施方案公告日期": "announcement_date",
     "分红类型": "dividend_type",
     "送股比例": "bonus_share_ratio",
     "转增比例": "capitalization_ratio",
@@ -162,6 +162,17 @@ def _clean_value(v: Any) -> Any:
         except (AttributeError, ValueError):
             pass
     return v
+
+
+def _share_count(value: Any) -> int | None:
+    """Normalize exchange-list share counts without inventing a missing value."""
+    clean = _clean_value(value)
+    if clean is None:
+        return None
+    try:
+        return int(float(clean))
+    except (TypeError, ValueError):
+        return None
 
 
 def _df_to_records(
@@ -291,82 +302,87 @@ class AKShareAdapter(BaseAdapter):
         )
 
     def _fetch_listing_info(self, request: FetchRequest) -> FetchResult:
-        """上市信息: 上市日期 / ST / 停牌 / 拼音
+        """Fetch pool metadata from exchange lists and a dated suspension list.
 
-        流程: stock_info_a_code_name() 取名称 → stock_individual_info_em(symbol) 取上市日期
-        BSE 上市日期直接从 stock_info_bj_name_code() 获取。
+        An unavailable source leaves its field unknown. It must never turn an
+        absent name into a claim that a stock is not ST or not suspended.
         """
-        name_map: dict[str, str] = {}
-        bj_listing_map: dict[str, str] = {}
+        exchange_rows: dict[str, dict[str, Any]] = {}
 
-        # SSE + SZSE 名称
+        def load_exchange_list(
+            fetch: Callable[[], pd.DataFrame],
+            code_column: str,
+            name_column: str,
+            date_column: str,
+            total_shares_column: str | None = None,
+            circ_shares_column: str | None = None,
+        ) -> None:
+            try:
+                self._wait_rate_limit()
+                for _, row in fetch().iterrows():
+                    code = _strip_code(str(row.get(code_column, "")).strip()).zfill(6)
+                    if not code or code == "000000":
+                        continue
+                    exchange_rows[code] = {
+                        "name": str(row.get(name_column, "")).strip(),
+                        "listing_date": _clean_value(row.get(date_column)),
+                        "total_shares": _share_count(row.get(total_shares_column)) if total_shares_column else None,
+                        "circ_shares": _share_count(row.get(circ_shares_column)) if circ_shares_column else None,
+                    }
+            except Exception as error:
+                logger.warning("exchange listing source failed: %s", error)
+
+        load_exchange_list(
+            lambda: ak.stock_info_sh_name_code(symbol="主板A股"),
+            "证券代码", "证券简称", "上市日期", "总股本", "流通股本",
+        )
+        load_exchange_list(
+            lambda: ak.stock_info_sh_name_code(symbol="科创板"),
+            "证券代码", "证券简称", "上市日期", "总股本", "流通股本",
+        )
+        load_exchange_list(
+            lambda: ak.stock_info_sz_name_code(symbol="A股列表"),
+            "A股代码", "A股简称", "A股上市日期", "A股总股本", "A股流通股本",
+        )
+        load_exchange_list(
+            ak.stock_info_bj_name_code,
+            "证券代码", "证券简称", "上市日期", "总股本", "流通股本",
+        )
+
+        suspension_codes: set[str] | None = None
         try:
             self._wait_rate_limit()
-            df = ak.stock_info_a_code_name()
-            for _, row in df.iterrows():
-                name_map[str(row["code"]).strip()] = str(row["name"]).strip()
-        except Exception as e:
-            logger.warning(f"stock_info_a_code_name 失败: {e}")
+            frame = ak.stock_tfp_em(date=datetime.date.today().strftime("%Y%m%d"))
+            suspension_codes = {
+                _strip_code(str(value).strip()).zfill(6)
+                for value in frame.get("代码", pd.Series(dtype="object"))
+                if str(value).strip()
+            }
+        except Exception as error:
+            logger.warning("suspension source failed: %s", error)
 
-        # BSE 名称 + 上市日期
-        try:
-            self._wait_rate_limit()
-            df_bj = ak.stock_info_bj_name_code()
-            for _, row in df_bj.iterrows():
-                code = str(row["证券代码"]).strip()
-                name_map[code] = str(row["证券简称"]).strip()
-                bj_listing_map[code] = _clean_value(row.get("上市日期"))
-        except Exception as e:
-            logger.warning(f"stock_info_bj_name_code 失败: {e}")
-
-        # 确定目标股票
-        if request.stock_codes:
-            targets = [_strip_code(c) for c in request.stock_codes]
-        else:
-            targets = list(name_map.keys())
-
+        targets = (
+            [_strip_code(code).zfill(6) for code in request.stock_codes]
+            if request.stock_codes
+            else sorted(exchange_rows)
+        )
         if not targets:
-            return self._make_empty_result("无法获取股票列表")
+            return self._make_empty_result("无法获取交易所股票清单")
 
         records: list[dict[str, Any]] = []
         for code in targets:
-            name = name_map.get(code, "")
-
-            # 上市日期: BSE 直接取；其他调 stock_individual_info_em
-            listing_date: str | None = bj_listing_map.get(code)
-            if listing_date is None:
-                try:
-                    self._wait_rate_limit()
-                    info_df = ak.stock_individual_info_em(symbol=code)
-                    if info_df is not None and len(info_df) > 0:
-                        items = dict(
-                            zip(
-                                info_df.iloc[:, 0].astype(str).tolist(),
-                                info_df.iloc[:, 1].tolist(),
-                            )
-                        )
-                        for key in ("上市时间", "上市日期"):
-                            if key in items:
-                                listing_date = _clean_value(items[key])
-                                break
-                except Exception as e:
-                    logger.debug(f"stock_individual_info_em({code}) 失败: {e}")
-
-            # P0#2修复: is_st 用 startswith 而非 in, 避免误匹配 BEST/STONE 等
-            upper_name = name.upper()
-            is_st = upper_name.startswith(("ST", "*ST"))
-            # P0#3修复: is_suspended 暂无法从免费源可靠获取, 标记为 None 而非 False
-            # (PRD §9.3: 字段缺失时返回 null + 原因码, 而非默认值)
-            is_suspended = None
-
+            row = exchange_rows.get(code)
+            name = row["name"] if row else ""
             records.append(
                 {
                     "stock_code": code,
                     "name": name,
-                    "listing_date": listing_date,
-                    "is_st": is_st,
-                    "is_suspended": is_suspended,
+                    "listing_date": row["listing_date"] if row else None,
+                    "is_st": name.upper().startswith(("ST", "*ST")) if row else None,
+                    "is_suspended": code in suspension_codes if suspension_codes is not None else None,
                     "pinyin": _generate_pinyin(name),
+                    "total_shares": row["total_shares"] if row else None,
+                    "circ_shares": row["circ_shares"] if row else None,
                 }
             )
 
@@ -393,6 +409,7 @@ class AKShareAdapter(BaseAdapter):
         adjust = adjust_map.get(request.adjust, "")
 
         all_records: list[dict[str, Any]] = []
+        raw_payloads: list[str] = []
         for code in request.stock_codes:
             plain_code = _strip_code(code)
             try:
@@ -407,6 +424,7 @@ class AKShareAdapter(BaseAdapter):
                 if end:
                     kwargs["end_date"] = end
                 df = ak.stock_zh_a_hist(**kwargs)
+                raw_payloads.append(df.to_json(orient="records", date_format="iso", force_ascii=False))
                 all_records.extend(_df_to_records(df, _PRICE_DAILY_FIELD_MAP))
             except Exception as e:
                 logger.warning(f"stock_zh_a_hist({plain_code}) 失败: {e}")
@@ -416,6 +434,7 @@ class AKShareAdapter(BaseAdapter):
 
         return self._make_result(
             data=all_records,
+            raw_response="\n".join(raw_payloads),
             confidence="strict",
             api_version=_AKSHARE_VERSION,
         )
@@ -459,12 +478,14 @@ class AKShareAdapter(BaseAdapter):
             return self._make_empty_result(f"{data_type_name} 需要 stock_codes")
 
         all_records: list[dict[str, Any]] = []
+        raw_payloads: list[str] = []
         for code in request.stock_codes:
             em_symbol = _to_em_symbol(code)
             plain_code = _strip_code(code)
             try:
                 self._wait_rate_limit()
                 df = api_func(symbol=em_symbol)
+                raw_payloads.append(df.to_json(orient="records", date_format="iso", force_ascii=False))
                 records = _df_to_records(df)
                 for rec in records:
                     # 确保有 stock_code
@@ -483,6 +504,7 @@ class AKShareAdapter(BaseAdapter):
 
         return self._make_result(
             data=all_records,
+            raw_response="\n".join(raw_payloads),
             confidence="strict",
             api_version=_AKSHARE_VERSION,
         )
@@ -493,11 +515,13 @@ class AKShareAdapter(BaseAdapter):
             return self._make_empty_result("dividends 需要 stock_codes")
 
         all_records: list[dict[str, Any]] = []
+        raw_payloads: list[str] = []
         for code in request.stock_codes:
             plain_code = _strip_code(code)
             try:
                 self._wait_rate_limit()
                 df = ak.stock_dividend_cninfo(symbol=plain_code)
+                raw_payloads.append(df.to_json(orient="records", date_format="iso", force_ascii=False))
                 records = _df_to_records(df, _DIVIDEND_FIELD_MAP)
                 for rec in records:
                     rec["stock_code"] = plain_code
@@ -510,6 +534,7 @@ class AKShareAdapter(BaseAdapter):
 
         return self._make_result(
             data=all_records,
+            raw_response="\n".join(raw_payloads),
             confidence="strict",
             api_version=_AKSHARE_VERSION,
         )
@@ -519,11 +544,13 @@ class AKShareAdapter(BaseAdapter):
         try:
             self._wait_rate_limit()
             df = ak.tool_trade_date_hist_sina()
+            raw_payload = df.to_json(orient="records", date_format="iso", force_ascii=False)
             records = _df_to_records(df)
             if not records:
                 return self._make_empty_result("交易日历为空")
             return self._make_result(
                 data=records,
+                raw_response=raw_payload,
                 confidence="strict",
                 api_version=_AKSHARE_VERSION,
             )

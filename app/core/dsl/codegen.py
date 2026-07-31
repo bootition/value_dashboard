@@ -6,12 +6,21 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from app.core.dsl.ast_nodes import (
-    ASTNode, Literal, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp,
+    ASTNode, Literal, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp, FIELD_METADATA,
 )
 
 logger = logging.getLogger(__name__)
+_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def quote_identifier(identifier: str) -> str:
+    """Quote a validated SQL identifier; values must never become SQL structure."""
+    if not isinstance(identifier, str) or not _IDENTIFIER_RE.fullmatch(identifier):
+        raise ValueError(f"invalid SQL identifier: {identifier}")
+    return f'"{identifier}"'
 
 
 class UnsupportedPeriodFunctionError(ValueError):
@@ -29,13 +38,13 @@ class CodeGen:
         "zscore": "({arg} - AVG({arg}) OVER ()) / NULLIF(STDDEV({arg}) OVER (), 0)",
         "normalize": "({arg} - MIN({arg}) OVER ()) / NULLIF((MAX({arg}) OVER () - MIN({arg}) OVER ()), 0)",
         "TTM": "{arg}",  # TTM 在数据层已处理，这里透传
-        "YoY": "LAG({arg}, 4) OVER (ORDER BY report_date)",  # 简化: 4期前
-        "QoQ": "LAG({arg}, 1) OVER (ORDER BY report_date)",
-        "CAGR": "POWER({arg} / NULLIF(LAG({arg}, {n}) OVER (ORDER BY report_date), 0), 1.0/{n}) - 1",
-        "rolling_avg": "AVG({arg}) OVER (ORDER BY report_date ROWS BETWEEN {n} PRECEDING AND CURRENT ROW)",
-        "rolling_max": "MAX({arg}) OVER (ORDER BY report_date ROWS BETWEEN {n} PRECEDING AND CURRENT ROW)",
-        "rolling_min": "MIN({arg}) OVER (ORDER BY report_date ROWS BETWEEN {n} PRECEDING AND CURRENT ROW)",
-        "lag": "LAG({arg}, {n}) OVER (ORDER BY report_date)",
+        "YoY": "LAG({arg}, 4) OVER (PARTITION BY stock_code ORDER BY report_date)",
+        "QoQ": "LAG({arg}, 1) OVER (PARTITION BY stock_code ORDER BY report_date)",
+        "CAGR": "POWER({arg} / NULLIF(LAG({arg}, {n}) OVER (PARTITION BY stock_code ORDER BY report_date), 0), 1.0/{n}) - 1",
+        "rolling_avg": "AVG({arg}) OVER (PARTITION BY stock_code ORDER BY report_date ROWS BETWEEN {n} PRECEDING AND CURRENT ROW)",
+        "rolling_max": "MAX({arg}) OVER (PARTITION BY stock_code ORDER BY report_date ROWS BETWEEN {n} PRECEDING AND CURRENT ROW)",
+        "rolling_min": "MIN({arg}) OVER (PARTITION BY stock_code ORDER BY report_date ROWS BETWEEN {n} PRECEDING AND CURRENT ROW)",
+        "lag": "LAG({arg}, {n}) OVER (PARTITION BY stock_code ORDER BY report_date)",
         "avg": "AVG({arg})",
         "max": "MAX({arg})",
         "min": "MIN({arg})",
@@ -52,7 +61,7 @@ class CodeGen:
             SQL 片段, 如 "income.revenue / NULLIF(balance.total_assets, 0) AS result"
         """
         sql = self._gen_expr(ast)
-        return f"{sql} AS {alias}"
+        return f"{sql} AS {quote_identifier(alias)}"
 
     def generate_select(
         self, ast: ASTNode, stock_code: str | None = None, alias: str = "result"
@@ -86,7 +95,7 @@ class CodeGen:
             where = f"WHERE s.stock_code = '{stock_code}'"
         else:
             where = ""
-        return f"SELECT s.stock_code, {expr_sql} AS {alias}\nFROM {from_clause}\n{where}"
+        return f"SELECT s.stock_code, {expr_sql} AS {quote_identifier(alias)}\nFROM {from_clause}\n{where}"
 
     def _collect_tables(self, node: ASTNode, tables: set[str]) -> None:
         """收集 AST 中引用的表名"""
@@ -110,17 +119,11 @@ class CodeGen:
             return str(node.value)
 
         if isinstance(node, FieldRef):
-            if node.period in {"TTM", "YoY", "QoQ"}:
-                raise UnsupportedPeriodFunctionError(
-                    f"{node.period} requires a historical execution context"
-                )
-            # field_ref → table_alias.field_name
-            table_alias = {"balance": "bs", "income": "ic", "cashflow": "cf"}.get(node.table, "s")
-            return f"{table_alias}.{node.field}"
+            return self._gen_field(node, node.period)
 
         if isinstance(node, IndicatorRef):
             # indicator_ref → indicator_snapshot 中的列名
-            return node.name
+            return quote_identifier(node.name)
 
         if isinstance(node, BinaryOp):
             left = self._gen_expr(node.left) if node.left else ""
@@ -141,9 +144,11 @@ class CodeGen:
 
         if isinstance(node, FuncCall):
             if node.func_name in {"TTM", "YoY", "QoQ"}:
-                raise UnsupportedPeriodFunctionError(
-                    f"{node.func_name} requires a historical execution context"
-                )
+                if len(node.args) != 1 or not isinstance(node.args[0], FieldRef):
+                    raise UnsupportedPeriodFunctionError(
+                        f"{node.func_name} requires exactly one normalized financial field"
+                    )
+                return self._gen_field(node.args[0], node.func_name)
             # 处理带参数的函数
             args_sql = [self._gen_expr(a) for a in node.args]
 
@@ -161,3 +166,157 @@ class CodeGen:
             return template.replace("{arg}", arg_str)
 
         return "NULL"
+
+    def _gen_field(self, field: FieldRef, period: str) -> str:
+        """Generate a field expression relative to the snapshot report date.
+
+        Snapshot rows provide the current reporting period. Historical periods
+        are correlated by stock code and exact report dates, so missing reports
+        produce NULL rather than an order-dependent approximation.
+        """
+        aliases = {"balance": "bs", "income": "ic", "cashflow": "cf"}
+        tables = {
+            "balance": "balance_sheet",
+            "income": "income_statement",
+            "cashflow": "cash_flow",
+        }
+        alias = aliases.get(field.table, "s")
+        table = tables.get(field.table)
+        current = f"{alias}.{field.field}"
+        if table is None:
+            return current
+        is_cumulative = FIELD_METADATA.get(
+            f"{field.table}.{field.field}", {}
+        ).get("period_type") == "cumulative"
+        if period == "LATEST":
+            return current
+        if period == "MRQ":
+            return self._quarter_value_sql(table, field.field, alias) if is_cumulative else current
+        if period == "TTM":
+            if field.table == "balance":
+                raise UnsupportedPeriodFunctionError("TTM requires a cumulative flow field")
+            return self._ttm_sql(table, field.field, current)
+        if period == "YoY":
+            if is_cumulative:
+                current_quarter = self._quarter_value_sql(table, field.field, alias)
+                prior_quarter = self._prior_year_same_quarter_value_sql(table, field.field)
+                return f"(({current_quarter} - ({prior_quarter})) / NULLIF(ABS(({prior_quarter})), 0))"
+            prior = self._prior_year_same_period_sql(table, field.field)
+            return f"(({current} - ({prior})) / NULLIF(ABS(({prior})), 0))"
+        if period == "QoQ":
+            if field.table == "balance":
+                raise UnsupportedPeriodFunctionError("QoQ requires a cumulative flow field")
+            current_quarter = self._quarter_value_sql(table, field.field, alias)
+            prior_quarter = self._prior_quarter_value_sql(table, field.field)
+            return f"(({current_quarter} - ({prior_quarter})) / NULLIF(ABS(({prior_quarter})), 0))"
+        raise UnsupportedPeriodFunctionError(f"unsupported field period: {period}")
+
+    @staticmethod
+    def _prior_year_same_period_sql(table: str, field: str) -> str:
+        return (
+            f"SELECT prior.{field} FROM {table} prior "
+            "WHERE prior.stock_code = s.stock_code "
+            "AND prior.report_date = MAKE_DATE("
+            "CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER) - 1, "
+            "CAST(EXTRACT(MONTH FROM s.report_date) AS INTEGER), "
+            "CAST(EXTRACT(DAY FROM s.report_date) AS INTEGER))"
+        )
+
+    @staticmethod
+    def _prior_exact_quarter_sql(table: str, field: str) -> str:
+        return (
+            f"SELECT prior.{field} FROM {table} prior "
+            "WHERE prior.stock_code = s.stock_code "
+            f"AND prior.report_date = {CodeGen._prior_quarter_end_sql('s.report_date')}"
+        )
+
+    @staticmethod
+    def _prior_quarter_end_sql(date_expression: str) -> str:
+        """Return the exact preceding fiscal quarter end, preserving month lengths."""
+        return (
+            f"CASE EXTRACT(MONTH FROM {date_expression}) "
+            f"WHEN 3 THEN MAKE_DATE(CAST(EXTRACT(YEAR FROM {date_expression}) AS INTEGER) - 1, 12, 31) "
+            f"WHEN 6 THEN MAKE_DATE(CAST(EXTRACT(YEAR FROM {date_expression}) AS INTEGER), 3, 31) "
+            f"WHEN 9 THEN MAKE_DATE(CAST(EXTRACT(YEAR FROM {date_expression}) AS INTEGER), 6, 30) "
+            f"WHEN 12 THEN MAKE_DATE(CAST(EXTRACT(YEAR FROM {date_expression}) AS INTEGER), 9, 30) "
+            "ELSE NULL END"
+        )
+
+    @staticmethod
+    def _quarter_value_sql(table: str, field: str, alias: str) -> str:
+        return (
+            f"CASE EXTRACT(MONTH FROM s.report_date) "
+            f"WHEN 3 THEN {alias}.{field} "
+            f"WHEN 6 THEN {alias}.{field} - (SELECT q1.{field} FROM {table} q1 "
+            "WHERE q1.stock_code = s.stock_code "
+            "AND q1.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER), 3, 31)) "
+            f"WHEN 9 THEN {alias}.{field} - (SELECT q2.{field} FROM {table} q2 "
+            "WHERE q2.stock_code = s.stock_code "
+            "AND q2.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER), 6, 30)) "
+            f"WHEN 12 THEN {alias}.{field} - (SELECT q3.{field} FROM {table} q3 "
+            "WHERE q3.stock_code = s.stock_code "
+            "AND q3.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER), 9, 30)) "
+            "ELSE NULL END"
+        )
+
+    @staticmethod
+    def _prior_quarter_value_sql(table: str, field: str) -> str:
+        return (
+            "SELECT CASE EXTRACT(MONTH FROM prior.report_date) "
+            f"WHEN 3 THEN prior.{field} "
+            f"WHEN 6 THEN prior.{field} - (SELECT q1.{field} FROM {table} q1 "
+            "WHERE q1.stock_code = prior.stock_code "
+            "AND q1.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 3, 31)) "
+            f"WHEN 9 THEN prior.{field} - (SELECT q2.{field} FROM {table} q2 "
+            "WHERE q2.stock_code = prior.stock_code "
+            "AND q2.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 6, 30)) "
+            f"WHEN 12 THEN prior.{field} - (SELECT q3.{field} FROM {table} q3 "
+            "WHERE q3.stock_code = prior.stock_code "
+            "AND q3.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 9, 30)) "
+            "ELSE NULL END "
+            f"FROM {table} prior WHERE prior.stock_code = s.stock_code "
+            f"AND prior.report_date = {CodeGen._prior_quarter_end_sql('s.report_date')}"
+        )
+
+    @staticmethod
+    def _prior_year_same_quarter_value_sql(table: str, field: str) -> str:
+        """Return last year's same-quarter flow, preserving cumulative semantics."""
+        return (
+            "SELECT CASE EXTRACT(MONTH FROM prior.report_date) "
+            f"WHEN 3 THEN prior.{field} "
+            f"WHEN 6 THEN prior.{field} - (SELECT q1.{field} FROM {table} q1 "
+            "WHERE q1.stock_code = prior.stock_code "
+            "AND q1.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 3, 31)) "
+            f"WHEN 9 THEN prior.{field} - (SELECT q2.{field} FROM {table} q2 "
+            "WHERE q2.stock_code = prior.stock_code "
+            "AND q2.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 6, 30)) "
+            f"WHEN 12 THEN prior.{field} - (SELECT q3.{field} FROM {table} q3 "
+            "WHERE q3.stock_code = prior.stock_code "
+            "AND q3.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 9, 30)) "
+            "ELSE NULL END "
+            f"FROM {table} prior WHERE prior.stock_code = s.stock_code "
+            "AND prior.report_date = MAKE_DATE("
+            "CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER) - 1, "
+            "CAST(EXTRACT(MONTH FROM s.report_date) AS INTEGER), "
+            "CAST(EXTRACT(DAY FROM s.report_date) AS INTEGER))"
+        )
+
+    @staticmethod
+    def _ttm_sql(table: str, field: str, current: str) -> str:
+        return (
+            "CASE WHEN EXTRACT(MONTH FROM s.report_date) = 12 "
+            "AND EXTRACT(DAY FROM s.report_date) = 31 "
+            f"THEN {current} ELSE ("
+            f"SELECT annual.{field} + current_row.{field} - prior.{field} "
+            f"FROM {table} current_row "
+            f"JOIN {table} annual ON annual.stock_code = current_row.stock_code "
+            "AND annual.report_date = MAKE_DATE("
+            "CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER) - 1, 12, 31) "
+            f"JOIN {table} prior ON prior.stock_code = current_row.stock_code "
+            "AND prior.report_date = MAKE_DATE("
+            "CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER) - 1, "
+            "CAST(EXTRACT(MONTH FROM s.report_date) AS INTEGER), "
+            "CAST(EXTRACT(DAY FROM s.report_date) AS INTEGER)) "
+            "WHERE current_row.stock_code = s.stock_code "
+            "AND current_row.report_date = s.report_date) END"
+        )

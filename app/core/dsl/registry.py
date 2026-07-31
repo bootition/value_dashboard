@@ -10,21 +10,32 @@ PRD §11.5:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-from datetime import datetime, timezone
+import re
 from typing import Any
 
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+from app.core.dsl.ast_nodes import INDICATOR_METADATA
 
 logger = logging.getLogger(__name__)
 
 # 表达式状态
 STATUS_DRAFT = "draft"
 STATUS_VALIDATED = "validated"
+STATUS_SINGLE_PREVIEWED = "single_previewed"
 STATUS_PREVIEWED = "previewed"
 STATUS_PUBLISHED = "published"
+IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+
+def validate_expression_identifier(name: str) -> str:
+    """Allow only identifiers that are safe as persisted SQL aliases."""
+    if not isinstance(name, str) or not IDENTIFIER_RE.fullmatch(name):
+        raise ValueError("expression name must match [a-z][a-z0-9_]{0,63}")
+    if name in INDICATOR_METADATA:
+        raise ValueError("expression name conflicts with a built-in indicator")
+    return name
 
 
 class ExpressionRegistry:
@@ -65,6 +76,7 @@ class ExpressionRegistry:
         Returns:
             创建结果, 包含 id 和版本号
         """
+        validate_expression_identifier(name)
         # 确定版本号
         existing = self.sqlite.query(
             "SELECT MAX(version) as max_ver FROM dsl_expressions WHERE name = ?",
@@ -91,12 +103,22 @@ class ExpressionRegistry:
                  historical_capable: bool) -> dict[str, Any]:
         """更新表达式状态为已校验"""
         self._update_status(name, version, STATUS_VALIDATED,
-                           {"ast_json": ast_json, "historical_capable": historical_capable})
+                            {"ast_json": ast_json, "historical_capable": historical_capable},
+                            allowed_from={STATUS_DRAFT})
         return {"name": name, "version": version, "status": STATUS_VALIDATED}
 
+    def preview_single(self, name: str, version: int) -> dict[str, Any]:
+        """记录已完成单股预览。"""
+        self._update_status(
+            name, version, STATUS_SINGLE_PREVIEWED, allowed_from={STATUS_VALIDATED}
+        )
+        return {"name": name, "version": version, "status": STATUS_SINGLE_PREVIEWED}
+
     def preview(self, name: str, version: int) -> dict[str, Any]:
-        """更新表达式状态为已预览"""
-        self._update_status(name, version, STATUS_PREVIEWED)
+        """记录已完成小样本预览。"""
+        self._update_status(
+            name, version, STATUS_PREVIEWED, allowed_from={STATUS_SINGLE_PREVIEWED}
+        )
         return {"name": name, "version": version, "status": STATUS_PREVIEWED}
 
     def publish(self, name: str, version: int) -> dict[str, Any]:
@@ -116,7 +138,7 @@ class ExpressionRegistry:
         content_hash = hashlib.sha256(content.encode()).hexdigest()
 
         self._update_status(name, version, STATUS_PUBLISHED,
-                           {"content_hash": content_hash})
+                            {"content_hash": content_hash}, allowed_from={STATUS_PREVIEWED})
 
         logger.info(f"发布表达式: {name} v{version} (hash={content_hash[:8]})")
         return {"name": name, "version": version, "status": STATUS_PUBLISHED,
@@ -162,37 +184,33 @@ class ExpressionRegistry:
         dep_name: str, dep_version: int,
     ) -> None:
         """添加依赖关系 (PRD §11.5 DL15: 版本锁定)"""
-        # 获取表达式 ID
-        rows = self.sqlite.query(
-            "SELECT id FROM dsl_expressions WHERE name=? AND version=?",
-            [name, version],
-        )
-        if not rows:
-            return
-        expr_id = rows[0]["id"]
-
-        # 获取依赖表达式 ID
-        dep_rows = self.sqlite.query(
-            "SELECT id FROM dsl_expressions WHERE name=? AND version=?",
-            [dep_name, dep_version],
-        )
-        if not dep_rows:
-            return
-        dep_id = dep_rows[0]["id"]
-
         with self.sqlite.transaction() as conn:
+            expr_row = conn.execute(
+                "SELECT id, status FROM dsl_expressions WHERE name=? AND version=?",
+                [name, version],
+            ).fetchone()
+            if not expr_row:
+                return
+            if expr_row["status"] != STATUS_VALIDATED:
+                raise ValueError("dependencies can only be recorded for validated expressions")
+
+            dep_row = conn.execute(
+                "SELECT id FROM dsl_expressions WHERE name=? AND version=?",
+                [dep_name, dep_version],
+            ).fetchone()
+            if not dep_row:
+                return
             conn.execute(
                 "INSERT OR REPLACE INTO dsl_dependencies (expression_id, depends_on_id, depends_on_version) VALUES (?, ?, ?)",
-                [expr_id, dep_id, dep_version],
+                [expr_row["id"], dep_row["id"], dep_version],
             )
 
     def check_circular(self, name: str, version: int) -> bool:
         """检查是否存在循环依赖"""
         # 简化实现: 检查直接依赖链
-        visited: set[int] = set()
-        return self._dfs_cycle(name, version, visited)
+        return self._dfs_cycle(name, version, set())
 
-    def _dfs_cycle(self, name: str, version: int, visited: set[int]) -> bool:
+    def _dfs_cycle(self, name: str, version: int, active_path: set[int]) -> bool:
         rows = self.sqlite.query(
             "SELECT id FROM dsl_expressions WHERE name=? AND version=?",
             [name, version],
@@ -201,9 +219,9 @@ class ExpressionRegistry:
             return False
         expr_id = rows[0]["id"]
 
-        if expr_id in visited:
+        if expr_id in active_path:
             return True  # 循环
-        visited.add(expr_id)
+        active_path.add(expr_id)
 
         deps = self.sqlite.query(
             "SELECT e2.name, d.depends_on_version FROM dsl_dependencies d "
@@ -212,15 +230,18 @@ class ExpressionRegistry:
             [expr_id],
         )
         for dep in deps:
-            if self._dfs_cycle(dep["name"], dep["depends_on_version"], visited):
+            if self._dfs_cycle(dep["name"], dep["depends_on_version"], active_path):
                 return True
+        active_path.remove(expr_id)
         return False
 
     def _update_status(
         self, name: str, version: int, status: str,
         extra: dict[str, Any] | None = None,
+        *,
+        allowed_from: set[str],
     ) -> None:
-        """更新表达式状态"""
+        """Advance an expression only from the lifecycle stage that precedes it."""
         sets = ["status = ?"]
         params: list[Any] = [status]
 
@@ -234,10 +255,14 @@ class ExpressionRegistry:
                     sets.append(f"{k} = ?")
                     params.append(v)
 
-        params.extend([name, version])
+        placeholders = ", ".join("?" for _ in allowed_from)
+        params.extend([name, version, *sorted(allowed_from)])
 
         with self.sqlite.transaction() as conn:
-            conn.execute(
-                f"UPDATE dsl_expressions SET {', '.join(sets)} WHERE name=? AND version=?",
+            cursor = conn.execute(
+                f"""UPDATE dsl_expressions SET {', '.join(sets)}
+                    WHERE name=? AND version=? AND status IN ({placeholders})""",
                 params,
             )
+            if cursor.rowcount != 1:
+                raise ValueError(f"invalid DSL lifecycle transition to {status}")

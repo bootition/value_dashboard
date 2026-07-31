@@ -25,6 +25,9 @@ if str(PROJECT_ROOT) not in sys.path:
 import duckdb
 import pandas as pd
 
+from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -32,7 +35,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB = PROJECT_ROOT / "data" / "valuedashboard.duckdb"
 DEFAULT_SOURCE = PROJECT_ROOT / "额外资料" / "C17 a股上市公司财务数据合集（90-25年）" / "原始数据（dta格式）"
 
 BALANCE_SHEET_MAP: dict[str, str] = {
@@ -505,7 +507,7 @@ def verify(conn: duckdb.DuckDBPyConnection) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="CSMAR .dta → DuckDB 导入")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="DuckDB 路径")
+    parser.add_argument("--db", type=Path, help="DuckDB 路径（必须与已验证运行环境一致）")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE, help="CSMAR 原始数据目录")
     parser.add_argument("--dry-run", action="store_true", help="只读取不写入")
     parser.add_argument("--tables", nargs="*", default=None,
@@ -516,52 +518,46 @@ def main():
         logger.error("CSMAR 数据目录不存在: %s", args.source)
         sys.exit(1)
 
-    if not args.dry_run and not args.db.parent.exists():
-        args.db.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        paths = require_formal_maintenance_paths()
+    except PathIsolationError as error:
+        parser.error(str(error))
+    if args.db is not None and args.db.resolve(strict=False) != paths.duckdb_path:
+        parser.error("--db must match the validated VD_DUCKDB_PATH")
 
     logger.info("CSMAR 数据源: %s", args.source)
-    logger.info("目标数据库: %s", args.db)
+    logger.info("目标数据库: %s", paths.duckdb_path)
     logger.info("模式: %s", "DRY RUN" if args.dry_run else "WRITE")
 
-    conn = duckdb.connect(str(args.db))
-    try:
-        if not args.dry_run:
-            from app.core.storage.schema import init_duckdb_schema
-            logger.info("初始化 schema...")
-            class _FakeStore:
-                def __init__(self, c): self._c = c
-                def execute_script(self, sql): self._c.execute(sql)
-                def transaction(self): return self
-                def __enter__(self): return self._c
-                def __exit__(self, *a): pass
-            init_duckdb_schema(_FakeStore(conn))
+    store = DuckDBStore(paths=paths)
+    if not args.dry_run:
+        from app.core.storage.schema import init_duckdb_schema
 
-        tables = args.tables or ["stock_meta", "balance_sheet", "income_statement", "cash_flow", "dividends"]
-        results = {}
+        logger.info("初始化 schema...")
+        init_duckdb_schema(store)
 
-        importers = {
-            "stock_meta": import_stock_meta,
-            "balance_sheet": import_balance_sheet,
-            "income_statement": import_income_statement,
-            "cash_flow": import_cash_flow,
-            "dividends": import_dividends,
-        }
-
+    tables = args.tables or ["stock_meta", "balance_sheet", "income_statement", "cash_flow", "dividends"]
+    results = {}
+    importers = {
+        "stock_meta": import_stock_meta,
+        "balance_sheet": import_balance_sheet,
+        "income_statement": import_income_statement,
+        "cash_flow": import_cash_flow,
+        "dividends": import_dividends,
+    }
+    connection = store.read_connection if args.dry_run else store.transaction
+    with connection() as conn:
         for table in tables:
             if table in importers:
                 logger.info("\n%s %s %s", "=" * 20, table, "=" * 20)
                 results[table] = importers[table](conn, args.source, args.dry_run)
-
         if not args.dry_run:
             verify(conn)
 
-        logger.info("\n%s", "=" * 60)
-        logger.info("导入完成汇总:")
-        for table, count in results.items():
-            logger.info("  %-20s %s 行", table, f"{count:,}")
-
-    finally:
-        conn.close()
+    logger.info("\n%s", "=" * 60)
+    logger.info("导入完成汇总:")
+    for table, count in results.items():
+        logger.info("  %-20s %s 行", table, f"{count:,}")
 
 
 if __name__ == "__main__":

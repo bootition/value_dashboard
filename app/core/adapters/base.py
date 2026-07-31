@@ -34,7 +34,7 @@ DataType = Literal[
 
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
-SourceName = Literal["cninfo", "akshare_eastmoney", "tdx", "baostock", "local_cache"]
+SourceName = Literal["cninfo", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache"]
 
 
 # ─── 请求/响应模型 ──────────────────────────────────────────────────
@@ -188,7 +188,14 @@ class BaseAdapter:
             error=error,
             api_version=api_version,
         )
-        return FetchResult(data=data, metadata=metadata)
+        return FetchResult(
+            data=data,
+            metadata=metadata,
+            raw_response=(
+                raw_response if isinstance(raw_response, bytes)
+                else raw_response.encode("utf-8") if isinstance(raw_response, str) else None
+            ),
+        )
 
     def _make_empty_result(self, reason: str, confidence: ConfidenceLevel = "missing") -> FetchResult:
         """构建空结果（数据不可得）"""

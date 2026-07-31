@@ -8,6 +8,7 @@
 
 依赖: akshare, pandas, duckdb
 """
+# ruff: noqa: E402
 
 from __future__ import annotations
 
@@ -26,6 +27,9 @@ import akshare as ak
 import duckdb
 import pandas as pd
 
+from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -33,7 +37,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB = PROJECT_ROOT / "data" / "valuedashboard.duckdb"
 CSMAR_CUTOFF = "2025-03-31"
 RATE_LIMIT = 0.5
 
@@ -275,10 +278,24 @@ def supplement_financials(
         logger.info("[DRY RUN] %s: %d 行待插入", table_name, len(insert_df))
         return len(insert_df)
 
+    raise RuntimeError(
+        "Direct AKShare publication is disabled: use the canonical audited ingestion "
+        "path to persist source payloads, fetch batches, and field audits atomically."
+    )
+
     cols = list(insert_df.columns)
 
     existing = conn.execute(f"SELECT COUNT(*) FROM {table_name} WHERE report_date > '{CSMAR_CUTOFF}'").fetchone()[0]
     if existing > 0:
+        csv_stocks = insert_df["stock_code"].nunique()
+        existing_stocks = conn.execute(
+            f"SELECT COUNT(DISTINCT stock_code) AS cnt FROM {table_name} WHERE report_date > '{CSMAR_CUTOFF}'"
+        ).fetchone()[0]
+        if existing_stocks > 0 and csv_stocks < existing_stocks * 0.5:
+            raise ValueError(
+                f"{table_name}: CSV covers {csv_stocks} stocks but DB has {existing_stocks} "
+                f"post-cutoff stocks. Refusing delete-and-replace."
+            )
         conn.execute(f"DELETE FROM {table_name} WHERE report_date > '{CSMAR_CUTOFF}'")
         logger.info("  已删除 %d 行旧补充数据", existing)
 
@@ -317,7 +334,7 @@ def supplement_dividends(
                 except ValueError:
                     continue
 
-                announce_date_raw = row.get("实施公告日期")
+                announce_date_raw = row.get("实施方案公告日期")
                 announce_date = None
                 if announce_date_raw is not None and not (isinstance(announce_date_raw, float) and pd.isna(announce_date_raw)):
                     announce_date = str(announce_date_raw).strip()[:10]
@@ -430,19 +447,33 @@ def verify(conn: duckdb.DuckDBPyConnection) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="AKShare 数据补齐")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--db", type=Path, help="DuckDB 路径（必须与已验证运行环境一致）")
     parser.add_argument("--sample", type=int, default=0, help="只处理前 N 只股票 (0=全部)")
     parser.add_argument("--skip-financials", action="store_true")
     parser.add_argument("--skip-dividends", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
-    logger.info("数据库: %s", args.db)
+    try:
+        paths = require_formal_maintenance_paths()
+    except PathIsolationError as error:
+        parser.error(str(error))
+    if args.db is not None and args.db.resolve(strict=False) != paths.duckdb_path:
+        parser.error("--db must match the validated VD_DUCKDB_PATH")
+    if not args.dry_run:
+        parser.error(
+            "Direct AKShare publication is disabled: this script cannot atomically "
+            "retain source payloads, fetch batches, and field audits. Run with "
+            "--dry-run only, then publish through the canonical audited ingestion workflow."
+        )
+
+    logger.info("数据库: %s", paths.duckdb_path)
     logger.info("CSMAR 截止: %s", CSMAR_CUTOFF)
     logger.info("模式: %s", "DRY RUN" if args.dry_run else "WRITE")
 
-    conn = duckdb.connect(str(args.db))
-    try:
+    store = DuckDBStore(paths=paths)
+    connection = store.read_connection if args.dry_run else store.transaction
+    with connection() as conn:
         stock_codes_df = conn.execute("SELECT DISTINCT stock_code FROM stock_meta ORDER BY stock_code").fetchdf()
         stock_codes = stock_codes_df["stock_code"].tolist()
         logger.info("股票总数: %d", len(stock_codes))
@@ -470,9 +501,6 @@ def main():
 
         if not args.dry_run:
             verify(conn)
-
-    finally:
-        conn.close()
 
 
 if __name__ == "__main__":

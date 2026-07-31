@@ -1,5 +1,6 @@
 import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
+import axios from 'axios'
 import App from './App.vue'
 import './style.css'
 
@@ -51,5 +52,15 @@ router.afterEach((to) => {
 })
 
 const app = createApp(App)
+let writeToken: string | null = null
+axios.interceptors.request.use(async (request) => {
+  if (!['post', 'put', 'patch', 'delete'].includes(request.method?.toLowerCase() ?? '')) return request
+  if (writeToken === null) {
+    const response = await axios.get<{ write_token: string }>('/api/session')
+    writeToken = response.data.write_token
+  }
+  request.headers.set('X-VD-Write-Token', writeToken)
+  return request
+})
 app.use(router)
 app.mount('#app')

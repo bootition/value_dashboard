@@ -22,6 +22,16 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.core.update import IncrementalUpdater
 
 
+PATH_ENVIRONMENT_VARIABLES = (
+    "VD_ENV",
+    "VD_FORMAL_ACK",
+    "VD_DUCKDB_PATH",
+    "VD_SQLITE_PATH",
+    "VD_TEST_RUN_ROOT",
+    "VD_STAGING_ROOT",
+)
+
+
 @pytest.mark.parametrize(
     "service_type",
     [
@@ -38,7 +48,12 @@ from app.core.update import IncrementalUpdater
         BackupManager,
     ],
 )
-def test_business_constructor_requires_an_explicit_database_boundary(service_type: type) -> None:
+def test_business_constructor_fails_closed_without_a_database_profile(
+    service_type: type,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in PATH_ENVIRONMENT_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
     with pytest.raises(PathIsolationError):
         service_type()
 
@@ -111,6 +126,6 @@ def test_backup_manager_uses_run_local_backup_directory(
 ) -> None:
     manager = BackupManager(paths=database_paths)
 
-    assert manager._backup_dir == database_paths.run_root / "backup"
+    assert manager._backup_dir == database_paths.run_root / "data" / "backup"
     repository_backup = Path(__file__).parents[2] / "data" / "backup"
     assert manager._backup_dir != repository_backup

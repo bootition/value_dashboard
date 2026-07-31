@@ -12,7 +12,7 @@ import logging
 from typing import Any
 
 from app.core.dsl.ast_nodes import (
-    ASTNode, Literal, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp,
+    ASTNode, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp, Literal,
     FIELD_METADATA, INDICATOR_METADATA,
 )
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -173,14 +173,64 @@ class Validator:
             if node.operand:
                 self._check_dimensions(node.operand)
 
+        elif isinstance(node, FieldRef):
+            source_meta = FIELD_METADATA.get(f"{node.table}.{node.field}")
+            if source_meta is None:
+                self._errors.append(f"未知标准化字段: {node.table}.{node.field}")
+                return
+            if node.period in ("TTM", "QoQ") and source_meta["period_type"] != "cumulative":
+                self._errors.append(
+                    f"{node.period} 仅适用于累计流量字段 (period_type={source_meta['period_type']})"
+                )
+
+        elif isinstance(node, IndicatorRef):
+            if node.name not in INDICATOR_METADATA and not self._published_indicator_exists(node.name):
+                self._errors.append(f"未知指标标识符: {node.name}")
+
         elif isinstance(node, FuncCall):
+            if node.func_name in ("TTM", "YoY", "QoQ"):
+                if len(node.args) != 1 or not isinstance(node.args[0], FieldRef):
+                    self._errors.append(
+                        f"{node.func_name}() requires exactly one normalized financial field"
+                    )
             # TTM() 仅适用于 cumulative 流量字段 (PRD §11.4)
             if node.func_name == "TTM":
                 for arg in node.args:
-                    if arg.period_type not in ("cumulative", "ttm"):
-                        self._warnings.append(
+                    source_period = (
+                        FIELD_METADATA.get(f"{arg.table}.{arg.field}", {}).get("period_type")
+                        if isinstance(arg, FieldRef) else arg.period_type
+                    )
+                    if source_period != "cumulative":
+                        self._errors.append(
                             f"TTM() 应用于非累计字段 (period_type={arg.period_type})"
                         )
+            if node.func_name == "QoQ":
+                for arg in node.args:
+                    source_period = (
+                        FIELD_METADATA.get(f"{arg.table}.{arg.field}", {}).get("period_type")
+                        if isinstance(arg, FieldRef) else arg.period_type
+                    )
+                    if source_period != "cumulative":
+                        self._errors.append(
+                            f"QoQ() 仅适用于累计流量字段 (period_type={arg.period_type})"
+                        )
+
+            if node.func_name in {"rank", "rank_industry", "percentile", "zscore", "normalize"}:
+                if len(node.args) != 1:
+                    self._errors.append(f"{node.func_name}() requires exactly one argument")
+
+            if node.func_name in {"CAGR", "rolling_avg", "rolling_max", "rolling_min", "lag"}:
+                if len(node.args) != 2 or not isinstance(node.args[1], Literal):
+                    self._errors.append(f"{node.func_name}() requires a field and an integer window")
+                elif node.args[1].value <= 0 or not node.args[1].value.is_integer():
+                    self._errors.append(f"{node.func_name}() window must be a positive integer")
+                self._errors.append(
+                    f"{node.func_name}() requires a historical planner and cannot be published"
+                )
+            elif node.func_name in {"avg", "max", "min"}:
+                self._errors.append(
+                    f"{node.func_name}() aggregate semantics are not supported by the snapshot planner"
+                )
 
             # 横截面函数自动标记 current_only (PRD §11.2 DL4)
             if node.func_name in ("rank", "rank_industry", "percentile", "zscore", "normalize"):
@@ -192,6 +242,13 @@ class Validator:
             # 递归校验参数
             for arg in node.args:
                 self._check_dimensions(arg)
+
+    def _published_indicator_exists(self, name: str) -> bool:
+        rows = self._sqlite.query(
+            "SELECT 1 FROM dsl_expressions WHERE name = ? AND status = 'published' LIMIT 1",
+            [name],
+        )
+        return bool(rows)
 
     def _collect_dependencies(self, node: ASTNode) -> set[str]:
         """收集 AST 中引用的所有指标名（用于依赖检测）"""

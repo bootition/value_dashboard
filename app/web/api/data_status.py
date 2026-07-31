@@ -6,42 +6,57 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
 
 @router.get("/summary")
-async def get_summary(request: Request) -> dict:
+def get_summary(request: Request) -> dict:
     """数据状态摘要 (PRD §15 DS2)"""
     duck = request.app.state.duck
     sqlite = request.app.state.sqlite
 
-    summary: dict = {}
-
     from app.core.data_quality import build_data_quality_status
 
-    summary["data_quality"] = build_data_quality_status(duck, sqlite)
+    try:
+        summary: dict = {"data_quality": build_data_quality_status(duck, sqlite)}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="data quality status is unavailable") from error
+    errors: list[str] = []
+    # Status is a live read; startup state is only a historical initialization result.
+    summary["minimum_data_readiness"] = summary["data_quality"]["minimum_data_readiness"]
 
     # 股票覆盖
     try:
-        row = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta")
+        row = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta WHERE is_listed IS TRUE")
         summary["stock_count"] = row[0]["cnt"]
     except Exception:
         summary["stock_count"] = 0
+        errors.append("stock_count")
 
     # 价格覆盖
     try:
-        row = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM price_daily_raw")
+        row = duck.read_query(
+            """SELECT COUNT(DISTINCT price.stock_code) as cnt FROM price_daily_raw price
+               JOIN stock_meta stock ON stock.stock_code = price.stock_code
+               WHERE stock.is_listed IS TRUE"""
+        )
         summary["price_raw_count"] = row[0]["cnt"]
     except Exception:
         summary["price_raw_count"] = 0
+        errors.append("price_raw_count")
 
     try:
-        row = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM price_daily_qfq")
+        row = duck.read_query(
+            """SELECT COUNT(DISTINCT price.stock_code) as cnt FROM price_daily_qfq price
+               JOIN stock_meta stock ON stock.stock_code = price.stock_code
+               WHERE stock.is_listed IS TRUE"""
+        )
         summary["price_qfq_count"] = row[0]["cnt"]
     except Exception:
         summary["price_qfq_count"] = 0
+        errors.append("price_qfq_count")
 
     # 价格回填状态 (PRD §6.1 D4: 上市以来全部可得数据)
     try:
@@ -56,16 +71,19 @@ async def get_summary(request: Request) -> dict:
             SELECT
                 COUNT(CASE WHEN p.earliest_price IS NULL THEN 1 END) as no_price,
                 COUNT(CASE WHEN p.earliest_price IS NOT NULL
-                            AND s.listing_date IS NOT NULL
-                            AND p.earliest_price > s.listing_date + INTERVAL '30 days' THEN 1 END) as incomplete,
+                             AND s.listing_date IS NOT NULL
+                             AND p.earliest_price > s.listing_date + INTERVAL '30 days' THEN 1 END) as incomplete,
                 COUNT(CASE WHEN p.earliest_price IS NOT NULL
-                            AND (s.listing_date IS NULL
-                                 OR p.earliest_price <= s.listing_date + INTERVAL '30 days') THEN 1 END) as complete
+                             AND s.listing_date IS NULL THEN 1 END) as unknown_listing_date,
+                COUNT(CASE WHEN p.earliest_price IS NOT NULL
+                             AND s.listing_date IS NOT NULL
+                             AND p.earliest_price <= s.listing_date + INTERVAL '30 days' THEN 1 END) as complete
             FROM stock_meta s
             LEFT JOIN (
                 SELECT stock_code, MIN(trade_date) as earliest_price
                 FROM price_daily_raw GROUP BY stock_code
             ) p ON s.stock_code = p.stock_code
+            WHERE s.is_listed IS TRUE
             """
         )
         summary["price_backfill"] = {
@@ -76,11 +94,13 @@ async def get_summary(request: Request) -> dict:
             "gap": {
                 "no_price": gap_row[0]["no_price"],
                 "incomplete": gap_row[0]["incomplete"],
+                "unknown_listing_date": gap_row[0]["unknown_listing_date"],
                 "complete": gap_row[0]["complete"],
             },
         }
     except Exception:
         summary["price_backfill"] = None
+        errors.append("price_backfill")
 
     # 分红回填状态 (PRD §6.4: 分红/送股/转增/配股)
     try:
@@ -108,6 +128,7 @@ async def get_summary(request: Request) -> dict:
         }
     except Exception:
         summary["dividends"] = None
+        errors.append("dividends")
 
     # xdxr 状态
     try:
@@ -121,6 +142,7 @@ async def get_summary(request: Request) -> dict:
         }
     except Exception:
         summary["xdxr"] = None
+        errors.append("xdxr")
 
     # 财务覆盖
     for table in ["balance_sheet", "income_statement", "cash_flow"]:
@@ -138,6 +160,7 @@ async def get_summary(request: Request) -> dict:
         except Exception:
             summary[f"{table}_count"] = 0
             summary[f"{table}_range"] = None
+            errors.append(table)
 
     # 指标快照覆盖
     try:
@@ -153,6 +176,7 @@ async def get_summary(request: Request) -> dict:
     except Exception:
         summary["indicator_snapshot_count"] = 0
         summary["indicator_snapshot_range"] = None
+        errors.append("indicator_snapshot")
 
     # 最近更新时间
     try:
@@ -165,6 +189,7 @@ async def get_summary(request: Request) -> dict:
     except Exception:
         summary["recent_jobs"] = []
         summary["last_update"] = None
+        errors.append("recent_jobs")
 
     # 重试/缺失摘要
     try:
@@ -172,12 +197,14 @@ async def get_summary(request: Request) -> dict:
         summary["retry_count"] = row[0]["cnt"]
     except Exception:
         summary["retry_count"] = 0
+        errors.append("retry_count")
 
     try:
         row = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
         summary["missing_count"] = row[0]["cnt"]
     except Exception:
         summary["missing_count"] = 0
+        errors.append("missing_count")
 
     # PDF解析失败任务摘要
     try:
@@ -189,6 +216,7 @@ async def get_summary(request: Request) -> dict:
         summary["pdf_tasks"] = row[0] if row else {"cnt": 0, "pending": 0}
     except Exception:
         summary["pdf_tasks"] = {"cnt": 0, "pending": 0}
+        errors.append("pdf_tasks")
 
     # 备份摘要
     try:
@@ -201,6 +229,7 @@ async def get_summary(request: Request) -> dict:
         summary["backup"] = row[0] if row else {"cnt": 0, "latest": None, "full_count": 0}
     except Exception:
         summary["backup"] = {"cnt": 0, "latest": None, "full_count": 0}
+        errors.append("backup")
 
     # 申万行业覆盖
     try:
@@ -210,12 +239,16 @@ async def get_summary(request: Request) -> dict:
         summary["sw_industry_count"] = row[0]["cnt"]
     except Exception:
         summary["sw_industry_count"] = 0
+        errors.append("sw_industry_count")
+
+    if errors:
+        raise HTTPException(status_code=503, detail={"error": "data status is partially unavailable", "fields": errors})
 
     return summary
 
 
 @router.get("/retry-list")
-async def get_retry_list(request: Request, limit: int = 50) -> dict:
+def get_retry_list(request: Request, limit: int = Query(50, ge=1, le=500)) -> dict:
     """重试列表摘要"""
     sqlite = request.app.state.sqlite
     try:
@@ -225,12 +258,12 @@ async def get_retry_list(request: Request, limit: int = 50) -> dict:
             [limit],
         )
         return {"count": len(rows), "items": rows}
-    except Exception as e:
-        return {"count": 0, "items": [], "error": str(e)}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="retry list is unavailable") from error
 
 
 @router.get("/missing-list")
-async def get_missing_list(request: Request, limit: int = 50) -> dict:
+def get_missing_list(request: Request, limit: int = Query(50, ge=1, le=500)) -> dict:
     """缺失列表摘要"""
     sqlite = request.app.state.sqlite
     try:
@@ -240,5 +273,5 @@ async def get_missing_list(request: Request, limit: int = 50) -> dict:
             [limit],
         )
         return {"count": len(rows), "items": rows}
-    except Exception as e:
-        return {"count": 0, "items": [], "error": str(e)}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail="missing list is unavailable") from error

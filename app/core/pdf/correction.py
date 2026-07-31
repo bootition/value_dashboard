@@ -13,8 +13,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
-from typing import Any
+import math
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -30,7 +32,9 @@ class CorrectionField(BaseModel):
     field_name: str = Field(..., description="标准化字段名, 如 total_assets")
     original_value: float | None = Field(None, description="原始值(可为空)")
     corrected_value: float = Field(..., description="校正后的值")
-    unit: str = Field("CNY", description="单位: CNY/ratio/percent/count")
+    unit: Literal["CNY", "ratio", "percent", "count"] = Field(
+        "CNY", description="单位: CNY/ratio/percent/count"
+    )
 
 
 class CorrectionTemplate(BaseModel):
@@ -38,14 +42,14 @@ class CorrectionTemplate(BaseModel):
 
     用户或外部 AI 填写此模板, 系统负责校验和发布。
     """
-    announcement_id: str | None = Field(None, description="CNINFO公告标识")
-    pdf_hash: str | None = Field(None, description="对应PDF的SHA256哈希")
-    page: int | None = Field(None, description="PDF页码")
-    report_period: str = Field(..., description="报告期, 如 2025-12-31")
-    stock_code: str = Field(..., description="股票代码")
-    unit: str = Field("CNY", description="默认单位")
-    reason: str = Field(..., description="校正原因")
-    fields: list[CorrectionField] = Field(..., description="拟写入的字段与数值")
+    announcement_id: str = Field(..., min_length=1, description="CNINFO公告标识")
+    pdf_hash: str = Field(..., pattern=r"^[0-9a-fA-F]{64}$", description="对应PDF的SHA256哈希")
+    page: int = Field(..., ge=1, description="PDF页码")
+    report_period: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="报告期, 如 2025-12-31")
+    stock_code: str = Field(..., pattern=r"^\d{6}$", description="股票代码")
+    unit: Literal["CNY", "ratio", "percent", "count"] = Field("CNY", description="默认单位")
+    reason: str = Field(..., min_length=1, description="校正原因")
+    fields: list[CorrectionField] = Field(..., min_length=1, description="拟写入的字段与数值")
     status: str = Field("draft", description="状态: draft/validated/previewed/published")
 
 
@@ -119,6 +123,9 @@ class CorrectionManager:
         if not template:
             return {"error": f"模板 {override_id} 不存在"}
 
+        if template.get("status_detail") != "draft":
+            return {"error": f"模板必须是草稿才能校验 (当前状态: {template.get('status_detail')})"}
+
         errors: list[str] = []
         warnings: list[str] = []
 
@@ -139,15 +146,17 @@ class CorrectionManager:
             # 检查校正值合理性
             try:
                 val = float(f["corrected_value"])
-                if val != val:  # NaN check
-                    errors.append(f"字段 {f['field_name']} 的校正值是 NaN")
+                if not math.isfinite(val):
+                    errors.append(f"字段 {f['field_name']} 的校正值必须是有限数值")
             except (TypeError, ValueError):
                 errors.append(f"字段 {f['field_name']} 的校正值不是数字")
 
-        # 检查报告期格式
+        # Check ISO date semantics, not only its string shape.
         rp = template.get("report_period", "")
-        if rp and len(rp) != 10:
-            warnings.append(f"报告期格式可能不正确: {rp} (期望 YYYY-MM-DD)")
+        try:
+            datetime.strptime(rp, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            errors.append(f"报告期格式不正确: {rp} (期望 YYYY-MM-DD)")
 
         valid = len(errors) == 0
 
@@ -170,6 +179,8 @@ class CorrectionManager:
         template = self._load_template(override_id)
         if not template:
             return {"error": f"模板 {override_id} 不存在"}
+        if template.get("status_detail") != "validated":
+            return {"error": f"模板必须先校验 (当前状态: {template.get('status_detail')})"}
 
         stock_code = template["stock_code"]
         report_period = template["report_period"]
@@ -245,32 +256,36 @@ class CorrectionManager:
         if not template:
             return {"error": f"模板 {override_id} 不存在"}
 
-        if template.get("status_detail") not in ("validated", "previewed"):
-            return {"error": f"模板必须先校验和预览 (当前状态: {template.get('status_detail')})"}
+        if template.get("status_detail") != "previewed":
+            return {"error": f"模板必须先完成影响预览 (当前状态: {template.get('status_detail')})"}
+        if not self._pdf_hash_exists(template["stock_code"], template["pdf_hash"]):
+            return {"error": "本地热存储或已验证归档中不存在模板指定的 PDF 哈希"}
 
-        # 写入 manual_overrides (与原始值分离)
+        # Write fields and lifecycle state atomically.  A published field with a
+        # previewed template is an ambiguous correction that must never escape.
         published_count = 0
-        for f in template["fields"]:
+        try:
             with self.sqlite.transaction() as conn:
-                conn.execute(
-                    """INSERT INTO manual_overrides
-                       (stock_code, field_name, report_date,
-                        original_value, override_value, reason, correction_template)
-                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                    [
-                        template["stock_code"],
-                        f["field_name"],
-                        template["report_period"],
-                        f.get("original_value"),
-                        f["corrected_value"],
-                        template["reason"],
-                        json.dumps(template, ensure_ascii=False, default=str),
-                    ],
-                )
-            published_count += 1
-
-        # 更新状态
-        self._update_status(override_id, "published")
+                for f in template["fields"]:
+                    conn.execute(
+                        """INSERT INTO manual_overrides
+                           (stock_code, field_name, report_date, original_value,
+                            override_value, reason, correction_template, status)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, 'published')""",
+                        [
+                            template["stock_code"],
+                            f["field_name"],
+                            template["report_period"],
+                            f.get("original_value"),
+                            f["corrected_value"],
+                            template["reason"],
+                            json.dumps(template, ensure_ascii=False, default=str),
+                        ],
+                    )
+                    published_count += 1
+                self._update_status_in_connection(conn, override_id, "published")
+        except Exception as error:
+            return {"error": f"校正字段发布失败: {error}"}
 
         logger.info(f"校正模板发布: {override_id}, {published_count} 个字段")
 
@@ -303,11 +318,11 @@ class CorrectionManager:
             cursor = conn.execute(
                 """INSERT INTO manual_overrides
                    (stock_code, field_name, report_date,
-                    override_value, reason, correction_template)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                    override_value, reason, correction_template, status)
+                   VALUES (?, ?, ?, ?, ?, ?, 'draft')""",
                 [
                     template.stock_code,
-                    template.fields[0].field_name if template.fields else "_template",
+                    "_template",
                     template.report_period,
                     0,  # placeholder
                     template.reason,
@@ -332,8 +347,8 @@ class CorrectionManager:
 
         try:
             template = json.loads(template_json)
-            # 状态从 JSON 中的 status 字段读取
-            template["status_detail"] = template.get("status", "draft")
+            # The database status is authoritative; JSON is only template content.
+            template["status_detail"] = row.get("status", "draft")
             return template
         except json.JSONDecodeError:
             return None
@@ -341,21 +356,60 @@ class CorrectionManager:
     def _update_status(self, override_id: int, status: str) -> None:
         """更新模板状态 — 直接更新 correction_template JSON 中的 status 字段"""
         rows = self.sqlite.query(
-            "SELECT correction_template FROM manual_overrides WHERE id = ?",
+            "SELECT correction_template, status FROM manual_overrides WHERE id = ?",
             [override_id],
         )
         if not rows or not rows[0].get("correction_template"):
             return
 
-        try:
-            template = json.loads(rows[0]["correction_template"])
-            template["status"] = status
-            template_json = json.dumps(template, ensure_ascii=False, default=str)
-            with self.sqlite.transaction() as conn:
-                conn.execute(
-                    "UPDATE manual_overrides SET correction_template = ? WHERE id = ?",
-                    [template_json, override_id],
-                )
-            logger.info(f"模板 {override_id} 状态更新为: {status}")
-        except Exception as e:
-            logger.warning(f"更新模板状态失败: {e}")
+        with self.sqlite.transaction() as conn:
+            self._update_status_in_connection(conn, override_id, status)
+        logger.info(f"模板 {override_id} 状态更新为: {status}")
+
+    def _update_status_in_connection(self, conn: Any, override_id: int, status: str) -> None:
+        row = conn.execute(
+            "SELECT correction_template, status FROM manual_overrides WHERE id = ?", [override_id]
+        ).fetchone()
+        if row is None or not row["correction_template"]:
+            raise ValueError(f"correction template {override_id} does not exist")
+        current = row["status"] or "draft"
+        allowed_from = {
+            "validated": {"draft"}, "previewed": {"validated"}, "published": {"previewed"},
+        }
+        if current not in allowed_from.get(status, set()):
+            raise ValueError(f"invalid correction lifecycle transition {current} -> {status}")
+        template = json.loads(row["correction_template"])
+        template["status"] = status
+        conn.execute(
+            "UPDATE manual_overrides SET correction_template = ?, status = ? WHERE id = ?",
+            [json.dumps(template, ensure_ascii=False, default=str), status, override_id],
+        )
+
+    def _pdf_hash_exists(self, stock_code: str, pdf_hash: str) -> bool:
+        """Require a local hot PDF or checksum-verified archive manifest match."""
+        from app.core.pdf.manager import PDFManager
+
+        manager = PDFManager(sqlite=self.sqlite)
+        stock_dir = manager.hot_dir / stock_code
+        if stock_dir.exists():
+            for pdf_path in stock_dir.glob("*.pdf"):
+                if self._hash_file(pdf_path) == pdf_hash:
+                    return True
+        rows = self.sqlite.query(
+            "SELECT archive_path, checksum FROM pdf_archive_manifest WHERE stock_code = ? AND checksum = ?",
+            [stock_code, pdf_hash],
+        )
+        return any(
+            Path(row["archive_path"]).exists()
+            and row["checksum"] == pdf_hash
+            and self._hash_file(Path(row["archive_path"])) == pdf_hash
+            for row in rows
+        )
+
+    @staticmethod
+    def _hash_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()

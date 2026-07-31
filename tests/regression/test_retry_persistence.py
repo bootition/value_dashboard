@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
@@ -13,6 +14,7 @@ class PriceAdapter:
     def fetch(self, request: FetchRequest) -> FetchResult:
         assert request.data_type == "price_daily"
         assert request.adjust == "qfq"
+        payload = b'{"trade_date":"2026-07-20","close":11.0}'
         return FetchResult(
             data=[
                 {
@@ -29,9 +31,10 @@ class PriceAdapter:
             metadata=SourceMetadata(
                 source="akshare_eastmoney",
                 fetch_time=datetime.now(timezone.utc),
-                raw_response_hash="a" * 64,
+                raw_response_hash=hashlib.sha256(payload).hexdigest(),
                 confidence="approximate",
             ),
+            raw_response=payload,
         )
 
 

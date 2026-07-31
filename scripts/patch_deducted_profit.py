@@ -20,11 +20,13 @@ import akshare as ak
 import duckdb
 import pandas as pd
 
+from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-DEFAULT_DB = PROJECT_ROOT / "data" / "valuedashboard.duckdb"
 CSMAR_CUTOFF = "2025-03-31"
 RATE_LIMIT = 0.5
 
@@ -123,13 +125,11 @@ def patch_deducted_profit(csv_path: Path, sample: int = 0) -> int:
     return updated_count
 
 
-def import_to_db(db_path: Path, csv_path: Path):
+def import_to_db(store: DuckDBStore, csv_path: Path):
     """导入更新后的数据到数据库"""
     print(f"\n=== 导入数据库 ===")
     
-    conn = duckdb.connect(str(db_path))
-    
-    try:
+    with store.transaction() as conn:
         # 读取 CSV
         df = pd.read_csv(csv_path, dtype={"stock_code": str})
         df["stock_code"] = df["stock_code"].str.zfill(6)
@@ -187,15 +187,17 @@ def import_to_db(db_path: Path, csv_path: Path):
         
         print(f"\n统计: {with_deducted} / {total} 行有扣非净利润 ({with_deducted/total*100:.1f}%)")
         
-    finally:
-        conn.close()
-
-
 def main():
     parser = argparse.ArgumentParser(description="补充扣非净利润数据")
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB)
+    parser.add_argument("--db", type=Path, help="DuckDB 路径（必须与已验证运行环境一致）")
     parser.add_argument("--sample", type=int, default=0, help="只处理前 N 只股票（0=全部）")
     args = parser.parse_args()
+    try:
+        paths = require_formal_maintenance_paths()
+    except PathIsolationError as error:
+        parser.error(str(error))
+    if args.db is not None and args.db.resolve(strict=False) != paths.duckdb_path:
+        parser.error("--db must match the validated VD_DUCKDB_PATH")
     
     csv_path = PROJECT_ROOT / "data" / "income_statement_akshare_temp.csv"
     
@@ -208,7 +210,7 @@ def main():
     
     if updated > 0:
         # 导入数据库
-        import_to_db(args.db, csv_path)
+        import_to_db(DuckDBStore(paths=paths), csv_path)
         print("\n[OK] 完成")
     else:
         print("\n[WARN] 没有更新任何数据")

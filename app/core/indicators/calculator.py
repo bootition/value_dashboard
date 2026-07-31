@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import logging
 import math
+import hashlib
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -83,10 +85,10 @@ class IndicatorCalculator:
         circ_shares = shares.get("circ_shares")
 
         # 获取TTM数据
-        ttm = self._get_ttm_data(stock_code)
+        ttm = self._get_ttm_data(stock_code, financials.get("report_date"))
 
         # 获取分红数据
-        dividends = self._get_dividend_summary(stock_code)
+        dividends = self._get_dividend_summary(stock_code, financials.get("report_date"))
 
         # ─── 1. 估值指标 ──────────────────────────────────────────
         result.update(self._calc_valuation(
@@ -110,25 +112,93 @@ class IndicatorCalculator:
 
         return result
 
-    def compute_snapshot_for_all(self, batch_size: int = 100) -> dict[str, Any]:
+    def compute_snapshot_for_all(
+        self,
+        batch_size: int = 100,
+        *,
+        publish_gate: Callable[[DuckDBStore, SQLiteStore], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         """为所有有财务数据的股票计算指标快照并写入 indicator_snapshot 表
 
         Args:
             batch_size: 每批处理的股票数量
+            publish_gate: 发布前质量门禁 (duck, sqlite) -> {"ready": bool, ...}；
+                默认使用 data_quality.snapshot_publish_gate（股本关系完整性），
+                调用方可注入更严格的门禁（如 screening_readiness）。
 
         Returns:
             计算报告
         """
-        # 只计算有财务数据的股票（避免对空数据股票做无意义查询）
-        stocks = self.duck.read_query("""
-            SELECT DISTINCT bs.stock_code
-            FROM balance_sheet bs
-            WHERE EXISTS (
-                SELECT 1 FROM income_statement ic
-                WHERE ic.stock_code = bs.stock_code
-            )
-            ORDER BY bs.stock_code
+        # A direct CLI invocation must obey the same minimum-data contract as
+        # initialization.  Do not publish a screenable snapshot for a subset
+        # of the current universe while another stock lacks core inputs.
+        readiness = self.duck.read_query("""
+            SELECT
+                m.stock_code,
+                EXISTS (
+                    SELECT 1
+                    FROM balance_sheet bs
+                    JOIN income_statement ic
+                      ON ic.stock_code = bs.stock_code AND ic.report_date = bs.report_date
+                    JOIN cash_flow cf
+                      ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
+                    WHERE bs.stock_code = m.stock_code
+                      AND bs.total_assets IS NOT NULL
+                      AND bs.total_liabilities IS NOT NULL
+                      AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
+                      AND ic.revenue IS NOT NULL
+                      AND ic.parent_net_profit IS NOT NULL
+                      AND cf.cf_from_operating IS NOT NULL
+                ) AS has_core_financials,
+                EXISTS (
+                    SELECT 1 FROM price_daily_raw raw
+                    WHERE raw.stock_code = m.stock_code AND raw.close IS NOT NULL
+                ) AS has_raw_price,
+                EXISTS (
+                    SELECT 1 FROM price_daily_qfq qfq
+                    WHERE qfq.stock_code = m.stock_code AND qfq.close IS NOT NULL
+                ) AS has_qfq_price
+            FROM stock_meta m
+            WHERE m.is_listed IS TRUE
+            ORDER BY m.stock_code
         """)
+        missing_codes = [
+            row["stock_code"]
+            for row in readiness
+            if not (
+                row["has_core_financials"]
+                and row["has_raw_price"]
+                and row["has_qfq_price"]
+            )
+        ]
+        if missing_codes:
+            return {
+                "status": "partial",
+                "reason": "minimum_data_not_ready",
+                "total": len(readiness),
+                "success": 0,
+                "failed": len(missing_codes),
+                "failed_codes": missing_codes[:20],
+            }
+        # P1-2修复: 发布快照前执行完整质量门禁（默认覆盖股本关系
+        # circ_shares<=total_shares；调用方可注入 screening_readiness 等
+        # 更严格门禁）。门禁不通过则拒绝发布，保留上一代已发布快照。
+        gate = publish_gate
+        if gate is None:
+            from app.core.data_quality import snapshot_publish_gate
+            gate = snapshot_publish_gate
+        gate_report = gate(self.duck, self.sqlite)
+        if not gate_report.get("ready"):
+            logger.warning("指标快照发布被质量门禁拒绝: %s", gate_report)
+            return {
+                "status": "rejected",
+                "reason": "publish_gate_failed",
+                "gate": gate_report,
+                "total": len(readiness),
+                "success": 0,
+                "failed": len(readiness),
+            }
+        stocks = [{"stock_code": row["stock_code"]} for row in readiness]
         total = len(stocks)
         if total == 0:
             return {"status": "skipped", "reason": "no stocks in stock_meta"}
@@ -138,57 +208,74 @@ class IndicatorCalculator:
         success = 0
         failed = 0
         failed_codes: list[str] = []
-        staging_table = f"indicator_snapshot_staging_{uuid.uuid4().hex}"
-        self._cleanup_snapshot_staging_tables()
-        self.duck.write_query(
-            f'CREATE TABLE "{staging_table}" AS '
-            "SELECT * FROM indicator_snapshot WHERE FALSE"
-        )
+        computed_records: list[dict[str, Any]] = []
 
-        try:
-            for i in range(0, total, batch_size):
-                batch = stocks[i:i + batch_size]
-                batch_records: list[dict] = []
+        # Reuse one snapshot-consistent read connection. Opening a new DuckDB
+        # connection for every metric query makes a full-universe calculation
+        # take hours.
+        with self.duck.read_connection() as connection:
+            self._calculation_read_connection = connection
+            try:
+                for i in range(0, total, batch_size):
+                    batch = stocks[i:i + batch_size]
 
-                for stock in batch:
-                    code = stock["stock_code"]
-                    try:
-                        indicators = self.compute_all_for_stock(code)
-                        if indicators.get("report_date") is None:
+                    for stock in batch:
+                        code = stock["stock_code"]
+                        try:
+                            indicators = self.compute_all_for_stock(code)
+                            if indicators.get("report_date") is None:
+                                failed += 1
+                                failed_codes.append(code)
+                                continue
+                            computed_records.append(indicators)
+                            success += 1
+                        except Exception as error:
                             failed += 1
                             failed_codes.append(code)
-                            continue
-                        batch_records.append(indicators)
-                        success += 1
-                    except Exception as error:
-                        failed += 1
-                        failed_codes.append(code)
-                        logger.debug("计算 %s 指标失败: %s", code, error)
+                            logger.debug("计算 %s 指标失败: %s", code, error)
 
-                if batch_records:
-                    self._write_batch(batch_records, staging_table)
+                    logger.info(
+                        "  指标计算进度: %s/%s (成功 %s, 失败 %s)",
+                        min(i + batch_size, total),
+                        total,
+                        success,
+                        failed,
+                    )
+            finally:
+                del self._calculation_read_connection
 
-                logger.info(
-                    "  指标计算进度: %s/%s (成功 %s, 失败 %s)",
-                    min(i + batch_size, total),
-                    total,
-                    success,
-                    failed,
-                )
+        # A partial recalculation must not erase previously usable snapshots.
+        # Publish only a complete replacement; callers receive failed codes and
+        # can retry without exposing a mixed-generation screening dataset.
+        if success > 0 and failed == 0:
+            staging_table = f"indicator_snapshot_staging_{uuid.uuid4().hex}"
+            self._cleanup_snapshot_staging_tables()
+            self.duck.write_query(
+                f'CREATE TABLE "{staging_table}" AS '
+                "SELECT * FROM indicator_snapshot WHERE FALSE"
+            )
+            try:
+                self._write_batch(computed_records, staging_table)
+                self._publish_snapshot(staging_table, expected_count=success, records=computed_records)
+            finally:
+                self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
 
-            if success > 0:
-                self._publish_snapshot(staging_table, expected_count=success)
+        logger.info("指标快照计算完成: 成功 %s, 失败 %s", success, failed)
+        return {
+            "status": "success" if failed == 0 else "partial",
+            "total": total,
+            "success": success,
+            "failed": failed,
+            "failed_codes": failed_codes[:20],
+        }
 
-            logger.info("指标快照计算完成: 成功 %s, 失败 %s", success, failed)
-            return {
-                "status": "success" if failed == 0 else "partial",
-                "total": total,
-                "success": success,
-                "failed": failed,
-                "failed_codes": failed_codes[:20],
-            }
-        finally:
-            self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
+    def _read_query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+        connection = getattr(self, "_calculation_read_connection", None)
+        if connection is None:
+            return self.duck.read_query(sql, params)
+        cursor = connection.execute(sql, params or [])
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
 
     # ─── 数据获取 ──────────────────────────────────────────────────
 
@@ -197,7 +284,7 @@ class IndicatorCalculator:
 
         M8-问题1修复: 应用人工覆写值 (PRD §9.5 R7: 覆写与原始值分离, 但计算时使用覆写值)
         """
-        rows = self.duck.read_query("""
+        rows = self._read_query("""
             SELECT
                 bs.report_date,
                 bs.monetary_funds, bs.accounts_receivable, bs.inventory,
@@ -239,28 +326,11 @@ class IndicatorCalculator:
 
         financials = rows[0]
 
-        # M8-问题1: 应用人工覆写 (PRD §9.5: 覆写值用于计算, 原始值保留在 source_audit)
-        try:
-            overrides = self.sqlite.query(
-                """SELECT field_name, override_value FROM manual_overrides
-                   WHERE stock_code = ? AND status = 'published'
-                   AND rolled_back_at IS NULL
-                   AND (report_date = ? OR report_date IS NULL)""",
-                [stock_code, str(financials.get("report_date", ""))],
-            )
-            for ov in overrides:
-                field = ov["field_name"]
-                if field in financials:
-                    financials[field] = ov["override_value"]
-                    logger.debug(f"应用人工覆写: {stock_code}.{field} = {ov['override_value']}")
-        except Exception as e:
-            logger.debug(f"读取人工覆写失败 (非致命): {e}")
-
-        return financials
+        return self._apply_published_overrides(stock_code, [financials])[0]
 
     def _get_latest_price(self, stock_code: str) -> dict[str, Any]:
         """获取最新收盘价"""
-        rows = self.duck.read_query("""
+        rows = self._read_query("""
             SELECT trade_date, close, volume, turnover
             FROM price_daily_raw
             WHERE stock_code = ? AND close IS NOT NULL
@@ -275,7 +345,7 @@ class IndicatorCalculator:
 
         从 stock_meta 表获取真实的总股本和流通股本（单位：股）。
         """
-        rows = self.duck.read_query("""
+        rows = self._read_query("""
             SELECT total_shares, circ_shares
             FROM stock_meta
             WHERE stock_code = ?
@@ -286,11 +356,11 @@ class IndicatorCalculator:
             circ_shares = rows[0].get("circ_shares")
             return {
                 "total_shares": total_shares,
-                "circ_shares": circ_shares or total_shares,
+                "circ_shares": circ_shares,
             }
         return {"total_shares": None, "circ_shares": None}
 
-    def _get_ttm_data(self, stock_code: str) -> dict[str, Any]:
+    def _get_ttm_data(self, stock_code: str, as_of_date: Any | None = None) -> dict[str, Any]:
         """计算TTM（滚动十二个月）数据
 
         标准 TTM = 最近4个季度的单季度值之和
@@ -301,7 +371,7 @@ class IndicatorCalculator:
         PRD §9.1: 允许 approximate 值，需标记 confidence。
         """
         # 获取最近8个季度的累计值（足够计算TTM和YoY）
-        rows = self.duck.read_query("""
+        rows = self._read_query("""
             SELECT
                 ic.report_date,
                 ic.revenue, ic.cost_of_revenue,
@@ -317,12 +387,15 @@ class IndicatorCalculator:
             LEFT JOIN cash_flow cf
                 ON ic.stock_code = cf.stock_code AND ic.report_date = cf.report_date
             WHERE ic.stock_code = ?
+              AND (? IS NULL OR ic.report_date <= CAST(? AS DATE))
             ORDER BY ic.report_date DESC
             LIMIT 8
-        """, [stock_code])
+        """, [stock_code, str(as_of_date) if as_of_date else None, str(as_of_date) if as_of_date else None])
 
         if not rows:
             return {}
+
+        rows = self._apply_published_overrides(stock_code, rows)
 
         latest = rows[0]
         latest_date = str(latest.get("report_date", ""))
@@ -334,16 +407,24 @@ class IndicatorCalculator:
         # 情况2: 最新报告期是季报，用累计值差分
         # 正确TTM = 最新年报 + 最新累计 - 去年同期累计
         # 例: Q1 2025 TTM = 2024年报 + Q1_2025累计 - Q1_2024累计
-        if len(rows) >= 5:
+        if len(rows) >= 2:
             current_cumulative = rows[0]
-            year_ago_cumulative = rows[4]  # 4个季度前的同期累计
+            current_date = str(current_cumulative.get("report_date", ""))[:10]
+            try:
+                year_ago_date = f"{int(current_date[:4]) - 1}{current_date[4:]}"
+            except (TypeError, ValueError):
+                return {"_ttm_confidence": "missing", "_ttm_reason": "invalid_report_date"}
+            year_ago_cumulative = next(
+                (row for row in rows if str(row.get("report_date", ""))[:10] == year_ago_date),
+                None,
+            )
 
-            # 找最近的年报（12-31）
-            annual = None
-            for row in rows:
-                if "12-31" in str(row.get("report_date", "")):
-                    annual = row
-                    break
+            # TTM requires exactly the previous fiscal year-end, never an older annual report.
+            annual_date = f"{int(current_date[:4]) - 1}-12-31"
+            annual = next(
+                (row for row in rows if str(row.get("report_date", ""))[:10] == annual_date),
+                None,
+            )
 
             ttm: dict[str, Any] = {"report_date": current_cumulative["report_date"]}
             for key in ["revenue", "cost_of_revenue", "gross_profit",
@@ -354,13 +435,17 @@ class IndicatorCalculator:
                         "interest_expense", "investment_income", "total_profit",
                         "income_tax", "cf_from_operating"]:
                 curr = current_cumulative.get(key)
-                prev = year_ago_cumulative.get(key)
+                prev = year_ago_cumulative.get(key) if year_ago_cumulative else None
                 if annual and curr is not None and prev is not None:
                     ann_val = annual.get(key)
                     if ann_val is not None:
                         ttm[key] = ann_val + curr - prev
                     else:
                         ttm[key] = None
+                elif year_ago_cumulative is None:
+                    ttm[key] = None
+                    ttm["_ttm_confidence"] = "missing"
+                    ttm["_ttm_reason"] = "prior_year_same_period_missing"
                 elif curr is not None and prev is not None:
                     # P0#10修复: 无年报数据时, 累计差分 (curr-prev) 不是 TTM
                     # 例: Q1_2025 - Q1_2024 = 同比增量, 而非12个月滚动总和
@@ -380,15 +465,19 @@ class IndicatorCalculator:
         logger.warning(f"TTM 数据不足: {stock_code} (仅 {len(rows)} 个季度, 需要至少5个)")
         return {"_ttm_confidence": "missing", "_ttm_reason": "insufficient_history"}
 
-    def _get_dividend_summary(self, stock_code: str) -> dict[str, Any]:
-        """获取分红摘要"""
-        rows = self.duck.read_query("""
+    def _get_dividend_summary(self, stock_code: str, as_of_date: Any | None = None) -> dict[str, Any]:
+        """Return only dividends known on the snapshot's reporting date."""
+        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        rows = self._read_query("""
             WITH valid_dividends AS (
                 SELECT ex_date, dividend_per_share
                 FROM dividends
                 WHERE stock_code = ?
                   AND dividend_per_share IS NOT NULL
                   AND dividend_per_share > 0
+                  AND announcement_date IS NOT NULL
+                  AND ex_date <= CAST(? AS DATE)
+                  AND announcement_date <= CAST(? AS DATE)
             ), latest AS (
                 SELECT MAX(EXTRACT(YEAR FROM ex_date)) AS latest_year
                 FROM valid_dividends
@@ -404,7 +493,7 @@ class IndicatorCalculator:
                          THEN dividend_per_share ELSE 0 END) as latest_dps
             FROM valid_dividends
             CROSS JOIN latest
-        """, [stock_code])
+        """, [stock_code, str(as_of_date), str(as_of_date)])
 
         return rows[0] if rows else {}
 
@@ -442,8 +531,8 @@ class IndicatorCalculator:
 
         # PB-MRQ = 总市值 / 最新报告期归母权益
         # P0#9修复: PB>200 时置NULL (权益接近0导致PB虚高，业务无意义)
-        equity = financials.get("total_equity_parent") or financials.get("total_equity")
-        if close and shares and equity and equity > 0:
+        equity = financials.get("total_equity_parent") if financials.get("total_equity_parent") is not None else financials.get("total_equity")
+        if close and shares and equity is not None and equity > 0:
             pb = (close * shares) / equity
             result["pb_mrq"] = pb if pb <= 200 else None
         else:
@@ -464,30 +553,35 @@ class IndicatorCalculator:
             result["pcf_ttm"] = None
 
         # 股息率 = 最近12个月每股股息 / 最新收盘价
-        total_dps = dividends.get("total_dps")
-        if close and close > 0 and total_dps and total_dps > 0:
-            # 简化：用历史总DPS近似最近12个月DPS
-            # 精确实现需要筛选最近一年的分红记录
-            result["dividend_yield"] = self._calc_dividend_yield(stock_code, close)
+        if close and close > 0:
+            result["dividend_yield"] = self._calc_dividend_yield(
+                stock_code, close, price.get("trade_date")
+            )
         else:
             result["dividend_yield"] = None
 
         return result
 
-    def _calc_dividend_yield(self, stock_code: str, close: float) -> float | None:
+    def _calc_dividend_yield(
+        self, stock_code: str, close: float, as_of_date: Any | None = None,
+    ) -> float | None:
         """计算最近12个月股息率
 
-        注: CSMAR学术数据集有滞后(截止2024-12-31), 使用2年窗口确保捕获最新分红.
-        生产环境 vd data update 补充最新数据后可收紧到1年.
+        Only distributions in the trailing twelve months are relevant. Older
+        data is a missing-data condition, not a reason to inflate the yield.
         """
-        rows = self.duck.read_query("""
+        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        rows = self._read_query("""
             SELECT SUM(dividend_per_share) as dps
             FROM dividends
             WHERE stock_code = ?
-              AND dividend_per_share IS NOT NULL
-              AND dividend_per_share > 0
-              AND ex_date >= CURRENT_DATE - INTERVAL '2 years'
-        """, [stock_code])
+               AND dividend_per_share IS NOT NULL
+               AND dividend_per_share > 0
+               AND announcement_date IS NOT NULL
+               AND announcement_date <= CAST(? AS DATE)
+               AND ex_date <= CAST(? AS DATE)
+               AND ex_date >= CAST(? AS DATE) - INTERVAL '1 year'
+        """, [stock_code, str(as_of_date), str(as_of_date), str(as_of_date)])
 
         if rows and rows[0].get("dps"):
             dps = rows[0]["dps"]
@@ -504,16 +598,6 @@ class IndicatorCalculator:
         gross_profit = ttm.get("gross_profit")
         op_cf = ttm.get("cf_from_operating")
 
-        # 如果TTM没有，退化到最新报告期
-        if not revenue:
-            revenue = financials.get("revenue") or financials.get("total_operating_revenue")
-        if not net_profit:
-            net_profit = financials.get("net_profit")
-        if not parent_profit:
-            parent_profit = financials.get("parent_net_profit")
-        if not gross_profit:
-            gross_profit = financials.get("gross_profit")
-
         # P1-24修复: ROE/ROA使用平均值(期初+期末)/2而非期末值
         # 获取上一期权益和总资产
         prev_equity = None
@@ -521,25 +605,30 @@ class IndicatorCalculator:
         if stock_code:
             report_date = financials.get("report_date")
             if report_date:
-                prev_rows = self.duck.read_query(
+                prior_year_same_period = (
+                    f"{int(str(report_date)[:4]) - 1}{str(report_date)[4:]}"
+                    if len(str(report_date)) >= 10 else None
+                )
+                prev_rows = self._read_query(
                     """SELECT total_equity_parent, total_equity, total_assets
                        FROM balance_sheet
-                       WHERE stock_code = ? AND report_date < ?
-                       ORDER BY report_date DESC LIMIT 1""",
-                    [stock_code, str(report_date)],
+                       WHERE stock_code = ? AND report_date = CAST(? AS DATE)""",
+                    [stock_code, prior_year_same_period],
                 )
                 if prev_rows:
-                    prev_equity = prev_rows[0].get("total_equity_parent") or prev_rows[0].get("total_equity")
-                    prev_assets = prev_rows[0].get("total_assets")
+                    prior = self._apply_published_overrides(stock_code, prev_rows)[0]
+                    prev_equity_parent = prior.get("total_equity_parent")
+                    prev_equity = prev_equity_parent if prev_equity_parent is not None else prior.get("total_equity")
+                    prev_assets = prior.get("total_assets")
 
         # ROE = TTM归母净利润 / 平均归母权益
         # V2-3.3修复: |ROE|>1.0 时置NULL
         # P1-24修复: 用(期初+期末)/2而非期末值
-        equity = financials.get("total_equity_parent") or financials.get("total_equity")
-        avg_equity = equity
-        if prev_equity and equity:
+        equity = financials.get("total_equity_parent") if financials.get("total_equity_parent") is not None else financials.get("total_equity")
+        avg_equity = None
+        if prev_equity is not None and equity is not None:
             avg_equity = (prev_equity + equity) / 2
-        if parent_profit is not None and avg_equity and avg_equity > 0:
+        if parent_profit is not None and avg_equity is not None and avg_equity > 0:
             roe = parent_profit / avg_equity
             result["roe"] = roe if abs(roe) <= 1.0 else None
         else:
@@ -548,8 +637,8 @@ class IndicatorCalculator:
         # ROA = TTM净利润 / 平均总资产
         # P1-24修复: 用(期初+期末)/2而非期末值
         total_assets = financials.get("total_assets")
-        avg_assets = total_assets
-        if prev_assets and total_assets:
+        avg_assets = None
+        if prev_assets is not None and total_assets is not None:
             avg_assets = (prev_assets + total_assets) / 2
         if net_profit is not None and avg_assets and avg_assets > 0:
             result["roa"] = net_profit / avg_assets
@@ -558,7 +647,7 @@ class IndicatorCalculator:
 
         # 毛利率 = (营收 - 营业成本) / 营收
         # P0#9修复: 毛利率范围限制在 [-1, 1], 超出置 NULL
-        cost = ttm.get("cost_of_revenue") or financials.get("cost_of_revenue")
+        cost = ttm.get("cost_of_revenue")
         if revenue and revenue > 0 and cost is not None:
             gm = (revenue - cost) / revenue
             result["gross_margin"] = gm if -1.0 <= gm <= 1.0 else None
@@ -576,7 +665,7 @@ class IndicatorCalculator:
 
         # ROIC = TTM营业利润 / 投入资本
         # 投入资本 = 总权益 + 有息负债
-        op_profit = ttm.get("operating_profit") or financials.get("operating_profit")
+        op_profit = ttm.get("operating_profit")
         interest_debt = self._calc_interest_bearing_debt(financials)
         invested_capital = None
         if equity and interest_debt is not None:
@@ -599,11 +688,12 @@ class IndicatorCalculator:
         result: dict[str, Any] = {}
 
         # 获取历史年度数据用于 YoY 和 CAGR
-        rows = self.duck.read_query("""
+        rows = self._read_query("""
             SELECT report_date, revenue, parent_net_profit, deducted_net_profit
             FROM income_statement
             WHERE stock_code = ?
-              AND EXTRACT(MONTH FROM report_date) = 12
+               AND EXTRACT(MONTH FROM report_date) = 12
+               AND EXTRACT(DAY FROM report_date) = 31
             ORDER BY report_date DESC
             LIMIT 7
         """, [stock_code])
@@ -618,9 +708,15 @@ class IndicatorCalculator:
             })
             return result
 
-        # YoY = (今年 - 去年) / |去年|
-        if len(rows) >= 2:
-            curr, prev = rows[0], rows[1]
+        rows = self._apply_published_overrides(stock_code, rows)
+
+        years = {int(str(row["report_date"])[:4]): row for row in rows}
+        current_year = max(years)
+        current = years[current_year]
+
+        # YoY requires an exact prior annual report.
+        if current_year - 1 in years:
+            curr, prev = current, years[current_year - 1]
             result["revenue_yoy"] = self._yoy(curr.get("revenue"), prev.get("revenue"))
             result["net_profit_yoy"] = self._yoy(
                 curr.get("parent_net_profit"), prev.get("parent_net_profit"))
@@ -632,16 +728,18 @@ class IndicatorCalculator:
             result["deducted_profit_yoy"] = None
 
         # CAGR = (末值/初值)^(1/n) - 1
-        result["revenue_cagr3"] = self._cagr([r.get("revenue") for r in rows], 3)
-        result["revenue_cagr5"] = self._cagr([r.get("revenue") for r in rows], 5)
-        result["net_profit_cagr3"] = self._cagr(
-            [r.get("parent_net_profit") for r in rows], 3)
-        result["net_profit_cagr5"] = self._cagr(
-            [r.get("parent_net_profit") for r in rows], 5)
-        result["deducted_profit_cagr3"] = self._cagr(
-            [r.get("deducted_net_profit") for r in rows], 3)
-        result["deducted_profit_cagr5"] = self._cagr(
-            [r.get("deducted_net_profit") for r in rows], 5)
+        def cagr(field: str, years_back: int) -> float | None:
+            required = set(range(current_year - years_back, current_year + 1))
+            if not required.issubset(years):
+                return None
+            return self._cagr([years[year].get(field) for year in range(current_year, current_year - years_back - 1, -1)], years_back)
+
+        result["revenue_cagr3"] = cagr("revenue", 3)
+        result["revenue_cagr5"] = cagr("revenue", 5)
+        result["net_profit_cagr3"] = cagr("parent_net_profit", 3)
+        result["net_profit_cagr5"] = cagr("parent_net_profit", 5)
+        result["deducted_profit_cagr3"] = cagr("deducted_net_profit", 3)
+        result["deducted_profit_cagr5"] = cagr("deducted_net_profit", 5)
 
         return result
 
@@ -680,12 +778,8 @@ class IndicatorCalculator:
         result["interest_bearing_debt"] = self._calc_interest_bearing_debt(financials)
 
         # 利息保障倍数 = TTM营业利润 / TTM利息费用
-        # V2-3.1修复: interest_expense 缺失时用 financial_expenses 近似（覆盖率从1.6%提升到~95%）
-        op_profit = ttm.get("operating_profit") or financials.get("operating_profit")
-        interest_expense = ttm.get("interest_expense") or financials.get("interest_expense")
-        if interest_expense is None:
-            # 多数企业只报告 financial_expenses 不单独报告 interest_expense
-            interest_expense = ttm.get("financial_expenses") or financials.get("financial_expenses")
+        op_profit = ttm.get("operating_profit")
+        interest_expense = ttm.get("interest_expense")
         if (op_profit is not None and interest_expense is not None
                 and abs(interest_expense) > 0):
             result["interest_coverage"] = op_profit / abs(interest_expense)
@@ -708,11 +802,8 @@ class IndicatorCalculator:
         """5. 股东回报指标"""
         result: dict[str, Any] = {}
 
-        # 分红率 = 每股股息 / 每股收益
-        # P1-18修复: 使用最新一年DPS而非历史最大DPS
+        # 分红率 = 已验证的最近年度每股股息 / 每股收益
         dps = dividends.get("latest_dps")  # 最新一年DPS
-        if dps is None:
-            dps = dividends.get("max_dps")  # 回退到max（兼容旧数据）
         eps = ttm.get("parent_net_profit")
         shares = total_shares
         if dps and eps and shares and shares > 0:
@@ -728,7 +819,9 @@ class IndicatorCalculator:
         result["dps"] = dps
 
         # 连续分红年数（从最近年份往前数连续分红的年数）
-        result["consecutive_div_years"] = self._calc_consecutive_div_years(stock_code)
+        result["consecutive_div_years"] = self._calc_consecutive_div_years(
+            stock_code, financials.get("report_date")
+        )
 
         return result
 
@@ -736,12 +829,16 @@ class IndicatorCalculator:
         """6. 行情与技术统计指标"""
         result: dict[str, Any] = {}
 
-        # 获取最近250个交易日的价格数据（含换手率）
-        rows = self.duck.read_query("""
-            SELECT trade_date, close, volume, turnover, turnover_rate
-            FROM price_daily_raw
-            WHERE stock_code = ?
-            ORDER BY trade_date DESC
+        # Raw prices remain appropriate for moving averages and volume. Returns,
+        # volatility and drawdown must use QFQ closes to remove corporate-action gaps.
+        rows = self._read_query("""
+            SELECT raw.trade_date, raw.close AS raw_close, raw.volume, raw.turnover,
+                   raw.turnover_rate, qfq.close AS qfq_close
+            FROM price_daily_raw raw
+            LEFT JOIN price_daily_qfq qfq
+              ON qfq.stock_code = raw.stock_code AND qfq.trade_date = raw.trade_date
+            WHERE raw.stock_code = ?
+            ORDER BY raw.trade_date DESC
             LIMIT 250
         """, [stock_code])
 
@@ -754,9 +851,20 @@ class IndicatorCalculator:
 
         # 按时间正序排列（旧→新）
         rows.reverse()
-        closes = [r["close"] for r in rows if r["close"] is not None]
-        volumes = [r["volume"] for r in rows if r["volume"] is not None]
-        turn_rates = [r["turnover_rate"] for r in rows if r["turnover_rate"] is not None]
+        expected_trading_dates = self._expected_trading_dates(rows)
+        if expected_trading_dates is None:
+            for key in ["ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+                        "turnover_rate", "avg_volume", "period_return",
+                        "annualized_volatility", "max_drawdown"]:
+                result[key] = None
+            return result
+        # Without a persisted calendar, gaps cannot be distinguished from
+        # non-trading days. Fail closed instead of inventing a contiguous run.
+        closes = self._trailing_contiguous_closes(rows, "raw_close", expected_trading_dates)
+        qfq_closes = self._trailing_contiguous_closes(rows, "qfq_close", expected_trading_dates)
+        trailing_rows = self._trailing_contiguous_rows(rows, expected_trading_dates)
+        volumes = [row["volume"] for row in trailing_rows if row["volume"] is not None]
+        turn_rates = [row["turnover_rate"] for row in trailing_rows if row["turnover_rate"] is not None]
 
         if not closes:
             for key in ["ma5", "ma10", "ma20", "ma60", "ma120", "ma250"]:
@@ -778,18 +886,22 @@ class IndicatorCalculator:
         else:
             result["avg_volume"] = None
 
-        # 区间收益率 (最近250日)
-        if len(closes) >= 2:
-            result["period_return"] = (closes[-1] - closes[0]) / closes[0] if closes[0] != 0 else None
+        # QFQ return/volatility/drawdown use the trailing uninterrupted QFQ run.
+        # Never compact values across a missing QFQ observation into a fake series.
+        if len(qfq_closes) >= 2:
+            result["period_return"] = (
+                (qfq_closes[-1] - qfq_closes[0]) / qfq_closes[0]
+                if qfq_closes[0] != 0 else None
+            )
         else:
             result["period_return"] = None
 
         # 年化波动率 (最近60日日收益率标准差 × sqrt(250))
-        if len(closes) >= 20:
+        if len(qfq_closes) >= 21:
             returns = []
-            for i in range(1, min(len(closes), 60)):
-                if closes[i - 1] and closes[i - 1] != 0:
-                    returns.append((closes[i] - closes[i - 1]) / closes[i - 1])
+            recent_qfq = qfq_closes[-60:]
+            for i in range(1, len(recent_qfq)):
+                returns.append((recent_qfq[i] - recent_qfq[i - 1]) / recent_qfq[i - 1])
             if len(returns) >= 2:
                 avg_ret = sum(returns) / len(returns)
                 variance = sum((r - avg_ret) ** 2 for r in returns) / (len(returns) - 1)
@@ -800,10 +912,10 @@ class IndicatorCalculator:
             result["annualized_volatility"] = None
 
         # 最大回撤 (最近250日)
-        if len(closes) >= 2:
-            max_price = closes[0]
+        if len(qfq_closes) >= 2:
+            max_price = qfq_closes[0]
             max_drawdown = 0.0
-            for price in closes[1:]:
+            for price in qfq_closes[1:]:
                 if price > max_price:
                     max_price = price
                 if max_price > 0:
@@ -832,6 +944,30 @@ class IndicatorCalculator:
             return None
         return (curr - prev) / abs(prev)
 
+    def _apply_published_overrides(
+        self, stock_code: str, rows: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Overlay published corrections on every financial period used in a calculation."""
+        if not rows:
+            return rows
+        by_date = {str(row.get("report_date", ""))[:10]: row for row in rows}
+        try:
+            overrides = self.sqlite.query(
+                """SELECT field_name, report_date, override_value FROM manual_overrides
+                   WHERE stock_code = ? AND status = 'published' AND rolled_back_at IS NULL""",
+                [stock_code],
+            )
+        except Exception as error:
+            logger.debug("读取人工覆写失败 (非致命): %s", error)
+            return rows
+        for override in overrides:
+            report_date = override.get("report_date")
+            targets = [by_date.get(str(report_date)[:10])] if report_date else list(rows)
+            for target in targets:
+                if target is not None and override["field_name"] in target:
+                    target[override["field_name"]] = override["override_value"]
+        return rows
+
     @staticmethod
     def _cagr(values: list[float | None], n: int) -> float | None:
         """复合年增长率"""
@@ -853,32 +989,38 @@ class IndicatorCalculator:
     @staticmethod
     def _calc_interest_bearing_debt(financials: dict) -> float | None:
         """有息负债 = 短期借款 + 长期借款 + 应付债券"""
-        st = financials.get("short_term_loans") or 0
-        lt = financials.get("long_term_loans") or 0
-        bp = financials.get("bonds_payable") or 0
+        st = financials.get("short_term_loans")
+        lt = financials.get("long_term_loans")
+        bp = financials.get("bonds_payable")
+        if st is None or lt is None or bp is None:
+            return None
         total = st + lt + bp
-        return total if total > 0 else None
+        return total
 
-    def _calc_consecutive_div_years(self, stock_code: str) -> int:
+    def _calc_consecutive_div_years(self, stock_code: str, as_of_date: Any | None = None) -> int | None:
         """计算连续分红年数（从最近年份往前数连续分红的年数）
 
         例如：公司2018/2019/2021/2022年分红 → 返回2（2021-2022连续）
         如果2023也分红 → 返回3（2021-2023连续）
         """
-        rows = self.duck.read_query("""
+        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        rows = self._read_query("""
             SELECT DISTINCT EXTRACT(YEAR FROM ex_date) as yr
             FROM dividends
             WHERE stock_code = ?
               AND dividend_per_share IS NOT NULL
               AND dividend_per_share > 0
+              AND announcement_date IS NOT NULL
+              AND ex_date <= CAST(? AS DATE)
+              AND announcement_date <= CAST(? AS DATE)
             ORDER BY yr DESC
-        """, [stock_code])
+        """, [stock_code, str(as_of_date), str(as_of_date)])
 
         if not rows:
-            return 0
+            return None
 
         years = sorted([r["yr"] for r in rows], reverse=True)
-        current_year = datetime.now().year
+        current_year = int(str(as_of_date)[:4])
 
         # 允许最近1年没分红（可能是当年还未到分红日）
         # 从最近的分红年份开始往前数
@@ -889,7 +1031,7 @@ class IndicatorCalculator:
         # 如果最新分红年份是近三年内，开始计数
         # (CSMAR学术数据集有滞后，放宽到 current_year-2; 生产环境 vd data update 会补充最新)
         if latest_year < current_year - 2:
-            return 0  # 最近三年都没分红
+            return None  # 最近三年都没分红
 
         consecutive = 0
         expected_year = latest_year
@@ -901,6 +1043,68 @@ class IndicatorCalculator:
                 break
 
         return consecutive
+
+    def _expected_trading_dates(self, rows: list[dict[str, Any]]) -> set[str] | None:
+        """Return persisted expected dates for this price window, when available."""
+        if len(rows) < 2:
+            return None
+        start_date = str(rows[0].get("trade_date", ""))[:10]
+        end_date = str(rows[-1].get("trade_date", ""))[:10]
+        if not start_date or not end_date:
+            return None
+        try:
+            calendar_rows = self.sqlite.query(
+                """SELECT trade_date FROM trading_dates
+                   WHERE trade_date >= ? AND trade_date <= ?""",
+                [start_date, end_date],
+            )
+        except Exception as error:
+            logger.debug("交易日历不可用，跳过日期连续性校验: %s", error)
+            return None
+        expected_dates = {str(row["trade_date"])[:10] for row in calendar_rows}
+        return expected_dates or None
+
+    @staticmethod
+    def _trailing_contiguous_closes(
+        rows: list[dict[str, Any]], field: str, expected_trading_dates: set[str] | None = None,
+    ) -> list[float]:
+        """Return the latest valid run without bridging persisted expected trading days."""
+        closes: list[float] = []
+        newer_date: str | None = None
+        for row in reversed(rows):
+            value = row.get(field)
+            if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                break
+            trade_date = str(row.get("trade_date", ""))[:10]
+            if not trade_date:
+                break
+            if newer_date is not None and expected_trading_dates is not None:
+                if any(trade_date < date < newer_date for date in expected_trading_dates):
+                    break
+            closes.append(float(value))
+            newer_date = trade_date
+        closes.reverse()
+        return closes
+
+    @staticmethod
+    def _trailing_contiguous_rows(
+        rows: list[dict[str, Any]], expected_trading_dates: set[str],
+    ) -> list[dict[str, Any]]:
+        """Return the latest calendar-contiguous raw window without compacting gaps."""
+        trailing: list[dict[str, Any]] = []
+        newer_date: str | None = None
+        for row in reversed(rows):
+            trade_date = str(row.get("trade_date", ""))[:10]
+            if not trade_date:
+                break
+            if newer_date is not None and any(
+                trade_date < expected < newer_date for expected in expected_trading_dates
+            ):
+                break
+            trailing.append(row)
+            newer_date = trade_date
+        trailing.reverse()
+        return trailing
 
     # ─── 写入 ──────────────────────────────────────────────────────
 
@@ -918,7 +1122,9 @@ class IndicatorCalculator:
             for table in tables:
                 connection.execute(f'DROP TABLE IF EXISTS "{table["table_name"]}"')
 
-    def _publish_snapshot(self, staging_table: str, expected_count: int) -> None:
+    def _publish_snapshot(
+        self, staging_table: str, expected_count: int, records: list[dict[str, Any]],
+    ) -> None:
         with self.duck.transaction() as connection:
             row_count = connection.execute(
                 f'SELECT COUNT(*) FROM "{staging_table}"'
@@ -950,6 +1156,7 @@ class IndicatorCalculator:
             connection.execute(
                 f'INSERT INTO indicator_snapshot BY NAME SELECT * FROM "{staging_table}"'
             )
+            self._record_derived_lineage_in_connection(connection, records)
 
     def _write_batch(self, records: list[dict], table_name: str = "indicator_snapshot") -> None:
         """批量写入指标快照
@@ -964,10 +1171,13 @@ class IndicatorCalculator:
             "WHERE table_name = ? ORDER BY ordinal_position",
             [table_name],
         )
-        available_cols = {c["column_name"] for c in cols_info}
-
-        # 使用第一条记录确定字段（假设所有记录结构相同）
-        fields = [k for k in records[0] if k in available_cols]
+        # Records may differ by source or data availability. Keep every schema
+        # column emitted by any record instead of silently dropping late fields.
+        fields = [
+            column["column_name"]
+            for column in cols_info
+            if any(column["column_name"] in record for record in records)
+        ]
         if not fields:
             return
 
@@ -980,3 +1190,58 @@ class IndicatorCalculator:
 
         with self.duck.write_connection() as conn:
             conn.executemany(sql, all_values)
+
+    def _record_derived_lineage(self, records: list[dict[str, Any]]) -> None:
+        """Write lineage for every published snapshot value from the final table.
+
+        The calculator cannot claim strict confidence unless all upstream inputs
+        are verifiably strict; until that propagation is available it records
+        derived values as approximate with a formula/data-version marker.
+        """
+        with self.duck.transaction() as connection:
+            self._record_derived_lineage_in_connection(connection, records)
+
+    def _record_derived_lineage_in_connection(
+        self, connection: Any, records: list[dict[str, Any]],
+    ) -> None:
+        formula = "indicator_calculator/latest_restated/v1"
+        batch_id = str(uuid.uuid4())
+        raw_hash = hashlib.sha256(formula.encode("utf-8")).hexdigest()
+        if not records:
+            return
+        audit_rows: list[tuple[Any, ...]] = []
+        excluded = {"stock_code", "report_date", "latest_price_date", "calculated_at", "data_version"}
+        for row in records:
+            for field_name, value in row.items():
+                if field_name in excluded or not isinstance(value, (int, float)):
+                    continue
+                audit_rows.append((
+                    row["stock_code"], field_name, row["report_date"], value,
+                    "derived_calculator", batch_id, datetime.now(timezone.utc), raw_hash,
+                    "approximate", "derived_input_lineage_pending", "indicator_calculator/v1",
+                    row["report_date"], "latest_restated", formula,
+                ))
+        connection.execute(
+            """INSERT INTO fetch_batch
+               (batch_id, data_type, source, adapter_version, fetch_time, raw_response_hash,
+                row_count, confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [batch_id, "indicator_snapshot", "derived_calculator", "indicator_calculator/v1",
+             datetime.now(timezone.utc), raw_hash, len(audit_rows), "approximate"],
+        )
+        connection.execute(
+            """INSERT INTO raw_response_archive
+               (raw_response_hash, source, fetch_time, payload, api_version, integrity_verified)
+               VALUES (?, ?, ?, ?, ?, TRUE)
+               ON CONFLICT(raw_response_hash) DO NOTHING""",
+            [raw_hash, "derived_calculator", datetime.now(timezone.utc), formula.encode("utf-8"),
+             "indicator_calculator/v1"],
+        )
+        connection.executemany(
+            """INSERT INTO source_audit
+               (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time,
+                raw_response_hash, confidence, reason_code, api_version, effective_date,
+                data_version, formula)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            audit_rows,
+        )

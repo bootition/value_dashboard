@@ -4,28 +4,39 @@
 # TECH_PLAN §1.4: --onedir 模式 (安装时解压一次, 之后秒启)
 
 import os
-import sys
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
-# 收集所有数据文件
-datas = []
+PROJECT_ROOT = os.path.abspath(SPECPATH)
 
-# 前端静态资源
-frontend_static = 'app/web/static'
-if os.path.isdir(frontend_static):
-    datas.append((frontend_static, 'app/web/static'))
 
-# 配置文件
-config_dir = 'config'
-if os.path.isdir(config_dir):
-    datas.append((config_dir, 'config'))
+def required_directory(relative_path):
+    path = os.path.join(PROJECT_ROOT, relative_path)
+    if not os.path.isdir(path):
+        raise SystemExit(f"Required release directory is missing: {path}")
+    return path
 
-# DSL 语法文件
-datas.append(('app/core/dsl/grammar.lark', 'app/core/dsl'))
 
-# OpenCode skill 文件
-datas.append(('app/cli/opencode_skill.md', 'app/cli'))
+def required_file(relative_path):
+    path = os.path.join(PROJECT_ROOT, relative_path)
+    if not os.path.isfile(path):
+        raise SystemExit(f"Required release file is missing: {path}")
+    return path
+
+
+# Release contract: code resources only. Mutable user data is deliberately
+# excluded and must be provisioned beside the installed executable.
+datas = [
+    (required_directory('app/web/static'), 'app/web/static'),
+    (required_file('config/default.yaml'), 'config'),
+    (required_file('app/core/dsl/grammar.lark'), 'app/core/dsl'),
+    (required_file('app/cli/opencode_skill.md'), 'app/cli'),
+]
+# AKShare loads bundled calendars and lookup files via package-relative paths.
+# Hidden imports alone do not include these resources in a frozen empty-profile
+# install, causing the first-run stock-universe adapter to disappear.
+datas += collect_data_files('akshare')
 
 # 隐式导入 (PyInstaller 可能遗漏的库)
 hiddenimports = [
@@ -48,8 +59,8 @@ hiddenimports = [
 ]
 
 a = Analysis(
-    ['app/web/main.py'],
-    pathex=[os.getcwd()],
+    ['app/launcher.py'],
+    pathex=[PROJECT_ROOT],
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,

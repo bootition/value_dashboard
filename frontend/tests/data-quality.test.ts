@@ -17,9 +17,9 @@ import {
   type StockFreshness,
 } from '../src/types/data-quality.ts'
 
-test('KNOWN_WARNING_CODES is a readonly tuple of the six known codes', () => {
+test('KNOWN_WARNING_CODES is a readonly tuple of the known codes', () => {
   assert.ok(Array.isArray(KNOWN_WARNING_CODES))
-  assert.equal(KNOWN_WARNING_CODES.length, 6)
+  assert.equal(KNOWN_WARNING_CODES.length, 9)
   const expected = [
     'FINANCIAL_SHELL_ROWS',
     'SNAPSHOT_STALE',
@@ -27,6 +27,9 @@ test('KNOWN_WARNING_CODES is a readonly tuple of the six known codes', () => {
     'LINEAGE_INVALID',
     'UNPUBLISHED_OVERRIDES',
     'STALE_RUNNING_JOBS',
+    'MINIMUM_DATA_NOT_READY',
+    'CODE_IDENTITY_ALIAS',
+    'LIVE_SCHEMA_INCOMPATIBLE',
   ] as const
   for (const code of expected) {
     assert.ok(KNOWN_WARNING_CODES.includes(code), `missing ${code}`)
@@ -49,15 +52,33 @@ test('SNAPSHOT_DEPENDENT_INDICATOR_FIELDS is exactly the wildcard sentinel', () 
 
 test('DataQualityStatus shape matches backend build_data_quality_status', () => {
   const status: DataQualityStatus = {
+    minimum_data_readiness: {
+      ready: true,
+      stock_count: 1,
+      missing: {},
+      missing_counts: {},
+      schema_compatibility: { compatible: true, missing: [] },
+    },
     dates: {
       price: '2025-01-20',
       balance_sheet: { latest_record: '2024-09-30', latest_complete: '2024-06-30' },
       income_statement: { latest_record: '2024-09-30', latest_complete: '2024-06-30' },
       cash_flow: { latest_record: '2024-09-30', latest_complete: '2024-06-30' },
-      indicator_snapshot: { latest_complete: '2024-06-30', calculated_at: '2025-01-20T10:00:00' },
+      indicator_snapshot: {
+        latest_complete: '2024-06-30',
+        calculated_at: '2025-01-20T10:00:00',
+        latest_price_date: '2025-01-20',
+      },
     },
-    dividends: { total_rows: 100, unverified_period_end_rows: 5 },
-    lineage: { invalid_hash_rows: 0, orphan_batch_rows: 0 },
+    dividends: { total_rows: 100, active_missing_announcement_rows: 5, unverified_period_end_rows: 5 },
+    lineage: {
+      invalid_hash_rows: 0,
+      orphan_batch_rows: 0,
+      audit_archive_gap_rows: 0,
+      batch_archive_gap_rows: 0,
+      archive_gap_rows: 0,
+    },
+    code_identity: { raw_alias_rows: 0 },
     operations: { unpublished_overrides: 0, running_jobs: 0 },
     warning_codes: [],
   }

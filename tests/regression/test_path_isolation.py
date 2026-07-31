@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -14,6 +13,7 @@ from app.core.storage.path_policy import (
     PathIsolationError,
     VdEnv,
     canonicalize_path,
+    require_formal_maintenance_paths,
 )
 
 
@@ -38,6 +38,7 @@ def test_policy_module_has_only_allowed_imports() -> None:
     allowed = {
         "__future__",
         "os",
+        "sys",
         "dataclasses",
         "enum",
         "pathlib",
@@ -79,6 +80,13 @@ def test_from_env_fails_closed_when_all_variables_missing(
         DatabasePathSet.from_env()
 
 
+def test_policy_source_never_assigns_environment_defaults() -> None:
+    policy_path = Path(__file__).parents[2] / "app" / "core" / "storage" / "path_policy.py"
+    source = policy_path.read_text(encoding="utf-8")
+    assert 'os.environ["VD_ENV"] =' not in source
+    assert 'os.environ["VD_FORMAL_ACK"] =' not in source
+
+
 def test_from_env_rejects_unknown_environment(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -113,6 +121,21 @@ def test_formal_environment_requires_ack(
     monkeypatch.setenv("VD_SQLITE_PATH", str(tmp_path / "valuedashboard.sqlite"))
     with pytest.raises(PathIsolationError, match="VD_FORMAL_ACK"):
         DatabasePathSet.from_env()
+
+
+def test_maintenance_paths_reject_a_test_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clear_path_environment(monkeypatch)
+    run_root = tmp_path / "run"
+    monkeypatch.setenv("VD_ENV", "test")
+    monkeypatch.setenv("VD_TEST_RUN_ROOT", str(run_root))
+    monkeypatch.setenv("VD_DUCKDB_PATH", str(run_root / "valuedashboard.duckdb"))
+    monkeypatch.setenv("VD_SQLITE_PATH", str(run_root / "valuedashboard.sqlite"))
+
+    with pytest.raises(PathIsolationError, match="Expected VD_ENV=formal"):
+        require_formal_maintenance_paths()
 
 
 def test_from_env_accepts_safe_nonexistent_external_test_root(
@@ -194,3 +217,11 @@ def test_canonicalize_rejects_relative_path() -> None:
 def test_canonicalize_allows_absolute_path() -> None:
     result = canonicalize_path(Path("C:/some/path"))
     assert result.is_absolute()
+
+
+def test_write_lock_checks_windows_process_exit_code() -> None:
+    source = (Path(__file__).parents[2] / "app" / "core" / "storage" / "duckdb_store.py").read_text(
+        encoding="utf-8"
+    )
+    assert "GetExitCodeProcess" in source
+    assert "exit_code.value == 259" in source

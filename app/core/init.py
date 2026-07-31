@@ -97,6 +97,11 @@ class DataInitializer:
             step1 = self._fetch_stock_universe()
             report["steps"]["stock_universe"] = step1
 
+            # Step 1b: listing metadata is separate from the stock-list endpoint.
+            # Do not turn unavailable ST/suspension status into a safe-looking false.
+            step1b = self._fetch_listing_info()
+            report["steps"]["listing_info"] = step1b
+
             # Step 2: 交易日历
             step2 = self._fetch_trading_dates()
             report["steps"]["trading_dates"] = step2
@@ -105,6 +110,8 @@ class DataInitializer:
             step3 = self._fetch_sw_industry()
             report["steps"]["sw_industry"] = step3
 
+            step4: dict[str, Any] | None = None
+            step5: dict[str, Any] | None = None
             if not skip_prices:
                 # Step 4: 近5年日线价格 (raw + qfq)
                 step4 = self._fetch_daily_prices(years=5)
@@ -114,6 +121,31 @@ class DataInitializer:
                 # Step 5: 最小核心财务集
                 step5 = self._fetch_financial_statements()
                 report["steps"]["financials"] = step5
+
+            # Company actions are independently required for price history and
+            # must not be inferred from dividend rows or adjusted prices.
+            if not skip_prices and step4 is not None and step4.get("status") != "skipped":
+                step5b = self._fetch_xdxr()
+                report["steps"]["corporate_actions"] = step5b
+
+            if (
+                step4 is not None
+                and step5 is not None
+                and step4.get("status") == "success"
+                and step5.get("status") == "success"
+            ):
+                # A successful import without a snapshot is not screenable.
+                from app.core.indicators.calculator import IndicatorCalculator
+
+                step6 = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite).compute_snapshot_for_all()
+                report["steps"]["indicators"] = step6
+            elif not skip_prices and not skip_financials:
+                report["steps"]["indicators"] = {
+                    "status": "skipped",
+                    "reason": "prerequisites_not_ready",
+                    "daily_prices_status": step4.get("status") if step4 else None,
+                    "financials_status": step5.get("status") if step5 else None,
+                }
 
             report["status"] = aggregate_job_status(report["steps"])
 
@@ -164,6 +196,7 @@ class DataInitializer:
                 "pinyin": pinyin,
                 "exchange": exchange,
                 "listing_date": row.get("listing_date"),
+                "is_listed": True,
                 "is_st": row.get("is_st"),
                 "is_suspended": row.get("is_suspended"),
                 "total_shares": row.get("total_shares"),
@@ -171,23 +204,35 @@ class DataInitializer:
             })
 
         # PRD §7.4 L1: 保留旧值，不以空值覆盖旧值。
-        with self.duck.write_connection() as conn:
+        # A partial response may contain only the exchanges fetched successfully.
+        # Never infer delisting for an exchange absent from this response.
+        covered_exchanges = {record["exchange"] for record in records if record["exchange"]}
+        with self.duck.transaction() as conn:
+            # Retain historical securities but exclude codes absent from this
+            # successfully fetched current-listed exchange from active research.
+            if covered_exchanges:
+                exchange_placeholders = ", ".join("?" for _ in covered_exchanges)
+                conn.execute(
+                    f"UPDATE stock_meta SET is_listed = FALSE WHERE exchange IN ({exchange_placeholders})",
+                    sorted(covered_exchanges),
+                )
             conn.executemany(
                 """INSERT INTO stock_meta
-                   (stock_code, name, pinyin, exchange, listing_date, is_st, is_suspended, total_shares, circ_shares)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   (stock_code, name, pinyin, exchange, listing_date, is_listed, is_st, is_suspended, total_shares, circ_shares)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT (stock_code) DO UPDATE SET
-                       name = excluded.name,
-                       pinyin = COALESCE(excluded.pinyin, stock_meta.pinyin),
-                       exchange = excluded.exchange,
-                       listing_date = COALESCE(excluded.listing_date, stock_meta.listing_date),
-                       is_st = COALESCE(excluded.is_st, stock_meta.is_st),
+                        name = excluded.name,
+                        pinyin = COALESCE(excluded.pinyin, stock_meta.pinyin),
+                        exchange = excluded.exchange,
+                        listing_date = COALESCE(excluded.listing_date, stock_meta.listing_date),
+                        is_listed = TRUE,
+                        is_st = COALESCE(excluded.is_st, stock_meta.is_st),
                        is_suspended = COALESCE(excluded.is_suspended, stock_meta.is_suspended),
                        total_shares = COALESCE(excluded.total_shares, stock_meta.total_shares),
                        circ_shares = COALESCE(excluded.circ_shares, stock_meta.circ_shares),
                        updated_at = now()""",
                 [(r["stock_code"], r["name"], r["pinyin"], r["exchange"],
-                  r["listing_date"], r["is_st"], r["is_suspended"],
+                  r["listing_date"], r["is_listed"], r["is_st"], r["is_suspended"],
                   r["total_shares"], r["circ_shares"]) for r in records],
             )
 
@@ -196,6 +241,79 @@ class DataInitializer:
 
         logger.info(f"[Step 1] 获取 {len(records)} 只股票")
         return {"status": "success", "count": len(records)}
+
+    def _fetch_listing_info(self) -> dict[str, Any]:
+        """Fetch and persist listing/ST/suspension/share metadata for the stock universe."""
+        logger.info("[Step 1b] 获取上市与状态元数据...")
+        stocks = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+        )
+        stock_codes = [row["stock_code"] for row in stocks]
+        if not stock_codes:
+            return {"status": "skipped", "reason": "no_stock_universe", "count": 0}
+
+        result = self.adapter_mgr.fetch(
+            FetchRequest(data_type="listing_info", stock_codes=stock_codes)
+        )
+        if result.metadata.error or not result.data:
+            self._record_failures("listing_info", stock_codes, result)
+            return {
+                "status": "failed",
+                "error": result.metadata.error or "empty result",
+                "count": 0,
+            }
+
+        records_by_code = {
+            str(row.get("stock_code", "")): row
+            for row in result.data
+            if row.get("stock_code")
+        }
+        updated = 0
+        missing_codes: list[str] = []
+        with self.duck.write_connection() as conn:
+            for code in stock_codes:
+                row = records_by_code.get(code)
+                if row is None:
+                    missing_codes.append(code)
+                    continue
+                conn.execute(
+                    """UPDATE stock_meta SET
+                           name = COALESCE(NULLIF(?, ''), name),
+                           pinyin = COALESCE(NULLIF(?, ''), pinyin),
+                           listing_date = COALESCE(?, listing_date),
+                           is_st = COALESCE(?, is_st),
+                           is_suspended = COALESCE(?, is_suspended),
+                           total_shares = COALESCE(?, total_shares),
+                           circ_shares = COALESCE(?, circ_shares),
+                           updated_at = now()
+                       WHERE stock_code = ?""",
+                    [
+                        row.get("name"),
+                        row.get("pinyin"),
+                        row.get("listing_date"),
+                        row.get("is_st"),
+                        row.get("is_suspended"),
+                        row.get("total_shares"),
+                        row.get("circ_shares"),
+                        code,
+                    ],
+                )
+                if (
+                    row.get("listing_date") is None
+                    or row.get("is_st") is None
+                    or row.get("is_suspended") is None
+                ):
+                    missing_codes.append(code)
+                updated += 1
+
+        for code in missing_codes:
+            self._record_missing(code, "listing_info", "source_incomplete")
+        self._record_batch(result, "listing_info", updated)
+        return {
+            "status": "success" if not missing_codes else "partial",
+            "count": updated,
+            "missing": len(missing_codes),
+        }
 
     def _fetch_trading_dates(self) -> dict[str, Any]:
         """Step 2: 获取交易日历"""
@@ -276,7 +394,9 @@ class DataInitializer:
         logger.info(f"[Step 4] 获取近 {years} 年日线价格 (raw + qfq)...")
 
         # 获取股票列表
-        stocks = self.duck.read_query("SELECT stock_code, exchange FROM stock_meta")
+        stocks = self.duck.read_query(
+            "SELECT stock_code, exchange FROM stock_meta WHERE is_listed IS TRUE"
+        )
         if not stocks:
             return {"status": "skipped", "reason": "无股票数据"}
 
@@ -321,30 +441,35 @@ class DataInitializer:
                 continue
 
             if qfq_result.metadata.error or not qfq_result.data:
-                if stock.get("exchange") == "BSE":
-                    qfq_exempt += 1
-                else:
-                    fail_count += 1
-                    failed_codes.append(code)
-                    self._record_failure(
-                        code,
-                        "price_daily",
-                        qfq_result.metadata.source or "akshare_eastmoney",
-                        qfq_result.metadata.error or "empty result",
-                        extra_json='{"adjust": "qfq"}',
-                    )
-                    continue
+                fail_count += 1
+                failed_codes.append(code)
+                self._record_failure(
+                    code,
+                    "price_daily",
+                    qfq_result.metadata.source or "akshare_eastmoney",
+                    qfq_result.metadata.error or "empty result",
+                    extra_json='{"adjust": "qfq"}',
+                )
+                continue
 
             # 写入 DuckDB
             # P0#2.7修复: 用 INSERT OR REPLACE 替代 DELETE+INSERT
             # PRD §7.4 L1: "保留旧值，不以空值覆盖旧值"
             try:
                 with self.duck.transaction() as conn:
-                    # raw — INSERT OR REPLACE 保留未抓取的旧日期
+                    # Sparse source rows must not replace already verified values with NULL.
                     conn.executemany(
-                        """INSERT OR REPLACE INTO price_daily_raw
+                        """INSERT INTO price_daily_raw
                            (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                             open=COALESCE(excluded.open, price_daily_raw.open),
+                             high=COALESCE(excluded.high, price_daily_raw.high),
+                             low=COALESCE(excluded.low, price_daily_raw.low),
+                             close=COALESCE(excluded.close, price_daily_raw.close),
+                             volume=COALESCE(excluded.volume, price_daily_raw.volume),
+                             turnover=COALESCE(excluded.turnover, price_daily_raw.turnover),
+                             turnover_rate=COALESCE(excluded.turnover_rate, price_daily_raw.turnover_rate)""",
                         [(
                             code,
                             r.get("trade_date"),
@@ -361,10 +486,18 @@ class DataInitializer:
                     # qfq (如果有)
                     if qfq_result.data:
                         conn.executemany(
-                            """INSERT OR REPLACE INTO price_daily_qfq
+                            """INSERT INTO price_daily_qfq
                                (stock_code, trade_date, open, high, low, close,
                                 volume, turnover, turnover_rate)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                                  open=COALESCE(excluded.open, price_daily_qfq.open),
+                                  high=COALESCE(excluded.high, price_daily_qfq.high),
+                                  low=COALESCE(excluded.low, price_daily_qfq.low),
+                                  close=COALESCE(excluded.close, price_daily_qfq.close),
+                                  volume=COALESCE(excluded.volume, price_daily_qfq.volume),
+                                  turnover=COALESCE(excluded.turnover, price_daily_qfq.turnover),
+                                  turnover_rate=COALESCE(excluded.turnover_rate, price_daily_qfq.turnover_rate)""",
                             [(
                                 code,
                                 r.get("trade_date"),
@@ -377,11 +510,20 @@ class DataInitializer:
                                 r.get("turnover_rate"),
                             ) for r in qfq_result.data],
                         )
+                    raw_batch_id = self._record_batch_in_connection(
+                        conn, raw_result, "price_daily_raw", len(raw_result.data)
+                    )
+                    self._record_field_audit_in_connection(
+                        conn, raw_result, raw_result.data, code, "trade_date", raw_batch_id
+                    )
+                    qfq_batch_id = self._record_batch_in_connection(
+                        conn, qfq_result, "price_daily_qfq", len(qfq_result.data)
+                    )
+                    self._record_field_audit_in_connection(
+                        conn, qfq_result, qfq_result.data, code, "trade_date", qfq_batch_id
+                    )
 
                 success_count += 1
-
-                # 记录批次溯源
-                self._record_batch(raw_result, "price_daily_raw", len(raw_result.data))
 
             except Exception as e:
                 fail_count += 1
@@ -441,7 +583,9 @@ class DataInitializer:
         """Step 5: 获取最小核心财务集（三大报表）"""
         logger.info("[Step 5] 获取最小核心财务集...")
 
-        stocks = self.duck.read_query("SELECT stock_code FROM stock_meta")
+        stocks = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE"
+        )
         if not stocks:
             return {"status": "skipped", "reason": "无股票数据"}
 
@@ -476,8 +620,15 @@ class DataInitializer:
                         # P0#2.7修复: 不再 DELETE, 用 INSERT OR REPLACE 保留旧值
                         for row in complete_rows:
                             self._upsert_financial_row(conn, "balance_sheet", code, row)
+                        batch_id = self._record_batch_in_connection(
+                            conn, bs_result, "balance_sheet", len(complete_rows)
+                        )
+                        self._record_field_audit_in_connection(
+                            conn, bs_result, complete_rows, code, "report_date", batch_id
+                        )
                     if complete_rows:
                         balance_ok += 1
+                        self._record_missing_financial_sector_fields(code, complete_rows)
                 except Exception as e:
                     logger.error(f"  写入 {code} 资产负债表失败: {e}")
                     self._record_failure(code, "balance_sheet", bs_result.metadata.source or "akshare_eastmoney", str(e))
@@ -502,6 +653,12 @@ class DataInitializer:
                         # P0#2.7修复: 不再 DELETE, 用 INSERT OR REPLACE 保留旧值
                         for row in complete_rows:
                             self._upsert_financial_row(conn, "income_statement", code, row)
+                        batch_id = self._record_batch_in_connection(
+                            conn, ic_result, "income_statement", len(complete_rows)
+                        )
+                        self._record_field_audit_in_connection(
+                            conn, ic_result, complete_rows, code, "report_date", batch_id
+                        )
                     if complete_rows:
                         income_ok += 1
                 except Exception as e:
@@ -528,6 +685,12 @@ class DataInitializer:
                         # P0#2.7修复: 不再 DELETE, 用 INSERT OR REPLACE 保留旧值
                         for row in complete_rows:
                             self._upsert_financial_row(conn, "cash_flow", code, row)
+                        batch_id = self._record_batch_in_connection(
+                            conn, cf_result, "cash_flow", len(complete_rows)
+                        )
+                        self._record_field_audit_in_connection(
+                            conn, cf_result, complete_rows, code, "report_date", batch_id
+                        )
                     if complete_rows:
                         cashflow_ok += 1
                 except Exception as e:
@@ -540,13 +703,127 @@ class DataInitializer:
             f"[Step 5] 财务抓取完成: "
             f"资产负债表 {balance_ok}, 利润表 {income_ok}, 现金流量表 {cashflow_ok}"
         )
+        complete_stock_count = min(balance_ok, income_ok, cashflow_ok)
+        status = (
+            "success"
+            if complete_stock_count == total
+            else "failed"
+            if complete_stock_count == 0
+            else "partial"
+        )
         return {
-            "status": "success",
+            "status": status,
             "total": total,
             "balance_sheet": balance_ok,
             "income_statement": income_ok,
             "cash_flow": cashflow_ok,
+            "complete_stocks": complete_stock_count,
         }
+
+    def _fetch_xdxr(self) -> dict[str, Any]:
+        """Fetch and persist corporate actions for every current listed stock."""
+        stocks = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+        )
+        if not stocks:
+            return {"status": "skipped", "reason": "no_listed_stocks"}
+
+        succeeded = 0
+        failed = 0
+        rows_written = 0
+        for stock in stocks:
+            code = stock["stock_code"]
+            result = self.adapter_mgr.fetch(FetchRequest(data_type="xdxr", stock_codes=[code]))
+            if result.metadata.error or not result.data:
+                failed += 1
+                self._record_failure(
+                    code,
+                    "xdxr",
+                    result.metadata.source,
+                    result.metadata.error or "empty result",
+                )
+                self._record_missing(code, "xdxr", "source_unavailable")
+                continue
+            try:
+                with self.duck.transaction() as conn:
+                    self._upsert_xdxr_rows(conn, code, result.data)
+                    batch_id = self._record_batch_in_connection(conn, result, "xdxr", len(result.data))
+                    self._record_field_audit_in_connection(
+                        conn, result, result.data, code, "event_date", batch_id
+                    )
+                succeeded += 1
+                rows_written += len(result.data)
+            except Exception as error:
+                failed += 1
+                self._record_failure(code, "xdxr", "duckdb", str(error))
+
+        return {
+            "status": "success" if failed == 0 else "partial",
+            "total": len(stocks),
+            "success": succeeded,
+            "failed": failed,
+            "rows_written": rows_written,
+        }
+
+    @staticmethod
+    def _upsert_xdxr_rows(conn: Any, stock_code: str, rows: list[dict[str, Any]]) -> None:
+        """Upsert only complete TDX corporate-action keys without deleting history."""
+        valid_rows = [
+            row for row in rows
+            if row.get("event_date") is not None and row.get("category") is not None
+        ]
+        if not valid_rows:
+            raise ValueError("xdxr result has no event_date/category rows")
+        conn.executemany(
+            """INSERT INTO xdxr
+                   (stock_code, event_date, category, fenhong, songzhuangu, peigu, peigujia)
+               VALUES (?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(stock_code, event_date, category) DO UPDATE SET
+                   fenhong=COALESCE(excluded.fenhong, xdxr.fenhong),
+                   songzhuangu=COALESCE(excluded.songzhuangu, xdxr.songzhuangu),
+                   peigu=COALESCE(excluded.peigu, xdxr.peigu),
+                   peigujia=COALESCE(excluded.peigujia, xdxr.peigujia)""",
+            [
+                (
+                    stock_code,
+                    row["event_date"],
+                    row["category"],
+                    row.get("fenhong"),
+                    row.get("songzhuangu"),
+                    row.get("peigu"),
+                    row.get("peigujia"),
+                )
+                for row in valid_rows
+            ],
+        )
+
+    @staticmethod
+    def _upsert_dividend_rows(conn: Any, stock_code: str, rows: list[dict[str, Any]]) -> None:
+        """Persist dividend rows without replacing previously verified values with NULL."""
+        valid_rows = [row for row in rows if row.get("ex_date")]
+        if not valid_rows:
+            raise ValueError("dividend result has no ex_date rows")
+        conn.executemany(
+            """INSERT INTO dividends
+                   (stock_code, ex_date, announcement_date, dividend_per_share, stock_dividend,
+                    transfer_share, rights_issue, rights_issue_price)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(stock_code, ex_date) DO UPDATE SET
+                 announcement_date=COALESCE(excluded.announcement_date, dividends.announcement_date),
+                 dividend_per_share=COALESCE(excluded.dividend_per_share, dividends.dividend_per_share),
+                 stock_dividend=COALESCE(excluded.stock_dividend, dividends.stock_dividend),
+                 transfer_share=COALESCE(excluded.transfer_share, dividends.transfer_share),
+                 rights_issue=COALESCE(excluded.rights_issue, dividends.rights_issue),
+                 rights_issue_price=COALESCE(excluded.rights_issue_price, dividends.rights_issue_price)""",
+            [
+                (
+                    stock_code, row["ex_date"], row.get("announcement_date"),
+                    row.get("dividend_per_share"), row.get("stock_dividend"),
+                    row.get("transfer_share"), row.get("rights_issue"), row.get("rights_issue_price"),
+                )
+                for row in valid_rows
+            ],
+        )
 
     def _upsert_financial_row(self, conn, table: str, stock_code: str, row: dict) -> None:
         """动态插入财务报表行
@@ -604,6 +881,23 @@ class DataInitializer:
             "TAXES_PAYABLE": "taxes_payable",
             "PREPAYMENTS_RECEIVED": "prepayments_received",
             "TRADING_FIN_ASSETS": "trading_financial_assets",
+            # 金融行业监管指标。供应商未提供时保持 NULL，不能用通用财务字段替代。
+            "CORE_TIER1_CAPITAL_ADEQUACY_RATIO": "core_tier1_capital_adequacy_ratio",
+            "CORE_TIER1_CAPITAL_RATIO": "core_tier1_capital_adequacy_ratio",
+            "核心一级资本充足率": "core_tier1_capital_adequacy_ratio",
+            "TIER1_CAPITAL_ADEQUACY_RATIO": "tier1_capital_adequacy_ratio",
+            "TIER1_CAPITAL_RATIO": "tier1_capital_adequacy_ratio",
+            "一级资本充足率": "tier1_capital_adequacy_ratio",
+            "CAPITAL_ADEQUACY_RATIO": "capital_adequacy_ratio",
+            "CAPITAL_RATIO": "capital_adequacy_ratio",
+            "资本充足率": "capital_adequacy_ratio",
+            "NON_PERFORMING_LOAN_RATIO": "non_performing_loan_ratio",
+            "NPL_RATIO": "non_performing_loan_ratio",
+            "不良贷款率": "non_performing_loan_ratio",
+            "PROVISION_COVERAGE_RATIO": "provision_coverage_ratio",
+            "拨备覆盖率": "provision_coverage_ratio",
+            "RISK_COVERAGE_RATIO": "risk_coverage_ratio",
+            "风险覆盖率": "risk_coverage_ratio",
             # 利润表
             "TOTAL_OPERATE_INCOME": "total_operating_revenue",
             "OPERATE_INCOME": "revenue",
@@ -652,6 +946,16 @@ class DataInitializer:
             "SECURITY_CODE": "stock_code",
             "REPORT_DATE": "report_date",
             "REPORT_TYPE": "report_type",
+            # 标准化字段名（sina/tdx 等适配器直接输出标准列名）→ 保持标准名
+            "stock_code": "stock_code",
+            "report_date": "report_date",
+            "total_assets": "total_assets",
+            "total_liabilities": "total_liabilities",
+            "total_equity": "total_equity",
+            "total_equity_parent": "total_equity_parent",
+            "revenue": "revenue",
+            "parent_net_profit": "parent_net_profit",
+            "cf_from_operating": "cf_from_operating",
         }
 
         # 构建标准化记录
@@ -688,13 +992,51 @@ class DataInitializer:
         if not mapped:
             return
 
+        constraint_rows = conn.execute(
+            """SELECT 1 FROM duckdb_constraints()
+               WHERE table_name = ?
+                 AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                 AND constraint_column_names = ['stock_code', 'report_date']
+               LIMIT 1""",
+            [table],
+        ).fetchall()
+        if not constraint_rows:
+            # Older production databases have an income_statement table without
+            # the declared composite key. Merge first so replacing one row does
+            # not erase columns omitted by a sparse provider response.
+            previous = conn.execute(
+                f"SELECT * FROM {table} WHERE stock_code = ? AND report_date = ?",
+                [mapped["stock_code"], mapped.get("report_date")],
+            ).fetchone()
+            if previous is not None:
+                previous_columns = [column[0] for column in conn.description]
+                merged = dict(zip(previous_columns, previous))
+                merged.update(mapped)
+                mapped = {column: value for column, value in merged.items() if column in available_cols}
+            conn.execute(
+                f"DELETE FROM {table} WHERE stock_code = ? AND report_date = ?",
+                [mapped["stock_code"], mapped.get("report_date")],
+            )
+            fields = list(mapped.keys())
+            placeholders = ", ".join(["?"] * len(fields))
+            conn.execute(
+                f"INSERT INTO {table} ({', '.join(fields)}) VALUES ({placeholders})",
+                list(mapped.values()),
+            )
+            return
+
         # 构建 INSERT
         fields = list(mapped.keys())
         values = list(mapped.values())
         placeholders = ", ".join(["?"] * len(fields))
         field_str = ", ".join(fields)
+        update_fields = [field for field in fields if field not in {"stock_code", "report_date"}]
+        updates = ", ".join(
+            f"{field} = COALESCE(excluded.{field}, {table}.{field})" for field in update_fields
+        )
         conn.execute(
-            f"INSERT OR REPLACE INTO {table} ({field_str}) VALUES ({placeholders})",
+            f"""INSERT INTO {table} ({field_str}) VALUES ({placeholders})
+                ON CONFLICT(stock_code, report_date) DO UPDATE SET {updates}""",
             values,
         )
 
@@ -702,24 +1044,154 @@ class DataInitializer:
         """记录批次级溯源到 fetch_batch 表"""
         try:
             with self.duck.write_connection() as conn:
-                conn.execute(
-                    """INSERT INTO fetch_batch
-                       (batch_id, data_type, source, adapter_version,
-                        fetch_time, raw_response_hash, row_count, confidence)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [
-                        self._batch_id,
-                        data_type,
-                        result.metadata.source,
-                        result.metadata.api_version or "unknown",
-                        result.metadata.fetch_time,
-                        result.metadata.raw_response_hash,
-                        row_count,
-                        result.metadata.confidence,
-                    ],
-                )
+                self._record_batch_in_connection(conn, result, data_type, row_count)
         except Exception as e:
             logger.warning(f"记录批次溯源失败: {e}")
+            raise
+
+    def _record_batch_in_connection(
+        self, conn: Any, result: FetchResult, data_type: str, row_count: int,
+    ) -> str:
+        """Validate and retain source material in the caller's data transaction."""
+        import hashlib
+
+        if row_count > 0 and not result.raw_response:
+            raise ValueError(f"{data_type} has rows but no source material")
+        if row_count > 0 and hashlib.sha256(result.raw_response).hexdigest() != result.metadata.raw_response_hash:
+            raise ValueError(f"{data_type} source material hash mismatch")
+        fetch_batch_id = str(uuid.uuid4())
+        conn.execute(
+            """INSERT INTO fetch_batch
+               (batch_id, data_type, source, adapter_version,
+                fetch_time, raw_response_hash, row_count, confidence)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            [fetch_batch_id, data_type, result.metadata.source,
+             result.metadata.api_version or "unknown", result.metadata.fetch_time,
+             result.metadata.raw_response_hash, row_count, result.metadata.confidence],
+        )
+        conn.execute(
+            """INSERT INTO raw_response_archive
+               (raw_response_hash, source, fetch_time, payload, api_version, integrity_verified)
+               VALUES (?, ?, ?, ?, ?, TRUE)
+               ON CONFLICT(raw_response_hash) DO NOTHING""",
+            [result.metadata.raw_response_hash, result.metadata.source,
+             result.metadata.fetch_time, result.raw_response, result.metadata.api_version],
+        )
+        self._last_fetch_batch_id = fetch_batch_id
+        return fetch_batch_id
+
+    def _record_field_audit(
+        self,
+        result: FetchResult,
+        rows: list[dict[str, Any]],
+        *,
+        stock_code: str,
+        report_date_field: str = "report_date",
+    ) -> None:
+        """Persist normalized per-value provenance after the corresponding data write."""
+        with self.duck.write_connection() as conn:
+            self._record_field_audit_in_connection(
+                conn, result, rows, stock_code, report_date_field,
+                getattr(self, "_last_fetch_batch_id", self._batch_id),
+            )
+
+    def _record_field_audit_in_connection(
+        self, conn: Any, result: FetchResult, rows: list[dict[str, Any]],
+        stock_code: str, report_date_field: str, fetch_batch_id: str,
+    ) -> None:
+        audit_rows: list[tuple[Any, ...]] = []
+        for row in rows:
+            report_date = row.get(report_date_field) or row.get(report_date_field.upper())
+            for source_field, value in row.items():
+                field_name = self._standard_audit_field(source_field)
+                if field_name is None or not isinstance(value, (int, float)):
+                    continue
+                audit_rows.append((
+                    stock_code, field_name, report_date, value, result.metadata.source,
+                    fetch_batch_id,
+                    result.metadata.fetch_time, result.metadata.raw_response_hash,
+                    result.metadata.confidence, None, result.metadata.api_version,
+                ))
+        if not audit_rows:
+            return
+        conn.executemany(
+            """INSERT INTO source_audit
+               (stock_code, field_name, report_date, value, source, fetch_batch_id,
+                fetch_time, raw_response_hash, confidence, reason_code, api_version)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            audit_rows,
+        )
+
+    @staticmethod
+    def _standard_audit_field(source_field: str) -> str | None:
+        """Map provider aliases to the standardized names consumed by screening."""
+        aliases = {
+            "OPERATE_INCOME": "revenue", "TOTAL_OPERATE_INCOME": "total_operating_revenue",
+            "OPERATE_COST": "cost_of_revenue", "NETPROFIT": "net_profit",
+            "PARENT_NETPROFIT": "parent_net_profit", "DEDUCTED_NET_PROFIT": "deducted_net_profit",
+            "NETCASH_OPERATE": "cf_from_operating", "NETCASH_INVEST": "cf_from_investing",
+            "NETCASH_FINANCE": "cf_from_financing", "TOTAL_ASSETS": "total_assets",
+            "TOTAL_LIABILITIES": "total_liabilities", "TOTAL_EQUITY": "total_equity",
+            "TOTAL_EQUITY_PARENT": "total_equity_parent", "CLOSE": "latest_close",
+            "OPEN": "open", "HIGH": "high", "LOW": "low", "VOLUME": "volume",
+            "TURNOVER": "turnover", "TURNOVER_RATE": "turnover_rate",
+        }
+        normalized = source_field.upper()
+        if normalized in {"STOCK_CODE", "SECURITY_CODE", "REPORT_DATE", "TRADE_DATE", "RAW_DATA"}:
+            return None
+        return aliases.get(normalized, source_field.lower())
+
+    def _record_missing_financial_sector_fields(
+        self,
+        stock_code: str,
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """Record unavailable mandatory sector fields only when classification is explicit."""
+        sector_rows = self.duck.read_query(
+            "SELECT sw_level1, sw_level2 FROM stock_meta WHERE stock_code = ?", [stock_code]
+        )
+        if not sector_rows:
+            return
+        sector_text = " ".join(
+            str(sector_rows[0].get(field) or "") for field in ("sw_level1", "sw_level2")
+        )
+        if "银行" in sector_text:
+            required = (
+                "core_tier1_capital_adequacy_ratio",
+                "tier1_capital_adequacy_ratio",
+                "capital_adequacy_ratio",
+                "non_performing_loan_ratio",
+                "provision_coverage_ratio",
+            )
+        elif "证券" in sector_text:
+            required = ("risk_coverage_ratio",)
+        else:
+            required = ()
+        if not required:
+            return
+        aliases = {
+            "core_tier1_capital_adequacy_ratio": {"CORE_TIER1_CAPITAL_ADEQUACY_RATIO", "CORE_TIER1_CAPITAL_RATIO", "核心一级资本充足率"},
+            "tier1_capital_adequacy_ratio": {"TIER1_CAPITAL_ADEQUACY_RATIO", "TIER1_CAPITAL_RATIO", "一级资本充足率"},
+            "capital_adequacy_ratio": {"CAPITAL_ADEQUACY_RATIO", "CAPITAL_RATIO", "资本充足率"},
+            "non_performing_loan_ratio": {"NON_PERFORMING_LOAN_RATIO", "NPL_RATIO", "不良贷款率"},
+            "provision_coverage_ratio": {"PROVISION_COVERAGE_RATIO", "拨备覆盖率"},
+            "risk_coverage_ratio": {"RISK_COVERAGE_RATIO", "风险覆盖率"},
+        }
+        source_values = {
+            str(key).upper(): value
+            for row in rows
+            for key, value in row.items()
+        }
+        for field in required:
+            present_values = [
+                source_values[alias.upper()]
+                for alias in aliases[field]
+                if alias.upper() in source_values
+            ]
+            if not present_values:
+                self._record_missing(stock_code, f"balance.{field}", "source_field_unavailable")
+            elif all(value is None for value in present_values):
+                self._record_missing(stock_code, f"balance.{field}", "source_value_missing")
 
     def _record_failure(
         self,
@@ -738,7 +1210,7 @@ class DataInitializer:
                         extra_json)
                        VALUES (?, ?, ?, ?, 0, ?, ?)""",
                     [stock_code, data_type, adapter, error[:500],
-                     datetime.now(timezone.utc).isoformat(), extra_json],
+                     datetime.now(timezone.utc).isoformat(), extra_json or "{}"],
                 )
         except Exception as e:
             logger.warning(f"记录失败信息失败: {e}")

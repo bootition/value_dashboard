@@ -6,12 +6,13 @@ import ast
 from pathlib import Path
 from typing import Any
 
-import app.core.update as update_module
 import app.web.main as web_main
+from fastapi.testclient import TestClient
 from app.core.config import Config
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 
 
 WEB_ROOT = Path(__file__).parents[2] / "app" / "web"
@@ -35,6 +36,59 @@ def test_create_app_wires_explicit_database_state(
     assert app.state.config is config
     assert app.state.duck is duck
     assert app.state.sqlite is sqlite
+
+
+def test_health_reports_database_unavailability(
+    database_paths: DatabasePathSet,
+    monkeypatch,
+) -> None:
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    init_duckdb_schema(duck)
+    init_sqlite_schema(sqlite)
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=duck,
+        sqlite=sqlite,
+    )
+    client = TestClient(app)
+
+    assert client.get("/api/health").status_code == 200
+    monkeypatch.setattr(duck, "read_query", lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("offline")))
+
+    response = client.get("/api/health")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["status"] == "unavailable"
+
+
+def test_browser_mutations_require_local_host_origin_and_session_token(
+    database_paths: DatabasePathSet,
+) -> None:
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    init_duckdb_schema(duck)
+    init_sqlite_schema(sqlite)
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=duck,
+        sqlite=sqlite,
+    )
+    client = TestClient(app)
+
+    assert client.put("/api/screening/draft", json={"draft": {}}).status_code == 403
+    token = client.get("/api/session").json()["write_token"]
+    assert client.put(
+        "/api/screening/draft", json={"draft": {}},
+        headers={"X-VD-Write-Token": token, "Origin": "http://attacker.invalid"},
+    ).status_code == 403
+    assert client.put(
+        "/api/screening/draft", json={"draft": {}},
+        headers={"X-VD-Write-Token": token, "Origin": "http://testserver"},
+    ).status_code == 200
+    assert client.get("/api/health", headers={"Host": "attacker.invalid"}).status_code == 400
 
 
 def test_run_server_reuses_one_resolved_database_pair(
@@ -68,13 +122,6 @@ def test_run_server_reuses_one_resolved_database_pair(
         assert paths is database_paths
         return sqlite
 
-    class StubUpdater:
-        def __init__(self, *, duck: object, sqlite: object) -> None:
-            calls["updater"] = (duck, sqlite)
-
-        def run_incremental_check(self) -> dict[str, Any]:
-            return {"needs_update": False}
-
     def create_app(**kwargs: object) -> object:
         calls["create_app"] = kwargs
         return object()
@@ -84,14 +131,24 @@ def test_run_server_reuses_one_resolved_database_pair(
     monkeypatch.setattr(web_main, "DuckDBStore", build_duck)
     monkeypatch.setattr(web_main, "SQLiteStore", build_sqlite)
     monkeypatch.setattr(
+        "app.core.data_quality.minimum_data_readiness",
+        lambda store: {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}},
+    )
+    monkeypatch.setattr(
         web_main,
         "init_all_schema",
         lambda *, duckdb_store, sqlite_store: calls.update(
             schema=(duckdb_store, sqlite_store)
         ),
     )
-    monkeypatch.setattr(update_module, "IncrementalUpdater", StubUpdater)
     monkeypatch.setattr(web_main, "create_app", create_app)
+    monkeypatch.setattr(
+        web_main,
+        "_start_startup_maintenance",
+        lambda app, current_duck, current_sqlite, readiness: calls.update(
+            maintenance=(app, current_duck, current_sqlite, readiness)
+        ),
+    )
     monkeypatch.setattr(
         web_main.uvicorn,
         "run",
@@ -105,13 +162,18 @@ def test_run_server_reuses_one_resolved_database_pair(
     assert calls["duck"] == 1
     assert calls["sqlite"] == 1
     assert calls["schema"] == (duck, sqlite)
-    assert calls["updater"] == (duck, sqlite)
     assert calls["create_app"] == {
         "paths": database_paths,
         "config": config,
         "duck": duck,
         "sqlite": sqlite,
+        "startup_readiness": {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}},
     }
+    maintenance_app, maintenance_duck, maintenance_sqlite, maintenance_readiness = calls["maintenance"]
+    assert maintenance_app is calls["uvicorn"][0]
+    assert maintenance_duck is duck
+    assert maintenance_sqlite is sqlite
+    assert maintenance_readiness == {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}}
 
 
 def test_web_sources_have_no_implicit_database_constructors() -> None:

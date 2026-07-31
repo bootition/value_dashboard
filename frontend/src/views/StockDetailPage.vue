@@ -3,12 +3,13 @@ import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NCard, NSpace, NTag, NSelect, NRadioGroup, NRadioButton,
-  NEmpty, NSpin, NDescriptions, NDescriptionsItem, NResult,
+  NEmpty, NSpin, NAlert, NDescriptions, NDescriptionsItem, NResult,
   useMessage,
 } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { dispose, init } from 'klinecharts'
 import type { Chart, KLineData } from 'klinecharts'
+import { isIndicatorUntrusted } from '../types/data-quality.ts'
 import IndicatorTabs from '../components/IndicatorTabs.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataTraceability from '../components/DataTraceability.vue'
@@ -32,6 +33,7 @@ const stockCode = computed(() => {
 })
 const hasStockCodeError = computed(() => !stockCode.value)
 const loading = ref(false)
+const generation = ref(0)
 const stockInfo = ref<StockInfo | null>(null)
 const indicators = ref<IndicatorsResponse | null>(null)
 const klineData = ref<KlineResponse>({ candles: [] })
@@ -46,51 +48,75 @@ const klineRef = ref<HTMLElement>()
 const chartInstance = ref<Chart | null>(null)
 const klineAbortController = ref<AbortController | null>(null)
 
+const hasUntrustedIndicators = computed(() => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value))
+
 // 财务趋势配置
 const trendPeriod = ref<'annual' | 'quarterly' | 'ttm'>('annual')
 const trendYears = ref(5)
 
+function onIndicatorTimeDimension(value: string) {
+  const yearsByDimension: Record<string, number> = {
+    current: 1,
+    '1y': 1,
+    '3y': 3,
+    '5y': 5,
+    '10y': 10,
+    all: 99,
+  }
+  trendPeriod.value = 'annual'
+  trendYears.value = yearsByDimension[value] ?? 5
+}
+
 async function fetchAll() {
   if (hasStockCodeError.value) return
+  const gen = ++generation.value
   loading.value = true
   try {
     await Promise.all([
-      fetchStockInfo(),
-      fetchIndicators(),
-      fetchKline(),
-      fetchTrend(),
-      fetchAudit(),
-      fetchWarningCodes(),
+      fetchStockInfo(gen),
+      fetchIndicators(gen),
+      fetchKline(gen),
+      fetchTrend(gen),
+      fetchAudit(gen),
     ])
   } finally {
     loading.value = false
   }
 }
 
-async function fetchStockInfo() {
+async function fetchStockInfo(gen: number) {
   try {
     const resp = await axios.get<StockInfo>(`/api/stock/${stockCode.value}/info`)
+    if (gen !== generation.value) return
     stockInfo.value = resp.data
   } catch (e) {
+    if (gen !== generation.value) return
     stockInfo.value = null
     const detail = isAxiosError(e) ? e.response?.data?.detail : null
     message.warning(`加载股票信息失败: ${detail || '网络错误'}`)
   }
 }
 
-async function fetchIndicators() {
+async function fetchIndicators(gen: number) {
   try {
     const resp = await axios.get<IndicatorsResponse>(`/api/stock/${stockCode.value}/indicators`)
+    if (gen !== generation.value) return
     indicators.value = resp.data
+    // 服务端权威信任信号优先；缺失时回退到数据状态页轮询
+    if (resp.data.trust) {
+      warningCodes.value = resp.data.trust.warning_codes
+      return
+    }
   } catch (e) {
+    if (gen !== generation.value) return
     indicators.value = null
     const detail = isAxiosError(e) ? e.response?.data?.detail : null
     message.warning(`加载指标数据失败: ${detail || '网络错误'}`)
   }
+  await fetchWarningCodes(gen)
 }
 
-async function fetchKline() {
-  // 取消之前的请求，避免竞态条件
+async function fetchKline(gen: number) {
   if (klineAbortController.value) {
     klineAbortController.value.abort()
   }
@@ -100,48 +126,55 @@ async function fetchKline() {
       params: { adjust: adjustMode.value, days: klineDays.value },
       signal: klineAbortController.value.signal,
     })
+    if (gen !== generation.value) return
     klineData.value = resp.data
     renderKline()
   } catch (e) {
-    if (axios.isCancel(e)) return
+    if (axios.isCancel(e) || gen !== generation.value) return
     klineData.value = { candles: [] }
     const detail = isAxiosError(e) ? e.response?.data?.detail : null
     message.warning(`加载K线数据失败: ${detail || '网络错误'}`)
   }
 }
 
-async function fetchTrend() {
+async function fetchTrend(gen: number) {
   try {
     const resp = await axios.get<TrendResponse>(`/api/stock/${stockCode.value}/financial-trend`, {
       params: { period: trendPeriod.value, years: trendYears.value },
     })
+    if (gen !== generation.value) return
     trendData.value = resp.data
   } catch (e) {
+    if (gen !== generation.value) return
     trendData.value = { trend: [], period: 'annual', count: 0 }
     const detail = isAxiosError(e) ? e.response?.data?.detail : null
     message.warning(`加载财务趋势失败: ${detail || '网络错误'}`)
   }
 }
 
-async function fetchAudit() {
+async function fetchAudit(gen: number) {
   try {
     const resp = await axios.get<AuditResponse>(`/api/stock/${stockCode.value}/source-audit`)
+    if (gen !== generation.value) return
     auditData.value = resp.data
   } catch (e) {
+    if (gen !== generation.value) return
     auditData.value = { field_audit: [], batch_audit: [] }
     const detail = isAxiosError(e) ? e.response?.data?.detail : null
     message.warning(`加载溯源信息失败: ${detail || '网络错误'}`)
   }
 }
 
-async function fetchWarningCodes() {
+async function fetchWarningCodes(gen: number) {
   try {
     const resp = await axios.get<{ data_quality: { warning_codes: readonly WarningCode[] } }>(
       '/api/data-status/summary'
     )
+    if (gen !== generation.value) return
     warningCodes.value = resp.data.data_quality.warning_codes
   } catch {
-    warningCodes.value = []
+    if (gen !== generation.value) return
+    warningCodes.value = ['LINEAGE_INVALID']
   }
 }
 
@@ -226,14 +259,15 @@ function renderKline() {
   chart.setDataLoader({
     getBars: ({ type, callback }) => callback(type === 'init' ? candles : [], false),
   })
-  chart.createIndicator('MA')
+  chart.createIndicator({ name: 'MA', calcParams: [5, 10, 20, 60, 120, 250] }, false)
+  chart.createIndicator('VOL', false)
 }
 
 // ─── 监听变化 ───────────────────────────────────────────────────
-watch(adjustMode, fetchKline)
-watch(klineDays, fetchKline)
-watch(trendPeriod, fetchTrend)
-watch(trendYears, fetchTrend)
+watch(adjustMode, () => fetchKline(generation.value))
+watch(klineDays, () => fetchKline(generation.value))
+watch(trendPeriod, () => fetchTrend(generation.value))
+watch(trendYears, () => fetchTrend(generation.value))
 watch(stockCode, fetchAll)
 
 onMounted(fetchAll)
@@ -292,11 +326,21 @@ onUnmounted(() => {
         <n-empty v-if="!klineData.candles?.length" description="无K线数据" style="padding: 40px;" />
       </n-card>
 
+      <!-- 全局数据可信告警 -->
+      <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" style="margin-bottom: 16px;">
+        当前数据库状态不可信，以下指标数据可能不准确或不完整。请先检查<router-link to="/data-status">数据状态页</router-link>。
+      </n-alert>
+
       <!-- 数据新鲜度 -->
       <DataFreshnessCard :freshness="indicators?.freshness ?? null" />
 
       <!-- 指标摘要 -->
-      <IndicatorTabs :indicators="indicators" :trend-data="trendData" :warning-codes="warningCodes" />
+      <IndicatorTabs
+        :indicators="indicators"
+        :trend-data="trendData"
+        :warning-codes="warningCodes"
+        @update:time-dimension="onIndicatorTimeDimension"
+      />
 
       <!-- 财务趋势 -->
       <FinancialTrendCard

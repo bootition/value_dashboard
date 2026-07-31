@@ -18,6 +18,7 @@ PRD §7.2 分阶段: 最小可用初始化(近5年) → 其余历史回填
 from __future__ import annotations
 
 import logging
+import hashlib
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -75,6 +76,7 @@ class PriceBackfiller:
         skip_if_complete: bool = True,
         max_stocks: int = 0,
         fetch_dividends: bool = True,
+        fetch_xdxr: bool = True,
     ) -> dict[str, Any]:
         """执行全市场价格历史回填
 
@@ -108,9 +110,10 @@ class PriceBackfiller:
                 report["steps"]["dividends"] = self._backfill_dividends(
                     max_stocks=max_stocks,
                 )
-
-            # 回填后修正 listing_date (用真实最早价格日覆盖伪造值)
-            report["steps"]["listing_date_fix"] = self._fix_listing_dates()
+            if fetch_xdxr:
+                report["steps"]["corporate_actions"] = self._backfill_xdxr(
+                    max_stocks=max_stocks,
+                )
 
             report["status"] = aggregate_job_status(report["steps"])
 
@@ -139,7 +142,8 @@ class PriceBackfiller:
         logger.info("[价格回填] 开始...")
 
         stocks = self.duck.read_query(
-            "SELECT stock_code, listing_date, exchange FROM stock_meta ORDER BY stock_code"
+            """SELECT stock_code, listing_date, exchange FROM stock_meta
+               WHERE is_listed IS TRUE ORDER BY stock_code"""
         )
         if not stocks:
             return {"status": "skipped", "reason": "无股票数据"}
@@ -154,12 +158,10 @@ class PriceBackfiller:
         success = 0
         skipped = 0
         failed = 0
-        qfq_exempt = 0
         failed_codes: list[str] = []
 
         for i, stock in enumerate(stocks):
             code = stock["stock_code"]
-            exchange = stock.get("exchange")
             listing_date = stock.get("listing_date")
             listing_str = str(listing_date) if listing_date else None
 
@@ -169,19 +171,12 @@ class PriceBackfiller:
                     f"(成功 {success}, 跳过 {skipped}, 失败 {failed})"
                 )
 
-            # 确定起始日期: 优先用 listing_date, 否则用 1990-01-01
-            # 注意: 当前 listing_date 可能是伪造的(2021-06-21),
-            # 伪造值会导致 start_date 太晚, 因此对疑似伪造值用 1990-01-01 兜底
-            if listing_str and listing_str < "2015-01-01":
-                # 2015 年前的 listing_date 大概率是真实的
-                start_date = listing_str
-            else:
-                # 2015 年后的 listing_date 可能是伪造的(从价格反推),
-                # 用 1990-01-01 兜底, baostock 会自动返回从真实上市日开始的数据
-                start_date = _A_SHARE_EPOCH_DATE
+            # Only an exchange-sourced listing date may constrain the request.
+            # Unknown metadata uses the market epoch without creating a date.
+            start_date = listing_str or _A_SHARE_EPOCH_DATE
 
             # 跳过逻辑: 如果已有数据且最早日期 <= listing_date + 30天, 说明已完整
-            if skip_if_complete and listing_str and listing_str < "2015-01-01":
+            if skip_if_complete and listing_str:
                 existing = self.duck.read_query(
                     "SELECT MIN(trade_date) as earliest FROM price_daily_raw WHERE stock_code = ?",
                     [code],
@@ -222,32 +217,35 @@ class PriceBackfiller:
                 continue
 
             if qfq_result.metadata.error or not qfq_result.data:
-                if exchange == "BSE":
-                    qfq_exempt += 1
-                else:
-                    failed += 1
-                    failed_codes.append(code)
-                    self._record_failure(
-                        code,
-                        "price_daily",
-                        qfq_result.metadata.source,
-                        qfq_result.metadata.error or "empty result",
-                        extra_json='{"adjust": "qfq"}',
-                    )
-                    continue
+                failed += 1
+                failed_codes.append(code)
+                self._record_failure(
+                    code,
+                    "price_daily",
+                    qfq_result.metadata.source,
+                    qfq_result.metadata.error or "empty result",
+                    extra_json='{"adjust": "qfq"}',
+                )
+                continue
 
             # 写入 DuckDB (DELETE + INSERT)
             try:
                 with self.duck.transaction() as conn:
-                    # raw
-                    conn.execute(
-                        "DELETE FROM price_daily_raw WHERE stock_code = ?", [code]
-                    )
+                    # Raw and qfq data are upserted so a partial adapter response
+                    # cannot erase dates or fields already verified locally.
                     conn.executemany(
                         """INSERT INTO price_daily_raw
                            (stock_code, trade_date, open, high, low, close,
                             volume, turnover, turnover_rate)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                             open=COALESCE(excluded.open, price_daily_raw.open),
+                             high=COALESCE(excluded.high, price_daily_raw.high),
+                             low=COALESCE(excluded.low, price_daily_raw.low),
+                             close=COALESCE(excluded.close, price_daily_raw.close),
+                             volume=COALESCE(excluded.volume, price_daily_raw.volume),
+                             turnover=COALESCE(excluded.turnover, price_daily_raw.turnover),
+                             turnover_rate=COALESCE(excluded.turnover_rate, price_daily_raw.turnover_rate)""",
                         [(
                             code,
                             r.get("trade_date"),
@@ -263,14 +261,19 @@ class PriceBackfiller:
 
                     # qfq
                     if qfq_result.data:
-                        conn.execute(
-                            "DELETE FROM price_daily_qfq WHERE stock_code = ?", [code]
-                        )
                         conn.executemany(
                             """INSERT INTO price_daily_qfq
                                (stock_code, trade_date, open, high, low, close,
                                 volume, turnover, turnover_rate)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                                 open=COALESCE(excluded.open, price_daily_qfq.open),
+                                 high=COALESCE(excluded.high, price_daily_qfq.high),
+                                 low=COALESCE(excluded.low, price_daily_qfq.low),
+                                 close=COALESCE(excluded.close, price_daily_qfq.close),
+                                 volume=COALESCE(excluded.volume, price_daily_qfq.volume),
+                                 turnover=COALESCE(excluded.turnover, price_daily_qfq.turnover),
+                                 turnover_rate=COALESCE(excluded.turnover_rate, price_daily_qfq.turnover_rate)""",
                             [(
                                 code,
                                 r.get("trade_date"),
@@ -283,9 +286,24 @@ class PriceBackfiller:
                                 r.get("turnover_rate"),
                             ) for r in qfq_result.data],
                         )
+                    from app.core.init import DataInitializer
+
+                    lineage = DataInitializer.__new__(DataInitializer)
+                    lineage._batch_id = self._batch_id
+                    raw_batch_id = lineage._record_batch_in_connection(
+                        conn, raw_result, "price_daily_raw", len(raw_result.data)
+                    )
+                    lineage._record_field_audit_in_connection(
+                        conn, raw_result, raw_result.data, code, "trade_date", raw_batch_id
+                    )
+                    qfq_batch_id = lineage._record_batch_in_connection(
+                        conn, qfq_result, "price_daily_qfq", len(qfq_result.data)
+                    )
+                    lineage._record_field_audit_in_connection(
+                        conn, qfq_result, qfq_result.data, code, "trade_date", qfq_batch_id
+                    )
 
                 success += 1
-                self._record_batch(raw_result, "price_daily_raw", len(raw_result.data))
 
             except Exception as e:
                 failed += 1
@@ -302,7 +320,6 @@ class PriceBackfiller:
             "success": success,
             "skipped": skipped,
             "failed": failed,
-            "qfq_exempt": qfq_exempt,
             "failed_codes": failed_codes[:50],
         }
 
@@ -315,7 +332,9 @@ class PriceBackfiller:
         """
         logger.info("[分红回填] 开始 (baostock 源, 补送股/转增)...")
 
-        stocks = self.duck.read_query("SELECT stock_code FROM stock_meta ORDER BY stock_code")
+        stocks = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+        )
         if not stocks:
             return {"status": "skipped", "reason": "无股票数据"}
 
@@ -365,11 +384,18 @@ class PriceBackfiller:
             try:
                 with self.duck.transaction() as conn:
                     conn.executemany(
-                        """INSERT OR REPLACE INTO dividends
+                        """INSERT INTO dividends
                            (stock_code, ex_date, announcement_date,
                             dividend_per_share, stock_dividend, transfer_share,
                             rights_issue, rights_issue_price)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(stock_code, ex_date) DO UPDATE SET
+                             announcement_date=COALESCE(excluded.announcement_date, dividends.announcement_date),
+                             dividend_per_share=COALESCE(excluded.dividend_per_share, dividends.dividend_per_share),
+                             stock_dividend=COALESCE(excluded.stock_dividend, dividends.stock_dividend),
+                             transfer_share=COALESCE(excluded.transfer_share, dividends.transfer_share),
+                             rights_issue=COALESCE(excluded.rights_issue, dividends.rights_issue),
+                             rights_issue_price=COALESCE(excluded.rights_issue_price, dividends.rights_issue_price)""",
                         [
                             (
                                 code,
@@ -383,6 +409,16 @@ class PriceBackfiller:
                             )
                             for row in valid_rows
                         ],
+                    )
+                    from app.core.init import DataInitializer
+
+                    lineage = DataInitializer.__new__(DataInitializer)
+                    lineage._batch_id = self._batch_id
+                    batch_id = lineage._record_batch_in_connection(
+                        conn, result, "dividends", len(valid_rows)
+                    )
+                    lineage._record_field_audit_in_connection(
+                        conn, result, valid_rows, code, "ex_date", batch_id
                     )
                 success += 1
                 total_rows += len(valid_rows)
@@ -410,6 +446,49 @@ class PriceBackfiller:
             "total_rows": total_rows,
         }
 
+    def _backfill_xdxr(self, max_stocks: int = 0) -> dict[str, Any]:
+        """Backfill TDX corporate actions without replacing verified local history."""
+        from app.core.init import DataInitializer
+
+        stocks = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+        )
+        if max_stocks > 0:
+            stocks = stocks[:max_stocks]
+        if not stocks:
+            return {"status": "skipped", "reason": "no_listed_stocks"}
+
+        success = failed = rows_written = 0
+        for stock in stocks:
+            code = stock["stock_code"]
+            result = self.adapter_mgr.fetch(FetchRequest(data_type="xdxr", stock_codes=[code]))
+            if result.metadata.error or not result.data:
+                failed += 1
+                self._record_failure(code, "xdxr", result.metadata.source, result.metadata.error or "empty result")
+                self._record_missing(code, "xdxr", "source_unavailable")
+                continue
+            try:
+                with self.duck.transaction() as conn:
+                    DataInitializer._upsert_xdxr_rows(conn, code, result.data)
+                    lineage = DataInitializer.__new__(DataInitializer)
+                    lineage._batch_id = self._batch_id
+                    batch_id = lineage._record_batch_in_connection(conn, result, "xdxr", len(result.data))
+                    lineage._record_field_audit_in_connection(
+                        conn, result, result.data, code, "event_date", batch_id
+                    )
+                success += 1
+                rows_written += len(result.data)
+            except Exception as error:
+                failed += 1
+                self._record_failure(code, "xdxr", "duckdb", str(error))
+        return {
+            "status": "success" if failed == 0 else "partial",
+            "total": len(stocks),
+            "success": success,
+            "failed": failed,
+            "rows_written": rows_written,
+        }
+
     def _record_missing(
         self,
         stock_code: str,
@@ -426,57 +505,13 @@ class PriceBackfiller:
                 [stock_code, field_name, reason_code],
             )
 
-    def _fix_listing_dates(self) -> dict[str, Any]:
-        """回填后修正 listing_date
-
-        用 price_daily_raw 的 MIN(trade_date) 覆盖伪造的 listing_date。
-        回填完成后, MIN(trade_date) 就是真实上市日。
-        """
-        logger.info("[listing_date 修正] 用真实最早价格日覆盖伪造值...")
-
-        try:
-            with self.duck.write_connection() as conn:
-                conn.execute(
-                    """
-                    UPDATE stock_meta
-                    SET listing_date = sub.first_date
-                    FROM (
-                        SELECT stock_code, MIN(trade_date) AS first_date
-                        FROM price_daily_raw
-                        GROUP BY stock_code
-                    ) sub
-                    WHERE stock_meta.stock_code = sub.stock_code
-                    """
-                )
-                result = conn.execute(
-                    """
-                    SELECT
-                        COUNT(*) as total,
-                        COUNT(listing_date) as with_date,
-                        MIN(listing_date) as earliest,
-                        MAX(listing_date) as latest
-                    FROM stock_meta
-                    """
-                ).fetchone()
-
-            total, with_date, earliest, latest = result
-            logger.info(
-                f"[listing_date 修正] 完成: {with_date}/{total} 有上市日, "
-                f"范围 {earliest} ~ {latest}"
-            )
-            return {
-                "status": "success",
-                "total": total,
-                "with_listing_date": with_date,
-                "earliest": str(earliest) if earliest else None,
-                "latest": str(latest) if latest else None,
-            }
-        except Exception as e:
-            logger.error(f"listing_date 修正失败: {e}")
-            return {"status": "failed", "error": str(e)}
-
     def _record_batch(self, result: Any, data_type: str, row_count: int) -> None:
         """记录批次溯源"""
+        if row_count > 0:
+            if not result.raw_response:
+                raise ValueError(f"{data_type} has rows but no source material")
+            if hashlib.sha256(result.raw_response).hexdigest() != result.metadata.raw_response_hash:
+                raise ValueError(f"{data_type} source material hash mismatch")
         try:
             with self.duck.write_connection() as conn:
                 conn.execute(
@@ -495,8 +530,22 @@ class PriceBackfiller:
                         result.metadata.confidence,
                     ],
                 )
+                conn.execute(
+                    """INSERT INTO raw_response_archive
+                       (raw_response_hash, source, fetch_time, payload, api_version, integrity_verified)
+                       VALUES (?, ?, ?, ?, ?, TRUE)
+                       ON CONFLICT(raw_response_hash) DO NOTHING""",
+                    [
+                        result.metadata.raw_response_hash,
+                        result.metadata.source,
+                        result.metadata.fetch_time,
+                        result.raw_response,
+                        result.metadata.api_version,
+                    ],
+                )
         except Exception as e:
             logger.warning(f"记录批次溯源失败: {e}")
+            raise
 
     def _record_failure(
         self,

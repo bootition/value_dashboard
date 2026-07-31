@@ -17,11 +17,13 @@ adapters:
     akshare_eastmoney: 0.5
     tdx: 0.1
     baostock: 0.1
+    tencent: 0.2
+    sina: 0.35
   primary:
-    balance_sheet: ["akshare_eastmoney", "tdx"]
-    income_statement: ["akshare_eastmoney", "tdx"]
-    cash_flow: ["akshare_eastmoney", "tdx"]
-    price_daily: ["baostock", "tdx", "akshare_eastmoney"]
+    balance_sheet: ["sina", "tdx", "akshare_eastmoney"]
+    income_statement: ["sina", "tdx", "akshare_eastmoney"]
+    cash_flow: ["sina", "tdx", "akshare_eastmoney"]
+    price_daily: ["baostock", "tdx", "tencent", "akshare_eastmoney"]
     dividends: ["cninfo", "akshare_eastmoney", "baostock"]
     xdxr: ["tdx"]
     announcements: ["cninfo"]
@@ -39,6 +41,12 @@ screening:
 backup:
   keep_full_backups: 3
   encrypt_personal_data: true
+
+archive:
+  root: "parquet"
+
+pdf:
+  archive_root: "archive_pdf"
 
 logging:
   level: INFO

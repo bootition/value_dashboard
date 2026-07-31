@@ -1,0 +1,16 @@
+{
+  "run_id": "20260731-130149",
+  "env": "formal",
+  "only_gap": true,
+  "targets": 355,
+  "gap_before": 430,
+  "stats": {
+    "success": 355,
+    "failed": 0,
+    "no_events": 0,
+    "div_rows": 2051,
+    "xdxr_rows": 7351
+  },
+  "failed_codes": [],
+  "finished_at": "2026-07-31T13:01:49.660734+00:00"
+}

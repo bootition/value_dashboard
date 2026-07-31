@@ -20,8 +20,9 @@ def _configure_temp_databases(database_paths: DatabasePathSet, monkeypatch) -> N
         "load",
         classmethod(lambda cls, config_dir=None, paths=None: config),
     )
-    monkeypatch.setattr("app.core.storage.duckdb_store.DuckDBStore", lambda: duck)
-    monkeypatch.setattr("app.core.storage.sqlite_store.SQLiteStore", lambda: sqlite)
+    monkeypatch.setattr(
+        "app.cli.main._database_stores", lambda *, initialize=True: (duck, sqlite),
+    )
     init_duckdb_schema(duck)
     init_sqlite_schema(sqlite)
 
@@ -52,3 +53,22 @@ def test_data_diagnose_is_unhealthy_when_quality_warnings_exist(
     assert response["result"]["status"] == "error"
     assert response["result"]["data"]["healthy"] is False
     assert "SNAPSHOT_STALE" in response["result"]["data"]["data_quality"]["warning_codes"]
+
+
+def test_data_diagnose_uses_the_read_only_database_composition(
+    database_paths: DatabasePathSet,
+    monkeypatch,
+) -> None:
+    _configure_temp_databases(database_paths, monkeypatch)
+    calls: list[bool] = []
+    original = __import__("app.cli.main", fromlist=["_database_stores"])._database_stores
+
+    def stores(*, initialize: bool = True):
+        calls.append(initialize)
+        return original(initialize=initialize)
+
+    monkeypatch.setattr("app.cli.main._database_stores", stores)
+
+    data_diagnose()
+
+    assert calls == [False]

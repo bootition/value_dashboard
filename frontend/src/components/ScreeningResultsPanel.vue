@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, h, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import {
   NCard,
   NButton,
@@ -18,7 +19,7 @@ import {
   useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import type { ScreeningResult, WarningCode, ScreeningRuleNode, ScreeningSaveResponse, ScreeningExportResponse, ScreeningWatchlistResponse } from '../types/screening.ts'
+import type { ScreeningResult, WarningCode, ScreeningRuleNode, ScreeningExportResponse, ScreeningWatchlistResponse } from '../types/screening.ts'
 import axios, { isAxiosError } from 'axios'
 
 const props = defineProps<{
@@ -31,18 +32,24 @@ const props = defineProps<{
   untrustedFields: readonly string[]
   qualityStatus: 'loading' | 'available' | 'failed'
   ruleTree: ScreeningRuleNode
-  sortField: string
-  sortDirection: 'asc' | 'desc'
-}>()
-
-const emit = defineEmits<{
-  // refresh emit removed — parent handles refreshes independently
+  runId: string | null
+  ruleId: number | null
+  ruleVersion: number | null
+  lockedIndicators: Record<string, unknown>
+  sort: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>
+  basePoolConfig: Record<string, unknown>
 }>()
 
 const message = useMessage()
+const router = useRouter()
 const showSaveDialog = ref(false)
 const saveTitle = ref('')
 const saveNote = ref('')
+const savedResultId = ref<number | null>(null)
+
+watch(() => props.runId, () => {
+  savedResultId.value = null
+})
 
 const hasWarnings = computed(() => props.warningCodes.length > 0)
 const hasUntrustedFields = computed(() => props.untrustedFields.length > 0)
@@ -54,7 +61,7 @@ const operationsOnlyWarnings = computed(
     props.warningCodes.every((c) => OPERATIONS_ONLY_CODES.has(c)),
 )
 const durableActionsDisabled = computed(
-  () => (hasUntrustedFields.value || qualityUnavailable.value) && props.results.length > 0,
+  () => (hasUntrustedFields.value || qualityUnavailable.value || props.ruleId === null || props.runId === null) && props.results.length > 0,
 )
 
 const ruleFieldsSet = computed(() => {
@@ -140,6 +147,14 @@ const tableColumns = computed(() => {
         sorter: 'default',
         render(row) {
           const v = row[key]
+          if (key === 'stock_code' && typeof v === 'string') {
+            return h(NButton, {
+              text: true,
+              type: 'primary',
+              title: `查看 ${v} 详情`,
+              onClick: () => router.push(`/stock/${encodeURIComponent(v)}`),
+            }, () => v)
+          }
           if (v === null || v === undefined) return '—'
           if (typeof v === 'number') {
             return Math.abs(v) < 0.01 && v !== 0
@@ -178,15 +193,13 @@ async function saveResults() {
     return
   }
   try {
-    await axios.post<ScreeningSaveResponse>('/api/screening/save', {
+    const response = await axios.post<{ status: string; result_id: number }>('/api/screening/save', {
       title: saveTitle.value,
       note: saveNote.value || null,
-      rule_json: { conditions: props.ruleTree },
-      results: props.results,
-      columns: Object.keys(props.results[0] || {}).filter((k) => !k.startsWith('_')),
-      sort: [{ field: props.sortField, direction: props.sortDirection }],
-      data_date: props.dataDate,
+      run_id: props.runId,
+      columns: selectedColumns.value,
     })
+    savedResultId.value = response.data.result_id
     message.success('结果已保存')
     showSaveDialog.value = false
     saveTitle.value = ''
@@ -202,11 +215,13 @@ async function exportCSV() {
     message.warning('当前结果包含不可信字段或质量状态未知，无法导出')
     return
   }
+  if (savedResultId.value === null) {
+    message.warning('请先保存当前筛选结果，再导出 CSV')
+    return
+  }
   try {
     const resp = await axios.post<ScreeningExportResponse>('/api/screening/export_csv', {
-      results: props.results,
-      columns: Object.keys(props.results[0] || {}).filter((k) => !k.startsWith('_')),
-      data_date: props.dataDate,
+      result_id: savedResultId.value,
     })
     const blob = new Blob(['\ufeff' + resp.data.csv], { type: 'text/csv;charset=utf-8;bom' })
     const url = URL.createObjectURL(blob)
@@ -223,12 +238,17 @@ async function exportCSV() {
 }
 
 async function addToWatchlist() {
-  const codes = props.results.map((r) => r.stock_code)
+  if (savedResultId.value === null) {
+    message.warning('请先保存当前筛选结果，再加入自选')
+    return
+  }
+  const codes = filteredResults.value.map((r) => r.stock_code)
   if (!codes.length) return
   try {
     const resp = await axios.post<ScreeningWatchlistResponse>('/api/screening/add_to_watchlist', {
-      stock_codes: codes,
-      group: 'screening',
+        stock_codes: codes,
+        group: 'screening',
+        result_id: savedResultId.value,
     })
     message.success(`已加入自选: ${resp.data.added} 只`)
   } catch (e: unknown) {
@@ -270,7 +290,7 @@ async function addToWatchlist() {
     </n-alert>
 
     <n-grid :cols="4" :x-gap="16" style="margin-bottom: 16px">
-      <n-grid-item><n-card><n-statistic label="结果数" :value="results.length" /></n-card></n-grid-item>
+      <n-grid-item><n-card><n-statistic label="结果数" :value="filteredResults.length" /></n-card></n-grid-item>
       <n-grid-item><n-card><n-statistic label="基础池" :value="basePoolSize" /></n-card></n-grid-item>
       <n-grid-item><n-card><n-statistic label="耗时(ms)" :value="executionTime" /></n-card></n-grid-item>
       <n-grid-item><n-card><n-statistic label="数据日期"><template #default><span>{{ dataDate || '—' }}</span><n-tag v-if="hasWarnings" size="small" type="warning" style="margin-left: 8px">{{ warningCodes.length }} 个警告</n-tag></template></n-statistic></n-card></n-grid-item>

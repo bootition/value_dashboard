@@ -20,7 +20,8 @@ export interface ScreeningRuleCondition {
   readonly id: string
   field: string
   op: string
-  value: number | null
+  value: number | [number, number] | null
+  right_field?: string
 }
 
 /** Recursive AND/OR group in a screening rule tree. */
@@ -59,6 +60,7 @@ export type ScreeningResult = Readonly<ScreeningResultKnownFields> &
 
 /** Response from POST /api/screening/run. */
 export interface ScreeningRunResponse {
+  readonly run_id: string
   readonly results: ReadonlyArray<ScreeningResult>
   readonly total: number
   readonly execution_time_ms: number

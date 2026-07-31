@@ -65,6 +65,16 @@ def test_sqlite_store_uses_injected_path_set(tmp_path: Path) -> None:
     assert paths.sqlite_path.is_file()
 
 
+def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
+    paths = make_paths(tmp_path)
+    store = SQLiteStore(paths=paths)
+    store.execute("CREATE TABLE query_boundary (id INTEGER PRIMARY KEY)")
+    assert store.query("SELECT COUNT(*) AS count FROM query_boundary") == [{"count": 0}]
+    with pytest.raises(Exception, match="readonly|read-only"):
+        with store.connection() as conn:
+            conn.execute("INSERT INTO query_boundary (id) VALUES (1)")
+
+
 @pytest.mark.parametrize("store_type", [DuckDBStore, SQLiteStore])
 def test_store_revalidates_untrusted_path_set_before_side_effects(
     store_type: type,

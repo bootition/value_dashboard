@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import logging
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
@@ -314,7 +315,9 @@ class TDXAdapter(BaseAdapter):
                         }
                     )
 
-                raw_lines.append(f"{plain_code}: {len(bars)} bars")
+                raw_lines.append(
+                    json.dumps(all_records[-len(bars):], ensure_ascii=False, sort_keys=True, default=str)
+                )
                 self._wait_rate_limit()
 
         if not all_records:
@@ -435,7 +438,9 @@ class TDXAdapter(BaseAdapter):
                         }
                     )
 
-                raw_lines.append(f"{plain_code}: {len(df)} xdxr rows")
+                raw_lines.append(
+                    json.dumps(all_records[-len(df):], ensure_ascii=False, sort_keys=True, default=str)
+                )
 
         if not all_records:
             return self._make_empty_result(
@@ -584,7 +589,7 @@ class TDXAdapter(BaseAdapter):
                     all_records.append(record)
 
                 raw_lines.append(
-                    f"{filename}: {len(df_filtered)}/{len(df_recs)} records"
+                    json.dumps(all_records[-len(df_filtered):], ensure_ascii=False, sort_keys=True, default=str)
                 )
 
         if not all_records:
@@ -695,5 +700,3 @@ class TDXAdapter(BaseAdapter):
             return df is not None and not df.empty
         except Exception:
             return False
-
-

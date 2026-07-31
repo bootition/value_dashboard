@@ -6,12 +6,27 @@
 
 from __future__ import annotations
 
-from typing import Any
 
-from fastapi import APIRouter, Query, Request
+import json
+
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+
+# 依赖 indicator_snapshot 的数值字段；信任决策阻断时必须遮蔽
+_SNAPSHOT_VALUE_FIELDS = (
+    "latest_close",
+    "pe_ttm",
+    "pb_mrq",
+    "roe",
+    "gross_margin",
+    "net_margin",
+    "debt_ratio",
+    "revenue_yoy",
+    "net_profit_yoy",
+    "dividend_yield",
+)
 
 
 class AddStockRequest(BaseModel):
@@ -33,7 +48,7 @@ class MoveGroupRequest(BaseModel):
 
 
 @router.get("/list")
-async def list_watchlist(request: Request, group: str | None = None) -> dict:
+def list_watchlist(request: Request, group: str | None = None) -> dict:
     """列出自选股票 (PRD §13: 分组/排序/自定义列/来源记录)"""
     sqlite = request.app.state.sqlite
     duck = request.app.state.duck
@@ -74,8 +89,8 @@ async def list_watchlist(request: Request, group: str | None = None) -> dict:
             stock_codes,
         )
         info_map = {r["stock_code"]: r for r in stock_info}
-    except Exception:
-        info_map = {}
+    except Exception as error:
+        raise HTTPException(status_code=503, detail={"error": "database unavailable", "detail": str(error)})
 
     items = []
     for row in rows:
@@ -102,31 +117,69 @@ async def list_watchlist(request: Request, group: str | None = None) -> dict:
             "dividend_yield": info.get("dividend_yield"),
         })
 
+    # P1-4: 服务端权威信任决策；阻断警告存在时遮蔽快照数值字段
+    from app.core.data_quality import (
+        indicator_trust,
+        mask_untrusted_values,
+        read_warning_codes,
+    )
+
+    trust = indicator_trust(read_warning_codes(duck, sqlite))
+    untrusted = set(trust["untrusted_fields"])
+    for item in items:
+        item.update(mask_untrusted_values(
+            {field: item[field] for field in _SNAPSHOT_VALUE_FIELDS}, trust
+        ))
+        item["untrusted_fields"] = (
+            list(_SNAPSHOT_VALUE_FIELDS) if trust["untrusted_all"]
+            else sorted(untrusted & set(_SNAPSHOT_VALUE_FIELDS))
+        )
+
     # 获取分组列表
     groups = sqlite.query(
         "SELECT DISTINCT group_name, COUNT(*) as cnt "
         "FROM watchlist GROUP BY group_name ORDER BY group_name"
     )
 
-    return {"items": items, "count": len(items), "groups": groups}
+    return {"items": items, "count": len(items), "groups": groups, "trust": trust}
 
 
 @router.post("/add")
-async def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
+def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     """添加股票到自选 (PRD §13: 手动保留)"""
     sqlite = request.app.state.sqlite
     with sqlite.transaction() as conn:
+        if req.source_result_id is not None:
+            result = conn.execute(
+                "SELECT rule_id, result_json FROM screening_results WHERE id = ?",
+                [req.source_result_id],
+            ).fetchone()
+            if result is None:
+                raise HTTPException(status_code=400, detail="screening result provenance is missing")
+            if req.stock_code not in {row.get("stock_code") for row in json.loads(result["result_json"])}:
+                raise HTTPException(status_code=400, detail="stock code is not in the source result")
+            if req.source_rule_id is not None and req.source_rule_id != result["rule_id"]:
+                raise HTTPException(status_code=400, detail="source rule does not match source result")
+            source_rule_id = result["rule_id"]
+        elif req.source_rule_id is not None:
+            raise HTTPException(status_code=400, detail="source result is required for screening provenance")
+        else:
+            source_rule_id = None
         conn.execute(
-            """INSERT OR REPLACE INTO watchlist
+            """INSERT INTO watchlist
                (stock_code, group_name, source_rule_id, source_result_id)
-               VALUES (?, ?, ?, ?)""",
-            [req.stock_code, req.group_name, req.source_rule_id, req.source_result_id],
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(stock_code, group_name) DO UPDATE SET
+                 source_rule_id=excluded.source_rule_id,
+                 source_result_id=excluded.source_result_id,
+                 added_at=CURRENT_TIMESTAMP""",
+            [req.stock_code, req.group_name, source_rule_id, req.source_result_id],
         )
     return {"status": "ok", "stock_code": req.stock_code, "group": req.group_name}
 
 
 @router.delete("/remove")
-async def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
+def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
     """从自选移除 (PRD §13: 手动移除)"""
     sqlite = request.app.state.sqlite
     if req.group_name:
@@ -143,7 +196,7 @@ async def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
 
 
 @router.post("/move")
-async def move_group(req: MoveGroupRequest, request: Request) -> dict:
+def move_group(req: MoveGroupRequest, request: Request) -> dict:
     """移动到其他分组"""
     sqlite = request.app.state.sqlite
     sqlite.execute(
@@ -155,7 +208,7 @@ async def move_group(req: MoveGroupRequest, request: Request) -> dict:
 
 
 @router.get("/groups")
-async def list_groups(request: Request) -> dict:
+def list_groups(request: Request) -> dict:
     """列出所有分组"""
     sqlite = request.app.state.sqlite
     groups = sqlite.query(

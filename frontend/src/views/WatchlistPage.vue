@@ -2,11 +2,13 @@
 import { ref, onMounted, computed, h } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  NCard, NSpace, NSelect, NInput, NButton, NDataTable,
-  NEmpty, useMessage, NStatistic, NGrid, NGridItem, NCheckboxGroup, NCheckbox
+  NAlert, NCard, NSpace, NSelect, NInput, NButton, NDataTable,
+  NEmpty, useMessage, NStatistic, NGrid, NGridItem, NCheckboxGroup, NCheckbox, NTag
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
+import { isIndicatorUntrusted } from '../types/data-quality.ts'
+import type { IndicatorTrust } from '../types/data-quality.ts'
 
 interface WatchlistItem {
   stock_code: string
@@ -27,6 +29,7 @@ interface WatchlistItem {
   revenue_yoy: number | null
   net_profit_yoy: number | null
   dividend_yield: number | null
+  untrusted_fields?: string[]
 }
 
 interface WatchlistGroup {
@@ -34,15 +37,28 @@ interface WatchlistGroup {
   cnt: number
 }
 
+interface WatchlistResponse {
+  items: WatchlistItem[]
+  count: number
+  groups: WatchlistGroup[]
+  trust?: IndicatorTrust
+}
+
 const router = useRouter()
 const message = useMessage()
 
 const items = ref<WatchlistItem[]>([])
 const groups = ref<WatchlistGroup[]>([])
+const trust = ref<IndicatorTrust | null>(null)
 const loading = ref(false)
 const selectedGroup = ref<string | null>(null)
 const addStockCode = ref('')
 const addGroupName = ref('default')
+
+const warningCodes = computed(() => trust.value?.warning_codes ?? [])
+const hasUntrustedIndicators = computed(
+  () => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value)
+)
 
 const groupOptions = computed(() => [
   { label: '全部分组', value: '' },
@@ -67,6 +83,20 @@ const allColumnOptions = [
   { label: '来源', value: 'source' },
 ]
 
+type NumericField =
+  | 'latest_close' | 'pe_ttm' | 'pb_mrq' | 'roe' | 'gross_margin'
+  | 'net_margin' | 'debt_ratio' | 'revenue_yoy' | 'net_profit_yoy' | 'dividend_yield'
+
+function trustedRender(field: NumericField, format: (value: number) => string) {
+  return (row: WatchlistItem) => {
+    if (isIndicatorUntrusted(field, warningCodes.value)) {
+      return h(NTag, { size: 'tiny', type: 'error' }, () => '数据不可信')
+    }
+    const value = row[field]
+    return value != null ? format(value) : '—'
+  }
+}
+
 const tableColumns = computed(() => {
   const cols: DataTableColumns<WatchlistItem> = []
   const colDefs: Record<string, DataTableColumns<WatchlistItem>[number]> = {
@@ -74,14 +104,14 @@ const tableColumns = computed(() => {
     name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || '—' },
     exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
     group_name: { title: '分组', key: 'group_name', width: 90 },
-    latest_close: { title: '收盘价', key: 'latest_close', width: 80, sorter: 'default', render: (r) => r.latest_close != null ? r.latest_close.toFixed(2) : '—' },
-    pe_ttm: { title: 'PE', key: 'pe_ttm', width: 70, sorter: 'default', render: (r) => r.pe_ttm != null ? r.pe_ttm.toFixed(1) : '—' },
-    pb_mrq: { title: 'PB', key: 'pb_mrq', width: 70, sorter: 'default', render: (r) => r.pb_mrq != null ? r.pb_mrq.toFixed(2) : '—' },
-    roe: { title: 'ROE', key: 'roe', width: 80, sorter: 'default', render: (r) => r.roe != null ? (r.roe * 100).toFixed(2) + '%' : '—' },
-    gross_margin: { title: '毛利率', key: 'gross_margin', width: 80, sorter: 'default', render: (r) => r.gross_margin != null ? (r.gross_margin * 100).toFixed(2) + '%' : '—' },
-    net_margin: { title: '净利率', key: 'net_margin', width: 80, sorter: 'default', render: (r) => r.net_margin != null ? (r.net_margin * 100).toFixed(2) + '%' : '—' },
-    debt_ratio: { title: '负债率', key: 'debt_ratio', width: 80, sorter: 'default', render: (r) => r.debt_ratio != null ? (r.debt_ratio * 100).toFixed(2) + '%' : '—' },
-    revenue_yoy: { title: '营收YoY', key: 'revenue_yoy', width: 90, sorter: 'default', render: (r) => r.revenue_yoy != null ? (r.revenue_yoy * 100).toFixed(2) + '%' : '—' },
+    latest_close: { title: '收盘价', key: 'latest_close', width: 80, sorter: 'default', render: trustedRender('latest_close', (v) => v.toFixed(2)) },
+    pe_ttm: { title: 'PE', key: 'pe_ttm', width: 70, sorter: 'default', render: trustedRender('pe_ttm', (v) => v.toFixed(1)) },
+    pb_mrq: { title: 'PB', key: 'pb_mrq', width: 70, sorter: 'default', render: trustedRender('pb_mrq', (v) => v.toFixed(2)) },
+    roe: { title: 'ROE', key: 'roe', width: 80, sorter: 'default', render: trustedRender('roe', (v) => (v * 100).toFixed(2) + '%') },
+    gross_margin: { title: '毛利率', key: 'gross_margin', width: 80, sorter: 'default', render: trustedRender('gross_margin', (v) => (v * 100).toFixed(2) + '%') },
+    net_margin: { title: '净利率', key: 'net_margin', width: 80, sorter: 'default', render: trustedRender('net_margin', (v) => (v * 100).toFixed(2) + '%') },
+    debt_ratio: { title: '负债率', key: 'debt_ratio', width: 80, sorter: 'default', render: trustedRender('debt_ratio', (v) => (v * 100).toFixed(2) + '%') },
+    revenue_yoy: { title: '营收YoY', key: 'revenue_yoy', width: 90, sorter: 'default', render: trustedRender('revenue_yoy', (v) => (v * 100).toFixed(2) + '%') },
     source: { title: '来源', key: 'source', width: 80, render: (r) => r.source_result_id ? '筛选' : (r.source_rule_id ? '规则' : '手动') },
   }
   for (const col of selectedColumns.value) {
@@ -102,9 +132,10 @@ async function fetchWatchlist() {
   loading.value = true
   try {
     const params = selectedGroup.value ? { group: selectedGroup.value } : {}
-    const resp = await axios.get('/api/watchlist/list', { params })
+    const resp = await axios.get<WatchlistResponse>('/api/watchlist/list', { params })
     items.value = resp.data.items
     groups.value = resp.data.groups
+    trust.value = resp.data.trust ?? null
   } catch (e: unknown) {
     const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '未知错误'
     message.error(`加载失败: ${detail}`)
@@ -167,6 +198,9 @@ onMounted(fetchWatchlist)
         </n-checkbox-group>
       </n-space>
     </n-card>
+    <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" style="margin-bottom: 16px;">
+      当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。
+    </n-alert>
     <n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped />
     <n-empty v-else description="自选列表为空，添加股票或从筛选结果加入" style="padding: 40px;" />
   </div>

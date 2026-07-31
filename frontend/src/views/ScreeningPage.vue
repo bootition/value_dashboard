@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed } from 'vue'
+import { ref, reactive, onMounted, computed, watch } from 'vue'
 import { NCard, NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, useMessage } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
@@ -23,6 +23,7 @@ const results = ref<readonly ScreeningResult[]>([])
 const executionTime = ref(0)
 const basePoolSize = ref(0)
 const dataDate = ref<string | null>(null)
+const runId = ref<string | null>(null)
 const warningCodes = ref<readonly WarningCode[]>([])
 const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
 
@@ -41,15 +42,13 @@ interface SavedRule {
 
 const savedRules = ref<SavedRule[]>([])
 const selectedRuleId = ref<number>(0)
+const activeRule = computed(() => savedRules.value.find(rule => rule.id === selectedRuleId.value) || null)
+const ruleName = ref('')
 
 const ruleTree = reactive<ScreeningRuleNode>({
   id: generateRuleId(),
   logic: 'AND',
-  rules: [
-    { id: generateRuleId(), field: 'pe_ttm', op: '>', value: 0 },
-    { id: generateRuleId(), field: 'pe_ttm', op: '<', value: 100 },
-    { id: generateRuleId(), field: 'roe', op: '>', value: 0.1 },
-  ],
+  rules: [],
 })
 
 interface SortRule {
@@ -68,12 +67,13 @@ const opOptions = [
   { label: '<=', value: '<=' },
   { label: '=', value: '=' },
   { label: '!=', value: '!=' },
+  { label: '区间', value: 'between' },
   { label: '不为空', value: 'is_not_null' },
   { label: '为空', value: 'is_null' },
 ]
 
 const indicatorOptions = computed(() =>
-  indicators.value.map((i) => ({ label: i.name, value: i.name })),
+  indicators.value.map((i) => ({ label: (i as ScreeningIndicator & { label?: string }).label || i.name, value: i.name })),
 )
 
 const resultColumns = computed(() => {
@@ -105,26 +105,25 @@ function removeSortRule(index: number) {
 }
 
 async function runScreening() {
+  if (activeRule.value === null) {
+    message.warning('请先保存并选择规则版本，再运行筛选')
+    return
+  }
   loading.value = true
   try {
     const resp = await axios.post<ScreeningRunResponse>('/api/screening/run', {
-      rule: {
-        conditions: ruleTree,
-        sort: sortRules.value,
-        columns: [
-          'stock_code', 'name', 'exchange', 'sw_level1', 'latest_close',
-          'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'net_margin',
-          'debt_ratio', 'revenue_yoy', 'dividend_yield',
-        ],
-      },
+      rule_id: activeRule.value.id,
+      rule_version: activeRule.value.version,
       include_st: !basePool.exclude_st,
       include_suspended: !basePool.exclude_suspended,
       min_listing_years: basePool.min_listing_years,
+      strict_only: strictOnly.value,
     })
     results.value = resp.data.results
     executionTime.value = resp.data.execution_time_ms
     basePoolSize.value = resp.data.base_pool_size
     dataDate.value = resp.data.data_date
+    runId.value = resp.data.run_id
     message.success(`筛选完成: ${resp.data.total} 条 (${resp.data.execution_time_ms}ms)`)
   } catch (e: unknown) {
     const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : null
@@ -140,6 +139,107 @@ async function loadSavedRules() {
     savedRules.value = resp.data.rules
   } catch {
     message.warning('无法加载已保存的规则')
+  }
+}
+
+let draftTimer: ReturnType<typeof setTimeout> | undefined
+let draftHydrated = false
+const draftRevision = ref(0)
+let draftSaveInFlight = false
+let draftSaveQueued = false
+
+function draftPayload() {
+  return {
+    conditions: ruleTree,
+    sort: sortRules.value,
+    base_pool: { ...basePool },
+    strict_only: strictOnly.value,
+  }
+}
+
+async function persistDraft() {
+  if (!draftHydrated) return
+  if (draftSaveInFlight) {
+    draftSaveQueued = true
+    return
+  }
+  draftSaveInFlight = true
+  try {
+    const response = await axios.put<{ revision: number }>('/api/screening/draft', {
+      draft: draftPayload(),
+      revision: draftRevision.value,
+    })
+    draftRevision.value = response.data.revision
+  } catch (error) {
+    if (isAxiosError(error) && error.response?.status === 409) {
+      draftHydrated = false
+      message.warning('草稿已在其他页面更新；请刷新后再编辑')
+    } else {
+      message.warning('筛选草稿自动保存失败')
+    }
+  } finally {
+    draftSaveInFlight = false
+    if (draftSaveQueued && draftHydrated) {
+      draftSaveQueued = false
+      void persistDraft()
+    }
+  }
+}
+
+function saveDraftSoon() {
+  if (!draftHydrated) return
+  if (draftTimer) clearTimeout(draftTimer)
+  draftTimer = setTimeout(() => void persistDraft(), 400)
+}
+
+watch([ruleTree, sortRules, basePool, strictOnly], saveDraftSoon, { deep: true })
+
+async function restoreDraft() {
+  try {
+    const response = await axios.get<{ draft: {
+      conditions?: ScreeningRuleNode
+      sort?: SortRule[]
+      base_pool?: Partial<typeof basePool>
+      strict_only?: boolean
+    } | null; revision?: number }>('/api/screening/draft')
+    const draft = response.data.draft
+    draftRevision.value = response.data.revision ?? 0
+    if (!draft) return
+    if (draft.conditions) Object.assign(ruleTree, draft.conditions)
+    if (draft.sort) sortRules.value = draft.sort
+    if (draft.base_pool) Object.assign(basePool, draft.base_pool)
+    if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
+  } catch {
+    message.warning('无法恢复最近筛选草稿')
+  }
+}
+
+async function saveRule() {
+  if (!ruleName.value.trim()) {
+    message.warning('请输入规则名称')
+    return
+  }
+  try {
+    const resp = await axios.post<{ rule_id: number; version: number }>('/api/screening/rules/save', {
+      name: ruleName.value.trim(),
+      rule_json: {
+        conditions: ruleTree,
+        sort: sortRules.value,
+        columns: Array.from(new Set([
+          'stock_code', 'name', 'exchange', 'sw_level1', 'sw_level2', 'latest_close',
+          ...sortRules.value.map(item => item.field),
+          ...Array.from(ruleFields.value),
+        ])),
+      },
+      locked_indicators: {},
+      status: 'saved',
+    })
+    await loadSavedRules()
+    selectedRuleId.value = resp.data.rule_id
+    message.success(`规则已保存为 v${resp.data.version}`)
+  } catch (e: unknown) {
+    const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '未知错误'
+    message.error(`保存规则失败: ${detail}`)
   }
 }
 
@@ -176,7 +276,8 @@ const ruleOptions = computed(() => {
 })
 
 onMounted(async () => {
-  // Load saved rules
+  await restoreDraft()
+  draftHydrated = true
   await loadSavedRules()
   
   try {
@@ -211,16 +312,18 @@ onMounted(async () => {
     <h2>筛选</h2>
     
     <n-card title="加载规则" size="small" style="margin-bottom: 16px">
-      <n-space align="center">
-        <span>已保存的规则:</span>
+        <n-space align="center">
+          <span>已保存的规则:</span>
         <n-select
           v-model:value="selectedRuleId"
           :options="ruleOptions"
           size="small"
           style="width: 250px"
-          @update:value="loadRule"
-        />
-      </n-space>
+            @update:value="loadRule"
+          />
+          <n-input v-model:value="ruleName" size="small" placeholder="规则名称" style="width: 160px" />
+          <n-button size="small" @click="saveRule">保存新版本</n-button>
+        </n-space>
     </n-card>
 
     <DslIndicatorManager style="margin-bottom: 16px" />
@@ -309,8 +412,12 @@ onMounted(async () => {
       :untrusted-fields="untrustedFields"
       :quality-status="qualityStatus"
       :rule-tree="ruleTree"
-      :sort-field="sortRules[0]?.field || ''"
-      :sort-direction="sortRules[0]?.direction || 'asc'"
+      :run-id="runId"
+      :rule-id="activeRule?.id ?? null"
+      :rule-version="activeRule?.version ?? null"
+      :locked-indicators="activeRule?.locked_indicators ?? {}"
+      :sort="sortRules"
+      :base-pool-config="basePool"
     />
 
     <n-empty v-if="results.length === 0" description="运行筛选后显示结果" style="padding: 40px" />

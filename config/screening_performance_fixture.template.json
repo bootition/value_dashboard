@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "database_root": "C:/replace-with-an-external-staging-fixture-root",
+  "composite_indicator": {
+    "name": "capital_buffer",
+    "version": 1
+  },
+  "rule": {
+    "conditions": {
+      "logic": "AND",
+      "rules": [
+        {"field": "pe_ttm", "op": ">", "value": 0},
+        {"field": "pe_ttm", "op": "<", "value": 100},
+        {"field": "pb_mrq", "op": ">", "value": 0},
+        {"field": "pb_mrq", "op": "<", "value": 20},
+        {"field": "roe", "op": ">", "value": -1},
+        {"field": "roa", "op": ">", "value": -1},
+        {"field": "gross_margin", "op": ">", "value": -1},
+        {"field": "net_margin", "op": ">", "value": -1},
+        {"field": "debt_ratio", "op": "<", "value": 10},
+        {"field": "current_ratio", "op": ">", "value": 0},
+        {"field": "quick_ratio", "op": ">", "value": 0},
+        {"field": "revenue_yoy", "op": ">", "value": -10},
+        {"field": "net_profit_yoy", "op": ">", "value": -10},
+        {"field": "revenue_cagr3", "op": ">", "value": -10},
+        {"field": "net_profit_cagr5", "op": ">", "value": -10},
+        {"field": "dividend_yield", "op": ">=", "value": 0},
+        {"field": "payout_ratio", "op": ">=", "value": 0},
+        {"field": "goodwill_ratio", "op": "<", "value": 10},
+        {"field": "capital_buffer", "op": ">", "value": 0},
+        {"field": "pe_ttm_industry_rank", "op": "<=", "value": 5000}
+      ]
+    },
+    "sort": [{"field": "pe_ttm_industry_rank", "direction": "asc"}],
+    "columns": [
+      "stock_code", "name", "sw_level1", "sw_level2", "pe_ttm",
+      "roe", "debt_ratio", "capital_buffer", "pe_ttm_industry_rank"
+    ]
+  }
+}

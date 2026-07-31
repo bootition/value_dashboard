@@ -7,9 +7,10 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
-from lark import Lark, Transformer, Token, Tree, v_args
+from lark import Lark, Transformer, Token
 
 from app.core.dsl.ast_nodes import (
     ASTNode, Literal, FieldRef, IndicatorRef, FuncCall,
@@ -20,6 +21,11 @@ logger = logging.getLogger(__name__)
 
 _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 _parser: Lark | None = None
+MAX_EXPRESSION_BYTES = 10_000
+MAX_EXPRESSION_TOKENS = 500
+MAX_NESTING_DEPTH = 50
+MAX_FUNCTION_ARGS = 10
+_TOKEN_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|-?\d+(?:\.\d+)?|[()@.,+*/<>=!-]")
 
 
 def _get_parser() -> Lark:
@@ -68,12 +74,19 @@ class DSLTransformer(Transformer):
 
         key = f"{table}.{field_name}"
         meta = FIELD_METADATA.get(key, {})
+        unit = meta.get("unit", "unknown")
+        period_type = meta.get("period_type", "point_in_time")
+        if period == "TTM":
+            period_type = "ttm"
+        elif period in {"YoY", "QoQ"}:
+            unit = "ratio"
+            period_type = "single_quarter"
         return FieldRef(
             table=table,
             field=field_name,
             period=period,
-            unit=meta.get("unit", "unknown"),
-            period_type=meta.get("period_type", "point_in_time"),
+            unit=unit,
+            period_type=period_type,
             historical_capable=meta.get("historical_capable", True),
         )
 
@@ -105,16 +118,23 @@ class DSLTransformer(Transformer):
                 func_args.append(item)
 
         is_cross = func_name in ("rank", "rank_industry", "percentile", "zscore", "normalize")
+        if len(func_args) > MAX_FUNCTION_ARGS:
+            raise ValueError(f"{func_name}() exceeds {MAX_FUNCTION_ARGS} arguments")
+        is_growth = func_name in ("YoY", "QoQ")
+        is_ttm = func_name == "TTM"
         return FuncCall(
             func_name=func_name,
             args=func_args,
-            unit="ratio" if is_cross else (func_args[0].unit if func_args else "unknown"),
-            period_type="current_only" if is_cross else (func_args[0].period_type if func_args else "current_only"),
+            unit="ratio" if is_cross or is_growth else (func_args[0].unit if func_args else "unknown"),
+            period_type=(
+                "current_only" if is_cross else "single_quarter" if is_growth else "ttm"
+                if is_ttm else (func_args[0].period_type if func_args else "current_only")
+            ),
             historical_capable=False if is_cross else (func_args[0].historical_capable if func_args else False),
         )
 
     def arg_list(self, items):
-        return [a for a in items if a is not None]
+        return [a for a in items if a is not None and not isinstance(a, Token)]
 
     def additive(self, items):
         result = items[0]
@@ -153,15 +173,17 @@ class DSLTransformer(Transformer):
         return result
 
     def or_expr(self, items):
-        result = items[0]
-        for i in range(1, len(items)):
-            result = BinaryOp(op="OR", left=result, right=items[i], unit="unknown", historical_capable=False)
+        operands = [item for item in items if not isinstance(item, Token)]
+        result = operands[0]
+        for operand in operands[1:]:
+            result = BinaryOp(op="OR", left=result, right=operand, unit="unknown", historical_capable=False)
         return result
 
     def and_expr(self, items):
-        result = items[0]
-        for i in range(1, len(items)):
-            result = BinaryOp(op="AND", left=result, right=items[i], unit="unknown", historical_capable=False)
+        operands = [item for item in items if not isinstance(item, Token)]
+        result = operands[0]
+        for operand in operands[1:]:
+            result = BinaryOp(op="AND", left=result, right=operand, unit="unknown", historical_capable=False)
         return result
 
     def comparison(self, items):
@@ -197,9 +219,31 @@ def parse(expression: str) -> ASTNode:
     Raises:
         ParseError: 语法错误
     """
+    _validate_expression_budget(expression)
     parser = _get_parser()
     tree = parser.parse(expression)
     transformer = DSLTransformer()
     ast = transformer.transform(tree)
     logger.debug(f"解析 '{expression}' → {ast.__class__.__name__}")
     return ast
+
+
+def _validate_expression_budget(expression: str) -> None:
+    """Reject oversized input before Earley parsing consumes unbounded resources."""
+    if len(expression.encode("utf-8")) > MAX_EXPRESSION_BYTES:
+        raise ValueError(f"expression exceeds {MAX_EXPRESSION_BYTES} bytes")
+    tokens = _TOKEN_PATTERN.findall(expression)
+    if len(tokens) > MAX_EXPRESSION_TOKENS:
+        raise ValueError(f"expression exceeds {MAX_EXPRESSION_TOKENS} tokens")
+    depth = 0
+    for character in expression:
+        if character == "(":
+            depth += 1
+            if depth > MAX_NESTING_DEPTH:
+                raise ValueError(f"expression exceeds {MAX_NESTING_DEPTH} nesting depth")
+        elif character == ")":
+            depth -= 1
+            if depth < 0:
+                raise ValueError("expression has unmatched closing parenthesis")
+    if depth:
+        raise ValueError("expression has unmatched opening parenthesis")

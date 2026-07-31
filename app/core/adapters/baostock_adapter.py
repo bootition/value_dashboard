@@ -16,6 +16,7 @@ BaoStock 是基于 socket 协议的免费 A 股数据服务（baostock.com:10030
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime
@@ -47,7 +48,6 @@ try:
     # ─── monkeypatch 2: socket 超时 ────────────────────────────────
     # baostock socket 默认无超时, recv() 会永久阻塞
     # 在 login 后给 default_socket 设 settimeout
-    import socket as _socket
     import baostock.common.context as _bs_ctx
 
     _SOCKET_TIMEOUT = 30
@@ -152,12 +152,18 @@ def _parse_date(value: str | None) -> str | None:
 class BaoStockAdapter(BaseAdapter):
     """BaoStock 适配器：socket 协议、零反爬、价格回退数据源。"""
 
-    def __init__(self, rate_limit: float = 0.1) -> None:
+    def __init__(self, rate_limit: float = 0.1, *, reuse_session: bool = False) -> None:
         super().__init__(
             name="baostock",
             supported={"price_daily", "dividends", "trading_dates"},
             rate_limit=rate_limit,
         )
+        # Long-running bulk repair keeps one authenticated socket open across
+        # many fetch() calls instead of login/logout per fetch (each login is
+        # a full socket handshake; 5,534 stocks x 2 adjust modes would add
+        # thousands of redundant logins). Close explicitly via .close().
+        self.reuse_session = reuse_session
+        self._logged_in = False
 
     # ─── 调度入口 ──────────────────────────────────────────────────
 
@@ -224,6 +230,18 @@ class BaoStockAdapter(BaseAdapter):
                     adjustflag=adjustflag,
                 )
 
+                if rs.error_code != "0" and self.reuse_session and self._is_not_logged_in(rs.error_msg):
+                    self._reconnect()
+                    self._wait_rate_limit()
+                    rs = bs.query_history_k_data_plus(
+                        bs_code,
+                        _PRICE_FIELDS,
+                        start_date=start_date,
+                        end_date=end_date,
+                        frequency="d",
+                        adjustflag=adjustflag,
+                    )
+
                 if rs.error_code != "0":
                     msg = f"query_history_k_data_plus({bs_code}) 失败: {rs.error_msg}"
                     logger.warning(msg)
@@ -251,7 +269,9 @@ class BaoStockAdapter(BaseAdapter):
                     )
                     count += 1
 
-                raw_lines.append(f"{bs_code}: {count} rows")
+                raw_lines.append(
+                    json.dumps(records[-count:], ensure_ascii=False, sort_keys=True, default=str)
+                )
                 logger.debug("baostock price_daily %s 取得 %d 条", bs_code, count)
 
         error = (
@@ -304,6 +324,15 @@ class BaoStockAdapter(BaseAdapter):
                         yearType="report",
                     )
 
+                    if rs.error_code != "0" and self.reuse_session and self._is_not_logged_in(rs.error_msg):
+                        self._reconnect()
+                        self._wait_rate_limit()
+                        rs = bs.query_dividend_data(
+                            bs_code,
+                            year=year,
+                            yearType="report",
+                        )
+
                     if rs.error_code != "0":
                         logger.warning(
                             "query_dividend_data(%s, %d) 失败: %s",
@@ -323,7 +352,9 @@ class BaoStockAdapter(BaseAdapter):
                             records.append(record)
                             count_for_code += 1
 
-                raw_lines.append(f"{bs_code}: {count_for_code} dividend rows")
+                raw_lines.append(
+                    json.dumps(records[-count_for_code:], ensure_ascii=False, sort_keys=True, default=str)
+                )
                 logger.debug(
                     "baostock dividends %s 取得 %d 条", bs_code, count_for_code
                 )
@@ -409,17 +440,18 @@ class BaoStockAdapter(BaseAdapter):
             while rs.next():
                 row = rs.get_row_data()
                 # 字段顺序：date, is_trading_day
-                if len(row) >= 2:
+                if len(row) >= 2 and row[1] == "1":
                     records.append(
                         {
-                            "date": _parse_date(row[0]),
-                            "is_trading_day": row[1] == "1",
+                            "trade_date": _parse_date(row[0]),
                         }
                     )
 
         return self._make_result(
             data=records,
-            raw_response=f"trading_dates: {len(records)} rows".encode("utf-8"),
+            raw_response=json.dumps(
+                records, ensure_ascii=False, sort_keys=True, default=str
+            ).encode("utf-8"),
             confidence="approximate",
             api_version=_API_VERSION,
         )
@@ -432,7 +464,21 @@ class BaoStockAdapter(BaseAdapter):
 
         socket 协议非线程安全，单次 fetch 内复用一个会话；
         异常时 finally 确保 logout，避免连接泄漏。
+
+        reuse_session=True 时只登录一次，后续 fetch 复用同一连接，
+        由调用方通过 close() 显式登出。
         """
+        if self.reuse_session:
+            self._ensure_login()
+            try:
+                yield
+            except Exception:
+                # The socket may be in an unknown state after an exception;
+                # force a fresh login on the next use.
+                self._logged_in = False
+                raise
+            return
+
         self._wait_rate_limit()
         lg = bs.login()
         if lg is not None and getattr(lg, "error_code", "0") != "0":
@@ -448,3 +494,46 @@ class BaoStockAdapter(BaseAdapter):
                 logger.debug("baostock 登出成功")
             except Exception:
                 logger.warning("baostock logout 异常", exc_info=True)
+
+    def _ensure_login(self) -> None:
+        """Login once for session-reuse mode; idempotent."""
+        if self._logged_in:
+            return
+        self._wait_rate_limit()
+        lg = bs.login()
+        if lg is not None and getattr(lg, "error_code", "0") != "0":
+            raise RuntimeError(
+                f"baostock login 失败: {getattr(lg, 'error_msg', 'unknown')}"
+            )
+        self._logged_in = True
+        logger.debug("baostock 登录成功 (session reuse)")
+
+    @staticmethod
+    def _is_not_logged_in(error_msg: str | None) -> bool:
+        """BaoStock answers 'user not logged in' after the server dropped the session."""
+        if not error_msg:
+            return False
+        lowered = error_msg.lower()
+        return "未登录" in error_msg or "not login" in lowered or "not logged" in lowered
+
+    def _reconnect(self) -> None:
+        """Force a fresh login after the server-side session expired."""
+        try:
+            bs.logout()
+        except Exception:
+            logger.debug("baostock logout during reconnect failed", exc_info=True)
+        self._logged_in = False
+        self._ensure_login()
+        logger.warning("baostock 会话已失效，已重新登录")
+
+    def close(self) -> None:
+        """Logout explicitly when session-reuse mode is active."""
+        if not self.reuse_session or not self._logged_in:
+            return
+        try:
+            bs.logout()
+            logger.debug("baostock 登出成功 (session reuse)")
+        except Exception:
+            logger.warning("baostock logout 异常", exc_info=True)
+        finally:
+            self._logged_in = False

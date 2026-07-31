@@ -3,9 +3,9 @@
 证监会指定信息披露平台，所有数据 confidence="strict"。
 
 Endpoints:
-- 公告搜索: POST http://www.cninfo.com.cn/new/hisAnnouncement/query
-- 股票→orgId 映射: GET http://www.cninfo.com.cn/new/data/szse_stock.json
-- PDF 下载: http://static.cninfo.com.cn/{adjunctUrl}  (M8 任务实现)
+- 公告搜索: POST https://www.cninfo.com.cn/new/hisAnnouncement/query
+- 股票→orgId 映射: GET https://www.cninfo.com.cn/new/data/szse_stock.json
+- PDF 下载: https://static.cninfo.com.cn/{adjunctUrl}  (M8 任务实现)
 
 公告类别 (category 参数):
 - category_ndbg_szsh       年报
@@ -38,9 +38,9 @@ __all__ = ["CNINFOAdapter"]
 
 # ─── 常量 ────────────────────────────────────────────────────────────
 
-_CNINFO_BASE = "http://www.cninfo.com.cn"
+_CNINFO_BASE = "https://www.cninfo.com.cn"
 _SEARCH_URL = f"{_CNINFO_BASE}/new/hisAnnouncement/query"
-_PDF_BASE = "http://static.cninfo.com.cn"
+_PDF_BASE = "https://static.cninfo.com.cn"
 
 # 股票→orgId 映射源（szse 为主，sse/bj 为 best-effort 补充）
 _STOCK_LIST_URLS: list[str] = [
@@ -319,7 +319,7 @@ class CNINFOAdapter(BaseAdapter):
             ann_dt = datetime.fromtimestamp(ann_time_ms / 1000.0, tz=timezone.utc)
 
         adjunct_url = raw.get("adjunctUrl") or ""
-        pdf_url = f"{_PDF_BASE}/{adjunct_url}" if adjunct_url else None
+        pdf_url = f"{_PDF_BASE}/{adjunct_url.lstrip('/')}" if adjunct_url else None
 
         return {
             "stock_code": stock_code,
@@ -432,14 +432,14 @@ class CNINFOAdapter(BaseAdapter):
         ex_date 需解析公告 PDF 才能获得，留给 M8 阶段。
 
         P0#2.6修复: 区分"预案"和"实施"——只解析已实施的分红, 跳过预案
-        P0#2.5修复: ex_date 用公告日近似 (比 None 好, 至少能入库)
+        Announcement dates are not ex-dates.  A row without an authoritative
+        ex-date must not be promoted to the formal dividends table.
         """
         title = ann.get("title") or ""
 
         # P0#2.6修复: 跳过预案/提案类公告, 只保留实施类
         # 预案标题通常含"预案"、"拟"、"提案"、"审议通过"
         # 实施标题通常含"实施"、"权益分派"、"派息"、"除权除息"
-        title_lower = title.lower()
         if any(kw in title for kw in ["预案", "拟", "提案", "审议通过", "尚需", "待审"]):
             return None
 
@@ -471,9 +471,9 @@ class CNINFOAdapter(BaseAdapter):
         if cash_per_10 is None and transfer_per_10 is None and send_per_10 is None:
             return None
 
-        # P0#2.5修复: ex_date 用公告日近似 (真实除权日需解析PDF)
-        # 公告日通常在除权日前1-2周, 用它近似比 None 好
-        ex_date = ann.get("announcement_date")
+        ex_date = ann.get("ex_date")
+        if ex_date is None:
+            return None
 
         return {
             "stock_code": ann.get("stock_code"),
@@ -492,7 +492,6 @@ class CNINFOAdapter(BaseAdapter):
             "transfer_share": (
                 transfer_per_10 / 10.0 if transfer_per_10 is not None else None
             ),
-            # P0#2.5修复: 用公告日近似 ex_date (比 None 好)
             "ex_date": ex_date,
         }
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Iterator
@@ -20,6 +21,7 @@ from typing import Any, Iterator
 import duckdb
 
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+from app.core.storage.maintenance import assert_writes_allowed
 
 
 def _is_process_alive(pid: int) -> bool:
@@ -28,10 +30,15 @@ def _is_process_alive(pid: int) -> bool:
         import ctypes
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.OpenProcess(0x1000, False, pid)  # SYNCHRONIZE access
-        if handle:
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_uint32()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
             kernel32.CloseHandle(handle)
-            return True
-        return False
     except Exception:
         return False
 
@@ -89,12 +96,12 @@ class DuckDBStore:
         使用 O_CREAT | O_EXCL 原子性创建锁文件。如果文件已存在，
         检查持有者 PID 是否仍存活——若已退出则接管锁，否则等待。
 
-        P0#2.14修复: PID 重用漏洞——原进程崩溃后 PID 被新进程复用,
-        _is_process_alive 返回 True 导致锁永不回收。
-        修复: 锁文件增加时间戳, 超过 _LOCK_MAX_AGE_SEC 秒视为过期锁。
+        A dead PID is reclaimed, but an apparently live lock is never expired by
+        age: long-running writes must retain serialization. The owner token
+        prevents a former holder from removing a lock acquired after replacement.
         """
-        _LOCK_MAX_AGE_SEC = 3600  # 锁最大存活 1 小时, 超过视为过期
         self._revalidate()
+        assert_writes_allowed(self._db_path)
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         deadline = time.monotonic() + timeout
 
@@ -107,8 +114,8 @@ class DuckDBStore:
                     0o644,
                 )
                 try:
-                    # P0#2.14修复: 写入 PID + 时间戳, 用于检测过期锁
-                    os.write(fd, f"pid={os.getpid()}\ntime={time.time()}\n".encode())
+                    token = secrets.token_urlsafe(24)
+                    os.write(fd, f"pid={os.getpid()}\ntime={time.time()}\ntoken={token}\n".encode())
                 finally:
                     os.close(fd)
                 break
@@ -118,13 +125,6 @@ class DuckDBStore:
                     content = self._lock_path.read_text()
                     lines = content.strip().split("\n")
                     holder_pid = int(lines[0].split("=")[1])
-                    lock_time = float(lines[1].split("=")[1]) if len(lines) > 1 else 0
-
-                    # P0#2.14修复: 检查锁是否过期 (PID 重用防护)
-                    if time.time() - lock_time > _LOCK_MAX_AGE_SEC:
-                        self._lock_path.unlink(missing_ok=True)
-                        continue
-
                     if not _is_process_alive(holder_pid):
                         # 持有者已退出，清理僵尸锁并重试
                         self._lock_path.unlink(missing_ok=True)
@@ -144,7 +144,12 @@ class DuckDBStore:
         try:
             yield
         finally:
-            self._lock_path.unlink(missing_ok=True)
+            try:
+                # Never let an old holder remove a replacement lock.
+                if f"token={token}" in self._lock_path.read_text(encoding="utf-8"):
+                    self._lock_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     @contextlib.contextmanager
     def write_connection(self, timeout: float = 30.0) -> Iterator[duckdb.DuckDBPyConnection]:

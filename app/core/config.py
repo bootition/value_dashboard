@@ -2,37 +2,32 @@
 
 from pathlib import Path
 from typing import Any
+from importlib.resources import files
 
 import yaml
 
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
-import os
 import sys
 
 # 开发模式: __file__ 的上三级目录
 # 打包模式 (PyInstaller): _MEIPASS 是解压目录, sys.executable 是 exe 路径
-if getattr(sys, "frozen", False):
-    # PyInstaller onedir: _internal/ 目录下有 config/
+_FROZEN = getattr(sys, "frozen", False)
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+if _FROZEN:
+    # Frozen config is an immutable bundle resource; cwd never selects it.
     _BUNDLE_DIR = Path(sys._MEIPASS) if hasattr(sys, "_MEIPASS") else Path(sys.executable).parent
     _EXE_DIR = Path(sys.executable).resolve().parent
-    # 优先使用 cwd（start.bat 从项目根目录启动 exe）
-    _cwd = Path(os.getcwd()).resolve()
-    if (_cwd / "config" / "default.yaml").exists():
-        _CONFIG_DIR = _cwd / "config"
-        _PROJECT_ROOT = _cwd
-    elif (_EXE_DIR / "config" / "default.yaml").exists():
-        _CONFIG_DIR = _EXE_DIR / "config"
-        _PROJECT_ROOT = _EXE_DIR
-    elif (_BUNDLE_DIR / "config" / "default.yaml").exists():
-        _CONFIG_DIR = _BUNDLE_DIR / "config"
-        _PROJECT_ROOT = _cwd  # 数据文件用 cwd（项目根目录）
-    else:
-        _CONFIG_DIR = _EXE_DIR.parent.parent / "config"
-        _PROJECT_ROOT = _EXE_DIR.parent.parent
+    _CONFIG_DIR = _BUNDLE_DIR / "config"
+    _PROJECT_ROOT = _EXE_DIR
 else:
     _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
     _CONFIG_DIR = _PROJECT_ROOT / "config"
+
+
+def is_frozen_runtime() -> bool:
+    """Return whether this process is executing from a frozen release."""
+    return _FROZEN
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -58,6 +53,11 @@ class Config:
         *,
         paths: DatabasePathSet | None = None,
     ) -> None:
+        if _FROZEN:
+            data = _deep_merge(data, {"server": {"host": "127.0.0.1"}})
+        server = data.get("server") if isinstance(data.get("server"), dict) else None
+        if server is not None and server.get("host", "127.0.0.1") not in _LOOPBACK_HOSTS:
+            raise PathIsolationError("server.host must be a loopback address")
         self._data = data
         self._paths = paths.validate() if paths is not None else None
 
@@ -70,6 +70,8 @@ class Config:
     ) -> "Config":
         """加载配置：先读 default.yaml，再用 user.yaml 覆盖"""
         cfg_dir = config_dir or _CONFIG_DIR
+        if _FROZEN and cfg_dir.resolve() != _CONFIG_DIR.resolve():
+            raise PathIsolationError("Frozen releases only load configuration from bundled resources")
         default_path = cfg_dir / "default.yaml"
         user_path = cfg_dir / "user.yaml"
 
@@ -77,8 +79,13 @@ class Config:
         if default_path.exists():
             with open(default_path, encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
+        elif not _FROZEN and config_dir is None:
+            # Installed wheels do not have a repository-level config directory.
+            # The package resource is the supported default-config contract there.
+            resource = files("app.resources").joinpath("config/default.yaml")
+            data = yaml.safe_load(resource.read_text(encoding="utf-8")) or {}
 
-        if user_path.exists():
+        if not _FROZEN and user_path.exists():
             with open(user_path, encoding="utf-8") as f:
                 user_data = yaml.safe_load(f) or {}
             data = _deep_merge(data, user_data)

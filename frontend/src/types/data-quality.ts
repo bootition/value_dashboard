@@ -26,6 +26,9 @@ export type KnownWarningCode =
   | 'LINEAGE_INVALID'
   | 'UNPUBLISHED_OVERRIDES'
   | 'STALE_RUNNING_JOBS'
+  | 'MINIMUM_DATA_NOT_READY'
+  | 'CODE_IDENTITY_ALIAS'
+  | 'LIVE_SCHEMA_INCOMPATIBLE'
 
 /**
  * Warning code type. Accepts known codes with autocomplete, but also accepts
@@ -48,6 +51,9 @@ export const KNOWN_WARNING_CODES = [
   'LINEAGE_INVALID',
   'UNPUBLISHED_OVERRIDES',
   'STALE_RUNNING_JOBS',
+  'MINIMUM_DATA_NOT_READY',
+  'CODE_IDENTITY_ALIAS',
+  'LIVE_SCHEMA_INCOMPATIBLE',
 ] as const
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +106,9 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   LINEAGE_INVALID: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
   UNPUBLISHED_OVERRIDES: [],
   STALE_RUNNING_JOBS: [],
+  MINIMUM_DATA_NOT_READY: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
+  CODE_IDENTITY_ALIAS: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
+  LIVE_SCHEMA_INCOMPATIBLE: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
 }
 
 /**
@@ -173,6 +182,7 @@ export interface FinancialStatementDates {
 export interface IndicatorSnapshotDates {
   readonly latest_complete: string | null
   readonly calculated_at: string | null
+  readonly latest_price_date: string | null
 }
 
 /**
@@ -195,6 +205,7 @@ export interface DataDates {
  */
 export interface DividendQuality {
   readonly total_rows: number
+  readonly active_missing_announcement_rows: number
   readonly unverified_period_end_rows: number
 }
 
@@ -207,6 +218,13 @@ export interface DividendQuality {
 export interface LineageQuality {
   readonly invalid_hash_rows: number
   readonly orphan_batch_rows: number
+  readonly audit_archive_gap_rows: number
+  readonly batch_archive_gap_rows: number
+  readonly archive_gap_rows: number
+}
+
+export interface CodeIdentityQuality {
+  readonly raw_alias_rows: number
 }
 
 /**
@@ -227,10 +245,42 @@ export interface OperationalWarnings {
  */
 export interface DataQualityStatus {
   readonly dates: DataDates
+  readonly minimum_data_readiness: MinimumDataReadiness
   readonly dividends: DividendQuality
   readonly lineage: LineageQuality
+  readonly code_identity: CodeIdentityQuality
   readonly operations: OperationalWarnings
   readonly warning_codes: readonly WarningCode[]
+}
+
+export interface MinimumDataReadiness {
+  readonly ready: boolean
+  readonly stock_count: number
+  readonly missing: Readonly<Record<string, readonly string[]>>
+  readonly missing_counts: Readonly<Record<string, number>>
+  readonly schema_compatibility: {
+    readonly compatible: boolean
+    readonly missing: readonly string[]
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Backend contract: IndicatorTrust
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Server-authoritative trust signal embedded in read-only indicator responses.
+ *
+ * From backend `app/core/data_quality.py::indicator_trust`. When
+ * `untrusted_all` is true, every snapshot-derived numeric field in the same
+ * response has been masked to null by the server; `untrusted_fields` lists
+ * the explicitly invalidated fields otherwise (e.g. dividend indicators
+ * under DIVIDEND_DATES_UNVERIFIED).
+ */
+export interface IndicatorTrust {
+  readonly warning_codes: readonly WarningCode[]
+  readonly untrusted_all: boolean
+  readonly untrusted_fields: readonly string[]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -256,4 +306,7 @@ export interface StockFreshness {
   readonly data_version: string | null
   readonly stale_days: number | null
   readonly stale_warning: boolean
+  readonly price_age_days?: number | null
+  readonly financial_age_days?: number | null
+  readonly snapshot_age_days?: number | null
 }

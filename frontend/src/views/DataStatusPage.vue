@@ -1,14 +1,28 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert } from 'naive-ui'
 import axios from 'axios'
 import type { DataQualityStatus } from '../types'
+
+interface RetryItem {
+  stock_code: string
+  data_type: string
+  adapter: string
+  error: string
+  retry_count: number
+}
+
+interface MissingItem {
+  stock_code: string
+  field_name: string
+  reason_code: string
+}
 
 interface DataSummary {
   stock_count: number
   price_raw_count: number
   price_qfq_count: number
-  price_backfill?: { earliest_date: string | null; latest_date: string | null; stock_count: number; total_rows: number }
+  price_backfill?: { earliest_date: string | null; latest_date: string | null; stock_count: number; total_rows: number; gap: { no_price: number; incomplete: number; unknown_listing_date: number; complete: number } }
   balance_sheet_count: number
   balance_sheet_range?: { earliest: string | null; latest: string | null }
   income_statement_count: number
@@ -18,19 +32,35 @@ interface DataSummary {
   retry_count: number
   missing_count: number
   last_update: string | null
-  recent_jobs?: any[]
+  recent_jobs?: Array<{ finished_at: string; job_type: string; status: string }>
   pdf_tasks?: { cnt: number; pending: number }
   backup?: { cnt: number; latest: string | null; full_count: number }
+  dividends?: { total_rows: number; stocks: number; earliest: string | null; latest: string | null; stock_dividend_filled: number; transfer_share_filled: number; rights_issue_filled: number } | null
+  xdxr?: { total_rows: number; stocks: number } | null
   readonly data_quality: DataQualityStatus
 }
 
 const summary = ref<DataSummary | null>(null)
 const loading = ref(true)
 const error = ref('')
-const retryList = ref<any[]>([])
-const missingList = ref<any[]>([])
+const retryList = ref<RetryItem[]>([])
+const missingList = ref<MissingItem[]>([])
+
+const pct = (value: number, total: number) => {
+  if (!total || total === 0) return '0%'
+  return ((value / total) * 100).toFixed(1) + '%'
+}
+
+const priceRawPct = computed(() => summary.value ? pct(summary.value.price_raw_count, summary.value.stock_count) : '0%')
+const priceQfqPct = computed(() => summary.value ? pct(summary.value.price_qfq_count, summary.value.stock_count) : '0%')
+const swIndustryPct = computed(() => summary.value ? pct(summary.value.sw_industry_count, summary.value.stock_count) : '0%')
+const balanceSheetPct = computed(() => summary.value ? pct(summary.value.balance_sheet_count, summary.value.stock_count) : '0%')
+const incomeStatementPct = computed(() => summary.value ? pct(summary.value.income_statement_count, summary.value.stock_count) : '0%')
+const cashFlowPct = computed(() => summary.value ? pct(summary.value.cash_flow_count, summary.value.stock_count) : '0%')
+const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.indicator_snapshot_count, summary.value.stock_count) : '0%')
 
 async function fetchData() {
+  error.value = ''
   loading.value = true
   try {
     const [sumResp, retryResp, missResp] = await Promise.all([
@@ -41,8 +71,8 @@ async function fetchData() {
     summary.value = sumResp.data
     retryList.value = retryResp.data.items || []
     missingList.value = missResp.data.items || []
-  } catch (e: any) {
-    error.value = e.message || '加载失败'
+  } catch (e: unknown) {
+    error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
   } finally {
     loading.value = false
   }
@@ -113,13 +143,27 @@ onMounted(fetchData)
         <!-- 覆盖统计 -->
         <n-grid :cols="4" :x-gap="16" :y-gap="16" style="margin-bottom: 16px;">
           <n-grid-item><n-card><n-statistic label="股票总数" :value="summary.stock_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="Raw价格覆盖" :value="summary.price_raw_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="Qfq价格覆盖" :value="summary.price_qfq_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="申万行业覆盖" :value="summary.sw_industry_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="资产负债表" :value="summary.balance_sheet_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="利润表" :value="summary.income_statement_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="现金流量表" :value="summary.cash_flow_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="指标快照" :value="summary.indicator_snapshot_count" /></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="Raw价格覆盖" :value="summary.price_raw_count">
+            <template #suffix>{{ priceRawPct }}</template>
+          </n-statistic></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="Qfq价格覆盖" :value="summary.price_qfq_count">
+            <template #suffix>{{ priceQfqPct }}</template>
+          </n-statistic></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="申万行业覆盖" :value="summary.sw_industry_count">
+            <template #suffix>{{ swIndustryPct }}</template>
+          </n-statistic></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="资产负债表" :value="summary.balance_sheet_count">
+            <template #suffix>{{ balanceSheetPct }}</template>
+          </n-statistic></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="利润表" :value="summary.income_statement_count">
+            <template #suffix>{{ incomeStatementPct }}</template>
+          </n-statistic></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="现金流量表" :value="summary.cash_flow_count">
+            <template #suffix>{{ cashFlowPct }}</template>
+          </n-statistic></n-card></n-grid-item>
+          <n-grid-item><n-card><n-statistic label="指标快照" :value="summary.indicator_snapshot_count">
+            <template #suffix>{{ indicatorSnapshotPct }}</template>
+          </n-statistic></n-card></n-grid-item>
         </n-grid>
 
         <!-- 回填状态 -->
@@ -129,6 +173,7 @@ onMounted(fetchData)
             <n-descriptions-item label="最新日期">{{ summary.price_backfill.latest_date || '—' }}</n-descriptions-item>
             <n-descriptions-item label="覆盖股票">{{ summary.price_backfill.stock_count }}</n-descriptions-item>
             <n-descriptions-item label="总行数">{{ summary.price_backfill.total_rows }}</n-descriptions-item>
+            <n-descriptions-item label="上市日未知">{{ summary.price_backfill.gap.unknown_listing_date }}</n-descriptions-item>
           </n-descriptions>
         </n-card>
 
@@ -138,6 +183,15 @@ onMounted(fetchData)
             <n-descriptions-item label="资产负债表">{{ summary.balance_sheet_range?.earliest }} ~ {{ summary.balance_sheet_range?.latest }}</n-descriptions-item>
             <n-descriptions-item label="利润表">{{ summary.income_statement_count }} 只</n-descriptions-item>
             <n-descriptions-item label="现金流量表">{{ summary.cash_flow_count }} 只</n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+
+        <n-card title="公司行动与分红" size="small" style="margin-bottom: 16px;">
+          <n-descriptions :column="4" size="small">
+            <n-descriptions-item label="分红记录">{{ summary.dividends?.total_rows ?? 0 }}</n-descriptions-item>
+            <n-descriptions-item label="分红覆盖股票">{{ summary.dividends?.stocks ?? 0 }}</n-descriptions-item>
+            <n-descriptions-item label="分红日期范围">{{ summary.dividends ? `${summary.dividends.earliest || '—'} ~ ${summary.dividends.latest || '—'}` : '—' }}</n-descriptions-item>
+            <n-descriptions-item label="除权除息记录">{{ summary.xdxr?.total_rows ?? 0 }}（{{ summary.xdxr?.stocks ?? 0 }} 只）</n-descriptions-item>
           </n-descriptions>
         </n-card>
 

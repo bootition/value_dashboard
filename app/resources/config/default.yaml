@@ -1,0 +1,52 @@
+# Value Dashboard 默认配置
+# 用户可在 config/user.yaml 中覆盖任意键
+
+server:
+  host: "127.0.0.1"
+  port: 8765
+  open_browser: true
+
+database:
+  duckdb_path: "data/valuedashboard.duckdb"
+  sqlite_path: "data/valuedashboard.sqlite"
+  sqlite_wal_mode: true
+
+adapters:
+  rate_limit_interval:
+    cninfo: 1.5
+    akshare_eastmoney: 0.5
+    tdx: 0.1
+    baostock: 0.1
+    sina: 0.35
+  primary:
+    balance_sheet: ["sina", "tdx", "akshare_eastmoney"]
+    income_statement: ["sina", "tdx", "akshare_eastmoney"]
+    cash_flow: ["sina", "tdx", "akshare_eastmoney"]
+    price_daily: ["baostock", "tdx", "akshare_eastmoney"]
+    dividends: ["cninfo", "akshare_eastmoney", "baostock"]
+    xdxr: ["tdx"]
+    announcements: ["cninfo"]
+    listing_info: ["akshare_eastmoney"]
+    sw_industry: ["local_cache"]
+
+screening:
+  default_exclude_st: true
+  default_exclude_suspended: true
+  default_min_listing_years: 1
+  max_conditions: 20
+  max_nesting_levels: 3
+  performance_target_seconds: 5
+
+backup:
+  keep_full_backups: 3
+  encrypt_personal_data: true
+
+archive:
+  root: "parquet"
+
+pdf:
+  archive_root: "archive_pdf"
+
+logging:
+  level: INFO
+  format: '%(asctime)s %(levelname)s %(name)s: %(message)s'

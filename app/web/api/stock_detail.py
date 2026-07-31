@@ -17,6 +17,8 @@ from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse
 from typing import Literal
 
+from app.core.pdf.manager import PDFManager
+
 router = APIRouter(prefix="/api/stock", tags=["stock-detail"])
 
 TTM_FLOW_FIELDS = (
@@ -77,12 +79,37 @@ def calculate_ttm_trend(rows: list[dict]) -> list[dict]:
             item[field] = current.get(field)
         revenue = item.get("revenue")
         cost = item.get("cost_of_revenue")
-        item["net_profit"] = item.get("parent_net_profit") or item.get("net_profit")
+        item["net_profit"] = (
+            item.get("parent_net_profit")
+            if item.get("parent_net_profit") is not None
+            else item.get("net_profit")
+        )
         item["gross_profit"] = (
             revenue - cost if revenue is not None and cost is not None else None
         )
         trend.append(item)
     return trend
+
+
+def _to_single_quarter(rows: list[dict]) -> list[dict]:
+    """Convert cumulative flow statements to standalone quarters, preserving balances."""
+    flow_fields = (
+        "revenue", "cost_of_revenue", "gross_profit", "operating_profit", "net_profit",
+        "parent_net_profit", "deducted_net_profit", "cf_from_operating",
+        "cf_from_investing", "cf_from_financing",
+    )
+    chronological = list(reversed(rows))
+    prior_by_year: dict[str, dict] = {}
+    for row in chronological:
+        year = str(row.get("report_date", ""))[:4]
+        prior = prior_by_year.get(year)
+        if prior:
+            for field in flow_fields:
+                value = row.get(field)
+                previous = prior.get(field)
+                row[field] = value - previous if value is not None and previous is not None else None
+        prior_by_year[year] = {field: row.get(field) for field in flow_fields}
+    return chronological
 
 
 def build_freshness_metadata(
@@ -91,19 +118,35 @@ def build_freshness_metadata(
     calculated_at: datetime | str | None,
     data_version: str | None,
 ) -> dict:
-    """Describe the dates behind an indicator and flag material staleness."""
-    stale_days = (
-        (price_date - financial_date).days
-        if financial_date is not None and price_date is not None
-        else None
-    )
+    """Describe independent financial, price, and snapshot ages (all UTC)."""
+    from datetime import timezone
+    today = datetime.now(timezone.utc).date()
+    calculated_date: date | None = None
+    if isinstance(calculated_at, datetime):
+        if calculated_at.tzinfo is None:
+            calculated_date = calculated_at.date()
+        else:
+            calculated_date = calculated_at.astimezone(timezone.utc).date()
+    elif isinstance(calculated_at, str):
+        try:
+            calculated_date = datetime.fromisoformat(calculated_at.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+        except ValueError:
+            calculated_date = None
+    price_age_days = (today - price_date).days if price_date else None
+    financial_age_days = (today - financial_date).days if financial_date else None
+    snapshot_age_days = (today - calculated_date).days if calculated_date else None
+    ages = (financial_age_days, price_age_days, snapshot_age_days)
+    stale_days = max(value for value in ages if value is not None) if any(value is not None for value in ages) else None
     return {
         "financial_effective_date": financial_date.isoformat() if financial_date else None,
         "price_date": price_date.isoformat() if price_date else None,
         "calculated_at": str(calculated_at) if calculated_at is not None else None,
         "data_version": data_version,
         "stale_days": stale_days,
-        "stale_warning": stale_days is None or stale_days > 365,
+        "price_age_days": price_age_days,
+        "financial_age_days": financial_age_days,
+        "snapshot_age_days": snapshot_age_days,
+        "stale_warning": stale_days is None or stale_days > 7,
     }
 
 # ─── 指标历史能力标志 (PRD §14 SD7: current_only 指标标注) ──────────
@@ -134,7 +177,7 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
 
 
 @router.get("/{stock_code}/info")
-async def get_stock_info(stock_code: str, request: Request) -> dict:
+def get_stock_info(stock_code: str, request: Request) -> dict:
     """股票基本信息 (PRD §14 SD1: 代码/名称/拼音/最近收盘价/价格日期)"""
     duck = request.app.state.duck
     rows = duck.read_query(
@@ -166,7 +209,7 @@ async def get_stock_info(stock_code: str, request: Request) -> dict:
 
 
 @router.get("/{stock_code}/kline")
-async def get_kline(
+def get_kline(
     stock_code: str,
     request: Request,
     adjust: Literal["raw", "qfq"] = "raw",
@@ -218,7 +261,7 @@ async def get_kline(
 
 
 @router.get("/{stock_code}/indicators")
-async def get_indicators(stock_code: str, request: Request) -> dict:
+def get_indicators(stock_code: str, request: Request) -> dict:
     """指标摘要 (PRD §14 SD3: 估值/盈利/成长/安全/股东回报)"""
     duck = request.app.state.duck
     rows = duck.read_query(
@@ -239,10 +282,26 @@ async def get_indicators(stock_code: str, request: Request) -> dict:
         data_version=indicators.get("data_version"),
     )
 
+    # P1-4: 服务端权威信任决策；阻断警告存在时遮蔽快照数值，不再伪装为正常研究数据
+    from app.core.data_quality import (
+        indicator_trust,
+        mask_untrusted_values,
+        read_warning_codes,
+    )
+
+    trust = indicator_trust(read_warning_codes(duck, request.app.state.sqlite))
+
     # 按类别组织，附带 historical_capable 标志 (PRD §14 SD7)
     def _with_meta(values: dict) -> dict:
-        return {k: {"value": v, "historical_capable": INDICATOR_HISTORICAL_CAPABLE.get(k, True)}
-                for k, v in values.items()}
+        untrusted = set(trust["untrusted_fields"])
+        return {
+            k: {
+                "value": v,
+                "historical_capable": INDICATOR_HISTORICAL_CAPABLE.get(k, True),
+                "untrusted": trust["untrusted_all"] or k in untrusted,
+            }
+            for k, v in mask_untrusted_values(values, trust).items()
+        }
 
     summary = {
         "valuation": _with_meta({
@@ -270,6 +329,8 @@ async def get_indicators(stock_code: str, request: Request) -> dict:
             "revenue_cagr5": indicators.get("revenue_cagr5"),
             "net_profit_cagr3": indicators.get("net_profit_cagr3"),
             "net_profit_cagr5": indicators.get("net_profit_cagr5"),
+            "deducted_profit_cagr3": indicators.get("deducted_profit_cagr3"),
+            "deducted_profit_cagr5": indicators.get("deducted_profit_cagr5"),
         }),
         "safety": _with_meta({
             "debt_ratio": indicators.get("debt_ratio"),
@@ -289,14 +350,15 @@ async def get_indicators(stock_code: str, request: Request) -> dict:
     return {
         "indicators": summary,
         "report_date": str(indicators.get("report_date", "")) if indicators.get("report_date") else None,
-        "latest_close": indicators.get("latest_close"),
+        "latest_close": None if trust["untrusted_all"] else indicators.get("latest_close"),
         "latest_price_date": str(indicators.get("latest_price_date", "")) if indicators.get("latest_price_date") else None,
         "freshness": freshness,
+        "trust": trust,
     }
 
 
 @router.get("/{stock_code}/financial-trend")
-async def get_financial_trend(
+def get_financial_trend(
     stock_code: str,
     request: Request,
     period: Literal["annual", "quarterly", "ttm"] = "annual",
@@ -356,8 +418,12 @@ async def get_financial_trend(
     if not rows:
         return {"trend": [], "period": period}
 
+    _apply_published_overrides(rows, request.app.state.sqlite, stock_code)
+
     if period == "ttm":
         rows = calculate_ttm_trend(rows)
+    elif period == "quarterly":
+        rows = _to_single_quarter(rows)
 
     # 按时间正序
     else:
@@ -367,15 +433,17 @@ async def get_financial_trend(
     trend = []
     for r in rows:
         revenue = r.get("revenue")
-        net_profit = r.get("parent_net_profit") or r.get("net_profit")
+        parent_net_profit = r.get("parent_net_profit")
+        net_profit = parent_net_profit if parent_net_profit is not None else r.get("net_profit")
         total_assets = r.get("total_assets")
-        total_equity = r.get("total_equity_parent") or r.get("total_equity")
+        total_equity = r.get("total_equity_parent") if r.get("total_equity_parent") is not None else r.get("total_equity")
 
         item = {
             "report_date": str(r.get("report_date", "")),
             "revenue": revenue,
             "gross_profit": r.get("gross_profit"),
             "net_profit": net_profit,
+            "parent_net_profit": parent_net_profit,
             "deducted_net_profit": r.get("deducted_net_profit"),
             "operating_profit": r.get("operating_profit"),
             "basic_eps": r.get("basic_eps"),
@@ -384,18 +452,36 @@ async def get_financial_trend(
             "total_equity": total_equity,
             "cf_from_operating": r.get("cf_from_operating"),
             # 衍生指标
-            "gross_margin": (r["gross_profit"] / revenue) if revenue and revenue != 0 and r.get("gross_profit") else None,
-            "net_margin": (net_profit / revenue) if revenue and revenue != 0 and net_profit else None,
-            "debt_ratio": (r.get("total_liabilities") / total_assets) if total_assets and total_assets != 0 and r.get("total_liabilities") else None,
-            "roe": (net_profit / total_equity) if total_equity and total_equity != 0 and net_profit else None,
+            "gross_margin": (r["gross_profit"] / revenue) if revenue not in (None, 0) and r.get("gross_profit") is not None else None,
+            "net_margin": (net_profit / revenue) if revenue not in (None, 0) and net_profit is not None else None,
+            "debt_ratio": (r.get("total_liabilities") / total_assets) if total_assets not in (None, 0) and r.get("total_liabilities") is not None else None,
+            "roe": (net_profit / total_equity) if total_equity not in (None, 0) and net_profit is not None else None,
         }
         trend.append(item)
 
-    return {"trend": trend, "period": period, "count": len(trend)}
+    return {
+        "trend": trend,
+        "period": period,
+        "period_semantic": "single_quarter" if period == "quarterly" else period,
+        "count": len(trend),
+    }
+
+
+def _apply_published_overrides(rows: list[dict], sqlite, stock_code: str) -> None:
+    """Apply the same current corrections used by the indicator calculator."""
+    by_date = {str(row.get("report_date", ""))[:10]: row for row in rows}
+    for override in sqlite.query(
+        """SELECT field_name, report_date, override_value FROM manual_overrides
+           WHERE stock_code = ? AND status = 'published' AND rolled_back_at IS NULL""",
+        [stock_code],
+    ):
+        target = by_date.get(str(override.get("report_date") or "")[:10])
+        if target is not None and override["field_name"] in target:
+            target[override["field_name"]] = override["override_value"]
 
 
 @router.get("/{stock_code}/source-audit")
-async def get_source_audit(
+def get_source_audit(
     stock_code: str,
     request: Request,
     limit: int = Query(20, ge=1, le=100),
@@ -406,14 +492,14 @@ async def get_source_audit(
     """
     duck = request.app.state.duck
 
-    # 关键字段溯源 (补充 effective_date/data_version/formula)
+    # Return stored lineage metadata; legacy rows remain visibly incomplete.
     audit_rows = duck.read_query(
         """SELECT field_name, report_date, value, source,
                   fetch_time, confidence, reason_code, is_override,
                   api_version,
-                  report_date AS effective_date,
-                  'latest_restated' AS data_version,
-                  '' AS formula,
+                   effective_date,
+                   data_version,
+                   formula,
                   NULL AS as_reported_value,
                   NULL AS latest_restated_diff
            FROM source_audit
@@ -439,7 +525,7 @@ async def get_source_audit(
         "dividend_yield": "annual_dps / latest_close",
     }
     for row in audit_rows:
-        if row.get("field_name") in formula_map:
+        if not row.get("formula") and row.get("field_name") in formula_map:
             row["formula"] = formula_map[row["field_name"]]
 
     # 批次级溯源
@@ -503,7 +589,7 @@ CUSTOM_TREND_FIELDS: dict[str, str] = {
 
 
 @router.get("/{stock_code}/custom-trend")
-async def get_custom_trend(
+def get_custom_trend(
     stock_code: str,
     request: Request,
     fields: str = Query("revenue,parent_net_profit,gross_margin,roe"),
@@ -559,30 +645,31 @@ async def get_custom_trend(
     for r in rows:
         item: dict = {"report_date": str(r.get("report_date", ""))}
         revenue = r.get("revenue")
-        net_profit = r.get("parent_net_profit") or r.get("net_profit")
+        parent_net_profit = r.get("parent_net_profit")
+        net_profit = parent_net_profit if parent_net_profit is not None else r.get("net_profit")
         total_assets = r.get("total_assets")
-        total_equity = r.get("total_equity_parent") or r.get("total_equity")
+        total_equity = r.get("total_equity_parent") if r.get("total_equity_parent") is not None else r.get("total_equity")
 
         for f in valid_fields:
             if f in CUSTOM_TREND_FIELDS:
                 item[f] = r.get(f)
             elif f == "gross_margin":
                 gp = r.get("_gross_profit")
-                item[f] = (gp / revenue) if gp and revenue and revenue != 0 else None
+                item[f] = (gp / revenue) if gp is not None and revenue not in (None, 0) else None
             elif f == "net_margin":
-                item[f] = (net_profit / revenue) if net_profit and revenue and revenue != 0 else None
+                item[f] = (net_profit / revenue) if net_profit is not None and revenue not in (None, 0) else None
             elif f == "debt_ratio":
                 tl = r.get("total_liabilities")
-                item[f] = (tl / total_assets) if tl and total_assets and total_assets != 0 else None
+                item[f] = (tl / total_assets) if tl is not None and total_assets not in (None, 0) else None
             elif f == "roe":
-                item[f] = (net_profit / total_equity) if net_profit and total_equity and total_equity != 0 else None
+                item[f] = (net_profit / total_equity) if net_profit is not None and total_equity not in (None, 0) else None
         trend.append(item)
 
     return {"trend": trend, "fields": valid_fields, "count": len(trend)}
 
 
 @router.get("/{stock_code}/available-fields")
-async def get_available_fields() -> dict:
+def get_available_fields() -> dict:
     """列出可用于自定义趋势的字段"""
     return {"fields": list(CUSTOM_TREND_FIELDS.keys()) + ["gross_margin", "net_margin", "debt_ratio", "roe"]}
 
@@ -590,11 +677,11 @@ async def get_available_fields() -> dict:
 # ─── M4-问题3: PDF 浏览器打开（最小实现） ──────────────────────────
 
 @router.get("/{stock_code}/pdf/{filename}", response_model=None)
-async def serve_pdf(
+def serve_pdf(
     stock_code: str,
     filename: str,
     request: Request,
-) -> FileResponse | dict:
+) -> FileResponse:
     """打开已恢复到本地的 PDF (PRD §14 SD9)
 
     M8-问题2修复: 热数据找不到时检查冷归档, 返回归档位置与恢复指引 (PRD §18.2 AR6)
@@ -605,22 +692,21 @@ async def serve_pdf(
     # P0#14修复: 白名单验证 stock_code 和 filename, 防止路径遍历
     # stock_code: 6位数字; filename: 字母数字+下划线+点+连字符, 以.pdf结尾
     if not re.match(r"^\d{6}$", stock_code):
-        return {"error": "Invalid stock code"}
+        raise HTTPException(status_code=400, detail="Invalid stock code")
     if not re.match(r"^[a-zA-Z0-9_.\-]+\.pdf$", filename, re.IGNORECASE):
-        return {"error": "Invalid filename"}
+        raise HTTPException(status_code=400, detail="Invalid filename")
     # 额外检查: 不允许 ".." 或 "/" 或 "\" 在 filename 中
     if ".." in filename or "/" in filename or "\\" in filename:
-        return {"error": "Invalid filename"}
+        raise HTTPException(status_code=400, detail="Invalid filename")
 
-    cfg = request.app.state.config
-    pdf_dir = cfg.project_root / "data" / "pdf" / stock_code
+    pdf_dir = PDFManager(sqlite=request.app.state.sqlite).hot_dir / stock_code
     pdf_path = (pdf_dir / filename).resolve()
 
     # 二次验证: 确保解析后的路径仍在 pdf_dir 内
     try:
         pdf_path.relative_to(pdf_dir.resolve())
     except ValueError:
-        return {"error": "Path traversal detected"}
+        raise HTTPException(status_code=400, detail="Path traversal detected")
 
     if pdf_path.exists():
         return FileResponse(
@@ -630,38 +716,43 @@ async def serve_pdf(
         )
 
     # M8-问题2: 检查冷归档 (PRD §18.2 AR6: 显示归档位置与恢复指引)
-    from app.core.pdf.manager import PDFManager
     mgr = PDFManager(sqlite=request.app.state.sqlite)
     if mgr.is_in_archive(stock_code, filename):
-        archive_path = cfg.project_root / "data" / "archive_pdf" / stock_code / filename
-        return {
+        archived = next(
+            (item for item in mgr.list_archived_pdfs(stock_code) if item["filename"] == filename),
+            {},
+        )
+        raise HTTPException(status_code=409, detail={
             "error": "PDF is in cold archive",
-            "archive_location": str(archive_path),
             "recovery_instruction": f"请通过 CLI 恢复: vd data restore_pdf {stock_code} {filename}",
             "stock_code": stock_code,
             "filename": filename,
-        }
+            "archive_path": archived.get("archive_path"),
+            "checksum": archived.get("checksum"),
+            "integrity_verified": archived.get("integrity_verified", False),
+        })
 
-    return {
+    raise HTTPException(status_code=404, detail={
         "error": "PDF not found",
         "path": str(pdf_path),
         "hint": "请先通过 CLI 下载 PDF: vd data download_pdf <stock_code>",
-    }
+    })
 
 
 @router.get("/{stock_code}/pdf-list")
-async def list_pdfs(stock_code: str, request: Request) -> dict:
+def list_pdfs(stock_code: str, request: Request) -> dict:
     """列出已下载的 PDF 文件"""
-    cfg = request.app.state.config
-    pdf_dir = cfg.project_root / "data" / "pdf" / stock_code
+    import re
 
-    if not pdf_dir.exists():
-        return {"files": [], "count": 0}
+    if not re.fullmatch(r"\d{6}", stock_code):
+        raise HTTPException(status_code=400, detail="Invalid stock code")
+    pdf_dir = PDFManager(sqlite=request.app.state.sqlite)._stock_dir(stock_code)
 
     files = []
-    for f in pdf_dir.glob("*.pdf"):
-        files.append({
-            "filename": f.name,
-            "size_bytes": f.stat().st_size,
-        })
+    if pdf_dir.exists():
+        for f in pdf_dir.glob("*.pdf"):
+            files.append({"filename": f.name, "size_bytes": f.stat().st_size, "archived": False})
+    mgr = PDFManager(sqlite=request.app.state.sqlite)
+    hot_names = {item["filename"] for item in files}
+    files.extend(item for item in mgr.list_archived_pdfs(stock_code) if item["filename"] not in hot_names)
     return {"files": files, "count": len(files)}

@@ -17,7 +17,7 @@ import re
 from typing import Any
 
 from app.core.dsl.parser import parse
-from app.core.dsl.validator import Validator, ValidationError
+from app.core.dsl.validator import Validator
 from app.core.dsl.codegen import CodeGen
 from app.core.dsl.registry import ExpressionRegistry, STATUS_PUBLISHED
 from app.core.dsl.ast_nodes import FIELD_METADATA, INDICATOR_METADATA, ASTNode
@@ -154,6 +154,8 @@ class DSLEngine:
         expr = self.registry.get(name, version)
         if not expr:
             return {"error": "expression not found"}
+        if expr["status"] != "draft":
+            return {"error": "expression must be a draft before validation"}
 
         expression_text = expr["expression_text"]
 
@@ -214,6 +216,8 @@ class DSLEngine:
         expr = self.registry.get(name, version)
         if not expr:
             return {"error": "expression not found"}
+        if expr["status"] != "validated":
+            return {"error": "expression must be validated before single-stock preview"}
 
         try:
             # P1-19修复: preview时也展开简写（与validate保持一致）
@@ -235,7 +239,7 @@ class DSLEngine:
             if value is None:
                 reason_codes = self._infer_reason_codes(ast, stock_code)
 
-            self.registry.preview(name, version)
+            self.registry.preview_single(name, version)
             return {
                 "name": name, "version": version,
                 "stock_code": stock_code,
@@ -253,6 +257,8 @@ class DSLEngine:
         expr = self.registry.get(name, version)
         if not expr:
             return {"error": "expression not found"}
+        if expr["status"] != "single_previewed":
+            return {"error": "expression must complete single-stock preview before sample preview"}
 
         try:
             # P1-19修复: preview_sample也展开简写
@@ -354,14 +360,24 @@ class DSLEngine:
         if not expr:
             return {"error": "expression not found"}
 
-        if expr["status"] not in ("validated", "previewed"):
-            return {"error": f"表达式必须先校验和预览 (当前状态: {expr['status']})"}
+        if expr["status"] != "previewed":
+            return {"error": f"表达式必须完成校验和两次预览 (当前状态: {expr['status']})"}
+
+        # Screening only materializes current snapshot-period values. Refuse
+        # expressions whose preview requires historical rows rather than
+        # publishing an indicator with different runtime semantics.
+        expanded = expand_shorthand(expr["expression_text"])
+        if any(token in expanded for token in ("@MRQ", "@TTM", "@YoY", "@QoQ", "TTM(", "YoY(", "QoQ(")):
+            return {"error": "screening cannot publish historical-period DSL expressions"}
 
         # 检查循环依赖
         if self.registry.check_circular(name, version):
             return {"error": "循环依赖检测到 (PRD §11.5 DL15)"}
 
-        return self.registry.publish(name, version)
+        try:
+            return self.registry.publish(name, version)
+        except ValueError as error:
+            return {"error": str(error)}
 
     def list_published(self) -> list[dict[str, Any]]:
         """列出已发布的复合指标"""

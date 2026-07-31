@@ -18,6 +18,7 @@ export {
 
   // Trust helper
   isIndicatorUntrusted,
+  type IndicatorTrust,
 
   // Backend contracts
   type FinancialStatementDates,
@@ -25,6 +26,8 @@ export {
   type DataDates,
   type DividendQuality,
   type LineageQuality,
+  type CodeIdentityQuality,
+  type MinimumDataReadiness,
   type OperationalWarnings,
   type DataQualityStatus,
   type StockFreshness,

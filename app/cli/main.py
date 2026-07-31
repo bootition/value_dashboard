@@ -11,6 +11,88 @@ import json
 from typing import Any
 import typer
 
+
+def _database_context(*, initialize: bool = True):
+    """Create the CLI's database pair through the validated path boundary.
+
+    Status and evidence commands must not mutate a formal profile merely to
+    inspect it, so schema initialization and interrupted-restore recovery are
+    reserved for commands that explicitly need a writable composition.
+    """
+    from app.core.config import Config
+    from app.core.storage.duckdb_store import DuckDBStore
+    from app.core.storage.path_policy import resolve_and_validate_paths
+    from app.core.storage.sqlite_store import SQLiteStore
+
+    paths = resolve_and_validate_paths()
+    Config.load_with_paths(paths)
+    duck, sqlite = DuckDBStore(paths=paths), SQLiteStore(paths=paths)
+    if initialize:
+        from app.core.storage.schema import init_all_schema
+        from app.core.backup.manager import recover_pending_restore
+
+        init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
+        recover_pending_restore(paths)
+    return paths, duck, sqlite
+
+
+def _database_stores(*, initialize: bool = True):
+    _, duck, sqlite = _database_context(initialize=initialize)
+    return duck, sqlite
+
+
+def _duck_store():
+    return _database_stores()[0]
+
+
+def _sqlite_store():
+    return _database_stores()[1]
+
+
+def _dsl_engine():
+    from app.core.dsl.engine import DSLEngine
+
+    _, duck, sqlite = _database_context()
+    return DSLEngine(duck=duck, sqlite=sqlite)
+
+
+def _screening_engine():
+    from app.core.data_quality import screening_readiness
+    from app.core.screening.engine import ScreeningEngine
+    from app.cli.protocol import make_response
+
+    _, duck, sqlite = _database_context()
+    readiness = screening_readiness(duck, sqlite)
+    if not readiness["ready"]:
+        typer.echo(json.dumps(make_response(
+            "screening.run", error_code="E002", error_message="minimum_data_not_ready",
+            data=readiness,
+        ), ensure_ascii=False))
+        return
+    return ScreeningEngine(duck=duck, sqlite=sqlite)
+
+
+def _backup_manager(*, initialize: bool = True):
+    from app.core.backup.manager import BackupManager
+
+    _, duck, sqlite = _database_context(initialize=initialize)
+    return BackupManager(duck=duck, sqlite=sqlite)
+
+
+def _pdf_manager():
+    from app.core.pdf.manager import PDFManager
+
+    _, _, sqlite = _database_context()
+    return PDFManager(sqlite=sqlite)
+
+
+def _correction_manager():
+    from app.core.pdf.correction import CorrectionManager
+
+    _, duck, sqlite = _database_context()
+    return CorrectionManager(duck=duck, sqlite=sqlite)
+
+
 app = typer.Typer(
     name="value-dashboard",
     help="A股价值投资研究与筛选工具 CLI",
@@ -29,13 +111,13 @@ def server() -> None:
 @app.command()
 def init() -> None:
     """初始化数据库 schema"""
-    from app.core.config import Config
-
-    Config.load()
     from app.core.storage.schema import init_all_schema
 
-    init_all_schema()
-    typer.echo("数据库 schema 初始化完成")
+    _, duck, sqlite = _database_context()
+    init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
+    from app.cli.protocol import make_response
+
+    typer.echo(json.dumps(make_response("init", {"status": "ok"}), ensure_ascii=False))
 
 
 data_app = typer.Typer(help="数据管理")
@@ -51,19 +133,46 @@ def data_init(
 
     按顺序获取: 股票全集 → 交易日历 → 申万行业 → 近5年价格 → 核心财务
     """
-    from app.core.config import Config
-
-    Config.load()
     from app.cli.protocol import make_response
     from app.core.init import DataInitializer
 
-    initializer = DataInitializer()
+    _, duck, sqlite = _database_context()
+    initializer = DataInitializer(duck=duck, sqlite=sqlite)
     report = initializer.run_full_init(
         skip_prices=skip_prices,
         skip_financials=skip_financials,
     )
 
     typer.echo(json.dumps(make_response("data.init", report), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("refresh_universe")
+def data_refresh_universe() -> None:
+    """Refresh the current listed universe and its verified pool metadata."""
+    from app.cli.protocol import make_response
+    from app.core.init import DataInitializer
+
+    _, duck, sqlite = _database_context()
+    initializer = DataInitializer(duck=duck, sqlite=sqlite)
+    universe = initializer._fetch_stock_universe()
+    metadata = (
+        initializer._fetch_listing_info()
+        if universe.get("status") == "success"
+        else {"status": "skipped", "reason": "universe_not_refreshed"}
+    )
+    result = {
+        "status": "success" if metadata.get("status") == "success" else "partial",
+        "universe": universe,
+        "pool_metadata": metadata,
+    }
+    typer.echo(
+        json.dumps(
+            make_response("data.refresh_universe", result),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
 
 
 @data_app.command("update")
@@ -75,13 +184,11 @@ def data_update(
 
     检查新交易日、新公告、待重试任务，执行增量更新。
     """
-    from app.core.config import Config
-
-    Config.load()
     from app.cli.protocol import make_response
     from app.core.update import IncrementalUpdater
 
-    updater = IncrementalUpdater()
+    _, duck, sqlite = _database_context()
+    updater = IncrementalUpdater(duck=duck, sqlite=sqlite)
 
     if check_only:
         report = updater.run_incremental_check()
@@ -89,6 +196,26 @@ def data_update(
         report = updater.run_incremental_update(max_stocks=max_stocks)
 
     typer.echo(json.dumps(make_response("data.update", report), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("replenish_missing_core_data")
+def data_replenish_missing_core_data(
+    max_stocks: int = typer.Option(0, "--max-stocks", min=0, help="最多补齐 N 只股票，0=全部缺项"),
+) -> None:
+    """Only fetch listed stocks missing snapshot-required prices or financial fields."""
+    from app.cli.protocol import make_response
+    from app.core.update import IncrementalUpdater
+
+    _, duck, sqlite = _database_context()
+    result = IncrementalUpdater(duck=duck, sqlite=sqlite).replenish_missing_core_data(max_stocks)
+    typer.echo(
+        json.dumps(
+            make_response("data.replenish_missing_core_data", result),
+            ensure_ascii=False,
+            indent=2,
+            default=str,
+        )
+    )
 
 
 @data_app.command("backfill-prices")
@@ -102,13 +229,11 @@ def data_backfill_prices(
     将 price_daily 从"近5年"扩展到"上市以来全部"。
     同时回填 dividends 送股/转增字段。
     """
-    from app.core.config import Config
-
-    Config.load()
     from app.cli.protocol import make_response
     from app.core.backfill import PriceBackfiller
 
-    backfiller = PriceBackfiller()
+    _, duck, sqlite = _database_context()
+    backfiller = PriceBackfiller(duck=duck, sqlite=sqlite)
     report = backfiller.run_full_backfill(
         skip_if_complete=skip_complete,
         max_stocks=max_stocks,
@@ -120,13 +245,11 @@ def data_backfill_prices(
 @data_app.command("compute_indicators")
 def data_compute_indicators() -> None:
     """计算全部内建指标并写入 indicator_snapshot 表 (PRD §10)"""
-    from app.core.config import Config
-
-    Config.load()
     from app.cli.protocol import make_response
     from app.core.indicators.calculator import IndicatorCalculator
 
-    calc = IndicatorCalculator()
+    _, duck, sqlite = _database_context()
+    calc = IndicatorCalculator(duck=duck, sqlite=sqlite)
     report = calc.compute_snapshot_for_all()
 
     typer.echo(json.dumps(make_response("data.compute_indicators", report), ensure_ascii=False, indent=2, default=str))
@@ -149,8 +272,7 @@ def indicator_create(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
     result = engine.create(name, expression, description, direction)
     typer.echo(json.dumps(make_response("indicator.create", result), ensure_ascii=False, indent=2))
 
@@ -164,8 +286,7 @@ def indicator_validate(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
     result = engine.validate(name, version)
     typer.echo(json.dumps(make_response("indicator.validate", result), ensure_ascii=False, indent=2, default=str))
 
@@ -180,8 +301,7 @@ def indicator_preview_single(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
     result = engine.preview_single(name, version, stock_code)
     typer.echo(json.dumps(make_response("indicator.preview_single", result), ensure_ascii=False, indent=2, default=str))
 
@@ -196,8 +316,7 @@ def indicator_preview_sample(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
     result = engine.preview_sample(name, version, limit)
     typer.echo(json.dumps(make_response("indicator.preview_sample", result), ensure_ascii=False, indent=2, default=str))
 
@@ -211,8 +330,7 @@ def indicator_publish(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
     result = engine.publish(name, version)
     typer.echo(json.dumps(make_response("indicator.publish", result), ensure_ascii=False, indent=2, default=str))
 
@@ -223,8 +341,7 @@ def indicator_list() -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
     result = engine.list_all()
     typer.echo(json.dumps(make_response("indicator.list", result), ensure_ascii=False, indent=2, default=str))
 
@@ -237,8 +354,7 @@ def indicator_discover(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.dsl.engine import DSLEngine
-    engine = DSLEngine()
+    engine = _dsl_engine()
 
     if what == "all":
         result = {
@@ -269,18 +385,34 @@ def data_status() -> None:
     Config.load()
     from app.cli.protocol import make_response
     from app.core.data_quality import build_data_quality_status
-    from app.core.storage.duckdb_store import DuckDBStore
-    from app.core.storage.sqlite_store import SQLiteStore
+    duck, sqlite = _database_stores(initialize=False)
 
-    duck = DuckDBStore()
-    sqlite = SQLiteStore()
-
-    stock_count = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta")
-    raw_count = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM price_daily_raw")
-    qfq_count = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM price_daily_qfq")
-    bs_count = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM balance_sheet")
-    ic_count = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM income_statement")
-    cf_count = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM cash_flow")
+    stock_count = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta WHERE is_listed IS TRUE")
+    raw_count = duck.read_query(
+        """SELECT COUNT(DISTINCT price.stock_code) as cnt FROM price_daily_raw price
+           JOIN stock_meta stock ON stock.stock_code = price.stock_code
+           WHERE stock.is_listed IS TRUE"""
+    )
+    qfq_count = duck.read_query(
+        """SELECT COUNT(DISTINCT price.stock_code) as cnt FROM price_daily_qfq price
+           JOIN stock_meta stock ON stock.stock_code = price.stock_code
+           WHERE stock.is_listed IS TRUE"""
+    )
+    bs_count = duck.read_query(
+        """SELECT COUNT(DISTINCT statement.stock_code) as cnt FROM balance_sheet statement
+           JOIN stock_meta stock ON stock.stock_code = statement.stock_code
+           WHERE stock.is_listed IS TRUE"""
+    )
+    ic_count = duck.read_query(
+        """SELECT COUNT(DISTINCT statement.stock_code) as cnt FROM income_statement statement
+           JOIN stock_meta stock ON stock.stock_code = statement.stock_code
+           WHERE stock.is_listed IS TRUE"""
+    )
+    cf_count = duck.read_query(
+        """SELECT COUNT(DISTINCT statement.stock_code) as cnt FROM cash_flow statement
+           JOIN stock_meta stock ON stock.stock_code = statement.stock_code
+           WHERE stock.is_listed IS TRUE"""
+    )
     retry_count = sqlite.query("SELECT COUNT(*) as cnt FROM retry_list")
     missing_count = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
 
@@ -305,11 +437,7 @@ def status() -> None:
 
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.duckdb_store import DuckDBStore
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    duck = DuckDBStore()
-    sqlite = SQLiteStore()
+    duck, sqlite = _database_stores(initialize=False)
 
     data: dict[str, Any] = {}
     try:
@@ -374,57 +502,104 @@ app.add_typer(screening_app, name="screening")
 
 @screening_app.command("run")
 def screening_run(
-    rule: str = typer.Argument(..., help="规则JSON (conditions+sort+columns)"),
+    rule_id: int = typer.Argument(..., help="已保存规则 ID"),
+    version: int = typer.Option(..., "--version", help="规则版本"),
     include_st: bool = typer.Option(False, "--include-st"),
     include_suspended: bool = typer.Option(False, "--include-suspended"),
     min_years: int = typer.Option(1, "--min-years"),
+    strict_only: bool = typer.Option(False, "--strict-only"),
 ) -> None:
     """手动运行筛选 (PRD §12.2 SC8)"""
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
+    from app.core.data_quality import screening_readiness
     from app.core.screening.engine import ScreeningEngine
 
-    engine = ScreeningEngine()
-    rule_dict = json.loads(rule)
+    _, duck, sqlite = _database_context()
+    decision = screening_readiness(duck, sqlite)
+    if not decision["ready"]:
+        typer.echo(json.dumps(make_response(
+            "screening.run",
+            error_code="E002",
+            error_message="screening_data_not_ready",
+            data=decision,
+        ), ensure_ascii=False))
+        return
+    rows = sqlite.query("SELECT rule_json, locked_indicators FROM screening_rules WHERE id = ? AND version = ?", [rule_id, version])
+    if not rows:
+        typer.echo(json.dumps(make_response("screening.run", error_code="E001", error_message="saved rule version not found"), ensure_ascii=False))
+        return
+    engine = ScreeningEngine(duck=duck, sqlite=sqlite)
+    rule_dict = json.loads(rows[0]["rule_json"])
+    locked_indicators = json.loads(rows[0]["locked_indicators"] or "{}")
     result = engine.run(
         rule=rule_dict,
         include_st=include_st,
         include_suspended=include_suspended,
         min_listing_years=min_years,
+        strict_only=strict_only,
+        locked_indicators=locked_indicators,
     )
+    for stock in result["results"]:
+        stock["_entry_explanation"] = engine.generate_entry_explanation(stock, rule_dict.get("conditions", {}))
+    from app.web.api.screening import _attach_result_report_dates
+    _attach_result_report_dates(duck, result["results"])
+    run_id = __import__("uuid").uuid4().hex
+    sqlite.execute(
+        """INSERT INTO screening_runs
+           (run_id, rule_id, rule_version, result_json, columns_json, sort_json, data_date,
+            base_pool_config, strict_only, confidence_summary)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [
+            run_id, rule_id, version, json.dumps(result["results"], ensure_ascii=False, default=str),
+            json.dumps(rule_dict.get("columns", []), ensure_ascii=False),
+            json.dumps(rule_dict.get("sort", []), ensure_ascii=False), result["data_date"],
+            json.dumps({"include_st": include_st, "include_suspended": include_suspended, "min_listing_years": min_years}),
+            strict_only, json.dumps({"strict_only": strict_only, "locked_indicators": locked_indicators}),
+        ],
+    )
+    result["run_id"] = run_id
     typer.echo(json.dumps(make_response("screening.run", result), ensure_ascii=False, indent=2, default=str))
 
 
 @screening_app.command("save_result")
 def screening_save(
     title: str = typer.Argument(..., help="标题(必填)"),
-    results_file: str = typer.Argument(..., help="结果JSON文件路径"),
-    data_date: str = typer.Option("", "--data-date"),
+    run_id: str = typer.Argument(..., help="服务端筛选运行 ID"),
 ) -> None:
     """保存筛选结果 (PRD §12.5 SC14-15)"""
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.sqlite_store import SQLiteStore
+    from app.core.data_quality import screening_readiness
 
-    sqlite = SQLiteStore()
-    with open(results_file, encoding="utf-8") as f:
-        results = json.load(f)
-
-    from datetime import datetime  # P2修复: 移除死uuid导入
-    # P2修复: 使用autoincrement id
+    _, duck, sqlite = _database_context()
+    decision = screening_readiness(duck, sqlite)
+    if not decision["ready"]:
+        typer.echo(json.dumps(make_response(
+            "screening.save_result", error_code="E002", error_message="screening_data_not_ready",
+            data=decision,
+        ), ensure_ascii=False))
+        return
+    if not title.strip():
+        typer.echo(json.dumps(make_response("screening.save_result", error_code="E001", error_message="title is required"), ensure_ascii=False))
+        return
     with sqlite.transaction() as conn:
+        run = conn.execute("SELECT * FROM screening_runs WHERE run_id = ?", [run_id]).fetchone()
+        if run is None:
+            typer.echo(json.dumps(make_response("screening.save_result", error_code="E001", error_message="server screening run not found"), ensure_ascii=False))
+            return
         cursor = conn.execute(
             """INSERT INTO screening_results
-               (title, data_date, result_json, columns_json, sort_json, confidence_summary)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            [title, data_date or datetime.now().isoformat(),
-             json.dumps(results, ensure_ascii=False, default=str),
-             "[]", "[]",
-             json.dumps({"total": len(results)})],
+               (title, rule_id, rule_version, data_date, result_json, columns_json, sort_json,
+                confidence_summary, base_pool_config)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [title, run["rule_id"], run["rule_version"], run["data_date"], run["result_json"],
+              run["columns_json"], run["sort_json"], run["confidence_summary"], run["base_pool_config"]],
         )
         result_id = cursor.lastrowid
+        conn.execute("DELETE FROM screening_runs WHERE run_id = ?", [run_id])
     typer.echo(json.dumps(make_response("screening.save_result", {"status": "ok", "result_id": result_id}), ensure_ascii=False))
 
 
@@ -434,9 +609,7 @@ def screening_list(limit: int = typer.Option(20, "--limit")) -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = _sqlite_store()
     rows = sqlite.query(
         "SELECT id, title, data_date, created_at FROM screening_results ORDER BY created_at DESC LIMIT ?",
         [limit],
@@ -456,9 +629,7 @@ def override_list() -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.duckdb_store import DuckDBStore
-
-    duck = DuckDBStore()
+    duck = _duck_store()
     try:
         rows = duck.read_query(
             "SELECT stock_code, field_name, source, value, confidence "
@@ -482,9 +653,7 @@ def override_submit(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = _sqlite_store()
     with sqlite.transaction() as conn:
         conn.execute(
             """INSERT INTO manual_overrides
@@ -504,9 +673,7 @@ def override_revoke(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = _sqlite_store()
     sqlite.execute(
         "UPDATE manual_overrides SET rolled_back_at = ? WHERE id = ?",
         [datetime.now().isoformat(), override_id],
@@ -527,7 +694,8 @@ def plan_confirm(plan_id: str = typer.Argument(...)) -> None:
     Config.load()
     from app.cli.protocol import confirm_plan
 
-    result = confirm_plan(plan_id)
+    _, _, sqlite = _database_context()
+    result = confirm_plan(plan_id, sqlite=sqlite)
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 
 
@@ -540,18 +708,28 @@ app.add_typer(backup_app, name="backup")
 @backup_app.command("create")
 def backup_create(
     password: str = typer.Option("", "--password", help="用户口令(加密个性化数据)"),
+    prompt_password: bool = typer.Option(
+        False,
+        "--prompt-password",
+        help="在隐藏输入提示中读取口令，避免将其写入命令行历史",
+    ),
     target_dir: str = typer.Option("data/backup", "--target"),
 ) -> None:
     """创建全量备份 (PRD §18.3 AR9-10)
 
     --password: 提供口令则加密个性化数据并生成离线恢复密钥
+    --prompt-password: 在隐藏输入提示中读取口令，不能与 --password 同时使用
     """
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.backup.manager import BackupManager
 
-    mgr = BackupManager()
+    if password and prompt_password:
+        raise typer.BadParameter("--password and --prompt-password cannot be used together")
+    if prompt_password:
+        password = typer.prompt("Backup password", hide_input=True, confirmation_prompt=True)
+
+    mgr = _backup_manager()
     result = mgr.create_full_backup(
         user_password=password or None,
         target_dir=target_dir,
@@ -563,6 +741,7 @@ def backup_create(
 def backup_restore(
     backup_path: str = typer.Argument(..., help="备份ZIP文件路径"),
     password: str = typer.Option("", "--password", help="用户口令(解密个性化数据)"),
+    recovery_key: str = typer.Option("", "--recovery-key", help="离线恢复密钥(忘记口令时使用)"),
 ) -> None:
     """恢复备份 (PRD §18.2 AR5: 只能通过CLI, 两段式确认)"""
     from app.core.config import Config
@@ -575,9 +754,11 @@ def backup_restore(
         "operation": operation,
         "backup_path": backup_path,
         "password_provided": bool(password),
+        "recovery_key_provided": bool(recovery_key),
         "warning": "恢复将覆盖当前数据，请确保Web服务已停止",
     }
-    result = create_plan(operation, plan_summary)
+    _, _, sqlite = _database_context()
+    result = create_plan(operation, plan_summary, sqlite=sqlite)
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
 
 
@@ -587,9 +768,8 @@ def backup_list() -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.backup.manager import BackupManager
 
-    mgr = BackupManager()
+    mgr = _backup_manager(initialize=False)
     backups = mgr.list_backups()
     typer.echo(json.dumps(make_response("backup.list", {"backups": backups, "count": len(backups)}), ensure_ascii=False, default=str))
 
@@ -597,7 +777,9 @@ def backup_list() -> None:
 @backup_app.command("restore_execute")
 def backup_restore_execute(
     backup_path: str = typer.Argument(..., help="备份ZIP文件路径"),
+    plan_id: str = typer.Option(..., "--plan-id", help="已确认的恢复计划 ID"),
     password: str = typer.Option("", "--password", help="用户口令"),
+    recovery_key: str = typer.Option("", "--recovery-key", help="离线恢复密钥"),
 ) -> None:
     """执行恢复 (在 plan confirm 之后调用)
 
@@ -605,17 +787,32 @@ def backup_restore_execute(
     """
     from app.core.config import Config
     Config.load()
-    from app.cli.protocol import make_response, require_confirmed_plan
+    from app.cli.protocol import consume_confirmed_plan, make_response
     from app.core.backup.manager import BackupManager
 
     # P0#16修复: 验证 plan confirm 已执行
-    plan_error = require_confirmed_plan("backup.restore")
+    _, duck, sqlite = _database_context()
+    plan_error, plan_summary = consume_confirmed_plan(
+        "backup.restore", plan_id=plan_id, sqlite=sqlite
+    )
     if plan_error:
         typer.echo(json.dumps(plan_error, ensure_ascii=False, indent=2, default=str))
         return
 
-    mgr = BackupManager()
-    result = mgr.restore_from_backup(backup_path, password or None)
+    if plan_summary.get("backup_path") != backup_path:
+        typer.echo(json.dumps(make_response(
+            "backup.restore_execute",
+            error_code="E001",
+            error_message="backup_path does not match the confirmed plan",
+        ), ensure_ascii=False, indent=2))
+        return
+
+    mgr = BackupManager(duck=duck, sqlite=sqlite)
+    result = mgr.restore_from_backup(
+        backup_path,
+        user_password=password or None,
+        recovery_key=recovery_key or None,
+    )
     typer.echo(json.dumps(make_response("backup.restore_execute", result), ensure_ascii=False, indent=2, default=str))
 
 
@@ -631,25 +828,16 @@ def archive_create(
 ) -> None:
     """创建冷归档 (PRD §18.1 AR1: 热数据→冷归档)"""
     from app.core.config import Config
-    Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.duckdb_store import DuckDBStore
-    import os
+    from app.core.archive import DataArchiveManager
 
-    os.makedirs(target_dir, exist_ok=True)
-    duck = DuckDBStore()
-
-    # 导出主要表为 Parquet
-    exported = []
-    for table in ["price_daily_raw", "balance_sheet", "income_statement", "cash_flow", "indicator_snapshot"]:
-        try:
-            output_path = os.path.join(target_dir, f"{table}.parquet")
-            duck.execute_script(f"COPY {table} TO '{output_path}' (FORMAT PARQUET);")
-            exported.append(table)
-        except Exception as e:
-            pass  # 表可能为空
-
-    typer.echo(json.dumps(make_response("archive.create", {"status": "ok", "exported": exported, "target": target_dir}), ensure_ascii=False))
+    paths, duck, sqlite = _database_context()
+    Config.load_with_paths(paths)
+    try:
+        result = DataArchiveManager(duck, paths, sqlite).create(target_dir)
+    except Exception as error:
+        result = {"status": "error", "error": str(error)}
+    typer.echo(json.dumps(make_response("archive.create", result), ensure_ascii=False))
 
 
 @archive_app.command("verify")
@@ -657,20 +845,17 @@ def archive_verify(
     target_dir: str = typer.Argument("data/parquet"),
 ) -> None:
     """验证归档完整性 (PRD §18.2 AR4: 归档验证成功后才允许清理)"""
+    from app.core.archive import DataArchiveManager
+    from app.core.config import Config
     from app.cli.protocol import make_response
-    import os
-    if not os.path.exists(target_dir):
-        typer.echo(json.dumps(make_response("archive.verify", {"status": "error", "error": "归档目录不存在"}), ensure_ascii=False))
-        return
 
-    files = [f for f in os.listdir(target_dir) if f.endswith(".parquet")]
-    verified = []
-    for f in files:
-        path = os.path.join(target_dir, f)
-        size = os.path.getsize(path)
-        verified.append({"file": f, "size_bytes": size})
-
-    typer.echo(json.dumps(make_response("archive.verify", {"status": "ok", "files": verified, "count": len(verified)}), ensure_ascii=False))
+    paths, duck, sqlite = _database_context()
+    Config.load_with_paths(paths)
+    try:
+        result = DataArchiveManager(duck, paths, sqlite).verify(target_dir)
+    except Exception as error:
+        result = {"status": "error", "error": str(error)}
+    typer.echo(json.dumps(make_response("archive.verify", result), ensure_ascii=False))
 
 
 @archive_app.command("clean")
@@ -678,18 +863,57 @@ def archive_clean(
     target_dir: str = typer.Argument("data/parquet"),
 ) -> None:
     """清理已归档的本地热数据 (PRD §18.2 AR4: 归档验证成功后才允许清理, 两段式确认)"""
+    from app.core.archive import DataArchiveManager
     from app.core.config import Config
-    Config.load()
     from app.cli.protocol import create_plan
 
     operation = "archive.clean"
+    paths, duck, sqlite = _database_context()
+    Config.load_with_paths(paths)
+    try:
+        archive_root = DataArchiveManager(duck, paths, sqlite).resolve_target(target_dir)
+    except Exception as error:
+        typer.echo(json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False))
+        return
     plan_summary = {
         "operation": operation,
-        "target_dir": target_dir,
+        "target_dir": str(archive_root),
         "warning": "清理将删除本地热数据, 请确保归档已验证成功",
     }
-    result = create_plan(operation, plan_summary)
+    result = create_plan(operation, plan_summary, sqlite=sqlite)
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+@archive_app.command("clean_execute")
+def archive_clean_execute(
+    target_dir: str = typer.Argument("data/parquet"),
+    plan_id: str = typer.Option(..., "--plan-id", help="已确认的清理计划 ID"),
+) -> None:
+    """执行已确认的归档清理，只删除已验证的公共热表数据。"""
+    from app.core.archive import ARCHIVE_TABLES, DataArchiveManager
+    from app.core.config import Config
+    from app.cli.protocol import consume_confirmed_plan, make_response
+
+    paths, duck, sqlite = _database_context()
+    Config.load_with_paths(paths)
+    try:
+        archive_manager = DataArchiveManager(duck, paths, sqlite)
+        archive_root = archive_manager.resolve_target(target_dir)
+    except Exception as error:
+        typer.echo(json.dumps(make_response("archive.clean_execute", error_code="E001", error_message=str(error)), ensure_ascii=False))
+        return
+    plan_error, summary = consume_confirmed_plan("archive.clean", plan_id=plan_id, sqlite=sqlite)
+    if plan_error:
+        typer.echo(json.dumps(plan_error, ensure_ascii=False, indent=2))
+        return
+    if summary.get("target_dir") != str(archive_root):
+        typer.echo(json.dumps(make_response("archive.clean_execute", error_code="E001", error_message="target_dir does not match the confirmed plan"), ensure_ascii=False))
+        return
+    verified, verification_error = archive_manager.delete_verified_hot_data(target_dir)
+    if not verified:
+        typer.echo(json.dumps(make_response("archive.clean_execute", error_code="E002", error_message=f"archive verification failed: {verification_error}"), ensure_ascii=False))
+        return
+    typer.echo(json.dumps(make_response("archive.clean_execute", {"status": "success", "cleared_tables": list(ARCHIVE_TABLES), "archive": str(archive_root)}), ensure_ascii=False))
 
 
 # ─── 补充缺失的 data 命令 (M7-问题2/4) ───────────────────────────
@@ -701,31 +925,35 @@ def data_diagnose() -> None:
     Config.load()
     from app.cli.protocol import make_response
     from app.core.data_quality import build_data_quality_status
-    from app.core.storage.duckdb_store import DuckDBStore
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    duck = DuckDBStore()
-    sqlite = SQLiteStore()
+    duck, sqlite = _database_stores(initialize=False)
 
     report: dict = {}
 
     # 检查股票全集
     try:
-        row = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta")
+        row = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta WHERE is_listed IS TRUE")
         report["stock_count"] = row[0]["cnt"]
     except Exception:
         report["stock_count"] = "error"
 
     # 检查价格覆盖
     try:
-        row = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM price_daily_raw")
+        row = duck.read_query(
+            """SELECT COUNT(DISTINCT price.stock_code) as cnt FROM price_daily_raw price
+               JOIN stock_meta stock ON stock.stock_code = price.stock_code
+               WHERE stock.is_listed IS TRUE"""
+        )
         report["price_coverage"] = row[0]["cnt"]
     except Exception:
         report["price_coverage"] = "error"
 
     # 检查财务覆盖
     try:
-        row = duck.read_query("SELECT COUNT(DISTINCT stock_code) as cnt FROM balance_sheet")
+        row = duck.read_query(
+            """SELECT COUNT(DISTINCT statement.stock_code) as cnt FROM balance_sheet statement
+               JOIN stock_meta stock ON stock.stock_code = statement.stock_code
+               WHERE stock.is_listed IS TRUE"""
+        )
         report["financial_coverage"] = row[0]["cnt"]
     except Exception:
         report["financial_coverage"] = "error"
@@ -765,15 +993,143 @@ def data_diagnose() -> None:
         issues.append("指标快照为空, 请运行: vd data compute_indicators")
     if report.get("retry_count", 0) > 0:
         issues.append(f"有 {report['retry_count']} 个待重试任务, 请运行: vd data update")
+    blocking_warnings = {
+        "FINANCIAL_SHELL_ROWS",
+        "SNAPSHOT_STALE",
+        "MINIMUM_DATA_NOT_READY",
+        "DIVIDEND_DATES_UNVERIFIED",
+    }
     issues.extend(
         f"数据质量阻断: {warning_code}"
         for warning_code in data_quality["warning_codes"]
+        if warning_code in blocking_warnings
     )
+    report["operational_warnings"] = [
+        warning_code
+        for warning_code in data_quality["warning_codes"]
+        if warning_code not in blocking_warnings
+    ]
 
     report["issues"] = issues
     report["healthy"] = len(issues) == 0
 
     typer.echo(json.dumps(make_response("data.diagnose", report), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("reconcile_jobs")
+def data_reconcile_jobs(
+    older_than_hours: int = typer.Option(24, "--older-than-hours", min=1, max=24 * 365),
+) -> None:
+    """Create a confirmation plan for stale running jobs; no records change yet."""
+    from datetime import datetime, timedelta, timezone
+
+    from app.cli.protocol import create_plan
+
+    _, _, sqlite = _database_context()
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    jobs = sqlite.query(
+        """SELECT id, job_type, started_at FROM job_logs
+           WHERE status = 'running' AND started_at < ? ORDER BY started_at""",
+        [cutoff.isoformat()],
+    )
+    result = create_plan(
+        "data.reconcile_jobs",
+        {
+            "older_than_hours": older_than_hours,
+            "cutoff": cutoff.isoformat(),
+            "job_ids": [job["id"] for job in jobs],
+            "count": len(jobs),
+            "action": "mark stale running jobs failed; preserve original details and add reconciliation reason",
+        },
+        sqlite=sqlite,
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("reconcile_jobs_execute")
+def data_reconcile_jobs_execute(
+    plan_id: str = typer.Option(..., "--plan-id", help="confirmed reconciliation plan ID"),
+) -> None:
+    """Execute a confirmed stale-job reconciliation plan."""
+    from datetime import datetime, timezone
+
+    from app.cli.protocol import consume_confirmed_plan, make_response
+
+    _, _, sqlite = _database_context()
+    error, summary = consume_confirmed_plan("data.reconcile_jobs", plan_id=plan_id, sqlite=sqlite)
+    if error:
+        typer.echo(json.dumps(error, ensure_ascii=False, indent=2, default=str))
+        return
+    job_ids = summary.get("job_ids", [])
+    if not isinstance(job_ids, list) or not all(isinstance(job_id, int) for job_id in job_ids):
+        typer.echo(json.dumps(make_response(
+            "data.reconcile_jobs_execute", error_code="E001", error_message="invalid confirmed job plan"
+        ), ensure_ascii=False, indent=2))
+        return
+    reconciled = 0
+    with sqlite.transaction() as conn:
+        for job_id in job_ids:
+            row = conn.execute("SELECT details_json FROM job_logs WHERE id = ? AND status = 'running'", [job_id]).fetchone()
+            if row is None:
+                continue
+            try:
+                details = json.loads(row["details_json"] or "{}")
+            except json.JSONDecodeError:
+                details = {"legacy_details": row["details_json"]}
+            details["reconciliation"] = {
+                "reason_code": "stale_running_job",
+                "plan_id": plan_id,
+                "reconciled_at": datetime.now(timezone.utc).isoformat(),
+            }
+            conn.execute(
+                """UPDATE job_logs SET status = 'failed', finished_at = ?, details_json = ?
+                   WHERE id = ? AND status = 'running'""",
+                [datetime.now(timezone.utc).isoformat(), json.dumps(details, ensure_ascii=False), job_id],
+            )
+            reconciled += 1
+    typer.echo(json.dumps(make_response(
+        "data.reconcile_jobs_execute", {"status": "success", "reconciled": reconciled, "plan_id": plan_id}
+    ), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("quarantine_legacy_records")
+def data_quarantine_legacy_records() -> None:
+    """Create a confirmation plan to quarantine unsupported legacy lineage and dividends."""
+    from app.cli.protocol import create_plan
+    from app.core.data_maintenance import legacy_quarantine_summary
+
+    _, duck, sqlite = _database_context()
+    summary = legacy_quarantine_summary(duck)
+    result = create_plan("data.quarantine_legacy_records", summary, sqlite=sqlite)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("quarantine_legacy_records_execute")
+def data_quarantine_legacy_records_execute(
+    plan_id: str = typer.Option(..., "--plan-id", help="confirmed legacy quarantine plan ID"),
+) -> None:
+    """Execute a confirmed legacy-record quarantine without deleting retained evidence."""
+    from app.cli.protocol import consume_confirmed_plan, make_response
+    from app.core.data_maintenance import legacy_quarantine_summary, quarantine_legacy_records
+
+    _, duck, sqlite = _database_context()
+    error, planned = consume_confirmed_plan("data.quarantine_legacy_records", plan_id=plan_id, sqlite=sqlite)
+    if error:
+        typer.echo(json.dumps(error, ensure_ascii=False, indent=2, default=str))
+        return
+    current = legacy_quarantine_summary(duck)
+    if current != planned:
+        typer.echo(json.dumps(make_response(
+            "data.quarantine_legacy_records_execute",
+            error_code="E001",
+            error_message="legacy record set changed after plan creation",
+        ), ensure_ascii=False, indent=2))
+        return
+    result = quarantine_legacy_records(duck)
+    result["plan_id"] = plan_id
+    typer.echo(json.dumps(make_response(
+        "data.quarantine_legacy_records_execute", result
+    ), ensure_ascii=False, indent=2, default=str))
 
 
 @data_app.command("switch_source")
@@ -782,25 +1138,41 @@ def data_switch_source(
     source: str = typer.Argument(..., help="数据源: akshare_eastmoney/tdx/baostock"),
 ) -> None:
     """切换数据源 (M7-问题4)"""
-    from app.core.config import Config
+    from app.core.config import Config, is_frozen_runtime
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.adapters.manager import ADAPTER_PRIORITY
+    from app.core.adapters.manager import build_adapter_priority
+    import yaml
 
-    if data_type not in ADAPTER_PRIORITY:
-        typer.echo(json.dumps(make_response("data.switch_source", {"error": f"未知数据类型: {data_type}"}), ensure_ascii=False))
+    if is_frozen_runtime():
+        typer.echo(json.dumps(make_response(
+            "data.switch_source", error_code="E002",
+            error_message="frozen releases do not support persistent adapter configuration",
+        ), ensure_ascii=False))
         return
 
-    if source not in ADAPTER_PRIORITY[data_type]:
-        typer.echo(json.dumps(make_response("data.switch_source", {"error": f"数据源 {source} 不支持 {data_type}, 可用: {ADAPTER_PRIORITY[data_type]}"}), ensure_ascii=False))
+    priorities = build_adapter_priority(None)
+    if data_type not in priorities:
+        typer.echo(json.dumps(make_response("data.switch_source", error_code="E001", error_message=f"未知数据类型: {data_type}"), ensure_ascii=False))
         return
 
-    # 将指定源移到第一位
-    current = ADAPTER_PRIORITY[data_type]
+    if source not in priorities[data_type]:
+        typer.echo(json.dumps(make_response("data.switch_source", error_code="E001", error_message=f"数据源 {source} 不支持 {data_type}, 可用: {priorities[data_type]}"), ensure_ascii=False))
+        return
+
+    current = priorities[data_type]
     new_order = [source] + [s for s in current if s != source]
-    ADAPTER_PRIORITY[data_type] = new_order
+    cfg = Config.current()
+    user_config = cfg.project_root / "config" / "user.yaml"
+    existing = yaml.safe_load(user_config.read_text(encoding="utf-8")) if user_config.exists() else {}
+    if not isinstance(existing, dict):
+        existing = {}
+    adapters = existing.setdefault("adapters", {})
+    primary = adapters.setdefault("primary", {})
+    primary[data_type] = new_order
+    user_config.write_text(yaml.safe_dump(existing, allow_unicode=True, sort_keys=True), encoding="utf-8")
 
-    typer.echo(json.dumps(make_response("data.switch_source", {"status": "ok", "data_type": data_type, "new_priority": new_order}), ensure_ascii=False))
+    typer.echo(json.dumps(make_response("data.switch_source", {"status": "ok", "data_type": data_type, "new_priority": new_order, "persisted": str(user_config)}), ensure_ascii=False))
 
 
 @data_app.command("refetch")
@@ -820,8 +1192,31 @@ def data_refetch(
         "data_type": data_type,
         "warning": "重抓将覆盖该股票的现有数据",
     }
-    result = create_plan(operation, plan_summary)
+    _, _, sqlite = _database_context()
+    result = create_plan(operation, plan_summary, sqlite=sqlite)
     typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("refetch_execute")
+def data_refetch_execute(
+    stock_code: str = typer.Argument(..., help="股票代码"),
+    data_type: str = typer.Option("price_daily", "--type", help="数据类型"),
+    plan_id: str = typer.Option(..., "--plan-id", help="已确认的重抓计划 ID"),
+) -> None:
+    """执行已确认的单股票重抓并保留可追溯的持久化结果。"""
+    from app.cli.protocol import consume_confirmed_plan, make_response
+    from app.core.update import IncrementalUpdater
+
+    _, duck, sqlite = _database_context()
+    plan_error, summary = consume_confirmed_plan("data.refetch", plan_id=plan_id, sqlite=sqlite)
+    if plan_error:
+        typer.echo(json.dumps(plan_error, ensure_ascii=False, indent=2))
+        return
+    if summary.get("stock_code") != stock_code or summary.get("data_type") != data_type:
+        typer.echo(json.dumps(make_response("data.refetch_execute", error_code="E001", error_message="arguments do not match the confirmed plan"), ensure_ascii=False))
+        return
+    result = IncrementalUpdater(duck=duck, sqlite=sqlite).refetch_one(stock_code, data_type)
+    typer.echo(json.dumps(make_response("data.refetch_execute", result), ensure_ascii=False, indent=2, default=str))
 
 
 # ─── 补充缺失的 screening 命令 (M7-问题1) ───────────────────────
@@ -835,57 +1230,111 @@ def screening_create(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
+    sqlite = _sqlite_store()
     rule_dict = json.loads(rule)
+    from app.web.api.screening import resolve_rule_indicator_locks
+    try:
+        locks = resolve_rule_indicator_locks(sqlite, rule_dict, {})
+    except ValueError as error:
+        typer.echo(json.dumps(make_response("screening.create", error_code="E001", error_message=str(error)), ensure_ascii=False))
+        return
     with sqlite.transaction() as conn:
+        existing = conn.execute("SELECT MAX(version) FROM screening_rules WHERE name = ?", [name]).fetchone()[0]
+        version = (existing or 0) + 1
         conn.execute(
-            "INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status) VALUES (?, 1, ?, ?, 'draft')",
-            [name, json.dumps(rule_dict, ensure_ascii=False), "[]"],
+            "INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status) VALUES (?, ?, ?, ?, 'draft')",
+            [name, version, json.dumps(rule_dict, ensure_ascii=False), json.dumps(locks, ensure_ascii=False)],
         )
-    typer.echo(json.dumps(make_response("screening.create", {"status": "ok", "name": name, "version": 1}), ensure_ascii=False))
+    typer.echo(json.dumps(make_response("screening.create", {"status": "ok", "name": name, "version": version}), ensure_ascii=False))
 
 
 @screening_app.command("export_csv")
 def screening_export_csv(
-    results_file: str = typer.Argument(..., help="结果JSON文件路径"),
+    result_id: int = typer.Argument(..., help="已保存筛选结果 ID"),
     output_file: str = typer.Argument(..., help="输出CSV文件路径"),
 ) -> None:
     """导出CSV (M7-问题1, PRD §12.5 SC16)"""
     from app.cli.protocol import make_response
     import csv
-    with open(results_file, encoding="utf-8") as f:
-        results = json.load(f)
+    from app.core.data_quality import screening_readiness
+    from app.web.api.screening import _csv_cell, _field_provenance
+    _, duck, sqlite = _database_context()
+    decision = screening_readiness(duck, sqlite)
+    if not decision["ready"]:
+        typer.echo(json.dumps(make_response(
+            "screening.export_csv", error_code="E002", error_message="screening_data_not_ready", data=decision,
+        ), ensure_ascii=False))
+        return
+    saved = sqlite.query("SELECT * FROM screening_results WHERE id = ?", [result_id])
+    if not saved:
+        typer.echo(json.dumps(make_response("screening.export_csv", error_code="E001", error_message="saved result not found"), ensure_ascii=False))
+        return
+    record = saved[0]
+    results = json.loads(record["result_json"])
 
     if not results:
         typer.echo(json.dumps(make_response("screening.export_csv", {"error": "no results"}), ensure_ascii=False))
         return
 
+    keys = json.loads(record["columns_json"])
+    try:
+        provenance = _field_provenance(duck, sqlite, results, keys)
+    except ValueError as error:
+        typer.echo(json.dumps(make_response(
+            "screening.export_csv", error_code="E002", error_message=str(error),
+        ), ensure_ascii=False))
+        return
+    rule = sqlite.query(
+        "SELECT locked_indicators FROM screening_rules WHERE id = ? AND version = ?",
+        [record["rule_id"], record["rule_version"]],
+    )
+    if not rule:
+        typer.echo(json.dumps(make_response(
+            "screening.export_csv", error_code="E001", error_message="saved result rule provenance is missing",
+        ), ensure_ascii=False))
+        return
+
     with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
-        keys = list(results[0].keys())
-        writer.writerow(keys)
-        for row in results:
-            writer.writerow([row.get(k, "") for k in keys])
+        summary = json.loads(record["confidence_summary"] or "{}")
+        writer.writerow(keys + [
+            "_data_date", "_rule_id", "_rule_version", "_locked_indicators",
+            "_strict_only", "_field_provenance", "_entry_explanation",
+        ])
+        for index, row in enumerate(results):
+            writer.writerow([_csv_cell(row.get(key, "")) for key in keys] + [
+                record["data_date"], record["rule_id"], record["rule_version"],
+                rule[0]["locked_indicators"], summary.get("strict_only", False),
+                json.dumps(provenance[index], ensure_ascii=False, sort_keys=True, default=str),
+                _csv_cell(row.get("_entry_explanation", "")),
+            ])
 
     typer.echo(json.dumps(make_response("screening.export_csv", {"status": "ok", "rows": len(results), "file": output_file}), ensure_ascii=False))
 
 
 @screening_app.command("add_to_watchlist")
 def screening_add_to_watchlist(
-    results_file: str = typer.Argument(..., help="结果JSON文件路径"),
+    result_id: int = typer.Argument(..., help="已保存筛选结果 ID"),
     group: str = typer.Option("screening", "--group"),
 ) -> None:
     """将筛选结果加入自选 (M7-问题1, PRD §12.5 SC17)"""
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.storage.sqlite_store import SQLiteStore
-
-    sqlite = SQLiteStore()
-    with open(results_file, encoding="utf-8") as f:
-        results = json.load(f)
+    from app.core.data_quality import screening_readiness
+    _, duck, sqlite = _database_context()
+    decision = screening_readiness(duck, sqlite)
+    if not decision["ready"]:
+        typer.echo(json.dumps(make_response(
+            "screening.add_to_watchlist", error_code="E002", error_message="screening_data_not_ready", data=decision,
+        ), ensure_ascii=False))
+        return
+    saved = sqlite.query("SELECT rule_id, result_json FROM screening_results WHERE id = ?", [result_id])
+    if not saved:
+        typer.echo(json.dumps(make_response("screening.add_to_watchlist", error_code="E001", error_message="saved result not found"), ensure_ascii=False))
+        return
+    record = saved[0]
+    results = json.loads(record["result_json"])
 
     added = 0
     with sqlite.transaction() as conn:
@@ -893,8 +1342,13 @@ def screening_add_to_watchlist(
             code = row.get("stock_code", "")
             if code:
                 conn.execute(
-                    "INSERT OR REPLACE INTO watchlist (stock_code, group_name) VALUES (?, ?)",
-                    [code, group],
+                    """INSERT INTO watchlist (stock_code, group_name, source_rule_id, source_result_id)
+                       VALUES (?, ?, ?, ?)
+                       ON CONFLICT(stock_code, group_name) DO UPDATE SET
+                         source_rule_id=excluded.source_rule_id,
+                         source_result_id=excluded.source_result_id,
+                         added_at=CURRENT_TIMESTAMP""",
+                    [code, group, record["rule_id"], result_id],
                 )
                 added += 1
 
@@ -946,9 +1400,8 @@ def data_download_pdf(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.manager import PDFManager
 
-    mgr = PDFManager()
+    mgr = _pdf_manager()
     result = mgr.download_announcement_pdfs(stock_code, max_count=max_count)
     typer.echo(json.dumps(make_response("data.download_pdf", result), ensure_ascii=False, indent=2, default=str))
 
@@ -959,9 +1412,8 @@ def data_list_pdfs(stock_code: str = typer.Argument(...)) -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.manager import PDFManager
 
-    mgr = PDFManager()
+    mgr = _pdf_manager()
     files = mgr.list_local_pdfs(stock_code)
     typer.echo(json.dumps(make_response("data.list_pdfs", {"files": files, "count": len(files)}), ensure_ascii=False, default=str))
 
@@ -975,9 +1427,8 @@ def data_archive_pdfs(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.manager import PDFManager
 
-    mgr = PDFManager()
+    mgr = _pdf_manager()
     result = mgr.archive_pdfs(stock_code or None, target_dir)
     typer.echo(json.dumps(make_response("data.archive_pdfs", result), ensure_ascii=False, indent=2, default=str))
 
@@ -991,9 +1442,8 @@ def data_restore_pdf(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.manager import PDFManager
 
-    mgr = PDFManager()
+    mgr = _pdf_manager()
     result = mgr.restore_pdf(stock_code, filename)
     typer.echo(json.dumps(make_response("data.restore_pdf", result), ensure_ascii=False, indent=2, default=str))
 
@@ -1008,12 +1458,11 @@ def override_submit_template(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.correction import CorrectionManager
 
     with open(template_file, encoding="utf-8") as f:
         template_json = f.read()
 
-    mgr = CorrectionManager()
+    mgr = _correction_manager()
     result = mgr.create_from_json(template_json)
     typer.echo(json.dumps(make_response("override.submit_template", result), ensure_ascii=False, indent=2, default=str))
 
@@ -1026,9 +1475,8 @@ def override_validate_template(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.correction import CorrectionManager
 
-    mgr = CorrectionManager()
+    mgr = _correction_manager()
     result = mgr.validate(override_id)
     typer.echo(json.dumps(make_response("override.validate_template", result), ensure_ascii=False, indent=2, default=str))
 
@@ -1041,9 +1489,8 @@ def override_preview_template(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.correction import CorrectionManager
 
-    mgr = CorrectionManager()
+    mgr = _correction_manager()
     result = mgr.preview_impact(override_id)
     typer.echo(json.dumps(make_response("override.preview_template", result), ensure_ascii=False, indent=2, default=str))
 
@@ -1056,9 +1503,8 @@ def override_publish_template(
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.correction import CorrectionManager
 
-    mgr = CorrectionManager()
+    mgr = _correction_manager()
     result = mgr.publish(override_id)
     typer.echo(json.dumps(make_response("override.publish_template", result), ensure_ascii=False, indent=2, default=str))
 
@@ -1069,9 +1515,8 @@ def override_list_templates() -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.pdf.correction import CorrectionManager
 
-    mgr = CorrectionManager()
+    mgr = _correction_manager()
     templates = mgr.list_templates()
     typer.echo(json.dumps(make_response("override.list_templates", {"templates": templates, "count": len(templates)}), ensure_ascii=False, default=str))
 

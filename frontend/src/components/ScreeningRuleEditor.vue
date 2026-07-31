@@ -72,10 +72,17 @@ function updateOp(idx: number, op: string): void {
   }
 }
 
-function updateValue(idx: number, value: number): void {
+function updateValue(idx: number, value: number | [number, number]): void {
   const item = props.node.rules[idx]
   if (item && !isRuleNode(item)) {
     item.value = value
+  }
+}
+
+function updateRightField(idx: number, value: string | undefined): void {
+  const item = props.node.rules[idx]
+  if (item && !isRuleNode(item)) {
+    item.right_field = value
   }
 }
 </script>
@@ -133,6 +140,7 @@ function updateValue(idx: number, value: number): void {
           @update:field="updateField(idx, $event)"
           @update:op="updateOp(idx, $event)"
           @update:value="updateValue(idx, $event)"
+          @update:right-field="updateRightField(idx, $event)"
           @delete="removeAt(idx)"
         />
       </template>

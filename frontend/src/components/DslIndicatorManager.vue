@@ -11,9 +11,10 @@ import type { DataTableColumns } from 'naive-ui'
 interface DslExpression {
   id: number
   name: string
+  version: number
   expression: string
   description: string
-  status: 'draft' | 'validated' | 'published'
+  status: 'draft' | 'validated' | 'single_previewed' | 'previewed' | 'published'
   created_at: string
 }
 
@@ -39,7 +40,8 @@ const newExpression = ref({
   description: '',
 })
 
-const previewResult = ref<DslValidateResult | null>(null)
+const previewResult = ref<DslValidateResult | Record<string, unknown> | null>(null)
+const previewStockCode = ref('600519')
 
 function statusTagType(s: string) {
   if (s === 'published') return 'success' as const
@@ -62,14 +64,28 @@ const columns: DataTableColumns<DslExpression> = [
   {
     title: '操作',
     key: 'actions',
-    width: 240,
+    width: 360,
     render: (row: DslExpression) =>
       h(NSpace, {}, () => [
-        h(NButton, { size: 'tiny', onClick: () => previewExpression(row) }, () => '预览'),
+        h(NButton, {
+          size: 'tiny',
+          disabled: row.status !== 'draft',
+          onClick: () => validateExpression(row),
+        }, () => '校验'),
+        h(NButton, {
+          size: 'tiny',
+          disabled: row.status !== 'validated',
+          onClick: () => previewSingleExpression(row),
+        }, () => '单股预览'),
+        h(NButton, {
+          size: 'tiny',
+          disabled: row.status !== 'single_previewed',
+          onClick: () => previewSampleExpression(row),
+        }, () => '小样本预览'),
         h(NButton, {
           size: 'tiny',
           type: 'primary',
-          disabled: row.status === 'published',
+          disabled: row.status !== 'previewed',
           onClick: () => publishExpression(row),
         }, () => '发布'),
         h(NButton, { size: 'tiny', type: 'error', onClick: () => deleteExpression(row) }, () => '删除'),
@@ -82,7 +98,7 @@ async function loadExpressions() {
   try {
     const resp = await axios.get('/api/dsl/expressions')
     expressions.value = resp.data.expressions || []
-  } catch (e) {
+  } catch {
     message.error('加载指标列表失败')
   } finally {
     loading.value = false
@@ -106,13 +122,44 @@ async function createExpression() {
   }
 }
 
-async function previewExpression(expr: DslExpression) {
+async function validateExpression(expr: DslExpression) {
   try {
-    const resp = await axios.post('/api/dsl/validate', { expression: expr.expression })
+    const resp = await axios.post(`/api/dsl/expressions/${expr.name}/${expr.version}/validate`)
     previewResult.value = resp.data
     showPreviewModal.value = true
+    loadExpressions()
   } catch (e: unknown) {
-    const detail = axios.isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '验证失败'
+    const detail = axios.isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '校验失败'
+    message.error(detail)
+  }
+}
+
+async function previewSingleExpression(expr: DslExpression) {
+  if (!previewStockCode.value.trim()) {
+    message.warning('请输入单股预览代码')
+    return
+  }
+  try {
+    const resp = await axios.post(`/api/dsl/expressions/${expr.name}/${expr.version}/preview-single`, {
+      stock_code: previewStockCode.value.trim(),
+    })
+    previewResult.value = resp.data
+    showPreviewModal.value = true
+    loadExpressions()
+  } catch (e: unknown) {
+    const detail = axios.isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '单股预览失败'
+    message.error(detail)
+  }
+}
+
+async function previewSampleExpression(expr: DslExpression) {
+  try {
+    const resp = await axios.post(`/api/dsl/expressions/${expr.name}/${expr.version}/preview-sample`)
+    previewResult.value = resp.data
+    showPreviewModal.value = true
+    loadExpressions()
+  } catch (e: unknown) {
+    const detail = axios.isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '小样本预览失败'
     message.error(detail)
   }
 }
@@ -153,7 +200,10 @@ loadExpressions()
 <template>
   <n-card title="复合指标管理" size="small">
     <template #header-extra>
-      <n-button size="small" type="primary" @click="showCreateModal = true">创建指标</n-button>
+      <n-space>
+        <n-input v-model:value="previewStockCode" size="small" placeholder="单股代码" style="width: 110px" />
+        <n-button size="small" type="primary" @click="showCreateModal = true">创建指标</n-button>
+      </n-space>
     </template>
     <n-empty v-if="expressions.length === 0 && !loading" description="暂无复合指标" />
     <n-data-table

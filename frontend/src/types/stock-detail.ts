@@ -13,7 +13,7 @@
  * - GET /api/stock/{code}/source-audit
  */
 
-import type { StockFreshness } from './data-quality.ts'
+import type { IndicatorTrust, StockFreshness } from './data-quality.ts'
 
 // ─── Stock Info ───────────────────────────────────────────────────────────
 
@@ -36,6 +36,7 @@ export interface StockInfo {
 export interface IndicatorMetric {
   readonly value: number | null
   readonly historical_capable: boolean
+  readonly untrusted?: boolean
 }
 
 export interface ValuationIndicators {
@@ -65,6 +66,8 @@ export interface GrowthIndicators {
   readonly revenue_cagr5: IndicatorMetric
   readonly net_profit_cagr3: IndicatorMetric
   readonly net_profit_cagr5: IndicatorMetric
+  readonly deducted_profit_cagr3: IndicatorMetric
+  readonly deducted_profit_cagr5: IndicatorMetric
 }
 
 export interface SafetyIndicators {
@@ -96,6 +99,7 @@ export interface IndicatorsResponse {
   readonly latest_close: number | null
   readonly latest_price_date: string | null
   readonly freshness: StockFreshness | null
+  readonly trust?: IndicatorTrust
 }
 
 // ─── Kline ────────────────────────────────────────────────────────────────
@@ -134,16 +138,11 @@ export interface TrendResponse {
   readonly trend: readonly FinancialTrendRow[]
   readonly period: 'annual' | 'quarterly' | 'ttm'
   readonly count: number
+  readonly period_semantic?: string
 }
 
 // ─── Source Audit ─────────────────────────────────────────────────────────
 
-/**
- * View-facing projection of field-level audit rows.
- * Backend returns additional fields (reason_code, is_override, api_version,
- * effective_date, data_version, formula, as_reported_value, latest_restated_diff)
- * that are not consumed by the current view.
- */
 export interface AuditFieldRow {
   readonly field_name: string
   readonly report_date: string
@@ -151,14 +150,18 @@ export interface AuditFieldRow {
   readonly source: string
   readonly confidence: string
   readonly fetch_time: string
+  readonly reason_code?: string | null
+  readonly is_override?: boolean
+  readonly api_version?: string | null
+  readonly effective_date?: string | null
+  readonly data_version?: string | null
+  readonly formula?: string | null
+  readonly as_reported_value?: number | null
+  readonly latest_restated_diff?: number | null
 }
 
-/**
- * View-facing projection of batch-level audit rows.
- * Backend returns additional fields (batch_id) that are not consumed by
- * the current view.
- */
 export interface AuditBatchRow {
+  readonly batch_id?: string
   readonly data_type: string
   readonly source: string
   readonly row_count: number

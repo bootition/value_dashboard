@@ -1,0 +1,9 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "skills": {
+    "paths": [
+      "D:\\Mr.Q\\opencode-shared-skills\\frontend\\frontend-design",
+      "D:\\Mr.Q\\opencode-shared-skills\\frontend\\web-design-guidelines"
+    ]
+  }
+}
