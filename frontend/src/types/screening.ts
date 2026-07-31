@@ -41,7 +41,7 @@ export interface ScreeningResultKnownFields {
   readonly stock_code: string
   readonly name: string
   readonly exchange: string
-  readonly sw_level1: string
+  readonly csrc_l1: string
   readonly latest_close: number
   readonly pe_ttm: number | null
   readonly pb_mrq: number | null

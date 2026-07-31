@@ -110,7 +110,7 @@ const columnOptions = computed(() => {
     stock_code: '股票代码',
     name: '名称',
     exchange: '交易所',
-    sw_level1: '申万一级',
+    csrc_l1: '证监会一级',
     latest_close: '最新价',
     pe_ttm: 'PE-TTM',
     pb_mrq: 'PB-MRQ',

@@ -307,7 +307,7 @@ onUnmounted(() => {
           <n-descriptions-item label="代码">{{ stockInfo?.stock_code }}</n-descriptions-item>
           <n-descriptions-item label="拼音">{{ stockInfo?.pinyin }}</n-descriptions-item>
           <n-descriptions-item label="上市日期">{{ stockInfo?.listing_date }}</n-descriptions-item>
-          <n-descriptions-item label="申万一级">{{ stockInfo?.sw_level1 || '—' }}</n-descriptions-item>
+          <n-descriptions-item label="证监会一级">{{ stockInfo?.csrc_l1 || '—' }}</n-descriptions-item>
         </n-descriptions>
       </n-card>
 

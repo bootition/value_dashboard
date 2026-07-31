@@ -14,7 +14,7 @@ interface WatchlistItem {
   stock_code: string
   name: string
   exchange: string
-  sw_level1: string | null
+  csrc_l1: string | null
   group_name: string
   source_rule_id: number | null
   source_result_id: number | null

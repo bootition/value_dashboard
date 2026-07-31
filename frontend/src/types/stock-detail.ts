@@ -25,8 +25,8 @@ export interface StockInfo {
   readonly listing_date: string | null
   readonly is_st: boolean
   readonly is_suspended: boolean
-  readonly sw_level1: string | null
-  readonly sw_level2: string | null
+  readonly csrc_l1: string | null
+  readonly csrc_l2: string | null
   readonly latest_close: number | null
   readonly latest_price_date: string | null
 }

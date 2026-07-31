@@ -28,7 +28,7 @@ interface DataSummary {
   income_statement_count: number
   cash_flow_count: number
   indicator_snapshot_count: number
-  sw_industry_count: number
+  csrc_industry_count: number
   retry_count: number
   missing_count: number
   last_update: string | null
@@ -40,11 +40,23 @@ interface DataSummary {
   readonly data_quality: DataQualityStatus
 }
 
+interface AutoUpdateStatus {
+  state: string
+  enabled: boolean
+  paused: boolean
+  current_stage: string
+  progress: Record<string, unknown>
+  last_error: string | null
+  last_success_at: string | null
+  updated_at?: string | null
+}
+
 const summary = ref<DataSummary | null>(null)
 const loading = ref(true)
 const error = ref('')
 const retryList = ref<RetryItem[]>([])
 const missingList = ref<MissingItem[]>([])
+const autoUpdate = ref<AutoUpdateStatus | null>(null)
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
@@ -53,7 +65,7 @@ const pct = (value: number, total: number) => {
 
 const priceRawPct = computed(() => summary.value ? pct(summary.value.price_raw_count, summary.value.stock_count) : '0%')
 const priceQfqPct = computed(() => summary.value ? pct(summary.value.price_qfq_count, summary.value.stock_count) : '0%')
-const swIndustryPct = computed(() => summary.value ? pct(summary.value.sw_industry_count, summary.value.stock_count) : '0%')
+const csrcIndustryPct = computed(() => summary.value ? pct(summary.value.csrc_industry_count, summary.value.stock_count) : '0%')
 const balanceSheetPct = computed(() => summary.value ? pct(summary.value.balance_sheet_count, summary.value.stock_count) : '0%')
 const incomeStatementPct = computed(() => summary.value ? pct(summary.value.income_statement_count, summary.value.stock_count) : '0%')
 const cashFlowPct = computed(() => summary.value ? pct(summary.value.cash_flow_count, summary.value.stock_count) : '0%')
@@ -63,19 +75,38 @@ async function fetchData() {
   error.value = ''
   loading.value = true
   try {
-    const [sumResp, retryResp, missResp] = await Promise.all([
+    const [sumResp, retryResp, missResp, autoResp] = await Promise.all([
       axios.get('/api/data-status/summary'),
       axios.get('/api/data-status/retry-list'),
       axios.get('/api/data-status/missing-list'),
+      axios.get('/api/data-status/auto-update'),
     ])
     summary.value = sumResp.data
     retryList.value = retryResp.data.items || []
     missingList.value = missResp.data.items || []
+    autoUpdate.value = autoResp.data
   } catch (e: unknown) {
     error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
   } finally {
     loading.value = false
   }
+}
+
+function autoUpdateStateLabel(state: string): string {
+  const labels: Record<string, string> = {
+    idle: '空闲', running: '运行中', paused: '已暂停',
+    disabled: '已关闭', finished: '已完成', failed: '失败',
+    enabled: '已开启',
+  }
+  return labels[state] || state
+}
+
+function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'info' | 'default' {
+  if (state === 'running') return 'info'
+  if (state === 'finished') return 'success'
+  if (state === 'failed') return 'error'
+  if (state === 'paused' || state === 'disabled') return 'warning'
+  return 'default'
 }
 
 onMounted(fetchData)
@@ -95,6 +126,34 @@ onMounted(fetchData)
         <p style="color: #999; margin-bottom: 16px;">
           最近更新: {{ summary.last_update || '尚未初始化' }}
         </p>
+
+        <!-- 自动更新状态（PRD §7.3 只读展示） -->
+        <n-card title="自动更新" size="small" style="margin-bottom: 16px;" v-if="autoUpdate">
+          <n-descriptions :column="4" size="small">
+            <n-descriptions-item label="状态">
+              <n-tag :type="autoUpdateTagType(autoUpdate.state)" size="small">
+                {{ autoUpdateStateLabel(autoUpdate.state) }}
+              </n-tag>
+              <span
+                v-if="autoUpdate.enabled && !autoUpdate.paused && autoUpdate.state !== 'running'"
+                style="color:#999; margin-left:8px;"
+              >（启动后自动更新）</span>
+            </n-descriptions-item>
+            <n-descriptions-item label="当前阶段">{{ autoUpdate.current_stage || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="上次成功">{{ autoUpdate.last_success_at || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="最后错误">
+              <span v-if="autoUpdate.last_error" style="color:#d03050;">{{ autoUpdate.last_error }}</span>
+              <span v-else>—</span>
+            </n-descriptions-item>
+          </n-descriptions>
+          <p v-if="autoUpdate.state === 'disabled'" style="color:#999; margin:8px 0 0;">
+            自动更新已关闭。可在 CLI 执行 <code>vd data auto-update enable</code> 重新开启。
+          </p>
+          <p v-else style="color:#999; margin:8px 0 0;">
+            控制入口（开关/立即更新/暂停/继续）在 CLI：
+            <code>vd data auto-update status|enable|disable|run|pause|resume</code>
+          </p>
+        </n-card>
 
         <!-- 数据质量警告 -->
         <n-alert
@@ -149,8 +208,8 @@ onMounted(fetchData)
           <n-grid-item><n-card><n-statistic label="Qfq价格覆盖" :value="summary.price_qfq_count">
             <template #suffix>{{ priceQfqPct }}</template>
           </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="申万行业覆盖" :value="summary.sw_industry_count">
-            <template #suffix>{{ swIndustryPct }}</template>
+          <n-grid-item><n-card><n-statistic label="CSRC行业覆盖" :value="summary.csrc_industry_count">
+            <template #suffix>{{ csrcIndustryPct }}</template>
           </n-statistic></n-card></n-grid-item>
           <n-grid-item><n-card><n-statistic label="资产负债表" :value="summary.balance_sheet_count">
             <template #suffix>{{ balanceSheetPct }}</template>

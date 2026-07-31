@@ -226,7 +226,7 @@ async function saveRule() {
         conditions: ruleTree,
         sort: sortRules.value,
         columns: Array.from(new Set([
-          'stock_code', 'name', 'exchange', 'sw_level1', 'sw_level2', 'latest_close',
+          'stock_code', 'name', 'exchange', 'csrc_l1', 'csrc_l2', 'latest_close',
           ...sortRules.value.map(item => item.field),
           ...Array.from(ruleFields.value),
         ])),

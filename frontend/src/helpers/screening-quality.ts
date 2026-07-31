@@ -18,7 +18,7 @@ export type { ScreeningRuleNode, ScreeningRuleCondition }
  * These fields come from stock_meta or price tables, not from indicator_snapshot.
  * They should not be flagged as untrusted by indicator-level warning codes.
  */
-const METADATA_FIELDS = new Set(['stock_code', 'name', 'exchange', 'sw_level1', 'latest_close'])
+const METADATA_FIELDS = new Set(['stock_code', 'name', 'exchange', 'csrc_l1', 'latest_close'])
 
 /**
  * Recursively collect every indicator field referenced by a rule tree.
