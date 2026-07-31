@@ -245,10 +245,10 @@ def minimum_data_readiness(
                   AND dividend.announcement_date IS NOT NULL
               ) AS has_corporate_action_or_dividend_lineage,
             CASE
-                WHEN lower(coalesce(m.sw_level1, '') || ' ' || coalesce(m.sw_level2, '')) LIKE '%银行%'
+                WHEN lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%银行%'
                 THEN complete_financials.report_date IS NOT NULL AND complete_financials.capital_adequacy_ratio IS NOT NULL
                   AND complete_financials.non_performing_loan_ratio IS NOT NULL AND complete_financials.provision_coverage_ratio IS NOT NULL
-                WHEN lower(coalesce(m.sw_level1, '') || ' ' || coalesce(m.sw_level2, '')) LIKE '%证券%'
+                WHEN lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%证券%'
                 THEN complete_financials.report_date IS NOT NULL AND complete_financials.risk_coverage_ratio IS NOT NULL
                 ELSE TRUE
             END AS has_sector_financials,

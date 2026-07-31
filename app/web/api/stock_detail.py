@@ -182,7 +182,7 @@ def get_stock_info(stock_code: str, request: Request) -> dict:
     duck = request.app.state.duck
     rows = duck.read_query(
         "SELECT stock_code, name, pinyin, exchange, listing_date, "
-        "is_st, is_suspended, sw_level1, sw_level2 "
+        "is_st, is_suspended, csrc_l1, csrc_l2 "
         "FROM stock_meta WHERE stock_code = ?",
         [stock_code],
     )

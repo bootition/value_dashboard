@@ -104,7 +104,7 @@ RANK_SUFFIXES = (
     "_industry_rank", "_industry_percentile",
     "_sw1_rank", "_sw1_percentile", "_sw2_rank", "_sw2_percentile",
 )
-METADATA_COLUMNS = {"stock_code", "name", "exchange", "sw_level1", "sw_level2"}
+METADATA_COLUMNS = {"stock_code", "name", "exchange", "sw_level1", "sw_level2", "csrc_l1", "csrc_l2"}
 MAX_RULE_LEAVES = 100
 MAX_IN_VALUES = 1_000
 
@@ -300,6 +300,7 @@ class ScreeningEngine:
 base_pool AS (
     SELECT
         m.stock_code, m.name, m.pinyin, m.exchange, m.sw_level1, m.sw_level2,
+        m.csrc_l1, m.csrc_l2,
         m.is_st, m.is_suspended, m.listing_date, s.*, {', '.join(normalized_selects)}
     FROM stock_meta m
     LEFT JOIN LATERAL (
@@ -336,7 +337,8 @@ base_pool AS (
 
         # ─── 阶段2: 横截面排名 ──────────────────────────────────
         # P1-21修复: NULLS LAST 避免NULL值获得rank=1
-        # P1-22修复: sw_level1为NULL时行业排名返回NULL (PRD §12.4)
+        # P1-22修复: csrc_l1为NULL时行业排名返回NULL (PRD §12.4)
+        # PRD §24: 行业口径切换为 CSRC（证监会），申万列不再消费
         rank_cols: list[str] = []
         if rank_fields:
             for field in sorted(rank_fields):
@@ -350,35 +352,35 @@ base_pool AS (
                     f"CASE WHEN {sql_field} IS NULL THEN NULL ELSE "
                     f"PERCENT_RANK() OVER (ORDER BY {sql_field} NULLS LAST) END AS {self._field_sql_name(field + '_market_percentile')}"
                 )
-                # 申万一级排名 (sw_level1为NULL时返回NULL, PRD §12.4)
+                # CSRC 一级排名 (csrc_l1为NULL时返回NULL, PRD §12.4)
                 rank_cols.append(
-                    f"CASE WHEN sw_level1 IS NULL OR {sql_field} IS NULL THEN NULL "
-                    f"ELSE RANK() OVER (PARTITION BY sw_level1 ORDER BY {sql_field} NULLS LAST) END "
+                    f"CASE WHEN csrc_l1 IS NULL OR {sql_field} IS NULL THEN NULL "
+                    f"ELSE RANK() OVER (PARTITION BY csrc_l1 ORDER BY {sql_field} NULLS LAST) END "
                     f"AS {self._field_sql_name(field + '_industry_rank')}"
                 )
                 rank_cols.append(
-                    f"CASE WHEN sw_level1 IS NULL OR {sql_field} IS NULL THEN NULL "
-                    f"ELSE PERCENT_RANK() OVER (PARTITION BY sw_level1 ORDER BY {sql_field} NULLS LAST) END "
+                    f"CASE WHEN csrc_l1 IS NULL OR {sql_field} IS NULL THEN NULL "
+                    f"ELSE PERCENT_RANK() OVER (PARTITION BY csrc_l1 ORDER BY {sql_field} NULLS LAST) END "
                     f"AS {self._field_sql_name(field + '_industry_percentile')}"
                 )
                 rank_cols.append(
-                    f"CASE WHEN sw_level1 IS NULL OR {sql_field} IS NULL THEN NULL "
-                    f"ELSE RANK() OVER (PARTITION BY sw_level1 ORDER BY {sql_field} NULLS LAST) END "
+                    f"CASE WHEN csrc_l1 IS NULL OR {sql_field} IS NULL THEN NULL "
+                    f"ELSE RANK() OVER (PARTITION BY csrc_l1 ORDER BY {sql_field} NULLS LAST) END "
                     f"AS {self._field_sql_name(field + '_sw1_rank')}"
                 )
                 rank_cols.append(
-                    f"CASE WHEN sw_level1 IS NULL OR {sql_field} IS NULL THEN NULL "
-                    f"ELSE PERCENT_RANK() OVER (PARTITION BY sw_level1 ORDER BY {sql_field} NULLS LAST) END "
+                    f"CASE WHEN csrc_l1 IS NULL OR {sql_field} IS NULL THEN NULL "
+                    f"ELSE PERCENT_RANK() OVER (PARTITION BY csrc_l1 ORDER BY {sql_field} NULLS LAST) END "
                     f"AS {self._field_sql_name(field + '_sw1_percentile')}"
                 )
                 rank_cols.append(
-                    f"CASE WHEN sw_level1 IS NULL OR sw_level2 IS NULL OR {sql_field} IS NULL THEN NULL "
-                    f"ELSE RANK() OVER (PARTITION BY sw_level1, sw_level2 ORDER BY {sql_field} NULLS LAST) END "
+                    f"CASE WHEN csrc_l1 IS NULL OR csrc_l2 IS NULL OR {sql_field} IS NULL THEN NULL "
+                    f"ELSE RANK() OVER (PARTITION BY csrc_l1, csrc_l2 ORDER BY {sql_field} NULLS LAST) END "
                     f"AS {self._field_sql_name(field + '_sw2_rank')}"
                 )
                 rank_cols.append(
-                    f"CASE WHEN sw_level1 IS NULL OR sw_level2 IS NULL OR {sql_field} IS NULL THEN NULL "
-                    f"ELSE PERCENT_RANK() OVER (PARTITION BY sw_level1, sw_level2 ORDER BY {sql_field} NULLS LAST) END "
+                    f"CASE WHEN csrc_l1 IS NULL OR csrc_l2 IS NULL OR {sql_field} IS NULL THEN NULL "
+                    f"ELSE PERCENT_RANK() OVER (PARTITION BY csrc_l1, csrc_l2 ORDER BY {sql_field} NULLS LAST) END "
                     f"AS {self._field_sql_name(field + '_sw2_percentile')}"
                 )
 
@@ -542,7 +544,7 @@ LIMIT 5000
         if not columns_spec:
             # 默认列
             cols = [
-                "stock_code", "name", "exchange", "sw_level1",
+                "stock_code", "name", "exchange", "csrc_l1",
                 "latest_close", "pe_ttm", "pb_mrq", "roe",
                 "gross_margin", "net_margin", "debt_ratio",
             ]
@@ -704,8 +706,8 @@ LIMIT 5000
                         return f"CASE WHEN {argument} IS NULL THEN NULL ELSE RANK() OVER (ORDER BY {argument} NULLS LAST) END"
                     if node.func_name == "rank_industry":
                         return (
-                            f"CASE WHEN sw_level1 IS NULL OR {argument} IS NULL THEN NULL ELSE "
-                            f"RANK() OVER (PARTITION BY sw_level1 ORDER BY {argument} NULLS LAST) END"
+                            f"CASE WHEN csrc_l1 IS NULL OR {argument} IS NULL THEN NULL ELSE "
+                            f"RANK() OVER (PARTITION BY csrc_l1 ORDER BY {argument} NULLS LAST) END"
                         )
                     if node.func_name == "percentile":
                         return f"CASE WHEN {argument} IS NULL THEN NULL ELSE PERCENT_RANK() OVER (ORDER BY {argument} NULLS LAST) END"

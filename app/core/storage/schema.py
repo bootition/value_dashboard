@@ -30,10 +30,12 @@ CREATE TABLE IF NOT EXISTS stock_meta (
     is_listed      BOOLEAN DEFAULT TRUE,
     is_st          BOOLEAN,
     is_suspended   BOOLEAN,
-    sw_level1      VARCHAR,            -- 申万一级（缺失为 NULL）
-    sw_level2      VARCHAR,            -- 申万二级
+    sw_level1      VARCHAR,            -- 申万一级（缺失为 NULL；已废弃，仅保留追溯）
+    sw_level2      VARCHAR,            -- 申万二级（已废弃，仅保留追溯）
     sw_level1_code VARCHAR,
     sw_level2_code VARCHAR,
+    csrc_l1        VARCHAR,            -- CSRC（证监会）一级门类（当前行业口径）
+    csrc_l2        VARCHAR,            -- CSRC（证监会）二级大类
     total_shares   BIGINT,             -- 总股本（股）
     circ_shares    BIGINT,             -- 流通股本（股）
     updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -588,6 +590,12 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         )
         connection.execute(
             "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS is_listed BOOLEAN"
+        )
+        connection.execute(
+            "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS csrc_l1 VARCHAR"
+        )
+        connection.execute(
+            "ALTER TABLE stock_meta ADD COLUMN IF NOT EXISTS csrc_l2 VARCHAR"
         )
         for column in (
             "core_tier1_capital_adequacy_ratio DOUBLE",

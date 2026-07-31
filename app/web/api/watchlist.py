@@ -75,7 +75,7 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
 
     try:
         stock_info = duck.read_query(
-            f"""SELECT m.stock_code, m.name, m.exchange, m.sw_level1,
+            f"""SELECT m.stock_code, m.name, m.exchange, m.csrc_l1,
                        s.latest_close, s.pe_ttm, s.pb_mrq, s.roe,
                        s.gross_margin, s.net_margin, s.debt_ratio,
                        s.revenue_yoy, s.net_profit_yoy, s.dividend_yield
@@ -100,7 +100,7 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             "stock_code": code,
             "name": info.get("name", ""),
             "exchange": info.get("exchange", ""),
-            "sw_level1": info.get("sw_level1"),
+            "csrc_l1": info.get("csrc_l1"),
             "group_name": row["group_name"],
             "source_rule_id": row.get("source_rule_id"),
             "source_result_id": row.get("source_result_id"),

@@ -352,7 +352,7 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
 def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], columns: list[str]) -> list[dict[str, Any]]:
     """Return source rows pinned to the report date saved with each result row."""
     stock_codes = [row.get("stock_code") for row in results if row.get("stock_code")]
-    fields = [field for field in columns if field not in {"stock_code", "name", "exchange", "sw_level1", "sw_level2"}]
+    fields = [field for field in columns if field not in {"stock_code", "name", "exchange", "sw_level1", "sw_level2", "csrc_l1", "csrc_l2"}]
     if not stock_codes or not fields:
         return [{} for _ in results]
     if any(not row.get("_report_date") for row in results):

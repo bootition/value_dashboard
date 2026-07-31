@@ -35,6 +35,7 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "xdxr": ["tdx"],
     "announcements": ["cninfo"],
     "sw_industry": ["local_cache"],
+    "csrc_industry": ["cninfo"],
     "trading_dates": ["akshare_eastmoney", "baostock"],
 }
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
@@ -237,6 +238,15 @@ class AdapterManager:
             logger.warning(f"Sina 适配器未安装: {e}")
         except Exception as e:
             logger.warning(f"Sina 适配器初始化失败: {e}")
+
+        # CSRC 行业适配器（CNINFO 证监会口径，当前行业唯一来源）
+        try:
+            from app.core.adapters.csrc_industry_adapter import CSRCIndustryAdapter
+            self.register(CSRCIndustryAdapter(self._rate_limits["cninfo"]))
+        except ImportError as e:
+            logger.warning(f"CSRC 行业适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"CSRC 行业适配器初始化失败: {e}")
 
         self._initialized = True
         logger.info(f"适配器管理器初始化完成: {list(self._adapters.keys())}")

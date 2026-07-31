@@ -28,7 +28,8 @@ DataType = Literal[
     "xdxr",                 # 除权除息记录
     "announcements",        # 公告
     "listing_info",         # 上市信息 (ST/停牌/上市日期)
-    "sw_industry",          # 申万行业分类
+    "sw_industry",          # 申万行业分类（已废弃，仅保留兼容）
+    "csrc_industry",        # CSRC（证监会）行业分类（当前口径）
     "trading_dates",        # 交易日历
 ]
 

@@ -33,7 +33,7 @@ class CodeGen:
     # 函数 → SQL 模板
     FUNC_SQL: dict[str, str] = {
         "rank": "RANK() OVER (ORDER BY {arg})",
-        "rank_industry": "RANK() OVER (PARTITION BY sw_level1 ORDER BY {arg})",
+        "rank_industry": "RANK() OVER (PARTITION BY csrc_l1 ORDER BY {arg})",
         "percentile": "PERCENT_RANK() OVER (ORDER BY {arg})",
         "zscore": "({arg} - AVG({arg}) OVER ()) / NULLIF(STDDEV({arg}) OVER (), 0)",
         "normalize": "({arg} - MIN({arg}) OVER ()) / NULLIF((MAX({arg}) OVER () - MIN({arg}) OVER ()), 0)",

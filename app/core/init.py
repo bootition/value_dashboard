@@ -106,8 +106,8 @@ class DataInitializer:
             step2 = self._fetch_trading_dates()
             report["steps"]["trading_dates"] = step2
 
-            # Step 3: 申万行业分类
-            step3 = self._fetch_sw_industry()
+            # Step 3: CSRC 行业分类
+            step3 = self._fetch_csrc_industry()
             report["steps"]["sw_industry"] = step3
 
             step4: dict[str, Any] | None = None
@@ -336,58 +336,52 @@ class DataInitializer:
         logger.info(f"[Step 2] 获取 {len(result.data)} 个交易日")
         return {"status": "success", "count": len(result.data)}
 
-    def _fetch_sw_industry(self) -> dict[str, Any]:
-        """Step 3: 申万行业分类（本地缓存或缺失）"""
-        logger.info("[Step 3] 获取申万行业分类...")
+    def _fetch_csrc_industry(self) -> dict[str, Any]:
+        """Step 3: CSRC（证监会）行业分类（CNINFO 自动获取，PRD §24）"""
+        logger.info("[Step 3] 获取 CSRC 行业分类...")
 
-        # PRD 审查问题2: SW industry 无备用适配器
-        # 从本地缓存加载（用户手动下载的 SWS 分类文件）
-        from app.core.config import Config
-        import json
-
-        cfg = Config.current()
-        sw_json = cfg.project_root / "config" / "sw_industry_cache.json"
-        sw_csv = cfg.project_root / "config" / "sw_industry_cache.csv"
-
-        records = []
-        if sw_json.exists():
-            with open(sw_json, encoding="utf-8") as f:
-                data = json.load(f)
-                records = data if isinstance(data, list) else data.get("data", [])
-        elif sw_csv.exists():
-            import csv
-            with open(sw_csv, encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    records.append(row)
-
-        if records:
-            # 更新 stock_meta 的行业字段
-            with self.duck.write_connection() as conn:
-                for r in records:
-                    conn.execute(
-                        """UPDATE stock_meta SET sw_level1=?, sw_level2=?,
-                           sw_level1_code=?, sw_level2_code=? WHERE stock_code=?""",
-                        [r.get("sw_level1"), r.get("sw_level2"),
-                         r.get("sw_level1_code"), r.get("sw_level2_code"),
-                         r.get("stock_code")],
-                    )
-
-            logger.info(f"[Step 3] 从本地缓存加载 {len(records)} 条行业分类")
-            return {"status": "success", "source": "local_cache", "count": len(records)}
-        else:
-            # 无缓存文件，所有股票行业为 NULL（PRD §12.4: 不阻止全市场排名）
-            logger.warning(
-                "[Step 3] 申万行业分类缓存文件不存在 (config/sw_industry_cache.json 或 .csv)。"
-                "行业排名将为 NULL，全市场排名仍可用。"
-                "请手动从 swsresearch.com 下载分类文件并保存为 config/sw_industry_cache.json。"
+        try:
+            stocks = self.duck.read_query(
+                "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
             )
+        except Exception as error:
+            return {"status": "failed", "source": "cninfo", "count": 0, "error": str(error)}
+
+        if not stocks:
+            return {"status": "skipped", "reason": "无股票数据"}
+
+        codes = [str(row["stock_code"]) for row in stocks]
+        result = self.adapter_mgr.fetch(FetchRequest(
+            data_type="csrc_industry",
+            stock_codes=codes,
+        ))
+
+        if result.metadata.error:
+            return {
+                "status": "partial" if result.data else "failed",
+                "source": "cninfo",
+                "count": len(result.data),
+                "error": result.metadata.error,
+            }
+
+        if not result.data:
             return {
                 "status": "missing",
-                "source": "local_cache",
+                "source": "cninfo",
                 "count": 0,
-                "note": "无缓存文件，行业排名将为 NULL（PRD §12.4 允许）",
+                "note": "CSRC 行业数据不可得，行业排名将为 NULL（PRD §12.4 允许）",
             }
+
+        # 批量写入 csrc_l1/csrc_l2（幂等）
+        with self.duck.transaction() as conn:
+            conn.executemany(
+                """UPDATE stock_meta SET csrc_l1=?, csrc_l2=? WHERE stock_code=?""",
+                [(row.get("csrc_l1"), row.get("csrc_l2"), row.get("stock_code"))
+                 for row in result.data],
+            )
+
+        logger.info(f"[Step 3] CSRC 行业分类更新完成: {len(result.data)} 条")
+        return {"status": "success", "source": "cninfo", "count": len(result.data)}
 
     def _fetch_daily_prices(self, years: int = 5) -> dict[str, Any]:
         """Step 4: 获取近N年日线价格 (raw + qfq)"""
@@ -1148,12 +1142,12 @@ class DataInitializer:
     ) -> None:
         """Record unavailable mandatory sector fields only when classification is explicit."""
         sector_rows = self.duck.read_query(
-            "SELECT sw_level1, sw_level2 FROM stock_meta WHERE stock_code = ?", [stock_code]
+            "SELECT csrc_l1, csrc_l2 FROM stock_meta WHERE stock_code = ?", [stock_code]
         )
         if not sector_rows:
             return
         sector_text = " ".join(
-            str(sector_rows[0].get(field) or "") for field in ("sw_level1", "sw_level2")
+            str(sector_rows[0].get(field) or "") for field in ("csrc_l1", "csrc_l2")
         )
         if "银行" in sector_text:
             required = (
