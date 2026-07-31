@@ -95,18 +95,22 @@ class CSRCIndustryAdapter(BaseAdapter):
             return []
 
         rows: list[dict[str, Any]] = []
+        latest_row: dict[str, Any] | None = None
         for _, record in df.iterrows():
             is_latest = record.get("最新记录标识")
-            # 接口未返回该列或值为空时，退化为取第一条（按变更日期倒序）
-            if is_latest is not None and str(is_latest) != "1":
-                continue
-            rows.append({
+            normalized = {
                 "stock_code": stock_code,
                 "csrc_l1": record.get("行业门类"),
                 "csrc_l2": record.get("行业大类"),
                 "as_of_date": str(record.get("变更日期") or ""),
-            })
-            break  # 只取最新一条当前归属
+            }
+            if latest_row is None:
+                latest_row = normalized  # 兜底：无 =1 记录时取第一条
+            if is_latest is not None and str(is_latest) == "1":
+                rows.append(normalized)
+                break
+        if not rows and latest_row is not None:
+            rows.append(latest_row)
         return rows
 
     # ─── 结果构建辅助 ─────────────────────────────────────────────

@@ -106,18 +106,22 @@ class AutoUpdateController:
 
     # ─── 状态查询 ────────────────────────────────────────────────
 
+    def _status_unlocked(self) -> dict[str, Any]:
+        """构造状态字典（调用方必须已持有 self._lock）。"""
+        return {
+            "state": "paused" if self._paused and self._state == "enabled" else self._state,
+            "enabled": self._state == "enabled",
+            "paused": self._paused,
+            "current_stage": self._current_stage,
+            "progress": dict(self._progress),
+            "last_error": self._last_error,
+            "last_success_at": self._last_success_at,
+        }
+
     def status(self) -> dict[str, Any]:
         """返回当前自动更新状态（网页只读展示用）。"""
         with self._lock:
-            return {
-                "state": "paused" if self._paused and self._state == "enabled" else self._state,
-                "enabled": self._state == "enabled",
-                "paused": self._paused,
-                "current_stage": self._current_stage,
-                "progress": dict(self._progress),
-                "last_error": self._last_error,
-                "last_success_at": self._last_success_at,
-            }
+            return self._status_unlocked()
 
     def persisted_status(self) -> dict[str, Any]:
         """从 SQLite 读取最近一次持久化状态（供跨进程/启动恢复）。"""
@@ -125,10 +129,12 @@ class AutoUpdateController:
         if not rows:
             return self.status()
         row = rows[0]
+        state = row.get("state")
+        paused = bool(row.get("paused"))
         return {
-            "state": row.get("state"),
-            "enabled": row.get("state") != "disabled",
-            "paused": bool(row.get("paused")),
+            "state": "paused" if paused and state == "enabled" else state,
+            "enabled": state != "disabled",
+            "paused": paused,
             "current_stage": row.get("current_stage"),
             "progress": json.loads(row.get("progress_json") or "{}"),
             "last_error": row.get("last_error"),
@@ -144,7 +150,7 @@ class AutoUpdateController:
             self._state = "enabled"
             self._paused = False
             self._persist()
-            return self.status()
+            return self._status_unlocked()
 
     def disable(self) -> dict[str, Any]:
         """关闭自动更新（完全手动模式）。"""
@@ -153,7 +159,7 @@ class AutoUpdateController:
             self._paused = False
             self._current_stage = "idle"
             self._persist()
-            return self.status()
+            return self._status_unlocked()
 
     def pause(self) -> dict[str, Any]:
         """暂停自动更新推进。"""
@@ -162,14 +168,14 @@ class AutoUpdateController:
                 return {"error": "auto update is disabled"}
             self._paused = True
             self._persist()
-            return self.status()
+            return self._status_unlocked()
 
     def resume(self) -> dict[str, Any]:
         """继续自动更新推进。"""
         with self._lock:
             self._paused = False
             self._persist()
-            return self.status()
+            return self._status_unlocked()
 
     # ─── 执行 ────────────────────────────────────────────────────
 

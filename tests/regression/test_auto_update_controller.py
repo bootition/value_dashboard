@@ -65,7 +65,7 @@ def test_auto_update_run_once_records_result(duckdb_store, sqlite_store, monkeyp
         def run_incremental_update(self, max_stocks: int = 0) -> dict:
             return {"status": "success", "steps": {"prices": {"status": "success"}}}
 
-    monkeypatch.setattr("app.core.auto_update.IncrementalUpdater", FakeUpdater)
+    monkeypatch.setattr("app.core.update.IncrementalUpdater", FakeUpdater)
 
     report = controller.run_once()
 
@@ -86,7 +86,7 @@ def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, 
         def run_incremental_update(self, max_stocks: int = 0) -> dict:
             return {"status": "partial", "steps": {"prices": {"status": "failed"}}}
 
-    monkeypatch.setattr("app.core.auto_update.IncrementalUpdater", FailingUpdater)
+    monkeypatch.setattr("app.core.update.IncrementalUpdater", FailingUpdater)
 
     report = controller.run_once()
 

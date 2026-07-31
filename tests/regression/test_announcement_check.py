@@ -152,6 +152,10 @@ def test_incremental_check_exposes_announcement_capability_gap() -> None:
 
 def test_refetch_one_incremental_writes_new_report_period(duckdb_store, sqlite_store) -> None:
     """本地已有 2026Q1，数据源返回 2026Q2 → 只写入新报告期，Q1 不变。"""
+    import hashlib
+
+    raw_response = b'{"num":1}'
+
     class FinancialAdapter:
         def fetch(self, request):
             return FetchResult(
@@ -161,9 +165,9 @@ def test_refetch_one_incremental_writes_new_report_period(duckdb_store, sqlite_s
                 }],
                 metadata=SourceMetadata(
                     source="sina", fetch_time=datetime.now(timezone.utc),
-                    raw_response_hash="b" * 64, confidence="strict",
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="strict",
                 ),
-                raw_response=b'{"num":1}',
+                raw_response=raw_response,
             )
 
     duckdb_store.write_query(
@@ -186,6 +190,10 @@ def test_refetch_one_incremental_writes_new_report_period(duckdb_store, sqlite_s
 
 def test_refetch_one_incremental_skips_when_source_has_no_new_period(duckdb_store, sqlite_store) -> None:
     """数据源仍返回旧报告期（财报延迟）→ skipped，不写入、不覆盖旧值。"""
+    import hashlib
+
+    raw_response = b'{"num":1}'
+
     class FinancialAdapter:
         def fetch(self, request):
             return FetchResult(
@@ -195,9 +203,9 @@ def test_refetch_one_incremental_skips_when_source_has_no_new_period(duckdb_stor
                 }],
                 metadata=SourceMetadata(
                     source="sina", fetch_time=datetime.now(timezone.utc),
-                    raw_response_hash="c" * 64, confidence="strict",
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="strict",
                 ),
-                raw_response=b'{"num":1}',
+                raw_response=raw_response,
             )
 
     duckdb_store.write_query(
