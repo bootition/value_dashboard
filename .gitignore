@@ -48,6 +48,9 @@ progress.md
 docs/evidence/evidence-s0/
 docs/evidence/evidence-s1/
 
+# In-flight repair run state (checkpoint files, not evidence)
+scripts/evidence/repair_state_*.json
+
 # OS/editor
 .DS_Store
 Thumbs.db
