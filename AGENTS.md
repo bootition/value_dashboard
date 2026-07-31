@@ -72,6 +72,7 @@ uv lock --locked
 - ✅ 推送前 `git fetch` 检查远程是否有新提交，有冲突先解决再推
 - ✅ 代理：本机通过 `127.0.0.1:10808` 访问 GitHub（已在 git 全局配置 http proxy），如网络变更需重新确认
 - ✅ 重要历史分支/事故基线打 tag 并推送（如 `incident-2026-07-22`、`s1-path-isolation-archive-156dded`）
+- ⚠️ **网络失败必须如实告知**：push 失败（如忘记开梯子、`Failed to connect to github.com`、认证失败等）时，**禁止**说"已推送/已提交完成"；必须明确告知用户「push 失败 + 原因 + 当前状态（提交在本地但未上远程）」，并提示打开梯子后重试（`git push`），直到 `git ls-remote origin` 确认远程已更新
 
 ### 4. 提交消息风格
 
