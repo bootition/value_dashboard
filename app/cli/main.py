@@ -179,6 +179,7 @@ def data_refresh_universe() -> None:
 def data_update(
     max_stocks: int = typer.Option(0, "--max-stocks", help="最多更新N只股票(0=全部)"),
     check_only: bool = typer.Option(False, "--check-only", help="只检查不更新"),
+    stocks: str = typer.Option("", "--stocks", help="只更新指定股票，逗号分隔（如 000001,600519）"),
 ) -> None:
     """增量更新 (PRD §7.3)
 
@@ -192,6 +193,19 @@ def data_update(
 
     if check_only:
         report = updater.run_incremental_check()
+    elif stocks.strip():
+        # 指定股票更新（PRD §16.1）：只刷新这些股票的核心数据
+        codes = [c.strip() for c in stocks.split(",") if c.strip()]
+        report = {
+            "status": "success",
+            "targeted": len(codes),
+            "results": {},
+        }
+        for code in codes:
+            report["results"][code] = {
+                data_type: updater.refetch_one(code, data_type)
+                for data_type in ("price_daily", "balance_sheet", "income_statement", "cash_flow", "dividends", "xdxr")
+            }
     else:
         report = updater.run_incremental_update(max_stocks=max_stocks)
 
@@ -240,6 +254,76 @@ def data_backfill_prices(
         fetch_dividends=not no_dividends,
     )
     typer.echo(json.dumps(make_response("data.backfill_prices", report), ensure_ascii=False, indent=2, default=str))
+
+
+# ─── 自动更新控制 (PRD §7.3, §16.1) ───────────────────────────────
+
+auto_update_app = typer.Typer(help="自动更新控制（开关/立即更新/暂停/继续/状态）")
+data_app.add_typer(auto_update_app, name="auto-update")
+
+
+def _auto_update_controller():
+    from app.core.auto_update import AutoUpdateController
+
+    _, duck, sqlite = _database_context()
+    return AutoUpdateController(duck=duck, sqlite=sqlite)
+
+
+@auto_update_app.command("status")
+def auto_update_status() -> None:
+    """查询自动更新状态（网页只读展示同源数据）"""
+    from app.cli.protocol import make_response
+
+    controller = _auto_update_controller()
+    typer.echo(json.dumps(make_response("data.auto-update.status", controller.persisted_status()), ensure_ascii=False, indent=2, default=str))
+
+
+@auto_update_app.command("enable")
+def auto_update_enable() -> None:
+    """开启自动更新（默认行为，PRD §7.3）"""
+    from app.cli.protocol import make_response
+
+    controller = _auto_update_controller()
+    typer.echo(json.dumps(make_response("data.auto-update.enable", controller.enable()), ensure_ascii=False, indent=2, default=str))
+
+
+@auto_update_app.command("disable")
+def auto_update_disable() -> None:
+    """关闭自动更新（改为完全手动模式）"""
+    from app.cli.protocol import make_response
+
+    controller = _auto_update_controller()
+    typer.echo(json.dumps(make_response("data.auto-update.disable", controller.disable()), ensure_ascii=False, indent=2, default=str))
+
+
+@auto_update_app.command("run")
+def auto_update_run(
+    max_stocks: int = typer.Option(0, "--max-stocks", help="最多更新N只股票(0=全部)"),
+) -> None:
+    """立即执行一次自动更新（等价手动触发）"""
+    from app.cli.protocol import make_response
+
+    controller = _auto_update_controller()
+    report = controller.run_once(max_stocks=max_stocks)
+    typer.echo(json.dumps(make_response("data.auto-update.run", report), ensure_ascii=False, indent=2, default=str))
+
+
+@auto_update_app.command("pause")
+def auto_update_pause() -> None:
+    """暂停自动更新推进"""
+    from app.cli.protocol import make_response
+
+    controller = _auto_update_controller()
+    typer.echo(json.dumps(make_response("data.auto-update.pause", controller.pause()), ensure_ascii=False, indent=2, default=str))
+
+
+@auto_update_app.command("resume")
+def auto_update_resume() -> None:
+    """继续自动更新推进"""
+    from app.cli.protocol import make_response
+
+    controller = _auto_update_controller()
+    typer.echo(json.dumps(make_response("data.auto-update.resume", controller.resume()), ensure_ascii=False, indent=2, default=str))
 
 
 @data_app.command("compute_indicators")

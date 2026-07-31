@@ -248,7 +248,7 @@ def get_capabilities() -> dict[str, Any]:
             "discover": ["schema", "capabilities", "examples", "fields", "indicators", "functions", "reason_codes"],
             "indicator": ["create", "validate", "preview_single", "preview_sample", "publish", "list", "discover"],
             "screening": ["create", "run", "save_result", "export_csv", "add_to_watchlist", "list"],
-            "data": ["init", "refresh_universe", "update", "replenish_missing_core_data", "status", "compute_indicators", "diagnose", "switch_source", "refetch", "refetch_execute", "reconcile_jobs", "reconcile_jobs_execute", "quarantine_legacy_records", "quarantine_legacy_records_execute", "download_pdf", "list_pdfs", "archive_pdfs", "restore_pdf", "backfill_prices"],
+            "data": ["init", "refresh_universe", "update", "replenish_missing_core_data", "status", "compute_indicators", "diagnose", "switch_source", "refetch", "refetch_execute", "reconcile_jobs", "reconcile_jobs_execute", "quarantine_legacy_records", "quarantine_legacy_records_execute", "download_pdf", "list_pdfs", "archive_pdfs", "restore_pdf", "backfill_prices", "auto-update"],
             "override": ["list_conflicts", "submit", "revoke", "submit_template", "validate_template", "preview_template", "publish_template", "list_templates"],
             "backup": ["create", "restore", "restore_execute", "list", "store_credential", "retrieve_credential"],
             "archive": ["create", "verify", "clean", "clean_execute"],

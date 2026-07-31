@@ -1,0 +1,221 @@
+"""自动更新控制器（PRD §7.3, §7.7, §16.1）
+
+启动后自动执行增量更新，追赶上次运行之后缺失的数据。
+- 生命周期状态：idle / running / paused / disabled / finished / failed
+- 状态持久化到 SQLite（auto_update_state 表），供网页只读展示
+- CLI 控制：enable / disable / run / pause / resume / status
+- 与手动更新共用 IncrementalUpdater，同一时刻至多一个更新在运行
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import threading
+from datetime import datetime, timezone
+from typing import Any
+
+from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+from app.core.storage.sqlite_store import SQLiteStore
+
+logger = logging.getLogger(__name__)
+
+STATE_TABLE = "auto_update_state"
+
+VALID_STATES = {"idle", "running", "paused", "disabled", "finished", "failed"}
+
+
+class AutoUpdateController:
+    """自动更新生命周期控制器（线程安全）。
+
+    - 默认 enabled=True；disabled 时不自动触发，也不更新状态表
+    - running 时其他触发请求被拒绝（单写者串行）
+    - paused 时暂停推进；resume 后继续
+    """
+
+    def __init__(
+        self,
+        duck: DuckDBStore | None = None,
+        sqlite: SQLiteStore | None = None,
+        *,
+        paths: DatabasePathSet | None = None,
+        enabled: bool = True,
+    ) -> None:
+        if paths is None and duck is None and sqlite is None:
+            from app.core.storage.path_policy import resolve_and_validate_paths
+            paths = resolve_and_validate_paths()
+        if paths is None and (duck is None or sqlite is None):
+            raise PathIsolationError("AutoUpdateController requires both stores or validated paths")
+        if paths is not None:
+            validated = paths.validate()
+            duck = duck or DuckDBStore(paths=validated)
+            sqlite = sqlite or SQLiteStore(paths=validated)
+            if duck.db_path != validated.duckdb_path or sqlite.db_path != validated.sqlite_path:
+                raise PathIsolationError("AutoUpdateController stores do not match injected paths")
+
+        assert duck is not None and sqlite is not None
+        self.duck = duck
+        self.sqlite = sqlite
+        self._lock = threading.Lock()
+        self._state: str = "enabled" if enabled else "disabled"
+        self._paused = False
+        self._current_stage: str = "idle"
+        self._progress: dict[str, Any] = {}
+        self._last_error: str | None = None
+        self._last_success_at: str | None = None
+        self._ensure_state_table()
+
+    # ─── 状态持久化 ──────────────────────────────────────────────
+
+    def _ensure_state_table(self) -> None:
+        with self.sqlite.transaction() as conn:
+            conn.execute(
+                f"""CREATE TABLE IF NOT EXISTS {STATE_TABLE} (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    state TEXT NOT NULL,
+                    paused INTEGER NOT NULL DEFAULT 0,
+                    current_stage TEXT,
+                    progress_json TEXT,
+                    last_error TEXT,
+                    last_success_at TEXT,
+                    updated_at TEXT
+                )"""
+            )
+
+    def _persist(self) -> None:
+        with self.sqlite.transaction() as conn:
+            conn.execute(
+                f"""INSERT INTO {STATE_TABLE}
+                    (id, state, paused, current_stage, progress_json, last_error, last_success_at, updated_at)
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                      state=excluded.state, paused=excluded.paused,
+                      current_stage=excluded.current_stage,
+                      progress_json=excluded.progress_json,
+                      last_error=excluded.last_error,
+                      last_success_at=excluded.last_success_at,
+                      updated_at=excluded.updated_at""",
+                [
+                    self._state, int(self._paused), self._current_stage,
+                    json.dumps(self._progress, ensure_ascii=False, default=str),
+                    self._last_error, self._last_success_at,
+                    datetime.now(timezone.utc).isoformat(),
+                ],
+            )
+
+    # ─── 状态查询 ────────────────────────────────────────────────
+
+    def status(self) -> dict[str, Any]:
+        """返回当前自动更新状态（网页只读展示用）。"""
+        with self._lock:
+            return {
+                "state": "paused" if self._paused and self._state == "enabled" else self._state,
+                "enabled": self._state == "enabled",
+                "paused": self._paused,
+                "current_stage": self._current_stage,
+                "progress": dict(self._progress),
+                "last_error": self._last_error,
+                "last_success_at": self._last_success_at,
+            }
+
+    def persisted_status(self) -> dict[str, Any]:
+        """从 SQLite 读取最近一次持久化状态（供跨进程/启动恢复）。"""
+        rows = self.sqlite.query(f"SELECT * FROM {STATE_TABLE} WHERE id = 1")
+        if not rows:
+            return self.status()
+        row = rows[0]
+        return {
+            "state": row.get("state"),
+            "enabled": row.get("state") != "disabled",
+            "paused": bool(row.get("paused")),
+            "current_stage": row.get("current_stage"),
+            "progress": json.loads(row.get("progress_json") or "{}"),
+            "last_error": row.get("last_error"),
+            "last_success_at": row.get("last_success_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    # ─── 控制命令 ────────────────────────────────────────────────
+
+    def enable(self) -> dict[str, Any]:
+        """开启自动更新（默认行为）。"""
+        with self._lock:
+            self._state = "enabled"
+            self._paused = False
+            self._persist()
+            return self.status()
+
+    def disable(self) -> dict[str, Any]:
+        """关闭自动更新（完全手动模式）。"""
+        with self._lock:
+            self._state = "disabled"
+            self._paused = False
+            self._current_stage = "idle"
+            self._persist()
+            return self.status()
+
+    def pause(self) -> dict[str, Any]:
+        """暂停自动更新推进。"""
+        with self._lock:
+            if self._state != "enabled":
+                return {"error": "auto update is disabled"}
+            self._paused = True
+            self._persist()
+            return self.status()
+
+    def resume(self) -> dict[str, Any]:
+        """继续自动更新推进。"""
+        with self._lock:
+            self._paused = False
+            self._persist()
+            return self.status()
+
+    # ─── 执行 ────────────────────────────────────────────────────
+
+    def run_once(self, *, max_stocks: int = 0) -> dict[str, Any]:
+        """立即执行一次增量更新（手动触发或启动后自动触发）。
+
+        返回更新报告；同时更新持久化状态。
+        """
+        with self._lock:
+            if self._state != "enabled":
+                return {"status": "skipped", "reason": "auto_update_disabled"}
+            if self._paused:
+                return {"status": "skipped", "reason": "auto_update_paused"}
+            if self._current_stage == "running":
+                return {"status": "skipped", "reason": "already_running"}
+            self._current_stage = "running"
+            self._progress = {"phase": "starting"}
+            self._last_error = None
+            self._persist()
+
+        from app.core.update import IncrementalUpdater
+
+        try:
+            updater = IncrementalUpdater(duck=self.duck, sqlite=self.sqlite)
+            report = updater.run_incremental_update(max_stocks=max_stocks)
+
+            with self._lock:
+                self._current_stage = (
+                    "finished" if report.get("status") == "success" else "failed"
+                )
+                self._progress = {
+                    "phase": "done",
+                    "status": report.get("status"),
+                    "steps": {k: v.get("status") for k, v in report.get("steps", {}).items()},
+                }
+                if report.get("status") == "success":
+                    self._last_success_at = datetime.now(timezone.utc).isoformat()
+                    self._last_error = None
+                else:
+                    self._last_error = f"update status: {report.get('status')}"
+                self._persist()
+            return report
+        except Exception as error:
+            logger.exception("自动更新失败")
+            with self._lock:
+                self._current_stage = "failed"
+                self._last_error = str(error)
+                self._persist()
+            return {"status": "failed", "error": str(error)}

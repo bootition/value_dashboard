@@ -231,20 +231,33 @@ def get_summary(request: Request) -> dict:
         summary["backup"] = {"cnt": 0, "latest": None, "full_count": 0}
         errors.append("backup")
 
-    # 申万行业覆盖
+    # CSRC 行业覆盖
     try:
         row = duck.read_query(
-            "SELECT COUNT(*) as cnt FROM stock_meta WHERE sw_level1 IS NOT NULL"
+            "SELECT COUNT(*) as cnt FROM stock_meta WHERE csrc_l1 IS NOT NULL"
         )
-        summary["sw_industry_count"] = row[0]["cnt"]
+        summary["csrc_industry_count"] = row[0]["cnt"]
     except Exception:
-        summary["sw_industry_count"] = 0
-        errors.append("sw_industry_count")
+        summary["csrc_industry_count"] = 0
+        errors.append("csrc_industry_count")
 
     if errors:
         raise HTTPException(status_code=503, detail={"error": "data status is partially unavailable", "fields": errors})
 
     return summary
+
+
+@router.get("/auto-update")
+def get_auto_update_status(request: Request) -> dict:
+    """自动更新状态（PRD §15 只读展示）"""
+    sqlite = request.app.state.sqlite
+    from app.core.auto_update import AutoUpdateController
+
+    try:
+        controller = AutoUpdateController(duck=request.app.state.duck, sqlite=sqlite)
+        return controller.persisted_status()
+    except Exception as error:
+        raise HTTPException(status_code=503, detail=f"auto update status is unavailable: {error}") from error
 
 
 @router.get("/retry-list")

@@ -29,6 +29,7 @@ adapters:
     announcements: ["cninfo"]
     listing_info: ["akshare_eastmoney"]
     sw_industry: ["local_cache"]
+    csrc_industry: ["cninfo"]
 
 screening:
   default_exclude_st: true
@@ -37,6 +38,12 @@ screening:
   max_conditions: 20
   max_nesting_levels: 3
   performance_target_seconds: 5
+
+update:
+  enabled: true           # 自动更新默认开启（PRD §7.3）
+  startup: true           # 启动时自动执行增量更新
+  incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
+  announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
 
 backup:
   keep_full_backups: 3

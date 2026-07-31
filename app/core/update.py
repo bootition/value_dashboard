@@ -29,6 +29,30 @@ from app.core.storage.sqlite_store import SQLiteStore
 logger = logging.getLogger(__name__)
 
 
+# ─── 公告分类（PRD §7.7）───────────────────────────────────────────
+# 只有定期报告/业绩预告/业绩快报类公告触发财务刷新；
+# 其他公告只登记入册，不进入财务刷新队列。
+
+_ANNOUNCEMENT_FINANCIAL_KEYWORDS: tuple[str, ...] = (
+    "年度报告", "半年度报告", "一季报", "第一季度报告", "三季报", "第三季度报告",
+    "业绩预告", "业绩快报",
+)
+_ANNOUNCEMENT_DIVIDEND_KEYWORDS: tuple[str, ...] = (
+    "权益分派", "分红", "除权除息", "利润分配",
+)
+
+
+def classify_announcement(title: str | None) -> str:
+    """按公告标题分类：financial（触发财务刷新）| dividend（分红除权）| other（只登记）"""
+    if not title:
+        return "other"
+    if any(kw in title for kw in _ANNOUNCEMENT_FINANCIAL_KEYWORDS):
+        return "financial"
+    if any(kw in title for kw in _ANNOUNCEMENT_DIVIDEND_KEYWORDS):
+        return "dividend"
+    return "other"
+
+
 class IncrementalUpdater:
     """增量检查与更新执行器
 
@@ -60,6 +84,26 @@ class IncrementalUpdater:
         self.adapter_mgr = adapter_mgr or AdapterManager()
         self.duck = duck
         self.sqlite = sqlite
+        # 增量窗口上限：本地价格距今超过该天数时，raw 也整段重拉
+        # （默认 30 天；可由 config/update.incremental_window_days 覆盖）
+        self.incremental_window_days: int = self._load_update_config(
+            "incremental_window_days", default=30
+        )
+        # 全市场公告检查的日期回看窗口（默认 3 天）
+        self.announcement_lookback_days: int = self._load_update_config(
+            "announcement_lookback_days", default=3
+        )
+
+    @staticmethod
+    def _load_update_config(key: str, *, default: int) -> int:
+        try:
+            from app.core.config import Config
+            cfg = Config.current()
+            update_cfg = cfg["update"] if "update" in cfg else {}
+            value = update_cfg.get(key) if isinstance(update_cfg, dict) else None
+            return int(value) if value else default
+        except Exception:
+            return default
 
     def run_incremental_check(self, *, include_announcements: bool = True) -> dict[str, Any]:
         """执行增量检查，返回检查报告
@@ -151,18 +195,33 @@ class IncrementalUpdater:
             report["steps"]["financials"] = financials
             actions = self._refresh_market_actions(announcement_codes)
             report["steps"]["market_actions"] = actions
+            # 只有真正写入新报告期的股票才登记公告；
+            # 数据源延迟（pending）或刷新失败（failed）保持公告 pending 并记录重试
             refreshed_codes = set(financials["succeeded_codes"])
             for code, announcements in announcement_check["affected_announcements"].items():
                 if code in refreshed_codes:
                     self._mark_announcements_seen(code, announcements)
                 else:
+                    reason = (
+                        "financial data source not yet ready; announcement remains pending"
+                        if code in set(financials.get("pending_codes", []))
+                        else "financial refresh failed; announcement remains pending"
+                    )
                     self._record_failure(
                         code,
                         "announcements",
                         "cninfo",
-                        "financial refresh failed; announcement remains pending",
+                        reason,
                         extra_json=json.dumps({"announcement_ids": [item["announcement_id"] for item in announcements]}),
                     )
+
+        # 非财务类公告只登记入册，不触发财务刷新（PRD §7.7）
+        all_new = announcement_check.get("all_new_announcements", {})
+        financial_set = set(announcement_codes)
+        for code, announcements in all_new.items():
+            if code in financial_set:
+                continue
+            self._mark_announcements_seen(code, announcements)
 
         # 2. 增量更新价格（只更新有新交易日的股票）
         step = self._update_prices_incremental(max_stocks)
@@ -225,44 +284,99 @@ class IncrementalUpdater:
             logger.warning(f"获取最新价格日期失败: {e}")
         return None
 
-    def _check_new_announcements(self, *, persist: bool = True) -> dict[str, Any]:
-        """Compare remote announcement IDs without mutating during a check-only run."""
+    def _get_latest_financial_report_date(self, stock_code: str, data_type: str) -> str | None:
+        """获取本地最新财务报告期（balance_sheet/income_statement/cash_flow）"""
+        table = data_type if data_type in {"balance_sheet", "income_statement", "cash_flow"} else None
+        if table is None:
+            return None
         try:
-            stocks = self.duck.read_query(
-                "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+            rows = self.duck.read_query(
+                f"SELECT MAX(report_date) as latest FROM {table} WHERE stock_code = ?",
+                [stock_code],
             )
+            if rows and rows[0]["latest"]:
+                return str(rows[0]["latest"])
+        except Exception as e:
+            logger.warning(f"获取 {table} 最新报告期失败: {e}")
+        return None
+
+    def _check_new_announcements(
+        self,
+        *,
+        persist: bool = True,
+        lookback_days: int = 3,
+    ) -> dict[str, Any]:
+        """Compare remote announcement IDs without mutating during a check-only run.
+
+        全市场按日期段批量查询（PRD §7.7），替代逐股轮询：
+        - CNINFO 全市场接口一次查询最近 N 天公告（分 sse/szse/bj 三板块）
+        - 与本地 announcement_registry 比对，找出未见过的公告
+        - 财务类公告进入 affected_stock_codes（触发财务刷新）
+        - 非财务类公告也返回，供登记但不触发财务刷新
+        """
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        lookback = lookback_days if lookback_days else self.announcement_lookback_days
+        start_date = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")
+        try:
+            result = self.adapter_mgr.fetch(FetchRequest(
+                data_type="announcements",
+                start_date=start_date,
+                end_date=end_date,
+            ))
         except Exception as error:
             return {"status": "unavailable", "checked_remote": False, "error": str(error)}
-        if not stocks:
-            return {"status": "available", "checked_remote": True, "affected_stock_codes": []}
+
+        if result.metadata.error:
+            if persist:
+                self._record_failure("", "announcements", result.metadata.source, result.metadata.error)
+            return {
+                "status": (
+                    "unavailable" if "all_boards_failed" in (result.metadata.error or "")
+                    else "partial"
+                ),
+                "checked_remote": True,
+                "affected_stock_codes": [],
+                "affected_announcements": {},
+                "all_new_announcements": {},
+                "errors": [result.metadata.error],
+            }
+
         affected: set[str] = set()
-        errors: list[str] = []
         affected_announcements: dict[str, list[dict[str, Any]]] = {}
-        for stock in stocks:
-            code = stock["stock_code"]
-            result = self.adapter_mgr.fetch(FetchRequest(data_type="announcements", stock_codes=[code]))
-            if result.metadata.error:
-                errors.append(f"{code}: {result.metadata.error}")
-                if persist:
-                    self._record_failure(code, "announcements", result.metadata.source, result.metadata.error)
+        for item in result.data:
+            announcement_id = item.get("announcement_id")
+            stock_code = item.get("stock_code")
+            if not announcement_id or not stock_code:
                 continue
-            announcements = [item for item in result.data if item.get("announcement_id")]
-            if not announcements:
-                continue
-            for item in announcements:
-                seen = self.sqlite.query(
-                    "SELECT 1 FROM announcement_registry WHERE announcement_id = ?",
-                    [item["announcement_id"]],
-                )
-                if not seen:
-                    affected.add(code)
-                    affected_announcements.setdefault(code, []).append(item)
+            seen = self.sqlite.query(
+                "SELECT 1 FROM announcement_registry WHERE announcement_id = ?",
+                [announcement_id],
+            )
+            if not seen:
+                affected.add(stock_code)
+                affected_announcements.setdefault(stock_code, []).append(item)
+
+        # 按标题分类，只保留财务类公告触发刷新
+        financial_codes: set[str] = set()
+        financial_announcements: dict[str, list[dict[str, Any]]] = {}
+        for code in sorted(affected):
+            financial_items = [
+                item for item in affected_announcements[code]
+                if classify_announcement(item.get("title")) == "financial"
+            ]
+            if financial_items:
+                financial_codes.add(code)
+                financial_announcements[code] = financial_items
+
         return {
-            "status": "available" if not errors else "partial",
+            "status": "available",
             "checked_remote": True,
-            "affected_stock_codes": sorted(affected),
-            "affected_announcements": affected_announcements,
-            "errors": errors[:20],
+            "affected_stock_codes": sorted(financial_codes),
+            "affected_announcements": financial_announcements,
+            "all_new_announcements": {
+                code: affected_announcements[code] for code in sorted(affected)
+            },
+            "errors": [],
         }
 
     def _mark_announcements_seen(self, stock_code: str, announcements: list[dict[str, Any]]) -> None:
@@ -282,21 +396,35 @@ class IncrementalUpdater:
             )
 
     def _refresh_financials(self, stock_codes: list[str]) -> dict[str, Any]:
-        """Refetch all three core statements for stocks with newly registered filings."""
+        """Refresh core statements for stocks with newly registered filings.
+
+        增量模式（PRD §7.7）：
+        - 只拉最新报告期，本地已有则跳过（skipped）
+        - 数据源无新报告期（财报延迟）时返回 pending_codes，
+          由调用方保持公告 pending 并在下次启动重试
+        """
         succeeded = 0
         succeeded_codes: list[str] = []
+        pending_codes: list[str] = []
         failed: list[str] = []
         for code in stock_codes:
-            outcomes = [self.refetch_one(code, data_type) for data_type in ("balance_sheet", "income_statement", "cash_flow")]
+            outcomes = [
+                self.refetch_one(code, data_type, incremental=True)
+                for data_type in ("balance_sheet", "income_statement", "cash_flow")
+            ]
             if all(outcome["status"] == "success" for outcome in outcomes):
-                succeeded += 1
-                succeeded_codes.append(code)
+                if all(outcome.get("skipped") for outcome in outcomes):
+                    pending_codes.append(code)
+                else:
+                    succeeded += 1
+                    succeeded_codes.append(code)
             else:
                 failed.append(code)
         return {
             "status": "success" if not failed else "partial",
             "total": len(stock_codes), "success": succeeded, "failed": len(failed),
             "failed_codes": failed[:20], "succeeded_codes": succeeded_codes,
+            "pending_codes": pending_codes[:20],
         }
 
     def _refresh_market_actions(self, stock_codes: list[str]) -> dict[str, Any]:
@@ -347,8 +475,29 @@ class IncrementalUpdater:
         logger.info(f"[增量] 交易日历更新完成: {len(result.data)} 个日期")
         return {"status": "success", "count": len(result.data)}
 
+    def _get_xdxr_codes_since(self, start_date: str) -> set[str]:
+        """Get stock codes with corporate-action events on/after start_date.
+
+        前复权（qfq）价格以最新除权为基础重算历史，因此发生除权除息后，
+        该股票的全部 qfq 历史都需要重拉（PRD §7.7 复权一致性）。
+        """
+        try:
+            rows = self.duck.read_query(
+                "SELECT DISTINCT stock_code FROM xdxr WHERE event_date >= ?",
+                [start_date],
+            )
+            return {str(row["stock_code"]) for row in rows}
+        except Exception as e:
+            logger.warning(f"查询 xdxr 股票失败: {e}")
+            return set()
+
     def _update_prices_incremental(self, max_stocks: int) -> dict:
-        """增量更新价格——只更新有新数据的股票"""
+        """增量更新价格——只更新有新数据的股票。
+
+        - 普通股票：按 latest_local → today 增量补齐 raw + qfq
+        - 发生除权除息（xdxr）的股票：qfq 全历史重拉，保证复权口径一致
+        - 本地价格陈旧超过窗口上限：raw 也走全量重拉
+        """
         logger.info("[增量] 检查需要价格更新的股票...")
 
         latest_local = self._get_latest_local_price_date()
@@ -376,6 +525,24 @@ class IncrementalUpdater:
         start_date = latest_local or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
         end_date = today
 
+        # 增量窗口内发生除权除息的股票：qfq 需要全历史重拉
+        xdxr_window_start = start_date
+        xdxr_codes = self._get_xdxr_codes_since(xdxr_window_start)
+        if xdxr_codes:
+            logger.info(f"[增量] {len(xdxr_codes)} 只股票在窗口内发生除权除息，qfq 将全历史重拉")
+
+        # 本地数据过于陈旧（超过窗口上限）：raw 也整段重拉
+        raw_full_refetch = False
+        if latest_local:
+            try:
+                latest_date = datetime.strptime(latest_local, "%Y-%m-%d").date()
+                gap_days = (datetime.now().date() - latest_date).days
+                raw_full_refetch = gap_days > self.incremental_window_days
+            except ValueError:
+                raw_full_refetch = False
+        if raw_full_refetch:
+            logger.info(f"[增量] 本地价格陈旧超过 {self.incremental_window_days} 天，raw 整段重拉")
+
         success_count = 0
         fail_count = 0
         all_rows = []
@@ -387,17 +554,22 @@ class IncrementalUpdater:
             if (i + 1) % 100 == 0:
                 logger.info(f"  增量价格进度: {i+1}/{len(target_stocks)}")
 
+            need_qfq_full = code in xdxr_codes
+            # qfq 全量重拉的股票：从适配器支持的起点拉全历史；
+            # raw 在数据陈旧时同样全量。
+            fetch_start = None if (need_qfq_full or raw_full_refetch) else start_date
+
             raw_result = self.adapter_mgr.fetch(FetchRequest(
                 data_type="price_daily",
                 stock_codes=[code],
-                start_date=start_date,
+                start_date=fetch_start,
                 end_date=end_date,
                 adjust="raw",
             ))
             qfq_result = self.adapter_mgr.fetch(FetchRequest(
                 data_type="price_daily",
                 stock_codes=[code],
-                start_date=start_date,
+                start_date=fetch_start,
                 end_date=end_date,
                 adjust="qfq",
             ))
@@ -485,6 +657,8 @@ class IncrementalUpdater:
             "total": len(target_stocks),
             "success": success_count,
             "failed": fail_count,
+            "xdxr_full_refetch": len(xdxr_codes),
+            "raw_full_refetch": raw_full_refetch,
         }
 
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
@@ -554,8 +728,12 @@ class IncrementalUpdater:
             "still_failing": still_failing,
         }
 
-    def refetch_one(self, stock_code: str, data_type: str) -> dict[str, Any]:
-        """Refetch one supported dataset through the same durable write paths as init."""
+    def refetch_one(self, stock_code: str, data_type: str, *, incremental: bool = False) -> dict[str, Any]:
+        """Refetch one supported dataset through the same durable write paths as init.
+
+        incremental=True 仅对财务三表有效：只拉最新报告期（num=1），
+        本地已有该报告期时跳过写入并返回 skipped（数据源未就绪语义）。
+        """
         if data_type not in {"price_daily", "balance_sheet", "income_statement", "cash_flow", "dividends", "xdxr"}:
             return {"status": "error", "error": f"unsupported refetch type: {data_type}"}
         if data_type == "price_daily":
@@ -578,6 +756,45 @@ class IncrementalUpdater:
             return {"status": "success", "stock_code": stock_code, "data_type": data_type}
 
         from app.core.init import DataInitializer
+
+        # 财务三表增量模式：只拉最新报告期，本地已有则跳过（PRD §7.7）
+        if incremental and data_type in {"balance_sheet", "income_statement", "cash_flow"}:
+            latest_local = self._get_latest_financial_report_date(stock_code, data_type)
+            result = self.adapter_mgr.fetch(FetchRequest(
+                data_type=data_type,
+                stock_codes=[stock_code],
+                extra_params={"num": "1"},
+            ))
+            if result.metadata.error or not result.data:
+                return {"status": "failed", "error": result.metadata.error or "empty result"}
+            new_rows = [
+                row for row in result.data
+                if not latest_local or str(row.get("report_date") or "") > latest_local
+            ]
+            if not new_rows:
+                logger.info(
+                    f"[增量] {stock_code} {data_type} 无新报告期（本地最新 {latest_local}），跳过写入"
+                )
+                return {
+                    "status": "success", "stock_code": stock_code, "data_type": data_type,
+                    "skipped": True, "latest_local": latest_local,
+                }
+            initializer = DataInitializer(duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr)
+            try:
+                with self.duck.transaction() as conn:
+                    for row in new_rows:
+                        initializer._upsert_financial_row(conn, data_type, stock_code, row)
+                    batch_id = initializer._record_batch_in_connection(
+                        conn, result, data_type, len(new_rows)
+                    )
+                    initializer._record_field_audit_in_connection(
+                        conn, result, new_rows, stock_code, "report_date", batch_id
+                    )
+                if data_type == "balance_sheet":
+                    initializer._record_missing_financial_sector_fields(stock_code, new_rows)
+            except Exception as error:
+                return {"status": "failed", "error": str(error)}
+            return {"status": "success", "stock_code": stock_code, "data_type": data_type, "skipped": False}
 
         result = self.adapter_mgr.fetch(FetchRequest(data_type=data_type, stock_codes=[stock_code]))
         if result.metadata.error or not result.data:

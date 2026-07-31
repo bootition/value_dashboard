@@ -69,17 +69,17 @@ def _run_startup_maintenance(
         logger.warning("后台最小初始化失败: %s", error)
 
     try:
-        from app.core.update import IncrementalUpdater
+        from app.core.auto_update import AutoUpdateController
 
-        check_report = IncrementalUpdater(duck=duck, sqlite=sqlite).run_incremental_check(
-            include_announcements=False
-        )
-        if check_report["needs_update"]:
-            logger.info("增量检查: 需要更新，详情见数据状态页")
+        controller = AutoUpdateController(duck=duck, sqlite=sqlite)
+        if controller.status().get("enabled") and not controller.status().get("paused"):
+            logger.info("启动后台自动更新（PRD §7.3）...")
+            controller.run_once()
+            logger.info("自动更新完成")
         else:
-            logger.info("增量检查: 数据已是最新")
+            logger.info("自动更新已关闭或暂停，跳过")
     except Exception as error:
-        logger.warning("后台增量检查失败(非致命): %s", error)
+        logger.warning("后台自动更新失败(非致命): %s", error)
     return current
 
 
