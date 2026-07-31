@@ -51,6 +51,32 @@ cd frontend; npm run lint; npm run test; npm run build
 uv lock --locked
 ```
 
+## Git 纪律（强制，防止工作丢失）
+
+**背景教训（2026-07）：** 7-26 ~ 7-31 共 5 天的审计修复、数据重建脚本、60+ 测试全部未提交，仅因 AI 默认"不主动 commit"且项目无规则兜底。现立规则如下：
+
+### 1. 提交时机
+
+- ✅ **会话结束前**：若工作区有未提交变更，必须提交（这是默认动作，不再等待用户明确要求）
+- ✅ **里程碑完成时**：每完成一个可独立验证的阶段立即提交
+- ✅ 提交前先 `git status`，确认没有误入 `data/`、构建产物、证据目录等被 ignore 的文件
+- ❌ 禁止跨主题打包提交；按主题拆分（docs/ feat/ fix/ chore/）
+
+### 2. 提交边界（哪些永不提交）
+
+- `data/`（正式数据库）、`*.whl`、`app/web/static/assets/`（构建产物）、`tests/regression/<hash>/`、`docs/evidence/evidence-s0|s1/`、`_legacy/`、`.omo/`、`.opencode/`、`.planning/`、`frontend/test-results/` —— 见 `.gitignore`，如有遗漏先补 `.gitignore` 而非硬提交
+
+### 3. Push 纪律
+
+- ✅ 每个会话的提交完成后 **必须 `git push`**（remote 已配置：`origin` → github.com/bootition/value_dashboard）
+- ✅ 推送前 `git fetch` 检查远程是否有新提交，有冲突先解决再推
+- ✅ 代理：本机通过 `127.0.0.1:10808` 访问 GitHub（已在 git 全局配置 http proxy），如网络变更需重新确认
+- ✅ 重要历史分支/事故基线打 tag 并推送（如 `incident-2026-07-22`、`s1-path-isolation-archive-156dded`）
+
+### 4. 提交消息风格
+
+参考现有历史（`feat:` / `fix:` / `chore:` / `docs:` 前缀 + 中文摘要 + 可选要点列表）。
+
 ## 工作区边界
 
 - `data/` — 正式数据库（只读！所有写操作必须经 CLI/维护脚本 + 单写者串行）
