@@ -1,0 +1,476 @@
+{
+  "captured_at": "2026-08-01T05:15:11.501236+00:00",
+  "sample_size": 27,
+  "close_tolerance": 0.02,
+  "share_tolerance": 0.001,
+  "rows": [
+    {
+      "stock_code": "600036",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 39.62,
+        "external_close": 39.62,
+        "close_diff_rel": 0.0,
+        "db_total": 25219845601,
+        "external_total": 25219845601,
+        "db_circ": 20628944429,
+        "external_circ": 20628944429
+      }
+    },
+    {
+      "stock_code": "601398",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 7.99,
+        "external_close": 7.99,
+        "close_diff_rel": 0.0,
+        "db_total": 356406257089,
+        "external_total": 356406257089,
+        "db_circ": 269612212539,
+        "external_circ": 269612212539
+      }
+    },
+    {
+      "stock_code": "000001",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 11.63,
+        "external_close": 11.63,
+        "close_diff_rel": 0.0,
+        "db_total": 19405918198,
+        "external_total": 19405918198,
+        "db_circ": 19405684991,
+        "external_circ": 19405600653
+      }
+    },
+    {
+      "stock_code": "601318",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 54.9,
+        "external_close": 54.9,
+        "close_diff_rel": 0.0,
+        "db_total": 18107641995,
+        "external_total": 18107641995,
+        "db_circ": 10660065083,
+        "external_circ": 10660065083
+      }
+    },
+    {
+      "stock_code": "600030",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 28.43,
+        "external_close": 28.43,
+        "close_diff_rel": 0.0,
+        "db_total": 14820546829,
+        "external_total": 14820546829,
+        "db_circ": 12176550974,
+        "external_circ": 12176550974
+      }
+    },
+    {
+      "stock_code": "601988",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 6.06,
+        "external_close": 6.06,
+        "close_diff_rel": 0.0,
+        "db_total": 322212411814,
+        "external_total": 322212411814,
+        "db_circ": 210765514846,
+        "external_circ": 210765514846
+      }
+    },
+    {
+      "stock_code": "600519",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 1350.6,
+        "external_close": 1350.6,
+        "close_diff_rel": 0.0,
+        "db_total": 1250081601,
+        "external_total": 1250081601,
+        "db_circ": 1250081601,
+        "external_circ": 1250081601
+      }
+    },
+    {
+      "stock_code": "000858",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 78.56,
+        "external_close": 78.0,
+        "close_diff_rel": 0.007179,
+        "db_total": 3881608005,
+        "external_total": 3881608005,
+        "db_circ": 3881510936,
+        "external_circ": 3881513391
+      }
+    },
+    {
+      "stock_code": "300750",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 395.3,
+        "external_close": 395.3,
+        "close_diff_rel": 0.0,
+        "db_total": 4626654919,
+        "external_total": 4626654919,
+        "db_circ": 4260081019,
+        "external_circ": 4260081019
+      }
+    },
+    {
+      "stock_code": "688428",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 26.46,
+        "external_close": 26.46,
+        "close_diff_rel": 0.0,
+        "db_total": 1769107002,
+        "external_total": 1769107002,
+        "db_circ": 272822767,
+        "external_circ": 272822767
+      }
+    },
+    {
+      "stock_code": "688026",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 12.64,
+        "external_close": 12.64,
+        "close_diff_rel": 0.0,
+        "db_total": 140364427,
+        "external_total": 140364427,
+        "db_circ": 140319605,
+        "external_circ": 140319605
+      }
+    },
+    {
+      "stock_code": "688813",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 99.0,
+        "external_close": 99.0,
+        "close_diff_rel": 0.0,
+        "db_total": 160000000,
+        "external_total": 160000000,
+        "db_circ": 30076976,
+        "external_circ": 30076976
+      }
+    },
+    {
+      "stock_code": "002594",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 96.2,
+        "external_close": 95.77,
+        "close_diff_rel": 0.00449,
+        "db_total": 9117197565,
+        "external_total": 9117197565,
+        "db_circ": 3487068722,
+        "external_circ": 3486613500
+      }
+    },
+    {
+      "stock_code": "000678",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 8.45,
+        "external_close": 8.45,
+        "close_diff_rel": 0.0,
+        "db_total": 459611797,
+        "external_total": 459611797,
+        "db_circ": 459611797,
+        "external_circ": 459611797
+      }
+    },
+    {
+      "stock_code": "300878",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": false
+      },
+      "details": {
+        "snapshot_close": 28.5,
+        "external_close": 28.5,
+        "close_diff_rel": 0.0,
+        "db_total": 144790322,
+        "external_total": 144790322,
+        "db_circ": 143901838,
+        "external_circ": 144123959
+      }
+    },
+    {
+      "stock_code": "300514",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 9.1,
+        "external_close": 9.1,
+        "close_diff_rel": 0.0,
+        "db_total": 200000000,
+        "external_total": 200000000,
+        "db_circ": 160258325,
+        "external_circ": 160258325
+      }
+    },
+    {
+      "stock_code": "688110",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 102.15,
+        "external_close": 102.15,
+        "close_diff_rel": 0.0,
+        "db_total": 442377391,
+        "external_total": 442377391,
+        "db_circ": 442377391,
+        "external_circ": 442377391
+      }
+    },
+    {
+      "stock_code": "300583",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 11.84,
+        "external_close": 11.84,
+        "close_diff_rel": 0.0,
+        "db_total": 189702126,
+        "external_total": 189702126,
+        "db_circ": 186148926,
+        "external_circ": 186148926
+      }
+    },
+    {
+      "stock_code": "002426",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": false
+      },
+      "details": {
+        "snapshot_close": 2.56,
+        "external_close": 2.58,
+        "close_diff_rel": 0.007752,
+        "db_total": 3402625916,
+        "external_total": 3402625916,
+        "db_circ": 3194296760,
+        "external_circ": 3402599891
+      }
+    },
+    {
+      "stock_code": "603053",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 8.93,
+        "external_close": 8.93,
+        "close_diff_rel": 0.0,
+        "db_total": 888890000,
+        "external_total": 888890000,
+        "db_circ": 888890000,
+        "external_circ": 888890000
+      }
+    },
+    {
+      "stock_code": "002815",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 11.15,
+        "external_close": 11.15,
+        "close_diff_rel": 0.0,
+        "db_total": 1234151324,
+        "external_total": 1234151324,
+        "db_circ": 777138039,
+        "external_circ": 777142014
+      }
+    },
+    {
+      "stock_code": "600078",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 9.56,
+        "external_close": 9.56,
+        "close_diff_rel": 0.0,
+        "db_total": 676812861,
+        "external_total": 676812861,
+        "db_circ": 662572861,
+        "external_circ": 662572861
+      }
+    },
+    {
+      "stock_code": "603909",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 8.8,
+        "external_close": 8.8,
+        "close_diff_rel": 0.0,
+        "db_total": 260673140,
+        "external_total": 260673140,
+        "db_circ": 260673140,
+        "external_circ": 260673140
+      }
+    },
+    {
+      "stock_code": "000555",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 11.14,
+        "external_close": 11.14,
+        "close_diff_rel": 0.0,
+        "db_total": 975774437,
+        "external_total": 975774437,
+        "db_circ": 974916887,
+        "external_circ": 974631587
+      }
+    },
+    {
+      "stock_code": "600356",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 8.18,
+        "external_close": 8.18,
+        "close_diff_rel": 0.0,
+        "db_total": 329536504,
+        "external_total": 329536504,
+        "db_circ": 298731378,
+        "external_circ": 298731378
+      }
+    },
+    {
+      "stock_code": "603848",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 12.9,
+        "external_close": 12.9,
+        "close_diff_rel": 0.0,
+        "db_total": 402406511,
+        "external_total": 402406511,
+        "db_circ": 402406511,
+        "external_circ": 402406511
+      }
+    },
+    {
+      "stock_code": "300561",
+      "checks": {
+        "close_match": true,
+        "total_shares_match": true,
+        "circ_shares_match": true
+      },
+      "details": {
+        "snapshot_close": 17.46,
+        "external_close": 17.46,
+        "close_diff_rel": 0.0,
+        "db_total": 328107975,
+        "external_total": 328107975,
+        "db_circ": 241057574,
+        "external_circ": 241057574
+      }
+    }
+  ],
+  "summary": {
+    "close_matched": 27,
+    "close_mismatched": 0,
+    "close_unverifiable": 0,
+    "total_shares_matched": 27,
+    "total_shares_mismatched": 0,
+    "circ_shares_matched": 25,
+    "circ_shares_mismatched": 2
+  }
+}
