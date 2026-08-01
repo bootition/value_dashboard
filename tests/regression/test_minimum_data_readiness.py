@@ -63,6 +63,10 @@ def test_readiness_requires_complete_history_fresh_prices_and_coherent_snapshot(
                 "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', CURRENT_DATE - INTERVAL '8 days', 10)",
                 "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES ('000001', CURRENT_DATE - INTERVAL '8 days', 10)",
                 "UPDATE indicator_snapshot SET latest_price_date = CURRENT_DATE - INTERVAL '8 days' WHERE stock_code = '000001'",
+                "UPDATE source_audit SET report_date = CURRENT_DATE - INTERVAL '8 days' "
+                "WHERE stock_code = '000001' AND field_name = 'latest_close' "
+                "AND fetch_batch_id IN (SELECT batch_id FROM fetch_batch "
+                "WHERE data_type IN ('price_daily_raw', 'price_daily_qfq'))",
             ],
             "price_freshness",
         ),
@@ -87,8 +91,14 @@ def test_readiness_identifies_each_remaining_hard_requirement(
 
     readiness = minimum_data_readiness(duckdb_store)
 
-    assert readiness["ready"] is False
-    assert readiness["missing_counts"][missing_key] == 1
+    if missing_key == "price_freshness":
+        # 价格陈旧属披露项（PRD §6.4 D7: 允许陈旧但显示日期）: 有数据但
+        # 超过 7 天无新 bar 视为停牌豁免，不阻断 ready 也不计入缺口。
+        assert readiness["ready"] is True
+        assert "price_freshness" not in readiness["missing_counts"]
+    else:
+        assert readiness["ready"] is False
+        assert readiness["missing_counts"][missing_key] == 1
 
 
 def test_readiness_requires_sufficient_nonzero_volume(duckdb_store: DuckDBStore) -> None:
@@ -206,19 +216,39 @@ def test_screening_rejects_an_internal_qfq_gap_on_a_calendar_date(
     )
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
-    gap = duckdb_store.read_query(
-        """SELECT CAST(trade_date AS VARCHAR) AS trade_date FROM price_daily_qfq
-           WHERE stock_code = '000001' AND trade_date < CURRENT_DATE - INTERVAL '1 year'
-           ORDER BY trade_date DESC LIMIT 1"""
-    )[0]["trade_date"]
+    # Remove a gap larger than the 2% suspension tolerance.
+    # 60 natural days ≈ 43 trading days of ~1570 (≈2.7%).
     duckdb_store.write_query(
-        "DELETE FROM price_daily_qfq WHERE stock_code = '000001' AND trade_date = ?", [gap]
+        """DELETE FROM price_daily_qfq WHERE stock_code = '000001'
+           AND trade_date < CURRENT_DATE - INTERVAL '1 year'
+           AND trade_date >= CURRENT_DATE - INTERVAL '1 year' - INTERVAL '60 days'"""
     )
 
     decision = screening_readiness(duckdb_store, sqlite_store)
 
     assert decision["ready"] is False
     assert decision["warning_codes"] == ["TRADING_CALENDAR_UNAVAILABLE"]
+
+
+def test_screening_tolerates_a_small_calendar_gap_as_suspension(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
+           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
+    )
+    insert_minimum_screenable_data(duckdb_store)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+    # A single missing bar is within the 2% suspension tolerance.
+    duckdb_store.write_query(
+        """DELETE FROM price_daily_qfq WHERE stock_code = '000001'
+           AND trade_date < CURRENT_DATE - INTERVAL '1 year'
+           AND trade_date >= CURRENT_DATE - INTERVAL '1 year' - INTERVAL '2 days'"""
+    )
+
+    decision = screening_readiness(duckdb_store, sqlite_store)
+
+    assert decision["ready"] is True
 
 
 def test_published_override_after_snapshot_blocks_readiness(

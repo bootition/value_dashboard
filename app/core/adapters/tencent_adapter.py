@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 from typing import Any
 
 import requests
 
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
-_API_VERSION = "tencent-fqkline-1"
-_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+_API_VERSION = "tencent-fqkline-2"
+# newfqkline/get is the current endpoint; the legacy fqkline/get returns empty
+# day arrays for BSE symbols on non-trading days.
+_KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
+# Tencent returns at most this many bars per request (most recent in window).
+_MAX_BARS_PER_REQUEST = 640
 
 
 def _symbol(stock_code: str) -> str | None:
@@ -43,52 +48,67 @@ class TencentAdapter(BaseAdapter):
             symbol = _symbol(stock_code)
             if symbol is None:
                 return self._make_empty_result(f"invalid stock code: {stock_code}")
-            self._wait_rate_limit()
-            suffix = "qfq" if request.adjust == "qfq" else ""
-            # Tencent's fqkline API requires dashed dates (2021-01-01);
-            # compact dates (20210101) are rejected with "param error".
+            # Tencent's fqkline API requires dashed dates (2021-01-01).
             start = request.start_date or "1990-01-01"
             end = request.end_date or "2099-12-31"
-            try:
-                response = requests.get(
-                    _KLINE_URL,
-                    params={"param": f"{symbol},day,{start},{end},640,{suffix}"},
-                    headers=_HEADERS,
-                    timeout=30,
-                )
-                response.raise_for_status()
-                payload = response.json()
-            except (requests.RequestException, ValueError) as error:
-                return self._make_empty_result(f"tencent price request failed: {error}")
-
-            item = payload.get("data", {}).get(symbol, {})
-            key = "qfqday" if request.adjust == "qfq" else "day"
-            bars = item.get(key, [])
-            # Tencent emits plain ``day`` for BSE symbols without a recorded
-            # adjustment factor. In that case raw and QFQ are identical.
-            if request.adjust == "qfq" and not bars:
-                bars = item.get("day", [])
-            if not bars:
-                return self._make_empty_result(f"tencent returned no {request.adjust} bars for {stock_code}")
-            responses.append(payload)
-            for bar in bars:
-                if len(bar) < 6:
-                    continue
+            # Page backwards: each request returns the most recent 640 bars in
+            # the window, so repeatedly narrow the window until the start is
+            # reached or the source has no older data.
+            window_end = end
+            pages = 0
+            while window_end >= start and pages < 12:
+                self._wait_rate_limit()
+                suffix = "qfq" if request.adjust == "qfq" else ""
                 try:
-                    records.append({
-                        "stock_code": stock_code,
-                        "trade_date": bar[0],
-                        "open": float(bar[1]),
-                        "close": float(bar[2]),
-                        "high": float(bar[3]),
-                        "low": float(bar[4]),
-                        # Tencent publishes volume in lots; storage uses shares.
-                        "volume": float(bar[5]) * 100,
-                        "turnover": None,
-                        "turnover_rate": None,
-                    })
-                except (TypeError, ValueError):
-                    continue
+                    response = requests.get(
+                        _KLINE_URL,
+                        params={"param": f"{symbol},day,{start},{window_end},{_MAX_BARS_PER_REQUEST},{suffix}"},
+                        headers=_HEADERS,
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                except (requests.RequestException, ValueError) as error:
+                    return self._make_empty_result(f"tencent price request failed: {error}")
+
+                item = payload.get("data", {}).get(symbol, {})
+                key = "qfqday" if request.adjust == "qfq" else "day"
+                bars = item.get(key, [])
+                # Tencent emits plain ``day`` for BSE symbols without a recorded
+                # adjustment factor. In that case raw and QFQ are identical.
+                if request.adjust == "qfq" and not bars:
+                    bars = item.get("day", [])
+                if not bars:
+                    if pages == 0:
+                        return self._make_empty_result(
+                            f"tencent returned no {request.adjust} bars for {stock_code}"
+                        )
+                    break
+                responses.append(payload)
+                for bar in bars:
+                    if len(bar) < 6:
+                        continue
+                    try:
+                        records.append({
+                            "stock_code": stock_code,
+                            "trade_date": bar[0],
+                            "open": float(bar[1]),
+                            "close": float(bar[2]),
+                            "high": float(bar[3]),
+                            "low": float(bar[4]),
+                            # Tencent publishes volume in lots; storage uses shares.
+                            "volume": float(bar[5]) * 100,
+                            "turnover": None,
+                            "turnover_rate": None,
+                        })
+                    except (TypeError, ValueError):
+                        continue
+                oldest = min(bar[0] for bar in bars)
+                if oldest <= start:
+                    break
+                # Move the window end just before the oldest bar received.
+                window_end = (datetime.strptime(oldest, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+                pages += 1
         if not records:
             return self._make_empty_result("tencent returned no parseable price bars")
         return self._make_result(

@@ -42,6 +42,7 @@ class FinancialRepairer:
         resume: bool,
         rate_limit: float,
         evidence_dir: Path,
+        only_gap: bool = False,
     ) -> None:
         self.paths = resolve_and_validate_paths()
         self.duck = DuckDBStore(paths=self.paths)
@@ -49,6 +50,7 @@ class FinancialRepairer:
         self._init = DataInitializer(duck=self.duck, sqlite=self.sqlite)
         self._sina = SinaAdapter(rate_limit=rate_limit)
         self.max_stocks = max_stocks
+        self.only_gap = only_gap
         self.evidence_dir = evidence_dir
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = self.evidence_dir / f"repair_state_{self.paths.env.value}_financials.json"
@@ -56,6 +58,34 @@ class FinancialRepairer:
         if resume and self.state_path.exists():
             self.completed = set(json.loads(self.state_path.read_text(encoding="utf-8")).get("completed", []))
             logger.info("Resume: %d codes already completed", len(self.completed))
+
+    def _lineage_gap_codes(self) -> list[str]:
+        """Stocks missing any readiness-relevant core financial field lineage."""
+        rows = self.duck.read_query(
+            """WITH evidence AS (
+                 SELECT a.stock_code, a.field_name
+                 FROM source_audit a
+                 JOIN fetch_batch b ON a.fetch_batch_id = b.batch_id
+                 JOIN raw_response_archive r ON r.raw_response_hash = a.raw_response_hash
+                 WHERE octet_length(r.payload) > 0
+                   AND a.field_name IN (
+                     'total_assets', 'total_liabilities', 'total_equity', 'total_equity_parent',
+                     'revenue', 'parent_net_profit', 'cf_from_operating')
+             )
+             SELECT m.stock_code FROM stock_meta m
+             WHERE m.is_listed IS TRUE
+               AND NOT (
+                 EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'total_assets')
+                 AND EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'total_liabilities')
+                 AND EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'revenue')
+                 AND EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'parent_net_profit')
+                 AND EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'cf_from_operating')
+                 AND (EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'total_equity')
+                      OR EXISTS (SELECT 1 FROM evidence e WHERE e.stock_code = m.stock_code AND e.field_name = 'total_equity_parent'))
+               )
+             ORDER BY m.stock_code"""
+        )
+        return [str(r["stock_code"]) for r in rows]
 
     def _repair_stock(self, code: str) -> dict[str, Any]:
         outcomes: list[dict[str, Any]] = []
@@ -97,10 +127,13 @@ class FinancialRepairer:
             "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
         )
         targets = [str(r["stock_code"]) for r in universe if str(r["stock_code"]) not in self.completed]
+        if self.only_gap:
+            gap = set(self._lineage_gap_codes())
+            targets = [c for c in targets if c in gap]
+            logger.info("only_gap: %d stocks missing financial lineage", len(gap))
         if self.max_stocks > 0:
             targets = targets[: self.max_stocks]
         logger.info("financial repair targets=%d", len(targets))
-
         stats = {"success": 0, "partial": 0, "rows": 0}
         failed_codes: list[str] = []
         for i, code in enumerate(targets):
@@ -142,6 +175,7 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--rate-limit", type=float, default=0.35)
     parser.add_argument("--evidence-dir", type=Path, default=Path("scripts/evidence"))
+    parser.add_argument("--only-gap", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     raise SystemExit(FinancialRepairer(
@@ -149,6 +183,7 @@ def main() -> None:
         resume=args.resume,
         rate_limit=args.rate_limit,
         evidence_dir=args.evidence_dir,
+        only_gap=args.only_gap,
     ).run())
 
 

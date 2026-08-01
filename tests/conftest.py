@@ -55,12 +55,14 @@ def insert_minimum_screenable_data(store: DuckDBStore, stock_code: str = "000001
         )
         connection.execute(
             """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close, latest_price_date, calculated_at)
-               VALUES (?, '2025-12-31', 10, CURRENT_DATE, CURRENT_TIMESTAMP)
+               VALUES (?, '2025-12-31', 10,
+                       (SELECT CAST(MAX(trade_date) AS DATE) FROM price_daily_raw WHERE stock_code = ?),
+                       CURRENT_TIMESTAMP)
                ON CONFLICT (stock_code, report_date) DO UPDATE SET
                    latest_close = excluded.latest_close,
                    latest_price_date = excluded.latest_price_date,
                    calculated_at = excluded.calculated_at""",
-            [stock_code],
+            [stock_code, stock_code],
         )
         connection.execute(
             """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
@@ -83,8 +85,10 @@ def insert_minimum_screenable_data(store: DuckDBStore, stock_code: str = "000001
             [stock_code],
         )
         batches = (
-            ("price_daily_raw", "latest_close", "CURRENT_DATE"),
-            ("price_daily_qfq", "latest_close", "CURRENT_DATE"),
+            ("price_daily_raw", "latest_close",
+             "(SELECT CAST(MAX(trade_date) AS VARCHAR) FROM price_daily_raw WHERE stock_code = ?)"),
+            ("price_daily_qfq", "latest_close",
+             "(SELECT CAST(MAX(trade_date) AS VARCHAR) FROM price_daily_qfq WHERE stock_code = ?)"),
             ("balance_sheet", "total_assets", "DATE '2025-12-31'"),
             ("balance_sheet", "total_liabilities", "DATE '2025-12-31'"),
             ("balance_sheet", "total_equity", "DATE '2025-12-31'"),
@@ -109,12 +113,20 @@ def insert_minimum_screenable_data(store: DuckDBStore, stock_code: str = "000001
                    VALUES (?, ?, 'fixture', '1', CURRENT_TIMESTAMP - INTERVAL '1 day', ?, 1, 'strict')""",
                 [batch_id, data_type, digest],
             )
-            connection.execute(
-                f"""INSERT INTO source_audit
-                   (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
-                   VALUES (?, ?, {report_date}, 1, 'fixture', ?, CURRENT_TIMESTAMP - INTERVAL '1 day', ?, 'strict')""",
-                [stock_code, field_name, batch_id, digest],
-            )
+            if report_date.startswith("(SELECT"):
+                connection.execute(
+                    f"""INSERT INTO source_audit
+                       (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
+                       VALUES (?, ?, {report_date}, 1, 'fixture', ?, CURRENT_TIMESTAMP - INTERVAL '1 day', ?, 'strict')""",
+                    [stock_code, field_name, stock_code, batch_id, digest],
+                )
+            else:
+                connection.execute(
+                    f"""INSERT INTO source_audit
+                       (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
+                       VALUES (?, ?, {report_date}, 1, 'fixture', ?, CURRENT_TIMESTAMP - INTERVAL '1 day', ?, 'strict')""",
+                    [stock_code, field_name, batch_id, digest],
+                )
 
 
 def insert_matching_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> None:

@@ -137,6 +137,44 @@ def test_stock_codes_list_issues_one_request_per_code(monkeypatch) -> None:
     assert result.raw_response.count(b'{"result":') == 2
 
 
+def test_bank_sector_title_variants_map_to_standard_fields(monkeypatch) -> None:
+    """Bank statements use different wording (no 合计/所有 suffix)."""
+
+    def fake_get(url, params=None, headers=None, timeout=None) -> _Response:
+        source = params["source"]
+        if source == "fzb":
+            items = [
+                _item("资产总计", "6033962000000"),
+                _item("负债合计", "5489879000000"),
+                _item("股东权益", "544083000000"),
+                _item("归属于母公司股东的权益", "544083000000"),
+            ]
+        elif source == "lrb":
+            items = [
+                _item("营业收入", "35277000000"),
+                _item("归属于母公司的净利润", "14523000000"),
+            ]
+        else:
+            items = [_item("经营活动产生的现金流量", "37802000000")]
+        return _Response(_payload_bytes({"20260331": items}))
+
+    monkeypatch.setattr("app.core.adapters.sina_adapter.requests.get", fake_get)
+
+    for data_type, expect in (
+        ("balance_sheet", ("total_assets", "total_liabilities", "total_equity", "total_equity_parent")),
+        ("income_statement", ("revenue", "parent_net_profit")),
+        ("cash_flow", ("cf_from_operating",)),
+    ):
+        result = SinaAdapter(rate_limit=0).fetch(
+            FetchRequest(data_type=data_type, stock_codes=["000001"])
+        )
+        assert result.metadata.error is None
+        assert len(result.data) == 1
+        row = result.data[0]
+        for field in expect:
+            assert row.get(field) is not None, f"{data_type} missing {field}: {row}"
+
+
 # ─── 真实 fixture 字段映射 ──────────────────────────────────────────
 
 

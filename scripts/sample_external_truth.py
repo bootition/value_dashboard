@@ -69,7 +69,7 @@ def main() -> int:
     snapshot = {
         str(r["stock_code"]): r for r in duck.read_query(
             """SELECT stock_code, latest_close, latest_price_date FROM indicator_snapshot
-               WHERE report_date = (SELECT MAX(report_date) FROM indicator_snapshot)"""
+               QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1"""
         )
     }
     meta = {

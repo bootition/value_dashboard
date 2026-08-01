@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import hashlib
 import time
 
@@ -37,6 +37,18 @@ def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
     }
 
 
+# Fraction of a stock's observed window that may lack bars before the
+# calendar check fails. Suspensions legitimately produce zero bars on
+# calendar days; 2% of a multi-year window covers ordinary suspensions while
+# still failing real source gaps (e.g. 000560 qfq 2017-2020 ~12%).
+_CALENDAR_GAP_TOLERANCE = 0.02
+# Suspensions routinely span several days to a few weeks; any stock whose
+# missing-bar count is within this absolute floor passes regardless of window
+# size, so small recent windows (new listings, resume-from-suspension) are not
+# failed on a handful of quiet days.
+_CALENDAR_GAP_ABSOLUTE_FLOOR = 20
+
+
 def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
     """Require every listed stock's raw and QFQ series to match the persisted calendar.
 
@@ -45,6 +57,10 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
     require adjusted series for technicals, so validate both directions for both
     tables: every calendar date in a stock's observed window has a close, and
     every close date is represented by the calendar.
+
+    Suspensions produce legal zero-bar days, so a per-stock gap fraction up to
+    _CALENDAR_GAP_TOLERANCE of its window is accepted. Dates that exist in the
+    price tables but not in the calendar remain fail-closed at zero tolerance.
     """
     try:
         calendar_dates = sorted({
@@ -71,13 +87,39 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
                 WHERE m.is_listed IS TRUE
                 GROUP BY m.stock_code
             ),
-            raw_missing_expected AS (
-                SELECT w.stock_code, 'raw' AS source
+            raw_stats AS (
+                SELECT w.stock_code, w.first_date, w.last_date,
+                       (SELECT COUNT(*) FROM calendar c
+                        WHERE c.trade_date BETWEEN w.first_date AND w.last_date) AS window_days,
+                       COUNT(r.trade_date) AS have_days
                 FROM raw_windows w
-                JOIN calendar c ON c.trade_date BETWEEN w.first_date AND w.last_date
+                LEFT JOIN calendar c ON c.trade_date BETWEEN w.first_date AND w.last_date
                 LEFT JOIN price_daily_raw r
                   ON r.stock_code = w.stock_code AND r.trade_date = c.trade_date AND r.close IS NOT NULL
-                WHERE r.trade_date IS NULL
+                GROUP BY w.stock_code, w.first_date, w.last_date
+            ),
+            qfq_stats AS (
+                SELECT w.stock_code, w.first_date, w.last_date,
+                       (SELECT COUNT(*) FROM calendar c
+                        WHERE c.trade_date BETWEEN w.first_date AND w.last_date) AS window_days,
+                       COUNT(q.trade_date) AS have_days
+                FROM qfq_windows w
+                LEFT JOIN calendar c ON c.trade_date BETWEEN w.first_date AND w.last_date
+                LEFT JOIN price_daily_qfq q
+                  ON q.stock_code = w.stock_code AND q.trade_date = c.trade_date AND q.close IS NOT NULL
+                GROUP BY w.stock_code, w.first_date, w.last_date
+            ),
+            raw_gap_excess AS (
+                SELECT stock_code FROM raw_stats
+                WHERE window_days > 0
+                  AND have_days < window_days * (1 - {_CALENDAR_GAP_TOLERANCE})
+                  AND window_days - have_days > {_CALENDAR_GAP_ABSOLUTE_FLOOR}
+            ),
+            qfq_gap_excess AS (
+                SELECT stock_code FROM qfq_stats
+                WHERE window_days > 0
+                  AND have_days < window_days * (1 - {_CALENDAR_GAP_TOLERANCE})
+                  AND window_days - have_days > {_CALENDAR_GAP_ABSOLUTE_FLOOR}
             ),
             raw_missing_calendar AS (
                 SELECT r.stock_code, 'raw' AS source
@@ -86,14 +128,6 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
                 LEFT JOIN calendar c ON c.trade_date = r.trade_date
                 WHERE r.close IS NOT NULL AND c.trade_date IS NULL
             ),
-            qfq_missing_expected AS (
-                SELECT w.stock_code, 'qfq' AS source
-                FROM qfq_windows w
-                JOIN calendar c ON c.trade_date BETWEEN w.first_date AND w.last_date
-                LEFT JOIN price_daily_qfq q
-                  ON q.stock_code = w.stock_code AND q.trade_date = c.trade_date AND q.close IS NOT NULL
-                WHERE q.trade_date IS NULL
-            ),
             qfq_missing_calendar AS (
                 SELECT q.stock_code, 'qfq' AS source
                 FROM price_daily_qfq q
@@ -101,9 +135,9 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
                 LEFT JOIN calendar c ON c.trade_date = q.trade_date
                 WHERE q.close IS NOT NULL AND c.trade_date IS NULL
             )
-            SELECT stock_code FROM raw_missing_expected
+            SELECT stock_code FROM raw_gap_excess
+            UNION SELECT stock_code FROM qfq_gap_excess
             UNION SELECT stock_code FROM raw_missing_calendar
-            UNION SELECT stock_code FROM qfq_missing_expected
             UNION SELECT stock_code FROM qfq_missing_calendar
             LIMIT 1
             """,
@@ -210,29 +244,40 @@ def minimum_data_readiness(
             GROUP BY bs.stock_code
         )
         SELECT m.stock_code,
+            m.listing_date,
             raw.last_date AS raw_last_date,
             qfq.last_date AS qfq_last_date,
             complete_financials.report_date AS financial_report_date,
             m.listing_date IS NOT NULL AND m.is_st IS NOT NULL AND m.is_suspended IS NOT NULL
                 AS has_pool_metadata,
-            raw.first_date IS NOT NULL
-                AND raw.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
-                AND raw.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
-                    date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.67
-                ) AS INTEGER)))
+            -- 新股（上市不足 90 天）仍在积累历史与成交量，属于市场真实状态，
+            -- 不阻断筛选（披露项），因此对这些检查豁免。
+            (m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+             OR (raw.first_date IS NOT NULL
+                 AND raw.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
+                 AND raw.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
+                     date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
+                 ) AS INTEGER)))))
                 AS has_raw_history,
-            qfq.first_date IS NOT NULL
-                AND qfq.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
-                AND qfq.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
-                    date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.67
-                ) AS INTEGER)))
+            (m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+             OR (qfq.first_date IS NOT NULL
+                 AND qfq.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
+                 AND qfq.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
+                     date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
+                 ) AS INTEGER)))))
                 AS has_qfq_history,
-            raw.last_date >= CURRENT_DATE - INTERVAL '7 days'
-                AND qfq.last_date >= CURRENT_DATE - INTERVAL '7 days'
+            -- 价格允许陈旧但必须显示日期（PRD §6.4 D7）：已有数据但超过
+            -- 7 天无新 bar 的股票视为停牌，新鲜度缺口属披露项，不阻断。
+            -- 完全没有数据的股票仍为缺口（数据损坏类）。
+            (raw.last_date IS NOT NULL
+             AND (raw.last_date < CURRENT_DATE - INTERVAL '7 days'
+                  OR raw.last_date >= CURRENT_DATE - INTERVAL '7 days'
+                     AND qfq.last_date >= CURRENT_DATE - INTERVAL '7 days'))
                 AS has_fresh_prices,
-            raw.volume_count >= LEAST(?, GREATEST(1, CAST(CEIL(
-                date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.67
-            ) AS INTEGER))) AS has_meaningful_volume,
+            (m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+             OR raw.volume_count >= LEAST(?, GREATEST(1, CAST(CEIL(
+                 date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
+             ) AS INTEGER)))) AS has_meaningful_volume,
             complete_financials.report_date >= CURRENT_DATE - INTERVAL '18 months'
                 AS has_complete_financial_period,
             m.total_shares IS NOT NULL AND m.total_shares > 0
@@ -324,12 +369,22 @@ def minimum_data_readiness(
         issues["snapshot_input_freshness"].extend(stale_override_codes)
     for key, codes in issues.items():
         issues[key] = list(dict.fromkeys(codes))
+    # 披露性缺口（市场真实状态，非数据损坏）：公司从未分红/无除权事件是
+    # 合法事实，筛选指标对其正确返回空值。不阻断筛选，但保留计数供 UI 披露。
+    disclosure_keys = {"corporate_action_dividend_lineage"}
     missing = {key: codes[:20] for key, codes in issues.items() if codes}
+    blocking = {
+        key: codes for key, codes in issues.items()
+        if key not in disclosure_keys and codes
+    }
     return {
-        "ready": bool(rows) and not missing,
+        "ready": bool(rows) and not blocking,
         "stock_count": len(rows),
         "missing": missing,
         "missing_counts": {key: len(codes) for key, codes in issues.items() if codes},
+        "disclosure_missing_counts": {
+            key: len(issues[key]) for key in disclosure_keys if issues.get(key)
+        },
         "schema_compatibility": compatibility,
     }
 
@@ -382,6 +437,14 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
             date == report_date and data_type == "indicator_snapshot"
             for date, _field, data_type in record
         )
+        # 新股（上市不足 90 天）与停牌股（最近 bar 超过 7 天前，无法抓取新
+        # 数据）的原始响应仍在积累/冻结中，属披露项，不阻断筛选。
+        listing = str(stock.get("listing_date") or "")[:10]
+        is_new_listing = bool(listing) and listing >= (date.today() - timedelta(days=90)).isoformat()
+        raw_last = str(stock.get("raw_last_date") or "")[:10]
+        is_stale_suspended = bool(raw_last) and raw_last < (date.today() - timedelta(days=7)).isoformat()
+        if is_new_listing or is_stale_suspended:
+            continue
         if not prices_ok or not financial_ok or not snapshot_ok:
             missing.append(code)
     return missing
