@@ -1,1 +1,0 @@
-import{_ as e,j as t,p as n,u as r}from"./runtime-core.esm-bundler-K0sMz1Pv.js";var i=e({__name:`StockDetailPage`,setup(e){return(e,i)=>(t(),n(`div`,null,[...i[0]||=[r(`h2`,null,`个股详情`,-1),r(`p`,{style:{color:`#999`}},`个股详情页将在 M4 里程碑实现：K线图、估值摘要、财务趋势、溯源信息、PDF 打开。`,-1)]]))}});export{i as default};

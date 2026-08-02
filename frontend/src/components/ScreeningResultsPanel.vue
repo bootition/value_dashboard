@@ -38,6 +38,9 @@ const props = defineProps<{
   lockedIndicators: Record<string, unknown>
   sort: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>
   basePoolConfig: Record<string, unknown>
+  // P1-C: 匹配数超过 5000 行上限时服务端显式标记，前端必须警示而非静默丢尾
+  truncated?: boolean
+  totalMatched?: number
 }>()
 
 const message = useMessage()
@@ -287,6 +290,17 @@ async function addToWatchlist() {
           当前仅运行类警告，不影响保存和导出。
         </div>
       </template>
+    </n-alert>
+
+    <n-alert
+      v-if="props.truncated"
+      id="truncation-alert"
+      type="warning"
+      title="结果已截断"
+      style="margin-bottom: 16px"
+    >
+      匹配总数 {{ props.totalMatched ?? '超过上限' }} 条，仅展示前 5000 条。请调整筛选条件缩小范围，
+      否则保存的结果与导出的 CSV 同样只包含这 5000 条。
     </n-alert>
 
     <n-grid :cols="4" :x-gap="16" style="margin-bottom: 16px">

@@ -133,6 +133,8 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
     confidence_summary = {
         "total": result["total"], "strict_only": req.strict_only,
         "locked_indicators": locked_indicators,
+        # P1-C: 截断状态随结果持久化，导出 CSV 时标注
+        "truncated": bool(result.get("truncated")),
     }
     request.app.state.sqlite.execute(
         """INSERT INTO screening_runs
@@ -273,6 +275,7 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
     if not rule:
         raise HTTPException(status_code=400, detail="saved result rule provenance is missing")
     summary = json.loads(record.get("confidence_summary") or "{}")
+    truncated = bool(summary.get("truncated"))
 
     if not results:
         raise HTTPException(status_code=400, detail="no results to export")
@@ -291,6 +294,9 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         "_data_date", "_rule_id", "_rule_version", "_locked_indicators",
         "_strict_only", "_field_provenance", "_entry_explanation",
     ]
+    if truncated:
+        # P1-C: 截断结果必须在导出的 CSV 中显式标注，禁止静默丢尾
+        header.append("_truncated")
     writer.writerow(header)
 
     # 数据行
@@ -303,6 +309,8 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         line.append(summary.get("strict_only", False))
         line.append(json.dumps(provenance[index], ensure_ascii=False, sort_keys=True, default=str))
         line.append(_csv_cell(row.get("_entry_explanation", "")))
+        if truncated:
+            line.append(True)
         writer.writerow(line)
 
     csv_content = output.getvalue()
@@ -425,8 +433,10 @@ def list_available_indicators(request: Request) -> dict:
     for col in sorted(RANKABLE_INDICATORS):
         for suffix, label in (
             ("market_rank", "全市场排名"), ("market_percentile", "全市场分位"),
-            ("sw1_rank", "申万一级排名"), ("sw1_percentile", "申万一级分位"),
-            ("sw2_rank", "申万二级排名"), ("sw2_percentile", "申万二级分位"),
+            # P1-D修复: 行业排名按 PRD §24 为 CSRC（证监会）口径；
+            # 不再以"申万"标签误导用户，并暴露正确命名的 CSRC 列。
+            ("industry_rank", "证监会一级排名"), ("industry_percentile", "证监会一级分位"),
+            ("sw2_rank", "证监会二级排名"), ("sw2_percentile", "证监会二级分位"),
         ):
             indicators.append({"name": f"{col}_{suffix}", "rankable": False, "label": f"{col} {label}"})
     published = request.app.state.sqlite.query(

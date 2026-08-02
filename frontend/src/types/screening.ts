@@ -63,6 +63,7 @@ export interface ScreeningRunResponse {
   readonly run_id: string
   readonly results: ReadonlyArray<ScreeningResult>
   readonly total: number
+  readonly truncated?: boolean
   readonly execution_time_ms: number
   readonly base_pool_size: number
   readonly data_date: string | null

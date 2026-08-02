@@ -154,4 +154,39 @@ describe('ScreeningResultsPanel 持久化流程（PRD §12 SC14/SC16/SC17）', (
     expect((wrapper.find('#save-btn').element as HTMLButtonElement).disabled).toBe(true)
     expect((wrapper.find('#export-btn').element as HTMLButtonElement).disabled).toBe(true)
   })
+
+  it('结果超过 5000 条时显示截断警告（P1-C）', async () => {
+    const router = createRouter({ history: createMemoryHistory(), routes: [] })
+    const wrapper = mount(NMessageProvider, {
+      slots: {
+        default: () =>
+          h(ScreeningResultsPanel, {
+            results: RESULT_ROWS,
+            strictOnly: false,
+            executionTime: 5,
+            basePoolSize: 6000,
+            dataDate: '2026-06-30',
+            warningCodes: [],
+            untrustedFields: [],
+            qualityStatus: 'available',
+            ruleTree: { id: 'r1', logic: 'AND', rules: [] },
+            runId: 'run-1',
+            ruleId: 1,
+            ruleVersion: 1,
+            lockedIndicators: {},
+            sort: [],
+            basePoolConfig: {},
+            truncated: true,
+            totalMatched: 6000,
+          }),
+      },
+      global: { plugins: [router] },
+    })
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('结果已截断')
+    expect(text).toContain('6000')
+    expect(text).toContain('前 5000 条')
+  })
 })

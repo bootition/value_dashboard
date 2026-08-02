@@ -24,6 +24,8 @@ const executionTime = ref(0)
 const basePoolSize = ref(0)
 const dataDate = ref<string | null>(null)
 const runId = ref<string | null>(null)
+const truncated = ref(false)
+const totalMatched = ref(0)
 const warningCodes = ref<readonly WarningCode[]>([])
 const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
 
@@ -124,6 +126,11 @@ async function runScreening() {
     basePoolSize.value = resp.data.base_pool_size
     dataDate.value = resp.data.data_date
     runId.value = resp.data.run_id
+    truncated.value = resp.data.truncated ?? false
+    totalMatched.value = resp.data.total
+    if (resp.data.truncated) {
+      message.warning(`结果超过 5000 条，仅展示前 5000 条（共 ${resp.data.total} 条匹配）`)
+    }
     message.success(`筛选完成: ${resp.data.total} 条 (${resp.data.execution_time_ms}ms)`)
   } catch (e: unknown) {
     const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : null
@@ -418,6 +425,8 @@ onMounted(async () => {
       :locked-indicators="activeRule?.locked_indicators ?? {}"
       :sort="sortRules"
       :base-pool-config="basePool"
+      :truncated="truncated"
+      :total-matched="totalMatched"
     />
 
     <n-empty v-if="results.length === 0" description="运行筛选后显示结果" style="padding: 40px" />

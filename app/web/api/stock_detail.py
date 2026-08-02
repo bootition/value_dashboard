@@ -92,23 +92,47 @@ def calculate_ttm_trend(rows: list[dict]) -> list[dict]:
 
 
 def _to_single_quarter(rows: list[dict]) -> list[dict]:
-    """Convert cumulative flow statements to standalone quarters, preserving balances."""
+    """Convert cumulative flow statements to standalone quarters, preserving balances.
+
+    P1-A修复: 只有当同一年内存在"紧邻上一季度"（quarter index 差 1）时
+    才做差值；季度缺失（如缺 Q2 只剩 Q1/Q3）时无法推导单季值，
+    fail-closed 置 NULL（与 calculate_ttm_trend 的缺口处理一致），
+    绝不把累计值或"跨季差值"当作单季值输出。
+    """
     flow_fields = (
         "revenue", "cost_of_revenue", "gross_profit", "operating_profit", "net_profit",
         "parent_net_profit", "deducted_net_profit", "cf_from_operating",
         "cf_from_investing", "cf_from_financing",
     )
+    _QUARTER_OF_MONTH = {3: 1, 6: 2, 9: 3, 12: 4}
+
+    def _quarter_index(report_date: object) -> int:
+        text = str(report_date)
+        if len(text) < 7:
+            return 0
+        try:
+            return _QUARTER_OF_MONTH.get(int(text[5:7]), 0)
+        except ValueError:
+            return 0
+
     chronological = list(reversed(rows))
     prior_by_year: dict[str, dict] = {}
     for row in chronological:
         year = str(row.get("report_date", ""))[:4]
+        quarter = _quarter_index(row.get("report_date"))
         prior = prior_by_year.get(year)
-        if prior:
-            for field in flow_fields:
-                value = row.get(field)
-                previous = prior.get(field)
-                row[field] = value - previous if value is not None and previous is not None else None
-        prior_by_year[year] = {field: row.get(field) for field in flow_fields}
+        if prior is not None:
+            prior_quarter = prior.get("_quarter", 0)
+            if prior_quarter == quarter - 1:
+                for field in flow_fields:
+                    value = row.get(field)
+                    previous = prior.get(field)
+                    row[field] = value - previous if value is not None and previous is not None else None
+            else:
+                # 同一年内季度缺口（或上一行不是紧邻季度）：单季值不可推导
+                for field in flow_fields:
+                    row[field] = None
+        prior_by_year[year] = {**{field: row.get(field) for field in flow_fields}, "_quarter": quarter}
     return chronological
 
 

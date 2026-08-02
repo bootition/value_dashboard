@@ -2,10 +2,20 @@
 title: S1 路径隔离合约：DatabasePathSet 与 fail-closed 边界
 status: approved
 category: contracts
-last-reviewed: 2026-07-26
+last-reviewed: 2026-08-02
 ---
 
 # S1 路径隔离合约：DatabasePathSet 与 fail-closed 边界
+
+> **2026-08-02 所有者裁决（启动器 vs 本合约 §2.1/§2.4/§10.2/§14 冲突）：**
+> 发行版启动器 `start.bat`/`vd.bat` 是**经裁决的正式启动引导入口**：它们
+> 设置 `VD_ENV=formal`、`VD_FORMAL_ACK=confirmed` 与两个正式 DB 路径
+> （双击/命令行调用即构成用户对该 profile 的显式确认）。§2.1/§2.4/§10.2/§14
+> 中「启动器不得自动设置任何变量，仅检查外部提供」的要求仅适用于**非发行
+> 入口的任意脚本/CI**；Python 侧强制（`resolve_and_validate_paths` 缺失即
+> 致命、无静默 fallback、pytest 拒绝 `VD_FORMAL_ACK`）仍是权威边界且不受
+> 影响。启动器脚本本身受 git 版本控制、纯 ASCII、CRLF、无 BOM，改动需经
+> 代码审查。
 
 **文档状态：** DRAFT / DESIGNED — 设计级定义，非实现，非验证。  
 **权威来源：** `docs/15_CURRENT_REVERIFICATION_AND_REMEDIATION_GUIDE.md` 以下章节：

@@ -1,9 +1,10 @@
 ---
 title: 全项目系统性红队审查报告（第五轮，独立复核，2026-08-02）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-02
 last-reviewed: 2026-08-02
+superseded-by: reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md
 supersedes: reports/30_AUDIT_FIX_CLOSURE_2026-08-02.md
 ---
 

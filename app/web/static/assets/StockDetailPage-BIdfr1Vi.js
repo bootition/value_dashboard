@@ -1,1 +1,0 @@
-import{i as e,n as t,r as n,t as r}from"./index-0jFLf2Fr.js";var i=n({__name:`StockDetailPage`,setup(n){return(n,i)=>(e(),t(`div`,null,[...i[0]||=[r(`h2`,null,`个股详情`,-1),r(`p`,{style:{color:`#999`}},`个股详情页将在 M4 里程碑实现：K线图、估值摘要、财务趋势、溯源信息、PDF 打开。`,-1)]]))}});export{i as default};

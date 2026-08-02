@@ -107,6 +107,8 @@ RANK_SUFFIXES = (
 METADATA_COLUMNS = {"stock_code", "name", "exchange", "sw_level1", "sw_level2", "csrc_l1", "csrc_l2"}
 MAX_RULE_LEAVES = 100
 MAX_IN_VALUES = 1_000
+# P1-C修复: 结果行数上限（内存/导出保护）；超限时显式 truncated 标记
+MAX_RESULT_ROWS = 5_000
 
 
 class ScreeningEngine:
@@ -199,7 +201,7 @@ class ScreeningEngine:
         self._reject_mixed_report_dates()
 
         # 3. 构建 SQL
-        sql, params = self._build_sql(
+        sql, params, count_sql = self._build_sql(
             conditions=conditions,
             sort_spec=sort_spec,
             columns_spec=columns_spec,
@@ -213,6 +215,11 @@ class ScreeningEngine:
 
         # 4. 执行
         results = self.duck.read_query(sql, params)
+        # P1-C修复: total 用同骨架计数查询（真实匹配数，分母跟随基础池），
+        # 行数超上限时显式 truncated=True 而非静默丢尾。
+        count_rows = self.duck.read_query(count_sql, params)
+        total_matched = count_rows[0]["total"] if count_rows else len(results)
+        truncated = total_matched > len(results)
         execution_time = (time.monotonic() - start_time) * 1000
 
         # 5. 获取基础池大小（用于报告）
@@ -224,14 +231,15 @@ class ScreeningEngine:
         data_date = self._get_latest_data_date()
 
         logger.info(
-            f"筛选完成: {len(results)} 条结果, "
-            f"基础池 {base_pool_size} 只, "
-            f"耗时 {execution_time:.1f}ms"
+            f"筛选完成: {len(results)} 条结果"
+            + (f"（共 {total_matched} 条，已截断）" if truncated else "")
+            + f", 基础池 {base_pool_size} 只, 耗时 {execution_time:.1f}ms"
         )
 
         return {
             "results": results,
-            "total": len(results),
+            "total": total_matched,
+            "truncated": truncated,
             "execution_time_ms": round(execution_time, 1),
             "base_pool_size": base_pool_size,
             "data_date": data_date,
@@ -413,10 +421,18 @@ SELECT {select_cols}
 FROM {source_table}
 WHERE {where_clause if where_clause else '1=1'}
 {order_clause}
-LIMIT 5000
+LIMIT {MAX_RESULT_ROWS}
 """)
 
-        return "".join(sql_parts), params
+        # P1-C修复: 同一条 WITH 骨架的计数查询——total 必须反映真实匹配数
+        # （PRD §12.3 分母跟随基础池），截断必须显式标记而非静默丢尾。
+        with_prefix = "".join(sql_parts[:-1])
+        count_sql = (
+            f"{with_prefix} SELECT COUNT(*) AS total FROM {source_table} "
+            f"WHERE {where_clause if where_clause else '1=1'}"
+        )
+
+        return "".join(sql_parts), params, count_sql
 
     def _build_where(self, node: dict, level: int = 0) -> tuple[str, list[Any]]:
         """递归构建 WHERE 子句

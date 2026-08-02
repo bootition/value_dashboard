@@ -48,3 +48,46 @@ def test_missing_pdf_returns_not_found_not_a_runtime_name_error(
 
     assert response.status_code == 404
     assert response.json()["detail"]["error"] == "PDF not found"
+
+
+def test_quarterly_trend_fails_closed_when_in_year_period_is_missing() -> None:
+    """P1-A: 缺 Q2 时，Q3 单季值必须为 NULL（fail-closed），
+    禁止把 Q3−Q1（包含 Q2 的累计差额）当作单季值输出。"""
+    rows = [
+        {
+            "report_date": "2025-09-30", "revenue": 340.0, "parent_net_profit": 34.0,
+            "cf_from_operating": 68.0,
+        },
+        {
+            "report_date": "2025-03-31", "revenue": 100.0, "parent_net_profit": 10.0,
+            "cf_from_operating": 20.0,
+        },
+    ]
+
+    quarterly = _to_single_quarter(rows)
+
+    by_date = {str(row["report_date"])[:10]: row for row in quarterly}
+    # 年初首期（Q1）本身就是单季值，保留累计值
+    assert by_date["2025-03-31"]["revenue"] == 100.0
+    # Q3 缺少紧邻的 Q2：单季值不可推导 → NULL，而非 240.0
+    assert by_date["2025-09-30"]["revenue"] is None
+    assert by_date["2025-09-30"]["parent_net_profit"] is None
+    assert by_date["2025-09-30"]["cf_from_operating"] is None
+
+
+def test_quarterly_trend_fails_closed_when_prior_row_is_not_adjacent_quarter() -> None:
+    """P1-A: 年内只有 Q1 与 Q4（缺 Q2/Q3）时，Q4 单季值也必须为 NULL。"""
+    rows = [
+        {
+            "report_date": "2025-12-31", "revenue": 500.0, "parent_net_profit": 50.0,
+        },
+        {
+            "report_date": "2025-03-31", "revenue": 100.0, "parent_net_profit": 10.0,
+        },
+    ]
+
+    quarterly = _to_single_quarter(rows)
+
+    by_date = {str(row["report_date"])[:10]: row for row in quarterly}
+    assert by_date["2025-03-31"]["revenue"] == 100.0
+    assert by_date["2025-12-31"]["revenue"] is None

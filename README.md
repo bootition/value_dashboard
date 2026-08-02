@@ -1,10 +1,10 @@
 # Value Dashboard — A股价值投资研究与筛选工具
 
-**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-02 第五轮独立红队复核）：**BLOCK**，4 项未缓解 P1（季度单季值造假、股票池静默退市、筛选 LIMIT 5000 静默截断、CSRC/申万排名口径错标），退出条件见 [docs/reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md](docs/reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md)。
+**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-02 第五轮系统红队 4 项 P1 已全部修复）：代码层与数据层门禁全绿（S1 392+、前端 52+10 合约、正式库 ready=TRUE、筛选可用），修复依据见 [docs/reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md](docs/reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md)。
 
-CLI 使用 `vd.bat <command>`。该启动器显式建立 formal profile；直接 `vd`/`python -m app.cli.main` 在没有 profile 时会拒绝数据库操作。
+CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`python -m app.cli.main`）并显式建立 formal profile；发行目录中与 `value-dashboard.exe` 同目录时使用打包入口。直接 `python -m app.cli.main` 在缺少 profile 环境变量时会拒绝数据库操作。
 
-个人本地研究工具，用于 A 股基本面分析、指标计算、DSL 筛选和投资决策支持。当前处于审计修复收尾与自动数据更新实施阶段；正式数据已重建（2026-07-31）。
+个人本地研究工具，用于 A 股基本面分析、指标计算、DSL 筛选和投资决策支持。正式数据已重建（2026-07-31，`docs/reports/29`）。
 
 ---
 
@@ -52,7 +52,10 @@ Vue / TypeScript 语言服务器 (LSP) 未配置且已拒绝安装。前端门�
 ### 后端依赖
 
 ```bash
-# pip 方式（推荐：为每个依赖包单独安装）
+# uv 方式（推荐，锁文件已在仓库内）
+uv sync --locked
+
+# pip 方式（为每个依赖包单独安装）
 pip install fastapi uvicorn duckdb typer httpx pydantic lark cryptography pyarrow PyYAML pandas pypinyin
 
 # 可选数据源适配器
@@ -61,8 +64,6 @@ pip install akshare easy-tdx baostock
 # 开发依赖（测试、lint）
 pip install pytest pytest-asyncio httpx ruff
 ```
-
-> **注意：** `pyproject.toml` 使用 `build-backend = "setuptools.backends._legacy:_Backend"`，此遗留构建后端须先修复/验证后方可依赖 `pip install .` 或 `pip install -e .`。当前保守方案为上方逐依赖 `pip install`；项目以 `python -m` 方式直接运行，无需打包安装。也可选用 `uv` 等外部工具（需要兼容 setuptools>=68 的构建前端）。
 
 ### 前端
 
@@ -77,14 +78,13 @@ npm install
 
 ### 一键启动（start.bat）
 
-`start.bat` 是推荐启动方式，行为如下：
+`start.bat` 是推荐启动方式（发行版）与开发版通用入口：
 
-1. 检测 `dist/value-dashboard/value-dashboard.exe` 是否存在
-2. 若存在，以**打包模式**运行该 exe
-3. 若不存在，回退到**开发模式**：`python -m app.web.main`
-4. 启动时自动执行数据库 schema 初始化与增量检查（`init_all_schema()` + `IncrementalUpdater().run_incremental_check()`）
+1. 若与 `start.bat` 同目录存在 `value-dashboard.exe`（发行布局），以**打包模式**运行该 exe。
+2. 否则回退到**开发模式**：`python -m app.web.main`（仓库根目录开发路径）。
+3. 启动时自动执行数据库 schema 初始化与后台自动更新（`init_all_schema()` + 自动更新控制器）。
 
-**注意：** 启动路径会写入正式数据库（schema 初始化可幂等，增量检查只读），因此是正常的可写运行时路径，**不是**只读审计命令。
+**注意：** 启动路径会写入正式数据库（schema 初始化可幂等），因此是正常的可写运行时路径，**不是**只读审计命令。
 
 ### CLI 启动
 
@@ -145,8 +145,8 @@ CLI 命令根据子命令不同，可读取或写入正式数据库。详见 `--
 # 前端类型检查
 cd frontend && npx vue-tsc --noEmit
 
-# 前端 Node 测试（数据质量、个股详情、筛选质量合约）
-cd frontend && node --experimental-strip-types --test tests/data-quality.test.ts tests/stock-detail.test.ts tests/screening-quality.test.ts
+# 前端 Node 测试（数据质量、个股详情、筛选质量、指标可信合约）
+cd frontend && npm run test
 
 # 前端生产构建
 cd frontend && npm run build
@@ -165,12 +165,12 @@ Get-FileHash -LiteralPath `
 
 ## 当前状态
 
-**项目状态唯一权威见 [docs/STATUS.md](docs/STATUS.md)**。要点（2026-07-31）：
+**项目状态唯一权威见 [docs/STATUS.md](docs/STATUS.md)**。要点（2026-08-02）：
 
-- 代码层门禁全部通过（S1 隔离回归、前端 lint/build/46 合约、uv lock、性能 <5s）。
-- 数据层 P0-1（股本单位混用）已关闭：5,534 只股本重建，`circ_shares > total_shares` 1,215 → 0；价格、分红、财务 lineage 重建完成（`docs/reports/29`）。
-- 待确认：最终诊断（LINEAGE_INVALID 消除）、30 股外部真值抽样、回归验证。
-- 历史审计结论（BLOCK 等）已被 `docs/reports/29` 与 `docs/STATUS.md` 取代，**请勿再引用为当前结论**。
+- 代码层门禁全部通过（S1 隔离回归 392、Ruff 零 F821、前端 lint/build/52 node 合约 + 10 组件流程测试、uv lock、完整发行构建退出码 0）。
+- 数据层 ready=TRUE、warning_codes=[]、`snapshot_period_mismatches`=0（正式库只读复验，筛选可用）；P0-1 股本混用已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0）。
+- 发布级红队 P0/P1/P2 与第五轮系统红队 4 项 P1 全部关闭；剩余为披露性数据缺口（见 `docs/STATUS.md`）。
+- 历史审计结论（BLOCK 等）已被 `docs/reports/29`–`35` 与 `docs/STATUS.md` 取代，**请勿再引用为当前结论**。
 
 历史审计链（仅追溯用，均 superseded）：
 
@@ -182,25 +182,16 @@ Get-FileHash -LiteralPath `
 
 ---
 
-## 正式数据库哈希与事故状态
+## 正式数据库状态
 
-批准基线来自修复前备份；当前正式文件已经偏离。2026-07-22 最后一次只读
-`Get-FileHash` 结果如下：
+2026-07-31 全市场数据重建完成（`docs/reports/29`）：股本、价格、分红/公司行动、
+财务 lineage 与快照全部重建，`ready=TRUE`、`warning_codes=[]`；2026-08-02
+只读复验一致（证据：`docs/evidence/evidence-formal-*20260802.json`）。
 
-| 文件 | 批准基线/备份 SHA-256 | 当前正式文件 SHA-256 | 状态 |
-|---|---|---|---|
-| `data/valuedashboard.duckdb` | `46EBCEB6DDBCCA15D4E82D22CFA659EC1C593033DE190C08B5C54FC7211A3C91` | `5186E660E603B277B72E4EAF9988963C64B25B83882BA5ACF4BE2789A51268D6` | `DRIFTED / FROZEN` |
-| `data/valuedashboard.sqlite` | `228E0F53A8EBD0B99DAED8FA2D683D42F46644E8805495350EC162EFEC6596D3` | `B7B5F2FF2D1B4D2F71512DFEBD8DC2FBD9625E51BE2D0BFDB5CAF0657EC11959` | `DRIFTED / FROZEN` |
-
-**注意：** 没有 `data/.hashes` 锁文件。哈希记录见 [docs/reports/13_CURRENT_BLOCKERS_INVESTIGATION.md](docs/reports/13_CURRENT_BLOCKERS_INVESTIGATION.md)（历史）与 `docs/evidence/` 中各证据 JSON（当前基线）。
-
-备份位于 `data/backup/audit_pre_fix_20260720.duckdb` / `.sqlite`，当前复核仍与批准基线一致。恢复会覆盖现库，未经用户明确批准不得执行。
-
-事故边界：
-
-- 第一次变异已追溯到显式执行 `python -m pytest tests/ -q --no-header`；该命令绕过 `testpaths`，导入了带模块级数据库副作用的遗留验收脚本。事故后哈希一度为 DuckDB `98DF496F...4CC2B1A`、SQLite `B7B5F2FF...7EC11959`。
-- 第二次 DuckDB 变化发生在 worker 执行 `python -m pytest tests/regression -q` 的 12.98 秒窗口内；文件 `LastWriteTimeUtc=2026-07-22 01:41:26`，命令后哈希变为当前 `5186E660...A51268D6`。当时未做逐进程文件写入追踪，具体测试/调用链尚未证明。
-- 早先提出的“mmap 延迟写回且时间戳不变”解释已撤回；它与实际变更时间戳矛盾。
+历史（2026-07-21/22 两次验证运行曾改变正式库文件）已通过 S1 路径隔离
+（`scripts/s1-pytest.ps1`）与单写者串行纪律修复；事故基线详见
+`docs/reports/13`。正式库写操作必须经 CLI/维护脚本且单写者串行，见
+`docs/runbooks/s0-evidence-preservation.md` 与 `docs/STATUS.md`。
 
 ---
 
@@ -222,11 +213,7 @@ Vue / TypeScript 语言服务器 (LSP) 在当前工作区未配置且已拒绝�
 
 - **编译器门禁：** `vue-tsc -b`（构建时类型检查）
 - **构建门禁：** `vite build`（生产构建）
-- **Node 合约测试：** 2026-07-22 新鲜运行 `46/46` 通过。
-- **编译/构建：** `npx vue-tsc --noEmit` 和 `npm run build` 均成功。
-- **浏览器功能 QA：** 完全 mock API 的 19 个场景在 375/768/1280 三种宽度全部通过；覆盖 DataStatus、StockDetail、Screening、嵌套规则、loading/404/500、保存/导出/自选 payload 和阻断状态零持久化 POST。证据见 `frontend/test-results/final-frontend-qa/`。
-- **清理证明：** QA 命令正常退出，端口 6176 和 Vite/runner 进程均无残留。
-- **视觉证据限制：** 当前可用独立 reviewer 均为文本模型，无法读取 PNG 像素；57 张截图存在且运行时无水平溢出，但 CJK 像素级换行、裁剪和视觉层级尚未获得 vision-capable reviewer 或人工签署。因此不把浏览器功能 PASS 外推为完整视觉 PASS。
+- **Node 合约测试：** `npm run test` = 52 项纯 Node 合约 + 10 项 vitest 组件流程（筛选运行/保存/导出/加入自选、数据状态、自选信任遮蔽、个股不可信告警、写令牌拦截器）全部通过。
 - **可访问性修复：** `index.html` 已改为 `lang="zh-CN"`；DataStatus 失败状态已使用语义化 `NAlert type="error"`。
 
 ---

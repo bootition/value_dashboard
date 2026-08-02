@@ -225,10 +225,36 @@ class DataInitializer:
         # A partial response may contain only the exchanges fetched successfully.
         # Never infer delisting for an exchange absent from this response.
         covered_exchanges = {record["exchange"] for record in records if record["exchange"]}
+        # P1-B修复: 防御性退市门禁——按交易所比较"本次抓取数量"与"当前上市
+        # 数量"，若某交易所抓取数低于当前上市数的 90%（截断/部分响应的
+        # 合理下限），拒绝把缺失代码标记为退市，并披露到报告（防静默
+        # 剔除数千只有效股票；正常全量退市事件不会单轮超过 10%）。
+        listed_by_exchange: dict[str, int] = {}
+        if covered_exchanges:
+            exchange_placeholders = ", ".join("?" for _ in covered_exchanges)
+            for row in self.duck.read_query(
+                f"""SELECT exchange, COUNT(*) AS cnt FROM stock_meta
+                    WHERE is_listed IS TRUE AND exchange IN ({exchange_placeholders})
+                    GROUP BY exchange""",
+                sorted(covered_exchanges),
+            ):
+                listed_by_exchange[row["exchange"]] = row["cnt"]
+        fetched_by_exchange: dict[str, int] = {}
+        for record in records:
+            exchange = record.get("exchange")
+            if exchange:
+                fetched_by_exchange[exchange] = fetched_by_exchange.get(exchange, 0) + 1
+        delist_guarded: dict[str, dict[str, int]] = {}
+        for exchange in covered_exchanges:
+            listed = listed_by_exchange.get(exchange, 0)
+            fetched = fetched_by_exchange.get(exchange, 0)
+            if listed > 0 and fetched < max(1, int(listed * 0.9)):
+                delist_guarded[exchange] = {"listed": listed, "fetched": fetched}
+
         with self.duck.transaction() as conn:
             # Retain historical securities but exclude codes absent from this
             # successfully fetched current-listed exchange from active research.
-            if covered_exchanges:
+            if covered_exchanges and not delist_guarded:
                 exchange_placeholders = ", ".join("?" for _ in covered_exchanges)
                 conn.execute(
                     f"UPDATE stock_meta SET is_listed = FALSE WHERE exchange IN ({exchange_placeholders})",
@@ -257,6 +283,16 @@ class DataInitializer:
         # 记录批次溯源
         self._record_batch(result, "stock_list", len(records))
 
+        if delist_guarded:
+            logger.warning(
+                "退市门禁触发（疑似部分响应），跳过退市标记: %s", delist_guarded
+            )
+            return {
+                "status": "partial",
+                "count": len(records),
+                "delist_guarded_exchanges": delist_guarded,
+                "reason": "partial stock list response; delisting skipped for guarded exchanges",
+            }
         logger.info(f"[Step 1] 获取 {len(records)} 只股票")
         return {"status": "success", "count": len(records)}
 

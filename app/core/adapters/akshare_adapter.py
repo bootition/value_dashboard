@@ -257,8 +257,14 @@ class AKShareAdapter(BaseAdapter):
     # ─── handlers ───────────────────────────────────────────────
 
     def _fetch_stock_list(self, request: FetchRequest) -> FetchResult:
-        """全市场股票列表: SSE + SZSE (stock_info_a_code_name) + BSE (stock_info_bj_name_code)"""
+        """全市场股票列表: SSE + SZSE (stock_info_a_code_name) + BSE (stock_info_bj_name_code)
+
+        P1-B修复: 任一板块抓取失败时如实报告 partial（error + approximate），
+        禁止把部分列表伪装成 strict 成功——否则调用方会据此把缺失股票
+        静默标记为退市。
+        """
         records: list[dict[str, Any]] = []
+        source_errors: list[str] = []
 
         # SSE + SZSE
         try:
@@ -275,6 +281,7 @@ class AKShareAdapter(BaseAdapter):
                 )
         except Exception as e:
             logger.warning(f"stock_info_a_code_name 失败: {e}")
+            source_errors.append(f"sse_szse: {e}")
 
         # BSE
         try:
@@ -291,9 +298,18 @@ class AKShareAdapter(BaseAdapter):
                 )
         except Exception as e:
             logger.warning(f"stock_info_bj_name_code 失败: {e}")
+            source_errors.append(f"bse: {e}")
 
         if not records:
             return self._make_empty_result("无法获取股票列表")
+
+        if source_errors:
+            return self._make_result(
+                data=records,
+                confidence="approximate",
+                error="partial stock list: " + "; ".join(source_errors),
+                api_version=_AKSHARE_VERSION,
+            )
 
         return self._make_result(
             data=records,

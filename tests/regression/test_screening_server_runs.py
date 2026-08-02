@@ -45,6 +45,9 @@ def test_screening_run_is_server_persisted_and_save_uses_its_output(
         json={"rule_id": rule["rule_id"], "rule_version": rule["version"], "min_listing_years": 0},
     )
     assert run.status_code == 200
+    # P1-C: API 响应必须包含截断契约键（小池子 → truncated=False）
+    assert run.json()["truncated"] is False
+    assert run.json()["total"] == 1
     assert run.json()["results"] == [{"stock_code": "000001", "name": "Test", "pe_ttm": 10.0, "_entry_explanation": "pe_ttm > 0 (实际: 10.0000)"}]
 
     saved = client.post("/api/screening/save", json={
