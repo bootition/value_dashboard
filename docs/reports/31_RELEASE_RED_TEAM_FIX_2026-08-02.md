@@ -1,9 +1,10 @@
 ---
 title: 发布级红队 P0 修复报告（2026-08-02）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-02
 last-reviewed: 2026-08-02
+superseded-by: reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md
 ---
 
 # 发布级红队 P0 修复报告（2026-08-02）

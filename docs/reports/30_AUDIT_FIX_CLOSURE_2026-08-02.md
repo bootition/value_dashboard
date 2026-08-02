@@ -1,10 +1,11 @@
 ---
 title: 审计问题修复闭环报告（2026-08-02）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-02
 last-reviewed: 2026-08-02
 supersedes: reports/27_COMPREHENSIVE_RED_TEAM_REAUDIT_2026-07-31.md
+superseded-by: reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md
 ---
 
 # 审计问题修复闭环报告（2026-08-02）

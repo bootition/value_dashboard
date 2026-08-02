@@ -1,6 +1,6 @@
 # Value Dashboard — A股价值投资研究与筛选工具
 
-**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论：代码层通过，数据重建（P0-1 股本）已完成，最终诊断与 30 股外部真值抽样确认中。
+**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-02 第五轮独立红队复核）：**BLOCK**，4 项未缓解 P1（季度单季值造假、股票池静默退市、筛选 LIMIT 5000 静默截断、CSRC/申万排名口径错标），退出条件见 [docs/reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md](docs/reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md)。
 
 CLI 使用 `vd.bat <command>`。该启动器显式建立 formal profile；直接 `vd`/`python -m app.cli.main` 在没有 profile 时会拒绝数据库操作。
 

@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–33） | 仅 29–33 ✅；其余 superseded |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–34） | 仅 29/34 ✅；30–33 修复事实有效但整体结论已被 34 取代；其余 superseded |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是 |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -48,10 +48,8 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `decisions/01_PRODUCT_REQUIREMENTS_V1.md` — 产品需求规格（验收合同，活文档）
 - `decisions/02_TECH_CONSTRAINTS.md` — 技术约束
 - `reports/29_DATA_REBUILD_REPORT_2026-07-31.md` — 最新数据重建结论
-- `reports/30_AUDIT_FIX_CLOSURE_2026-08-02.md` — 审计修复闭环结论（reports/27 代码级 P1/P2 全关闭）
-- `reports/31_RELEASE_RED_TEAM_FIX_2026-08-02.md` — 发布级红队 P0 修复结论（6 项 P0 全关闭）
-- `reports/32_RELEASE_P1_FIX_AND_FORMAL_ACCEPTANCE_2026-08-02.md` — 发布级红队 P1 修复 + 正式库只读验收结论
-- `reports/33_FOURTH_ROUND_REVIEW_FIX_2026-08-02.md` — 第四轮复测修复结论（build-release 清理竞态 + 2 项 P2）
+- `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — **当前发布裁决**：第五轮全项目系统性红队独立复核（BLOCK + 4 项 P1 + 退出条件）
+- `reports/30`–`reports/33` — 前四轮修复/验收事实（整体"全部关闭"结论已被 34 取代，仅作追溯）
 - `runbooks/s0-evidence-preservation.md` — 证据保全手册
 - `contracts/path-isolation-contract.md` — 路径隔离合同
 
