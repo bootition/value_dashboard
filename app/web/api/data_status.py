@@ -133,12 +133,15 @@ def get_summary(request: Request) -> dict:
     # xdxr 状态
     try:
         xdxr_row = duck.read_query(
-            "SELECT COUNT(*) as total_rows, COUNT(DISTINCT stock_code) as stocks "
+            "SELECT COUNT(*) as total_rows, COUNT(DISTINCT stock_code) as stocks, "
+            "MIN(event_date) as earliest, MAX(event_date) as latest "
             "FROM xdxr"
         )
         summary["xdxr"] = {
             "total_rows": xdxr_row[0]["total_rows"],
             "stocks": xdxr_row[0]["stocks"],
+            "earliest": str(xdxr_row[0]["earliest"]) if xdxr_row[0]["earliest"] else None,
+            "latest": str(xdxr_row[0]["latest"]) if xdxr_row[0]["latest"] else None,
         }
     except Exception:
         summary["xdxr"] = None
@@ -240,6 +243,46 @@ def get_summary(request: Request) -> dict:
     except Exception:
         summary["csrc_industry_count"] = 0
         errors.append("csrc_industry_count")
+
+    # PRD §6.4/§15: 各数据域最新日期（股本/上市名单/除权/CSRC 刷新）
+    try:
+        meta_row = duck.read_query(
+            """SELECT
+                   COUNT(*) AS total,
+                   COUNT(total_shares) AS with_shares,
+                   COUNT(circ_shares) AS with_circ_shares,
+                   MAX(updated_at) AS latest_updated
+               FROM stock_meta"""
+        )
+        summary["share_capital"] = {
+            "latest_updated": str(meta_row[0]["latest_updated"]) if meta_row[0]["latest_updated"] else None,
+            "with_shares": meta_row[0]["with_shares"],
+            "with_circ_shares": meta_row[0]["with_circ_shares"],
+        }
+    except Exception:
+        summary["share_capital"] = None
+        errors.append("share_capital")
+
+    try:
+        refresh_rows = {
+            row["key"]: row["value"]
+            for row in sqlite.query(
+                """SELECT key, value FROM data_refresh_state
+                   WHERE key IN ('stock_list_last_refresh', 'listing_info_last_refresh',
+                                 'csrc_industry_last_refresh')"""
+            )
+        }
+        summary["listing_info"] = {
+            "stock_list_refreshed_at": refresh_rows.get("stock_list_last_refresh"),
+            "listing_info_refreshed_at": refresh_rows.get("listing_info_last_refresh"),
+        }
+        summary["csrc_industry_refresh"] = {
+            "last_refresh": refresh_rows.get("csrc_industry_last_refresh"),
+        }
+    except Exception:
+        summary["listing_info"] = None
+        summary["csrc_industry_refresh"] = None
+        errors.append("data_refresh_state")
 
     if errors:
         raise HTTPException(status_code=503, detail={"error": "data status is partially unavailable", "fields": errors})

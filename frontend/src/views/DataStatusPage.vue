@@ -36,7 +36,10 @@ interface DataSummary {
   pdf_tasks?: { cnt: number; pending: number }
   backup?: { cnt: number; latest: string | null; full_count: number }
   dividends?: { total_rows: number; stocks: number; earliest: string | null; latest: string | null; stock_dividend_filled: number; transfer_share_filled: number; rights_issue_filled: number } | null
-  xdxr?: { total_rows: number; stocks: number } | null
+  xdxr?: { total_rows: number; stocks: number; earliest: string | null; latest: string | null } | null
+  share_capital?: { latest_updated: string | null; with_shares: number; with_circ_shares: number } | null
+  listing_info?: { stock_list_refreshed_at: string | null; listing_info_refreshed_at: string | null } | null
+  csrc_industry_refresh?: { last_refresh: string | null } | null
   readonly data_quality: DataQualityStatus
 }
 
@@ -45,7 +48,13 @@ interface AutoUpdateStatus {
   enabled: boolean
   paused: boolean
   current_stage: string
-  progress: Record<string, unknown>
+  progress: {
+    phase?: string
+    job_id?: string
+    started_at?: string
+    status?: string
+    steps?: Record<string, string>
+  }
   last_error: string | null
   last_success_at: string | null
   updated_at?: string | null
@@ -140,6 +149,13 @@ onMounted(fetchData)
               >（启动后自动更新）</span>
             </n-descriptions-item>
             <n-descriptions-item label="当前阶段">{{ autoUpdate.current_stage || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="阶段进度">
+              {{ autoUpdate.progress?.phase || '—' }}
+              <span v-if="autoUpdate.progress?.steps && Object.keys(autoUpdate.progress.steps).length > 0">
+                （{{ Object.entries(autoUpdate.progress.steps).map(([k, v]) => `${k}:${v}`).join('、') }}）
+              </span>
+            </n-descriptions-item>
+            <n-descriptions-item label="作业ID">{{ autoUpdate.progress?.job_id || '—' }}</n-descriptions-item>
             <n-descriptions-item label="上次成功">{{ autoUpdate.last_success_at || '—' }}</n-descriptions-item>
             <n-descriptions-item label="最后错误">
               <span v-if="autoUpdate.last_error" style="color:#d03050;">{{ autoUpdate.last_error }}</span>
@@ -251,6 +267,39 @@ onMounted(fetchData)
             <n-descriptions-item label="分红覆盖股票">{{ summary.dividends?.stocks ?? 0 }}</n-descriptions-item>
             <n-descriptions-item label="分红日期范围">{{ summary.dividends ? `${summary.dividends.earliest || '—'} ~ ${summary.dividends.latest || '—'}` : '—' }}</n-descriptions-item>
             <n-descriptions-item label="除权除息记录">{{ summary.xdxr?.total_rows ?? 0 }}（{{ summary.xdxr?.stocks ?? 0 }} 只）</n-descriptions-item>
+          </n-descriptions>
+        </n-card>
+
+        <!-- PRD §6.4/§15: 各数据域最新日期 -->
+        <n-card title="各数据域最新日期" size="small" style="margin-bottom: 16px;">
+          <n-descriptions :column="3" size="small">
+            <n-descriptions-item label="价格日期">
+              {{ summary.data_quality.dates.price || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="财报最新完整期">
+              {{ summary.data_quality.dates.balance_sheet.latest_complete || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="分红最新日期">
+              {{ summary.dividends?.latest || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="除权除息最新日期">
+              {{ summary.xdxr?.latest || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="股本/上市名单更新">
+              {{ summary.share_capital?.latest_updated || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="CSRC 行业刷新">
+              {{ summary.csrc_industry_refresh?.last_refresh || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="股票池刷新">
+              {{ summary.listing_info?.stock_list_refreshed_at || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="上市状态刷新">
+              {{ summary.listing_info?.listing_info_refreshed_at || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="股本字段覆盖">
+              {{ summary.share_capital ? `${summary.share_capital.with_shares}/${summary.stock_count}` : '—' }}
+            </n-descriptions-item>
           </n-descriptions>
         </n-card>
 

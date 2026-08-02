@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -215,6 +216,9 @@ class AutoUpdateController:
         """立即执行一次增量更新（手动触发或启动后自动触发）。
 
         返回更新报告；同时更新持久化状态。
+        P1修复: 每个步骤完成后即持久化当前阶段/进度（含 job_id 与
+        started_at），页面在抓取过程中可见阶段与进度，而非只有
+        starting/done 两个终态。
         """
         with self._lock:
             if self._state != "enabled":
@@ -223,16 +227,36 @@ class AutoUpdateController:
                 return {"status": "skipped", "reason": "auto_update_paused"}
             if self._current_stage == "running":
                 return {"status": "skipped", "reason": "already_running"}
+            job_id = str(uuid.uuid4())
+            started_at = datetime.now(timezone.utc).isoformat()
             self._current_stage = "running"
-            self._progress = {"phase": "starting"}
+            self._progress = {
+                "phase": "starting",
+                "job_id": job_id,
+                "started_at": started_at,
+                "steps": {},
+            }
             self._last_error = None
             self._persist()
 
         from app.core.update import IncrementalUpdater
 
+        def progress(step_name: str, step: dict[str, Any]) -> None:
+            with self._lock:
+                self._progress = {
+                    "phase": f"step:{step_name}",
+                    "job_id": job_id,
+                    "started_at": started_at,
+                    "steps": {
+                        **self._progress.get("steps", {}),
+                        step_name: step.get("status"),
+                    },
+                }
+                self._persist()
+
         try:
             updater = IncrementalUpdater(duck=self.duck, sqlite=self.sqlite)
-            report = updater.run_incremental_update(max_stocks=max_stocks)
+            report = updater.run_incremental_update(max_stocks=max_stocks, progress_cb=progress)
 
             with self._lock:
                 self._current_stage = (
@@ -240,6 +264,8 @@ class AutoUpdateController:
                 )
                 self._progress = {
                     "phase": "done",
+                    "job_id": job_id,
+                    "started_at": started_at,
                     "status": report.get("status"),
                     "steps": {k: v.get("status") for k, v in report.get("steps", {}).items()},
                 }

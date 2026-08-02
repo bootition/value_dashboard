@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import { resolve } from 'node:path'
 import vue from '@vitejs/plugin-vue'
 
@@ -18,5 +18,12 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
+  },
+  test: {
+    // 组件/浏览器流程级测试（发布级红队 P1: 前端 E2E 缺口）
+    environment: 'jsdom',
+    include: ['tests/component/**/*.test.ts'],
+    setupFiles: ['tests/component/setup.ts'],
+    globals: false,
   },
 })

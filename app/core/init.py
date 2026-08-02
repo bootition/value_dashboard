@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,9 @@ from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
+
+# CSRC 行业分块抓取大小（P1: 每块独立提交并记录进度，中断可续传）
+CSRC_BATCH_SIZE = 50
 
 FinancialStatementType = Literal[
     "balance_sheet",
@@ -337,51 +341,85 @@ class DataInitializer:
         return {"status": "success", "count": len(result.data)}
 
     def _fetch_csrc_industry(self) -> dict[str, Any]:
-        """Step 3: CSRC（证监会）行业分类（CNINFO 自动获取，PRD §24）"""
+        """Step 3: CSRC（证监会）行业分类（CNINFO 自动获取，PRD §24）
+
+        P1修复（首启性能/可用性）：
+        - 只补抓 csrc_l1 IS NULL 的股票（断点续传语义，已有旧分类保留）
+        - 分块抓取（CSRC_BATCH_SIZE），每块独立事务提交并记录进度，
+          中断后下次运行从断点继续，不会每轮全市场逐股重扫
+        """
         logger.info("[Step 3] 获取 CSRC 行业分类...")
 
         try:
             stocks = self.duck.read_query(
-                "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+                """SELECT stock_code FROM stock_meta
+                   WHERE is_listed IS TRUE AND csrc_l1 IS NULL
+                   ORDER BY stock_code"""
             )
         except Exception as error:
             return {"status": "failed", "source": "cninfo", "count": 0, "error": str(error)}
 
         if not stocks:
-            return {"status": "skipped", "reason": "无股票数据"}
+            return {
+                "status": "success", "source": "cninfo", "count": 0,
+                "note": "全部上市股已有 CSRC 分类（无需重抓）",
+            }
 
         codes = [str(row["stock_code"]) for row in stocks]
-        result = self.adapter_mgr.fetch(FetchRequest(
-            data_type="csrc_industry",
-            stock_codes=codes,
-        ))
-
-        if result.metadata.error:
-            return {
-                "status": "partial" if result.data else "failed",
-                "source": "cninfo",
-                "count": len(result.data),
-                "error": result.metadata.error,
-            }
-
-        if not result.data:
-            return {
-                "status": "missing",
-                "source": "cninfo",
-                "count": 0,
-                "note": "CSRC 行业数据不可得，行业排名将为 NULL（PRD §12.4 允许）",
-            }
-
-        # 批量写入 csrc_l1/csrc_l2（幂等）
-        with self.duck.transaction() as conn:
-            conn.executemany(
-                """UPDATE stock_meta SET csrc_l1=?, csrc_l2=? WHERE stock_code=?""",
-                [(row.get("csrc_l1"), row.get("csrc_l2"), row.get("stock_code"))
-                 for row in result.data],
+        processed = 0
+        errors: list[str] = []
+        for i in range(0, len(codes), CSRC_BATCH_SIZE):
+            chunk = codes[i : i + CSRC_BATCH_SIZE]
+            result = self.adapter_mgr.fetch(FetchRequest(
+                data_type="csrc_industry",
+                stock_codes=chunk,
+            ))
+            if result.metadata.error and not result.data:
+                errors.append(result.metadata.error)
+            else:
+                # 幂等写入；缺数据的股票保持 NULL 留给下轮断点
+                with self.duck.transaction() as conn:
+                    conn.executemany(
+                        """UPDATE stock_meta SET csrc_l1=?, csrc_l2=? WHERE stock_code=?""",
+                        [(row.get("csrc_l1"), row.get("csrc_l2"), row.get("stock_code"))
+                         for row in result.data],
+                    )
+                processed += len(result.data)
+            self._mark_csrc_progress(i + len(chunk), len(codes))
+            logger.info(
+                "  [Step 3] CSRC 进度: %d/%d (本块 %d 条)",
+                min(i + len(chunk), len(codes)), len(codes), len(result.data),
             )
 
-        logger.info(f"[Step 3] CSRC 行业分类更新完成: {len(result.data)} 条")
-        return {"status": "success", "source": "cninfo", "count": len(result.data)}
+        logger.info(f"[Step 3] CSRC 行业分类更新完成: {processed} 条")
+        return {
+            "status": "success" if not errors else "partial",
+            "source": "cninfo",
+            "count": processed,
+            "total": len(codes),
+            "errors": errors[:20],
+        }
+
+    def _mark_csrc_progress(self, processed: int, total: int) -> None:
+        """持久化 CSRC 抓取进度（断点续传依据）。"""
+        try:
+            with self.sqlite.transaction() as conn:
+                conn.execute(
+                    """INSERT INTO data_refresh_state (key, value, updated_at)
+                       VALUES ('csrc_industry_progress', ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET
+                         value=excluded.value, updated_at=excluded.updated_at""",
+                    [
+                        json.dumps({
+                            "processed": processed,
+                            "total": total,
+                            "as_of": datetime.now(timezone.utc).date().isoformat(),
+                        }, ensure_ascii=False),
+                        datetime.now(timezone.utc).isoformat(),
+                    ],
+                )
+        except Exception as error:
+            logger.warning("记录 CSRC 进度失败: %s", error)
 
     def _fetch_daily_prices(self, years: int = 5) -> dict[str, Any]:
         """Step 4: 获取近N年日线价格 (raw + qfq)"""

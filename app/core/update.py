@@ -17,7 +17,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
@@ -159,41 +159,124 @@ class IncrementalUpdater:
 
         return report
 
-    def run_incremental_update(self, max_stocks: int = 0) -> dict[str, Any]:
-        """执行增量更新
+    def run_incremental_update(
+        self,
+        max_stocks: int = 0,
+        *,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """执行增量更新（跨进程单写者串行）
 
         Args:
             max_stocks: 最多更新的股票数量（0=全部需要更新的股票）
+            progress_cb: 每个步骤完成后回调 (step_name, step_result)，
+                供 AutoUpdateController 持久化可操作进度（PRD §7.3）。
 
         Returns:
-            更新报告
+            更新报告；被跨进程锁拒绝时返回 {"status": "skipped",
+            "reason": "another_update_running"}。
         """
         logger.info("=" * 60)
         logger.info("开始增量更新 (PRD §7.3)")
         logger.info("=" * 60)
 
+        from app.core.storage.update_lock import UpdateLockError, exclusive_update
+
+        try:
+            with exclusive_update(self.duck.db_path):
+                return self._run_incremental_update_locked(max_stocks, progress_cb)
+        except UpdateLockError:
+            logger.warning("增量更新被跨进程锁拒绝：另一更新正在运行")
+            return {
+                "status": "skipped",
+                "reason": "another_update_running",
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+    def _run_incremental_update_locked(
+        self,
+        max_stocks: int,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None,
+    ) -> dict[str, Any]:
+        """持锁执行更新主体；job_logs 生命周期（P1: 状态页"最近更新"）。"""
+        job_id = str(uuid.uuid4())
+        started_at = datetime.now(timezone.utc).isoformat()
+        job_row_id = self._start_job(job_id, max_stocks, started_at)
+        try:
+            report = self._run_incremental_update_flow(max_stocks, progress_cb, job_id, started_at)
+        except Exception as error:
+            self._finish_job(job_row_id, "failed", {"error": str(error)})
+            raise
+        self._finish_job(job_row_id, report["status"], report)
+        return report
+
+    def _start_job(self, job_id: str, max_stocks: int, started_at: str) -> int:
+        """记录增量更新作业开始（PRD §15 最近更新合同）。"""
+        with self.sqlite.transaction() as conn:
+            cursor = conn.execute(
+                """INSERT INTO job_logs (job_type, status, started_at, details_json)
+                   VALUES ('incremental_update', 'running', ?, ?)""",
+                [started_at, json.dumps({"job_id": job_id, "max_stocks": max_stocks}, ensure_ascii=False)],
+            )
+            return cursor.lastrowid
+
+    def _finish_job(self, job_row_id: int, status: str, details: dict[str, Any]) -> None:
+        """结束增量更新作业（success 之外一律记 failed，供状态页只读展示）。"""
+        self.sqlite.execute(
+            """UPDATE job_logs SET status = ?, finished_at = ?, details_json = ?
+               WHERE id = ?""",
+            [
+                "success" if status == "success" else "failed",
+                datetime.now(timezone.utc).isoformat(),
+                json.dumps(details, ensure_ascii=False, default=str),
+                job_row_id,
+            ],
+        )
+
+    def _run_incremental_update_flow(
+        self,
+        max_stocks: int,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None,
+        job_id: str,
+        started_at: str,
+    ) -> dict[str, Any]:
+        """更新主流程（调用方已持有跨进程更新锁）。"""
         # 先检查
         check_report = self.run_incremental_check()
 
         report: dict[str, Any] = {
             "check": check_report,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at,
+            "job_id": job_id,
             "steps": {},
         }
+
+        def report_step(name: str, step: dict[str, Any]) -> dict[str, Any]:
+            report["steps"][name] = step
+            if progress_cb is not None:
+                progress_cb(name, step)
+            return step
+
         if check_report["blocked"]:
-            report["steps"]["announcements"] = {
+            report_step("announcements", {
                 "status": "partial",
                 "reason": "authoritative announcement and financial freshness check is unavailable",
-            }
+            })
 
         # PRD §7.7 第 4 项: 股本与上市名单（新股/退市/股本变化），
         # 以及 PRD §24 CSRC 行业分类（低频刷新）。
-        report["steps"]["universe"] = self._refresh_universe_metadata()
+        # P1: 股本变化后必须触发快照重算，否则 total_market_cap 等
+        # 市值类指标仍使用旧快照（口径过期风险）。
+        shares_before = self._share_capital_fingerprint()
+        report_step("universe", self._refresh_universe_metadata())
+        shares_after = self._share_capital_fingerprint()
+        share_capital_changed = shares_before != shares_after
+        report["share_capital_changed"] = share_capital_changed
 
         # 1. 更新交易日历（如果有新的）
         if check_report["new_trading_days"]:
-            step = self._update_trading_dates()
-            report["steps"]["trading_dates"] = step
+            report_step("trading_dates", self._update_trading_dates())
 
         announcement_check = self._check_new_announcements(persist=True)
         report["check"]["announcement_check"] = announcement_check
@@ -201,9 +284,9 @@ class IncrementalUpdater:
         financials: dict[str, Any] | None = None
         if announcement_codes:
             financials = self._refresh_financials(announcement_codes)
-            report["steps"]["financials"] = financials
+            report_step("financials", financials)
             actions = self._refresh_market_actions(announcement_codes)
-            report["steps"]["market_actions"] = actions
+            report_step("market_actions", actions)
             # 只有真正写入新报告期的股票才登记公告；
             # 数据源延迟（pending）或刷新失败（failed）保持公告 pending 并记录重试
             refreshed_codes = set(financials["succeeded_codes"])
@@ -233,30 +316,46 @@ class IncrementalUpdater:
             self._mark_announcements_seen(code, announcements)
 
         # 2. 增量更新价格（只更新有新交易日的股票）
-        step = self._update_prices_incremental(max_stocks)
-        report["steps"]["prices"] = step
+        step = report_step("prices", self._update_prices_incremental(max_stocks))
         financial_step = report["steps"].get("financials", {"status": "success"})
         financial_refreshed = bool(financials and financials.get("success", 0) > 0)
         if (
-            (step["status"] == "success" and step.get("success", 0) > 0) or financial_refreshed
+            (step["status"] == "success" and step.get("success", 0) > 0)
+            or financial_refreshed
+            or share_capital_changed
         ) and financial_step["status"] == "success":
             from app.core.indicators.calculator import IndicatorCalculator
 
             snapshot_step = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite).compute_snapshot_for_all()
-            report["steps"]["indicators"] = snapshot_step
+            report_step("indicators", snapshot_step)
             if snapshot_step["status"] != "success":
                 snapshot_step["reason"] = "price update retained; snapshot publication not ready"
 
         # 3. 重试失败任务
         if check_report["retry_tasks"]:
-            step = self._retry_failed_tasks(check_report["retry_tasks"])
-            report["steps"]["retries"] = step
+            report_step("retries", self._retry_failed_tasks(check_report["retry_tasks"]))
 
         report["status"] = aggregate_job_status(report["steps"])
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
 
         logger.info(f"增量更新完成: {report['status']}")
         return report
+
+    def _share_capital_fingerprint(self) -> str:
+        """Return a cheap fingerprint of the share-capital pool state.
+
+        用于检测 universe 刷新是否实际改变股本/上市名单，从而决定是否
+        需要重算市值类指标快照。
+        """
+        rows = self.duck.read_query(
+            """SELECT COALESCE(md5(CAST(string_agg(
+                   stock_code || ':' ||
+                   COALESCE(CAST(total_shares AS VARCHAR), '') || ':' ||
+                   COALESCE(CAST(circ_shares AS VARCHAR), '') || ':' ||
+                   CAST(is_listed AS VARCHAR), '|') AS VARCHAR)), '') AS fp
+               FROM stock_meta"""
+        )
+        return rows[0]["fp"] if rows else ""
 
     def _refresh_universe_metadata(self) -> dict[str, Any]:
         """PRD §7.7 第 4 项: 刷新股票池、上市/ST/停牌/股本与 CSRC 行业。
@@ -274,12 +373,16 @@ class IncrementalUpdater:
 
         try:
             steps["stock_list"] = initializer._fetch_stock_universe()
+            if steps["stock_list"].get("status") == "success":
+                self._mark_refreshed("stock_list_last_refresh")
         except Exception as error:
             logger.warning("股票池刷新失败: %s", error)
             steps["stock_list"] = {"status": "failed", "error": str(error)}
 
         try:
             steps["listing_info"] = initializer._fetch_listing_info()
+            if steps["listing_info"].get("status") == "success":
+                self._mark_refreshed("listing_info_last_refresh")
         except Exception as error:
             logger.warning("上市状态刷新失败: %s", error)
             steps["listing_info"] = {"status": "failed", "error": str(error)}
@@ -288,7 +391,7 @@ class IncrementalUpdater:
             try:
                 steps["csrc_industry"] = initializer._fetch_csrc_industry()
                 if steps["csrc_industry"].get("status") == "success":
-                    self._mark_csrc_refreshed()
+                    self._mark_refreshed("csrc_industry_last_refresh")
             except Exception as error:
                 logger.warning("CSRC 行业刷新失败: %s", error)
                 steps["csrc_industry"] = {"status": "failed", "error": str(error)}
@@ -327,13 +430,17 @@ class IncrementalUpdater:
 
     def _mark_csrc_refreshed(self) -> None:
         """Persist the CSRC refresh date so later runs skip the full scan."""
+        self._mark_refreshed("csrc_industry_last_refresh")
+
+    def _mark_refreshed(self, key: str) -> None:
+        """Persist a data-domain refresh timestamp (data_refresh_state)."""
         with self.sqlite.transaction() as conn:
             conn.execute(
                 """INSERT INTO data_refresh_state (key, value, updated_at)
-                   VALUES ('csrc_industry_last_refresh', ?, ?)
+                   VALUES (?, ?, ?)
                    ON CONFLICT(key) DO UPDATE SET
                      value=excluded.value, updated_at=excluded.updated_at""",
-                [datetime.now(timezone.utc).date().isoformat(), datetime.now(timezone.utc).isoformat()],
+                [key, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()],
             )
 
     def _check_new_trading_days(self) -> list[str]:

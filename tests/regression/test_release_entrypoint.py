@@ -18,12 +18,26 @@ def test_packaged_entrypoint_routes_arguments_to_cli() -> None:
 
 
 def test_release_scripts_keep_formal_data_beside_the_executable() -> None:
-    root = Path(__file__).parents[2]
     for relative_path in ("start.bat", "vd.bat"):
-        source = (root / relative_path).read_text(encoding="utf-8")
-        assert 'set "RELEASE_ROOT=%CD%"' in source
+        source = (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
         assert '%RELEASE_ROOT%\\data\\valuedashboard.duckdb' in source
         assert '%RELEASE_ROOT%\\data\\valuedashboard.sqlite' in source
+
+
+def test_start_bat_uses_current_directory_as_release_root() -> None:
+    """start.bat 在打包分支把 RELEASE_ROOT 设为当前目录。"""
+    source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+    assert 'set "RELEASE_ROOT=%CD%"' in source
+
+
+def test_vd_bat_prefers_development_entrypoint_over_stale_dist_builds() -> None:
+    """P1: vd.bat 只在使用发行布局（与 exe 同目录）时走打包模式；
+    仓库根目录始终走 python 入口，避免 dist 旧发行遮蔽开发 CLI。"""
+    source = (PROJECT_ROOT / "vd.bat").read_text(encoding="utf-8")
+    assert 'if not exist "%~dp0value-dashboard.exe" (' in source
+    assert "python -m app.cli.main %*" in source
+    # 打包分支仍把数据放在 exe 旁的 data 目录
+    assert 'set "EXE_PATH=%~dp0value-dashboard.exe"' in source
 
 
 def test_release_scripts_bootstrap_an_empty_distribution_profile() -> None:

@@ -62,7 +62,9 @@ def test_auto_update_run_once_records_result(duckdb_store, sqlite_store, monkeyp
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run_incremental_update(self, max_stocks: int = 0) -> dict:
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+            if progress_cb is not None:
+                progress_cb("prices", {"status": "success"})
             return {"status": "success", "steps": {"prices": {"status": "success"}}}
 
     monkeypatch.setattr("app.core.update.IncrementalUpdater", FakeUpdater)
@@ -76,6 +78,34 @@ def test_auto_update_run_once_records_result(duckdb_store, sqlite_store, monkeyp
     assert status["progress"]["status"] == "success"
 
 
+def test_auto_update_persists_per_step_progress(duckdb_store, sqlite_store, monkeypatch) -> None:
+    """P1: 网络抓取阶段按步骤持久化进度（job_id/started_at/steps）。"""
+    controller = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+
+    class StepwiseUpdater:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+            assert progress_cb is not None
+            progress_cb("universe", {"status": "success"})
+            progress_cb("prices", {"status": "partial"})
+            return {"status": "partial", "steps": {"universe": {"status": "success"}, "prices": {"status": "partial"}}}
+
+    monkeypatch.setattr("app.core.update.IncrementalUpdater", StepwiseUpdater)
+
+    report = controller.run_once()
+    assert report["status"] == "partial"
+
+    # 每步回调后持久化：读 persisted 应含 step:prices 进度与 job_id
+    persisted = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store).persisted_status()
+    progress = persisted["progress"]
+    assert progress.get("job_id")
+    assert progress.get("started_at")
+    assert progress.get("steps") == {"universe": "success", "prices": "partial"}
+    assert progress.get("phase") in {"done", "step:prices"}
+
+
 def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, monkeypatch) -> None:
     controller = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
 
@@ -83,7 +113,7 @@ def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, 
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run_incremental_update(self, max_stocks: int = 0) -> dict:
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
             return {"status": "partial", "steps": {"prices": {"status": "failed"}}}
 
     monkeypatch.setattr("app.core.update.IncrementalUpdater", FailingUpdater)
