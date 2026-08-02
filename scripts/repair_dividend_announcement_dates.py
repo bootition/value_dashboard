@@ -7,6 +7,11 @@ CNINFO API column name "实施公告日期".
 
 This script re-queries only stocks that currently have dividends with missing
 announcement_date and updates matching records by (stock_code, ex_date).
+
+P1-3 fix: the dividend UPDATE, raw_response_archive, fetch_batch, and
+source_audit writes now share one DuckDB transaction through the canonical
+DataInitializer record helpers, so a partial failure cannot leave half-written
+lineage.
 """
 
 from __future__ import annotations
@@ -16,19 +21,19 @@ import hashlib
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import akshare as ak
-import duckdb
 
+from app.core.adapters.base import FetchResult, SourceMetadata
+from app.core.init import DataInitializer
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
 from app.core.storage.schema import init_duckdb_schema
+from app.core.storage.sqlite_store import SQLiteStore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,7 +49,7 @@ def _strip_code(code: str) -> str:
     return code.strip().zfill(6)
 
 
-def repair(duck: DuckDBStore, dry_run: bool, sample: int = 0) -> dict:
+def repair(duck: DuckDBStore, init: DataInitializer, dry_run: bool, sample: int = 0) -> dict:
     """Re-fetch announcement dates and update only NULL records."""
     stocks = duck.read_query(
         """SELECT DISTINCT stock_code FROM dividends
@@ -78,6 +83,7 @@ def repair(duck: DuckDBStore, dry_run: bool, sample: int = 0) -> dict:
                 logger.debug("  %s: CNINFO 无数据", plain_code)
                 continue
 
+            matched_rows: list[dict] = []
             fetched_any = False
             for _, row in df.iterrows():
                 ex_date_raw = row.get("除权日") or row.get("除权除息日")
@@ -109,23 +115,47 @@ def repair(duck: DuckDBStore, dry_run: bool, sample: int = 0) -> dict:
 
                 if announce_date is not None:
                     fetched_any = True
-                    if not dry_run:
-                        payload = df.to_json(orient="records", date_format="iso", force_ascii=False)
-                        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
-                        existing_archive = duck.read_query(
-                            "SELECT COUNT(*) AS count FROM raw_response_archive WHERE raw_response_hash = ?",
-                            [digest],
-                        )[0]["count"]
-                        if existing_archive == 0:
-                            duck.write_query(
-                                "INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload) VALUES (?, 'cninfo-repair', CURRENT_TIMESTAMP, ?)",
-                                [digest, payload.encode("utf-8")],
-                            )
-                        duck.write_query(
-                            "UPDATE dividends SET announcement_date = ? WHERE stock_code = ? AND ex_date = ? AND announcement_date IS NULL",
-                            [announce_date, plain_code, ex_date],
-                        )
+                    matched_rows.append({
+                        "stock_code": plain_code,
+                        "ex_date": ex_date,
+                        "announcement_date": announce_date,
+                        "dividend_per_share": existing_by_date[ex_date],
+                    })
                     updated += 1
+
+            if matched_rows and not dry_run:
+                raw = df.to_json(orient="records", date_format="iso", force_ascii=False)
+                result = FetchResult(
+                    data=matched_rows,
+                    metadata=SourceMetadata(
+                        source="cninfo",
+                        fetch_time=datetime.now(timezone.utc),
+                        raw_response_hash=hashlib.sha256(raw.encode("utf-8")).hexdigest(),
+                        confidence="approximate",
+                        api_version="cninfo-dividend-1",
+                        row_count=len(matched_rows),
+                    ),
+                    raw_response=raw.encode("utf-8"),
+                )
+                try:
+                    # 业务行 + raw_response_archive + fetch_batch + source_audit
+                    # 同一事务，全部提交或全部回滚 (P1-3)。
+                    with duck.transaction() as conn:
+                        for row in matched_rows:
+                            conn.execute(
+                                """UPDATE dividends SET announcement_date = ?
+                                   WHERE stock_code = ? AND ex_date = ? AND announcement_date IS NULL""",
+                                [row["announcement_date"], plain_code, row["ex_date"]],
+                            )
+                        batch_id = init._record_batch_in_connection(
+                            conn, result, "dividends", len(matched_rows),
+                        )
+                        init._record_field_audit_in_connection(
+                            conn, result, matched_rows, plain_code, "ex_date", batch_id,
+                        )
+                except Exception as error:
+                    logger.error("  %s canonical write failed: %s", plain_code, error)
+                    errors += 1
 
             if not fetched_any and existing:
                 no_match += 1
@@ -162,9 +192,10 @@ def main():
 
     store = DuckDBStore(paths=paths)
     init_duckdb_schema(store)
+    init = DataInitializer(duck=store, sqlite=SQLiteStore(paths=paths))
     logger.info("模式: %s 数据库: %s", "DRY RUN" if args.dry_run else "WRITE", paths.duckdb_path)
 
-    result = repair(store, dry_run=args.dry_run, sample=args.sample)
+    result = repair(store, init, dry_run=args.dry_run, sample=args.sample)
     import json
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0

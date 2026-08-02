@@ -47,6 +47,8 @@ progress.md
 # Machine evidence artifacts (only ever tracked deliberately, never swept)
 docs/evidence/evidence-s0/
 docs/evidence/evidence-s1/
+# Legacy stray location written by early S1 runs (hash-named)
+docs/evidence-s1/
 
 # In-flight repair run state (checkpoint files, not evidence)
 scripts/evidence/repair_state_*.json
