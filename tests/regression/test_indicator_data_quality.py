@@ -63,6 +63,13 @@ def test_latest_financials_ignore_newer_shell_row(
                 ('600519', '2026-03-31', NULL, 110)
             """
         )
+        # P0-4/5: 最新完整期 = 三表核心字段齐备；快照计算只取完整期
+        connection.execute(
+            """
+            INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
+            VALUES ('600519', '2025-03-31', 50)
+            """
+        )
 
     financials = _calculator(duckdb_store, sqlite_store)._get_latest_financials("600519")
 

@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 
 STATE_TABLE = "auto_update_state"
 
-VALID_STATES = {"idle", "running", "paused", "disabled", "finished", "failed"}
+# "enabled"/"disabled" 是持久化 state 列的实际取值（enable/disable 命令写入），
+# 必须纳入合法状态集，否则 _load_persisted_state 会拒绝加载已持久化的状态。
+VALID_STATES = {"idle", "running", "paused", "disabled", "enabled", "finished", "failed"}
 
 
 class AutoUpdateController:
@@ -32,6 +34,9 @@ class AutoUpdateController:
     - 默认 enabled=True；disabled 时不自动触发，也不更新状态表
     - running 时其他触发请求被拒绝（单写者串行）
     - paused 时暂停推进；resume 后继续
+    - P0-3修复: 构造时加载持久化状态（SQLite 为跨进程唯一真相源），
+      新控制器（CLI/Web 各自实例）不会把用户已 disable/pause 的
+      状态重置回 enabled；仅当从未持久化过时才使用构造参数默认值。
     """
 
     def __init__(
@@ -65,6 +70,7 @@ class AutoUpdateController:
         self._last_error: str | None = None
         self._last_success_at: str | None = None
         self._ensure_state_table()
+        self._load_persisted_state()
 
     # ─── 状态持久化 ──────────────────────────────────────────────
 
@@ -82,6 +88,32 @@ class AutoUpdateController:
                     updated_at TEXT
                 )"""
             )
+
+    def _load_persisted_state(self) -> None:
+        """Adopt the last persisted lifecycle state so a fresh controller in
+        another process (CLI or web) never resurrects an explicitly disabled
+        or paused update.
+
+        A stale `running` marker from a crashed process is reset to idle so
+        run_once can start a new cycle; terminal stages are kept for display.
+        """
+        rows = self.sqlite.query(f"SELECT * FROM {STATE_TABLE} WHERE id = 1")
+        if not rows:
+            return
+        row = rows[0]
+        state = row.get("state")
+        if state not in VALID_STATES:
+            return
+        self._state = state
+        self._paused = bool(row.get("paused"))
+        stage = row.get("current_stage") or "idle"
+        self._current_stage = "idle" if stage == "running" else stage
+        try:
+            self._progress = json.loads(row.get("progress_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            self._progress = {}
+        self._last_error = row.get("last_error")
+        self._last_success_at = row.get("last_success_at")
 
     def _persist(self) -> None:
         with self.sqlite.transaction() as conn:

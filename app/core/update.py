@@ -93,6 +93,11 @@ class IncrementalUpdater:
         self.announcement_lookback_days: int = self._load_update_config(
             "announcement_lookback_days", default=3
         )
+        # CSRC 行业低频刷新间隔（天）：行业归属变化极低，避免每次更新
+        # 逐股查询 CNINFO（约 1.5s/股）占用数小时（默认 30 天）
+        self.csrc_refresh_interval_days: int = self._load_update_config(
+            "csrc_refresh_interval_days", default=30
+        )
 
     @staticmethod
     def _load_update_config(key: str, *, default: int) -> int:
@@ -181,6 +186,10 @@ class IncrementalUpdater:
                 "reason": "authoritative announcement and financial freshness check is unavailable",
             }
 
+        # PRD §7.7 第 4 项: 股本与上市名单（新股/退市/股本变化），
+        # 以及 PRD §24 CSRC 行业分类（低频刷新）。
+        report["steps"]["universe"] = self._refresh_universe_metadata()
+
         # 1. 更新交易日历（如果有新的）
         if check_report["new_trading_days"]:
             step = self._update_trading_dates()
@@ -248,6 +257,84 @@ class IncrementalUpdater:
 
         logger.info(f"增量更新完成: {report['status']}")
         return report
+
+    def _refresh_universe_metadata(self) -> dict[str, Any]:
+        """PRD §7.7 第 4 项: 刷新股票池、上市/ST/停牌/股本与 CSRC 行业。
+
+        通过 DataInitializer 的 canonical 写入路径执行：
+        - stock_list: 上市名单（新股加入、退市标记）
+        - listing_info: 上市状态/股本元数据
+        - csrc_industry: 证监会行业分类（低频：默认 30 天一次）
+        各子步骤独立失败降级，不影响价格/财务更新。
+        """
+        from app.core.init import DataInitializer
+
+        initializer = DataInitializer(duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr)
+        steps: dict[str, Any] = {}
+
+        try:
+            steps["stock_list"] = initializer._fetch_stock_universe()
+        except Exception as error:
+            logger.warning("股票池刷新失败: %s", error)
+            steps["stock_list"] = {"status": "failed", "error": str(error)}
+
+        try:
+            steps["listing_info"] = initializer._fetch_listing_info()
+        except Exception as error:
+            logger.warning("上市状态刷新失败: %s", error)
+            steps["listing_info"] = {"status": "failed", "error": str(error)}
+
+        if self._csrc_refresh_due():
+            try:
+                steps["csrc_industry"] = initializer._fetch_csrc_industry()
+                if steps["csrc_industry"].get("status") == "success":
+                    self._mark_csrc_refreshed()
+            except Exception as error:
+                logger.warning("CSRC 行业刷新失败: %s", error)
+                steps["csrc_industry"] = {"status": "failed", "error": str(error)}
+        else:
+            steps["csrc_industry"] = {
+                "status": "skipped",
+                "reason": "refreshed_within_interval",
+                "interval_days": self.csrc_refresh_interval_days,
+            }
+
+        statuses = [step.get("status") for step in steps.values()]
+        return {
+            "status": (
+                "success"
+                if all(status == "success" for status in statuses)
+                else "skipped"
+                if all(status == "skipped" for status in statuses)
+                else "partial"
+            ),
+            "steps": steps,
+        }
+
+    def _csrc_refresh_due(self) -> bool:
+        """Return whether the CSRC industry refresh interval has elapsed."""
+        rows = self.sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = 'csrc_industry_last_refresh'"
+        )
+        if not rows:
+            return True
+        raw = rows[0].get("value")
+        try:
+            last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return True
+        return (datetime.now(timezone.utc).date() - last_date).days >= self.csrc_refresh_interval_days
+
+    def _mark_csrc_refreshed(self) -> None:
+        """Persist the CSRC refresh date so later runs skip the full scan."""
+        with self.sqlite.transaction() as conn:
+            conn.execute(
+                """INSERT INTO data_refresh_state (key, value, updated_at)
+                   VALUES ('csrc_industry_last_refresh', ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value, updated_at=excluded.updated_at""",
+                [datetime.now(timezone.utc).date().isoformat(), datetime.now(timezone.utc).isoformat()],
+            )
 
     def _check_new_trading_days(self) -> list[str]:
         """检查是否有本地没有的新交易日"""

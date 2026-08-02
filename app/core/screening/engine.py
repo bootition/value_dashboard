@@ -763,44 +763,22 @@ LIMIT 5000
         return " AND ".join(clauses)
 
     def _reject_mixed_report_dates(self) -> None:
-        """Fail closed when a snapshot would otherwise combine newer statement rows."""
-        rows = self.duck.read_query("""
-            SELECT m.stock_code, s.report_date AS snapshot_date,
-                   bs.latest_date AS balance_date, ic.latest_date AS income_date,
-                   cf.latest_date AS cashflow_date
-            FROM stock_meta m
-            LEFT JOIN LATERAL (
-                SELECT report_date FROM indicator_snapshot
-                WHERE stock_code = m.stock_code
-                ORDER BY report_date DESC LIMIT 1
-            ) s ON true
-            LEFT JOIN LATERAL (
-                SELECT MAX(report_date) AS latest_date FROM balance_sheet
-                WHERE stock_code = m.stock_code
-            ) bs ON true
-            LEFT JOIN LATERAL (
-                SELECT MAX(report_date) AS latest_date FROM income_statement
-                WHERE stock_code = m.stock_code
-            ) ic ON true
-            LEFT JOIN LATERAL (
-                SELECT MAX(report_date) AS latest_date FROM cash_flow
-                WHERE stock_code = m.stock_code
-            ) cf ON true
-            WHERE m.is_listed IS TRUE AND s.report_date IS NOT NULL
-              AND (
-                  (bs.latest_date IS NOT NULL AND bs.latest_date <> s.report_date)
-                  OR (ic.latest_date IS NOT NULL AND ic.latest_date <> s.report_date)
-                  OR (cf.latest_date IS NOT NULL AND cf.latest_date <> s.report_date)
-              )
-            LIMIT 1
-        """)
+        """Fail closed when a snapshot would otherwise combine newer statement rows.
+
+        P0-4/5修复: 与数据质量门禁共用同一判定（snapshot_period_mismatches，
+        data_quality 中的最新完整三表期）。报表存在晚于完整期但缺核心字段的
+        新行属于数据源未就绪（PRD §7.7），快照按完整期计算，不再触发全市场
+        阻断；只有快照期与完整期不一致（或快照存在但无完整期）才阻断。
+        """
+        from app.core.data_quality import snapshot_period_mismatches
+
+        rows = snapshot_period_mismatches(self.duck)
         if rows:
             row = rows[0]
             raise ValueError(
                 "mixed snapshot/statement report dates for "
                 f"{row['stock_code']}: snapshot={row['snapshot_date']}, "
-                f"balance={row['balance_date']}, income={row['income_date']}, "
-                f"cashflow={row['cashflow_date']}"
+                f"complete_period={row['complete_date']}"
             )
 
     @staticmethod

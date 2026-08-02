@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
 KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"akshare_eastmoney", "baostock", "cninfo", "tdx", "tencent", "sina", "local_cache"}
+    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache"}
 )
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
@@ -35,12 +35,15 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "xdxr": ["tdx"],
     "announcements": ["cninfo"],
     "sw_industry": ["local_cache"],
-    "csrc_industry": ["cninfo"],
+    # P0-1修复: CSRC 行业使用独立适配器名 cninfo_csrc，
+    # 不再覆盖 cninfo（announcements/dividends 的适配器）。
+    "csrc_industry": ["cninfo_csrc"],
     "trading_dates": ["akshare_eastmoney", "baostock"],
 }
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
     "cninfo": 1.5,
+    "cninfo_csrc": 1.5,
     "baostock": 0.1,
     "tdx": 0.1,
     "tencent": 0.2,
@@ -242,7 +245,7 @@ class AdapterManager:
         # CSRC 行业适配器（CNINFO 证监会口径，当前行业唯一来源）
         try:
             from app.core.adapters.csrc_industry_adapter import CSRCIndustryAdapter
-            self.register(CSRCIndustryAdapter(self._rate_limits["cninfo"]))
+            self.register(CSRCIndustryAdapter(self._rate_limits["cninfo_csrc"]))
         except ImportError as e:
             logger.warning(f"CSRC 行业适配器未安装: {e}")
         except Exception as e:

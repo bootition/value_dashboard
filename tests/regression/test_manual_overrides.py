@@ -64,6 +64,13 @@ def _insert_financials(store: DuckDBStore) -> None:
             VALUES ('600519', '2025-03-31', 500, 100)
             """
         )
+        # P0-4/5: 最新完整期 = 三表核心字段齐备；快照计算只取完整期
+        connection.execute(
+            """
+            INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
+            VALUES ('600519', '2025-03-31', 50)
+            """
+        )
 
 
 def _insert_override(store: SQLiteStore, status: str, value: float) -> None:

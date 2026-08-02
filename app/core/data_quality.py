@@ -192,6 +192,73 @@ def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
     }
 
 
+def snapshot_period_mismatches(duck: DuckDBStore) -> list[dict]:
+    """Return listed stocks whose published snapshot period is not the latest
+    complete three-statement period.
+
+    The latest complete period is the newest report_date where balance_sheet,
+    income_statement, and cash_flow all carry their core non-null fields.
+    Newer statement rows with missing core fields are a data-source pending
+    state (PRD §7.7: "数据源尚未就绪时保留旧值"), not a screening period.
+
+    This is the single shared judgment for both the readiness gate
+    (minimum_data_readiness → snapshot_period_alignment) and the screening
+    engine (_reject_mixed_report_dates), so a partial source update can never
+    pass one and silently block the other.
+    """
+    return duck.read_query(
+        """
+        SELECT m.stock_code,
+               s.report_date AS snapshot_date,
+               cp.complete_date
+        FROM stock_meta m
+        LEFT JOIN LATERAL (
+            SELECT report_date FROM indicator_snapshot
+            WHERE stock_code = m.stock_code
+            ORDER BY report_date DESC LIMIT 1
+        ) s ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(bs.report_date) AS complete_date
+            FROM balance_sheet bs
+            JOIN income_statement ic
+              ON ic.stock_code = bs.stock_code AND ic.report_date = bs.report_date
+            JOIN cash_flow cf
+              ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
+            WHERE bs.stock_code = m.stock_code
+              AND bs.total_assets IS NOT NULL
+              AND bs.total_liabilities IS NOT NULL
+              AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
+              AND ic.revenue IS NOT NULL
+              AND ic.parent_net_profit IS NOT NULL
+              AND cf.cf_from_operating IS NOT NULL
+        ) cp ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(report_date) AS max_date FROM balance_sheet WHERE stock_code = m.stock_code
+        ) lb ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(report_date) AS max_date FROM income_statement WHERE stock_code = m.stock_code
+        ) li ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(report_date) AS max_date FROM cash_flow WHERE stock_code = m.stock_code
+        ) lc ON true
+        WHERE m.is_listed IS TRUE
+          AND s.report_date IS NOT NULL
+          AND (
+              -- 完整期存在但与快照期不一致（任一方向）
+              (cp.complete_date IS NOT NULL AND s.report_date <> cp.complete_date)
+              -- 报表有比快照更新的行，但从未构成完整期（无法回算/校验口径）
+              OR (cp.complete_date IS NULL
+                  AND (
+                      lb.max_date IS NOT NULL AND lb.max_date > s.report_date
+                      OR li.max_date IS NOT NULL AND li.max_date > s.report_date
+                      OR lc.max_date IS NOT NULL AND lc.max_date > s.report_date
+                  ))
+          )
+        ORDER BY m.stock_code
+        """
+    )
+
+
 def minimum_data_readiness(
     duck: DuckDBStore,
     sqlite: SQLiteStore | None = None,
@@ -325,11 +392,28 @@ def minimum_data_readiness(
                   AND current_raw.close IS NOT NULL
                   AND ABS(snapshot.latest_close - current_raw.close)
                       <= GREATEST(ABS(current_raw.close), 1.0) * 0.000001
-            ) AS has_coherent_snapshot
+            ) AS has_coherent_snapshot,
+            -- P0-4/5: 快照期必须等于最新完整三表期（与筛选引擎共用判定）。
+            -- 若任一张报表存在晚于完整期的新行，属"数据源未就绪"的披露项
+            -- （PRD §7.7），不阻断；快照期与完整期不一致才是阻断项。
+            (complete_financials.report_date IS NOT NULL AND (
+                lb.max_balance IS NOT NULL AND lb.max_balance > complete_financials.report_date
+                OR li.max_income IS NOT NULL AND li.max_income > complete_financials.report_date
+                OR lc.max_cashflow IS NOT NULL AND lc.max_cashflow > complete_financials.report_date
+            )) AS has_pending_incomplete_period
         FROM stock_meta m
         LEFT JOIN raw ON raw.stock_code = m.stock_code
         LEFT JOIN qfq ON qfq.stock_code = m.stock_code
         LEFT JOIN complete_financials ON complete_financials.stock_code = m.stock_code
+        LEFT JOIN LATERAL (
+            SELECT MAX(report_date) AS max_balance FROM balance_sheet WHERE stock_code = m.stock_code
+        ) lb ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(report_date) AS max_income FROM income_statement WHERE stock_code = m.stock_code
+        ) li ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(report_date) AS max_cashflow FROM cash_flow WHERE stock_code = m.stock_code
+        ) lc ON true
         WHERE m.is_listed IS TRUE
         ORDER BY m.stock_code
         """,
@@ -345,7 +429,8 @@ def minimum_data_readiness(
         "snapshot_price_coherence": [], "share_capital": [],
         "corporate_action_dividend_lineage": [],
         "sector_financials": [], "snapshot_input_freshness": [],
-        "lineage_coverage": [],
+        "lineage_coverage": [], "snapshot_period_alignment": [],
+        "pending_financial_period": [],
     }
     for row in rows:
         for key, column in (
@@ -363,15 +448,25 @@ def minimum_data_readiness(
         ):
             if not row[column]:
                 issues[key].append(row["stock_code"])
+        # has_pending_incomplete_period 为真才是不利状态（列语义与其余相反）
+        if row.get("has_pending_incomplete_period"):
+            issues["pending_financial_period"].append(row["stock_code"])
     issues["lineage_coverage"].extend(_missing_lineage_coverage(duck, rows))
+    # P0-4/5: 快照期与最新完整三表期不一致是阻断项（与筛选引擎共用判定），
+    # 消除 "ready=true 但筛选全部失败" 的假阳性。
+    issues["snapshot_period_alignment"] = [
+        row["stock_code"] for row in snapshot_period_mismatches(duck)
+    ]
     if sqlite is not None:
         stale_override_codes = _published_override_stale_snapshot_codes(duck, sqlite)
         issues["snapshot_input_freshness"].extend(stale_override_codes)
     for key, codes in issues.items():
         issues[key] = list(dict.fromkeys(codes))
     # 披露性缺口（市场真实状态，非数据损坏）：公司从未分红/无除权事件是
-    # 合法事实，筛选指标对其正确返回空值。不阻断筛选，但保留计数供 UI 披露。
-    disclosure_keys = {"corporate_action_dividend_lineage"}
+    # 合法事实，筛选指标对其正确返回空值；报表存在晚于完整期的新行是
+    # "数据源尚未就绪"（PRD §7.7），快照按完整期计算，均不阻断筛选，
+    # 但保留计数供 UI 披露。
+    disclosure_keys = {"corporate_action_dividend_lineage", "pending_financial_period"}
     missing = {key: codes[:20] for key, codes in issues.items() if codes}
     blocking = {
         key: codes for key, codes in issues.items()

@@ -51,6 +51,8 @@ def test_failed_financial_refresh_keeps_announcement_pending_and_records_retry(d
     }
     updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
     updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+    # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
+    updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
 
     updater.run_incremental_update()
 
@@ -78,6 +80,8 @@ def test_successful_financial_refresh_marks_announcement_seen(duckdb_store, sqli
     }
     updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
     updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+    # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
+    updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
 
     updater.run_incremental_update()
 
@@ -101,6 +105,8 @@ def test_non_financial_announcement_is_registered_without_financial_refresh(duck
     updater._check_new_announcements = lambda persist=False: pending
     updater._refresh_financials = lambda codes: (_ for _ in ()).throw(AssertionError("financial refresh must not run"))
     updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+    # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
+    updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
 
     updater.run_incremental_update()
 
@@ -258,6 +264,8 @@ def test_pending_financial_refresh_keeps_announcement_pending_and_retries(duckdb
     }
     updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
     updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+    # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
+    updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
 
     updater.run_incremental_update()
 

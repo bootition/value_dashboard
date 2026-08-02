@@ -35,7 +35,8 @@ DataType = Literal[
 
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
-SourceName = Literal["cninfo", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache"]
+# P0-1: cninfo_csrc 是 CSRC 行业适配器的独立源名（与 cninfo 公告/分红适配器区分）
+SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache"]
 
 
 # ─── 请求/响应模型 ──────────────────────────────────────────────────

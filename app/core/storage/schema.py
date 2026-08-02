@@ -920,6 +920,20 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             "ON CONFLICT(version) DO NOTHING",
             (13, "筛选草稿 revision 版本号，支持并发冲突检测"),
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS data_refresh_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
+            "ON CONFLICT(version) DO NOTHING",
+            (14, "数据域刷新状态（如 CSRC 行业低频刷新时间戳）"),
+        )
 
 
 def init_all_schema(

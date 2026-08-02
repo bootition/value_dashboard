@@ -94,3 +94,51 @@ def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, 
     status = controller.status()
     assert status["current_stage"] == "failed"
     assert status["last_error"] is not None
+
+
+def test_new_controller_adopts_persisted_disabled_state(duckdb_store, sqlite_store) -> None:
+    """P0-3: 用户 disable 后，任何新控制器（CLI/Web 各自实例）不得复活自动更新。"""
+    first = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    first.disable()
+
+    second = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert second.status()["enabled"] is False
+    assert second.status()["state"] == "disabled"
+    assert second.persisted_status()["enabled"] is False
+    assert second.run_once()["status"] == "skipped"
+    assert second.run_once()["reason"] == "auto_update_disabled"
+
+
+def test_new_controller_adopts_persisted_paused_state(duckdb_store, sqlite_store) -> None:
+    first = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    first.pause()
+
+    second = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert second.status()["paused"] is True
+    assert second.run_once()["status"] == "skipped"
+    assert second.run_once()["reason"] == "auto_update_paused"
+
+
+def test_enable_after_restart_reactivates(duckdb_store, sqlite_store) -> None:
+    first = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    first.disable()
+
+    second = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    second.enable()
+
+    assert second.status()["enabled"] is True
+    persisted = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    assert persisted.status()["enabled"] is True
+
+
+def test_crashed_running_marker_is_reset_to_idle(duckdb_store, sqlite_store) -> None:
+    """崩溃遗留的 running 标记不得让新控制器永久拒绝 run_once。"""
+    first = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    first._current_stage = "running"
+    first._persist()
+
+    second = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert second.status()["current_stage"] == "idle"

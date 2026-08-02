@@ -317,6 +317,10 @@ class IndicatorCalculator:
               AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
               AND ic.revenue IS NOT NULL
               AND ic.parent_net_profit IS NOT NULL
+              -- P0-4/5修复: 只取"最新完整期"——三表核心字段齐备的报告期。
+              -- 晚于完整期但缺核心字段的行是数据源未就绪（PRD §7.7），
+              -- 不得混入快照计算，避免部分新财务+旧快照口径不一致。
+              AND cf.cf_from_operating IS NOT NULL
             ORDER BY bs.report_date DESC
             LIMIT 1
         """, [stock_code])

@@ -4,7 +4,11 @@ param(
 
     [string]$EvidenceDir = "docs/evidence/evidence-s1",
 
-    [Parameter(ValueFromRemainingArguments = $true)]
+    # Position 0 显式声明: 首个位置参数必须进入 PytestArgs。
+    # 此前未声明 Position，PowerShell 会把首个位置参数（如
+    # tests/regression/test_x.py）误绑到 $EvidenceDir，导致证据目录
+    # 创建在 tests/regression 下并触发 "Cannot create ... already exists"。
+    [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
     [string[]]$PytestArgs
 )
 

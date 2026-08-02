@@ -37,7 +37,10 @@ class CSRCIndustryAdapter(BaseAdapter):
 
     def __init__(self, rate_limit: float = 1.0, timeout: float = 30.0) -> None:
         super().__init__(
-            name="cninfo",  # 数据源自 CNINFO webapi
+            # P0-1修复: 适配器名与 CNINFO 公告/分红适配器区分。
+            # AdapterManager 以 name 为字典键，同名会互相覆盖；
+            # cninfo 保留给 announcements/dividends，本适配器使用 cninfo_csrc。
+            name="cninfo_csrc",  # 数据源自 CNINFO webapi
             supported={"csrc_industry"},  # type: ignore[arg-type]
             rate_limit=rate_limit,
         )

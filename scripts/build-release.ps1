@@ -66,3 +66,50 @@ foreach ($forbidden in @("data\valuedashboard.duckdb", "data\valuedashboard.sqli
         throw "Release must not package formal data: $forbidden"
     }
 }
+
+# Real launch smoke test (P0-6): boot the release through start.bat and require
+# a live /api/health endpoint. This exercises CMD parsing of the launcher (not
+# just its text) and the actual frozen executable with an empty formal profile.
+$healthPort = 8765
+if (Get-NetTCPConnection -State Listen -LocalPort $healthPort -ErrorAction SilentlyContinue) {
+    throw "Release smoke test cannot bind: port $healthPort is already in use. Stop the dev server and retry."
+}
+$smokeProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/d", "/c", "start.bat" -WorkingDirectory $releaseRoot -PassThru -WindowStyle Hidden
+try {
+    $healthy = $false
+    for ($attempt = 0; $attempt -lt 120; $attempt++) {
+        Start-Sleep -Seconds 1
+        if ($smokeProc.HasExited) { break }
+        try {
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$healthPort/api/health" -TimeoutSec 2 -UseBasicParsing
+            if ($response.StatusCode -eq 200) { $healthy = $true; break }
+        }
+        catch { }
+    }
+    if (-not $healthy) {
+        $logPath = Join-Path $releaseRoot "data\logs\start.log"
+        $logTail = if (Test-Path -LiteralPath $logPath) {
+            (Get-Content -LiteralPath $logPath -Tail 30) -join "`n"
+        }
+        else {
+            "(no start.log; launcher did not reach the packaged branch)"
+        }
+        throw "Release smoke test failed: /api/health unreachable within 120s.`n$logTail"
+    }
+}
+finally {
+    if (-not $smokeProc.HasExited) {
+        & taskkill /T /F /PID $smokeProc.Id 2>$null | Out-Null
+    }
+}
+# The smoke boot initializes an empty formal profile; remove it so the release
+# artifact stays free of mutable data.
+$smokeData = Join-Path $releaseRoot "data"
+if (Test-Path -LiteralPath $smokeData) {
+    Remove-Item -LiteralPath $smokeData -Recurse -Force
+}
+foreach ($forbidden in @("data\valuedashboard.duckdb", "data\valuedashboard.sqlite")) {
+    if (Test-Path -LiteralPath (Join-Path $releaseRoot $forbidden)) {
+        throw "Release must not package formal data: $forbidden"
+    }
+}

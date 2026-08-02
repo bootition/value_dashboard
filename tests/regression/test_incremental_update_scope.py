@@ -1,0 +1,181 @@
+"""P0-2 回归: 增量更新必须覆盖股票池/上市状态/股本与 CSRC 行业（PRD §7.7 第 4 项）。"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from app.core.update import IncrementalUpdater
+
+
+def _check_report(blocked: bool = False) -> dict:
+    return {
+        "new_trading_days": [], "retry_tasks": [],
+        "latest_local_price_date": "2026-07-20",
+        "announcement_check": {"status": "available"},
+        "needs_update": True, "blocked": blocked,
+    }
+
+
+def _stub_network_steps(updater: IncrementalUpdater) -> None:
+    """Replace every network-touching step except the one under test."""
+    updater.run_incremental_check = lambda: _check_report()
+    updater._check_new_announcements = lambda persist=False: {
+        "status": "available", "affected_stock_codes": [],
+        "affected_announcements": {}, "all_new_announcements": {},
+    }
+    updater._refresh_financials = lambda codes: {
+        "status": "success", "succeeded_codes": codes, "failed_codes": [],
+    }
+    updater._refresh_market_actions = lambda codes: {"status": "success"}
+    updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+
+
+def test_incremental_update_runs_universe_listing_and_csrc_steps(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_network_steps(updater)
+    calls: list[str] = []
+
+    def fake_universe(self) -> dict:
+        calls.append("universe")
+        return {
+            "status": "success",
+            "steps": {
+                "stock_list": {"status": "success", "count": 1},
+                "listing_info": {"status": "success", "count": 1},
+                "csrc_industry": {"status": "success", "count": 1},
+            },
+        }
+
+    monkeypatch.setattr(IncrementalUpdater, "_refresh_universe_metadata", fake_universe)
+
+    report = updater.run_incremental_update()
+
+    assert calls == ["universe"]
+    assert report["steps"]["universe"]["status"] == "success"
+    assert report["steps"]["universe"]["steps"]["stock_list"]["status"] == "success"
+    assert report["steps"]["universe"]["steps"]["csrc_industry"]["status"] == "success"
+
+
+def test_universe_step_degrades_without_blocking_prices(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_network_steps(updater)
+
+    def fake_universe(self) -> dict:
+        return {
+            "status": "partial",
+            "steps": {
+                "stock_list": {"status": "failed", "error": "source down"},
+                "listing_info": {"status": "success", "count": 0},
+                "csrc_industry": {"status": "skipped", "reason": "refreshed_recently"},
+            },
+        }
+
+    monkeypatch.setattr(IncrementalUpdater, "_refresh_universe_metadata", fake_universe)
+
+    report = updater.run_incremental_update()
+
+    assert report["steps"]["universe"]["status"] == "partial"
+    assert report["status"] in {"success", "partial"}
+
+
+def test_csrc_refresh_due_initial_run() -> None:
+    from app.core.update import IncrementalUpdater as Updater
+
+    updater = Updater.__new__(Updater)
+    updater.sqlite = _FakeSQLite([])
+    updater.csrc_refresh_interval_days = 30
+
+    assert updater._csrc_refresh_due() is True
+
+
+def test_csrc_refresh_throttled_by_persisted_marker(duckdb_store, sqlite_store) -> None:
+    today = datetime.now(timezone.utc).date().isoformat()
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES ('csrc_industry_last_refresh', ?, ?)""",
+        [today, datetime.now(timezone.utc).isoformat()],
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    assert updater._csrc_refresh_due() is False
+
+    stale = (datetime.now(timezone.utc).date() - timedelta(days=31)).isoformat()
+    sqlite_store.execute(
+        """UPDATE data_refresh_state SET value = ? WHERE key = 'csrc_industry_last_refresh'""",
+        [stale],
+    )
+    assert updater._csrc_refresh_due() is True
+
+
+def test_universe_step_skips_csrc_when_recently_refreshed(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    from app.core.init import DataInitializer
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES ('csrc_industry_last_refresh', ?, ?)""",
+        [today, datetime.now(timezone.utc).isoformat()],
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_stock_universe",
+        lambda self: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_listing_info",
+        lambda self: {"status": "success", "count": 1},
+    )
+
+    def forbidden(self) -> dict:
+        raise AssertionError("csrc refresh must be skipped inside the interval")
+
+    monkeypatch.setattr(DataInitializer, "_fetch_csrc_industry", forbidden)
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    step = updater._refresh_universe_metadata()
+
+    assert step["steps"]["csrc_industry"]["status"] == "skipped"
+    assert step["steps"]["csrc_industry"]["interval_days"] == updater.csrc_refresh_interval_days
+
+
+def test_universe_step_marks_csrc_refreshed_after_success(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    from app.core.init import DataInitializer
+
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_stock_universe",
+        lambda self: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_listing_info",
+        lambda self: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_csrc_industry",
+        lambda self: {"status": "success", "count": 1},
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    step = updater._refresh_universe_metadata()
+
+    assert step["status"] == "success"
+    rows = sqlite_store.query(
+        "SELECT value FROM data_refresh_state WHERE key = 'csrc_industry_last_refresh'"
+    )
+    assert rows
+    assert str(rows[0]["value"])[:10] == datetime.now(timezone.utc).date().isoformat()
+    assert updater._csrc_refresh_due() is False
+
+
+class _FakeSQLite:
+    def __init__(self, rows: list[dict]) -> None:
+        self._rows = rows
+
+    def query(self, sql: str) -> list[dict]:
+        return self._rows
