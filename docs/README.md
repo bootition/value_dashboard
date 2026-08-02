@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–32） | 仅 29–32 ✅；其余 superseded |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–33） | 仅 29–33 ✅；其余 superseded |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是 |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -51,6 +51,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/30_AUDIT_FIX_CLOSURE_2026-08-02.md` — 审计修复闭环结论（reports/27 代码级 P1/P2 全关闭）
 - `reports/31_RELEASE_RED_TEAM_FIX_2026-08-02.md` — 发布级红队 P0 修复结论（6 项 P0 全关闭）
 - `reports/32_RELEASE_P1_FIX_AND_FORMAL_ACCEPTANCE_2026-08-02.md` — 发布级红队 P1 修复 + 正式库只读验收结论
+- `reports/33_FOURTH_ROUND_REVIEW_FIX_2026-08-02.md` — 第四轮复测修复结论（build-release 清理竞态 + 2 项 P2）
 - `runbooks/s0-evidence-preservation.md` — 证据保全手册
 - `contracts/path-isolation-contract.md` — 路径隔离合同
 

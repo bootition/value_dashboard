@@ -73,12 +73,19 @@ class DataInitializer:
         self.sqlite = sqlite
         self._batch_id = str(uuid.uuid4())
 
-    def run_full_init(self, skip_prices: bool = False, skip_financials: bool = False) -> dict[str, Any]:
+    def run_full_init(
+        self,
+        skip_prices: bool = False,
+        skip_financials: bool = False,
+        skip_csrc: bool = False,
+    ) -> dict[str, Any]:
         """执行完整最小可用初始化
 
         Args:
             skip_prices: 跳过价格数据（调试用）
             skip_financials: 跳过财务数据（调试用）
+            skip_csrc: 跳过 CSRC 行业全量抓取（P2: 首次全量约 2.3h，
+                可用 --skip-csrc 先行建立最小可用，后续由自动更新低频补齐）
 
         Returns:
             初始化摘要报告
@@ -111,8 +118,15 @@ class DataInitializer:
             report["steps"]["trading_dates"] = step2
 
             # Step 3: CSRC 行业分类
-            step3 = self._fetch_csrc_industry()
-            report["steps"]["sw_industry"] = step3
+            if skip_csrc:
+                report["steps"]["sw_industry"] = {
+                    "status": "skipped",
+                    "reason": "skipped_by_flag",
+                    "note": "CSRC 行业分类由后续自动更新低频补齐（PRD §24）",
+                }
+            else:
+                step3 = self._fetch_csrc_industry()
+                report["steps"]["sw_industry"] = step3
 
             step4: dict[str, Any] | None = None
             step5: dict[str, Any] | None = None

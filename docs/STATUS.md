@@ -11,7 +11,7 @@
 
 | 层面 | 状态 | 依据 |
 |---|---|---|
-| 代码层 | ✅ 通过（可自动化门禁全部通过：S1 回归 389、Ruff 零 F821、前端 lint/build/52 node 合约 + 9 组件流程测试、uv lock、wheel；`reports/27` 代码级 P1/P2、发布级红队 P0 与 P1 全部关闭） | `reports/25`、`reports/30`、`reports/31`、`reports/32` |
+| 代码层 | ✅ 通过（可自动化门禁全部通过：S1 回归 392、Ruff 零 F821、前端 lint/build/52 node 合约 + 9 组件流程测试、uv lock、wheel、build-release 退出码 0；`reports/27` 代码级 P1/P2、发布级红队 P0/P1/P2 全部关闭） | `reports/25`、`reports/30`–`reports/33` |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
 | 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]（2026-08-02 正式库只读复验；`snapshot_period_mismatches`=0，筛选 451ms/3,878 只） | `reports/29`、`reports/32`、`docs/evidence/evidence-formal-*20260802.json` |
 | 30 股外部真值抽样 | ✅ 已执行（收盘 27/27、总股本 27/27；2 只流通股本为解禁时间差披露项） | `reports/29` |
@@ -39,6 +39,7 @@
 | `docs/reports/30_AUDIT_FIX_CLOSURE_2026-08-02.md` | 审计修复闭环报告（`reports/27` 代码级 P1/P2 全部关闭依据） | 代码层审计结论基线 |
 | `docs/reports/31_RELEASE_RED_TEAM_FIX_2026-08-02.md` | 发布级红队 P0 修复报告（6 项 P0 关闭依据） | 发布级审查结论基线 |
 | `docs/reports/32_RELEASE_P1_FIX_AND_FORMAL_ACCEPTANCE_2026-08-02.md` | 发布级红队 P1 修复 + 正式库只读验收报告 | 发布级 P1 关闭依据 + 正式库当前状态基线 |
+| `docs/reports/33_FOURTH_ROUND_REVIEW_FIX_2026-08-02.md` | 第四轮复测修复报告（build-release 清理竞态 P1 + 2 项 P2） | 发布级最后一轮修复依据 |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/contracts/path-isolation-contract.md` | 路径隔离合同（签署版） | |
 | `.planning/2026-07-31-automatic-data-updates/` | 当前实施会话计划 | 会话产物，不入 docs/ |

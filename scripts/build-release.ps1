@@ -101,12 +101,39 @@ finally {
     if (-not $smokeProc.HasExited) {
         & taskkill /T /F /PID $smokeProc.Id 2>$null | Out-Null
     }
+    # taskkill 返回后 EXE 进程可能仍在释放文件句柄（start.log 被占用），
+    # 立即删除 data\ 会抛错并使后续 forbidden 检查被跳过（P1 清理竞态）。
+    # 等待进程树退出并轮询删除，避免污染发行包/CI 误报。
+    $processExited = $false
+    for ($attempt = 0; $attempt -lt 60; $attempt++) {
+        $exeProcesses = @(Get-Process -Name "value-dashboard" -ErrorAction SilentlyContinue)
+        if ($exeProcesses.Count -eq 0) {
+            $processExited = $true
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $processExited) {
+        throw "Release smoke cleanup failed: value-dashboard process did not exit after taskkill"
+    }
 }
 # The smoke boot initializes an empty formal profile; remove it so the release
-# artifact stays free of mutable data.
+# artifact stays free of mutable data. 句柄释放可能有延迟，重试删除。
 $smokeData = Join-Path $releaseRoot "data"
 if (Test-Path -LiteralPath $smokeData) {
-    Remove-Item -LiteralPath $smokeData -Recurse -Force
+    $removed = $false
+    for ($attempt = 0; $attempt -lt 20 -and -not $removed; $attempt++) {
+        try {
+            Remove-Item -LiteralPath $smokeData -Recurse -Force -ErrorAction Stop
+            $removed = $true
+        }
+        catch {
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    if (-not $removed) {
+        throw "Release smoke cleanup failed: $smokeData is still locked after process exit"
+    }
 }
 foreach ($forbidden in @("data\valuedashboard.duckdb", "data\valuedashboard.sqlite")) {
     if (Test-Path -LiteralPath (Join-Path $releaseRoot $forbidden)) {

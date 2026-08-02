@@ -128,6 +128,7 @@ app.add_typer(data_app, name="data")
 def data_init(
     skip_prices: bool = typer.Option(False, "--skip-prices", help="跳过价格数据"),
     skip_financials: bool = typer.Option(False, "--skip-financials", help="跳过财务数据"),
+    skip_csrc: bool = typer.Option(False, "--skip-csrc", help="跳过 CSRC 行业全量抓取（先行建立最小可用）"),
 ) -> None:
     """最小可用初始化 (PRD §6.7)
 
@@ -141,6 +142,7 @@ def data_init(
     report = initializer.run_full_init(
         skip_prices=skip_prices,
         skip_financials=skip_financials,
+        skip_csrc=skip_csrc,
     )
 
     typer.echo(json.dumps(make_response("data.init", report), ensure_ascii=False, indent=2, default=str))

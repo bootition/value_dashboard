@@ -98,6 +98,11 @@ class IncrementalUpdater:
         self.csrc_refresh_interval_days: int = self._load_update_config(
             "csrc_refresh_interval_days", default=30
         )
+        # universe 步骤（股票池/上市状态）按日节流：全市场 stock_list 约
+        # 51s + listing_info 约 53s，后台线程可接受但无需每轮重拉（默认 1 天）
+        self.universe_refresh_interval_days: int = self._load_update_config(
+            "universe_refresh_interval_days", default=1
+        )
 
     @staticmethod
     def _load_update_config(key: str, *, default: int) -> int:
@@ -371,21 +376,35 @@ class IncrementalUpdater:
         initializer = DataInitializer(duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr)
         steps: dict[str, Any] = {}
 
-        try:
-            steps["stock_list"] = initializer._fetch_stock_universe()
-            if steps["stock_list"].get("status") == "success":
-                self._mark_refreshed("stock_list_last_refresh")
-        except Exception as error:
-            logger.warning("股票池刷新失败: %s", error)
-            steps["stock_list"] = {"status": "failed", "error": str(error)}
+        if self._refresh_due("stock_list_last_refresh", self.universe_refresh_interval_days):
+            try:
+                steps["stock_list"] = initializer._fetch_stock_universe()
+                if steps["stock_list"].get("status") == "success":
+                    self._mark_refreshed("stock_list_last_refresh")
+            except Exception as error:
+                logger.warning("股票池刷新失败: %s", error)
+                steps["stock_list"] = {"status": "failed", "error": str(error)}
+        else:
+            steps["stock_list"] = {
+                "status": "skipped",
+                "reason": "refreshed_within_interval",
+                "interval_days": self.universe_refresh_interval_days,
+            }
 
-        try:
-            steps["listing_info"] = initializer._fetch_listing_info()
-            if steps["listing_info"].get("status") == "success":
-                self._mark_refreshed("listing_info_last_refresh")
-        except Exception as error:
-            logger.warning("上市状态刷新失败: %s", error)
-            steps["listing_info"] = {"status": "failed", "error": str(error)}
+        if self._refresh_due("listing_info_last_refresh", self.universe_refresh_interval_days):
+            try:
+                steps["listing_info"] = initializer._fetch_listing_info()
+                if steps["listing_info"].get("status") == "success":
+                    self._mark_refreshed("listing_info_last_refresh")
+            except Exception as error:
+                logger.warning("上市状态刷新失败: %s", error)
+                steps["listing_info"] = {"status": "failed", "error": str(error)}
+        else:
+            steps["listing_info"] = {
+                "status": "skipped",
+                "reason": "refreshed_within_interval",
+                "interval_days": self.universe_refresh_interval_days,
+            }
 
         if self._csrc_refresh_due():
             try:
@@ -416,8 +435,13 @@ class IncrementalUpdater:
 
     def _csrc_refresh_due(self) -> bool:
         """Return whether the CSRC industry refresh interval has elapsed."""
+        return self._refresh_due("csrc_industry_last_refresh", self.csrc_refresh_interval_days)
+
+    def _refresh_due(self, key: str, interval_days: int) -> bool:
+        """Return whether a data-domain refresh marker is older than the interval."""
         rows = self.sqlite.query(
-            "SELECT value FROM data_refresh_state WHERE key = 'csrc_industry_last_refresh'"
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [key],
         )
         if not rows:
             return True
@@ -426,7 +450,7 @@ class IncrementalUpdater:
             last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return True
-        return (datetime.now(timezone.utc).date() - last_date).days >= self.csrc_refresh_interval_days
+        return (datetime.now(timezone.utc).date() - last_date).days >= interval_days
 
     def _mark_csrc_refreshed(self) -> None:
         """Persist the CSRC refresh date so later runs skip the full scan."""

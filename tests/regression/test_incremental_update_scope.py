@@ -173,9 +173,114 @@ def test_universe_step_marks_csrc_refreshed_after_success(
     assert updater._csrc_refresh_due() is False
 
 
+def test_universe_steps_are_throttled_by_daily_marker(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """P2: universe 步骤（stock_list/listing_info）按日节流，避免每轮 ~104s 网络开销。"""
+    from app.core.init import DataInitializer
+
+    now = datetime.now(timezone.utc)
+    for key in ("stock_list_last_refresh", "listing_info_last_refresh"):
+        sqlite_store.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES (?, ?, ?)""",
+            [key, now.isoformat(), now.isoformat()],
+        )
+
+    def forbidden(self) -> dict:
+        raise AssertionError("stock_list/listing_info must be skipped within the daily interval")
+
+    monkeypatch.setattr(DataInitializer, "_fetch_stock_universe", forbidden)
+    monkeypatch.setattr(DataInitializer, "_fetch_listing_info", forbidden)
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_csrc_industry",
+        lambda self: {"status": "success", "count": 1},
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    step = updater._refresh_universe_metadata()
+
+    assert step["steps"]["stock_list"]["status"] == "skipped"
+    assert step["steps"]["listing_info"]["status"] == "skipped"
+    assert step["steps"]["csrc_industry"]["status"] == "success"
+
+
+def test_universe_steps_run_when_marker_stale_or_absent(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """无刷新标记或标记过期时，universe 步骤照常执行。"""
+    from app.core.init import DataInitializer
+
+    stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES ('stock_list_last_refresh', ?, ?)""",
+        [stale, stale],
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_stock_universe",
+        lambda self: calls.append("stock_list") or {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_listing_info",
+        lambda self: calls.append("listing_info") or {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_csrc_industry",
+        lambda self: {"status": "success", "count": 1},
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    step = updater._refresh_universe_metadata()
+
+    assert calls == ["stock_list", "listing_info"]
+    assert step["steps"]["stock_list"]["status"] == "success"
+    assert step["steps"]["listing_info"]["status"] == "success"
+
+
+def test_full_init_skip_csrc_discloses_skipped(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """P2: --skip-csrc 先行建立最小可用，CSRC 步骤披露为 skipped 且不抓取。"""
+    from app.core.init import DataInitializer
+
+    initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store)
+    monkeypatch.setattr(
+        initializer, "_fetch_stock_universe",
+        lambda: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        initializer, "_fetch_listing_info",
+        lambda: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        initializer, "_fetch_trading_dates",
+        lambda: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        initializer, "_fetch_daily_prices",
+        lambda years=5: {"status": "skipped", "reason": "skip_prices"},
+    )
+    monkeypatch.setattr(
+        initializer, "_fetch_financial_statements",
+        lambda: {"status": "skipped", "reason": "skip_financials"},
+    )
+
+    def forbidden(self) -> dict:
+        raise AssertionError("csrc fetch must be skipped by --skip-csrc")
+
+    monkeypatch.setattr(initializer, "_fetch_csrc_industry", forbidden)
+
+    report = initializer.run_full_init(skip_prices=True, skip_financials=True, skip_csrc=True)
+
+    assert report["steps"]["sw_industry"]["status"] == "skipped"
+    assert "skipped_by_flag" in report["steps"]["sw_industry"]["reason"]
+
+
 class _FakeSQLite:
     def __init__(self, rows: list[dict]) -> None:
         self._rows = rows
 
-    def query(self, sql: str) -> list[dict]:
+    def query(self, sql: str, params: list | None = None) -> list[dict]:
         return self._rows
