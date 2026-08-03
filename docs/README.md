@@ -10,7 +10,7 @@
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
 | `reports/` | 报告 | 审计/验收/审查等事件型快照（05–42） | 仅 29/40–42 ✅；34–39 发现与修复事实保留、裁决被 40 取代；其余 superseded |
-| `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是 |
+| `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南可见 `user-first-use.md`） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
 | `archive/` | 归档 | 已废弃/完成的研究快照、执行计划（含 superpowers/） | ❌ 否（只读） |
@@ -59,6 +59,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新
 - `reports/30`–`reports/33` — 前四轮修复/验收事实（结论已被 34/35/36 更新）
 - `runbooks/s0-evidence-preservation.md` — 证据保全手册
+- `runbooks/user-first-use.md` — 首次使用与日常操作指南（G1）
 - `contracts/path-isolation-contract.md` — 路径隔离合同
 
 ## 新文档流程（Checklist）

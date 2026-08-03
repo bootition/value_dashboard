@@ -8,6 +8,19 @@ CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`p
 
 ---
 
+## 5 分钟上手（首次使用）
+
+完整操作指南见 [docs/runbooks/user-first-use.md](docs/runbooks/user-first-use.md)。速览：
+
+1. 双击 `start.bat` 启动，浏览器打开 `http://127.0.0.1:8765`。
+2. 先看「**数据状态**」页：数据是否就绪、价格/财报截至哪天。
+3. 「**筛选**」页：输入规则名称 →「保存新版本」→ 添加条件（如 `pe_ttm < 15`）→「运行筛选」。
+4. 「**保存结果**」→「导出 CSV」或「加入自选」。
+5. 匹配超过 5000 条时会「结果已截断」：缩小条件或确认 CSV 中的 `_truncated` 标注。
+6. 日常维护用 `vd` CLI（`vd data auto-update status`、`vd backup`）。
+
+---
+
 ## 架构
 
 | 层 | 技术栈 |

@@ -16,7 +16,7 @@
 | 30 股外部真值抽样 | ✅ 已执行（收盘 27/27、总股本 27/27；2 只流通股本为解禁时间差披露项） | `reports/29` |
 | 回归/发布验证 | ✅ 前端 + S1 全绿（408 passed，2026-08-03）；正式发行包可构建并经真实 exe `/api/health` smoke；正式库筛选可用；性能隔离基准就绪（PRD §19.1 目标主机仪式步骤待执行） | `reports/40` §2、`reports/32` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
-1. **次要 P2、后续任务与用户启用/UX 分层（完整清单见 `reports/41`、`reports/42`）**：存量结果无截断标记迁移、计数查询成本×2、P1-B 溯源 strict 不一致、草稿 409 后自动保存停用、strict-only 客户端过滤、打包恢复提示、写令牌重启后需刷新、Node engines 未声明、runbook 缺口、SQLite 明文个性化数据（PRD §18.3 解释缺口，待所有者明示意图）、`_csv_cell` 首字符防护、杂项。若面向首次接触的个人用户交付，应先完成 G1 操作指南与 L0 基础可用性；UI 高分美化属 L2 后续投入，均不改变当前 PASS。
+1. **次要 P2、后续任务与用户启用/UX 分层（完整清单见 `reports/41`、`reports/42`）**：存量结果无截断标记迁移、计数查询成本×2、P1-B 溯源 strict 不一致、打包恢复提示、写令牌重启后需刷新、Node engines 未声明、SQLite 明文个性化数据（PRD §18.3 解释缺口，待所有者明示意图）、`_csv_cell` 首字符防护、杂项。**G1 操作指南与 L0 基础可用性（L0-1~L0-7）已关闭（`reports/43`）**；UI 高分美化属 L2 后续投入，均不改变当前 PASS。
 2. **920305**：极新股，所有免费源无数据（价格/股本/分红缺失，如实记录 missing）。
 3. **银行/券商监管字段 92 只**（资本充足率/不良贷款率/拨备覆盖率/风险覆盖率）：免费结构化 API 不可得，保持 NULL，不伪造。
 4. **2026-03-31 之前历史期财务**：CSMAR 商业导入值保留，无原始字节 lineage（约 253 万条空 payload 已隔离至 quarantine 表，不删除）。
@@ -41,8 +41,10 @@
 | `docs/reports/39_SYSTEM_RED_TEAM_ROUND7_F4_FIX_2026-08-03.md` | 第七轮红队 F4 修复报告 | 修复事实保留；独立裁决被 `reports/40` 更新 |
 | `docs/reports/40_SYSTEM_RED_TEAM_FORMAL_ENABLEMENT_2026-08-03.md` | **当前裁决依据**：第八轮正式启用独立复审（PASS） | **当前发布裁决基线** |
 | `docs/reports/41_POST_LAUNCH_TASKS_AND_UX_REVIEW_2026-08-03.md` | 正式启用后任务清单 + 用户视角可用性审查（15 项 UX 增强，无 P0/P1） | 后续迭代任务索引 |
-| `docs/reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` | 用户启用指南与 UI 分层审查（G1/L0 基础可用性、L1 专业可用性、L2 高分美化） | 面向首次用户交付与 UX 迭代边界 |
+| `docs/reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` | 用户启用指南与 UI 分层审查（G1/L0 基础可用性、L1 专业可用性、L2 高分美化） | 分层边界；**迭代 A（G1+L0）已实施，见 `reports/43`** |
+| `docs/reports/43_REPORT42_ITERATION_A_IMPLEMENTATION_2026-08-03.md` | **报告42 迭代 A 实施报告**：G1 操作指南 + L0-1~L0-7（门禁 S1 411、前端 52+10/build 全绿） | G1/L0 关闭依据 |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
+| `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/contracts/path-isolation-contract.md` | 路径隔离合同（签署版） | |
 | `.planning/2026-07-31-automatic-data-updates/` | 当前实施会话计划 | 会话产物，不入 docs/ |
 ## 已被取代的结论（Superseded，禁止引用为当前结论）
