@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "command": "system-red-team-round8.formal-enable-gates",
+  "checked_at": "2026-08-03",
+  "formal_db_read_only": true,
+  "formal_db_sha256_before": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "formal_db_sha256_after": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "gates": {
+    "s1_pytest_regression": {"result": "passed", "collected": 408, "passed": 408, "duration_seconds": 167.29},
+    "ruff_check_app_tests": {"result": "passed"},
+    "uv_lock_locked": {"result": "passed", "packages": 80},
+    "frontend_lint": {"result": "passed"},
+    "frontend_test": {"result": "passed", "node_tests": 52, "vitest_tests": 10},
+    "frontend_build": {"result": "passed"},
+    "build_release": {"result": "passed", "details": "PyInstaller build, real start.bat/exe /api/health smoke, and no formal data packaged"},
+    "git_worktree_before_documentation": {"result": "clean"}
+  },
+  "verdict": "PASS"
+}

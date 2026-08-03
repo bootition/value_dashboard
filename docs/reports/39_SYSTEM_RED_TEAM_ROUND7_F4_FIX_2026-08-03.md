@@ -1,10 +1,11 @@
 ---
 title: 第七轮红队 F4 修复报告（原生 CLI 导出截断标注，2026-08-03）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-03
 last-reviewed: 2026-08-03
 supersedes: reports/38_SYSTEM_RED_TEAM_ROUND7_2026-08-02.md
+superseded-by: reports/40_SYSTEM_RED_TEAM_FORMAL_ENABLEMENT_2026-08-03.md
 ---
 
 # 第七轮红队 F4 修复报告（原生 CLI 导出截断标注，2026-08-03）
