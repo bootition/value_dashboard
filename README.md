@@ -1,6 +1,6 @@
 # Value Dashboard — A股价值投资研究与筛选工具
 
-**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-02 第六轮复审 F1/F2/F3 已修复）：代码层与数据层门禁全绿（S1 406、前端 52+10 合约、正式库 ready=TRUE、筛选可用），依据见 [docs/reports/37_REAUDIT_F1_F2_F3_FIX_2026-08-02.md](docs/reports/37_REAUDIT_F1_F2_F3_FIX_2026-08-02.md)。
+**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-02 第七轮独立红队复审）：**BLOCK**，F1/F2 与网页导出已修复，但原生 `vd screening export_csv` 仍静默丢失 `_truncated` 标记（F4）；门禁全绿（S1 406、前端 52+10、正式库 ready=TRUE、筛选可用），退出条件见 [docs/reports/38_SYSTEM_RED_TEAM_ROUND7_2026-08-02.md](docs/reports/38_SYSTEM_RED_TEAM_ROUND7_2026-08-02.md)。
 
 CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`python -m app.cli.main`）并显式建立 formal profile；发行目录中与 `value-dashboard.exe` 同目录时使用打包入口。直接 `python -m app.cli.main` 在缺少 profile 环境变量时会拒绝数据库操作。
 
