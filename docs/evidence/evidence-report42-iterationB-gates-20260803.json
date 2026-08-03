@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "command": "report42.iterationB.fix.gates",
+  "checked_at": "2026-08-03",
+  "formal_db_read_only": true,
+  "formal_db_sha256_before": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "formal_db_sha256_after": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "gates": {
+    "s1_pytest_regression": {"result": "passed", "collected": 411, "passed": 411, "duration_seconds": 175.43},
+    "ruff_check_app_tests": {"result": "passed"},
+    "frontend_lint": {"result": "passed"},
+    "frontend_test": {"result": "passed", "node_tests": 52, "vitest_tests": 10},
+    "frontend_build": {"result": "passed"},
+    "formal_db_hash_unchanged": {"result": "passed"}
+  },
+  "fixes": {
+    "l1_1_responsive_layout": {
+      "status": "done",
+      "locations": ["frontend/src/style.css", "frontend/src/components/ScreeningResultsPanel.vue", "frontend/src/views/WatchlistPage.vue"],
+      "detail": "stats-grid CSS 4→2→1 / 3→2→1；列选择器 width min(400px,100%)；控件 wrap"
+    },
+    "l1_2_trend_chart_readability": {
+      "status": "done",
+      "location": "frontend/src/components/FinancialTrendCard.vue",
+      "detail": "viewBox 0 0 600 200 + width 100%；X 轴标签抽样（最多 8 个）；数据点原生 tooltip（日期+值）"
+    },
+    "l1_3_data_status_polling": {
+      "status": "done",
+      "location": "frontend/src/views/DataStatusPage.vue",
+      "detail": "更新运行中每 12s 轮询（silent，避免闪烁）；停止自动取消；显示上次刷新时间与轮询标签"
+    },
+    "l1_4_export_filename": {
+      "status": "done",
+      "location": "frontend/src/components/ScreeningResultsPanel.vue",
+      "detail": "规则名_数据日期_结果数[_truncated].csv；新增 ruleName prop"
+    },
+    "l1_5_dsl_researcher_view": {
+      "status": "done",
+      "location": "frontend/src/components/DslIndicatorManager.vue",
+      "detail": "状态中文化；预览结构化（校验/公式/展开/依赖/历史可用/失败原因）+ 原始 JSON"
+    },
+    "l1_6_keyboard_accessibility": {
+      "status": "done",
+      "locations": ["frontend/src/App.vue", "frontend/src/style.css", "frontend/src/views/ScreeningPage.vue", "frontend/src/views/WatchlistPage.vue", "frontend/src/views/StockDetailPage.vue", "frontend/src/views/DataStatusPage.vue"],
+      "detail": "skip link + main-content 锚点；页面 h1；:focus-visible 可见焦点；股票代码改 router-link；表单 aria-label"
+    },
+    "l1_7_table_research_efficiency": {
+      "status": "done",
+      "locations": ["frontend/src/views/WatchlistPage.vue", "frontend/src/components/ScreeningResultsPanel.vue"],
+      "detail": "列配置 localStorage 记忆（含默认列回退与合法性过滤）；股票代码一键复制；统一列格式复用 L0-2"
+    }
+  }
+}
