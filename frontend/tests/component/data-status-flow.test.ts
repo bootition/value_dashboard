@@ -48,6 +48,10 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
             csrc_industry_refresh: { last_refresh: '2026-07-01T00:00:00+00:00' },
             data_quality: {
               warning_codes: ['STALE_RUNNING_JOBS'],
+              minimum_data_readiness: {
+                ready: true, stock_count: 5533, missing: {}, missing_counts: {},
+                schema_compatibility: { compatible: true, missing: [] },
+              },
               dates: {
                 price: '2026-07-31',
                 balance_sheet: { latest_record: '2026-06-30', latest_complete: '2026-06-30' },
@@ -121,6 +125,10 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
             last_update: null,
             data_quality: {
               warning_codes: [],
+              minimum_data_readiness: {
+                ready: false, stock_count: 0, missing: {}, missing_counts: {},
+                schema_compatibility: { compatible: true, missing: [] },
+              },
               dates: {
                 price: null,
                 balance_sheet: { latest_record: null, latest_complete: null },

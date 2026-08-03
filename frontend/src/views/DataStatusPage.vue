@@ -162,6 +162,20 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         {{ error }}
       </n-alert>
       <div v-else-if="summary">
+        <!-- L2 V3: 第一问"数据可研究吗" -->
+        <n-alert
+          :type="summary.data_quality.minimum_data_readiness.ready ? 'success' : 'error'"
+          :show-icon="true"
+          style="margin-bottom: 16px;"
+        >
+          <template #header>
+            {{ summary.data_quality.minimum_data_readiness.ready ? '数据可研究' : '数据尚未就绪' }}
+          </template>
+          {{ summary.data_quality.minimum_data_readiness.ready
+            ? `最近更新: ${summary.last_update || '—'}；价格/财报日期见下方详情。`
+            : `有 ${summary.data_quality.warning_codes.length} 个警告，请查看下方详情；更新完成后自动恢复。` }}
+        </n-alert>
+
         <p style="color: #999; margin-bottom: 16px;">
           最近更新: {{ summary.last_update || '尚未初始化' }}
         </p>

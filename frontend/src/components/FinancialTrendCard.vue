@@ -139,6 +139,16 @@ const chartPointTitles = computed(() => {
   }))
 })
 
+// L2 V4（报告42）: 数值跨越正负时绘制零值基准线
+const zeroLineY = computed(() => {
+  const { minY, maxY } = chartData.value
+  if (minY < 0 && maxY > 0) {
+    const padding = 40
+    return 200 - padding - ((0 - minY) / (maxY - minY || 1)) * (200 - 2 * padding)
+  }
+  return null
+})
+
 const trendColumns: DataTableColumns<FinancialTrendRow> = [
   { title: '报告期', key: 'report_date', width: 110 },
   { title: '营收', key: 'revenue', render: (r) => fmt(r.revenue, 0) },
@@ -195,6 +205,19 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
             {{ label.label }}
           </text>
           
+          <!-- L2 V4: 零值基准线（正负跨越时） -->
+          <line
+            v-if="zeroLineY !== null"
+            :x1="40"
+            :y1="zeroLineY"
+            :x2="560"
+            :y2="zeroLineY"
+            stroke="#d03050"
+            stroke-width="1"
+            stroke-dasharray="4 3"
+            opacity="0.6"
+          />
+
           <!-- Line chart -->
           <path :d="chartPath" fill="none" stroke="#18a058" stroke-width="2" />
           

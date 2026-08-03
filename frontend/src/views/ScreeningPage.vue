@@ -362,7 +362,9 @@ onMounted(async () => {
 
 <template>
   <div>
-    <h1 style="font-size: 24px; margin: 0 0 16px;">筛选</h1>
+    <h1 style="font-size: 24px; margin: 0 0 4px;">筛选</h1>
+    <!-- L2 V3: 以"规则→运行→结果"为主线的研究流程 -->
+    <p style="color: #667085; margin: 0 0 16px;">规则 → 运行 → 结果 → 保存/导出/加入自选</p>
     
     <n-card title="加载规则" size="small" style="margin-bottom: 16px">
         <n-space align="center" wrap>

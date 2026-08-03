@@ -217,7 +217,8 @@ async function saveResults() {
       columns: selectedColumns.value,
     })
     savedResultId.value = response.data.result_id
-    message.success('结果已保存')
+    // L2 V5（报告42）: 完成反馈带结果 ID，便于之后导出/归档
+    message.success(`已保存（结果 #${response.data.result_id}）`)
     showSaveDialog.value = false
     saveTitle.value = ''
     saveNote.value = ''
