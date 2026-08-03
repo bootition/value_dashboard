@@ -94,10 +94,14 @@ def calculate_ttm_trend(rows: list[dict]) -> list[dict]:
 def _to_single_quarter(rows: list[dict]) -> list[dict]:
     """Convert cumulative flow statements to standalone quarters, preserving balances.
 
-    P1-A修复: 只有当同一年内存在"紧邻上一季度"（quarter index 差 1）时
-    才做差值；季度缺失（如缺 Q2 只剩 Q1/Q3）时无法推导单季值，
-    fail-closed 置 NULL（与 calculate_ttm_trend 的缺口处理一致），
-    绝不把累计值或"跨季差值"当作单季值输出。
+    P1-A修复（第六轮复审 F1/F2）:
+    - F2: 差分必须基于"差分前的累计原值"——单季值 = 本期累计 − 上期累计，
+      且供下期差分的是本期累计原值，绝不能用差分后的单季值（否则连续
+      三个及以上报告期的 Q3/Q4 系统性错误）。
+    - F1: 年内首行不是 Q1 时，累计值无法推导单季值 → fail-closed 置 NULL；
+      年内首行即 Q1 时累计值 = 单季值，保留。
+    - 季度缺口（如缺 Q2 只剩 Q1/Q3）同样 fail-closed 置 NULL，
+      与 calculate_ttm_trend 的缺口处理一致；绝不输出累计值或跨季差值。
     """
     flow_fields = (
         "revenue", "cost_of_revenue", "gross_profit", "operating_profit", "net_profit",
@@ -120,19 +124,26 @@ def _to_single_quarter(rows: list[dict]) -> list[dict]:
     for row in chronological:
         year = str(row.get("report_date", ""))[:4]
         quarter = _quarter_index(row.get("report_date"))
+        # F2: 先取差分前的累计原值（下期差分必须用累计值，而非本期单季值）
+        cumulative = {field: row.get(field) for field in flow_fields}
         prior = prior_by_year.get(year)
         if prior is not None:
             prior_quarter = prior.get("_quarter", 0)
             if prior_quarter == quarter - 1:
                 for field in flow_fields:
-                    value = row.get(field)
+                    value = cumulative.get(field)
                     previous = prior.get(field)
                     row[field] = value - previous if value is not None and previous is not None else None
             else:
                 # 同一年内季度缺口（或上一行不是紧邻季度）：单季值不可推导
                 for field in flow_fields:
                     row[field] = None
-        prior_by_year[year] = {**{field: row.get(field) for field in flow_fields}, "_quarter": quarter}
+        elif quarter != 1:
+            # F1: 年内首行不是 Q1（如数据自 Q2 起始）→ 累计值不可推导单季值
+            for field in flow_fields:
+                row[field] = None
+        # else: 年内首行即 Q1 → 累计值 = 单季值，原样保留
+        prior_by_year[year] = {**cumulative, "_quarter": quarter}
     return chronological
 
 

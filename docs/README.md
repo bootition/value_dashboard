@@ -48,9 +48,10 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `decisions/01_PRODUCT_REQUIREMENTS_V1.md` — 产品需求规格（验收合同，活文档）
 - `decisions/02_TECH_CONSTRAINTS.md` — 技术约束
 - `reports/29_DATA_REBUILD_REPORT_2026-07-31.md` — 最新数据重建结论
-- `reports/36_SYSTEM_RED_TEAM_REAUDIT_2026-08-02.md` — **当前发布裁决**：第六轮修复后独立复审（BLOCK，P1-A/P1-C 残余 F1/F2/F3 + 退出条件）
+- `reports/36_SYSTEM_RED_TEAM_REAUDIT_2026-08-02.md` — 第六轮独立复审（BLOCK 发现，已被 37 修复）
+- `reports/37_REAUDIT_F1_F2_F3_FIX_2026-08-02.md` — **当前发布裁决**：第六轮复审 F1/F2/F3 修复
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
-- `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实（4 项 P1 + 3 项 P2 修复，裁决已被 36 取代）
+- `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新
 - `reports/30`–`reports/33` — 前四轮修复/验收事实（结论已被 34/35/36 更新）
 - `runbooks/s0-evidence-preservation.md` — 证据保全手册
 - `contracts/path-isolation-contract.md` — 路径隔离合同

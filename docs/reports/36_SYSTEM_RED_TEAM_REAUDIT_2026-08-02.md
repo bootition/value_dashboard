@@ -1,10 +1,11 @@
 ---
 title: 修复后系统红队复审报告（第六轮，独立复核，2026-08-02）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-02
 last-reviewed: 2026-08-02
 supersedes: reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md
+superseded-by: reports/37_REAUDIT_F1_F2_F3_FIX_2026-08-02.md
 ---
 
 # 修复后系统红队复审报告（第六轮，独立复核，2026-08-02）

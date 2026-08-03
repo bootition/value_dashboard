@@ -642,7 +642,14 @@ def screening_run(
             json.dumps(rule_dict.get("columns", []), ensure_ascii=False),
             json.dumps(rule_dict.get("sort", []), ensure_ascii=False), result["data_date"],
             json.dumps({"include_st": include_st, "include_suspended": include_suspended, "min_listing_years": min_years}),
-            strict_only, json.dumps({"strict_only": strict_only, "locked_indicators": locked_indicators}),
+            strict_only, json.dumps({
+                "strict_only": strict_only,
+                "locked_indicators": locked_indicators,
+                # F3修复: CLI 运行同样持久化截断状态与真实匹配数，
+                # 与 web 路径对齐，保证 CLI run → save → web 导出带 _truncated 标注
+                "truncated": bool(result.get("truncated")),
+                "total": result.get("total"),
+            }, ensure_ascii=False),
         ],
     )
     result["run_id"] = run_id

@@ -280,3 +280,86 @@ def test_industry_rank_is_partitioned_by_csrc_classification(
     assert by_code["000003"]["pe_ttm_industry_rank"] == 1
     # 全市场排名跨行业
     assert by_code["000003"]["pe_ttm_market_rank"] == 3
+
+
+# ─── F3: CLI run → save_result → web export 截断标记链路 ─────────────
+
+def test_cli_run_to_web_export_preserves_truncated_marker(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """F3（第六轮复审）: CLI screening run → save_result → web export CSV
+    必须携带 _truncated 标注（CLI 持久化 truncated/total，导出读取）。
+    """
+    import json as _json
+
+    import app.cli.main as cli_main
+    from typer.testing import CliRunner
+    from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+
+    # 小截断阈值（3）以便小池子触发截断；10 只可筛选股票
+    monkeypatch.setattr("app.core.screening.engine.MAX_RESULT_ROWS", 3)
+    codes = [f"60000{i}" for i in range(10)]
+    for index, code in enumerate(codes):
+        duckdb_store.write_query(
+            """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
+               VALUES (?, ?, 'SZSE', '2020-01-01', false, false)""",
+            [code, f"stock-{index}"],
+        )
+        insert_minimum_screenable_data(duckdb_store, code)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
+               VALUES ('cli-trunc', 1, ?, '{}', 'saved')""",
+            [_json.dumps({
+                "conditions": {"logic": "AND", "rules": []},
+                "columns": ["stock_code", "pe_ttm"],
+            }, ensure_ascii=False)],
+        )
+
+    monkeypatch.setattr(
+        cli_main, "_database_context",
+        lambda *, initialize=True: (None, duckdb_store, sqlite_store),
+    )
+
+    runner = CliRunner()
+    run_result = runner.invoke(
+        cli_main.app,
+        ["screening", "run", "1", "--version", "1", "--min-years", "0"],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    run_payload = _json.loads(run_result.output)
+    run_data = run_payload["result"]["data"]
+    assert run_data["truncated"] is True
+    assert run_data["total"] == 10
+    run_id = run_data["run_id"]
+
+    save_result = runner.invoke(
+        cli_main.app,
+        ["screening", "save_result", "cli-truncated-export", run_id],
+    )
+    assert save_result.exit_code == 0, save_result.output
+    result_id = _json.loads(save_result.output)["result"]["data"]["result_id"]
+
+    # 持久化的 confidence_summary 必须含 truncated/total
+    persisted = sqlite_store.query(
+        "SELECT confidence_summary FROM screening_results WHERE id = ?", [result_id]
+    )[0]["confidence_summary"]
+    summary = _json.loads(persisted)
+    assert summary["truncated"] is True
+    assert summary["total"] == 10
+
+    # web 导出必须带 _truncated 列且值为 True
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(screening_router)
+    response = TestClient(app).post("/api/screening/export_csv", json={"result_id": result_id})
+    assert response.status_code == 200
+    csv_text = response.json()["csv"]
+    lines = csv_text.splitlines()
+    assert "_truncated" in lines[0], lines[0]
+    assert lines[1].endswith(",True") or ",True" in lines[1], lines[1]
