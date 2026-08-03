@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -363,3 +364,134 @@ def test_cli_run_to_web_export_preserves_truncated_marker(
     lines = csv_text.splitlines()
     assert "_truncated" in lines[0], lines[0]
     assert lines[1].endswith(",True") or ",True" in lines[1], lines[1]
+
+
+# ─── F4: CLI run → save_result → CLI export_csv 截断标记链路 ─────────
+
+def _seed_cli_screenable_pool(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    count: int,
+    rule_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """播种 count 只可筛选股票 + 空规则，并挂接 CLI 数据库上下文（F3/F4 共用）。"""
+    import json as _json
+
+    import app.cli.main as cli_main
+    from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+
+    codes = [f"60000{i}" for i in range(count)]
+    for index, code in enumerate(codes):
+        duckdb_store.write_query(
+            """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
+               VALUES (?, ?, 'SZSE', '2020-01-01', false, false)""",
+            [code, f"stock-{index}"],
+        )
+        insert_minimum_screenable_data(duckdb_store, code)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
+               VALUES (?, 1, ?, '{}', 'saved')""",
+            [rule_name, _json.dumps({
+                "conditions": {"logic": "AND", "rules": []},
+                "columns": ["stock_code", "pe_ttm"],
+            }, ensure_ascii=False)],
+        )
+
+    monkeypatch.setattr(
+        cli_main, "_database_context",
+        lambda *, initialize=True: (None, duckdb_store, sqlite_store),
+    )
+
+
+def test_cli_run_to_cli_export_preserves_truncated_marker(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F4（第七轮复审）: CLI screening run（超上限）→ save_result → CLI export_csv
+    必须携带 _truncated 标注（header 与每条数据行），禁止静默丢尾。"""
+    import json as _json
+
+    import app.cli.main as cli_main
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr("app.core.screening.engine.MAX_RESULT_ROWS", 3)
+    _seed_cli_screenable_pool(duckdb_store, sqlite_store, 10, "cli-trunc-export", monkeypatch)
+
+    runner = CliRunner()
+    run_result = runner.invoke(
+        cli_main.app,
+        ["screening", "run", "1", "--version", "1", "--min-years", "0"],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    run_data = _json.loads(run_result.output)["result"]["data"]
+    assert run_data["truncated"] is True
+    assert run_data["total"] == 10
+    run_id = run_data["run_id"]
+
+    save_result = runner.invoke(
+        cli_main.app,
+        ["screening", "save_result", "cli-truncated-export", run_id],
+    )
+    assert save_result.exit_code == 0, save_result.output
+    result_id = _json.loads(save_result.output)["result"]["data"]["result_id"]
+
+    csv_path = tmp_path / "export.csv"
+    export_result = runner.invoke(
+        cli_main.app,
+        ["screening", "export_csv", str(result_id), str(csv_path)],
+    )
+    assert export_result.exit_code == 0, export_result.output
+    lines = csv_path.read_text(encoding="utf-8-sig").splitlines()
+    assert "_truncated" in lines[0], lines[0]
+    assert len(lines) == 4, lines  # 表头 + 3 条截断上限内行
+    assert all(line.endswith(",True") for line in lines[1:]), lines
+
+
+def test_cli_export_at_limit_has_no_truncation_marker(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """F4: 恰好命中上限（不截断）时 CLI export_csv 不得出现 _truncated 列。"""
+    import json as _json
+
+    import app.cli.main as cli_main
+    from typer.testing import CliRunner
+
+    monkeypatch.setattr("app.core.screening.engine.MAX_RESULT_ROWS", 3)
+    _seed_cli_screenable_pool(duckdb_store, sqlite_store, 3, "cli-at-limit-export", monkeypatch)
+
+    runner = CliRunner()
+    run_result = runner.invoke(
+        cli_main.app,
+        ["screening", "run", "1", "--version", "1", "--min-years", "0"],
+    )
+    assert run_result.exit_code == 0, run_result.output
+    run_data = _json.loads(run_result.output)["result"]["data"]
+    assert run_data["truncated"] is False
+    assert run_data["total"] == 3
+    run_id = run_data["run_id"]
+
+    save_result = runner.invoke(
+        cli_main.app,
+        ["screening", "save_result", "cli-at-limit-export", run_id],
+    )
+    assert save_result.exit_code == 0, save_result.output
+    result_id = _json.loads(save_result.output)["result"]["data"]["result_id"]
+
+    csv_path = tmp_path / "export.csv"
+    export_result = runner.invoke(
+        cli_main.app,
+        ["screening", "export_csv", str(result_id), str(csv_path)],
+    )
+    assert export_result.exit_code == 0, export_result.output
+    lines = csv_path.read_text(encoding="utf-8-sig").splitlines()
+    assert "_truncated" not in lines[0], lines[0]
+    assert len(lines) == 4, lines  # 表头 + 3 条完整结果行

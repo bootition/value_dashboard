@@ -27,6 +27,45 @@ def _csv_cell(value: Any) -> Any:
     return value
 
 
+# F4修复(第七轮红队): 网页与 CLI 导出共用同一 CSV 组装逻辑，防止截断标注漂移
+_CSV_META_COLUMNS = [
+    "_data_date", "_rule_id", "_rule_version", "_locked_indicators",
+    "_strict_only", "_field_provenance", "_entry_explanation",
+]
+
+
+def _csv_export_header(columns: list[str], truncated: bool) -> list[str]:
+    header = columns + _CSV_META_COLUMNS
+    if truncated:
+        # P1-C: 截断结果必须在导出的 CSV 中显式标注，禁止静默丢尾
+        header.append("_truncated")
+    return header
+
+
+def _csv_export_row(
+    columns: list[str],
+    row: dict[str, Any],
+    data_date: str,
+    rule_id: int,
+    rule_version: int,
+    locked_indicators: str,
+    strict_only: Any,
+    provenance: dict[str, Any],
+    truncated: bool,
+) -> list[Any]:
+    line = [_csv_cell(row.get(col, "")) for col in columns]
+    line.append(data_date)
+    line.append(rule_id)
+    line.append(rule_version)
+    line.append(locked_indicators)
+    line.append(strict_only)
+    line.append(json.dumps(provenance, ensure_ascii=False, sort_keys=True, default=str))
+    line.append(_csv_cell(row.get("_entry_explanation", "")))
+    if truncated:
+        line.append(True)
+    return line
+
+
 def _require_current_screenability(request: Request) -> None:
     """Enforce the current database gate for screen-derived durable output."""
     from app.core.data_quality import screening_readiness
@@ -290,28 +329,15 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         provenance = _field_provenance(request.app.state.duck, request.app.state.sqlite, results, columns)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    header = columns + [
-        "_data_date", "_rule_id", "_rule_version", "_locked_indicators",
-        "_strict_only", "_field_provenance", "_entry_explanation",
-    ]
-    if truncated:
-        # P1-C: 截断结果必须在导出的 CSV 中显式标注，禁止静默丢尾
-        header.append("_truncated")
-    writer.writerow(header)
+    writer.writerow(_csv_export_header(columns, truncated))
 
     # 数据行
     for index, row in enumerate(results):
-        line = [_csv_cell(row.get(col, "")) for col in columns]
-        line.append(data_date)
-        line.append(record["rule_id"])
-        line.append(record["rule_version"])
-        line.append(rule[0]["locked_indicators"])
-        line.append(summary.get("strict_only", False))
-        line.append(json.dumps(provenance[index], ensure_ascii=False, sort_keys=True, default=str))
-        line.append(_csv_cell(row.get("_entry_explanation", "")))
-        if truncated:
-            line.append(True)
-        writer.writerow(line)
+        writer.writerow(_csv_export_row(
+            columns, row, data_date, record["rule_id"], record["rule_version"],
+            rule[0]["locked_indicators"], summary.get("strict_only", False),
+            provenance[index], truncated,
+        ))
 
     csv_content = output.getvalue()
     return {"csv": csv_content, "rows": len(results)}

@@ -1350,7 +1350,7 @@ def screening_export_csv(
     from app.cli.protocol import make_response
     import csv
     from app.core.data_quality import screening_readiness
-    from app.web.api.screening import _csv_cell, _field_provenance
+    from app.web.api.screening import _csv_export_header, _csv_export_row, _field_provenance
     _, duck, sqlite = _database_context()
     decision = screening_readiness(duck, sqlite)
     if not decision["ready"]:
@@ -1390,17 +1390,15 @@ def screening_export_csv(
     with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         summary = json.loads(record["confidence_summary"] or "{}")
-        writer.writerow(keys + [
-            "_data_date", "_rule_id", "_rule_version", "_locked_indicators",
-            "_strict_only", "_field_provenance", "_entry_explanation",
-        ])
+        # F4修复: 与网页导出对齐，截断结果必须显式标注 _truncated，禁止静默丢尾
+        truncated = bool(summary.get("truncated"))
+        writer.writerow(_csv_export_header(keys, truncated))
         for index, row in enumerate(results):
-            writer.writerow([_csv_cell(row.get(key, "")) for key in keys] + [
-                record["data_date"], record["rule_id"], record["rule_version"],
+            writer.writerow(_csv_export_row(
+                keys, row, record["data_date"], record["rule_id"], record["rule_version"],
                 rule[0]["locked_indicators"], summary.get("strict_only", False),
-                json.dumps(provenance[index], ensure_ascii=False, sort_keys=True, default=str),
-                _csv_cell(row.get("_entry_explanation", "")),
-            ])
+                provenance[index], truncated,
+            ))
 
     typer.echo(json.dumps(make_response("screening.export_csv", {"status": "ok", "rows": len(results), "file": output_file}), ensure_ascii=False))
 
