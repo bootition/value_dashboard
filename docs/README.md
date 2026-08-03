@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–38） | 仅 29/38 ✅；34–37 发现与修复事实保留、裁决被 38 取代；其余 superseded |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–39） | 仅 29/39 ✅；34–38 发现与修复事实保留、裁决被 39 取代；其余 superseded |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是 |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -50,7 +50,8 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/29_DATA_REBUILD_REPORT_2026-07-31.md` — 最新数据重建结论
 - `reports/36_SYSTEM_RED_TEAM_REAUDIT_2026-08-02.md` — 第六轮独立复审（F1/F2/F3 发现基线）
 - `reports/37_REAUDIT_F1_F2_F3_FIX_2026-08-02.md` — F1/F2/F3 修复事实（整体裁决已被 38 更新）
-- `reports/38_SYSTEM_RED_TEAM_ROUND7_2026-08-02.md` — **当前发布裁决**：第七轮独立复审（BLOCK，F4 原生 CLI 导出静默截断）
+- `reports/38_SYSTEM_RED_TEAM_ROUND7_2026-08-02.md` — 第七轮独立复审（BLOCK 发现基线；裁决已被 39 取代）
+- `reports/39_SYSTEM_RED_TEAM_ROUND7_F4_FIX_2026-08-03.md` — **当前发布裁决**：F4 原生 CLI 导出截断标注修复
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新
 - `reports/30`–`reports/33` — 前四轮修复/验收事实（结论已被 34/35/36 更新）

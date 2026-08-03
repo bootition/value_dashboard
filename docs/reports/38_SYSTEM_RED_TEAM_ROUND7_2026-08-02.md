@@ -1,10 +1,11 @@
 ---
 title: 系统红队第七轮复审报告（第六轮 F1/F2/F3 修复后，2026-08-02）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-02
 last-reviewed: 2026-08-02
 supersedes: reports/37_REAUDIT_F1_F2_F3_FIX_2026-08-02.md
+superseded-by: reports/39_SYSTEM_RED_TEAM_ROUND7_F4_FIX_2026-08-03.md
 ---
 
 # 系统红队第七轮复审报告（第六轮 F1/F2/F3 修复后，2026-08-02）
