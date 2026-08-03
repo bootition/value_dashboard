@@ -3,12 +3,14 @@ import { ref, onMounted, computed, h } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   NAlert, NCard, NSpace, NSelect, NInput, NButton, NDataTable,
-  NEmpty, useMessage, NStatistic, NGrid, NGridItem, NCheckboxGroup, NCheckbox, NTag
+  NEmpty, useMessage, useDialog, NStatistic, NGrid, NGridItem, NCheckboxGroup, NCheckbox, NTag
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
-import axios, { isAxiosError } from 'axios'
+import axios from 'axios'
 import { isIndicatorUntrusted } from '../types/data-quality.ts'
 import type { IndicatorTrust } from '../types/data-quality.ts'
+import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
 
 interface WatchlistItem {
   stock_code: string
@@ -46,6 +48,7 @@ interface WatchlistResponse {
 
 const router = useRouter()
 const message = useMessage()
+const dialog = useDialog()
 
 const items = ref<WatchlistItem[]>([])
 const groups = ref<WatchlistGroup[]>([])
@@ -87,13 +90,13 @@ type NumericField =
   | 'latest_close' | 'pe_ttm' | 'pb_mrq' | 'roe' | 'gross_margin'
   | 'net_margin' | 'debt_ratio' | 'revenue_yoy' | 'net_profit_yoy' | 'dividend_yield'
 
-function trustedRender(field: NumericField, format: (value: number) => string) {
+function trustedRender(field: NumericField) {
+  // L0-2（报告42）: 与筛选/详情共用同一字段口径格式化
   return (row: WatchlistItem) => {
     if (isIndicatorUntrusted(field, warningCodes.value)) {
       return h(NTag, { size: 'tiny', type: 'error' }, () => '数据不可信')
     }
-    const value = row[field]
-    return value != null ? format(value) : '—'
+    return formatFieldValue(field, row[field])
   }
 }
 
@@ -104,14 +107,14 @@ const tableColumns = computed(() => {
     name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || '—' },
     exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
     group_name: { title: '分组', key: 'group_name', width: 90 },
-    latest_close: { title: '收盘价', key: 'latest_close', width: 80, sorter: 'default', render: trustedRender('latest_close', (v) => v.toFixed(2)) },
-    pe_ttm: { title: 'PE', key: 'pe_ttm', width: 70, sorter: 'default', render: trustedRender('pe_ttm', (v) => v.toFixed(1)) },
-    pb_mrq: { title: 'PB', key: 'pb_mrq', width: 70, sorter: 'default', render: trustedRender('pb_mrq', (v) => v.toFixed(2)) },
-    roe: { title: 'ROE', key: 'roe', width: 80, sorter: 'default', render: trustedRender('roe', (v) => (v * 100).toFixed(2) + '%') },
-    gross_margin: { title: '毛利率', key: 'gross_margin', width: 80, sorter: 'default', render: trustedRender('gross_margin', (v) => (v * 100).toFixed(2) + '%') },
-    net_margin: { title: '净利率', key: 'net_margin', width: 80, sorter: 'default', render: trustedRender('net_margin', (v) => (v * 100).toFixed(2) + '%') },
-    debt_ratio: { title: '负债率', key: 'debt_ratio', width: 80, sorter: 'default', render: trustedRender('debt_ratio', (v) => (v * 100).toFixed(2) + '%') },
-    revenue_yoy: { title: '营收YoY', key: 'revenue_yoy', width: 90, sorter: 'default', render: trustedRender('revenue_yoy', (v) => (v * 100).toFixed(2) + '%') },
+    latest_close: { title: fieldTitleWithUnit('latest_close', '收盘价'), key: 'latest_close', width: 80, sorter: 'default', render: trustedRender('latest_close') },
+    pe_ttm: { title: fieldTitleWithUnit('pe_ttm', 'PE'), key: 'pe_ttm', width: 70, sorter: 'default', render: trustedRender('pe_ttm') },
+    pb_mrq: { title: fieldTitleWithUnit('pb_mrq', 'PB'), key: 'pb_mrq', width: 70, sorter: 'default', render: trustedRender('pb_mrq') },
+    roe: { title: fieldTitleWithUnit('roe', 'ROE'), key: 'roe', width: 80, sorter: 'default', render: trustedRender('roe') },
+    gross_margin: { title: fieldTitleWithUnit('gross_margin', '毛利率'), key: 'gross_margin', width: 80, sorter: 'default', render: trustedRender('gross_margin') },
+    net_margin: { title: fieldTitleWithUnit('net_margin', '净利率'), key: 'net_margin', width: 80, sorter: 'default', render: trustedRender('net_margin') },
+    debt_ratio: { title: fieldTitleWithUnit('debt_ratio', '负债率'), key: 'debt_ratio', width: 80, sorter: 'default', render: trustedRender('debt_ratio') },
+    revenue_yoy: { title: fieldTitleWithUnit('revenue_yoy', '营收YoY'), key: 'revenue_yoy', width: 90, sorter: 'default', render: trustedRender('revenue_yoy') },
     source: { title: '来源', key: 'source', width: 80, render: (r) => r.source_result_id ? '筛选' : (r.source_rule_id ? '规则' : '手动') },
   }
   for (const col of selectedColumns.value) {
@@ -122,7 +125,7 @@ const tableColumns = computed(() => {
     title: '操作', key: 'actions', width: 120,
     render: (r) => h('div', [
       h(NButton, { size: 'tiny', type: 'info', onClick: () => router.push(`/stock/${r.stock_code}`) }, () => '查看'),
-      h(NButton, { size: 'tiny', type: 'error', style: 'margin-left: 4px', onClick: () => removeStock(r.stock_code, r.group_name) }, () => '移除'),
+      h(NButton, { size: 'tiny', type: 'error', style: 'margin-left: 4px', onClick: () => confirmRemove(r.stock_code, r.group_name) }, () => '移除'),
     ]),
   })
   return cols
@@ -137,23 +140,26 @@ async function fetchWatchlist() {
     groups.value = resp.data.groups
     trust.value = resp.data.trust ?? null
   } catch (e: unknown) {
-    const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '未知错误'
-    message.error(`加载失败: ${detail}`)
+    message.error(friendlyErrorMessage(e, '加载自选失败'))
   } finally {
     loading.value = false
   }
 }
 
+// L0-6（报告42）: 前端先校验 6 位数字代码；后端同样强制校验
 async function addStock() {
-  if (!addStockCode.value.trim()) return
+  const code = addStockCode.value.trim()
+  if (!/^\d{6}$/.test(code)) {
+    message.warning('请输入 6 位股票代码（如 600519）')
+    return
+  }
   try {
-    await axios.post('/api/watchlist/add', { stock_code: addStockCode.value.trim(), group_name: addGroupName.value || 'default' })
-    message.success(`已添加 ${addStockCode.value}`)
+    await axios.post('/api/watchlist/add', { stock_code: code, group_name: addGroupName.value || 'default' })
+    message.success(`已添加 ${code}`)
     addStockCode.value = ''
     fetchWatchlist()
   } catch (e: unknown) {
-    const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '未知错误'
-    message.error(`添加失败: ${detail}`)
+    message.error(friendlyErrorMessage(e, '添加失败'))
   }
 }
 
@@ -163,9 +169,19 @@ async function removeStock(code: string, group: string) {
     message.success(`已移除 ${code}`)
     fetchWatchlist()
   } catch (e: unknown) {
-    const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '未知错误'
-    message.error(`移除失败: ${detail}`)
+    message.error(friendlyErrorMessage(e, '移除失败'))
   }
+}
+
+// L0-6（报告42）: 移除前确认，防止误删
+function confirmRemove(code: string, group: string) {
+  dialog.warning({
+    title: '移出自选',
+    content: `确定将 ${code} 从「${group}」移除吗？`,
+    positiveText: '确认移除',
+    negativeText: '取消',
+    onPositiveClick: () => void removeStock(code, group),
+  })
 }
 
 const totalCount = computed(() => items.value.length)

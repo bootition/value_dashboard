@@ -8,6 +8,7 @@ from __future__ import annotations
 
 
 import json
+import re
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -148,6 +149,18 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
 def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     """添加股票到自选 (PRD §13: 手动保留)"""
     sqlite = request.app.state.sqlite
+    duck = request.app.state.duck
+    # L0-6（报告42）: 前后端双重校验——6 位数字代码且存在于股票列表中，
+    # 防止垃圾代码进入自选（筛选路径来源的代码天然合法，不受影响）
+    stock_code = req.stock_code.strip()
+    if not re.fullmatch(r"\d{6}", stock_code):
+        raise HTTPException(status_code=400, detail="invalid stock code: 6 digits required")
+    known = duck.read_query(
+        "SELECT 1 AS found FROM stock_meta WHERE stock_code = ? LIMIT 1",
+        [stock_code],
+    )
+    if not known:
+        raise HTTPException(status_code=400, detail="stock code not found in universe")
     with sqlite.transaction() as conn:
         if req.source_result_id is not None:
             result = conn.execute(
@@ -156,7 +169,7 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
             ).fetchone()
             if result is None:
                 raise HTTPException(status_code=400, detail="screening result provenance is missing")
-            if req.stock_code not in {row.get("stock_code") for row in json.loads(result["result_json"])}:
+            if stock_code not in {row.get("stock_code") for row in json.loads(result["result_json"])}:
                 raise HTTPException(status_code=400, detail="stock code is not in the source result")
             if req.source_rule_id is not None and req.source_rule_id != result["rule_id"]:
                 raise HTTPException(status_code=400, detail="source rule does not match source result")
@@ -173,9 +186,9 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
                  source_rule_id=excluded.source_rule_id,
                  source_result_id=excluded.source_result_id,
                  added_at=CURRENT_TIMESTAMP""",
-            [req.stock_code, req.group_name, source_rule_id, req.source_result_id],
+            [stock_code, req.group_name, source_rule_id, req.source_result_id],
         )
-    return {"status": "ok", "stock_code": req.stock_code, "group": req.group_name}
+    return {"status": "ok", "stock_code": stock_code, "group": req.group_name}
 
 
 @router.delete("/remove")

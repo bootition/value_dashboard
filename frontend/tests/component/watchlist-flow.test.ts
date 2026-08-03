@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
-import { NMessageProvider } from 'naive-ui'
+import { NMessageProvider, NDialogProvider } from 'naive-ui'
 import { h } from 'vue'
 import WatchlistPage from '../../src/views/WatchlistPage.vue'
 
@@ -51,8 +51,12 @@ describe('WatchlistPage 自选展示与信任遮蔽（PRD §13）', () => {
 
   it('渲染自选股票，LINEAGE_INVALID 时指标显示"数据不可信"', async () => {
     const router = createRouter({ history: createMemoryHistory(), routes: [] })
-    const wrapper = mount(NMessageProvider, {
-      slots: { default: () => h(WatchlistPage) },
+    // 与 App.vue 一致：L0-6 移除确认依赖 NDialogProvider
+    const wrapper = mount(NDialogProvider, {
+      slots: {
+        default: () =>
+          h(NMessageProvider, null, { default: () => h(WatchlistPage) }),
+      },
       global: { plugins: [router] },
     })
     await flushPromises()

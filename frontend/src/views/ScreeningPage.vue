@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { NCard, NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, useMessage } from 'naive-ui'
+import { NCard, NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, useMessage } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
@@ -15,6 +15,7 @@ import type {
 } from '../types/screening.ts'
 import { generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
+import { friendlyErrorMessage } from '../helpers/api-error.ts'
 
 const message = useMessage()
 const indicators = ref<readonly ScreeningIndicator[]>([])
@@ -133,12 +134,23 @@ async function runScreening() {
     }
     message.success(`筛选完成: ${resp.data.total} 条 (${resp.data.execution_time_ms}ms)`)
   } catch (e: unknown) {
-    const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : null
-    message.error(`筛选失败: ${detail || '未知错误'}`)
+    message.error(friendlyErrorMessage(e, '筛选失败'))
   } finally {
     loading.value = false
   }
 }
+
+// L0-3（报告42）: strict-only 切换时重新按服务端口径运行，
+// 使屏幕展示、保存记录、导出 CSV 三者结果一致（不再客户端二次过滤）。
+let strictRerunTimer: ReturnType<typeof setTimeout> | undefined
+watch(strictOnly, () => {
+  if (results.value.length === 0 || activeRule.value === null) return
+  if (strictRerunTimer) clearTimeout(strictRerunTimer)
+  strictRerunTimer = setTimeout(() => {
+    message.info(strictOnly.value ? '正在按 strict 口径重新筛选…' : '正在按完整口径重新筛选…')
+    void runScreening()
+  }, 400)
+})
 
 async function loadSavedRules() {
   try {
@@ -154,6 +166,8 @@ let draftHydrated = false
 const draftRevision = ref(0)
 let draftSaveInFlight = false
 let draftSaveQueued = false
+// L0-4（报告42）: 草稿 409 冲突后不再永久停用自动保存，而是给出明确选项
+const showDraftConflictModal = ref(false)
 
 function draftPayload() {
   return {
@@ -180,7 +194,8 @@ async function persistDraft() {
   } catch (error) {
     if (isAxiosError(error) && error.response?.status === 409) {
       draftHydrated = false
-      message.warning('草稿已在其他页面更新；请刷新后再编辑')
+      draftSaveQueued = false
+      showDraftConflictModal.value = true
     } else {
       message.warning('筛选草稿自动保存失败')
     }
@@ -190,6 +205,38 @@ async function persistDraft() {
       draftSaveQueued = false
       void persistDraft()
     }
+  }
+}
+
+async function resolveDraftConflict(choice: 'server' | 'local' | 'refresh') {
+  showDraftConflictModal.value = false
+  if (choice === 'refresh') {
+    window.location.reload()
+    return
+  }
+  if (choice === 'server') {
+    try {
+      await restoreDraft()
+      draftHydrated = true
+      message.success('已加载服务器草稿，自动保存已恢复')
+    } catch {
+      message.error('加载服务器草稿失败，请刷新页面')
+    }
+    return
+  }
+  try {
+    // 保留本地：以服务器当前 revision 覆盖服务器草稿（本地编辑优先）
+    const current = await axios.get<{ draft: unknown; revision?: number }>('/api/screening/draft')
+    const revision = current.data.revision ?? 0
+    const resp = await axios.put<{ revision: number }>('/api/screening/draft', {
+      draft: draftPayload(),
+      revision,
+    })
+    draftRevision.value = resp.data.revision
+    draftHydrated = true
+    message.success('已保留本地草稿（覆盖服务器版本），自动保存已恢复')
+  } catch {
+    message.error('保留本地草稿失败，请刷新页面')
   }
 }
 
@@ -245,8 +292,7 @@ async function saveRule() {
     selectedRuleId.value = resp.data.rule_id
     message.success(`规则已保存为 v${resp.data.version}`)
   } catch (e: unknown) {
-    const detail = isAxiosError(e) ? e.response?.data?.detail : e instanceof Error ? e.message : '未知错误'
-    message.error(`保存规则失败: ${detail}`)
+    message.error(friendlyErrorMessage(e, '保存规则失败'))
   }
 }
 
@@ -430,5 +476,45 @@ onMounted(async () => {
     />
 
     <n-empty v-if="results.length === 0" description="运行筛选后显示结果" style="padding: 40px" />
+
+    <!-- L0-1（报告42）: 空态给出可执行的首次筛选步骤，而非只提示"运行筛选" -->
+    <n-card
+      v-if="results.length === 0"
+      title="第一次筛选？三步开始"
+      size="small"
+      style="margin-top: 8px"
+    >
+      <n-alert
+        v-if="qualityStatus === 'failed'"
+        type="error"
+        :show-icon="true"
+        style="margin-bottom: 12px"
+      >
+        无法获取数据质量状态，运行结果可能不可信。请先前往<router-link to="/data-status">数据状态页</router-link>确认。
+      </n-alert>
+      <ol style="margin: 0; padding-left: 20px; line-height: 2;">
+        <li>在「加载规则」输入名称，点击<strong>保存新版本</strong>——筛选必须先保存规则（规则版本化，用于溯源）。</li>
+        <li>设置「基础股票池」（是否排除 ST/停牌、最低上市年限）与「数据质量」严格模式。</li>
+        <li>在「筛选条件」添加条件（如 pe_ttm &lt; 15），在「排序」设置优先级，点击<strong>运行筛选</strong>。</li>
+      </ol>
+      <div style="margin-top: 8px; color: #888; font-size: 12px;">
+        之后可保存结果、导出 CSV（含数据日期与规则溯源）或加入自选。
+      </div>
+    </n-card>
+
+    <!-- L0-4（报告42）: 草稿冲突恢复——加载服务器/保留本地/刷新 -->
+    <n-modal
+      v-model:show="showDraftConflictModal"
+      preset="dialog"
+      type="warning"
+      title="草稿冲突"
+      content="筛选草稿已在其他页面更新。为避免丢失编辑，请选择处理方式："
+    >
+      <template #action>
+        <n-button size="small" @click="resolveDraftConflict('refresh')">刷新页面</n-button>
+        <n-button size="small" @click="resolveDraftConflict('server')">加载服务器草稿</n-button>
+        <n-button size="small" type="primary" @click="resolveDraftConflict('local')">保留本地副本</n-button>
+      </template>
+    </n-modal>
   </div>
 </template>

@@ -3,13 +3,14 @@ import { ref, onMounted, onUnmounted, watch, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NCard, NSpace, NTag, NSelect, NRadioGroup, NRadioButton,
-  NEmpty, NSpin, NAlert, NDescriptions, NDescriptionsItem, NResult,
+  NEmpty, NSpin, NAlert, NDescriptions, NDescriptionsItem, NResult, NButton,
   useMessage,
 } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { dispose, init } from 'klinecharts'
 import type { Chart, KLineData } from 'klinecharts'
 import { isIndicatorUntrusted } from '../types/data-quality.ts'
+import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import IndicatorTabs from '../components/IndicatorTabs.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataTraceability from '../components/DataTraceability.vue'
@@ -33,6 +34,8 @@ const stockCode = computed(() => {
 })
 const hasStockCodeError = computed(() => !stockCode.value)
 const loading = ref(false)
+// L0-7（报告42）: 无效股票/无数据时呈现友好结果态，而非一页横线
+const stockUnavailable = ref(false)
 const generation = ref(0)
 const stockInfo = ref<StockInfo | null>(null)
 const indicators = ref<IndicatorsResponse | null>(null)
@@ -71,6 +74,7 @@ async function fetchAll() {
   if (hasStockCodeError.value) return
   const gen = ++generation.value
   loading.value = true
+  stockUnavailable.value = false
   try {
     await Promise.all([
       fetchStockInfo(gen),
@@ -92,8 +96,11 @@ async function fetchStockInfo(gen: number) {
   } catch (e) {
     if (gen !== generation.value) return
     stockInfo.value = null
-    const detail = isAxiosError(e) ? e.response?.data?.detail : null
-    message.warning(`加载股票信息失败: ${detail || '网络错误'}`)
+    if (isAxiosError(e) && e.response?.status === 404) {
+      stockUnavailable.value = true
+      return
+    }
+    message.warning(friendlyErrorMessage(e, '加载股票信息失败'))
   }
 }
 
@@ -110,8 +117,11 @@ async function fetchIndicators(gen: number) {
   } catch (e) {
     if (gen !== generation.value) return
     indicators.value = null
-    const detail = isAxiosError(e) ? e.response?.data?.detail : null
-    message.warning(`加载指标数据失败: ${detail || '网络错误'}`)
+    if (isAxiosError(e) && e.response?.status === 404) {
+      stockUnavailable.value = true
+      return
+    }
+    message.warning(friendlyErrorMessage(e, '加载指标数据失败'))
   }
   await fetchWarningCodes(gen)
 }
@@ -132,8 +142,7 @@ async function fetchKline(gen: number) {
   } catch (e) {
     if (axios.isCancel(e) || gen !== generation.value) return
     klineData.value = { candles: [] }
-    const detail = isAxiosError(e) ? e.response?.data?.detail : null
-    message.warning(`加载K线数据失败: ${detail || '网络错误'}`)
+    message.warning(friendlyErrorMessage(e, '加载K线数据失败'))
   }
 }
 
@@ -147,8 +156,7 @@ async function fetchTrend(gen: number) {
   } catch (e) {
     if (gen !== generation.value) return
     trendData.value = { trend: [], period: 'annual', count: 0 }
-    const detail = isAxiosError(e) ? e.response?.data?.detail : null
-    message.warning(`加载财务趋势失败: ${detail || '网络错误'}`)
+    message.warning(friendlyErrorMessage(e, '加载财务趋势失败'))
   }
 }
 
@@ -160,8 +168,7 @@ async function fetchAudit(gen: number) {
   } catch (e) {
     if (gen !== generation.value) return
     auditData.value = { field_audit: [], batch_audit: [] }
-    const detail = isAxiosError(e) ? e.response?.data?.detail : null
-    message.warning(`加载溯源信息失败: ${detail || '网络错误'}`)
+    message.warning(friendlyErrorMessage(e, '加载溯源信息失败'))
   }
 }
 
@@ -288,6 +295,20 @@ onUnmounted(() => {
       title="股票代码缺失"
       description="URL 中未提供股票代码，无法加载个股详情。请从筛选或自选列表进入。"
     />
+    <!-- L0-7（报告42）: 无效股票/无数据时给出友好结果态与回退路径 -->
+    <n-result
+      v-else-if="stockUnavailable"
+      status="404"
+      title="股票不存在或暂无数据"
+      description="请检查股票代码，或从筛选结果 / 自选列表进入个股详情。"
+    >
+      <template #footer>
+        <n-space justify="center">
+          <router-link to="/screening"><n-button type="primary">回到筛选</n-button></router-link>
+          <router-link to="/watchlist"><n-button>回到自选列表</n-button></router-link>
+        </n-space>
+      </template>
+    </n-result>
     <n-spin v-else :show="loading">
       <!-- 股票头部信息 -->
       <n-card size="small" style="margin-bottom: 16px;">

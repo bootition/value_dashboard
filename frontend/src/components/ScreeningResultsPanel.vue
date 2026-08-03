@@ -20,7 +20,9 @@ import {
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import type { ScreeningResult, WarningCode, ScreeningRuleNode, ScreeningExportResponse, ScreeningWatchlistResponse } from '../types/screening.ts'
-import axios, { isAxiosError } from 'axios'
+import axios from 'axios'
+import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
 
 const props = defineProps<{
   results: readonly ScreeningResult[]
@@ -67,36 +69,13 @@ const durableActionsDisabled = computed(
   () => (hasUntrustedFields.value || qualityUnavailable.value || props.ruleId === null || props.runId === null) && props.results.length > 0,
 )
 
-const ruleFieldsSet = computed(() => {
-  const fields = new Set<string>()
-  const walk = (n: import('../types/screening.ts').ScreeningRuleNode) => {
-    for (const item of n.rules) {
-      if ('logic' in item) walk(item)
-      else if (item.field) fields.add(item.field)
-    }
-  }
-  walk(props.ruleTree)
-  return fields
-})
-
-const filteredResults = computed(() => {
-  if (!props.strictOnly) return props.results
-  return props.results.filter(result => {
-    for (const field of ruleFieldsSet.value) {
-      const v = result[field]
-      if (v === null || v === undefined) return false
-    }
-    for (const field of props.untrustedFields) {
-      const v = result[field]
-      if (v === null || v === undefined) return false
-    }
-    return true
-  })
-})
+// L0-3（报告42）: 展示以服务端 run 结果为准。strict_only 切换时由 ScreeningPage
+// 重新运行（服务端过滤），前端不再做二次客户端过滤，保证屏幕/保存/CSV 三者一致。
+const displayedResults = computed(() => props.results)
 
 const allAvailableColumns = computed(() => {
-  if (!filteredResults.value.length) return []
-  const firstRow = filteredResults.value[0]
+  if (!displayedResults.value.length) return []
+  const firstRow = displayedResults.value[0]
   return Object.keys(firstRow).filter((k) => !k.startsWith('_'))
 })
 
@@ -132,14 +111,15 @@ const columnOptions = computed(() => {
     net_profit_yoy: '净利润同比',
   }
   return allAvailableColumns.value.map(col => ({
-    label: labelMap[col] || col,
+    // L0-2: 表头带单位，口径与自选/详情一致
+    label: fieldTitleWithUnit(col, labelMap[col] || col),
     value: col,
   }))
 })
 
 const tableColumns = computed(() => {
-  if (!filteredResults.value.length) return []
-  const firstRow = filteredResults.value[0]
+  if (!displayedResults.value.length) return []
+  const firstRow = displayedResults.value[0]
   const cols: DataTableColumns<ScreeningResult> = []
   
   for (const key of selectedColumns.value) {
@@ -158,15 +138,8 @@ const tableColumns = computed(() => {
               onClick: () => router.push(`/stock/${encodeURIComponent(v)}`),
             }, () => v)
           }
-          if (v === null || v === undefined) return '—'
-          if (typeof v === 'number') {
-            return Math.abs(v) < 0.01 && v !== 0
-              ? v.toExponential(2)
-              : Math.abs(v) >= 1000
-                ? v.toFixed(0)
-                : v.toFixed(4)
-          }
-          return String(v)
+          // L0-2: 统一字段口径格式化（百分比/价格/比值/市值）
+          return formatFieldValue(key, v)
         },
       })
     }
@@ -208,8 +181,7 @@ async function saveResults() {
     saveTitle.value = ''
     saveNote.value = ''
   } catch (e: unknown) {
-    const errMsg = isAxiosError(e) ? e.response?.data?.detail ?? e.message : e instanceof Error ? e.message : '未知错误'
-    message.error(`保存失败: ${errMsg}`)
+    message.error(friendlyErrorMessage(e, '保存失败'))
   }
 }
 
@@ -235,8 +207,7 @@ async function exportCSV() {
     URL.revokeObjectURL(url)
     message.success(`已导出 ${resp.data.rows} 条`)
   } catch (e: unknown) {
-    const errMsg = isAxiosError(e) ? e.response?.data?.detail ?? e.message : e instanceof Error ? e.message : '未知错误'
-    message.error(`导出失败: ${errMsg}`)
+    message.error(friendlyErrorMessage(e, '导出失败'))
   }
 }
 
@@ -245,7 +216,7 @@ async function addToWatchlist() {
     message.warning('请先保存当前筛选结果，再加入自选')
     return
   }
-  const codes = filteredResults.value.map((r) => r.stock_code)
+  const codes = displayedResults.value.map((r) => r.stock_code)
   if (!codes.length) return
   try {
     const resp = await axios.post<ScreeningWatchlistResponse>('/api/screening/add_to_watchlist', {
@@ -255,8 +226,7 @@ async function addToWatchlist() {
     })
     message.success(`已加入自选: ${resp.data.added} 只`)
   } catch (e: unknown) {
-    const errMsg = isAxiosError(e) ? e.response?.data?.detail ?? e.message : e instanceof Error ? e.message : '未知错误'
-    message.error(`加入自选失败: ${errMsg}`)
+    message.error(friendlyErrorMessage(e, '加入自选失败'))
   }
 }
 </script>
@@ -304,7 +274,7 @@ async function addToWatchlist() {
     </n-alert>
 
     <n-grid :cols="4" :x-gap="16" style="margin-bottom: 16px">
-      <n-grid-item><n-card><n-statistic label="结果数" :value="filteredResults.length" /></n-card></n-grid-item>
+      <n-grid-item><n-card><n-statistic label="结果数" :value="displayedResults.length" /></n-card></n-grid-item>
       <n-grid-item><n-card><n-statistic label="基础池" :value="basePoolSize" /></n-card></n-grid-item>
       <n-grid-item><n-card><n-statistic label="耗时(ms)" :value="executionTime" /></n-card></n-grid-item>
       <n-grid-item><n-card><n-statistic label="数据日期"><template #default><span>{{ dataDate || '—' }}</span><n-tag v-if="hasWarnings" size="small" type="warning" style="margin-left: 8px">{{ warningCodes.length }} 个警告</n-tag></template></n-statistic></n-card></n-grid-item>
@@ -332,7 +302,7 @@ async function addToWatchlist() {
 
     <n-data-table
       :columns="tableColumns"
-      :data="[...filteredResults]"
+      :data="[...displayedResults]"
       :max="5000"
       :pagination="{ pageSize: 50 }"
       :scroll-x="1200"
