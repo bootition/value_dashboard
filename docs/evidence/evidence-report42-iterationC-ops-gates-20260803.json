@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "command": "report42.iterationC.and.ops.fix.gates",
+  "checked_at": "2026-08-03",
+  "formal_db_read_only": true,
+  "formal_db_sha256_before": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "formal_db_sha256_after": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "gates": {
+    "s1_pytest_regression": {"result": "passed", "collected": 411, "passed": 411, "duration_seconds": 164.15},
+    "ruff_check_app_tests": {"result": "passed"},
+    "frontend_lint": {"result": "passed"},
+    "frontend_test": {"result": "passed", "node_tests": 52, "vitest_tests": 10},
+    "frontend_build": {"result": "passed"},
+    "formal_db_hash_unchanged": {"result": "passed"}
+  },
+  "iteration_c_l2": {
+    "v1_visual_tokens_cleanup": {"status": "done", "location": "frontend/src/style.css"},
+    "v2_theme_system": {"status": "done", "detail": "仅亮色（color-scheme: light），删除暗色声明与 Vite 模板残留"},
+    "v3_information_hierarchy": {"status": "done", "locations": ["frontend/src/views/ScreeningPage.vue", "frontend/src/views/DataStatusPage.vue"]},
+    "v4_data_visual_language": {"status": "done", "detail": "tabular-nums、风险色令牌、趋势图零值基准线"},
+    "v5_micro_interaction_feedback": {"status": "done", "detail": "保存结果带 ID 反馈；prefers-reduced-motion"},
+    "v6_brand_and_trust": {"status": "done", "location": "frontend/src/App.vue", "detail": "本地 A 股研究副标题 + 数据就绪徽标"}
+  },
+  "ops_items": {
+    "o1_performance_ritual": {
+      "status": "blocked_pending_csrc",
+      "detail": "PRD 19.1 仪式已执行：10 次筛选 233.6-282.1ms 全部 <5s（passing 10/10），但夹具第 20 条件 pe_ttm_industry_rank 依赖 csrc_l1（当前正式库全 NULL，CSRC 功能未实施），complete_results_returned=false，prd_acceptance=NOT_ATTESTED",
+      "evidence": "docs/evidence/evidence-performance-20260803.json"
+    },
+    "o2_ops_runbooks": {"status": "done", "files": ["docs/runbooks/ops-backup-restore.md", "docs/runbooks/ops-auto-update-retry.md", "docs/runbooks/ops-data-rebuild.md", "docs/runbooks/ops-build-release-s1.md"]},
+    "o4_encryption_stance": {"status": "done", "detail": "所有者确认文档化解释：备份/导出/凭据加密已落实；活动库明文在单用户本地威胁模型下可接受；PRD §18.3 与 §24 修订记录已更新，last-reviewed 2026-08-03"}
+  }
+}

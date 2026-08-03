@@ -1,0 +1,90 @@
+{
+  "prd_section": "19.1",
+  "fixture": "C:\\Users\\qhdjxgm\\AppData\\Local\\Temp\\vd-performance-20260803\\screening-performance-fixture.json",
+  "database_root": "C:\\Users\\qhdjxgm\\AppData\\Local\\Temp\\vd-performance-20260803",
+  "fixture_checks": {
+    "at_least_5000_listed_stocks": true,
+    "exactly_20_conditions": true,
+    "uses_composite_indicator": true,
+    "uses_current_industry_rank": true
+  },
+  "warmup": {
+    "execution_time_ms": 646.8,
+    "result_count": 0
+  },
+  "runs": [
+    {
+      "execution_time_ms": 282.1,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 254.1,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 251.7,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 256.9,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 240.8,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 233.6,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 261.2,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 242.0,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 252.8,
+      "result_count": 0
+    },
+    {
+      "execution_time_ms": 255.9,
+      "result_count": 0
+    }
+  ],
+  "metrics": {
+    "threshold_ms": 5000,
+    "runs": 10,
+    "passing_runs": 10,
+    "complete_results_returned": false,
+    "performance_goal_met": false,
+    "min_ms": 233.6,
+    "max_ms": 282.1,
+    "avg_ms": 253.1
+  },
+  "host_spec": {
+    "host": {
+      "cpu": {
+        "model": "AMD Ryzen 9 7845HX with Radeon Graphics",
+        "physical_cores": 12,
+        "logical_processors": 24
+      },
+      "memory": {
+        "total_gb": 32
+      },
+      "disk": {
+        "model": "YMTC PC41Q-1TB-B",
+        "type": "SSD",
+        "size_gb": 954
+      },
+      "os": "Windows",
+      "python_version": "3.14.2",
+      "node_version": "v24.13.0"
+    }
+  },
+  "host_spec_sha256": "8145814adc1ad1be8962c64a1d2d8bcc8df1f6d6aab33ad0a3ea0ed336cd5e60",
+  "prd_acceptance": "NOT_ATTESTED",
+  "residual_requirement": "Run this command against the target host's hot-data fixture with --host-spec and retain the output before claiming PRD 19.1 acceptance."
+}

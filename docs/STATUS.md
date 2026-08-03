@@ -16,11 +16,12 @@
 | 30 股外部真值抽样 | ✅ 已执行（收盘 27/27、总股本 27/27；2 只流通股本为解禁时间差披露项） | `reports/29` |
 | 回归/发布验证 | ✅ 前端 + S1 全绿（408 passed，2026-08-03）；正式发行包可构建并经真实 exe `/api/health` smoke；正式库筛选可用；性能隔离基准就绪（PRD §19.1 目标主机仪式步骤待执行） | `reports/40` §2、`reports/32` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
-1. **次要 P2、后续任务与用户启用/UX 分层（完整清单见 `reports/41`、`reports/42`）**：存量结果无截断标记迁移、计数查询成本×2、P1-B 溯源 strict 不一致、打包恢复提示、写令牌重启后需刷新、Node engines 未声明、SQLite 明文个性化数据（PRD §18.3 解释缺口，待所有者明示意图）、`_csv_cell` 首字符防护、杂项。**G1+L0（`reports/43`）与 L1（`reports/44`）已关闭**；UI 高分美化属 L2 后续投入，均不改变当前 PASS。
-2. **920305**：极新股，所有免费源无数据（价格/股本/分红缺失，如实记录 missing）。
-3. **银行/券商监管字段 92 只**（资本充足率/不良贷款率/拨备覆盖率/风险覆盖率）：免费结构化 API 不可得，保持 NULL，不伪造。
-4. **2026-03-31 之前历史期财务**：CSMAR 商业导入值保留，无原始字节 lineage（约 253 万条空 payload 已隔离至 quarantine 表，不删除）。
-5. **东财源被封**：已迁移至腾讯/Sina/BaoStock/交易所官方名单；东财适配器保留在回退链末端，网络恢复后自动可用。
+1. **次要 P2、后续任务（完整清单见 `reports/41`、`reports/42`）**：存量结果无截断标记迁移（O3）、计数查询成本×2、P1-B 溯源 strict 不一致、打包恢复提示、写令牌重启后需刷新、Node engines 未声明（O5）、chain-finalize 证据目录治理（O6）、`_csv_cell` 首字符防护、杂项（C1-C16）。**G1+L0（43）、L1（44）、L2 美化（45）、O2 运维 runbook、O4 加密口径（PRD §18.3 已修订）已关闭**；均不改变当前 PASS。
+2. **O1 性能仪式 attestation 待 CSRC**：PRD §19.1 仪式已执行（10/10 <5s，233-282ms），但夹具 `pe_ttm_industry_rank` 条件依赖尚未实施的 CSRC 行业分类（`csrc_l1` 全 NULL），`complete_results_returned=false` → NOT_ATTESTED；CSRC 落地后重跑即可（见 `reports/45` §2）。
+3. **920305**：极新股，所有免费源无数据（价格/股本/分红缺失，如实记录 missing）。
+4. **银行/券商监管字段 92 只**（资本充足率/不良贷款率/拨备覆盖率/风险覆盖率）：免费结构化 API 不可得，保持 NULL，不伪造。
+5. **2026-03-31 之前历史期财务**：CSMAR 商业导入值保留，无原始字节 lineage（约 253 万条空 payload 已隔离至 quarantine 表，不删除）。
+6. **东财源被封**：已迁移至腾讯/Sina/BaoStock/交易所官方名单；东财适配器保留在回退链末端，网络恢复后自动可用。
 ## 进行中的工作
 - **自动数据更新 + CSRC 行业分类**（最新会话）：PRD 修订已完成（`decisions/01` §7.3/7.4/7.7/15/16.1/20.4/21/22/24），实施计划见 `.planning/2026-07-31-automatic-data-updates/implementation-plan.md`（Phase A–G）。
 ## 当前有效文档（Current Truth）
@@ -43,9 +44,14 @@
 | `docs/reports/41_POST_LAUNCH_TASKS_AND_UX_REVIEW_2026-08-03.md` | 正式启用后任务清单 + 用户视角可用性审查（15 项 UX 增强，无 P0/P1） | 后续迭代任务索引 |
 | `docs/reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` | 用户启用指南与 UI 分层审查（G1/L0 基础可用性、L1 专业可用性、L2 高分美化） | 分层边界；**迭代 A（G1+L0）见 `reports/43`，迭代 B（L1）见 `reports/44`** |
 | `docs/reports/43_REPORT42_ITERATION_A_IMPLEMENTATION_2026-08-03.md` | 报告42 迭代 A 实施报告：G1 操作指南 + L0-1~L0-7 | G1/L0 关闭依据 |
-| `docs/reports/44_REPORT42_ITERATION_B_IMPLEMENTATION_2026-08-03.md` | **报告42 迭代 B 实施报告**：L1-1~L1-7 专业可用性（响应式/趋势图/轮询/文件名/DSL/无障碍/表格效率） | **L1 关闭依据** |
+| `docs/reports/44_REPORT42_ITERATION_B_IMPLEMENTATION_2026-08-03.md` | 报告42 迭代 B 实施报告：L1-1~L1-7 专业可用性 | L1 关闭依据 |
+| `docs/reports/45_REPORT42_ITERATION_C_AND_OPS_2026-08-03.md` | **报告42 迭代 C + 并行运维项实施报告**：L2 V1-V6 美化 + O1/O2/O4 | **L2 关闭依据；O1 性能达标但 attestation 待 CSRC 落地** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
+| `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
+| `docs/runbooks/ops-auto-update-retry.md` | 自动更新与重试运行手册（O2） | |
+| `docs/runbooks/ops-data-rebuild.md` | 数据重建运行手册（O2） | |
+| `docs/runbooks/ops-build-release-s1.md` | 构建、发布与 S1 门禁运行手册（O2） | |
 | `docs/contracts/path-isolation-contract.md` | 路径隔离合同（签署版） | |
 | `.planning/2026-07-31-automatic-data-updates/` | 当前实施会话计划 | 会话产物，不入 docs/ |
 ## 已被取代的结论（Superseded，禁止引用为当前结论）
