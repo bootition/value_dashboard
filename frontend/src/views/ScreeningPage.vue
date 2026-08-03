@@ -362,10 +362,10 @@ onMounted(async () => {
 
 <template>
   <div>
-    <h2>筛选</h2>
+    <h1 style="font-size: 24px; margin: 0 0 16px;">筛选</h1>
     
     <n-card title="加载规则" size="small" style="margin-bottom: 16px">
-        <n-space align="center">
+        <n-space align="center" wrap>
           <span>已保存的规则:</span>
         <n-select
           v-model:value="selectedRuleId"
@@ -374,7 +374,7 @@ onMounted(async () => {
           style="width: 250px"
             @update:value="loadRule"
           />
-          <n-input v-model:value="ruleName" size="small" placeholder="规则名称" style="width: 160px" />
+          <n-input v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称" style="width: 160px" />
           <n-button size="small" @click="saveRule">保存新版本</n-button>
         </n-space>
     </n-card>
@@ -468,6 +468,7 @@ onMounted(async () => {
       :run-id="runId"
       :rule-id="activeRule?.id ?? null"
       :rule-version="activeRule?.version ?? null"
+      :rule-name="activeRule?.name ?? ''"
       :locked-indicators="activeRule?.locked_indicators ?? {}"
       :sort="sortRules"
       :base-pool-config="basePool"

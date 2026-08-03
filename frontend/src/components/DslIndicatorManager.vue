@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { ref, h } from 'vue'
+import { ref, h, computed } from 'vue'
 import {
   NCard, NButton, NSpace, NInput, NDataTable, NModal, NForm, NFormItem,
-  NTag, NEmpty, useMessage, useDialog, NCode
+  NTag, NEmpty, useMessage, useDialog, NCode, NDescriptions, NDescriptionsItem
 } from 'naive-ui'
 import axios from 'axios'
 
@@ -43,9 +43,26 @@ const newExpression = ref({
 const previewResult = ref<DslValidateResult | Record<string, unknown> | null>(null)
 const previewStockCode = ref('600519')
 
+// L1-5（报告42）: 结构化预览的安全取值（校验类返回）
+const previewMeta = computed(() => {
+  const r = previewResult.value
+  if (!r || !('valid' in r)) return null
+  return r as DslValidateResult
+})
+
+// L1-5（报告42）: 状态中文化
+const STATUS_LABELS: Record<string, string> = {
+  draft: '草稿',
+  validated: '已校验',
+  single_previewed: '已单股预览',
+  previewed: '已小样本预览',
+  published: '已发布',
+}
+
 function statusTagType(s: string) {
   if (s === 'published') return 'success' as const
   if (s === 'validated') return 'info' as const
+  if (s === 'single_previewed' || s === 'previewed') return 'warning' as const
   return 'default' as const
 }
 
@@ -56,9 +73,9 @@ const columns: DataTableColumns<DslExpression> = [
   {
     title: '状态',
     key: 'status',
-    width: 100,
+    width: 110,
     render: (row: DslExpression) =>
-      h(NTag, { type: statusTagType(row.status), size: 'small' }, () => row.status),
+      h(NTag, { type: statusTagType(row.status), size: 'small' }, () => STATUS_LABELS[row.status] || row.status),
   },
   { title: '创建时间', key: 'created_at', width: 160 },
   {
@@ -236,10 +253,36 @@ loadExpressions()
         <n-button type="primary" @click="createExpression">创建</n-button>
       </template>
     </n-modal>
-    <n-modal v-model:show="showPreviewModal" preset="dialog" title="指标预览" style="width: 600px;">
-      <n-space vertical>
-        <n-code :code="JSON.stringify(previewResult, null, 2)" language="json" />
-      </n-space>
+    <n-modal v-model:show="showPreviewModal" preset="dialog" title="指标预览" style="width: 640px;">
+      <template v-if="previewResult">
+        <n-space vertical>
+          <!-- L1-5（报告42）: 结构化预览：公式 / 值 / 置信度 / 依赖 / 失败原因 -->
+          <n-descriptions v-if="previewMeta" :column="1" size="small" bordered>
+            <n-descriptions-item label="校验结果">
+              <n-tag :type="previewMeta.valid ? 'success' : 'error'" size="small">
+                {{ previewMeta.valid ? '通过' : '失败' }}
+              </n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="公式">{{ previewMeta.expression || '—' }}</n-descriptions-item>
+            <n-descriptions-item v-if="previewMeta.expanded_expression" label="展开公式">
+              {{ previewMeta.expanded_expression }}
+            </n-descriptions-item>
+            <n-descriptions-item v-if="previewMeta.dependencies?.length" label="依赖指标">
+              <n-tag v-for="dep in previewMeta.dependencies" :key="dep" size="small" style="margin-right: 4px;">{{ dep }}</n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item label="可用于历史序列">
+              <n-tag :type="previewMeta.historical_capable ? 'success' : 'warning'" size="small">
+                {{ previewMeta.historical_capable ? '是' : '否' }}
+              </n-tag>
+            </n-descriptions-item>
+            <n-descriptions-item v-if="!previewMeta.valid && previewMeta.message" label="失败原因">
+              <span style="color: #d03050;">{{ previewMeta.message }}</span>
+            </n-descriptions-item>
+          </n-descriptions>
+          <!-- 原始返回（值明细等） -->
+          <n-code :code="JSON.stringify(previewResult, null, 2)" language="json" style="max-height: 320px; overflow: auto;" />
+        </n-space>
+      </template>
       <template #action>
         <n-button @click="showPreviewModal = false">关闭</n-button>
       </template>

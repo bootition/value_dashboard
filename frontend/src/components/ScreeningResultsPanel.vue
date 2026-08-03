@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, h, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { RouterLink } from 'vue-router'
 import {
   NCard,
   NButton,
@@ -11,8 +11,6 @@ import {
   NForm,
   NFormItem,
   NInput,
-  NGrid,
-  NGridItem,
   NStatistic,
   NAlert,
   NSelect,
@@ -37,6 +35,8 @@ const props = defineProps<{
   runId: string | null
   ruleId: number | null
   ruleVersion: number | null
+  // L1-4（报告42）: 导出文件名使用规则名，用户可复现/归档
+  ruleName?: string
   lockedIndicators: Record<string, unknown>
   sort: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>
   basePoolConfig: Record<string, unknown>
@@ -46,11 +46,24 @@ const props = defineProps<{
 }>()
 
 const message = useMessage()
-const router = useRouter()
 const showSaveDialog = ref(false)
 const saveTitle = ref('')
 const saveNote = ref('')
 const savedResultId = ref<number | null>(null)
+
+// L1-7（报告42）: 列配置记忆（localStorage），刷新/重进页面不丢失
+const COLUMNS_STORAGE_KEY = 'vd.screening.columns'
+
+function loadSavedColumns(): string[] {
+  try {
+    const raw = localStorage.getItem(COLUMNS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
 
 watch(() => props.runId, () => {
   savedResultId.value = null
@@ -79,13 +92,30 @@ const allAvailableColumns = computed(() => {
   return Object.keys(firstRow).filter((k) => !k.startsWith('_'))
 })
 
-const selectedColumns = ref<string[]>([])
+const selectedColumns = ref<string[]>(loadSavedColumns())
 
 watch(allAvailableColumns, (newCols) => {
-  if (selectedColumns.value.length === 0 && newCols.length > 0) {
-    selectedColumns.value = [...newCols]
-  }
+  const valid = selectedColumns.value.filter((col) => newCols.includes(col))
+  selectedColumns.value = valid.length > 0 ? valid : [...newCols]
 }, { immediate: true })
+
+watch(selectedColumns, (cols) => {
+  try {
+    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(cols))
+  } catch {
+    // localStorage 不可用时静默降级（不阻断功能）
+  }
+}, { deep: true })
+
+// L1-7（报告42）: 一键复制股票代码
+async function copyStockCode(code: string) {
+  try {
+    await navigator.clipboard.writeText(code)
+    message.success(`已复制 ${code}`)
+  } catch {
+    message.warning('复制失败，请手动选择复制')
+  }
+}
 
 const columnOptions = computed(() => {
   const labelMap: Record<string, string> = {
@@ -128,15 +158,26 @@ const tableColumns = computed(() => {
         title: columnOptions.value.find(o => o.value === key)?.label || key,
         key,
         sorter: 'default',
+        // L1-7: 固定代码列，滚动时始终可见
+        fixed: key === 'stock_code' ? 'left' : undefined,
         render(row) {
           const v = row[key]
           if (key === 'stock_code' && typeof v === 'string') {
-            return h(NButton, {
-              text: true,
-              type: 'primary',
-              title: `查看 ${v} 详情`,
-              onClick: () => router.push(`/stock/${encodeURIComponent(v)}`),
-            }, () => v)
+            // L1-6: 使用 router-link 导航 + 可复制
+            return h('span', { class: 'stock-cell', style: 'white-space: nowrap;' }, [
+              h(RouterLink, {
+                to: `/stock/${encodeURIComponent(v)}`,
+                class: 'stock-link',
+              }, { default: () => v }),
+              h(NButton, {
+                text: true,
+                size: 'tiny',
+                type: 'primary',
+                class: 'copy-btn',
+                title: `复制 ${v}`,
+                onClick: () => void copyStockCode(v),
+              }, { default: () => '复制' }),
+            ])
           }
           // L0-2: 统一字段口径格式化（百分比/价格/比值/市值）
           return formatFieldValue(key, v)
@@ -185,6 +226,15 @@ async function saveResults() {
   }
 }
 
+// L1-4（报告42）: 可归档复现的文件名：规则名_数据日期_结果数[_truncated].csv
+function exportFileName(): string {
+  const base = (props.ruleName || 'screening').replace(/[\\/:*?"<>|\s]+/g, '_')
+  const date = props.dataDate ? String(props.dataDate).replace(/[\\/:]/g, '-') : 'nodate'
+  const rows = props.results.length
+  const suffix = props.truncated ? '_truncated' : ''
+  return `${base}_${date}_${rows}${suffix}.csv`
+}
+
 async function exportCSV() {
   if (durableActionsDisabled.value) {
     message.warning('当前结果包含不可信字段或质量状态未知，无法导出')
@@ -202,10 +252,10 @@ async function exportCSV() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `screening_${Date.now()}.csv`
+    a.download = exportFileName()
     a.click()
     URL.revokeObjectURL(url)
-    message.success(`已导出 ${resp.data.rows} 条`)
+    message.success(`已导出 ${resp.data.rows} 条（${a.download}）`)
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '导出失败'))
   }
@@ -273,12 +323,13 @@ async function addToWatchlist() {
       否则保存的结果与导出的 CSV 同样只包含这 5000 条。
     </n-alert>
 
-    <n-grid :cols="4" :x-gap="16" style="margin-bottom: 16px">
-      <n-grid-item><n-card><n-statistic label="结果数" :value="displayedResults.length" /></n-card></n-grid-item>
-      <n-grid-item><n-card><n-statistic label="基础池" :value="basePoolSize" /></n-card></n-grid-item>
-      <n-grid-item><n-card><n-statistic label="耗时(ms)" :value="executionTime" /></n-card></n-grid-item>
-      <n-grid-item><n-card><n-statistic label="数据日期"><template #default><span>{{ dataDate || '—' }}</span><n-tag v-if="hasWarnings" size="small" type="warning" style="margin-left: 8px">{{ warningCodes.length }} 个警告</n-tag></template></n-statistic></n-card></n-grid-item>
-    </n-grid>
+    <!-- L1-1: 响应式统计卡 4→2→1 列 -->
+    <div class="stats-grid">
+      <n-card><n-statistic label="结果数" :value="displayedResults.length" /></n-card>
+      <n-card><n-statistic label="基础池" :value="basePoolSize" /></n-card>
+      <n-card><n-statistic label="耗时(ms)" :value="executionTime" /></n-card>
+      <n-card><n-statistic label="数据日期"><template #default><span>{{ dataDate || '—' }}</span><n-tag v-if="hasWarnings" size="small" type="warning" style="margin-left: 8px">{{ warningCodes.length }} 个警告</n-tag></template></n-statistic></n-card>
+    </div>
 
     <n-space style="margin-bottom: 16px">
       <n-button id="save-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button>
@@ -287,14 +338,14 @@ async function addToWatchlist() {
     </n-space>
 
     <n-card size="small" style="margin-bottom: 16px">
-      <n-space align="center">
+      <n-space align="center" wrap>
         <span>显示列:</span>
         <n-select
           v-model:value="selectedColumns"
           :options="columnOptions"
           multiple
           size="small"
-          style="width: 400px"
+          style="width: min(400px, 100%)"
           placeholder="选择要显示的列"
         />
       </n-space>

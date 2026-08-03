@@ -112,7 +112,8 @@ const yAxisLabels = computed(() => {
   return labels
 })
 
-// X-axis labels (report dates)
+// L1-2（报告42）: X 轴标签按宽度抽样（最多 8 个），避免每点都画导致重叠
+const MAX_X_LABELS = 8
 const xAxisLabels = computed(() => {
   if (isEmpty.value) return []
   
@@ -120,9 +121,21 @@ const xAxisLabels = computed(() => {
   const padding = 40
   const xStep = (width - 2 * padding) / Math.max(chartData.value.points.length - 1, 1)
   
-  return chartData.value.points.map((point, index) => ({
+  const all = chartData.value.points.map((point, index) => ({
     label: point.date?.substring(0, 7) || '',
     x: padding + index * xStep,
+  }))
+  if (all.length <= MAX_X_LABELS) return all
+  const step = Math.ceil(all.length / MAX_X_LABELS)
+  return all.filter((_, index) => index % step === 0 || index === all.length - 1)
+})
+
+// L1-2（报告42）: 数据点 tooltip（日期 + 值）
+const chartPointTitles = computed(() => {
+  const isPercentage = ['gross_margin', 'net_margin', 'roe', 'debt_ratio'].includes(chartMetric.value)
+  return chartData.value.points.map((point) => ({
+    date: point.date || '',
+    value: isPercentage ? fmtPct(point.value) : fmt(point.value),
   }))
 })
 
@@ -164,7 +177,8 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
           </n-radio-group>
         </n-space>
         
-        <svg width="600" height="200" style="border: 1px solid #e0e0e0; border-radius: 4px;">
+        <!-- L1-2（报告42）: viewBox 等比缩放，宽度 100% 自适应 -->
+        <svg viewBox="0 0 600 200" style="width: 100%; max-width: 800px; height: auto; border: 1px solid #e0e0e0; border-radius: 4px;">
           <!-- Grid lines -->
           <line x1="40" y1="40" x2="560" y2="40" stroke="#f0f0f0" stroke-width="1" />
           <line x1="40" y1="80" x2="560" y2="80" stroke="#f0f0f0" stroke-width="1" />
@@ -176,7 +190,7 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
             {{ label.value }}
           </text>
           
-          <!-- X-axis labels -->
+          <!-- X-axis labels（按宽度抽样） -->
           <text v-for="(label, idx) in xAxisLabels" :key="idx" :x="label.x - 15" y="195" font-size="9" fill="#666">
             {{ label.label }}
           </text>
@@ -184,7 +198,7 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
           <!-- Line chart -->
           <path :d="chartPath" fill="none" stroke="#18a058" stroke-width="2" />
           
-          <!-- Data points -->
+          <!-- Data points（带原生 tooltip：日期 + 值） -->
           <circle
             v-for="(point, idx) in chartPoints"
             :key="idx"
@@ -192,7 +206,9 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
             :cy="point.y"
             r="3"
             fill="#18a058"
-          />
+          >
+            <title>{{ chartPointTitles[idx]?.date }}：{{ chartPointTitles[idx]?.value }}</title>
+          </circle>
         </svg>
       </div>
       

@@ -294,3 +294,54 @@ code {
     border-right-color: var(--border);
   }
 }
+
+/* ─── L1-1: 响应式统计卡（4→2→1 列） ─────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.stats-grid--3 { grid-template-columns: repeat(3, 1fr); }
+.stats-grid .n-card,
+.stats-grid .n-card__content { height: 100%; }
+
+@media (max-width: 1100px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+}
+@media (max-width: 640px) {
+  .stats-grid { grid-template-columns: 1fr !important; }
+}
+
+/* ─── L1-6: 键盘可访问性 ──────────────────────────────────────── */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 1000;
+  background: #18a058;
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 0 0 4px 0;
+  text-decoration: none;
+}
+.skip-link:focus {
+  left: 0;
+}
+:focus-visible {
+  outline: 2px solid #18a058;
+  outline-offset: 2px;
+}
+
+/* ─── L1-7: 表格股票代码链接 ──────────────────────────────────── */
+.stock-link {
+  color: #18a058;
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.stock-link:hover {
+  text-decoration: underline;
+}
+.copy-btn {
+  margin-left: 6px;
+}

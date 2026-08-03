@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert } from 'naive-ui'
 import axios from 'axios'
 import type { DataQualityStatus } from '../types'
@@ -66,6 +66,11 @@ const error = ref('')
 const retryList = ref<RetryItem[]>([])
 const missingList = ref<MissingItem[]>([])
 const autoUpdate = ref<AutoUpdateStatus | null>(null)
+// L1-3（报告42）: 更新运行中每 12s 自动轮询；显示"上次刷新"
+const lastRefreshedAt = ref<string | null>(null)
+let pollTimer: ReturnType<typeof setInterval> | undefined
+
+const isPolling = computed(() => autoUpdate.value?.state === 'running')
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
@@ -80,9 +85,9 @@ const incomeStatementPct = computed(() => summary.value ? pct(summary.value.inco
 const cashFlowPct = computed(() => summary.value ? pct(summary.value.cash_flow_count, summary.value.stock_count) : '0%')
 const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.indicator_snapshot_count, summary.value.stock_count) : '0%')
 
-async function fetchData() {
-  error.value = ''
-  loading.value = true
+async function fetchData(silent = false) {
+  if (!silent) error.value = ''
+  if (!silent) loading.value = true
   try {
     const [sumResp, retryResp, missResp, autoResp] = await Promise.all([
       axios.get('/api/data-status/summary'),
@@ -94,12 +99,33 @@ async function fetchData() {
     retryList.value = retryResp.data.items || []
     missingList.value = missResp.data.items || []
     autoUpdate.value = autoResp.data
+    lastRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e: unknown) {
-    error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
+    if (!silent) error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
+    schedulePolling()
   }
 }
+
+// L1-3（报告42）: 更新运行中每 12 秒轮询；停止后自动取消
+function schedulePolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+  if (autoUpdate.value?.state === 'running') {
+    pollTimer = setInterval(() => void fetchData(true), 12000)
+  }
+}
+
+onMounted(() => void fetchData())
+onBeforeUnmount(() => {
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = undefined
+  }
+})
 
 function autoUpdateStateLabel(state: string): string {
   const labels: Record<string, string> = {
@@ -118,14 +144,18 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
   return 'default'
 }
 
-onMounted(fetchData)
 </script>
 
 <template>
   <div>
-    <n-space align="center" justify="space-between" style="margin-bottom: 16px;">
-      <h2 style="margin: 0;">数据状态</h2>
-      <n-button :loading="loading" @click="fetchData">刷新</n-button>
+    <n-space align="center" justify="space-between" style="margin-bottom: 16px;" wrap>
+      <h1 style="font-size: 24px; margin: 0;">数据状态</h1>
+      <n-space align="center" size="small">
+        <!-- L1-3（报告42）: 显示上次刷新时间与自动轮询状态 -->
+        <span v-if="lastRefreshedAt" style="color:#999; font-size:12px;">上次刷新 {{ lastRefreshedAt }}</span>
+        <n-tag v-if="isPolling" size="small" type="info">更新运行中，每 12 秒自动刷新</n-tag>
+        <n-button :loading="loading" @click="fetchData()">刷新</n-button>
+      </n-space>
     </n-space>
     <n-spin :show="loading">
       <n-alert v-if="error" type="error" title="加载失败" style="margin-bottom: 16px;">

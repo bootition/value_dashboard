@@ -314,7 +314,7 @@ onUnmounted(() => {
       <n-card size="small" style="margin-bottom: 16px;">
         <n-space align="center" justify="space-between">
           <n-space align="center">
-            <h2 style="margin: 0;">{{ stockInfo?.name || stockCode }}</h2>
+            <h1 style="font-size: 22px; margin: 0;">{{ stockInfo?.name || stockCode }}</h1>
             <n-tag v-if="stockInfo?.exchange" size="small">{{ stockInfo.exchange }}</n-tag>
             <n-tag v-if="stockInfo?.is_st" size="small" type="warning">ST</n-tag>
             <n-tag v-if="stockInfo?.is_suspended" size="small" type="error">停牌</n-tag>

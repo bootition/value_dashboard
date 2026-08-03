@@ -30,17 +30,19 @@ const activeKey = computed(() => route.name as string)
   <n-config-provider :locale="zhCN" :date-locale="dateZhCN">
     <n-message-provider>
       <n-dialog-provider>
-        <n-layout position="absolute">
-          <n-layout-header bordered style="height: 56px; display: flex; align-items: center; padding: 0 24px;">
-            <span style="font-size: 18px; font-weight: 600; margin-right: 48px;">
-              Value Dashboard
-            </span>
-            <n-menu mode="horizontal" :options="menuOptions" :value="activeKey" />
-          </n-layout-header>
-          <n-layout-content style="padding: 24px;">
-            <router-view />
-          </n-layout-content>
-        </n-layout>
+    <n-layout position="absolute">
+      <!-- L1-6: 键盘用户跳过导航直达内容 -->
+      <a href="#main-content" class="skip-link">跳到主要内容</a>
+      <n-layout-header bordered style="height: 56px; display: flex; align-items: center; padding: 0 24px;">
+        <span style="font-size: 18px; font-weight: 600; margin-right: 48px;">
+          Value Dashboard
+        </span>
+        <n-menu mode="horizontal" :options="menuOptions" :value="activeKey" />
+      </n-layout-header>
+      <n-layout-content id="main-content" tabindex="-1" style="padding: 24px;">
+        <router-view />
+      </n-layout-content>
+    </n-layout>
       </n-dialog-provider>
     </n-message-provider>
   </n-config-provider>

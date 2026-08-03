@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, h } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, onMounted, computed, h, watch } from 'vue'
+import { useRouter, RouterLink } from 'vue-router'
 import {
   NAlert, NCard, NSpace, NSelect, NInput, NButton, NDataTable,
-  NEmpty, useMessage, useDialog, NStatistic, NGrid, NGridItem, NCheckboxGroup, NCheckbox, NTag
+  NEmpty, useMessage, useDialog, NStatistic, NCheckboxGroup, NCheckbox, NTag
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
@@ -68,7 +68,42 @@ const groupOptions = computed(() => [
   ...groups.value.map((g) => ({ label: `${g.group_name} (${g.cnt})`, value: g.group_name })),
 ])
 
-const selectedColumns = ref<string[]>(['stock_code','name','exchange','group_name','latest_close','pe_ttm','pb_mrq','roe','gross_margin','debt_ratio','source'])
+// L1-7（报告42）: 列配置记忆（localStorage），无历史配置时用默认列
+const DEFAULT_COLUMNS = ['stock_code', 'name', 'exchange', 'group_name', 'latest_close', 'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'debt_ratio', 'source']
+const COLUMNS_STORAGE_KEY = 'vd.watchlist.columns'
+
+function loadSavedColumns(): string[] {
+  try {
+    const raw = localStorage.getItem(COLUMNS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+const savedColumns = loadSavedColumns()
+const validSaved = savedColumns.filter((col) => allColumnOptions.some((o) => o.value === col))
+const selectedColumns = ref<string[]>(validSaved.length > 0 ? validSaved : [...DEFAULT_COLUMNS])
+
+watch(selectedColumns, (cols) => {
+  try {
+    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(cols))
+  } catch {
+    // localStorage 不可用时静默降级
+  }
+}, { deep: true })
+
+// L1-7（报告42）: 一键复制股票代码
+async function copyStockCode(code: string) {
+  try {
+    await navigator.clipboard.writeText(code)
+    message.success(`已复制 ${code}`)
+  } catch {
+    message.warning('复制失败，请手动选择复制')
+  }
+}
 
 const allColumnOptions = [
   { label: '代码', value: 'stock_code' },
@@ -103,7 +138,18 @@ function trustedRender(field: NumericField) {
 const tableColumns = computed(() => {
   const cols: DataTableColumns<WatchlistItem> = []
   const colDefs: Record<string, DataTableColumns<WatchlistItem>[number]> = {
-    stock_code: { title: '代码', key: 'stock_code', width: 90 },
+    // L1-7: 代码列首列（名称列紧随其后），保持滚动可读由用户调整窗口宽度
+    stock_code: {
+      title: '代码', key: 'stock_code', width: 130,
+      render: (r) => h('span', { style: 'white-space: nowrap;' }, [
+        h(RouterLink, { to: `/stock/${encodeURIComponent(r.stock_code)}`, class: 'stock-link' }, { default: () => r.stock_code }),
+        h(NButton, {
+          text: true, size: 'tiny', type: 'primary', class: 'copy-btn',
+          title: `复制 ${r.stock_code}`,
+          onClick: () => void copyStockCode(r.stock_code),
+        }, { default: () => '复制' }),
+      ]),
+    },
     name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || '—' },
     exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
     group_name: { title: '分组', key: 'group_name', width: 90 },
@@ -191,17 +237,18 @@ onMounted(fetchWatchlist)
 
 <template>
   <div>
-    <h2>自选列表</h2>
-    <n-grid :cols="3" :x-gap="16" style="margin-bottom: 16px;">
-      <n-grid-item><n-card size="small"><n-statistic label="总股票数" :value="totalCount" /></n-card></n-grid-item>
-      <n-grid-item><n-card size="small"><n-statistic label="分组数" :value="groups.length" /></n-card></n-grid-item>
-      <n-grid-item><n-card size="small"><n-statistic label="当前筛选" :value="selectedGroup || '全部'" /></n-card></n-grid-item>
-    </n-grid>
+    <h1 style="font-size: 24px; margin: 0 0 16px;">自选列表</h1>
+    <!-- L1-1: 响应式统计卡 3→2→1 列 -->
+    <div class="stats-grid stats-grid--3">
+      <n-card size="small"><n-statistic label="总股票数" :value="totalCount" /></n-card>
+      <n-card size="small"><n-statistic label="分组数" :value="groups.length" /></n-card>
+      <n-card size="small"><n-statistic label="当前筛选" :value="selectedGroup || '全部'" /></n-card>
+    </div>
     <n-card size="small" style="margin-bottom: 16px;">
       <n-space wrap>
         <n-select v-model:value="selectedGroup" :options="groupOptions" placeholder="选择分组" size="small" style="width: 200px;" @update:value="fetchWatchlist" />
-        <n-input v-model:value="addStockCode" placeholder="输入股票代码" size="small" style="width: 150px;" @keyup.enter="addStock" />
-        <n-input v-model:value="addGroupName" placeholder="分组名" size="small" style="width: 120px;" />
+        <n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" style="width: 150px;" @keyup.enter="addStock" />
+        <n-input v-model:value="addGroupName" placeholder="分组名" aria-label="分组名" size="small" style="width: 120px;" />
         <n-button size="small" type="primary" @click="addStock">添加</n-button>
       </n-space>
     </n-card>
