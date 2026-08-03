@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–35） | 仅 29–33、35 ✅；34 superseded（发现已由 35 修复）；其余 superseded |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–36） | 仅 29/36 ✅；34–35 发现与修复事实保留、裁决被 36 取代；其余 superseded |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是 |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -48,9 +48,10 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `decisions/01_PRODUCT_REQUIREMENTS_V1.md` — 产品需求规格（验收合同，活文档）
 - `decisions/02_TECH_CONSTRAINTS.md` — 技术约束
 - `reports/29_DATA_REBUILD_REPORT_2026-07-31.md` — 最新数据重建结论
-- `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — **当前发布裁决**：系统红队 4 项 P1 + 3 项发布阻断 P2 修复
-- `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现，已被 35 修复）
-- `reports/30`–`reports/33` — 前四轮修复/验收事实（结论已被 34/35 更新）
+- `reports/36_SYSTEM_RED_TEAM_REAUDIT_2026-08-02.md` — **当前发布裁决**：第六轮修复后独立复审（BLOCK，P1-A/P1-C 残余 F1/F2/F3 + 退出条件）
+- `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
+- `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实（4 项 P1 + 3 项 P2 修复，裁决已被 36 取代）
+- `reports/30`–`reports/33` — 前四轮修复/验收事实（结论已被 34/35/36 更新）
 - `runbooks/s0-evidence-preservation.md` — 证据保全手册
 - `contracts/path-isolation-contract.md` — 路径隔离合同
 

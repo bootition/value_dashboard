@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "command": "system-red-team-reaudit.reproduction",
+  "checked_at": "2026-08-02",
+  "environment": "synthetic rows only; formal database not touched; input order matches real caller (ORDER BY report_date DESC, function reverses internally)",
+  "findings": [
+    {
+      "id": "F2",
+      "title": "Consecutive-quarter diffs compound: prior_by_year stores post-diff single-quarter values",
+      "location": "app/web/api/stock_detail.py:126-135",
+      "setup": "cumulative revenue rows 2025-03-31=100, 2025-06-30=230, 2025-09-30=400, 2025-12-31=580 (DESC input as produced by API query)",
+      "result": {"derived_singles": [100.0, 130.0, 270.0, 310.0], "true_singles": [100.0, 130.0, 170.0, 180.0]},
+      "impact": "every stock with >=3 reported quarters in a year shows wrong Q3/Q4 single-quarter values in the quarterly research view, silently, no reason code"
+    },
+    {
+      "id": "F1",
+      "title": "First row of a year whose earliest period is not Q1 passes cumulative through as single quarter",
+      "location": "app/web/api/stock_detail.py:118-135",
+      "setup": "year starts at Q2: cumulative 230/400/580 (DESC input)",
+      "result": {"derived_singles": [230.0, 170.0, 410.0], "expected": ["NULL (not derivable)", 170.0, 180.0]},
+      "impact": "silent wrong value for missing-Q1 years (IPO mid-year / source gap), contrary to fix docstring"
+    }
+  ],
+  "code_confirmed_not_live_reproduced": [
+    {
+      "id": "F3",
+      "title": "CLI screening.run -> save_result -> web export_csv loses truncation marker",
+      "location": "app/cli/main.py:645,684-685; app/web/api/screening.py:277-278,297-313",
+      "sequence": "pool>5000 -> vd screening run (engine returns truncated=True, not persisted) -> vd screening save_result (confidence_summary without truncated/total) -> web export (summary.get('truncated')=False) -> CSV with 5000 rows, no _truncated column, total unknown",
+      "test_gap": "test_research_path_integrity.py:177-209 asserts engine keys only; no test asserts _truncated CSV column or CLI persistence"
+    }
+  ]
+}

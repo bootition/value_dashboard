@@ -1,10 +1,11 @@
 ---
 title: 系统红队 4 项 P1 修复报告（2026-08-02）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-02
 last-reviewed: 2026-08-02
 supersedes: reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md
+superseded-by: reports/36_SYSTEM_RED_TEAM_REAUDIT_2026-08-02.md
 ---
 
 # 系统红队 4 项 P1 修复报告（2026-08-02）
