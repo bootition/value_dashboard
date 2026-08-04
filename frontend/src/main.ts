@@ -37,6 +37,12 @@ const router = createRouter({
       meta: { title: '数据状态' },
     },
     {
+      path: '/design-preview',
+      name: 'design-preview',
+      component: () => import('./views/ResearchWorkbenchPreviewPage.vue'),
+      meta: { title: '筛选工作台样稿', staticPreview: true },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
       component: () => import('./views/NotFoundPage.vue'),

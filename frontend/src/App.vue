@@ -14,6 +14,7 @@ type Summary = { data_quality: { ready: boolean; warning_codes: string[] } }
 const quality = ref<{ ready: boolean; warning_codes: string[] } | null>(null)
 
 onMounted(async () => {
+  if (route.meta.staticPreview) return
   try {
     const resp = await axios.get<Summary>('/api/data-status/summary')
     quality.value = resp.data.data_quality
