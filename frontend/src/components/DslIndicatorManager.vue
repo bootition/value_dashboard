@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, h, computed } from 'vue'
 import {
-  NCard, NButton, NSpace, NInput, NDataTable, NModal, NForm, NFormItem,
+  NButton, NSpace, NInput, NDataTable, NModal, NForm, NFormItem,
   NTag, NEmpty, useMessage, useDialog, NCode, NDescriptions, NDescriptionsItem
 } from 'naive-ui'
 import axios from 'axios'
@@ -31,6 +31,7 @@ const message = useMessage()
 const dialog = useDialog()
 const showCreateModal = ref(false)
 const showPreviewModal = ref(false)
+const expanded = ref(false)
 const expressions = ref<DslExpression[]>([])
 const loading = ref(false)
 
@@ -215,22 +216,26 @@ loadExpressions()
 </script>
 
 <template>
-  <n-card title="复合指标管理" size="small">
-    <template #header-extra>
+  <section class="dsl-workbench">
+    <div class="dsl-heading"><div><p>COMPOSITE INDICATORS</p><h2>复合指标</h2><span>将已发布指标组合为可复用的研究条件。</span></div>
       <n-space>
-        <n-input v-model:value="previewStockCode" size="small" placeholder="单股代码" style="width: 110px" />
+        <n-button size="small" @click="expanded = !expanded">{{ expanded ? '收起' : '管理指标' }}</n-button>
         <n-button size="small" type="primary" @click="showCreateModal = true">创建指标</n-button>
       </n-space>
+    </div>
+    <p v-if="!expanded" class="dsl-summary">{{ expressions.length > 0 ? `已有 ${expressions.length} 个复合指标，可在筛选条件中直接使用。` : '暂无复合指标；创建后可作为筛选条件或排序字段使用。' }}</p>
+    <template v-else>
+      <div class="dsl-tools"><n-input v-model:value="previewStockCode" size="small" placeholder="单股预览代码" /><span>预览操作会使用这里的股票代码。</span></div>
+      <n-empty v-if="expressions.length === 0 && !loading" description="暂无复合指标" class="dsl-empty" />
+      <n-data-table
+        v-else
+        size="small"
+        :columns="columns"
+        :data="expressions"
+        :loading="loading"
+        :pagination="{ pageSize: 10 }"
+      />
     </template>
-    <n-empty v-if="expressions.length === 0 && !loading" description="暂无复合指标" />
-    <n-data-table
-      v-else
-      size="small"
-      :columns="columns"
-      :data="expressions"
-      :loading="loading"
-      :pagination="{ pageSize: 10 }"
-    />
     <n-modal v-model:show="showCreateModal" preset="dialog" title="创建复合指标" style="width: 600px;">
       <n-form>
         <n-form-item label="名称" required>
@@ -287,5 +292,9 @@ loadExpressions()
         <n-button @click="showPreviewModal = false">关闭</n-button>
       </template>
     </n-modal>
-  </n-card>
+  </section>
 </template>
+
+<style scoped>
+.dsl-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.dsl-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }.dsl-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.dsl-heading h2 { margin: 7px 0 5px; font-size: 18px; }.dsl-heading span, .dsl-summary, .dsl-tools span { color: #829087; font-size: 11px; }.dsl-summary { margin: 18px 0 0; }.dsl-tools { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; padding: 12px; border-radius: 8px; background: #fafcf9; }.dsl-tools :deep(.n-input) { width: 150px; }.dsl-empty { padding: 30px; }.dsl-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
+</style>
