@@ -52,7 +52,7 @@ CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`p
 ## 前提条件
 
 - **Python >= 3.11**（当前环境 3.14.2）
-- **Node.js 24.13.0 / npm 11.6.2**（前端构建）
+- **Node.js >= 20.19**（O5：Vite 8 与 `--experimental-strip-types` 测试要求；`frontend/package.json` 已声明 `engines.node >=20.19.0`，当前环境 24.13.0）
 
 当前 Python 版本对第三方库（FastAPI/Starlette）发出 `asyncio.iscoroutinefunction` 废弃警告，但不阻断测试或运行。
 

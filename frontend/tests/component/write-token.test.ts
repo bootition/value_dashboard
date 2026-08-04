@@ -76,4 +76,34 @@ describe('write-token interceptor（PRD §4 本地威胁模型）', () => {
     expect(sessionCalls).toBe(2)
     expect(records[0].token).toBe('tok-2')
   })
+
+  it('C4: 写令牌失效(403)后自动重新拉取并重放一次', async () => {
+    const records: RecordedRequest[] = []
+    let sessionCalls = 0
+    const adapter = async (config: any) => {
+      if (config.url === '/api/session') {
+        sessionCalls += 1
+        return { data: { write_token: `tok-${sessionCalls}` }, status: 200, statusText: 'OK', headers: {}, config }
+      }
+      const headers = config.headers as any
+      const token = headers?.get ? headers.get('X-VD-Write-Token') ?? null : null
+      records.push({ url: config.url, method: 'post', token })
+      if (token === 'tok-1' && config._vdRetried !== true) {
+        const err: any = new Error('token invalid')
+        err.response = { status: 403, data: { detail: 'local write token required' } }
+        err.config = config
+        throw err
+      }
+      return { data: {}, status: 200, statusText: 'OK', headers: {}, config }
+    }
+    const client = axios.create({ adapter })
+    installWriteTokenInterceptor(client)
+
+    await client.post('/api/screening/save', {})
+
+    expect(sessionCalls).toBe(2)
+    expect(records.length).toBe(2)
+    expect(records[0].token).toBe('tok-1')
+    expect(records[1].token).toBe('tok-2')
+  })
 })

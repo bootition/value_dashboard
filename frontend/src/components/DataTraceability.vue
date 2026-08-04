@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { NCard, NButton, NEmpty, NDataTable, NSpace, NModal, NList, NListItem, NTag, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import type { AuditResponse, AuditFieldRow, AuditBatchRow } from '../types/stock-detail.ts'
 import { fmt } from '../utils/formatters.ts'
 import axios from 'axios'
+import { isPackaged } from '../helpers/runtime.ts'
 
 const props = defineProps<{
   readonly stockCode: string
@@ -13,6 +14,11 @@ const props = defineProps<{
 
 const message = useMessage()
 const showPdfModal = ref(false)
+// C3修复(报告41): 打包版显示 vd 命令而非 python -m 开发命令
+const cliPrefix = ref('python -m app.cli.main')
+onMounted(async () => {
+  if (await isPackaged()) cliPrefix.value = 'vd'
+})
 const pdfList = ref<Array<{
   filename: string
   size_bytes: number
@@ -82,7 +88,7 @@ function viewPdf(filename: string, archived = false) {
 }
 
 function restoreCommand(filename: string): string {
-  return `python -m app.cli.main data restore_pdf ${props.stockCode} ${filename}`
+  return `${cliPrefix.value} data restore_pdf ${props.stockCode} ${filename}`
 }
 
 function formatFileSize(bytes: number): string {

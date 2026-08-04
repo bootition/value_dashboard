@@ -1,22 +1,37 @@
 # scripts/chain-finalize.ps1 — 串行执行正式库收尾链（后台运行）
 # 顺序: 等待分红 → 隔离 → 财务重建(最长) → 快照重算 → 诊断
+# O6修复(报告41): 正式路径参数化（不再硬编码），证据写入 docs/evidence/ 治理目录。
 param(
-    [int]$WaitPid = 237348
+    [string]$ProjectRoot = "",
+    [int]$WaitPid = 237348,
+    [string]$EvidenceDir = ""
 )
 
 $ErrorActionPreference = "Continue"
 $env:PYTHONIOENCODING = "utf-8"
 $env:VD_ENV = "formal"
 $env:VD_FORMAL_ACK = "confirmed"
-$env:VD_DUCKDB_PATH = "D:\Mr.Q\掌控经济\value-dashboard\data\valuedashboard.duckdb"
-$env:VD_SQLITE_PATH = "D:\Mr.Q\掌控经济\value-dashboard\data\valuedashboard.sqlite"
-$log = "D:\Mr.Q\掌控经济\value-dashboard\scripts\evidence\chain_finalize.log"
-Set-Location "D:\Mr.Q\掌控经济\value-dashboard"
+
+if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
+    $ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
+}
+if ([string]::IsNullOrWhiteSpace($EvidenceDir)) {
+    $EvidenceDir = Join-Path $ProjectRoot "docs\evidence"
+}
+$duckPath = Join-Path $ProjectRoot "data\valuedashboard.duckdb"
+$sqlitePath = Join-Path $ProjectRoot "data\valuedashboard.sqlite"
+$env:VD_DUCKDB_PATH = $duckPath
+$env:VD_SQLITE_PATH = $sqlitePath
+$log = Join-Path $ProjectRoot "scripts\evidence\chain_finalize.log"
+$diagOut = Join-Path $EvidenceDir "evidence-final-diagnostics.json"
+Set-Location $ProjectRoot
 
 function Log($msg) {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $log -Value "[$ts] $msg"
 }
+
+Log "ProjectRoot=$ProjectRoot  EvidenceDir=$EvidenceDir"
 
 # 1) 等待分红进程结束
 Log "等待分红进程 PID=$WaitPid ..."
@@ -29,7 +44,7 @@ Log "分红进程已结束"
 Log "== 步骤2: 隔离遗留 lineage =="
 python -c "
 import sys, json
-sys.path.insert(0, r'D:\Mr.Q\掌控经济\value-dashboard')
+sys.path.insert(0, r'$ProjectRoot')
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import resolve_and_validate_paths
 from app.core.data_maintenance import legacy_quarantine_summary, quarantine_legacy_records
@@ -50,7 +65,7 @@ Log "财务重建完成 exit=$LASTEXITCODE"
 Log "== 步骤4: 快照重算 =="
 python -c "
 import sys, json
-sys.path.insert(0, r'D:\Mr.Q\掌控经济\value-dashboard')
+sys.path.insert(0, r'$ProjectRoot')
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.path_policy import resolve_and_validate_paths
@@ -66,7 +81,7 @@ Log "快照重算完成 exit=$LASTEXITCODE"
 Log "== 步骤5: 诊断 =="
 python -c "
 import sys, json
-sys.path.insert(0, r'D:\Mr.Q\掌控经济\value-dashboard')
+sys.path.insert(0, r'$ProjectRoot')
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.path_policy import resolve_and_validate_paths
@@ -79,7 +94,7 @@ r = {
   'quality': build_data_quality_status(duck, sqlite),
   'screening_ready': screening_readiness(duck, sqlite),
 }
-out = r'D:\Mr.Q\掌控经济\value-dashboard\docs\evidence-final-diagnostics.json'
+out = r'$diagOut'
 open(out, 'w', encoding='utf-8').write(json.dumps(r, ensure_ascii=False, indent=2, default=str))
 print('diagnostics written to', out)
 print('ready=', r['screening_ready']['ready'], 'warnings=', r['screening_ready']['warning_codes'])

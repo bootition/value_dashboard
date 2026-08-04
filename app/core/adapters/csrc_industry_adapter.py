@@ -93,7 +93,13 @@ class CSRCIndustryAdapter(BaseAdapter):
 
         # 变更历史按日期倒序（接口默认返回全部历史），取最新一条当前记录。
         # F008C「最新记录标识」=1 表示当前归属。
-        df = ak.stock_industry_change_cninfo(symbol=stock_code)
+        try:
+            df = ak.stock_industry_change_cninfo(symbol=stock_code)
+        except (KeyError, TypeError) as e:
+            # 新发行/无行业变更历史的股票：CNINFO 无返回列（akshare 内部 KeyError），
+            # 属"该股无数据"而非源故障——如实返回空，避免逐股失败误触熔断。
+            logger.info("%s CNINFO 无行业变更历史，按缺失处理: %s", stock_code, e)
+            return []
         if df is None or df.empty:
             return []
 
