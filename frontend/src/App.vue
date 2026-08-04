@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMenu, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
+import { NConfigProvider, NLayout, NLayoutHeader, NLayoutContent, NMenu, NMessageProvider, NDialogProvider, NTag, NSpace, zhCN, dateZhCN } from 'naive-ui'
 import type { MenuOption } from 'naive-ui'
 import { h } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
@@ -41,16 +41,12 @@ const menuOptions: MenuOption[] = [
     key: 'watchlist',
   },
   {
-    label: () => h(RouterLink, { to: '/stock' }, { default: () => '个股详情' }),
-    key: 'stock-search',
-  },
-  {
     label: () => h(RouterLink, { to: '/data-status' }, { default: () => '数据状态' }),
     key: 'data-status',
   },
 ]
 
-const activeKey = computed(() => route.name === 'stock-detail' ? 'stock-search' : route.name as string)
+const activeKey = computed(() => route.name as string)
 </script>
 
 <template>
@@ -60,21 +56,23 @@ const activeKey = computed(() => route.name === 'stock-detail' ? 'stock-search' 
         <n-layout position="absolute">
           <!-- L1-6: 键盘用户跳过导航直达内容 -->
           <a v-if="!route.meta.staticPreview" href="#main-content" class="skip-link">跳到主要内容</a>
-          <router-view v-if="route.meta.staticPreview" />
-          <n-layout v-else has-sider class="app-shell">
-            <n-layout-sider bordered :width="226" class="app-sidebar">
-              <router-link to="/screening" class="app-brand"><span>V</span>value</router-link>
-              <p class="app-nav-label">研究工具</p>
-              <n-menu :options="menuOptions" :value="activeKey" />
-              <div class="app-sidebar-foot">
-                <router-link to="/data-status" class="app-data-status"><i></i>{{ statusTag.label }}</router-link>
-                <p>本地 A 股研究</p>
-              </div>
-            </n-layout-sider>
-            <n-layout-content id="main-content" tabindex="-1" class="app-main-content">
-              <router-view />
-            </n-layout-content>
-          </n-layout>
+          <n-layout-header v-if="!route.meta.staticPreview" bordered style="height: 56px; display: flex; align-items: center; padding: 0 24px; gap: 24px;">
+            <router-link to="/screening" style="text-decoration: none; display: flex; align-items: baseline; gap: 8px;">
+              <!-- L2 V6: 品牌副标题强化研究定位 -->
+              <span style="font-size: 18px; font-weight: 600; color: #1f2329;">Value Dashboard</span>
+              <span style="font-size: 12px; color: #667085;">本地 A 股研究</span>
+            </router-link>
+            <n-menu mode="horizontal" :options="menuOptions" :value="activeKey" />
+            <n-space style="margin-left: auto;">
+              <!-- L2 V6: 数据就绪/更新状态小徽标，点击直达数据状态页 -->
+              <router-link to="/data-status">
+                <n-tag :type="statusTag.type" size="small" round>{{ statusTag.label }}</n-tag>
+              </router-link>
+            </n-space>
+          </n-layout-header>
+          <n-layout-content id="main-content" tabindex="-1" :style="route.meta.staticPreview ? '' : 'padding: 24px;'">
+            <router-view />
+          </n-layout-content>
         </n-layout>
       </n-dialog-provider>
     </n-message-provider>
