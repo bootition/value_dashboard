@@ -96,9 +96,9 @@ const filteredTrendColumns = computed(() => {
 </script>
 
 <template>
-  <div>
-    <n-space style="margin-bottom: 12px" align="center">
-      <span>时间维度:</span>
+  <section class="indicator-workbench">
+    <div class="indicator-toolbar">
+      <span>时间维度</span>
       <n-radio-group :value="timeDimension" @update:value="onTimeDimensionChange" size="small">
         <n-radio-button v-for="option in timeDimensionOptions" :key="option.value" :value="option.value">
           {{ option.label }}
@@ -107,15 +107,15 @@ const filteredTrendColumns = computed(() => {
       <n-tag v-if="timeDimension !== 'current'" size="small" type="info">
         显示历史趋势数据
       </n-tag>
-    </n-space>
+    </div>
     
     <n-tabs type="line" style="margin-bottom: 16px;">
       <n-tab-pane name="valuation" tab="估值">
-        <n-grid :cols="4" :x-gap="12" :y-gap="12">
-          <n-grid-item><n-card size="small"><n-statistic label="PE-TTM" :value="fmt(metricValue(indicators?.indicators?.valuation?.pe_ttm))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.pe_ttm)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('pe_ttm')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
-          <n-grid-item><n-card size="small"><n-statistic label="PB-MRQ" :value="fmt(metricValue(indicators?.indicators?.valuation?.pb_mrq))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.pb_mrq)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('pb_mrq')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
-          <n-grid-item><n-card size="small"><n-statistic label="PS-TTM" :value="fmt(metricValue(indicators?.indicators?.valuation?.ps_ttm))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.ps_ttm)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('ps_ttm')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
-          <n-grid-item><n-card size="small"><n-statistic label="PCF-TTM" :value="fmt(metricValue(indicators?.indicators?.valuation?.pcf_ttm))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.pcf_ttm)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('pcf_ttm')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
+          <n-grid :cols="4" :x-gap="12" :y-gap="12">
+          <n-grid-item><n-card size="small"><n-statistic label="市盈率（PE-TTM）" :value="fmt(metricValue(indicators?.indicators?.valuation?.pe_ttm))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.pe_ttm)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('pe_ttm')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
+          <n-grid-item><n-card size="small"><n-statistic label="市净率（PB-MRQ）" :value="fmt(metricValue(indicators?.indicators?.valuation?.pb_mrq))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.pb_mrq)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('pb_mrq')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
+          <n-grid-item><n-card size="small"><n-statistic label="市销率（PS-TTM）" :value="fmt(metricValue(indicators?.indicators?.valuation?.ps_ttm))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.ps_ttm)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('ps_ttm')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
+          <n-grid-item><n-card size="small"><n-statistic label="市现率（PCF-TTM）" :value="fmt(metricValue(indicators?.indicators?.valuation?.pcf_ttm))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.pcf_ttm)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('pcf_ttm')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
           <n-grid-item><n-card size="small"><n-statistic label="股息率" :value="fmtPct(metricValue(indicators?.indicators?.valuation?.dividend_yield))" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.dividend_yield)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('dividend_yield')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
           <n-grid-item><n-card size="small"><n-statistic label="总市值" :value="fmt(metricValue(indicators?.indicators?.valuation?.total_market_cap), 0)" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.total_market_cap)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('total_market_cap')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
           <n-grid-item><n-card size="small"><n-statistic label="流通市值" :value="fmt(metricValue(indicators?.indicators?.valuation?.circ_market_cap), 0)" /><n-tooltip v-if="isCurrentOnly(indicators?.indicators?.valuation?.circ_market_cap)" trigger="hover"><template #trigger><n-tag size="tiny" type="warning" style="margin-top:4px">仅当前</n-tag></template>此指标依赖最新收盘价，只能用于当前时点展示，不可生成历史序列</n-tooltip><n-tag v-if="isFieldUntrusted('circ_market_cap')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
@@ -123,8 +123,8 @@ const filteredTrendColumns = computed(() => {
       </n-tab-pane>
     <n-tab-pane name="profitability" tab="盈利">
       <n-grid :cols="4" :x-gap="12" :y-gap="12">
-        <n-grid-item><n-card size="small"><n-statistic label="ROE" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.roe))" /><n-tag v-if="isFieldUntrusted('roe')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
-        <n-grid-item><n-card size="small"><n-statistic label="ROA" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.roa))" /><n-tag v-if="isFieldUntrusted('roa')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
+        <n-grid-item><n-card size="small"><n-statistic label="净资产收益率（ROE）" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.roe))" /><n-tag v-if="isFieldUntrusted('roe')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
+        <n-grid-item><n-card size="small"><n-statistic label="总资产收益率（ROA）" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.roa))" /><n-tag v-if="isFieldUntrusted('roa')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
         <n-grid-item><n-card size="small"><n-statistic label="毛利率" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.gross_margin))" /><n-tag v-if="isFieldUntrusted('gross_margin')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
         <n-grid-item><n-card size="small"><n-statistic label="净利率" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.net_margin))" /><n-tag v-if="isFieldUntrusted('net_margin')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
         <n-grid-item><n-card size="small"><n-statistic label="ROIC" :value="fmtPct(metricValue(indicators?.indicators?.profitability?.roic))" /><n-tag v-if="isFieldUntrusted('roic')" size="tiny" type="error" style="margin-top:4px">数据不可信</n-tag></n-card></n-grid-item>
@@ -182,5 +182,9 @@ const filteredTrendColumns = computed(() => {
       </n-space>
     </n-tab-pane>
   </n-tabs>
-  </div>
+   </section>
 </template>
+
+<style scoped>
+.indicator-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.indicator-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; color: #839087; font-size: 11px; }.indicator-workbench :deep(.n-tabs-nav) { margin-bottom: 16px; }.indicator-workbench :deep(.n-card) { border-radius: 10px; box-shadow: none; background: #fafcf9; }.indicator-workbench :deep(.n-statistic__label) { color: #7e8c82; font-size: 10px; }.indicator-workbench :deep(.n-statistic__value) { color: #3c5847; font-size: 19px; }.indicator-workbench :deep(.n-radio-button--checked) { color: #4d956b; }
+</style>

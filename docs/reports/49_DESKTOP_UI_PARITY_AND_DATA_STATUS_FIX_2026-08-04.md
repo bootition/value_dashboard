@@ -17,6 +17,7 @@ last-reviewed: 2026-08-04
 - 筛选规则编辑器、筛选结果操作区、自选规则分组、个股详情工作区及数据状态卡片布局按已确认样稿层级重构。
 - 个股搜索按整个右侧工作区居中，而非受窄列限制。
 - 自选技术存储组名 `default` 只显示为“默认组”；列配置改为按需展开。
+- 个股详情的指标、时间维度与趋势表收敛为同一工作面；关键估值与盈利标签中文优先并保留缩写。
 
 ## 2. 数据状态数值说明
 
@@ -31,7 +32,7 @@ last-reviewed: 2026-08-04
 
 | 门禁 | 结果 |
 |---|---|
-| `scripts/s1-pytest.ps1 tests/regression` | 424 passed（225.76s） |
+| `scripts/s1-pytest.ps1 tests/regression` | 424 passed（最终重跑 230.51s） |
 | `uv run --locked ruff check app tests/regression` | All checks passed |
 | `frontend/npm run lint` | 通过 |
 | `frontend/npm run test` | 52 Node 契约测试 + 11 Vitest 测试通过 |
