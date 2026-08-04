@@ -26,17 +26,18 @@ value, and component choice below was extracted from the current frontend source
 
 ## 1. Atmosphere & Identity
 
-**Read as:** trust-first financial research tool, operational, restrained, dense
-enough for data review. Not a consumer marketing surface.
+**Read as:** a desktop-first, trust-first financial research workspace: quiet,
+restrained, and dense enough for data review. Not a consumer marketing surface.
 
 - **User:** Chinese-speaking value-investment researcher / operator.
 - **Job of the UI:** surface numbers, coverage, and data-quality signals clearly
   enough that a researcher can decide whether to trust a figure in seconds.
 - **Tone:** quiet, workmanlike, information-dense. No decorative gradients, no
   brand-forward hero, no illustration system.
-- **Language:** Simplified Chinese for all visible labels, messages, and copy
-  (e.g. `筛选`, `数据状态`, `待重试`, `入选解释`). The product name
-  `Value Dashboard` in the header stays in Latin characters.
+- **Language:** Simplified Chinese for all visible labels, messages, and copy.
+  Metrics are Chinese first with a useful abbreviation retained in parentheses,
+  e.g. `市盈率（PE-TTM）` and `净资产收益率（ROE）`. Stable English field
+  names remain an API, rule-JSON, and machine-export concern, not UI copy.
 - **Density over delight:** the page is allowed to feel "spreadsheet-adjacent".
   Whitespace is functional (separating sections), not expressive.
 
@@ -148,16 +149,17 @@ This is intentional — the dashboard must feel native to the OS, not branded.
 
 ### 4.1 Shell
 
-`App.vue` defines a fixed two-region shell:
+`App.vue` defines a fixed desktop workspace shell:
 
 | Region | Size | Padding | Border |
 |---|---|---|---|
-| Header (`NLayoutHeader`, `bordered`) | height `56px` | `0 24px` | bottom, via `bordered` |
-| Content (`NLayoutContent`) | fills remaining height | `24px` all sides | none |
+| Sidebar (`NLayoutSider`, `bordered`) | width `226px` | `27px 17px 18px` | right, via `bordered` |
+| Content (`NLayoutContent`) | fills remaining height | `37px 49px 58px` | none |
 
-Header contains the brand label (18px/600, `margin-right: 48px`) followed by a
-horizontal `NMenu`. The shell uses `NLayout position="absolute"` filling the
-viewport; there is no max-width on the content region.
+Sidebar contains the `value` brand, the four V1 modules (筛选、自选列表、个股详情、
+数据状态), and a small data-readiness link. The shell uses `NLayout
+position="absolute"` filling the viewport. The individual stock detail module
+opens to its own stock search state; search is not a global control.
 
 ### 4.2 Spacing scale
 

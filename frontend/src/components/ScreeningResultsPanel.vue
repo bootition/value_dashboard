@@ -20,7 +20,7 @@ import type { DataTableColumns } from 'naive-ui'
 import type { ScreeningResult, WarningCode, ScreeningRuleNode, ScreeningExportResponse, ScreeningWatchlistResponse } from '../types/screening.ts'
 import axios from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
-import { fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
+import { fieldDisplayName, fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
 
 const props = defineProps<{
   results: readonly ScreeningResult[]
@@ -118,31 +118,9 @@ async function copyStockCode(code: string) {
 }
 
 const columnOptions = computed(() => {
-  const labelMap: Record<string, string> = {
-    stock_code: '股票代码',
-    name: '名称',
-    exchange: '交易所',
-    csrc_l1: '证监会一级',
-    latest_close: '最新价',
-    pe_ttm: 'PE-TTM',
-    pb_mrq: 'PB-MRQ',
-    ps_ttm: 'PS-TTM',
-    pcf_ttm: 'PCF-TTM',
-    dividend_yield: '股息率',
-    total_market_cap: '总市值',
-    roe: 'ROE',
-    roa: 'ROA',
-    gross_margin: '毛利率',
-    net_margin: '净利率',
-    debt_ratio: '资产负债率',
-    current_ratio: '流动比率',
-    quick_ratio: '速动比率',
-    revenue_yoy: '营收同比',
-    net_profit_yoy: '净利润同比',
-  }
   return allAvailableColumns.value.map(col => ({
     // L0-2: 表头带单位，口径与自选/详情一致
-    label: fieldTitleWithUnit(col, labelMap[col] || col),
+    label: fieldTitleWithUnit(col, fieldDisplayName(col)),
     value: col,
   }))
 })

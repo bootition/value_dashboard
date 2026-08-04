@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { NCard, NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, useMessage } from 'naive-ui'
+import { NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, useMessage } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
@@ -16,6 +16,7 @@ import type {
 import { generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fieldDisplayName } from '../utils/screening-format.ts'
 
 const message = useMessage()
 const indicators = ref<readonly ScreeningIndicator[]>([])
@@ -76,7 +77,10 @@ const opOptions = [
 ]
 
 const indicatorOptions = computed(() =>
-  indicators.value.map((i) => ({ label: (i as ScreeningIndicator & { label?: string }).label || i.name, value: i.name })),
+  indicators.value.map((i) => ({
+    label: fieldDisplayName(i.name, (i as ScreeningIndicator & { label?: string }).label),
+    value: i.name,
+  })),
 )
 
 const resultColumns = computed(() => {
@@ -361,149 +365,92 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div>
-    <h1 style="font-size: 24px; margin: 0 0 4px;">筛选</h1>
-    <!-- L2 V3: 以"规则→运行→结果"为主线的研究流程 -->
-    <p style="color: #667085; margin: 0 0 16px;">规则 → 运行 → 结果 → 保存/导出/加入自选</p>
-    
-    <n-card title="加载规则" size="small" style="margin-bottom: 16px">
-        <n-space align="center" wrap>
-          <span>已保存的规则:</span>
-        <n-select
-          v-model:value="selectedRuleId"
-          :options="ruleOptions"
-          size="small"
-          style="width: 250px"
-            @update:value="loadRule"
-          />
-          <n-input v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称" style="width: 160px" />
+  <section class="screening-page">
+    <header class="screening-page-header">
+      <div>
+        <p>研究工具 / 筛选</p>
+        <h1>条件筛选</h1>
+        <span>建立研究规则，找到值得进一步阅读的公司。</span>
+      </div>
+    </header>
+
+    <div class="screening-workspace">
+      <section class="screening-editor-card">
+        <div class="screening-card-heading">
+          <div><p>CURRENT RULE</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2><span>规则 → 运行 → 结果</span></div>
+        </div>
+        <div class="rule-load-row">
+          <span>已保存规则</span>
+          <n-select v-model:value="selectedRuleId" :options="ruleOptions" size="small" @update:value="loadRule" />
+          <n-input v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称" />
           <n-button size="small" @click="saveRule">保存新版本</n-button>
-        </n-space>
-    </n-card>
+        </div>
 
-    <DslIndicatorManager style="margin-bottom: 16px" />
-    
-    <n-card title="基础股票池" size="small" style="margin-bottom: 16px">
-      <n-space>
-        <n-switch v-model:value="basePool.exclude_st">
-          <template #checked>排除ST</template>
-          <template #unchecked>包含ST</template>
-        </n-switch>
-        <n-switch v-model:value="basePool.exclude_suspended">
-          <template #checked>排除停牌</template>
-          <template #unchecked>包含停牌</template>
-        </n-switch>
-        <span>最低上市年限:</span>
-        <n-input-number
-          v-model:value="basePool.min_listing_years"
-          :min="0"
-          :max="10"
-          size="small"
-        />
-      </n-space>
-    </n-card>
+        <div class="screening-section">
+          <div class="screening-section-title"><div><b>01</b><h3>基础股票池</h3></div></div>
+          <n-space wrap>
+            <n-switch v-model:value="basePool.exclude_st"><template #checked>排除 ST</template><template #unchecked>包含 ST</template></n-switch>
+            <n-switch v-model:value="basePool.exclude_suspended"><template #checked>排除停牌</template><template #unchecked>包含停牌</template></n-switch>
+            <span class="control-label">最低上市年限</span>
+            <n-input-number v-model:value="basePool.min_listing_years" :min="0" :max="10" size="small" />
+          </n-space>
+        </div>
 
-    <n-card title="数据质量" size="small" style="margin-bottom: 16px">
-      <n-space>
-        <n-switch v-model:value="strictOnly">
-          <template #checked>仅查看 strict</template>
-          <template #unchecked>包含 approximate</template>
-        </n-switch>
-        <span style="color: #999; font-size: 12px;">
-          {{ strictOnly ? '仅显示所有使用字段均为 strict 置信度的股票' : '显示所有股票，包括 approximate 置信度' }}
-        </span>
-      </n-space>
-    </n-card>
+        <div class="screening-section">
+          <div class="screening-section-title"><div><b>02</b><h3>筛选条件</h3></div></div>
+          <p class="screening-help">全部条件按当前逻辑组合。指标使用中文名称，并保留必要缩写核对口径。</p>
+          <ScreeningRuleEditor :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" />
+        </div>
 
-    <n-card title="筛选条件" size="small" style="margin-bottom: 16px">
-      <ScreeningRuleEditor
-        :node="ruleTree"
-        :depth="1"
-        :max-depth="3"
-        :max-conditions="20"
-        :is-root="true"
-        :indicator-options="indicatorOptions"
-        :op-options="opOptions"
-        @warn="(msg: string) => message.warning(msg)"
-      />
-    </n-card>
+        <div class="screening-section">
+          <div class="screening-section-title"><div><b>03</b><h3>排序方式</h3></div></div>
+          <n-space vertical>
+            <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
+              <span class="control-label">优先级 {{ index + 1 }}</span>
+              <n-select v-model:value="rule.field" :options="indicatorOptions" size="small" style="width: 220px" filterable />
+              <n-select v-model:value="rule.direction" :options="[{ label: '升序', value: 'asc' }, { label: '降序', value: 'desc' }]" size="small" style="width: 100px" />
+              <n-button size="tiny" quaternary type="error" @click="removeSortRule(index)">删除</n-button>
+            </n-space>
+            <n-button size="tiny" @click="addSortRule">+ 添加排序规则</n-button>
+          </n-space>
+        </div>
 
-    <n-card title="排序" size="small" style="margin-bottom: 16px">
-      <n-space vertical>
-        <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
-          <span>优先级 {{ index + 1 }}:</span>
-          <n-select
-            v-model:value="rule.field"
-            :options="indicatorOptions"
-            size="small"
-            style="width: 180px"
-            filterable
-          />
-          <n-select
-            v-model:value="rule.direction"
-            :options="[
-              { label: '升序', value: 'asc' },
-              { label: '降序', value: 'desc' },
-            ]"
-            size="small"
-            style="width: 100px"
-          />
-          <n-button size="tiny" type="error" @click="removeSortRule(index)">删除</n-button>
-        </n-space>
-        <n-space>
-          <n-button size="tiny" @click="addSortRule">+ 添加排序规则</n-button>
-          <n-button type="primary" :loading="loading" @click="runScreening">运行筛选</n-button>
-        </n-space>
-      </n-space>
-    </n-card>
+        <DslIndicatorManager class="dsl-manager" />
+      </section>
 
-    <ScreeningResultsPanel
-      :results="results"
-      :strict-only="strictOnly"
-      :execution-time="executionTime"
-      :base-pool-size="basePoolSize"
-      :data-date="dataDate"
-      :warning-codes="warningCodes"
-      :untrusted-fields="untrustedFields"
-      :quality-status="qualityStatus"
-      :rule-tree="ruleTree"
-      :run-id="runId"
-      :rule-id="activeRule?.id ?? null"
-      :rule-version="activeRule?.version ?? null"
-      :rule-name="activeRule?.name ?? ''"
-      :locked-indicators="activeRule?.locked_indicators ?? {}"
-      :sort="sortRules"
-      :base-pool-config="basePool"
-      :truncated="truncated"
-      :total-matched="totalMatched"
-    />
+      <aside class="screening-run-panel">
+        <div class="screening-ready"><i></i>{{ qualityStatus === 'available' ? '数据可用于筛选' : '数据状态加载中' }}</div>
+        <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
+        <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>排序方式</span><b>{{ sortRules.length }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
+        <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
+        <n-button type="primary" block :loading="loading" @click="runScreening">运行筛选 →</n-button>
+        <p class="screening-run-help">运行结果可保存、导出或加入自选列表。</p>
+      </aside>
+    </div>
 
-    <n-empty v-if="results.length === 0" description="运行筛选后显示结果" style="padding: 40px" />
+    <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :sort="sortRules" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
 
-    <!-- L0-1（报告42）: 空态给出可执行的首次筛选步骤，而非只提示"运行筛选" -->
-    <n-card
-      v-if="results.length === 0"
-      title="第一次筛选？三步开始"
-      size="small"
-      style="margin-top: 8px"
-    >
+    <section v-if="results.length === 0" class="screening-empty-card">
+      <n-empty description="运行筛选后显示候选公司" />
+      <!-- L0-1（报告42）: 空态给出可执行的首次筛选步骤，而非只提示"运行筛选" -->
+      <div class="first-screening-help">
       <n-alert
         v-if="qualityStatus === 'failed'"
         type="error"
         :show-icon="true"
-        style="margin-bottom: 12px"
       >
         无法获取数据质量状态，运行结果可能不可信。请先前往<router-link to="/data-status">数据状态页</router-link>确认。
       </n-alert>
-      <ol style="margin: 0; padding-left: 20px; line-height: 2;">
+      <ol>
         <li>在「加载规则」输入名称，点击<strong>保存新版本</strong>——筛选必须先保存规则（规则版本化，用于溯源）。</li>
         <li>设置「基础股票池」（是否排除 ST/停牌、最低上市年限）与「数据质量」严格模式。</li>
         <li>在「筛选条件」添加条件（如 pe_ttm &lt; 15），在「排序」设置优先级，点击<strong>运行筛选</strong>。</li>
       </ol>
-      <div style="margin-top: 8px; color: #888; font-size: 12px;">
+      <div>
         之后可保存结果、导出 CSV（含数据日期与规则溯源）或加入自选。
       </div>
-    </n-card>
+      </div>
+    </section>
 
     <!-- L0-4（报告42）: 草稿冲突恢复——加载服务器/保留本地/刷新 -->
     <n-modal
@@ -519,5 +466,9 @@ onMounted(async () => {
         <n-button size="small" type="primary" @click="resolveDraftConflict('local')">保留本地副本</n-button>
       </template>
     </n-modal>
-  </div>
+  </section>
 </template>
+
+<style scoped>
+.screening-page { max-width: 1380px; }.screening-page-header { margin-bottom: 27px; }.screening-page-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.screening-page-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.screening-page-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.screening-workspace { display: grid; grid-template-columns: minmax(620px, 1.6fr) minmax(282px, .72fr); gap: 21px; }.screening-editor-card, .screening-empty-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.screening-editor-card { padding: 28px 29px; }.screening-card-heading h2 { margin: 7px 0 5px; font-size: 19px; letter-spacing: -.04em; }.screening-card-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.screening-card-heading span { color: #829087; font-size: 11px; }.rule-load-row { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(120px, .65fr) auto; align-items: center; gap: 10px; margin: 25px 0; padding: 13px 14px; border-radius: 9px; background: #fafcf9; }.rule-load-row > span, .control-label { color: #89958c; font-size: 10px; }.screening-section { padding: 21px 0; border-top: 1px solid #edf1ee; }.screening-section-title > div { display: flex; align-items: baseline; gap: 9px; }.screening-section-title b { color: #83b194; font-size: 10px; }.screening-section-title h3 { margin: 0 0 13px; font-size: 13px; }.screening-help { margin: -4px 0 13px; color: #929d95; font-size: 10px; }.dsl-manager { margin-top: 3px; }.screening-run-panel { align-self: start; padding: 25px; border-radius: 16px; background: #eff7f1; box-shadow: 0 5px 17px rgba(47, 114, 74, .055); }.screening-ready { display: flex; align-items: center; gap: 6px; color: #659d75; font-size: 10px; }.screening-ready i { width: 6px; height: 6px; border-radius: 50%; background: #82ba94; }.screening-run-title { margin: 26px 0 19px; }.screening-run-title p { margin: 0 0 6px; color: #8a9b90; font-size: 10px; }.screening-run-title h2 { margin: 0; color: #365944; font-size: 20px; letter-spacing: -.05em; }.screening-run-data { padding: 13px 0; border-top: 1px solid #dbeade; border-bottom: 1px solid #dbeade; }.screening-run-data p { display: flex; justify-content: space-between; margin: 8px 0; color: #809087; font-size: 10px; }.screening-run-data b { color: #4d6556; font-weight: 650; }.screening-strict { display: grid; gap: 6px; margin: 18px 0; }.screening-strict span, .screening-run-help { color: #8d9b91; font-size: 9px; }.screening-run-help { margin: 11px 0 0; line-height: 1.5; text-align: center; }.screening-empty-card { display: grid; grid-template-columns: 220px 1fr; gap: 28px; align-items: center; margin-top: 21px; padding: 27px 29px; }.first-screening-help { color: #718077; font-size: 12px; }.first-screening-help :deep(.n-alert) { margin-bottom: 12px; }.first-screening-help ol { margin: 0; padding-left: 20px; line-height: 2; }.first-screening-help > div { margin-top: 8px; color: #87958c; font-size: 11px; }
+</style>

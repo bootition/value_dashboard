@@ -35,6 +35,8 @@ def _seed_screenable(duckdb_store: DuckDBStore) -> None:
         """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
            VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
     )
+
+
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query(
         """INSERT INTO indicator_snapshot
@@ -54,6 +56,25 @@ def _seed_screenable(duckdb_store: DuckDBStore) -> None:
                net_profit_yoy = excluded.net_profit_yoy,
                dividend_yield = excluded.dividend_yield"""
     )
+
+
+def test_stock_search_matches_partial_code_and_name(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
+           VALUES ('600519', '贵州茅台', 'SSE', '2020-01-01', false, false)"""
+    )
+    client = _build_client(duckdb_store, sqlite_store)
+
+    by_code = client.get('/api/stock/search', params={'query': '0519'})
+    by_name = client.get('/api/stock/search', params={'query': '茅'})
+
+    assert by_code.status_code == 200
+    assert by_code.json()['items'][0]['stock_code'] == '600519'
+    assert by_name.status_code == 200
+    assert by_name.json()['items'][0]['name'] == '贵州茅台'
 
 
 def _poison_lineage(duckdb_store: DuckDBStore) -> None:
