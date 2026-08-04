@@ -53,11 +53,13 @@ Get-FileHash data\valuedashboard.duckdb, data\valuedashboard.sqlite -Algorithm S
 
 ## 4. 注意事项
 
-- 银行/券商监管字段 92 只与 `920305` 等免费源缺口保持 NULL（不伪造）；
+- 银行/券商监管字段 90 只（STATUS 缺口#4）与 `920305` 等免费源缺口保持 NULL（不伪造）；
 - 2026-03-31 之前历史期财务为 CSMAR 商业导入值（无原始字节 lineage），
   quarantine 表保留不删除；
-- CSRC 行业分类（`csrc_l1/l2`）目前为 NULL：该功能仍在实施（Phase A–G），
-  行业排名在 CSRC 落地前返回 NULL（PRD §12.4 设计行为）。
+- CSRC 行业分类（`csrc_l1/l2`）已落地（2026-08-04，4923/5533）：无行业变更历史
+  的新上市/北交所（301xxx/920xxx）如实 NULL；行业排名对 NULL 行业返回 NULL
+  （PRD §12.4 设计行为，不造假）。填充命令：
+  `python scripts/populate_csrc_industry.py`（正式 profile，幂等/断点续传）。
 
 ## 5. 参考
 

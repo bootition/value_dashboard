@@ -3,8 +3,8 @@
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
-- **最后更新**：2026-08-03
-- **更新人**：opencode 会话（2026-08-03 第八轮系统红队正式启用独立复审）
+- **最后更新**：2026-08-04
+- **更新人**：opencode 会话（2026-08-04 剩余 P2 与 CSRC 填充）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
@@ -12,18 +12,14 @@
 | 代码层门禁 | ✅ 可自动化门禁全部通过（S1 回归 408、Ruff 零问题、uv lock、前端 lint/52 node + 10 组件测试、build-release 实际 smoke；2026-08-03 独立重跑） | `reports/40` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
-| 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]（2026-08-02 正式库只读复验；`snapshot_period_mismatches`=0，筛选 451ms/3,878 只） | `reports/29`、`reports/32`、`docs/evidence/evidence-formal-*20260802.json` |
+| 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]（2026-08-04 CSRC 填充后复验；CSRC 行业分类 4923/5533 已落地，筛选行业排名可用） | `reports/46`、`reports/29`、`reports/32` |
 | 30 股外部真值抽样 | ✅ 已执行（收盘 27/27、总股本 27/27；2 只流通股本为解禁时间差披露项） | `reports/29` |
-| 回归/发布验证 | ✅ 前端 + S1 全绿（408 passed，2026-08-03）；正式发行包可构建并经真实 exe `/api/health` smoke；正式库筛选可用；性能隔离基准就绪（PRD §19.1 目标主机仪式步骤待执行） | `reports/40` §2、`reports/32` |
+| 回归/发布验证 | ✅ 前端 + S1 全绿（423 passed，2026-08-04）；正式发行包可构建并经真实 exe `/api/health` smoke；**PRD §19.1 性能验收仪式 PASS（10/10 <5s，avg 256ms）** | `reports/46` §2、`reports/40` §2、`docs/evidence/evidence-performance-20260804.json` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
-1. **次要 P2、后续任务（完整清单见 `reports/41`、`reports/42`）**：存量结果无截断标记迁移（O3）、计数查询成本×2、P1-B 溯源 strict 不一致、打包恢复提示、写令牌重启后需刷新、Node engines 未声明（O5）、chain-finalize 证据目录治理（O6）、`_csv_cell` 首字符防护、杂项（C1-C16）。**G1+L0（43）、L1（44）、L2 美化（45）、O2 运维 runbook、O4 加密口径（PRD §18.3 已修订）已关闭**；均不改变当前 PASS。
-2. **O1 性能仪式 attestation 待 CSRC**：PRD §19.1 仪式已执行（10/10 <5s，233-282ms），但夹具 `pe_ttm_industry_rank` 条件依赖尚未实施的 CSRC 行业分类（`csrc_l1` 全 NULL），`complete_results_returned=false` → NOT_ATTESTED；CSRC 落地后重跑即可（见 `reports/45` §2）。
-3. **920305**：极新股，所有免费源无数据（价格/股本/分红缺失，如实记录 missing）。
-4. **银行/券商监管字段 92 只**（资本充足率/不良贷款率/拨备覆盖率/风险覆盖率）：免费结构化 API 不可得，保持 NULL，不伪造。
-5. **2026-03-31 之前历史期财务**：CSMAR 商业导入值保留，无原始字节 lineage（约 253 万条空 payload 已隔离至 quarantine 表，不删除）。
-6. **东财源被封**：已迁移至腾讯/Sina/BaoStock/交易所官方名单；东财适配器保留在回退链末端，网络恢复后自动可用。
+1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6（O1 性能仪式 2026-08-04 PASS、O2 runbook、O3 存量截断不迁移决策、O4 加密口径、O5 engines、O6 chain-finalize）见 `reports/46`；CSRC 行业分类数据已填充（4923/5533）。O7 剩余增量优化（按日节流/增量 CSRC 刷新）不阻断。
+2. **数据层披露缺口**：`920305` 极新股免费源无数据；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所（301xxx/920xxx）CSRC 分类如实 NULL。均不改变 PASS。
 ## 进行中的工作
-- **自动数据更新 + CSRC 行业分类**（最新会话）：PRD 修订已完成（`decisions/01` §7.3/7.4/7.7/15/16.1/20.4/21/22/24），实施计划见 `.planning/2026-07-31-automatic-data-updates/implementation-plan.md`（Phase A–G）。
+- **自动数据更新 + CSRC 行业分类**：PRD 修订完成（`decisions/01`）；CSRC 分类数据已落地（2026-08-04，4923/5533，见 `reports/46`）；自动更新控制器/状态页已具备。剩余增量优化（按日节流、增量 CSRC 刷新）按 `.planning/2026-07-31-automatic-data-updates/` 推进。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
@@ -45,7 +41,8 @@
 | `docs/reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` | 用户启用指南与 UI 分层审查（G1/L0 基础可用性、L1 专业可用性、L2 高分美化） | 分层边界；**迭代 A（G1+L0）见 `reports/43`，迭代 B（L1）见 `reports/44`** |
 | `docs/reports/43_REPORT42_ITERATION_A_IMPLEMENTATION_2026-08-03.md` | 报告42 迭代 A 实施报告：G1 操作指南 + L0-1~L0-7 | G1/L0 关闭依据 |
 | `docs/reports/44_REPORT42_ITERATION_B_IMPLEMENTATION_2026-08-03.md` | 报告42 迭代 B 实施报告：L1-1~L1-7 专业可用性 | L1 关闭依据 |
-| `docs/reports/45_REPORT42_ITERATION_C_AND_OPS_2026-08-03.md` | **报告42 迭代 C + 并行运维项实施报告**：L2 V1-V6 美化 + O1/O2/O4 | **L2 关闭依据；O1 性能达标但 attestation 待 CSRC 落地** |
+| `docs/reports/45_REPORT42_ITERATION_C_AND_OPS_2026-08-03.md` | **报告42 迭代 C + 并行运维项实施报告**：L2 V1-V6 美化 + O1/O2/O4 | **L2 关闭依据；O1 性能达标但 attestation 待 CSRC 落地**（已被 `reports/46` 更新） |
+| `docs/reports/46_REMAINING_P2_AND_CSRC_2026-08-04.md` | **剩余 P2 与 CSRC 填充实施报告**：C3-C16 + O1 attestation **PASS** + O3/O5/O6；正式库 ready 恢复 | **B1/B2 全部关闭依据；CSRC 数据落地** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |

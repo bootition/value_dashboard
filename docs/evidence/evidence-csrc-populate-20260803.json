@@ -1,0 +1,16 @@
+{
+  "command": "populate_csrc_industry",
+  "captured_at": "2026-08-03T20:15:17.637696+00:00",
+  "report": {
+    "status": "success",
+    "source": "cninfo",
+    "count": 2218,
+    "total": 2828,
+    "errors": []
+  },
+  "after": {
+    "csrc_l1_not_null": 4923,
+    "csrc_l2_not_null": 4923,
+    "listed_total": 5533
+  }
+}

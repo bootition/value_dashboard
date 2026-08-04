@@ -1,0 +1,65 @@
+{
+  "schema_version": "1.0",
+  "command": "remaining_p2_and_csrc.gates",
+  "checked_at": "2026-08-04",
+  "formal_db_read_only": false,
+  "formal_db_change_intent": "CSRC 行业分类填充（股票 4923/5533 获得 csrc_l1/l2）+ schema 迁移 14（data_refresh_state）。合法维护操作，正式库 hash 相应更新。",
+  "formal_db_sha256": {
+    "duckdb_before_csrc": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "duckdb_after_csrc": "51EA2DF2A181414DA92B8115D6934F56E31BBB5DE3D3C324EC99BC6CD513D92A",
+    "sqlite_before_csrc": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317",
+    "sqlite_after_csrc": "6E74BD9E5B022359BE662C91E20C6053D4D27B88CCFCEF5839687FBEE484D903"
+  },
+  "gates": {
+    "s1_pytest_regression": {"result": "passed", "collected": 423, "passed": 423, "duration_seconds": 189.74},
+    "ruff_check_app_tests": {"result": "passed"},
+    "frontend_lint": {"result": "passed"},
+    "frontend_test": {"result": "passed", "node_tests": 52, "vitest_tests": 11},
+    "frontend_build": {"result": "passed"},
+    "formal_s1_run_hash_match": {"result": "passed"}
+  },
+  "csrc_population": {
+    "status": "done",
+    "filled": 4923,
+    "total_listed": 5533,
+    "remaining_null_are_no_history_stocks": true,
+    "no_history_log": "301xxx/920xxx 等新上市/北交所无行业变更历史，如实 NULL",
+    "method": "scripts/populate_csrc_industry.py 两轮（首轮 2705；适配器修复熔断后再补 2218）",
+    "adapter_fix": "无历史股票按缺失处理，避免 KeyError 误触熔断"
+  },
+  "readiness_after_csrc": {
+    "screening_ready": true,
+    "warning_codes": [],
+    "disclosure_missing_counts": {
+      "regulatory_fields": 90,
+      "corporate_action_dividend_lineage": 96,
+      "pending_financial_period": 1
+    },
+    "note": "银行/券商监管字段缺口（STATUS 缺口#4，所有者口径'保持 NULL，不伪造'）改为披露项，不阻断筛选"
+  },
+  "prd_19_1_attestation": {
+    "status": "PASS",
+    "evidence": "docs/evidence/evidence-performance-20260804.json",
+    "runs": "10/10 < 5000ms (233.4-291.0ms, avg 256.2)",
+    "complete_results_returned": true,
+    "result_count": 3377
+  },
+  "closed_items": [
+    "C3 打包版恢复指引命令(DataTraceability + /api/session packaged)",
+    "C4 写令牌 403/401 自动重拉重放(http.ts + 测试)",
+    "C6 save_rule 服务端固定状态机",
+    "C7 草稿 PUT 413 上限",
+    "C8+C16 job_logs/过期 plan/已解析 missing GC(housekeeping + 启动维护)",
+    "C9 更新锁被拒→skipped 不误记 failed",
+    "C10 max_stocks ORDER BY 稳定排序",
+    "C11 _csv_cell 前导空白公式注入防护",
+    "C12 DSL 被依赖删除 409",
+    "C13 PDF/CLI 绝对路径脱敏",
+    "C14 筛选单次窗口计数 (COUNT(*) OVER()) 替代二次计数查询",
+    "C15 部分/截断批次溯源 approximate",
+    "O3 存量截断标记迁移决策(不迁移,如实披露)",
+    "O5 Node engines 声明",
+    "O6 chain-finalize.ps1 参数化+证据目录治理",
+    "O1 PRD 19.1 attestation PASS (2026-08-04)"
+  ]
+}
