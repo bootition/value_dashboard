@@ -74,15 +74,14 @@ const isPolling = computed(() => autoUpdate.value?.state === 'running')
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
-  return ((value / total) * 100).toFixed(1) + '%'
+  // Detail tables contain multiple report periods per company. Coverage is capped
+  // at the listed-stock universe rather than rendering misleading values >100%.
+  return (Math.min(value, total) / total * 100).toFixed(1) + '%'
 }
 
 const priceRawPct = computed(() => summary.value ? pct(summary.value.price_raw_count, summary.value.stock_count) : '0%')
 const priceQfqPct = computed(() => summary.value ? pct(summary.value.price_qfq_count, summary.value.stock_count) : '0%')
 const csrcIndustryPct = computed(() => summary.value ? pct(summary.value.csrc_industry_count, summary.value.stock_count) : '0%')
-const balanceSheetPct = computed(() => summary.value ? pct(summary.value.balance_sheet_count, summary.value.stock_count) : '0%')
-const incomeStatementPct = computed(() => summary.value ? pct(summary.value.income_statement_count, summary.value.stock_count) : '0%')
-const cashFlowPct = computed(() => summary.value ? pct(summary.value.cash_flow_count, summary.value.stock_count) : '0%')
 const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.indicator_snapshot_count, summary.value.stock_count) : '0%')
 
 async function fetchData(silent = false) {
@@ -180,8 +179,9 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
           最近更新: {{ summary.last_update || '尚未初始化' }}
         </p>
 
+        <section class="status-workbench">
         <!-- 自动更新状态（PRD §7.3 只读展示） -->
-        <n-card title="自动更新" size="small" style="margin-bottom: 16px;" v-if="autoUpdate">
+        <n-card title="自动更新" size="small" v-if="autoUpdate">
           <n-descriptions :column="4" size="small">
             <n-descriptions-item label="状态">
               <n-tag :type="autoUpdateTagType(autoUpdate.state)" size="small">
@@ -259,34 +259,19 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
           </n-space>
         </n-alert>
 
-        <!-- 覆盖统计 -->
-        <n-grid :cols="4" :x-gap="16" :y-gap="16" style="margin-bottom: 16px;">
-          <n-grid-item><n-card><n-statistic label="股票总数" :value="summary.stock_count" /></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="Raw价格覆盖" :value="summary.price_raw_count">
-            <template #suffix>{{ priceRawPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="Qfq价格覆盖" :value="summary.price_qfq_count">
-            <template #suffix>{{ priceQfqPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="CSRC行业覆盖" :value="summary.csrc_industry_count">
-            <template #suffix>{{ csrcIndustryPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="资产负债表" :value="summary.balance_sheet_count">
-            <template #suffix>{{ balanceSheetPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="利润表" :value="summary.income_statement_count">
-            <template #suffix>{{ incomeStatementPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="现金流量表" :value="summary.cash_flow_count">
-            <template #suffix>{{ cashFlowPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-          <n-grid-item><n-card><n-statistic label="指标快照" :value="summary.indicator_snapshot_count">
-            <template #suffix>{{ indicatorSnapshotPct }}</template>
-          </n-statistic></n-card></n-grid-item>
-        </n-grid>
+        <section class="coverage-grid" aria-label="数据覆盖概览">
+          <article><p>当前上市股票</p><strong>{{ summary.stock_count.toLocaleString('zh-CN') }}</strong><span>筛选基础股票池</span></article>
+          <article><p>原始价格覆盖</p><strong>{{ summary.price_raw_count.toLocaleString('zh-CN') }}</strong><span>覆盖率 {{ priceRawPct }}</span></article>
+          <article><p>前复权价格覆盖</p><strong>{{ summary.price_qfq_count.toLocaleString('zh-CN') }}</strong><span>覆盖率 {{ priceQfqPct }}</span></article>
+          <article><p>证监会行业分类</p><strong>{{ summary.csrc_industry_count.toLocaleString('zh-CN') }}</strong><span>覆盖率 {{ csrcIndustryPct }}</span></article>
+          <article><p>资产负债表记录</p><strong>{{ summary.balance_sheet_count.toLocaleString('zh-CN') }}</strong><span>多个报告期，非公司覆盖率</span></article>
+          <article><p>利润表记录</p><strong>{{ summary.income_statement_count.toLocaleString('zh-CN') }}</strong><span>多个报告期，非公司覆盖率</span></article>
+          <article><p>现金流量表记录</p><strong>{{ summary.cash_flow_count.toLocaleString('zh-CN') }}</strong><span>多个报告期，非公司覆盖率</span></article>
+          <article><p>指标快照</p><strong>{{ summary.indicator_snapshot_count.toLocaleString('zh-CN') }}</strong><span>覆盖率 {{ indicatorSnapshotPct }}</span></article>
+        </section>
 
         <!-- 回填状态 -->
-        <n-card title="价格回填状态" size="small" style="margin-bottom: 16px;" v-if="summary.price_backfill">
+        <n-card title="价格回填状态" size="small" v-if="summary.price_backfill">
           <n-descriptions :column="4" size="small">
             <n-descriptions-item label="最早日期">{{ summary.price_backfill.earliest_date || '—' }}</n-descriptions-item>
             <n-descriptions-item label="最新日期">{{ summary.price_backfill.latest_date || '—' }}</n-descriptions-item>
@@ -297,7 +282,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         </n-card>
 
         <!-- 财务覆盖范围 -->
-        <n-card title="财务报表覆盖范围" size="small" style="margin-bottom: 16px;" v-if="summary.balance_sheet_range">
+        <n-card title="财务报表覆盖范围" size="small" v-if="summary.balance_sheet_range">
           <n-descriptions :column="3" size="small">
             <n-descriptions-item label="资产负债表">{{ summary.balance_sheet_range?.earliest }} ~ {{ summary.balance_sheet_range?.latest }}</n-descriptions-item>
             <n-descriptions-item label="利润表">{{ summary.income_statement_count }} 只</n-descriptions-item>
@@ -305,7 +290,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
           </n-descriptions>
         </n-card>
 
-        <n-card title="公司行动与分红" size="small" style="margin-bottom: 16px;">
+        <n-card title="公司行动与分红" size="small">
           <n-descriptions :column="4" size="small">
             <n-descriptions-item label="分红记录">{{ summary.dividends?.total_rows ?? 0 }}</n-descriptions-item>
             <n-descriptions-item label="分红覆盖股票">{{ summary.dividends?.stocks ?? 0 }}</n-descriptions-item>
@@ -315,7 +300,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         </n-card>
 
         <!-- PRD §6.4/§15: 各数据域最新日期 -->
-        <n-card title="各数据域最新日期" size="small" style="margin-bottom: 16px;">
+        <n-card title="各数据域最新日期" size="small">
           <n-descriptions :column="3" size="small">
             <n-descriptions-item label="价格日期">
               {{ summary.data_quality.dates.price || '—' }}
@@ -348,7 +333,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         </n-card>
 
         <!-- 任务状态 -->
-        <n-grid :cols="3" :x-gap="16" style="margin-bottom: 16px;">
+        <n-grid :cols="3" :x-gap="16">
           <n-grid-item>
             <n-card size="small">
               <n-statistic label="待重试" :value="summary.retry_count">
@@ -373,7 +358,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         </n-grid>
 
         <!-- 备份摘要 -->
-        <n-card title="备份摘要" size="small" style="margin-bottom: 16px;" v-if="summary.backup">
+        <n-card title="备份摘要" size="small" v-if="summary.backup">
           <n-descriptions :column="3" size="small">
             <n-descriptions-item label="备份总数">{{ summary.backup?.cnt || 0 }}</n-descriptions-item>
             <n-descriptions-item label="全量备份">{{ summary.backup?.full_count || 0 }}</n-descriptions-item>
@@ -382,7 +367,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         </n-card>
 
         <!-- 重试列表 -->
-        <n-card title="重试列表" size="small" style="margin-bottom: 16px;" v-if="retryList.length > 0">
+        <n-card title="重试列表" size="small" v-if="retryList.length > 0">
           <n-data-table
             size="small"
             striped
@@ -413,14 +398,15 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
           />
         </n-card>
 
-        <n-card v-if="summary.stock_count === 0" style="margin-top: 16px;">
+        <n-card v-if="summary.stock_count === 0">
           <n-empty description="尚未初始化数据。请运行: python -m app.cli.main data init" />
         </n-card>
+        </section>
       </div>
     </n-spin>
   </section>
 </template>
 
 <style scoped>
-.data-status-page { max-width: 1380px; }.data-status-header { margin-bottom: 27px; }.data-status-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.data-status-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.data-status-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.data-readiness { border-radius: 16px; }
+.data-status-page { max-width: 1380px; }.data-status-header { margin-bottom: 27px; }.data-status-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.data-status-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.data-status-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.data-readiness { margin-bottom: 21px; border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.coverage-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 21px; }.coverage-grid article { padding: 19px 20px; border-radius: 14px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.coverage-grid p, .coverage-grid span { margin: 0; color: #8b978f; font-size: 10px; }.coverage-grid strong { display: block; margin: 7px 0 4px; color: #3c5847; font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }.status-workbench { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }.status-workbench > :deep(.n-grid), .status-workbench > :deep(.n-card):nth-child(1), .status-workbench > :deep(.n-card):nth-child(6), .status-workbench > :deep(.n-card):nth-child(7), .status-workbench > :deep(.n-card):nth-child(8), .status-workbench > :deep(.n-card):nth-child(9) { grid-column: 1 / -1; }.data-status-page :deep(.n-card) { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.data-status-page :deep(.n-card-header) { padding-top: 20px; }.data-status-page :deep(.n-card__content) { padding-bottom: 20px; }
 </style>

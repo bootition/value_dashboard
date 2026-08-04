@@ -3,12 +3,12 @@
    建立统一背景/层级/分割线/风险色/数字字体语义。 */
 
 :root {
-  --vd-bg: #f4f5f7;
+  --vd-bg: #f7f9f7;
   --vd-surface: #ffffff;
   --vd-border: #e3e6eb;
   --vd-text: #1f2329;
   --vd-text-2: #667085;
-  --vd-primary: #0f7b52;
+  --vd-primary: #70a986;
   --vd-danger: #d03050;
   --vd-warning: #d48806;
   --vd-up: #d03050;
@@ -38,9 +38,16 @@ body {
 }
 
 .app-sidebar {
-  position: relative !important;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
   background: #fff !important;
   padding: 27px 17px 18px;
+}
+
+.app-sidebar .n-layout-sider-scroll-container {
+  overflow: visible;
 }
 
 .app-brand {
@@ -74,22 +81,64 @@ body {
   letter-spacing: 0.11em;
 }
 
-.app-sidebar .n-menu {
-  --n-item-text-color: #77867c !important;
-  --n-item-text-color-active: #4a966d !important;
-  --n-item-text-color-hover: #4a966d !important;
-  --n-item-color-active: #eff8f1 !important;
-  --n-item-color-active-hover: #eff8f1 !important;
-  --n-item-color-hover: #f4f9f5 !important;
-  --n-item-height: 40px !important;
-  font-size: 13px;
+.app-nav {
+  display: grid;
+  gap: 5px;
 }
 
+.app-nav a {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 11px 12px;
+  border-radius: 9px;
+  color: #77867c;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.app-nav a:hover,
+.app-nav a.active {
+  background: #eff8f1;
+  color: #57966d;
+}
+
+.app-nav a.active {
+  font-weight: 700;
+}
+
+.app-nav-icon {
+  display: inline-block;
+  flex: 0 0 15px;
+  width: 15px;
+  height: 15px;
+  border: 1.4px solid currentColor;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.icon-filter {
+  border: 0;
+  border-top: 1.5px solid currentColor;
+  transform: skewY(-33deg);
+}
+
+.icon-filter::after {
+  content: '';
+  display: block;
+  width: 9px;
+  margin: 5px 0 0 4px;
+  border-top: 1.5px solid currentColor;
+}
+
+.icon-watchlist { border-radius: 50%; }
+.icon-watchlist::after { content: '★'; position: relative; left: 2px; top: -2px; font-size: 10px; }
+.icon-stock { border-radius: 50% 50% 2px 2px; }
+.icon-status { border-radius: 50%; }
+.icon-status::after { content: ''; display: block; width: 7px; height: 7px; margin: 3px; border-left: 1px solid currentColor; border-bottom: 1px solid currentColor; }
+
 .app-sidebar-foot {
-  position: absolute;
-  right: 17px;
-  bottom: 18px;
-  left: 17px;
+  margin-top: auto;
 }
 
 .app-data-status {
@@ -101,7 +150,6 @@ body {
   background: #f4faf5;
   color: #5f9975;
   font-size: 10px;
-  text-decoration: none;
 }
 
 .app-data-status i {
@@ -154,6 +202,31 @@ p {
 /* L2 V3: 卡片统一层级 */
 .n-card {
   border-color: var(--vd-border);
+  border-radius: 16px;
+  box-shadow: 0 4px 17px rgba(48, 82, 59, 0.045);
+}
+
+.n-data-table {
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.n-data-table-th {
+  background: #fafcfa !important;
+}
+
+.n-data-table-th__title {
+  color: #98a39b !important;
+  font-size: 10px;
+}
+
+.n-data-table-td {
+  border-color: #eff2f0 !important;
+}
+
+.n-alert {
+  border-radius: 14px;
+  box-shadow: 0 4px 17px rgba(48, 82, 59, 0.045);
 }
 
 /* L2 V5: 尊重系统减少动效偏好 */

@@ -89,12 +89,12 @@ function updateRightField(idx: number, value: string | undefined): void {
 
 <template>
   <div>
-    <div v-if="isRoot" style="margin-bottom: 8px">
+    <div v-if="isRoot" class="rule-logic-row">
       <n-select
         :value="node.logic"
         :options="logicOptions"
         size="small"
-        style="width: 150px"
+        class="rule-logic-select"
         @update:value="node.logic = $event"
       />
     </div>
@@ -102,10 +102,10 @@ function updateRightField(idx: number, value: string | undefined): void {
     <div
       v-for="(item, idx) in node.rules"
       :key="item.id"
-      style="padding-left: 16px; margin-bottom: 4px"
+      class="rule-editor-item"
     >
       <template v-if="isRuleNode(item)">
-        <div style="display: flex; align-items: center; gap: 8px">
+        <div class="rule-group-heading">
           <n-tag size="small" type="info">{{ item.logic }}</n-tag>
           <n-select
             :value="item.logic"
@@ -118,7 +118,7 @@ function updateRightField(idx: number, value: string | undefined): void {
             删除组
           </n-button>
         </div>
-        <div style="padding-left: 24px; margin-top: 4px; border-left: 1px dashed #eee">
+          <div class="rule-group-body">
           <ScreeningRuleEditor
             :node="item"
             :depth="depth + 1"
@@ -146,9 +146,13 @@ function updateRightField(idx: number, value: string | undefined): void {
       </template>
     </div>
 
-    <n-space style="margin-top: 8px">
+    <n-space class="rule-editor-actions">
       <n-button size="tiny" @click="addCondition">+ 添加条件</n-button>
       <n-button v-if="depth < maxDepth" size="tiny" @click="addGroup">+ 添加组</n-button>
     </n-space>
   </div>
 </template>
+
+<style scoped>
+.rule-logic-row { margin-bottom: 10px; }.rule-logic-select { width: 150px; }.rule-editor-item { margin-bottom: 4px; }.rule-group-heading { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-top: 1px solid #eff2f0; background: #fafcf9; }.rule-group-body { margin-top: 4px; padding-left: 18px; border-left: 1px dashed #d9e3db; }.rule-editor-actions { margin-top: 10px; }
+</style>

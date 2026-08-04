@@ -4,7 +4,7 @@
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-08-04
-- **更新人**：opencode 会话（2026-08-04 已确认四页桌面界面接入）
+- **更新人**：opencode 会话（2026-08-04 桌面界面样稿同构与数据状态修复）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
@@ -17,6 +17,7 @@
 | 回归/发布验证 | ✅ 前端 + S1 全绿（423 passed，2026-08-04）；正式发行包可构建并经真实 exe `/api/health` smoke；**PRD §19.1 性能验收仪式 PASS（10/10 <5s，avg 256ms）** | `reports/46` §2、`reports/40` §2、`docs/evidence/evidence-performance-20260804.json` |
 | 桌面筛选界面 | ✅ 已接入正式路径：浅色侧栏四模块、筛选工作区、中文优先指标与模块内个股搜索；S1 424、Ruff、前端门禁全绿 | `reports/47` |
 | 四页桌面界面 | ✅ 四页静态样稿经用户确认后已全部接入：筛选、自选规则分组、个股搜索/详情、数据状态；S1 424、Ruff、前端门禁全绿 | `reports/48` |
+| 界面同构与数据状态 | ✅ 修复正式页残留旧风格、侧栏图标溢出、个股搜索偏移及覆盖率视觉误读；前复权覆盖为 5533/5533（100.0%） | `reports/49` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6（O1 性能仪式 2026-08-04 PASS、O2 runbook、O3 存量截断不迁移决策、O4 加密口径、O5 engines、O6 chain-finalize）见 `reports/46`；CSRC 行业分类数据已填充（4923/5533）。O7 剩余增量优化（按日节流/增量 CSRC 刷新）不阻断。
 2. **数据层披露缺口**：`920305` 极新股免费源无数据；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所（301xxx/920xxx）CSRC 分类如实 NULL。均不改变 PASS。
@@ -47,6 +48,7 @@
 | `docs/reports/46_REMAINING_P2_AND_CSRC_2026-08-04.md` | **剩余 P2 与 CSRC 填充实施报告**：C3-C16 + O1 attestation **PASS** + O3/O5/O6；正式库 ready 恢复 | **B1/B2 全部关闭依据；CSRC 数据落地** |
 | `docs/reports/47_DESKTOP_SCREENING_UI_AND_STOCK_SEARCH_2026-08-04.md` | **桌面筛选界面与个股搜索入口实施报告**：正式筛选页 + 四模块侧栏 + 中文指标 + 模块内股票搜索 | **本次 UI 实施与门禁依据** |
 | `docs/reports/48_APPROVED_FOUR_PAGE_DESKTOP_UI_INTEGRATION_2026-08-04.md` | **已确认四页桌面界面正式接入报告**：样稿确认后完整接入四页 | **当前完整 UI 接入与门禁依据** |
+| `docs/reports/49_DESKTOP_UI_PARITY_AND_DATA_STATUS_FIX_2026-08-04.md` | **桌面界面样稿同构与数据状态修复报告**：正式页统一工作台风格、侧栏/搜索修复、覆盖率展示口径 | **本轮 UI 同构与数据展示修复依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |

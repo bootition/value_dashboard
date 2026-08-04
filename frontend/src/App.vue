@@ -1,9 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMenu, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
-import type { MenuOption } from 'naive-ui'
-import { h } from 'vue'
+import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
 import { RouterLink, RouterView } from 'vue-router'
 import axios from 'axios'
 
@@ -31,30 +29,48 @@ const statusTag = computed(() => {
   return { type: 'success' as const, label: '数据就绪', color: undefined }
 })
 
-const menuOptions: MenuOption[] = [
-  {
-    label: () => h(RouterLink, { to: '/screening' }, { default: () => '筛选' }),
-    key: 'screening',
-  },
-  {
-    label: () => h(RouterLink, { to: '/watchlist' }, { default: () => '自选列表' }),
-    key: 'watchlist',
-  },
-  {
-    label: () => h(RouterLink, { to: '/stock' }, { default: () => '个股详情' }),
-    key: 'stock-search',
-  },
-  {
-    label: () => h(RouterLink, { to: '/data-status' }, { default: () => '数据状态' }),
-    key: 'data-status',
-  },
+const menuItems = [
+  { label: '筛选', route: '/screening', key: 'screening', icon: 'filter' },
+  { label: '自选列表', route: '/watchlist', key: 'watchlist', icon: 'watchlist' },
+  { label: '个股详情', route: '/stock', key: 'stock-search', icon: 'stock' },
+  { label: '数据状态', route: '/data-status', key: 'data-status', icon: 'status' },
 ]
 
 const activeKey = computed(() => route.name === 'stock-detail' ? 'stock-search' : route.name as string)
+
+const themeOverrides = {
+  common: {
+    primaryColor: '#70a986',
+    primaryColorHover: '#5d9774',
+    primaryColorPressed: '#4c8764',
+    primaryColorSuppl: '#70a986',
+    borderRadius: '8px',
+    borderRadiusSmall: '6px',
+    fontSize: '13px',
+  },
+  Button: {
+    textColorPrimary: '#3e7551',
+    colorPrimary: '#c3dfca',
+    colorHoverPrimary: '#afd4b9',
+    colorPressedPrimary: '#9acaa8',
+    borderPrimary: '1px solid #c3dfca',
+  },
+  Input: {
+    border: '1px solid #dce9df',
+    borderHover: '1px solid #a9ceb4',
+    borderFocus: '1px solid #a9ceb4',
+    boxShadowFocus: '0 0 0 3px #edf7ef',
+  },
+  Select: {
+    border: '1px solid #dce9df',
+    borderHover: '1px solid #a9ceb4',
+    borderFocus: '1px solid #a9ceb4',
+  },
+}
 </script>
 
 <template>
-  <n-config-provider :locale="zhCN" :date-locale="dateZhCN">
+  <n-config-provider :locale="zhCN" :date-locale="dateZhCN" :theme-overrides="themeOverrides">
     <n-message-provider>
       <n-dialog-provider>
         <n-layout position="absolute">
@@ -65,9 +81,13 @@ const activeKey = computed(() => route.name === 'stock-detail' ? 'stock-search' 
             <n-layout-sider bordered :width="226" class="app-sidebar">
               <router-link to="/screening" class="app-brand"><span>V</span>value</router-link>
               <p class="app-nav-label">研究工具</p>
-              <n-menu :options="menuOptions" :value="activeKey" />
+              <nav class="app-nav" aria-label="研究工具">
+                <router-link v-for="item in menuItems" :key="item.key" :to="item.route" :class="{ active: activeKey === item.key }">
+                  <i :class="`app-nav-icon icon-${item.icon}`"></i>{{ item.label }}
+                </router-link>
+              </nav>
               <div class="app-sidebar-foot">
-                <router-link to="/data-status" class="app-data-status"><i></i>{{ statusTag.label }}</router-link>
+                <div class="app-data-status"><i></i>{{ statusTag.label }}</div>
                 <p>本地 A 股研究</p>
               </div>
             </n-layout-sider>

@@ -2,7 +2,6 @@
 import { computed, h, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
-  NCard,
   NButton,
   NDataTable,
   NTag,
@@ -11,7 +10,6 @@ import {
   NForm,
   NFormItem,
   NInput,
-  NStatistic,
   NAlert,
   NSelect,
   useMessage,
@@ -303,23 +301,10 @@ async function addToWatchlist() {
       否则保存的结果与导出的 CSV 同样只包含这 5000 条。
     </n-alert>
 
-    <!-- L1-1: 响应式统计卡 4→2→1 列 -->
-    <div class="stats-grid">
-      <n-card><n-statistic label="结果数" :value="displayedResults.length" /></n-card>
-      <n-card><n-statistic label="基础池" :value="basePoolSize" /></n-card>
-      <n-card><n-statistic label="耗时(ms)" :value="executionTime" /></n-card>
-      <n-card><n-statistic label="数据日期"><template #default><span>{{ dataDate || '—' }}</span><n-tag v-if="hasWarnings" size="small" type="warning" style="margin-left: 8px">{{ warningCodes.length }} 个警告</n-tag></template></n-statistic></n-card>
-    </div>
-
-    <n-space style="margin-bottom: 16px">
-      <n-button id="save-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button>
-      <n-button id="export-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="exportCSV">导出CSV</n-button>
-      <n-button id="watchlist-btn" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="addToWatchlist">加入自选</n-button>
-    </n-space>
-
-    <n-card size="small" style="margin-bottom: 16px">
-      <n-space align="center" wrap>
-        <span>显示列:</span>
+    <section class="screening-results-card">
+      <div class="results-heading"><div><p>SCREENING RESULTS</p><h2>筛选结果</h2><span>{{ totalMatched || displayedResults.length }} 家公司符合当前规则</span></div><div><n-button id="save-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button><n-button id="export-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="exportCSV">导出 CSV</n-button><n-button id="watchlist-btn" size="small" type="primary" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="addToWatchlist">加入自选</n-button></div></div>
+      <div class="result-meta"><span><b>{{ displayedResults.length }}</b> 家已展示</span><span>基础股票池 <b>{{ basePoolSize }}</b></span><span>耗时 <b>{{ executionTime }} ms</b></span><span>数据日期 <b>{{ dataDate || '—' }}</b></span></div>
+      <div class="column-config">
         <n-select
           v-model:value="selectedColumns"
           :options="columnOptions"
@@ -328,8 +313,7 @@ async function addToWatchlist() {
           style="width: min(400px, 100%)"
           placeholder="选择要显示的列"
         />
-      </n-space>
-    </n-card>
+      </div>
 
     <n-data-table
       :columns="tableColumns"
@@ -340,6 +324,7 @@ async function addToWatchlist() {
       size="small"
       striped
     />
+    </section>
 
     <n-modal v-model:show="showSaveDialog" title="保存筛选结果" preset="dialog">
       <n-form>
@@ -364,3 +349,7 @@ async function addToWatchlist() {
     </n-modal>
   </div>
 </template>
+
+<style scoped>
+.screening-results-card { margin-top: 21px; padding: 27px 29px 29px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.results-heading { display: flex; justify-content: space-between; gap: 20px; }.results-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.results-heading h2 { margin: 7px 0 5px; font-size: 19px; }.results-heading span { color: #829087; font-size: 11px; }.results-heading > div:last-child { display: flex; align-items: start; gap: 8px; }.result-meta { display: flex; gap: 22px; margin: 21px 0 15px; color: #8b978f; font-size: 10px; }.result-meta b { color: #536359; }.column-config { margin: 0 0 15px; padding: 12px; border-radius: 8px; background: #fafcf9; }
+</style>

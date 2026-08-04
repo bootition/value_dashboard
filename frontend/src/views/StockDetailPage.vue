@@ -350,35 +350,37 @@ onUnmounted(() => {
         <n-empty v-if="!klineData.candles?.length" description="无K线数据" style="padding: 40px;" />
       </n-card>
 
-      <!-- 全局数据可信告警 -->
-      <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" style="margin-bottom: 16px;">
-        当前数据库状态不可信，以下指标数据可能不准确或不完整。请先检查<router-link to="/data-status">数据状态页</router-link>。
-      </n-alert>
+      <section class="stock-detail-workbench">
+        <!-- 全局数据可信告警 -->
+        <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true">
+          当前数据库状态不可信，以下指标数据可能不准确或不完整。请先检查<router-link to="/data-status">数据状态页</router-link>。
+        </n-alert>
 
-      <!-- 数据新鲜度 -->
-      <DataFreshnessCard :freshness="indicators?.freshness ?? null" />
+        <!-- 数据新鲜度 -->
+        <DataFreshnessCard :freshness="indicators?.freshness ?? null" />
 
-      <!-- 指标摘要 -->
-      <IndicatorTabs
-        :indicators="indicators"
-        :trend-data="trendData"
-        :warning-codes="warningCodes"
-        @update:time-dimension="onIndicatorTimeDimension"
-      />
+        <!-- 指标摘要 -->
+        <IndicatorTabs
+          :indicators="indicators"
+          :trend-data="trendData"
+          :warning-codes="warningCodes"
+          @update:time-dimension="onIndicatorTimeDimension"
+        />
 
-      <!-- 财务趋势 -->
-      <FinancialTrendCard
-        v-model:trend-period="trendPeriod"
-        v-model:trend-years="trendYears"
-        :trend-data="trendData"
-      />
+        <!-- 财务趋势 -->
+        <FinancialTrendCard
+          v-model:trend-period="trendPeriod"
+          v-model:trend-years="trendYears"
+          :trend-data="trendData"
+        />
 
-      <!-- 溯源信息 + PDF -->
-      <DataTraceability :stock-code="stockCode" :audit-data="auditData" />
+        <!-- 溯源信息 + PDF -->
+        <DataTraceability :stock-code="stockCode" :audit-data="auditData" />
+      </section>
     </n-spin>
   </section>
 </template>
 
 <style scoped>
-.stock-detail-page { max-width: 1380px; }.stock-detail-header { margin-bottom: 21px; }.stock-search-back { display: inline-block; margin-bottom: 14px; color: #609477; font-size: 11px; text-decoration: none; }.stock-identity-card, .stock-chart-card { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.stock-identity-card :deep(.n-card__content) { padding: 24px 27px; }.stock-chart-card { margin-bottom: 21px; }.stock-chart-card :deep(.n-card-header) { padding: 20px 25px 0; }.stock-chart-card :deep(.n-card__content) { padding: 20px 25px 25px; }
+.stock-detail-page { max-width: 1380px; }.stock-detail-header { margin-bottom: 21px; }.stock-search-back { display: inline-block; margin-bottom: 14px; color: #609477; font-size: 11px; text-decoration: none; }.stock-identity-card, .stock-chart-card { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.stock-identity-card :deep(.n-card__content) { padding: 24px 27px; }.stock-chart-card { margin-bottom: 21px; }.stock-chart-card :deep(.n-card-header) { padding: 20px 25px 0; }.stock-chart-card :deep(.n-card__content) { padding: 20px 25px 25px; }.stock-detail-workbench { display: grid; gap: 21px; }.stock-detail-workbench :deep(.n-card), .stock-detail-workbench :deep(.n-alert) { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }
 </style>
