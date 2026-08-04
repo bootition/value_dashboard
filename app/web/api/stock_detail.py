@@ -211,6 +211,32 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
 }
 
 
+@router.get("/search")
+def search_stocks(
+    request: Request,
+    query: str = Query(min_length=1, max_length=80),
+) -> dict:
+    """Search the covered listed-stock universe by partial code or Chinese name."""
+    term = query.strip()
+    if not term:
+        raise HTTPException(status_code=400, detail="search query is required")
+
+    escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    pattern = f"%{escaped}%"
+    rows = request.app.state.duck.read_query(
+        """SELECT stock_code, name, exchange, csrc_l1
+           FROM stock_meta
+           WHERE is_listed IS TRUE
+             AND (stock_code LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')
+           ORDER BY
+             CASE WHEN stock_code = ? THEN 0 WHEN name = ? THEN 1 ELSE 2 END,
+             stock_code
+           LIMIT 20""",
+        [pattern, pattern, term, term],
+    )
+    return {"items": rows, "query": term}
+
+
 @router.get("/{stock_code}/info")
 def get_stock_info(stock_code: str, request: Request) -> dict:
     """股票基本信息 (PRD §14 SD1: 代码/名称/拼音/最近收盘价/价格日期)"""

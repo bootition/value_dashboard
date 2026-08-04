@@ -12,6 +12,37 @@ import { fmtPct } from './formatters.ts'
 
 export type FieldFormat = 'pct' | 'ratio' | 'price' | 'plain'
 
+/** 用户界面使用中文优先名称；稳定字段名仍只用于 API、规则 JSON 与导出。 */
+export const FIELD_LABELS: Readonly<Record<string, string>> = {
+  stock_code: '股票代码',
+  name: '股票名称',
+  exchange: '交易所',
+  csrc_l1: '证监会一级行业',
+  csrc_l2: '证监会二级行业',
+  latest_close: '最新收盘价',
+  pe_ttm: '市盈率（PE-TTM）',
+  pb_mrq: '市净率（PB-MRQ）',
+  ps_ttm: '市销率（PS-TTM）',
+  pcf_ttm: '市现率（PCF-TTM）',
+  dividend_yield: '股息率',
+  total_market_cap: '总市值',
+  circ_market_cap: '流通市值',
+  roe: '净资产收益率（ROE）',
+  roa: '总资产收益率（ROA）',
+  gross_margin: '销售毛利率',
+  net_margin: '销售净利率',
+  debt_ratio: '资产负债率',
+  current_ratio: '流动比率',
+  quick_ratio: '速动比率',
+  revenue_yoy: '营业收入同比',
+  net_profit_yoy: '净利润同比',
+  deducted_profit_yoy: '扣非净利润同比',
+}
+
+export function fieldDisplayName(field: string, fallback?: string): string {
+  return FIELD_LABELS[field] || fallback || field
+}
+
 const PCT_FIELDS = new Set([
   'roe', 'roa', 'roic',
   'gross_margin', 'net_margin', 'debt_ratio',

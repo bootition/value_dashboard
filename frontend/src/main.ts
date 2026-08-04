@@ -25,6 +25,12 @@ const router = createRouter({
       meta: { title: '自选列表' },
     },
     {
+      path: '/stock',
+      name: 'stock-search',
+      component: () => import('./views/StockSearchPage.vue'),
+      meta: { title: '个股详情' },
+    },
+    {
       path: '/stock/:code',
       name: 'stock-detail',
       component: () => import('./views/StockDetailPage.vue'),
