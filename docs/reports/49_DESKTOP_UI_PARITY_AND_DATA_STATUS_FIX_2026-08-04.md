@@ -18,6 +18,7 @@ last-reviewed: 2026-08-04
 - 个股搜索按整个右侧工作区居中，而非受窄列限制。
 - 自选技术存储组名 `default` 只显示为“默认组”；列配置改为按需展开。
 - 个股详情的指标、时间维度与趋势表收敛为同一工作面；关键估值与盈利标签中文优先并保留缩写。
+- 财务趋势与数据溯源组件同步移除默认小卡/线框组合，改为统一研究工作面；周期、指标、趋势表、溯源表和 PDF 管理能力保持不变。
 
 ## 2. 数据状态数值说明
 
@@ -32,7 +33,7 @@ last-reviewed: 2026-08-04
 
 | 门禁 | 结果 |
 |---|---|
-| `scripts/s1-pytest.ps1 tests/regression` | 424 passed（最终重跑 230.51s） |
+| `scripts/s1-pytest.ps1 tests/regression` | 424 passed（最终重跑 225.73s） |
 | `uv run --locked ruff check app tests/regression` | All checks passed |
 | `frontend/npm run lint` | 通过 |
 | `frontend/npm run test` | 52 Node 契约测试 + 11 Vitest 测试通过 |

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import {
-  NCard, NSpace, NRadioGroup, NRadioButton, NSelect, NEmpty, NDataTable, NRadio,
+  NSpace, NRadioGroup, NRadioButton, NSelect, NEmpty, NDataTable, NRadio,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import type { TrendResponse, FinancialTrendRow } from '../types/stock-detail.ts'
@@ -164,22 +164,22 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
 </script>
 
 <template>
-  <n-card title="财务趋势" size="small" style="margin-bottom: 16px;">
-    <template #header-extra>
+  <section class="trend-workbench">
+    <div class="trend-heading"><div><p>FINANCIAL TREND</p><h2>财务趋势</h2></div>
       <n-space>
         <n-radio-group v-model:value="trendPeriod" size="small">
           <n-radio-button value="annual">年度</n-radio-button>
           <n-radio-button value="quarterly">季度</n-radio-button>
           <n-radio-button value="ttm">TTM</n-radio-button>
         </n-radio-group>
-        <n-select v-model:value="trendYears" :options="periodOptions" size="small" style="width:80px;" />
+        <n-select v-model:value="trendYears" :options="periodOptions" size="small" class="trend-years" />
       </n-space>
-    </template>
-    <n-empty v-if="isEmpty" description="无财务趋势数据" style="padding: 40px;" />
+    </div>
+    <n-empty v-if="isEmpty" description="无财务趋势数据" class="trend-empty" />
     <template v-else>
       <!-- Chart View -->
-      <div v-if="showChart" style="margin-bottom: 16px;">
-        <n-space style="margin-bottom: 12px;">
+      <div v-if="showChart" class="trend-chart-view">
+        <n-space class="trend-metric-picker">
           <n-radio-group v-model:value="chartMetric" size="small">
             <n-radio v-for="opt in metricOptions" :key="opt.value" :value="opt.value">
               {{ opt.label }}
@@ -188,7 +188,7 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
         </n-space>
         
         <!-- L1-2（报告42）: viewBox 等比缩放，宽度 100% 自适应 -->
-        <svg viewBox="0 0 600 200" style="width: 100%; max-width: 800px; height: auto; border: 1px solid #e0e0e0; border-radius: 4px;">
+        <div class="trend-chart-frame"><svg viewBox="0 0 600 200">
           <!-- Grid lines -->
           <line x1="40" y1="40" x2="560" y2="40" stroke="#f0f0f0" stroke-width="1" />
           <line x1="40" y1="80" x2="560" y2="80" stroke="#f0f0f0" stroke-width="1" />
@@ -232,11 +232,11 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
           >
             <title>{{ chartPointTitles[idx]?.date }}：{{ chartPointTitles[idx]?.value }}</title>
           </circle>
-        </svg>
+        </svg></div>
       </div>
       
       <!-- Toggle view -->
-      <n-space style="margin-bottom: 12px;">
+      <n-space class="trend-view-toggle">
         <n-radio-group v-model:value="showChart" size="small">
           <n-radio-button :value="true">图表</n-radio-button>
           <n-radio-button :value="false">表格</n-radio-button>
@@ -254,5 +254,9 @@ const trendColumns: DataTableColumns<FinancialTrendRow> = [
         :scroll-x="1000"
       />
     </template>
-  </n-card>
+  </section>
 </template>
+
+<style scoped>
+.trend-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.trend-heading { display: flex; align-items: start; justify-content: space-between; gap: 16px; }.trend-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.trend-heading h2 { margin: 7px 0 0; font-size: 18px; }.trend-years { width: 80px; }.trend-empty { padding: 40px; }.trend-chart-view { margin-top: 21px; }.trend-metric-picker { margin-bottom: 12px; }.trend-chart-frame { padding: 12px; border-radius: 10px; background: #fafcf9; }.trend-chart-frame svg { display: block; width: 100%; max-width: 800px; height: auto; }.trend-view-toggle { margin: 16px 0 12px; }.trend-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
+</style>

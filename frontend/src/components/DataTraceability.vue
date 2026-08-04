@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, onMounted } from 'vue'
-import { NCard, NButton, NEmpty, NDataTable, NSpace, NModal, NList, NListItem, NTag, useMessage } from 'naive-ui'
+import { NButton, NEmpty, NDataTable, NSpace, NModal, NList, NListItem, NTag, useMessage } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import type { AuditResponse, AuditFieldRow, AuditBatchRow } from '../types/stock-detail.ts'
 import { fmt } from '../utils/formatters.ts'
@@ -99,15 +99,15 @@ function formatFileSize(bytes: number): string {
 </script>
 
 <template>
-  <n-card title="数据溯源" size="small">
-    <template #header-extra>
+    <section class="traceability-workbench">
+      <div class="traceability-heading"><div><p>DATA TRACEABILITY</p><h2>数据溯源</h2></div>
       <n-space>
         <n-button size="small" @click="openPdfModal">PDF管理</n-button>
       </n-space>
-    </template>
-    <n-empty v-if="isEmpty" description="无溯源数据" style="padding: 20px;" />
-    <template v-else>
-      <h4 style="margin: 0 0 8px;">关键字段溯源</h4>
+      </div>
+     <n-empty v-if="isEmpty" description="无溯源数据" class="traceability-empty" />
+     <template v-else>
+       <h3>关键字段溯源</h3>
       <n-data-table
         v-if="hasFieldAudit"
         size="small"
@@ -116,7 +116,7 @@ function formatFileSize(bytes: number): string {
         :data="fieldRows"
         :pagination="{ pageSize: 10 }"
       />
-      <h4 style="margin: 16px 0 8px;">批次溯源</h4>
+       <h3 class="batch-heading">批次溯源</h3>
       <n-data-table
         v-if="hasBatchAudit"
         size="small"
@@ -152,5 +152,9 @@ function formatFileSize(bytes: number): string {
         </n-space>
       </n-space>
     </n-modal>
-  </n-card>
+   </section>
 </template>
+
+<style scoped>
+.traceability-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.traceability-heading { display: flex; justify-content: space-between; gap: 16px; align-items: start; margin-bottom: 20px; }.traceability-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.traceability-heading h2 { margin: 7px 0 0; font-size: 18px; }.traceability-workbench h3 { margin: 0 0 9px; color: #627368; font-size: 12px; }.batch-heading { margin-top: 21px !important; }.traceability-empty { padding: 30px; }.traceability-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
+</style>
