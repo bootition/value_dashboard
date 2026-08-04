@@ -41,7 +41,8 @@ function mountPanel() {
           ruleTree: { id: 'r1', logic: 'AND', rules: [{ field: 'pe_ttm', op: '>', value: 0 }] },
           runId: 'run-1',
           ruleId: 1,
-          ruleVersion: 1,
+           ruleVersion: 1,
+           ruleName: '优质价值候选池',
           lockedIndicators: {},
           sort: [{ field: 'pe_ttm', direction: 'asc' }],
           basePoolConfig: { include_st: false },
@@ -116,7 +117,7 @@ describe('ScreeningResultsPanel 持久化流程（PRD §12 SC14/SC16/SC17）', (
       '/api/screening/add_to_watchlist',
       expect.objectContaining({
         stock_codes: ['600519', '000858'],
-        group: 'screening',
+        group: '优质价值候选池',
         result_id: 7,
       }),
     )

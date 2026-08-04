@@ -288,7 +288,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div>
+  <section class="stock-detail-page">
     <n-result
       v-if="hasStockCodeError"
       status="error"
@@ -311,7 +311,9 @@ onUnmounted(() => {
     </n-result>
     <n-spin v-else :show="loading">
       <!-- 股票头部信息 -->
-      <n-card size="small" style="margin-bottom: 16px;">
+      <header class="stock-detail-header">
+        <router-link to="/stock" class="stock-search-back">← 返回个股搜索</router-link>
+        <n-card size="small" class="stock-identity-card">
         <n-space align="center" justify="space-between">
           <n-space align="center">
             <h1 style="font-size: 22px; margin: 0;">{{ stockInfo?.name || stockCode }}</h1>
@@ -330,10 +332,11 @@ onUnmounted(() => {
           <n-descriptions-item label="上市日期">{{ stockInfo?.listing_date }}</n-descriptions-item>
           <n-descriptions-item label="证监会一级">{{ stockInfo?.csrc_l1 || '—' }}</n-descriptions-item>
         </n-descriptions>
-      </n-card>
+        </n-card>
+      </header>
 
       <!-- K线图 -->
-      <n-card title="K线图" size="small" style="margin-bottom: 16px;">
+      <n-card title="价格走势" size="small" class="stock-chart-card">
         <template #header-extra>
           <n-space>
             <n-radio-group v-model:value="adjustMode" size="small">
@@ -373,5 +376,9 @@ onUnmounted(() => {
       <!-- 溯源信息 + PDF -->
       <DataTraceability :stock-code="stockCode" :audit-data="auditData" />
     </n-spin>
-  </div>
+  </section>
 </template>
+
+<style scoped>
+.stock-detail-page { max-width: 1380px; }.stock-detail-header { margin-bottom: 21px; }.stock-search-back { display: inline-block; margin-bottom: 14px; color: #609477; font-size: 11px; text-decoration: none; }.stock-identity-card, .stock-chart-card { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.stock-identity-card :deep(.n-card__content) { padding: 24px 27px; }.stock-chart-card { margin-bottom: 21px; }.stock-chart-card :deep(.n-card-header) { padding: 20px 25px 0; }.stock-chart-card :deep(.n-card__content) { padding: 20px 25px 25px; }
+</style>

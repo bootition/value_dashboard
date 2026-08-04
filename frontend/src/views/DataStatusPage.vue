@@ -147,9 +147,9 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
 </script>
 
 <template>
-  <div>
-    <n-space align="center" justify="space-between" style="margin-bottom: 16px;" wrap>
-      <h1 style="font-size: 24px; margin: 0;">数据状态</h1>
+  <section class="data-status-page">
+    <n-space align="center" justify="space-between" class="data-status-header" wrap>
+      <div><p>研究工具 / 数据状态</p><h1>数据状态</h1><span>确认研究数据的时间范围、覆盖与质量。</span></div>
       <n-space align="center" size="small">
         <!-- L1-3（报告42）: 显示上次刷新时间与自动轮询状态 -->
         <span v-if="lastRefreshedAt" style="color:#999; font-size:12px;">上次刷新 {{ lastRefreshedAt }}</span>
@@ -166,7 +166,7 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         <n-alert
           :type="summary.data_quality.minimum_data_readiness.ready ? 'success' : 'error'"
           :show-icon="true"
-          style="margin-bottom: 16px;"
+          class="data-readiness"
         >
           <template #header>
             {{ summary.data_quality.minimum_data_readiness.ready ? '数据可研究' : '数据尚未就绪' }}
@@ -418,5 +418,9 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
         </n-card>
       </div>
     </n-spin>
-  </div>
+  </section>
 </template>
+
+<style scoped>
+.data-status-page { max-width: 1380px; }.data-status-header { margin-bottom: 27px; }.data-status-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.data-status-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.data-status-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.data-readiness { border-radius: 16px; }
+</style>

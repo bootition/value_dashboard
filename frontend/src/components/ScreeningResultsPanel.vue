@@ -250,7 +250,8 @@ async function addToWatchlist() {
   try {
     const resp = await axios.post<ScreeningWatchlistResponse>('/api/screening/add_to_watchlist', {
         stock_codes: codes,
-        group: 'screening',
+        // 筛选结果按规则名归组；手动加入的股票仍由自选列表使用默认组。
+        group: props.ruleName || 'default',
         result_id: savedResultId.value,
     })
     message.success(`已加入自选: ${resp.data.added} 只`)

@@ -2,15 +2,15 @@
 import { ref, onMounted, computed, h, watch } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import {
-  NAlert, NCard, NSpace, NSelect, NInput, NButton, NDataTable,
-  NEmpty, useMessage, useDialog, NStatistic, NCheckboxGroup, NCheckbox, NTag
+  NAlert, NInput, NButton, NDataTable,
+  NEmpty, useMessage, useDialog, NCheckboxGroup, NCheckbox, NTag
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
 import { isIndicatorUntrusted } from '../types/data-quality.ts'
 import type { IndicatorTrust } from '../types/data-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
-import { fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
+import { fieldDisplayName, fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
 
 interface WatchlistItem {
   stock_code: string
@@ -54,7 +54,7 @@ const items = ref<WatchlistItem[]>([])
 const groups = ref<WatchlistGroup[]>([])
 const trust = ref<IndicatorTrust | null>(null)
 const loading = ref(false)
-const selectedGroup = ref<string | null>(null)
+const selectedGroup = ref<string | null>('default')
 const addStockCode = ref('')
 const addGroupName = ref('default')
 
@@ -63,10 +63,7 @@ const hasUntrustedIndicators = computed(
   () => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value)
 )
 
-const groupOptions = computed(() => [
-  { label: '全部分组', value: '' },
-  ...groups.value.map((g) => ({ label: `${g.group_name} (${g.cnt})`, value: g.group_name })),
-])
+const selectedGroupLabel = computed(() => selectedGroup.value || '默认组')
 
 // L1-7（报告42）: 列配置记忆（localStorage），无历史配置时用默认列
 const DEFAULT_COLUMNS = ['stock_code', 'name', 'exchange', 'group_name', 'latest_close', 'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'debt_ratio', 'source']
@@ -106,18 +103,18 @@ async function copyStockCode(code: string) {
 }
 
 const allColumnOptions = [
-  { label: '代码', value: 'stock_code' },
-  { label: '名称', value: 'name' },
+  { label: '股票代码', value: 'stock_code' },
+  { label: '股票名称', value: 'name' },
   { label: '交易所', value: 'exchange' },
   { label: '分组', value: 'group_name' },
-  { label: '收盘价', value: 'latest_close' },
-  { label: 'PE', value: 'pe_ttm' },
-  { label: 'PB', value: 'pb_mrq' },
-  { label: 'ROE', value: 'roe' },
-  { label: '毛利率', value: 'gross_margin' },
-  { label: '净利率', value: 'net_margin' },
-  { label: '负债率', value: 'debt_ratio' },
-  { label: '营收YoY', value: 'revenue_yoy' },
+  { label: fieldDisplayName('latest_close'), value: 'latest_close' },
+  { label: fieldDisplayName('pe_ttm'), value: 'pe_ttm' },
+  { label: fieldDisplayName('pb_mrq'), value: 'pb_mrq' },
+  { label: fieldDisplayName('roe'), value: 'roe' },
+  { label: fieldDisplayName('gross_margin'), value: 'gross_margin' },
+  { label: fieldDisplayName('net_margin'), value: 'net_margin' },
+  { label: fieldDisplayName('debt_ratio'), value: 'debt_ratio' },
+  { label: fieldDisplayName('revenue_yoy'), value: 'revenue_yoy' },
   { label: '来源', value: 'source' },
 ]
 
@@ -230,41 +227,26 @@ function confirmRemove(code: string, group: string) {
   })
 }
 
-const totalCount = computed(() => items.value.length)
-
 onMounted(fetchWatchlist)
 </script>
 
 <template>
-  <div>
-    <h1 style="font-size: 24px; margin: 0 0 16px;">自选列表</h1>
-    <!-- L1-1: 响应式统计卡 3→2→1 列 -->
-    <div class="stats-grid stats-grid--3">
-      <n-card size="small"><n-statistic label="总股票数" :value="totalCount" /></n-card>
-      <n-card size="small"><n-statistic label="分组数" :value="groups.length" /></n-card>
-      <n-card size="small"><n-statistic label="当前筛选" :value="selectedGroup || '全部'" /></n-card>
+  <section class="watchlist-page">
+    <header class="watchlist-header"><div><p>研究工具 / 自选列表</p><h1>我的自选</h1><span>按手动收录与筛选规则来源组织研究中的公司。</span></div></header>
+    <div class="watchlist-layout">
+      <aside class="watchlist-groups">
+        <div class="groups-heading"><p>WATCHLIST GROUPS</p><h2>公司分组</h2></div>
+        <n-button v-for="group in groups" :key="group.group_name" :class="{ selected: selectedGroup === group.group_name }" text block @click="selectedGroup = group.group_name; fetchWatchlist()"><span><b>{{ group.group_name }}</b><small>{{ group.group_name === 'default' ? '手动收录' : '筛选规则来源' }}</small></span><em>{{ group.cnt }}</em></n-button>
+        <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="手动分组名" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
+      </aside>
+      <section class="watchlist-content">
+        <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" style="margin-bottom: 16px;">当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。</n-alert>
+        <div class="watchlist-card"><div class="watchlist-card-heading"><div><p>{{ selectedGroupLabel === '默认组' ? '手动收录' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedGroupLabel === '默认组' ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><span>显示 {{ items.length }} 家公司</span></div><div class="watchlist-toolbar"><n-checkbox-group v-model:value="selectedColumns"><n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" /></n-checkbox-group></div><n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped /><n-empty v-else description="该分组暂无公司" style="padding: 40px;" /></div>
+      </section>
     </div>
-    <n-card size="small" style="margin-bottom: 16px;">
-      <n-space wrap>
-        <n-select v-model:value="selectedGroup" :options="groupOptions" placeholder="选择分组" size="small" style="width: 200px;" @update:value="fetchWatchlist" />
-        <n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" style="width: 150px;" @keyup.enter="addStock" />
-        <n-input v-model:value="addGroupName" placeholder="分组名" aria-label="分组名" size="small" style="width: 120px;" />
-        <n-button size="small" type="primary" @click="addStock">添加</n-button>
-      </n-space>
-    </n-card>
-
-    <n-card size="small" style="margin-bottom: 16px;">
-      <n-space align="center">
-        <span style="font-size:12px;color:#999;">显示列:</span>
-        <n-checkbox-group v-model:value="selectedColumns">
-          <n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" />
-        </n-checkbox-group>
-      </n-space>
-    </n-card>
-    <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" style="margin-bottom: 16px;">
-      当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。
-    </n-alert>
-    <n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped />
-    <n-empty v-else description="自选列表为空，添加股票或从筛选结果加入" style="padding: 40px;" />
-  </div>
+  </section>
 </template>
+
+<style scoped>
+.watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.n-button) { justify-content: space-between; height: auto; margin-top: 5px; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.n-button.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.n-button__content) { display: flex; justify-content: space-between; width: 100%; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }
+</style>
