@@ -358,12 +358,22 @@ def minimum_data_readiness(
               ) AS has_corporate_action_or_dividend_lineage,
             CASE
                 WHEN lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%银行%'
-                THEN complete_financials.report_date IS NOT NULL AND complete_financials.capital_adequacy_ratio IS NOT NULL
-                  AND complete_financials.non_performing_loan_ratio IS NOT NULL AND complete_financials.provision_coverage_ratio IS NOT NULL
-                WHEN lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%证券%'
-                THEN complete_financials.report_date IS NOT NULL AND complete_financials.risk_coverage_ratio IS NOT NULL
+                  OR lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%证券%'
+                THEN complete_financials.report_date IS NOT NULL
                 ELSE TRUE
             END AS has_sector_financials,
+            -- 银行/券商监管字段（资本充足率/不良贷款率/拨备覆盖率/风险覆盖率）：
+            -- 免费结构化 API 不可得，所有者口径为"保持 NULL，不伪造"（STATUS 缺口#4），
+            -- 因此该缺口属披露项而非阻断项（disclosure_keys 处理）。
+            CASE
+                WHEN lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%银行%'
+                THEN complete_financials.capital_adequacy_ratio IS NOT NULL
+                  AND complete_financials.non_performing_loan_ratio IS NOT NULL
+                  AND complete_financials.provision_coverage_ratio IS NOT NULL
+                WHEN lower(coalesce(m.csrc_l1, '') || ' ' || coalesce(m.csrc_l2, '')) LIKE '%证券%'
+                THEN complete_financials.risk_coverage_ratio IS NOT NULL
+                ELSE TRUE
+            END AS has_regulatory_fields,
             EXISTS (
                 SELECT 1 FROM indicator_snapshot snapshot
                 WHERE snapshot.stock_code = m.stock_code
@@ -428,7 +438,7 @@ def minimum_data_readiness(
         "price_freshness": [], "meaningful_volume": [], "financial_period": [],
         "snapshot_price_coherence": [], "share_capital": [],
         "corporate_action_dividend_lineage": [],
-        "sector_financials": [], "snapshot_input_freshness": [],
+        "sector_financials": [], "regulatory_fields": [], "snapshot_input_freshness": [],
         "lineage_coverage": [], "snapshot_period_alignment": [],
         "pending_financial_period": [],
     }
@@ -443,6 +453,7 @@ def minimum_data_readiness(
             ("share_capital", "has_share_capital"),
             ("corporate_action_dividend_lineage", "has_corporate_action_or_dividend_lineage"),
             ("sector_financials", "has_sector_financials"),
+            ("regulatory_fields", "has_regulatory_fields"),
             ("snapshot_input_freshness", "has_current_snapshot_inputs"),
             ("snapshot_price_coherence", "has_coherent_snapshot"),
         ):
@@ -464,9 +475,14 @@ def minimum_data_readiness(
         issues[key] = list(dict.fromkeys(codes))
     # 披露性缺口（市场真实状态，非数据损坏）：公司从未分红/无除权事件是
     # 合法事实，筛选指标对其正确返回空值；报表存在晚于完整期的新行是
-    # "数据源尚未就绪"（PRD §7.7），快照按完整期计算，均不阻断筛选，
+    # "数据源尚未就绪"（PRD §7.7），快照按完整期计算；银行/券商监管字段
+    # 免费源不可得（所有者口径：保持 NULL，不伪造）——均不阻断筛选，
     # 但保留计数供 UI 披露。
-    disclosure_keys = {"corporate_action_dividend_lineage", "pending_financial_period"}
+    disclosure_keys = {
+        "corporate_action_dividend_lineage",
+        "pending_financial_period",
+        "regulatory_fields",
+    }
     missing = {key: codes[:20] for key, codes in issues.items() if codes}
     blocking = {
         key: codes for key, codes in issues.items()

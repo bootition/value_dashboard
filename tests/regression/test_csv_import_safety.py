@@ -57,3 +57,9 @@ def test_valid_csv_import_does_not_issue_a_delete(tmp_path) -> None:
 @pytest.mark.parametrize("value", ["=cmd()", "+1+1", "-1+1", "@cmd", "\tcmd", "\rcmd"])
 def test_csv_formula_prefixes_are_escaped(value: str) -> None:
     assert _csv_cell(value) == "'" + value
+
+
+@pytest.mark.parametrize("value", [" =cmd()", "  +1+1", "\t=1+1", "\r@cmd", " \t-cmd"])
+def test_csv_formula_leading_whitespace_variants_are_escaped(value: str) -> None:
+    """C11(报告41): 前导空白变体（" =cmd()" 等）必须同样被引号前缀防护。"""
+    assert _csv_cell(value) == "'" + value

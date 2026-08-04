@@ -728,7 +728,7 @@ class IncrementalUpdater:
         # 获取所有有新交易日需要更新的股票
         try:
             stocks = self.duck.read_query(
-                "SELECT stock_code, exchange FROM stock_meta WHERE is_listed IS TRUE"
+                "SELECT stock_code, exchange FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
             )
         except Exception:
             return {"status": "skipped", "reason": "no_stock_meta"}
@@ -738,6 +738,8 @@ class IncrementalUpdater:
 
         target_stocks = stocks
         if max_stocks > 0:
+            # C10修复(报告41): 取前 N 只必须稳定排序（ORDER BY stock_code），
+            # 否则每次运行取到的子集随机漂移
             target_stocks = target_stocks[:max_stocks]
 
         start_date = latest_local or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")

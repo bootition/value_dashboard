@@ -80,6 +80,15 @@ def _run_startup_maintenance(
             logger.info("自动更新已关闭或暂停，跳过")
     except Exception as error:
         logger.warning("后台自动更新失败(非致命): %s", error)
+
+    # C8/C16修复(报告41): 启动时对有界操作表做 GC（过期 plan / 旧 job_logs /
+    # 已解析 missing_list），幂等、保守、不涉及审计记录。
+    try:
+        from app.core.housekeeping import gc_operational_tables
+
+        gc_operational_tables(sqlite)
+    except Exception as error:
+        logger.warning("运维清理失败(非致命): %s", error)
     return current
 
 
@@ -171,8 +180,12 @@ def create_app(
         return await call_next(request)
 
     @app.get("/api/session")
-    async def session_token(request: Request) -> dict[str, str]:
-        return {"write_token": request.app.state.write_token}
+    async def session_token(request: Request) -> dict[str, str | bool]:
+        # C3(报告41): 暴露运行形态（打包版/开发版），前端据此显示正确 CLI 前缀
+        return {
+            "write_token": request.app.state.write_token,
+            "packaged": is_frozen_runtime(),
+        }
 
     # ─── 注册 API 路由 ──────────────────────────────────────────────
     from app.web.api.data_status import router as data_status_router

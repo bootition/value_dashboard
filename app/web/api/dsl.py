@@ -103,5 +103,13 @@ def delete_expression(expr_id: int, request: Request) -> dict[str, str]:
     if expression["status"] == "published":
         raise HTTPException(status_code=400, detail="published expressions are immutable")
 
-    request.app.state.sqlite.execute("DELETE FROM dsl_expressions WHERE id = ?", [expr_id])
+    # C12修复(报告41): 草稿被其他表达式依赖时删除不得返回 500——
+    # 捕获底层约束冲突并给出 409 + 依赖提示
+    try:
+        request.app.state.sqlite.execute("DELETE FROM dsl_expressions WHERE id = ?", [expr_id])
+    except Exception as error:  # noqa: BLE001 - 底层 SQLite 约束错误统一映射 409
+        raise HTTPException(
+            status_code=409,
+            detail=f"expression is referenced by other expressions and cannot be deleted: {error}",
+        ) from error
     return {"message": "expression deleted"}

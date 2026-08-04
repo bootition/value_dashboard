@@ -8,8 +8,20 @@ M7: 完整命令树
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 import typer
+
+
+def _sanitize_path_json(obj: Any) -> str:
+    """C13(报告41): json.dumps default——路径对象输出相对/脱敏形式，
+    避免在 CLI 输出泄露本机绝对路径。"""
+    if isinstance(obj, Path):
+        try:
+            return str(obj.relative_to(Path.cwd()))
+        except ValueError:
+            return obj.name
+    return str(obj)
 
 
 def _database_context(*, initialize: bool = True):
@@ -229,7 +241,8 @@ def data_replenish_missing_core_data(
             make_response("data.replenish_missing_core_data", result),
             ensure_ascii=False,
             indent=2,
-            default=str,
+            # C13修复(报告41): 路径对象相对化/取文件名，不在 CLI 输出泄露绝对路径
+            default=_sanitize_path_json,
         )
     )
 

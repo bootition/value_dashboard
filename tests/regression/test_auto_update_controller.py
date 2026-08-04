@@ -126,6 +126,28 @@ def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, 
     assert status["last_error"] is not None
 
 
+def test_auto_update_skipped_reports_idle_not_failed(duckdb_store, sqlite_store, monkeypatch) -> None:
+    """C9(报告41): 更新被跳过（如跨进程锁被拒/another_update_running）时，
+    控制器状态必须保持 idle 且不产生 last_error，不得误记 failed。"""
+    controller = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+
+    class LockedUpdater:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+            return {"status": "skipped", "reason": "another_update_running"}
+
+    monkeypatch.setattr("app.core.update.IncrementalUpdater", LockedUpdater)
+
+    report = controller.run_once()
+
+    assert report["status"] == "skipped"
+    status = controller.status()
+    assert status["current_stage"] == "idle"
+    assert status["last_error"] is None
+
+
 def test_new_controller_adopts_persisted_disabled_state(duckdb_store, sqlite_store) -> None:
     """P0-3: 用户 disable 后，任何新控制器（CLI/Web 各自实例）不得复活自动更新。"""
     first = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)

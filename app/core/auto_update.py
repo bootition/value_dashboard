@@ -259,9 +259,18 @@ class AutoUpdateController:
             report = updater.run_incremental_update(max_stocks=max_stocks, progress_cb=progress)
 
             with self._lock:
-                self._current_stage = (
-                    "finished" if report.get("status") == "success" else "failed"
-                )
+                if report.get("status") == "success":
+                    self._current_stage = "finished"
+                    self._last_success_at = datetime.now(timezone.utc).isoformat()
+                    self._last_error = None
+                elif report.get("status") == "skipped":
+                    # C9修复(报告41): 跨进程锁被拒/开关关闭等 skipped 状态不得误记
+                    # failed——保持可查询的 idle，不产生错误。
+                    self._current_stage = "idle"
+                    self._last_error = None
+                else:
+                    self._current_stage = "failed"
+                    self._last_error = f"update status: {report.get('status')}"
                 self._progress = {
                     "phase": "done",
                     "job_id": job_id,
@@ -269,11 +278,6 @@ class AutoUpdateController:
                     "status": report.get("status"),
                     "steps": {k: v.get("status") for k, v in report.get("steps", {}).items()},
                 }
-                if report.get("status") == "success":
-                    self._last_success_at = datetime.now(timezone.utc).isoformat()
-                    self._last_error = None
-                else:
-                    self._last_error = f"update status: {report.get('status')}"
                 self._persist()
             return report
         except Exception as error:

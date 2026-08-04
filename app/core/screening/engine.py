@@ -201,7 +201,7 @@ class ScreeningEngine:
         self._reject_mixed_report_dates()
 
         # 3. 构建 SQL
-        sql, params, count_sql = self._build_sql(
+        sql, params = self._build_sql(
             conditions=conditions,
             sort_spec=sort_spec,
             columns_spec=columns_spec,
@@ -215,10 +215,11 @@ class ScreeningEngine:
 
         # 4. 执行
         results = self.duck.read_query(sql, params)
-        # P1-C修复: total 用同骨架计数查询（真实匹配数，分母跟随基础池），
-        # 行数超上限时显式 truncated=True 而非静默丢尾。
-        count_rows = self.duck.read_query(count_sql, params)
-        total_matched = count_rows[0]["total"] if count_rows else len(results)
+        # C14修复(报告41): 复用单次窗口计数 COUNT(*) OVER () 替代二次计数查询，
+        # total 语义不变（真实匹配数，分母跟随基础池）；行数超上限时显式 truncated。
+        total_matched = int(results[0]["_vd_total"]) if results else 0
+        for row in results:
+            row.pop("_vd_total", None)
         truncated = total_matched > len(results)
         execution_time = (time.monotonic() - start_time) * 1000
 
@@ -260,7 +261,7 @@ class ScreeningEngine:
         strict_fields: set[str],
         compiled_indicators: dict[str, str],
     ) -> tuple[str, list[Any]]:
-        """构建完整的筛选 SQL
+        """构建完整的筛选 SQL（含单次窗口计数 _vd_total）
 
         策略 (审查问题3修订):
         - 基础池从 stock_meta 出发（不依赖 indicator_snapshot 的 report_date）
@@ -417,22 +418,14 @@ base_pool AS (
         select_cols = self._build_select(columns_spec, rank_fields)
 
         sql_parts.append(f"""
-SELECT {select_cols}
+SELECT {select_cols}, COUNT(*) OVER () AS _vd_total
 FROM {source_table}
 WHERE {where_clause if where_clause else '1=1'}
 {order_clause}
 LIMIT {MAX_RESULT_ROWS}
 """)
 
-        # P1-C修复: 同一条 WITH 骨架的计数查询——total 必须反映真实匹配数
-        # （PRD §12.3 分母跟随基础池），截断必须显式标记而非静默丢尾。
-        with_prefix = "".join(sql_parts[:-1])
-        count_sql = (
-            f"{with_prefix} SELECT COUNT(*) AS total FROM {source_table} "
-            f"WHERE {where_clause if where_clause else '1=1'}"
-        )
-
-        return "".join(sql_parts), params, count_sql
+        return "".join(sql_parts), params
 
     def _build_where(self, node: dict, level: int = 0) -> tuple[str, list[Any]]:
         """递归构建 WHERE 子句

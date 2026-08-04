@@ -762,14 +762,16 @@ def serve_pdf(
             "recovery_instruction": f"请通过 CLI 恢复: vd data restore_pdf {stock_code} {filename}",
             "stock_code": stock_code,
             "filename": filename,
-            "archive_path": archived.get("archive_path"),
+            # C13修复(报告41): 绝对路径脱敏——只暴露逻辑归档位置，不泄露本机路径
+            "archive_path": f"archive/{stock_code}/{filename}",
             "checksum": archived.get("checksum"),
             "integrity_verified": archived.get("integrity_verified", False),
         })
 
     raise HTTPException(status_code=404, detail={
         "error": "PDF not found",
-        "path": str(pdf_path),
+        # C13修复(报告41): 逻辑路径而非本机绝对路径
+        "path": f"pdf/{stock_code}/{filename}",
         "hint": "请先通过 CLI 下载 PDF: vd data download_pdf <stock_code>",
     })
 

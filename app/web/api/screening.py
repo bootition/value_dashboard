@@ -22,8 +22,13 @@ SCREENING_RUN_TTL_HOURS = 24
 
 
 def _csv_cell(value: Any) -> Any:
-    if isinstance(value, str) and value[:1] in {"=", "+", "-", "@", "\t", "\r"}:
-        return "'" + value
+    # C11修复(报告41): 公式注入防护覆盖前导空白变体（如 " =cmd()"），
+    # 同时保留原始首字符制表符/回车判定（"\tcmd"）——二者任一命中即加引号前缀。
+    if isinstance(value, str):
+        if value[:1] in {"=", "+", "-", "@", "\t", "\r"}:
+            return "'" + value
+        if value.lstrip()[:1] in {"=", "+", "-", "@"}:
+            return "'" + value
     return value
 
 
@@ -210,6 +215,10 @@ def get_draft(request: Request) -> dict[str, Any]:
 
 @router.put("/draft")
 def save_draft(req: ScreeningDraftRequest, request: Request) -> dict[str, int | str]:
+    # C7修复(报告41): 草稿 PUT 大小上限，防止超限负载（413）
+    draft_bytes = len(json.dumps(req.draft, ensure_ascii=False).encode("utf-8"))
+    if draft_bytes > MAX_RULE_JSON_BYTES:
+        raise HTTPException(status_code=413, detail="draft payload is too large")
     with request.app.state.sqlite.transaction() as conn:
         current = conn.execute(
             "SELECT revision FROM screening_drafts WHERE id = 1"
@@ -518,7 +527,8 @@ def save_rule(req: SaveRuleRequest, request: Request) -> dict:
                     version,
                     json.dumps(req.rule_json, ensure_ascii=False),
                     json.dumps(locks, ensure_ascii=False),
-                    req.status,
+                    # C6修复(报告41): 服务端固定状态机，忽略客户端提交的 status
+                    "saved",
                 ],
             )
         except Exception:

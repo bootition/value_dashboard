@@ -281,7 +281,12 @@ class DataInitializer:
             )
 
         # 记录批次溯源
-        self._record_batch(result, "stock_list", len(records))
+        # C15修复(报告41): 部分/截断响应（退市门禁触发）时批次溯源必须如实
+        # 降级为 approximate，不得伪装 strict——与适配器 partial 语义一致。
+        self._record_batch(
+            result, "stock_list", len(records),
+            confidence="approximate" if delist_guarded else None,
+        )
 
         if delist_guarded:
             logger.warning(
@@ -1122,17 +1127,21 @@ class DataInitializer:
             values,
         )
 
-    def _record_batch(self, result: FetchResult, data_type: str, row_count: int) -> None:
+    def _record_batch(
+        self, result: FetchResult, data_type: str, row_count: int,
+        confidence: str | None = None,
+    ) -> None:
         """记录批次级溯源到 fetch_batch 表"""
         try:
             with self.duck.write_connection() as conn:
-                self._record_batch_in_connection(conn, result, data_type, row_count)
+                self._record_batch_in_connection(conn, result, data_type, row_count, confidence)
         except Exception as e:
             logger.warning(f"记录批次溯源失败: {e}")
             raise
 
     def _record_batch_in_connection(
         self, conn: Any, result: FetchResult, data_type: str, row_count: int,
+        confidence: str | None = None,
     ) -> str:
         """Validate and retain source material in the caller's data transaction."""
         import hashlib
@@ -1141,6 +1150,8 @@ class DataInitializer:
             raise ValueError(f"{data_type} has rows but no source material")
         if row_count > 0 and hashlib.sha256(result.raw_response).hexdigest() != result.metadata.raw_response_hash:
             raise ValueError(f"{data_type} source material hash mismatch")
+        # C15: 调用方可显式降级置信度（如部分/截断响应），否则沿用源元数据
+        effective_confidence = confidence or result.metadata.confidence
         fetch_batch_id = str(uuid.uuid4())
         conn.execute(
             """INSERT INTO fetch_batch
@@ -1149,7 +1160,7 @@ class DataInitializer:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             [fetch_batch_id, data_type, result.metadata.source,
              result.metadata.api_version or "unknown", result.metadata.fetch_time,
-             result.metadata.raw_response_hash, row_count, result.metadata.confidence],
+             result.metadata.raw_response_hash, row_count, effective_confidence],
         )
         conn.execute(
             """INSERT INTO raw_response_archive

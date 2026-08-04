@@ -80,6 +80,12 @@ def test_partial_stock_list_does_not_silently_delist_valid_stocks(
         "SELECT COUNT(*) AS cnt FROM stock_meta WHERE is_listed IS TRUE"
     )[0]["cnt"]
     assert listed == 100
+    # C15(报告41): 部分/截断响应（退市门禁触发）的批次溯源必须如实降级为
+    # approximate，不得伪装 strict。
+    batch = duckdb_store.read_query(
+        "SELECT confidence FROM fetch_batch WHERE data_type = 'stock_list' ORDER BY fetch_time DESC LIMIT 1"
+    )[0]["confidence"]
+    assert batch == "approximate"
 
 
 def test_complete_stock_list_still_delists_absent_codes(
