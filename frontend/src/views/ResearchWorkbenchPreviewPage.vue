@@ -1,241 +1,120 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { NButton, NTag } from 'naive-ui'
 
-type Condition = {
-  field: string
-  label: string
-  operator: string
-  value: string
-}
+type Condition = { label: string; operator: string; value: string }
 
 const isStrict = ref(true)
 const ran = ref(false)
 const activePreset = ref<'value' | 'quality'>('value')
-const conditions = ref<Condition[]>([
-  { field: 'pe_ttm', label: '市盈率（PE-TTM）', operator: '小于', value: '15' },
-  { field: 'roe', label: '净资产收益率（ROE）', operator: '大于等于', value: '15%' },
-  { field: 'debt_ratio', label: '资产负债率', operator: '小于', value: '55%' },
-])
+const conditions = ref<Condition[]>([])
 
 const presets = {
   value: [
-    { field: 'pe_ttm', label: '市盈率（PE-TTM）', operator: '小于', value: '15' },
-    { field: 'roe', label: '净资产收益率（ROE）', operator: '大于等于', value: '15%' },
-    { field: 'debt_ratio', label: '资产负债率', operator: '小于', value: '55%' },
+    { label: '市盈率（PE-TTM）', operator: '小于', value: '15' },
+    { label: '净资产收益率（ROE）', operator: '大于等于', value: '15%' },
+    { label: '资产负债率', operator: '小于', value: '55%' },
   ],
   quality: [
-    { field: 'revenue_yoy', label: '营业收入同比', operator: '大于', value: '10%' },
-    { field: 'net_profit_yoy', label: '净利润同比', operator: '大于', value: '10%' },
-    { field: 'gross_margin', label: '销售毛利率', operator: '大于等于', value: '30%' },
+    { label: '营业收入同比', operator: '大于', value: '10%' },
+    { label: '净利润同比', operator: '大于', value: '10%' },
+    { label: '销售毛利率', operator: '大于等于', value: '30%' },
   ],
 } as const
 
+conditions.value = presets.value.map((condition) => ({ ...condition }))
+
 const stocks = [
-  { code: '600519', name: '贵州茅台', industry: '白酒', pe: '19.42', pb: '7.21', roe: '32.84%', debt: '18.71%', signal: '稳健' },
-  { code: '000858', name: '五 粮 液', industry: '白酒', pe: '16.88', pb: '3.46', roe: '21.65%', debt: '27.10%', signal: '关注' },
-  { code: '600900', name: '长江电力', industry: '水电', pe: '18.06', pb: '3.01', roe: '16.39%', debt: '61.42%', signal: '稳健' },
-  { code: '000333', name: '美的集团', industry: '白电', pe: '13.57', pb: '3.02', roe: '24.17%', debt: '64.29%', signal: '关注' },
+  { code: '600519', name: '贵州茅台', industry: '白酒', pe: '19.42', roe: '32.84%', cap: '1.81 万亿', status: '稳健' },
+  { code: '000858', name: '五 粮 液', industry: '白酒', pe: '16.88', roe: '21.65%', cap: '4,526 亿', status: '关注' },
+  { code: '600900', name: '长江电力', industry: '水电', pe: '18.06', roe: '16.39%', cap: '7,328 亿', status: '稳健' },
+  { code: '000333', name: '美的集团', industry: '白电', pe: '13.57', roe: '24.17%', cap: '5,522 亿', status: '关注' },
 ]
 
+const ruleTitle = computed(() => activePreset.value === 'value' ? '优质价值候选池' : '高质量成长候选池')
 const resultCount = computed(() => activePreset.value === 'value' ? 47 : 83)
-const summaryText = computed(() => activePreset.value === 'value' ? '低估值 · 高回报 · 财务稳健' : '成长质量 · 盈利能力 · 经营效率')
 
 function usePreset(preset: 'value' | 'quality') {
   activePreset.value = preset
   conditions.value = presets[preset].map((condition) => ({ ...condition }))
   ran.value = false
 }
-
-function runPreview() {
-  ran.value = true
-}
 </script>
 
 <template>
-  <main class="workbench-preview">
-    <section class="preview-heading">
-      <div>
-        <div class="eyebrow">DESIGN STUDY · SCREENING WORKBENCH</div>
-        <h1>价值筛选工作台</h1>
-        <p>面向长期研究的桌面筛选界面样稿。此页面使用本地演示数据，不读取或写入正式数据。</p>
+  <div class="ramtabs-preview">
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">V</span><span>value</span></div>
+      <nav aria-label="样稿导航">
+        <button class="nav-item active" type="button"><i class="nav-icon icon-grid"></i><span>研究首页</span></button>
+        <button class="nav-item" type="button"><i class="nav-icon icon-filter"></i><span>条件筛选</span></button>
+        <button class="nav-item" type="button"><i class="nav-icon icon-book"></i><span>自选公司</span></button>
+        <button class="nav-item" type="button"><i class="nav-icon icon-chart"></i><span>研究记录</span></button>
+      </nav>
+      <div class="sidebar-bottom">
+        <button class="nav-item" type="button"><i class="nav-icon icon-data"></i><span>数据状态</span></button>
+        <button class="profile" type="button"><span class="avatar">Q</span><span><b>研究账户</b><small>本地工作区</small></span><em>•••</em></button>
       </div>
-      <n-tag size="small" type="info" round>视觉样稿</n-tag>
-    </section>
+    </aside>
 
-    <section class="workbench-shell" aria-label="筛选工作台样稿">
-      <div class="editor-column">
-        <div class="section-header">
-          <div>
-            <span class="step-mark">01</span>
-            <h2>建立研究规则</h2>
+    <main class="dashboard">
+      <header class="topbar">
+        <div><p class="crumb">研究工作台 / 条件筛选</p><h1>早上好，开始今天的研究</h1></div>
+        <div class="top-actions"><button class="round-action" type="button" aria-label="通知">◇</button><button class="help-button" type="button">？</button><span class="header-avatar">Q</span></div>
+      </header>
+
+      <section class="hero-card">
+        <div class="hero-copy">
+          <span class="mini-label">VALUE DASHBOARD</span>
+          <h2>从数据开始，<br>建立你的投资判断。</h2>
+          <p>用清晰的规则发现候选公司，用可追溯的数据完成长期研究。</p>
+          <button class="hero-button" type="button">继续上次研究 <span>→</span></button>
+        </div>
+        <div class="hero-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="hero-disc"><span>47</span><small>候选公司</small></div><div class="float-card card-a"><b>+ 12.4%</b><span>盈利增长</span></div><div class="float-card card-b"><b>15.8</b><span>平均市盈率</span></div></div>
+      </section>
+
+      <section class="metrics" aria-label="研究数据概览">
+        <article><span class="metric-icon icon-filter"></span><div><p>可筛选公司</p><strong>5,533</strong><small>沪深北 A 股</small></div></article>
+        <article><span class="metric-icon icon-chart"></span><div><p>已保存规则</p><strong>12</strong><small>本月运行 36 次</small></div></article>
+        <article><span class="metric-icon icon-data"></span><div><p>数据状态</p><strong class="green">已就绪</strong><small>截至 2026 年 8 月 3 日</small></div></article>
+      </section>
+
+      <section class="content-grid">
+        <article class="rule-card">
+          <div class="card-heading"><div><span class="mini-label">SCREENING RULE</span><h2>{{ ruleTitle }}</h2></div><button class="ghost-button" type="button">编辑规则</button></div>
+          <div class="preset-tabs"><button :class="{ active: activePreset === 'value' }" type="button" @click="usePreset('value')">价值筛选</button><button :class="{ active: activePreset === 'quality' }" type="button" @click="usePreset('quality')">质量成长</button><button type="button" disabled>我的模板</button></div>
+          <div class="conditions">
+            <div class="condition-label"><span>筛选条件</span><button type="button">+ 添加</button></div>
+            <div v-for="(condition, index) in conditions" :key="condition.label" class="condition"><span class="condition-number">0{{ index + 1 }}</span><strong>{{ condition.label }}</strong><span>{{ condition.operator }}</span><b>{{ condition.value }}</b><button type="button" aria-label="删除条件">×</button></div>
           </div>
-          <span class="muted">草稿已自动保存</span>
-        </div>
+          <div class="trust-row"><span class="switch" :class="{ on: isStrict }" role="switch" :aria-checked="isStrict" tabindex="0" @click="isStrict = !isStrict" @keydown.enter="isStrict = !isStrict"><i></i></span><div><strong>仅使用严格可信数据</strong><p>排除口径不完整或近似计算的指标。</p></div><a href="#">了解口径</a></div>
+        </article>
 
-        <div class="rule-name-row">
-          <div class="rule-name">
-            <span>规则名称</span>
-            <strong>{{ activePreset === 'value' ? '优质价值候选池' : '高质量成长候选池' }}</strong>
-          </div>
-          <button class="text-button" type="button">版本 3 · 已保存</button>
-        </div>
+        <aside class="run-card">
+          <div class="run-card-top"><span class="status-dot"></span><span>数据可用于研究</span><button type="button">⋮</button></div>
+          <div class="run-number"><strong>{{ resultCount }}</strong><span>预计候选公司</span></div>
+          <div class="run-lines"><p><span>股票范围</span><b>沪深北 A 股</b></p><p><span>筛选条件</span><b>{{ conditions.length }} 项</b></p><p><span>排序方式</span><b>市盈率从低到高</b></p><p><span>数据截至</span><b>2026-08-03</b></p></div>
+          <button class="run-button" type="button" @click="ran = true">运行筛选 <span>→</span></button>
+          <p v-if="ran" class="completed">已完成 · 248 ms · {{ resultCount }} 家符合条件</p>
+          <p v-else class="run-note">结果可保存为快照、导出 CSV 或加入自选。</p>
+        </aside>
+      </section>
 
-        <div class="preset-row" aria-label="规则预设">
-          <button :class="['preset-button', { active: activePreset === 'value' }]" type="button" @click="usePreset('value')">
-            价值筛选
-          </button>
-          <button :class="['preset-button', { active: activePreset === 'quality' }]" type="button" @click="usePreset('quality')">
-            质量成长
-          </button>
-          <button class="preset-button" type="button" disabled>我的模板</button>
-        </div>
-
-        <div class="pool-panel">
-          <div class="panel-title-row">
-            <div>
-              <span class="step-mark">02</span>
-              <h2>确定股票范围</h2>
-            </div>
-            <span class="pool-count">5,533 家上市公司</span>
-          </div>
-          <div class="filter-chips">
-            <button class="filter-chip is-selected" type="button">沪深北 A 股</button>
-            <button class="filter-chip is-selected" type="button">排除 ST</button>
-            <button class="filter-chip is-selected" type="button">排除停牌</button>
-            <button class="filter-chip" type="button">上市满 1 年</button>
-          </div>
-        </div>
-
-        <div class="conditions-panel">
-          <div class="panel-title-row">
-            <div>
-              <span class="step-mark">03</span>
-              <h2>添加筛选条件</h2>
-            </div>
-            <button class="text-button" type="button">+ 添加条件</button>
-          </div>
-          <p class="helper-text">全部条件同时满足。指标名采用中文优先，并保留常用缩写以便核对口径。</p>
-          <div class="condition-table" role="table" aria-label="当前筛选条件">
-            <div class="condition-header" role="row">
-              <span>指标</span><span>关系</span><span>目标值</span><span></span>
-            </div>
-            <div v-for="condition in conditions" :key="condition.field" class="condition-row" role="row">
-              <strong>{{ condition.label }}</strong>
-              <span>{{ condition.operator }}</span>
-              <b>{{ condition.value }}</b>
-              <button type="button" :aria-label="`删除${condition.label}`">×</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="quality-row">
-          <div>
-            <strong>数据可信度</strong>
-            <span>{{ isStrict ? '只显示各项指标均严格可信的公司' : '允许显示近似可信的数据' }}</span>
-          </div>
-          <button :class="['toggle', { on: isStrict }]" type="button" :aria-pressed="isStrict" @click="isStrict = !isStrict">
-            <i></i>
-          </button>
-        </div>
-      </div>
-
-      <aside class="run-column" aria-label="运行摘要">
-        <div class="run-label">当前研究视图</div>
-        <h2>{{ activePreset === 'value' ? '优质价值候选池' : '高质量成长候选池' }}</h2>
-        <p>{{ summaryText }}</p>
-
-        <div class="data-date">
-          <span>数据截至</span>
-          <strong>2026 年 8 月 3 日</strong>
-          <small>价格与财务数据已就绪</small>
-        </div>
-
-        <div class="summary-grid">
-          <div><span>股票范围</span><strong>5,533</strong></div>
-          <div><span>筛选条件</span><strong>{{ conditions.length }}</strong></div>
-          <div><span>排序方式</span><strong>市盈率</strong></div>
-          <div><span>可信模式</span><strong>{{ isStrict ? '严格' : '完整' }}</strong></div>
-        </div>
-
-        <n-button type="primary" block size="large" @click="runPreview">运行筛选</n-button>
-        <p class="run-hint">预计耗时不足 1 秒。运行结果可保存、导出或加入自选。</p>
-
-        <div v-if="ran" class="run-feedback" role="status">
-          <span>已完成</span>
-          <strong>发现 {{ resultCount }} 家候选公司</strong>
-          <small>耗时 248 ms · 严格可信</small>
-        </div>
-
-        <div class="trust-note">
-          <span class="trust-dot"></span>
-          <p><strong>研究提示</strong> 结果仅用于研究比较，不构成投资建议。</p>
-        </div>
-      </aside>
-    </section>
-
-    <section class="results-section">
-      <div class="results-heading">
-        <div>
-          <div class="eyebrow">SCREENING RESULT</div>
-          <h2>候选公司</h2>
-          <p>{{ ran ? `符合当前规则的 ${resultCount} 家公司，以下展示前 4 家。` : '运行筛选后，这里将展示符合条件的公司。' }}</p>
-        </div>
-        <div class="result-actions">
-          <button class="text-button" type="button">配置列</button>
-          <button class="secondary-button" type="button">导出结果</button>
-        </div>
-      </div>
-
-      <div class="result-summary">
-        <div><span>平均市盈率</span><strong>16.98</strong></div>
-        <div><span>平均净资产收益率</span><strong>23.76%</strong></div>
-        <div><span>行业覆盖</span><strong>12 个</strong></div>
-        <div><span>数据状态</span><strong class="ready-text">严格可信</strong></div>
-      </div>
-
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>股票</th><th>行业</th><th>市盈率（PE-TTM）</th><th>市净率（PB）</th><th>净资产收益率（ROE）</th><th>资产负债率</th><th>研究信号</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="stock in stocks" :key="stock.code">
-              <td><strong>{{ stock.name }}</strong><span>{{ stock.code }}</span></td>
-              <td>{{ stock.industry }}</td><td>{{ stock.pe }}</td><td>{{ stock.pb }}</td><td>{{ stock.roe }}</td><td>{{ stock.debt }}</td>
-              <td><span :class="['signal', stock.signal === '稳健' ? 'signal-good' : 'signal-watch']">{{ stock.signal }}</span></td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-  </main>
+      <section class="results-card">
+        <div class="card-heading"><div><span class="mini-label">LATEST SCREEN</span><h2>候选公司</h2></div><div class="result-tools"><button class="ghost-button" type="button">配置列</button><button class="export-button" type="button">导出结果</button></div></div>
+        <div class="table-summary"><span><b>{{ resultCount }}</b> 家公司符合当前研究规则</span><span>平均市盈率 <b>16.98</b></span><span>平均净资产收益率 <b>23.76%</b></span><span class="strict"><i></i>严格可信</span></div>
+        <div class="table-shell"><table><thead><tr><th>公司</th><th>行业</th><th>市盈率（PE-TTM）</th><th>净资产收益率（ROE）</th><th>总市值</th><th>研究信号</th></tr></thead><tbody><tr v-for="stock in stocks" :key="stock.code"><td><strong>{{ stock.name }}</strong><span>{{ stock.code }}</span></td><td>{{ stock.industry }}</td><td>{{ stock.pe }}</td><td>{{ stock.roe }}</td><td>{{ stock.cap }}</td><td><span class="signal" :class="stock.status === '稳健' ? 'signal-good' : 'signal-warn'">{{ stock.status }}</span></td></tr></tbody></table></div>
+      </section>
+    </main>
+  </div>
 </template>
 
 <style scoped>
-.workbench-preview { min-width: 1180px; max-width: 1480px; margin: 0 auto; padding: 8px 8px 56px; color: #17201c; }
-.preview-heading, .results-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
-.preview-heading { padding: 24px 8px 28px; }
-.eyebrow, .run-label { color: #708078; font-size: 10px; font-weight: 700; letter-spacing: .12em; }
-h1, h2, p { margin: 0; }
-h1 { margin-top: 7px; font-size: 30px; line-height: 1.2; letter-spacing: -.03em; }
-h2 { font-size: 16px; letter-spacing: -.01em; }
-.preview-heading p, .results-heading p { margin-top: 8px; color: #718077; font-size: 13px; }
-.workbench-shell { display: grid; grid-template-columns: minmax(680px, 1.6fr) minmax(330px, .74fr); overflow: hidden; border: 1px solid #dce3de; border-radius: 12px; background: #fff; box-shadow: 0 12px 32px rgba(22, 42, 32, .06); }
-.editor-column { padding: 30px 32px 32px; border-right: 1px solid #e6ebe7; }
-.section-header, .panel-title-row, .rule-name-row, .quality-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.section-header > div, .panel-title-row > div { display: flex; align-items: center; gap: 10px; }
-.step-mark { color: #14734d; font-size: 10px; font-weight: 800; letter-spacing: .08em; }
-.muted, .helper-text { color: #87938c; font-size: 12px; }
-.rule-name-row { margin-top: 22px; padding: 15px 16px; border: 1px solid #e4e9e5; border-radius: 8px; }
-.rule-name { display: grid; gap: 3px; }.rule-name span, .summary-grid span, .data-date span, .result-summary span { color: #78857d; font-size: 11px; }.rule-name strong { font-size: 14px; }
-.text-button, .preset-button, .filter-chip, .condition-row button { border: 0; background: transparent; color: #50705f; cursor: pointer; font: inherit; font-size: 12px; }.text-button:hover { color: #0f6a46; }
-.preset-row { display: flex; gap: 8px; margin: 18px 0 24px; }.preset-button { padding: 7px 11px; border: 1px solid #e0e6e1; border-radius: 6px; color: #64736a; }.preset-button.active { border-color: #b6d7c7; background: #eff8f2; color: #09643e; font-weight: 700; }.preset-button:disabled { cursor: not-allowed; opacity: .45; }
-.pool-panel, .conditions-panel { border-top: 1px solid #e7ebe8; padding-top: 22px; }.conditions-panel { margin-top: 26px; }.pool-count { color: #547262; font-size: 12px; font-weight: 600; }.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 15px; }.filter-chip { padding: 7px 10px; border: 1px solid #e1e7e3; border-radius: 99px; color: #68786f; }.filter-chip.is-selected { border-color: #c7ded1; background: #f4faf6; color: #236847; }
-.helper-text { margin-top: 9px; }.condition-table { margin-top: 14px; border: 1px solid #e6ebe7; border-radius: 8px; overflow: hidden; }.condition-header, .condition-row { display: grid; grid-template-columns: 1.8fr .85fr .75fr 24px; align-items: center; column-gap: 12px; padding: 10px 14px; }.condition-header { background: #f8faf8; color: #839087; font-size: 11px; }.condition-row { min-height: 42px; border-top: 1px solid #edf0ee; font-size: 12px; }.condition-row strong { font-weight: 600; }.condition-row b { color: #0d6844; }.condition-row button { color: #9ca6a0; font-size: 19px; line-height: 1; }.condition-row button:hover { color: #c13a49; }
-.quality-row { margin-top: 26px; padding: 17px 0 0; border-top: 1px solid #e7ebe8; }.quality-row div { display: grid; gap: 4px; }.quality-row strong { font-size: 13px; }.quality-row span { color: #77847c; font-size: 12px; }.toggle { width: 38px; height: 22px; padding: 2px; border: 0; border-radius: 99px; background: #cbd4ce; cursor: pointer; }.toggle i { display: block; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .16s ease; }.toggle.on { background: #11734c; }.toggle.on i { transform: translateX(16px); }
-.run-column { display: flex; flex-direction: column; padding: 30px 27px; background: #f7faf8; }.run-column h2 { margin-top: 8px; font-size: 20px; }.run-column > p { margin-top: 8px; color: #718077; font-size: 12px; line-height: 1.6; }.data-date { display: grid; gap: 4px; margin-top: 30px; padding: 15px 0; border-top: 1px solid #dfe8e2; border-bottom: 1px solid #dfe8e2; }.data-date strong { font-size: 15px; }.data-date small { color: #17784e; font-size: 11px; }.summary-grid { display: grid; grid-template-columns: 1fr 1fr; margin: 20px 0 24px; gap: 17px; }.summary-grid div { display: grid; gap: 4px; }.summary-grid strong { font-size: 14px; }.run-hint { text-align: center; }.run-feedback { display: grid; gap: 3px; margin-top: 19px; padding: 13px; border: 1px solid #c6ddce; border-radius: 7px; background: #f0f8f3; }.run-feedback span { color: #17784e; font-size: 11px; font-weight: 700; }.run-feedback strong { font-size: 13px; }.run-feedback small { color: #6e7e74; font-size: 11px; }.trust-note { display: flex; gap: 8px; margin-top: auto; padding-top: 26px; }.trust-dot { width: 7px; height: 7px; margin-top: 5px; border-radius: 50%; background: #e5a11a; }.trust-note p { color: #718077; font-size: 11px; line-height: 1.65; }.trust-note strong { display: block; color: #415046; }
-.results-section { margin-top: 24px; padding: 28px 30px 30px; border: 1px solid #dce3de; border-radius: 12px; background: #fff; }.results-heading { align-items: center; }.results-heading h2 { margin-top: 5px; font-size: 21px; }.result-actions { display: flex; align-items: center; gap: 12px; }.secondary-button { border: 1px solid #cbd8d0; border-radius: 6px; background: #fff; color: #24583f; padding: 8px 12px; font: inherit; font-size: 12px; cursor: pointer; }.result-summary { display: grid; grid-template-columns: repeat(4, 1fr); margin: 24px 0; border: 1px solid #e5eae6; border-radius: 8px; }.result-summary div { display: grid; gap: 4px; padding: 13px 16px; border-right: 1px solid #e5eae6; }.result-summary div:last-child { border: 0; }.result-summary strong { font-size: 16px; }.ready-text { color: #13744b; }.table-wrap { overflow: hidden; border: 1px solid #e4e9e5; border-radius: 8px; } table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; } th { padding: 11px 14px; background: #f8faf8; color: #748178; font-size: 10px; font-weight: 700; letter-spacing: .025em; text-align: left; white-space: nowrap; } td { padding: 13px 14px; border-top: 1px solid #edf0ee; color: #405047; } td strong { display: block; color: #1d2a22; font-size: 12px; } td > span:not(.signal) { display: block; margin-top: 3px; color: #89958e; font-size: 10px; }.signal { display: inline-block; padding: 3px 7px; border-radius: 4px; font-size: 10px; }.signal-good { background: #eaf6ee; color: #16744b; }.signal-watch { background: #fbf4e7; color: #a56a0a; }
+.ramtabs-preview { --ink: #17221c; --muted: #79847e; --green: #197147; --green-deep: #0d5134; --line: #e4e9e5; min-height: 100vh; display: flex; background: #f5f7f5; color: var(--ink); font-family: system-ui, 'Microsoft YaHei', sans-serif; }
+.sidebar { position: fixed; inset: 0 auto 0 0; display: flex; flex-direction: column; width: 230px; padding: 28px 17px 18px; box-sizing: border-box; background: #fff; border-right: 1px solid #edf0ee; }.brand { display: flex; align-items: center; gap: 9px; margin: 0 12px 42px; color: #183425; font-size: 20px; font-weight: 750; letter-spacing: -.05em; }.brand-mark { display: grid; width: 28px; height: 28px; place-items: center; border-radius: 9px; background: var(--green-deep); color: #fff; font-size: 14px; }.sidebar nav { display: grid; gap: 5px; }.nav-item { display: flex; align-items: center; gap: 13px; width: 100%; padding: 11px 12px; border: 0; border-radius: 9px; background: transparent; color: #708078; font: inherit; font-size: 13px; text-align: left; cursor: pointer; }.nav-item.active { background: #edf7f0; color: #146941; font-weight: 700; }.nav-item:hover { background: #f4f7f4; color: #255a3d; }.nav-icon, .metric-icon { position: relative; display: inline-block; width: 16px; height: 16px; flex: 0 0 16px; border: 1.6px solid currentColor; border-radius: 4px; box-sizing: border-box; }.icon-grid::before { content: ''; position: absolute; inset: 3px; border: 1px solid currentColor; border-radius: 1px; }.icon-filter { border: 0; border-radius: 0; }.icon-filter::before { content: ''; position: absolute; inset: 2px 1px; border: 1.6px solid currentColor; clip-path: polygon(0 0, 100% 0, 61% 48%, 61% 100%, 40% 82%, 40% 48%); }.icon-book { border-radius: 2px 6px 6px 2px; }.icon-book::before { content: ''; position: absolute; left: 4px; top: 2px; height: 10px; border-left: 1px solid currentColor; }.icon-chart { border: 0; border-radius: 0; border-bottom: 1.6px solid currentColor; border-left: 1.6px solid currentColor; }.icon-chart::after { content: ''; position: absolute; width: 11px; height: 7px; left: 2px; top: 3px; border-top: 1.6px solid currentColor; transform: skewY(-32deg); }.icon-data { border-radius: 50%; }.icon-data::before, .icon-data::after { content: ''; position: absolute; left: 3px; right: 3px; border-top: 1px solid currentColor; }.icon-data::before { top: 5px; }.icon-data::after { top: 9px; }.sidebar-bottom { margin-top: auto; }.profile { display: flex; align-items: center; gap: 9px; width: 100%; margin-top: 12px; padding: 12px; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }.avatar, .header-avatar { display: grid; place-items: center; width: 29px; height: 29px; border-radius: 50%; background: #dbece0; color: #126440; font-size: 12px; font-weight: 800; }.profile b, .profile small { display: block; }.profile b { font-size: 11px; }.profile small { margin-top: 2px; color: var(--muted); font-size: 10px; }.profile em { margin-left: auto; color: #8d9891; font-style: normal; }
+.dashboard { width: calc(100% - 230px); max-width: 1520px; min-width: 1030px; margin-left: 230px; padding: 34px 48px 58px; box-sizing: border-box; }.topbar { display: flex; align-items: center; justify-content: space-between; margin-bottom: 29px; }.crumb { margin: 0 0 7px; color: #839087; font-size: 11px; }.topbar h1 { margin: 0; font-size: 23px; letter-spacing: -.04em; }.top-actions { display: flex; align-items: center; gap: 10px; }.round-action, .help-button { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid #e1e7e2; border-radius: 50%; background: #fff; color: #75837a; cursor: pointer; }.header-avatar { margin-left: 4px; width: 32px; height: 32px; }
+.hero-card { position: relative; display: flex; min-height: 238px; overflow: hidden; padding: 36px 42px; border-radius: 20px; background: linear-gradient(111deg, #124b32, #187148); color: #fff; box-shadow: 0 16px 35px rgba(21, 91, 56, .17); box-sizing: border-box; }.hero-copy { position: relative; z-index: 2; }.mini-label { color: #809088; font-size: 9px; font-weight: 800; letter-spacing: .15em; }.hero-card .mini-label { color: #b2d7bf; }.hero-card h2 { margin: 11px 0 10px; font-size: 28px; line-height: 1.15; letter-spacing: -.045em; }.hero-card p { max-width: 405px; margin: 0; color: #d4e9da; font-size: 12px; line-height: 1.65; }.hero-button { margin-top: 21px; padding: 9px 13px 9px 15px; border: 0; border-radius: 8px; background: #fff; color: #125637; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }.hero-button span { margin-left: 9px; font-size: 15px; }.hero-art { position: absolute; width: 430px; height: 300px; right: 58px; top: -30px; }.orbit { position: absolute; border: 1px solid rgba(255, 255, 255, .17); border-radius: 50%; }.orbit-one { width: 300px; height: 300px; left: 42px; top: 0; }.orbit-two { width: 220px; height: 220px; left: 82px; top: 40px; }.hero-disc { position: absolute; display: grid; width: 128px; height: 128px; left: 128px; top: 86px; place-items: center; align-content: center; border: 11px solid rgba(255, 255, 255, .15); border-radius: 50%; background: rgba(8, 60, 36, .63); box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }.hero-disc span { font-size: 32px; font-weight: 750; letter-spacing: -.06em; }.hero-disc small { margin-top: -3px; color: #c3dfcc; font-size: 10px; }.float-card { position: absolute; display: grid; gap: 3px; padding: 12px 15px; border: 1px solid rgba(255,255,255,.25); border-radius: 10px; background: rgba(255,255,255,.12); backdrop-filter: blur(10px); }.float-card b { font-size: 16px; }.float-card span { color: #d3e9da; font-size: 9px; }.card-a { left: 4px; top: 57px; }.card-b { right: 4px; bottom: 44px; }
+.metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin: 22px 0; }.metrics article { display: flex; align-items: center; gap: 13px; min-height: 82px; padding: 0 19px; border-radius: 13px; background: #fff; box-shadow: 0 3px 14px rgba(34, 53, 42, .045); }.metric-icon { display: grid; width: 34px; height: 34px; place-items: center; border-color: #cce3d5; background: #f2f9f4; color: #197147; }.metrics p, .metrics small { margin: 0; color: #849088; font-size: 10px; }.metrics strong { display: block; margin: 3px 0 1px; font-size: 19px; letter-spacing: -.04em; }.metrics .green { color: #167148; font-size: 16px; }
+.content-grid { display: grid; grid-template-columns: minmax(600px, 1.6fr) minmax(280px, .72fr); gap: 21px; }.rule-card, .run-card, .results-card { border-radius: 15px; background: #fff; box-shadow: 0 4px 17px rgba(34, 53, 42, .05); }.rule-card { padding: 26px 28px; }.card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }.card-heading h2 { margin: 6px 0 0; font-size: 18px; letter-spacing: -.035em; }.ghost-button { padding: 7px 10px; border: 1px solid #e1e7e2; border-radius: 7px; background: #fff; color: #557064; font: inherit; font-size: 11px; cursor: pointer; }.preset-tabs { display: flex; gap: 7px; margin: 23px 0; }.preset-tabs button { padding: 8px 11px; border: 0; border-radius: 7px; background: #f5f7f5; color: #748078; font: inherit; font-size: 11px; cursor: pointer; }.preset-tabs button.active { background: #eaf6ee; color: #136943; font-weight: 700; }.preset-tabs button:disabled { opacity: .45; cursor: not-allowed; }.condition-label { display: flex; justify-content: space-between; margin-bottom: 8px; color: #7a877f; font-size: 11px; }.condition-label button { border: 0; background: transparent; color: #157047; font: inherit; font-size: 11px; cursor: pointer; }.condition { display: grid; grid-template-columns: 31px 1.65fr .72fr .55fr 15px; align-items: center; gap: 9px; min-height: 42px; border-top: 1px solid #edf0ee; font-size: 11px; }.condition-number { color: #9aa49e; font-size: 10px; }.condition strong { font-size: 11px; }.condition > span:not(.condition-number) { color: #77857c; }.condition b { color: #146e47; }.condition button { border: 0; background: transparent; color: #a1aaa4; font-size: 17px; cursor: pointer; }.trust-row { display: flex; align-items: center; gap: 10px; margin-top: 20px; padding-top: 17px; border-top: 1px solid #edf0ee; }.switch { display: block; width: 31px; height: 18px; padding: 2px; border-radius: 20px; background: #cbd3ce; cursor: pointer; box-sizing: border-box; }.switch i { display: block; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: transform .15s; }.switch.on { background: #1c744b; }.switch.on i { transform: translateX(13px); }.trust-row div { flex: 1; }.trust-row strong { display: block; font-size: 11px; }.trust-row p { margin: 3px 0 0; color: #89948e; font-size: 10px; }.trust-row a { color: #2d7552; font-size: 10px; text-decoration: none; }
+.run-card { padding: 23px; background: #153e2b; color: #fff; box-shadow: 0 12px 24px rgba(17, 71, 44, .17); }.run-card-top { display: flex; align-items: center; gap: 7px; color: #c1dbca; font-size: 10px; }.run-card-top button { margin-left: auto; border: 0; background: transparent; color: #b8d4c1; cursor: pointer; }.status-dot, .strict i { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: #7dd29b; }.run-number { margin: 22px 0 19px; }.run-number strong { display: block; font-size: 50px; line-height: .9; letter-spacing: -.07em; }.run-number span { display: block; margin-top: 7px; color: #b6d1be; font-size: 11px; }.run-lines { padding: 13px 0; border-top: 1px solid rgba(255,255,255,.14); border-bottom: 1px solid rgba(255,255,255,.14); }.run-lines p { display: flex; justify-content: space-between; margin: 7px 0; color: #b2c9ba; font-size: 10px; }.run-lines b { color: #fff; font-weight: 600; }.run-button { width: 100%; margin-top: 20px; padding: 11px; border: 0; border-radius: 7px; background: #fff; color: #125537; font: inherit; font-size: 11px; font-weight: 750; cursor: pointer; }.run-button span { margin-left: 8px; }.run-note, .completed { margin: 11px 0 0; color: #b4cfbd; font-size: 10px; line-height: 1.5; text-align: center; }.completed { color: #9de4b5; }
+.results-card { margin-top: 21px; padding: 26px 28px 28px; }.result-tools { display: flex; gap: 8px; }.export-button { padding: 7px 11px; border: 0; border-radius: 7px; background: #eaf6ee; color: #176d46; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer; }.table-summary { display: flex; gap: 24px; margin: 21px 0 15px; color: #7b8880; font-size: 10px; }.table-summary b { color: #39483f; }.table-summary .strict { margin-left: auto; color: #1b7049; }.strict i { margin-right: 5px; }.table-shell { overflow: hidden; border: 1px solid #edf0ee; border-radius: 9px; } table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; } th { padding: 10px 13px; background: #f8faf8; color: #849088; font-size: 9px; font-weight: 700; text-align: left; white-space: nowrap; } td { padding: 12px 13px; border-top: 1px solid #edf0ee; color: #536158; } td strong { display: block; color: #26342b; font-size: 11px; } td > span:not(.signal) { display: block; margin-top: 2px; color: #9ca69f; font-size: 9px; }.signal { display: inline-block; padding: 3px 6px; border-radius: 5px; font-size: 9px; }.signal-good { background: #eaf6ee; color: #197148; }.signal-warn { background: #faf3e5; color: #a26c11; }
 </style>

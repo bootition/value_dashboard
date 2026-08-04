@@ -55,8 +55,8 @@ const activeKey = computed(() => route.name as string)
       <n-dialog-provider>
         <n-layout position="absolute">
           <!-- L1-6: 键盘用户跳过导航直达内容 -->
-          <a href="#main-content" class="skip-link">跳到主要内容</a>
-          <n-layout-header bordered style="height: 56px; display: flex; align-items: center; padding: 0 24px; gap: 24px;">
+          <a v-if="!route.meta.staticPreview" href="#main-content" class="skip-link">跳到主要内容</a>
+          <n-layout-header v-if="!route.meta.staticPreview" bordered style="height: 56px; display: flex; align-items: center; padding: 0 24px; gap: 24px;">
             <router-link to="/screening" style="text-decoration: none; display: flex; align-items: baseline; gap: 8px;">
               <!-- L2 V6: 品牌副标题强化研究定位 -->
               <span style="font-size: 18px; font-weight: 600; color: #1f2329;">Value Dashboard</span>
@@ -70,7 +70,7 @@ const activeKey = computed(() => route.name as string)
               </router-link>
             </n-space>
           </n-layout-header>
-          <n-layout-content id="main-content" tabindex="-1" style="padding: 24px;">
+          <n-layout-content id="main-content" tabindex="-1" :style="route.meta.staticPreview ? '' : 'padding: 24px;'">
             <router-view />
           </n-layout-content>
         </n-layout>
