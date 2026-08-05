@@ -1,10 +1,11 @@
 ---
 title: 最终筛选界面与自动更新恢复报告（2026-08-05）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-05
 last-reviewed: 2026-08-05
 supersedes: reports/49_DESKTOP_UI_PARITY_AND_DATA_STATUS_FIX_2026-08-04.md
+superseded-by: reports/51_LAUNCH_PATH_AND_LIVE_STATUS_RECOVERY_2026-08-06.md
 ---
 
 # 最终筛选界面与自动更新恢复报告（2026-08-05）
