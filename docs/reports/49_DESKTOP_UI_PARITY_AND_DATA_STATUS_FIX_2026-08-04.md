@@ -1,9 +1,10 @@
 ---
 title: 桌面界面样稿同构与数据状态修复报告（2026-08-04）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-04
 last-reviewed: 2026-08-04
+superseded-by: reports/50_FINAL_SCREENING_UI_AND_AUTO_UPDATE_RECOVERY_2026-08-05.md
 ---
 
 # 桌面界面样稿同构与数据状态修复报告（2026-08-04）

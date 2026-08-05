@@ -3,30 +3,32 @@
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
-- **最后更新**：2026-08-04
-- **更新人**：opencode 会话（2026-08-04 桌面界面样稿同构与数据状态修复）
+- **最后更新**：2026-08-05
+- **更新人**：opencode 会话（最终筛选界面与自动更新恢复）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
 | 整体启用 | ✅ **PASS / 可正式启用**（第八轮独立攻击确认 F4 已关闭：网页与原生 CLI 导出同源，原 F4 隔离复现现在含 `_truncated`；发行包实际启动 smoke、全量门禁及正式库保护均通过） | `reports/40`（取代 `reports/39` 的修复自证结论） |
-| 代码层门禁 | ✅ 可自动化门禁全部通过（S1 回归 408、Ruff 零问题、uv lock、前端 lint/52 node + 10 组件测试、build-release 实际 smoke；2026-08-03 独立重跑） | `reports/40` §2 |
+| 代码层门禁 | ✅ Ruff、前端 lint/52 node + 16 组件测试/build、完整隔离回归 435 全通过（2026-08-05）；S1 wrapper 因正在运行的 Web 服务按安全预检拒绝，本轮未生成正式库哈希证据 | `reports/50` §5；历史发布门禁见 `reports/40` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
-| 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]（2026-08-04 CSRC 填充后复验；CSRC 行业分类 4923/5533 已落地，筛选行业排名可用） | `reports/46`、`reports/29`、`reports/32` |
+| 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]（2026-08-05 正式复验；5537 只上市股，4 只极新股免费源数据未形成仅披露） | `reports/50`、`reports/46`、`reports/29` |
 | 30 股外部真值抽样 | ✅ 已执行（收盘 27/27、总股本 27/27；2 只流通股本为解禁时间差披露项） | `reports/29` |
 | 回归/发布验证 | ✅ 前端 + S1 全绿（423 passed，2026-08-04）；正式发行包可构建并经真实 exe `/api/health` smoke；**PRD §19.1 性能验收仪式 PASS（10/10 <5s，avg 256ms）** | `reports/46` §2、`reports/40` §2、`docs/evidence/evidence-performance-20260804.json` |
 | 桌面筛选界面 | ✅ 已接入正式路径：浅色侧栏四模块、筛选工作区、中文优先指标与模块内个股搜索；S1 424、Ruff、前端门禁全绿 | `reports/47` |
 | 四页桌面界面 | ✅ 四页静态样稿经用户确认后已全部接入：筛选、自选规则分组、个股搜索/详情、数据状态；S1 424、Ruff、前端门禁全绿 | `reports/48` |
-| 界面同构与数据状态 | ✅ 修复正式页残留旧风格、侧栏图标溢出、个股搜索偏移及覆盖率视觉误读；前复权覆盖为 5533/5533（100.0%） | `reports/49` |
+| 最终筛选界面与状态 | ✅ 筛选条件改为研究底稿式“全部/任一”自然语言规则；侧栏/筛选/状态页统一 readiness；无圆角卡片和阴影 | `reports/50` |
+| 自动更新恢复 | ✅ Windows 死亡锁回收、逐股原子续传、价格优先、增量快照与真实状态已跑通；正式库 ready=TRUE、warning=[]，10 股 smoke success | `reports/50` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
-1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6（O1 性能仪式 2026-08-04 PASS、O2 runbook、O3 存量截断不迁移决策、O4 加密口径、O5 engines、O6 chain-finalize）见 `reports/46`；CSRC 行业分类数据已填充（4923/5533）。O7 剩余增量优化（按日节流/增量 CSRC 刷新）不阻断。
-2. **数据层披露缺口**：`920305` 极新股免费源无数据；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所（301xxx/920xxx）CSRC 分类如实 NULL。均不改变 PASS。
+1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新已由 `reports/50` 关闭。
+2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
+3. **价格追赶进度**：最新可得价格日为 2026-08-05，但目标日完整 raw/qfq 覆盖为 245/5530；其余非停牌股票将由后续自动更新续传，不能宣称全市场已完整更新到 08-05。
 ## 进行中的工作
-- **自动数据更新 + CSRC 行业分类**：PRD 修订完成（`decisions/01`）；CSRC 分类数据已落地（2026-08-04，4923/5533，见 `reports/46`）；自动更新控制器/状态页已具备。剩余增量优化（按日节流、增量 CSRC 刷新）按 `.planning/2026-07-31-automatic-data-updates/` 推进。
+- **价格数据续传**：自动更新控制器已恢复并完成正式 smoke；目标日覆盖 245/5530，后续启动继续按逐股断点追赶。CSRC partial 已按 30 天节流，不再阻塞价格。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
-| `docs/decisions/01_PRODUCT_REQUIREMENTS_V1.md` | 产品需求规格（验收合同） | **活文档**：随功能演进修订，2026-07-31 修订了自动更新/CSRC 章节 |
+| `docs/decisions/01_PRODUCT_REQUIREMENTS_V1.md` | 产品需求规格（验收合同） | **活文档**：2026-08-05 修订筛选关系、自动更新恢复与新股披露口径 |
 | `docs/decisions/02_TECH_CONSTRAINTS.md` | 技术约束清单 | 约束冲突时以 README/实施为准时需人工裁决 |
 | `docs/reports/29_DATA_REBUILD_REPORT_2026-07-31.md` | 最新数据重建报告（P0-1 关闭依据） | 数据层当前结论基线 |
 | `docs/reports/30_AUDIT_FIX_CLOSURE_2026-08-02.md` | 审计修复闭环报告（`reports/27` 代码级 P1/P2 全部关闭依据） | 代码层审计结论基线 |
@@ -48,7 +50,7 @@
 | `docs/reports/46_REMAINING_P2_AND_CSRC_2026-08-04.md` | **剩余 P2 与 CSRC 填充实施报告**：C3-C16 + O1 attestation **PASS** + O3/O5/O6；正式库 ready 恢复 | **B1/B2 全部关闭依据；CSRC 数据落地** |
 | `docs/reports/47_DESKTOP_SCREENING_UI_AND_STOCK_SEARCH_2026-08-04.md` | **桌面筛选界面与个股搜索入口实施报告**：正式筛选页 + 四模块侧栏 + 中文指标 + 模块内股票搜索 | **本次 UI 实施与门禁依据** |
 | `docs/reports/48_APPROVED_FOUR_PAGE_DESKTOP_UI_INTEGRATION_2026-08-04.md` | **已确认四页桌面界面正式接入报告**：样稿确认后完整接入四页 | **当前完整 UI 接入与门禁依据** |
-| `docs/reports/49_DESKTOP_UI_PARITY_AND_DATA_STATUS_FIX_2026-08-04.md` | **桌面界面样稿同构与数据状态修复报告**：正式页统一工作台风格、侧栏/搜索修复、覆盖率展示口径 | **本轮 UI 同构与数据展示修复依据** |
+| `docs/reports/50_FINAL_SCREENING_UI_AND_AUTO_UPDATE_RECOVERY_2026-08-05.md` | **最终筛选界面与自动更新恢复**：规则语句重构、状态统一、死亡锁/续传/增量快照、正式库清理与复验 | **当前筛选 UI 与自动更新依据；取代 reports/49** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
@@ -68,6 +70,7 @@
 - `reports/37`（F1/F2/F3 修复，"可启用"）→ **修复事实保留**，整体裁决已被 `reports/38` 取代（F4）。
 - `reports/38`（第七轮 BLOCK，F4 原生 CLI 导出静默截断）→ **F4 已关闭**（见 `reports/39`），整体裁决为"可启用"。
 - `reports/39`（F4 修复，"可启用"）→ **修复事实保留**，独立正式启用裁决由 `reports/40` 给出（PASS）。
+- `reports/49`（桌面界面同构与数据状态修复）→ UI/状态当前结论由 `reports/50` 取代；历史修复事实保留。
 - 更早编号报告（05–24、26）→ 全部 superseded，仅作追溯证据。
 ## 维护规则（写文档的人必须遵守）
 1. **状态变化时**：更新本文件 → 将旧报告 front-matter 的 `status` 改为 `superseded` 并写 `superseded-by` → 新报告/文档必须带 front-matter 且 `status: approved`。
