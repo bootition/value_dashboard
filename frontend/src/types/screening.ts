@@ -72,6 +72,7 @@ export interface ScreeningRunResponse {
 /** Response from GET /api/data-status/summary (only the quality slice we need). */
 export interface DataStatusSummaryResponse {
   readonly data_quality: DataQualityStatus
+  readonly minimum_data_readiness?: DataQualityStatus['minimum_data_readiness']
 }
 
 /** Re-export for convenience. */

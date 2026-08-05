@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { NSelect, NInputNumber, NButton } from 'naive-ui'
+import { NSelect, NInputNumber } from 'naive-ui'
 import type { ScreeningRuleCondition } from '../types/screening.ts'
 
 const props = defineProps<{
   condition: ScreeningRuleCondition
+  ordinal: number
   indicatorOptions: Array<{ label: string; value: string }>
   opOptions: Array<{ label: string; value: string }>
 }>()
@@ -18,6 +19,8 @@ const emit = defineEmits<{
 }>()
 
 const compareByField = computed(() => Boolean(props.condition.right_field))
+const hasValue = computed(() => !['is_not_null', 'is_null'].includes(props.condition.op))
+const numericValue = computed(() => typeof props.condition.value === 'number' ? props.condition.value : null)
 
 function updateRange(index: number, value: number): void {
   const current = Array.isArray(props.condition.value) ? props.condition.value : [0, 0]
@@ -29,72 +32,140 @@ function updateRange(index: number, value: number): void {
 function toggleFieldComparison(): void {
   emit('update:rightField', compareByField.value ? undefined : props.indicatorOptions[0]?.value)
 }
-
-const numericValue = computed(() =>
-  typeof props.condition.value === 'number' ? props.condition.value : null,
-)
 </script>
 
 <template>
-  <div class="rule-condition-row">
-    <n-select
-      :value="condition.field"
-      :options="indicatorOptions"
-      size="small"
-      class="condition-field"
-      filterable
-      @update:value="emit('update:field', $event)"
-    />
-    <n-select
-      :value="condition.op"
-      :options="opOptions"
-      size="small"
-      class="condition-operator"
-      @update:value="emit('update:op', $event)"
-    />
-    <template v-if="condition.op === 'between'">
-      <n-input-number
-        :value="Array.isArray(condition.value) ? condition.value[0] : 0"
+  <article class="condition-line">
+    <div class="condition-index" aria-hidden="true">{{ String(ordinal).padStart(2, '0') }}</div>
+    <label class="condition-control condition-control--field">
+      <span>观察指标</span>
+      <n-select
+        :value="condition.field"
+        :options="indicatorOptions"
         size="small"
-        class="condition-value"
-        @update:value="updateRange(0, $event ?? 0)"
+        filterable
+        aria-label="观察指标"
+        @update:value="emit('update:field', $event)"
       />
-      <span>至</span>
-      <n-input-number
-        :value="Array.isArray(condition.value) ? condition.value[1] : 0"
+    </label>
+    <label class="condition-control condition-control--operator">
+      <span>判断关系</span>
+      <n-select
+        :value="condition.op"
+        :options="opOptions"
         size="small"
-        class="condition-value"
-        @update:value="updateRange(1, $event ?? 0)"
+        aria-label="判断关系"
+        @update:value="emit('update:op', $event)"
       />
-    </template>
-    <n-select
-      v-else-if="compareByField && condition.op !== 'is_not_null' && condition.op !== 'is_null'"
-      :value="condition.right_field"
-      :options="indicatorOptions"
-      size="small"
-       class="condition-value"
-      filterable
-      @update:value="emit('update:rightField', $event)"
-    />
-    <n-input-number
-      v-else-if="condition.op !== 'is_not_null' && condition.op !== 'is_null'"
-      :value="numericValue"
-      size="small"
-       class="condition-value"
-      @update:value="emit('update:value', $event ?? 0)"
-    />
-     <n-button
-      v-if="condition.op !== 'between' && condition.op !== 'in' && condition.op !== 'is_not_null' && condition.op !== 'is_null'"
-       size="tiny"
-       class="condition-mode"
-      @click="toggleFieldComparison"
-    >
-      {{ compareByField ? '固定值' : '字段比较' }}
-    </n-button>
-     <n-button size="tiny" quaternary type="error" class="condition-delete" @click="emit('delete')">×</n-button>
-  </div>
+    </label>
+    <div v-if="condition.op === 'between'" class="condition-control condition-control--value condition-range">
+      <span>取值范围</span>
+      <div>
+        <n-input-number :value="Array.isArray(condition.value) ? condition.value[0] : 0" size="small" aria-label="区间下限" @update:value="updateRange(0, $event ?? 0)" />
+        <i>至</i>
+        <n-input-number :value="Array.isArray(condition.value) ? condition.value[1] : 0" size="small" aria-label="区间上限" @update:value="updateRange(1, $event ?? 0)" />
+      </div>
+    </div>
+    <label v-else-if="compareByField && hasValue" class="condition-control condition-control--value">
+      <span>比较指标</span>
+      <n-select :value="condition.right_field" :options="indicatorOptions" size="small" filterable aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
+    </label>
+    <label v-else-if="hasValue" class="condition-control condition-control--value">
+      <span>目标值</span>
+      <n-input-number :value="numericValue" size="small" aria-label="目标值" @update:value="emit('update:value', $event ?? 0)" />
+    </label>
+    <div v-else class="condition-control condition-control--value condition-no-value">
+      <span>目标值</span>
+      <b>无需填写</b>
+    </div>
+    <div class="condition-tools">
+      <button v-if="hasValue && condition.op !== 'between'" type="button" @click="toggleFieldComparison">
+        {{ compareByField ? '改用数值' : '与指标比较' }}
+      </button>
+      <button type="button" class="delete-condition" aria-label="删除条件" @click="emit('delete')">删除</button>
+    </div>
+  </article>
 </template>
 
 <style scoped>
-.rule-condition-row { display: grid; grid-template-columns: minmax(180px, 1.7fr) 108px minmax(130px, .8fr) auto 28px; align-items: center; gap: 10px; min-height: 44px; padding: 6px 12px; border-top: 1px solid #eff2f0; }.condition-field, .condition-operator, .condition-value { width: 100%; }.condition-mode { color: #698a76; }.condition-delete { color: #99a39d; font-size: 17px; }
+.condition-line {
+  display: grid;
+  grid-template-columns: 42px minmax(190px, 1.6fr) minmax(120px, .72fr) minmax(170px, 1fr) 92px;
+  align-items: stretch;
+  min-height: 74px;
+  margin: 0 18px;
+  border: 1px solid #d8ddd9;
+  background: #fff;
+}
+
+.condition-index {
+  display: grid;
+  place-items: center;
+  border-right: 1px solid #d8ddd9;
+  background: #f4f5f1;
+  color: #7c847e;
+  font: 10px/1 var(--vd-mono);
+}
+
+.condition-control {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 12px;
+  border-right: 1px solid #e1e5e1;
+}
+
+.condition-control > span {
+  color: #7b847d;
+  font: 700 8px/1 var(--vd-mono);
+  letter-spacing: .12em;
+}
+
+.condition-control :deep(.n-base-selection),
+.condition-control :deep(.n-input) {
+  border-radius: 0;
+}
+
+.condition-range > div { display: flex; align-items: center; gap: 7px; }
+.condition-range i { color: #7c847e; font-size: 10px; font-style: normal; }
+.condition-no-value b { color: #8b918d; font-size: 11px; font-weight: 500; }
+
+.condition-tools {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  padding: 8px 10px;
+}
+
+.condition-tools button {
+  padding: 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: #5d7263;
+  cursor: pointer;
+  font-size: 9px;
+  text-align: left;
+}
+
+.condition-tools button:hover { border-bottom-color: currentColor; }
+.condition-tools .delete-condition { color: #9b5a56; }
+
+@media (max-width: 900px) {
+  .condition-line { grid-template-columns: 36px 1fr 1fr; }
+  .condition-index { grid-row: 1 / 3; }
+  .condition-control--value { grid-column: 2 / 4; border-top: 1px solid #e1e5e1; }
+  .condition-tools { grid-column: 2 / 4; flex-direction: row; justify-content: flex-end; border-top: 1px solid #e1e5e1; }
+}
+
+@media (max-width: 620px) {
+  .condition-line { grid-template-columns: 32px 1fr; margin: 0 8px; }
+  .condition-index { grid-row: 1 / 5; }
+  .condition-control { grid-column: 2; border-top: 1px solid #e1e5e1; }
+  .condition-control--field { border-top: 0; }
+  .condition-control--value, .condition-tools { grid-column: 2; }
+}
 </style>

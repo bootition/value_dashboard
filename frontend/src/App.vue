@@ -4,12 +4,13 @@ import { useRoute } from 'vue-router'
 import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
 import { RouterLink, RouterView } from 'vue-router'
 import axios from 'axios'
+import type { DataQualityStatus } from './types/data-quality.ts'
 
 const route = useRoute()
 
-// L2 V6（报告42）: 品牌与可信度表达——全局数据就绪/更新徽标
-type Summary = { data_quality: { ready: boolean; warning_codes: string[] } }
-const quality = ref<{ ready: boolean; warning_codes: string[] } | null>(null)
+type Summary = { data_quality: DataQualityStatus }
+const quality = ref<DataQualityStatus | null>(null)
+const qualityFailed = ref(false)
 
 onMounted(async () => {
   if (route.meta.staticPreview) return
@@ -17,14 +18,16 @@ onMounted(async () => {
     const resp = await axios.get<Summary>('/api/data-status/summary')
     quality.value = resp.data.data_quality
   } catch {
-    quality.value = { ready: false, warning_codes: [] }
+    quality.value = null
+    qualityFailed.value = true
   }
 })
 
 const statusTag = computed(() => {
   const q = quality.value
+  if (qualityFailed.value) return { type: 'error' as const, label: '状态读取失败', color: undefined }
   if (q === null) return { type: 'default' as const, label: '状态加载中…', color: undefined }
-  if (!q.ready) return { type: 'error' as const, label: '数据未就绪', color: undefined }
+  if (!q.minimum_data_readiness.ready) return { type: 'error' as const, label: '数据未就绪', color: undefined }
   if (q.warning_codes.length > 0) return { type: 'warning' as const, label: `警告 ${q.warning_codes.length}`, color: undefined }
   return { type: 'success' as const, label: '数据就绪', color: undefined }
 })

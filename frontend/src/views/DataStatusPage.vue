@@ -22,6 +22,7 @@ interface DataSummary {
   stock_count: number
   price_raw_count: number
   price_qfq_count: number
+  price_freshness?: { target_date: string | null; active_count: number; raw_current_count: number; qfq_current_count: number; complete_count: number } | null
   price_backfill?: { earliest_date: string | null; latest_date: string | null; stock_count: number; total_rows: number; gap: { no_price: number; incomplete: number; unknown_listing_date: number; complete: number } }
   balance_sheet_count: number
   balance_sheet_range?: { earliest: string | null; latest: string | null }
@@ -57,6 +58,8 @@ interface AutoUpdateStatus {
   }
   last_error: string | null
   last_success_at: string | null
+  last_result?: string | null
+  last_skip_reason?: string | null
   updated_at?: string | null
 }
 
@@ -143,6 +146,17 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
   return 'default'
 }
 
+function skipReasonLabel(reason: string | null | undefined): string {
+  const labels: Record<string, string> = {
+    another_update_running: '另一更新占用写入锁',
+    already_running: '更新任务已在运行',
+    auto_update_disabled: '自动更新已关闭',
+    auto_update_paused: '自动更新已暂停',
+    prices_up_to_date: '价格已经是最新日期',
+  }
+  return reason ? (labels[reason] || reason) : '—'
+}
+
 </script>
 
 <template>
@@ -201,6 +215,12 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
             </n-descriptions-item>
             <n-descriptions-item label="作业ID">{{ autoUpdate.progress?.job_id || '—' }}</n-descriptions-item>
             <n-descriptions-item label="上次成功">{{ autoUpdate.last_success_at || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="最近结果">
+              {{ autoUpdate.last_result || '尚未执行' }}
+              <span v-if="autoUpdate.last_result === 'skipped'" style="color:#d48806;">
+                （{{ skipReasonLabel(autoUpdate.last_skip_reason) }}）
+              </span>
+            </n-descriptions-item>
             <n-descriptions-item label="最后错误">
               <span v-if="autoUpdate.last_error" style="color:#d03050;">{{ autoUpdate.last_error }}</span>
               <span v-else>—</span>
@@ -304,6 +324,11 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
           <n-descriptions :column="3" size="small">
             <n-descriptions-item label="价格日期">
               {{ summary.data_quality.dates.price || '—' }}
+            </n-descriptions-item>
+            <n-descriptions-item label="价格更新覆盖">
+              {{ summary.price_freshness
+                ? `${summary.price_freshness.complete_count}/${summary.price_freshness.active_count}（目标 ${summary.price_freshness.target_date || '—'}）`
+                : '—' }}
             </n-descriptions-item>
             <n-descriptions-item label="财报最新完整期">
               {{ summary.data_quality.dates.balance_sheet.latest_complete || '—' }}

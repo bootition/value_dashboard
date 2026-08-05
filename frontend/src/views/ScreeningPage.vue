@@ -30,6 +30,7 @@ const truncated = ref(false)
 const totalMatched = ref(0)
 const warningCodes = ref<readonly WarningCode[]>([])
 const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
+const dataReady = ref<boolean | null>(null)
 
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
 const strictOnly = ref(false)
@@ -65,16 +66,24 @@ const sortRules = ref<SortRule[]>([
 ])
 
 const opOptions = [
-  { label: '>', value: '>' },
-  { label: '<', value: '<' },
-  { label: '>=', value: '>=' },
-  { label: '<=', value: '<=' },
-  { label: '=', value: '=' },
-  { label: '!=', value: '!=' },
-  { label: '区间', value: 'between' },
-  { label: '不为空', value: 'is_not_null' },
-  { label: '为空', value: 'is_null' },
+  { label: '高于', value: '>' },
+  { label: '低于', value: '<' },
+  { label: '不低于', value: '>=' },
+  { label: '不高于', value: '<=' },
+  { label: '等于', value: '=' },
+  { label: '不等于', value: '!=' },
+  { label: '位于区间', value: 'between' },
+  { label: '有数据', value: 'is_not_null' },
+  { label: '无数据', value: 'is_null' },
 ]
+
+const readinessCopy = computed(() => {
+  if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
+  if (dataReady.value === null) return { state: 'loading', label: '正在核对数据' }
+  return dataReady.value
+    ? { state: 'ready', label: '数据已就绪' }
+    : { state: 'blocked', label: '数据尚未就绪' }
+})
 
 const indicatorOptions = computed(() =>
   indicators.value.map((i) => ({
@@ -356,8 +365,10 @@ onMounted(async () => {
   try {
     const resp = await axios.get<DataStatusSummaryResponse>('/api/data-status/summary')
     warningCodes.value = resp.data.data_quality.warning_codes
+    dataReady.value = resp.data.data_quality.minimum_data_readiness.ready
     qualityStatus.value = 'available'
   } catch {
+    dataReady.value = null
     qualityStatus.value = 'failed'
     message.warning('无法加载数据质量状态')
   }
@@ -377,7 +388,7 @@ onMounted(async () => {
     <div class="screening-workspace">
       <section class="screening-editor-card">
         <div class="screening-card-heading">
-          <div><p>CURRENT RULE</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2><span>规则 → 运行 → 结果</span></div>
+          <div><p>RESEARCH RULE / DRAFT</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2><span>定义股票池、写下判断，再保存为可追溯版本。</span></div>
         </div>
         <div class="rule-load-row">
           <span>已保存规则</span>
@@ -387,7 +398,7 @@ onMounted(async () => {
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>01</b><h3>基础股票池</h3></div></div>
+          <div class="screening-section-title"><div><b>01 / UNIVERSE</b><h3>先确定研究范围</h3></div></div>
           <n-space wrap>
             <n-switch v-model:value="basePool.exclude_st"><template #checked>排除 ST</template><template #unchecked>包含 ST</template></n-switch>
             <n-switch v-model:value="basePool.exclude_suspended"><template #checked>排除停牌</template><template #unchecked>包含停牌</template></n-switch>
@@ -397,13 +408,12 @@ onMounted(async () => {
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>02</b><h3>筛选条件</h3></div></div>
-          <p class="screening-help">全部条件按当前逻辑组合。指标使用中文名称，并保留必要缩写核对口径。</p>
-          <div class="conditions-workbench"><div class="conditions-head"><span>指标</span><span>关系</span><span>目标值</span><span></span><span></span></div><ScreeningRuleEditor :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" /></div>
+          <div class="screening-section-title screening-section-title--conditions"><div><b>02 / THESIS</b><h3>把投资判断写成一句规则</h3></div><p>先决定股票需要满足全部条件，还是满足任意条件；再逐条填写判断。</p></div>
+          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" />
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>03</b><h3>排序方式</h3></div></div>
+          <div class="screening-section-title"><div><b>03 / PRIORITY</b><h3>定义结果优先级</h3></div></div>
           <n-space vertical>
             <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
               <span class="control-label">优先级 {{ index + 1 }}</span>
@@ -419,11 +429,11 @@ onMounted(async () => {
       </section>
 
       <aside class="screening-run-panel">
-        <div class="screening-ready"><i></i>{{ qualityStatus === 'available' ? '数据可用于筛选' : '数据状态加载中' }}</div>
+        <div class="screening-ready" :data-state="readinessCopy.state"><i></i>{{ readinessCopy.label }}</div>
         <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
         <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>排序方式</span><b>{{ sortRules.length }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
         <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
-        <n-button type="primary" block :loading="loading" @click="runScreening">运行筛选 →</n-button>
+        <n-button type="primary" block :loading="loading" :disabled="dataReady === false" @click="runScreening">运行筛选 →</n-button>
         <p class="screening-run-help">运行结果可保存、导出或加入自选列表。</p>
       </aside>
     </div>
@@ -470,5 +480,50 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.screening-page { max-width: 1380px; }.screening-page-header { margin-bottom: 27px; }.screening-page-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.screening-page-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.screening-page-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.screening-workspace { display: grid; grid-template-columns: minmax(620px, 1.6fr) minmax(282px, .72fr); gap: 21px; }.screening-editor-card, .screening-empty-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.screening-editor-card { padding: 28px 29px; }.screening-card-heading h2 { margin: 7px 0 5px; font-size: 19px; letter-spacing: -.04em; }.screening-card-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.screening-card-heading span { color: #829087; font-size: 11px; }.rule-load-row { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(120px, .65fr) auto; align-items: center; gap: 10px; margin: 25px 0; padding: 13px 14px; border-radius: 9px; background: #fafcf9; }.rule-load-row > span, .control-label { color: #89958c; font-size: 10px; }.screening-section { padding: 21px 0; border-top: 1px solid #edf1ee; }.screening-section-title > div { display: flex; align-items: baseline; gap: 9px; }.screening-section-title b { color: #83b194; font-size: 10px; }.screening-section-title h3 { margin: 0 0 13px; font-size: 13px; }.screening-help { margin: -4px 0 13px; color: #929d95; font-size: 10px; }.conditions-workbench { overflow: hidden; border: 1px solid #edf1ee; border-radius: 9px; }.conditions-head { display: grid; grid-template-columns: minmax(180px, 1.7fr) 108px minmax(130px, .8fr) auto 28px; gap: 10px; padding: 10px 12px; background: #fafcf9; color: #9ca69f; font-size: 9px; }.dsl-manager { margin-top: 3px; }.screening-run-panel { align-self: start; padding: 25px; border-radius: 16px; background: #eff7f1; box-shadow: 0 5px 17px rgba(47, 114, 74, .055); }.screening-ready { display: flex; align-items: center; gap: 6px; color: #659d75; font-size: 10px; }.screening-ready i { width: 6px; height: 6px; border-radius: 50%; background: #82ba94; }.screening-run-title { margin: 26px 0 19px; }.screening-run-title p { margin: 0 0 6px; color: #8a9b90; font-size: 10px; }.screening-run-title h2 { margin: 0; color: #365944; font-size: 20px; letter-spacing: -.05em; }.screening-run-data { padding: 13px 0; border-top: 1px solid #dbeade; border-bottom: 1px solid #dbeade; }.screening-run-data p { display: flex; justify-content: space-between; margin: 8px 0; color: #809087; font-size: 10px; }.screening-run-data b { color: #4d6556; font-weight: 650; }.screening-strict { display: grid; gap: 6px; margin: 18px 0; }.screening-strict span, .screening-run-help { color: #8d9b91; font-size: 9px; }.screening-run-help { margin: 11px 0 0; line-height: 1.5; text-align: center; }.screening-empty-card { display: grid; grid-template-columns: 220px 1fr; gap: 28px; align-items: center; margin-top: 21px; padding: 27px 29px; }.first-screening-help { color: #718077; font-size: 12px; }.first-screening-help :deep(.n-alert) { margin-bottom: 12px; }.first-screening-help ol { margin: 0; padding-left: 20px; line-height: 2; }.first-screening-help > div { margin-top: 8px; color: #87958c; font-size: 11px; }
+/* Final screening pass: an audit worksheet, not a stack of soft cards. */
+.screening-page { max-width: 1380px; color: #202622; }
+.screening-page-header { margin-bottom: 26px; padding-bottom: 20px; border-bottom: 1px solid #cfd5d0; }
+.screening-page-header p { margin: 0 0 8px; color: #68716a; font: 700 9px/1 var(--vd-mono); letter-spacing: .12em; }
+.screening-page-header h1 { margin: 0; font-family: 'Songti SC', 'STSong', serif; font-size: 30px; font-weight: 700; letter-spacing: -.04em; }
+.screening-page-header span { display: block; margin-top: 7px; color: #69716b; font-size: 12px; }
+.screening-workspace { display: grid; grid-template-columns: minmax(650px, 1.72fr) minmax(276px, .58fr); gap: 18px; }
+.screening-editor-card, .screening-empty-card { border: 1px solid #cfd5d0; border-radius: 0; background: #fff; box-shadow: none; }
+.screening-editor-card { padding: 0 28px 26px; }
+.screening-card-heading { margin: 0 -28px; padding: 22px 28px 19px; border-bottom: 3px solid #273c2f; }
+.screening-card-heading h2 { margin: 6px 0 4px; font-family: 'Songti SC', 'STSong', serif; font-size: 21px; letter-spacing: -.03em; }
+.screening-card-heading p { margin: 0; color: #68716a; font: 700 8px/1 var(--vd-mono); letter-spacing: .14em; }
+.screening-card-heading span { color: #747d76; font-size: 11px; }
+.rule-load-row { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(150px, .65fr) auto; align-items: center; gap: 9px; margin: 0 -28px; padding: 13px 28px; border-radius: 0; border-bottom: 1px solid #cfd5d0; background: #f1f2ed; }
+.rule-load-row > span, .control-label { color: #68716a; font: 700 9px/1 var(--vd-mono); }
+.rule-load-row :deep(.n-base-selection), .rule-load-row :deep(.n-input), .rule-load-row :deep(.n-button) { border-radius: 0; }
+.screening-section { padding: 26px 0 27px; border-top: 1px solid #d7dcd8; }
+.rule-load-row + .screening-section { border-top: 0; }
+.screening-section-title > div { display: flex; align-items: baseline; gap: 11px; }
+.screening-section-title b { color: #557060; font: 700 8px/1 var(--vd-mono); letter-spacing: .09em; }
+.screening-section-title h3 { margin: 0 0 15px; font-family: 'Songti SC', 'STSong', serif; font-size: 16px; font-weight: 700; }
+.screening-section-title--conditions { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
+.screening-section-title--conditions p { max-width: 390px; margin-bottom: 14px; color: #747c76; font-size: 10px; text-align: right; }
+.conditions-workbench { margin-top: 3px; border-radius: 0; overflow: visible; }
+.dsl-manager { margin-top: 4px; }
+.screening-run-panel { position: sticky; top: 28px; align-self: start; padding: 0; border: 1px solid #23372a; border-radius: 0; background: #283d30; color: #eef1eb; box-shadow: none; }
+.screening-ready { display: flex; align-items: center; gap: 8px; padding: 14px 19px; border-bottom: 1px solid rgba(255,255,255,.16); color: #c5dbc9; font: 700 9px/1 var(--vd-mono); letter-spacing: .08em; }
+.screening-ready i { width: 7px; height: 7px; border-radius: 0; background: #87b994; }
+.screening-ready[data-state='blocked'], .screening-ready[data-state='failed'] { color: #f0b5aa; }
+.screening-ready[data-state='blocked'] i, .screening-ready[data-state='failed'] i { background: #d37869; }
+.screening-ready[data-state='loading'] i { background: #d1bd78; }
+.screening-run-title { padding: 22px 19px; border-bottom: 1px solid rgba(255,255,255,.16); }
+.screening-run-title p { color: #aebbb1; font: 8px/1 var(--vd-mono); letter-spacing: .1em; }
+.screening-run-title h2 { margin: 7px 0 0; color: #fff; font-family: 'Songti SC', 'STSong', serif; font-size: 20px; }
+.screening-run-data { padding: 13px 19px; border-bottom: 1px solid rgba(255,255,255,.16); }
+.screening-run-data p { display: flex; justify-content: space-between; margin: 10px 0; color: #acb9ae; font-size: 10px; }
+.screening-run-data b { color: #eef1eb; font-weight: 600; }
+.screening-strict { padding: 16px 19px; border-top: 0; }
+.screening-strict span { display: block; margin-top: 8px; color: #a8b3aa; font-size: 9px; }
+.screening-run-panel > :deep(.n-button) { width: calc(100% - 38px); margin: 0 19px; border-radius: 0; }
+.screening-run-help { margin: 11px 19px 18px; color: #a5b0a7; font-size: 9px; text-align: center; }
+.screening-empty-card { margin-top: 18px; padding: 28px; }
+.first-screening-help { max-width: 650px; margin: 16px auto 0; color: #68736b; font-size: 11px; line-height: 1.7; }
+.first-screening-help ol { margin: 13px 0; padding-left: 20px; }
+@media (max-width: 1060px) { .screening-workspace { grid-template-columns: 1fr; }.screening-run-panel { position: static; }.rule-load-row { grid-template-columns: 1fr; }.screening-section-title--conditions { display: block; }.screening-section-title--conditions p { max-width: none; text-align: left; } }
+@media (max-width: 620px) { .screening-editor-card { padding: 0 14px 20px; }.screening-card-heading, .rule-load-row { margin-left: -14px; margin-right: -14px; padding-left: 14px; padding-right: 14px; } }
 </style>
