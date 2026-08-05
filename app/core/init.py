@@ -431,6 +431,8 @@ class DataInitializer:
             ))
             if result.metadata.error and not result.data:
                 errors.append(result.metadata.error)
+            elif not result.data:
+                errors.append("CSRC source returned no classifications")
             else:
                 # 幂等写入；缺数据的股票保持 NULL 留给下轮断点
                 with self.duck.transaction() as conn:

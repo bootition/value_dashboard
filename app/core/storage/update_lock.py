@@ -12,10 +12,11 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import ctypes
 import os
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 _held = contextvars.ContextVar("value_dashboard_update_lock_held", default=False)
 
@@ -30,14 +31,18 @@ def _lock_path(database_path: Path) -> Path:
 
 def _pid_exists(pid: int) -> bool:
     """Check if a PID is still alive (cross-platform)."""
-    import ctypes
     if hasattr(ctypes, "windll"):
         kernel32 = ctypes.windll.kernel32
         handle = kernel32.OpenProcess(0x1000, False, pid)
-        if handle:
+        if not handle:
+            return False
+        try:
+            exit_code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259  # STILL_ACTIVE
+        finally:
             kernel32.CloseHandle(handle)
-            return True
-        return False
     try:
         os.kill(pid, 0)
         return True
@@ -58,7 +63,11 @@ def _owner_is_dead(lock_path: Path) -> bool:
 
 
 @contextlib.contextmanager
-def exclusive_update(database_path: Path) -> Iterator[None]:
+def exclusive_update(
+    database_path: Path,
+    *,
+    on_stale_lock: Callable[[], None] | None = None,
+) -> Iterator[None]:
     """Reserve the incremental-update cycle for one process.
 
     Raises UpdateLockError immediately when another live process holds the
@@ -68,17 +77,21 @@ def exclusive_update(database_path: Path) -> Iterator[None]:
         yield
         return
     lock_path = _lock_path(database_path)
+    reclaimed_stale_lock = False
     try:
         fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         if _owner_is_dead(lock_path):
             lock_path.unlink(missing_ok=True)
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            reclaimed_stale_lock = True
         else:
             raise UpdateLockError("another incremental update is running")
     try:
         with os.fdopen(fd, "w", encoding="ascii") as handle:
             handle.write(f"pid={os.getpid()}\ntime={time.time()}\n")
+        if reclaimed_stale_lock and on_stale_lock is not None:
+            on_stale_lock()
         token = _held.set(True)
         try:
             yield

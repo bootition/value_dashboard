@@ -18,10 +18,12 @@ from datetime import datetime, timezone
 from app.core.init import CSRC_BATCH_SIZE, DataInitializer
 from app.core.update import IncrementalUpdater
 from app.core.storage.update_lock import exclusive_update
+from app.core.adapters.base import FetchRequest
+from app.core.adapters.tdx_adapter import TDXAdapter
 
 
 def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
-    updater.run_incremental_check = lambda: {
+    updater.run_incremental_check = lambda **kwargs: {
         "new_trading_days": [], "retry_tasks": [], "latest_local_price_date": "2026-07-20",
         "announcement_check": {"status": "available"}, "needs_update": True, "blocked": False,
     }
@@ -33,6 +35,17 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
     updater._refresh_market_actions = lambda codes: {"status": "success"}
     updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
+
+
+def test_tdx_declines_adjusted_prices_before_fetch() -> None:
+    adapter = TDXAdapter(rate_limit=0)
+
+    assert adapter.can_handle(FetchRequest(
+        data_type="price_daily", stock_codes=["600519"], adjust="raw",
+    )) is True
+    assert adapter.can_handle(FetchRequest(
+        data_type="price_daily", stock_codes=["600519"], adjust="qfq",
+    )) is False
 
 
 def test_incremental_update_writes_job_logs_lifecycle(duckdb_store, sqlite_store) -> None:
@@ -53,6 +66,23 @@ def test_incremental_update_writes_job_logs_lifecycle(duckdb_store, sqlite_store
     details = json.loads(rows[0]["details_json"])
     assert details["job_id"] == report["job_id"]
     assert details["status"] == "success"
+
+
+def test_incremental_update_always_closes_adapter_sessions(duckdb_store, sqlite_store) -> None:
+    class ClosingAdapterManager:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    manager = ClosingAdapterManager()
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=manager)
+    _stub_update_network_steps(updater)
+
+    updater.run_incremental_update(max_stocks=1)
+
+    assert manager.closed is True
 
 
 def test_incremental_update_records_failed_job_on_partial(duckdb_store, sqlite_store) -> None:
@@ -96,6 +126,46 @@ def test_update_lock_reclaims_dead_owner(duckdb_store, sqlite_store) -> None:
     assert not lock_path.exists()
 
 
+def test_update_lock_pid_probe_rejects_exited_windows_process(monkeypatch) -> None:
+    from app.core.storage import update_lock
+
+    class FakeKernel32:
+        def OpenProcess(self, access, inherit, pid):
+            return 123
+
+        def GetExitCodeProcess(self, handle, output):
+            output._obj.value = 0
+            return 1
+
+        def CloseHandle(self, handle):
+            return 1
+
+    monkeypatch.setattr(update_lock.ctypes.windll, "kernel32", FakeKernel32(), raising=False)
+
+    assert update_lock._pid_exists(12560) is False
+
+
+def test_update_lock_recovery_closes_crashed_incremental_job(duckdb_store, sqlite_store) -> None:
+    lock_path = duckdb_store.db_path.parent / ".value-dashboard.update.lock"
+    lock_path.write_text("pid=99999999\ntime=0\n", encoding="ascii")
+    sqlite_store.execute(
+        """INSERT INTO job_logs (job_type, status, started_at, details_json)
+           VALUES ('incremental_update', 'running', '2026-08-04T10:33:17+00:00', '{}')"""
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_update_network_steps(updater)
+    updater.run_incremental_update()
+
+    rows = sqlite_store.query(
+        """SELECT status, finished_at, details_json FROM job_logs
+           WHERE started_at = '2026-08-04T10:33:17+00:00'"""
+    )
+    assert rows[0]["status"] == "failed"
+    assert rows[0]["finished_at"] is not None
+    assert json.loads(rows[0]["details_json"])["reconciliation"]["reason_code"] == "dead_update_lock_owner"
+
+
 def test_update_lock_context_manager_serializes(duckdb_store) -> None:
     lock_path = duckdb_store.db_path.parent / ".value-dashboard.update.lock"
     with exclusive_update(duckdb_store.db_path):
@@ -122,6 +192,25 @@ def test_progress_callback_receives_each_step(duckdb_store, sqlite_store) -> Non
     assert seen
     assert ("universe", "success") in seen
     assert ("prices", "skipped") in seen
+
+
+def test_bounded_update_stops_after_price_step(duckdb_store, sqlite_store) -> None:
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_update_network_steps(updater)
+    universe_called = False
+
+    def universe() -> dict:
+        nonlocal universe_called
+        universe_called = True
+        return {"status": "success", "steps": {}}
+
+    updater._refresh_universe_metadata = universe
+
+    report = updater.run_incremental_update(max_stocks=10)
+
+    assert universe_called is False
+    assert set(report["steps"]) == {"prices"}
+    assert report["status"] == "success"
 
 
 def test_share_capital_change_triggers_snapshot_recompute(
@@ -256,6 +345,31 @@ def test_csrc_fetch_records_resume_progress(duckdb_store, sqlite_store) -> None:
     progress = json.loads(rows[0]["value"])
     assert progress["processed"] == 2
     assert progress["total"] == 2
+
+
+def test_csrc_fetch_handles_empty_success_without_executemany(duckdb_store, sqlite_store) -> None:
+    from types import SimpleNamespace
+
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1)
+           VALUES ('600519', 'TEST', 'SSE', TRUE, NULL)"""
+    )
+
+    class EmptyAdapterManager:
+        def fetch(self, request):
+            return SimpleNamespace(data=[], metadata=SimpleNamespace(error=None, source="cninfo_csrc"))
+
+    initializer = DataInitializer(
+        duck=duckdb_store,
+        sqlite=sqlite_store,
+        adapter_mgr=EmptyAdapterManager(),
+    )
+
+    report = initializer._fetch_csrc_industry()
+
+    assert report["status"] == "partial"
+    assert report["count"] == 0
+    assert report["errors"] == ["CSRC source returned no classifications"]
 
 
 class _ChunkAdapter:

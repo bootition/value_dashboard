@@ -153,6 +153,35 @@ def test_snapshot_refuses_to_publish_when_the_universe_lacks_minimum_data(
     ) == [{"stock_code": "OLD001"}]
 
 
+def test_incremental_snapshot_replaces_only_changed_stock_atomically(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close) VALUES
+           ('000001', '2025-03-31', 10), ('000002', '2025-03-31', 20)"""
+    )
+    calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
+    monkeypatch.setattr(
+        calculator,
+        "compute_all_for_stock",
+        lambda code: {"stock_code": code, "report_date": "2025-03-31", "latest_close": 15},
+    )
+
+    report = calculator.compute_snapshot_for_codes(
+        ["000001"], publish_gate=lambda duck, sqlite: {"ready": True},
+    )
+
+    assert report["status"] == "success"
+    assert duckdb_store.read_query(
+        "SELECT stock_code, latest_close FROM indicator_snapshot ORDER BY stock_code"
+    ) == [
+        {"stock_code": "000001", "latest_close": 15.0},
+        {"stock_code": "000002", "latest_close": 20.0},
+    ]
+
+
 @pytest.mark.parametrize(
     ("exchange", "missing", "should_publish"),
     [

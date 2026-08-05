@@ -18,7 +18,7 @@ import math
 import hashlib
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
@@ -135,6 +135,7 @@ class IndicatorCalculator:
         readiness = self.duck.read_query("""
             SELECT
                 m.stock_code,
+                m.listing_date,
                 EXISTS (
                     SELECT 1
                     FROM balance_sheet bs
@@ -170,6 +171,10 @@ class IndicatorCalculator:
                 and row["has_raw_price"]
                 and row["has_qfq_price"]
             )
+            and not (
+                row.get("listing_date") is not None
+                and str(row["listing_date"]) >= str(datetime.now().date() - timedelta(days=90))
+            )
         ]
         if missing_codes:
             return {
@@ -198,7 +203,11 @@ class IndicatorCalculator:
                 "success": 0,
                 "failed": len(readiness),
             }
-        stocks = [{"stock_code": row["stock_code"]} for row in readiness]
+        stocks = [
+            {"stock_code": row["stock_code"]}
+            for row in readiness
+            if row["has_core_financials"] and row["has_raw_price"] and row["has_qfq_price"]
+        ]
         total = len(stocks)
         if total == 0:
             return {"status": "skipped", "reason": "no stocks in stock_meta"}
@@ -267,6 +276,82 @@ class IndicatorCalculator:
             "success": success,
             "failed": failed,
             "failed_codes": failed_codes[:20],
+        }
+
+    def compute_snapshot_for_codes(
+        self,
+        stock_codes: list[str],
+        *,
+        publish_gate: Callable[[DuckDBStore, SQLiteStore], dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Atomically replace snapshots only for stocks whose prices changed."""
+        codes = list(dict.fromkeys(stock_codes))
+        if not codes:
+            return {"status": "skipped", "reason": "no_changed_stocks", "success": 0, "failed": 0}
+
+        gate = publish_gate
+        if gate is None:
+            from app.core.data_quality import snapshot_publish_gate
+            gate = snapshot_publish_gate
+        gate_report = gate(self.duck, self.sqlite)
+        if not gate_report.get("ready"):
+            return {
+                "status": "rejected", "reason": "publish_gate_failed", "gate": gate_report,
+                "total": len(codes), "success": 0, "failed": len(codes),
+            }
+
+        records: list[dict[str, Any]] = []
+        failed_codes: list[str] = []
+        with self.duck.read_connection() as connection:
+            self._calculation_read_connection = connection
+            try:
+                for code in codes:
+                    try:
+                        indicators = self.compute_all_for_stock(code)
+                        if indicators.get("report_date") is None:
+                            failed_codes.append(code)
+                        else:
+                            records.append(indicators)
+                    except Exception as error:
+                        logger.debug("增量计算 %s 指标失败: %s", code, error)
+                        failed_codes.append(code)
+            finally:
+                del self._calculation_read_connection
+
+        if failed_codes:
+            return {
+                "status": "partial", "reason": "changed_stock_not_ready",
+                "total": len(codes), "success": len(records), "failed": len(failed_codes),
+                "failed_codes": failed_codes[:20],
+            }
+
+        placeholders = ", ".join("?" for _ in codes)
+        existing_count = self.duck.read_query(
+            f"SELECT COUNT(*) AS count FROM indicator_snapshot WHERE stock_code NOT IN ({placeholders})",
+            codes,
+        )[0]["count"]
+        staging_table = f"indicator_snapshot_staging_{uuid.uuid4().hex}"
+        self._cleanup_snapshot_staging_tables()
+        self.duck.write_query(
+            f'CREATE TABLE "{staging_table}" AS SELECT * FROM indicator_snapshot WHERE FALSE'
+        )
+        try:
+            self.duck.write_query(
+                f'INSERT INTO "{staging_table}" BY NAME '
+                f"SELECT * FROM indicator_snapshot WHERE stock_code NOT IN ({placeholders})",
+                codes,
+            )
+            self._write_batch(records, staging_table)
+            self._publish_snapshot(
+                staging_table,
+                expected_count=existing_count + len(records),
+                records=records,
+            )
+        finally:
+            self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
+        return {
+            "status": "success", "total": len(codes), "success": len(records),
+            "failed": 0, "failed_codes": [],
         }
 
     def _read_query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:

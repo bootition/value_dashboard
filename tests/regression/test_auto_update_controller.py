@@ -146,6 +146,10 @@ def test_auto_update_skipped_reports_idle_not_failed(duckdb_store, sqlite_store,
     status = controller.status()
     assert status["current_stage"] == "idle"
     assert status["last_error"] is None
+    assert status["last_result"] == "skipped"
+    assert status["last_skip_reason"] == "another_update_running"
+    persisted = controller.persisted_status()
+    assert persisted["last_skip_reason"] == "another_update_running"
 
 
 def test_new_controller_adopts_persisted_disabled_state(duckdb_store, sqlite_store) -> None:

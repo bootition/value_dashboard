@@ -44,7 +44,7 @@ def test_failed_financial_refresh_keeps_announcement_pending_and_records_retry(d
         "affected_announcements": {"000001": [{"announcement_id": "notice-1", "title": "2026年半年度报告"}]},
         "all_new_announcements": {"000001": [{"announcement_id": "notice-1", "title": "2026年半年度报告"}]},
     }
-    updater.run_incremental_check = lambda: check
+    updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
     updater._refresh_financials = lambda codes: {
         "status": "partial", "succeeded_codes": [], "failed_codes": codes,
@@ -73,7 +73,7 @@ def test_successful_financial_refresh_marks_announcement_seen(duckdb_store, sqli
         "affected_announcements": {"000001": [{"announcement_id": "notice-1", "title": "2026年半年度报告"}]},
         "all_new_announcements": {"000001": [{"announcement_id": "notice-1", "title": "2026年半年度报告"}]},
     }
-    updater.run_incremental_check = lambda: check
+    updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
     updater._refresh_financials = lambda codes: {
         "status": "success", "succeeded_codes": codes, "failed_codes": [],
@@ -101,7 +101,7 @@ def test_non_financial_announcement_is_registered_without_financial_refresh(duck
         "affected_announcements": {},
         "all_new_announcements": {"000001": [{"announcement_id": "notice-2", "title": "关于召开临时股东大会的通知"}]},
     }
-    updater.run_incremental_check = lambda: check
+    updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
     updater._refresh_financials = lambda codes: (_ for _ in ()).throw(AssertionError("financial refresh must not run"))
     updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
@@ -256,7 +256,7 @@ def test_pending_financial_refresh_keeps_announcement_pending_and_retries(duckdb
         "affected_announcements": {"000001": [{"announcement_id": "notice-1", "title": "2026年半年度报告"}]},
         "all_new_announcements": {"000001": [{"announcement_id": "notice-1", "title": "2026年半年度报告"}]},
     }
-    updater.run_incremental_check = lambda: check
+    updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
     updater._refresh_financials = lambda codes: {
         "status": "success", "succeeded_codes": [], "failed_codes": [],

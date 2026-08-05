@@ -188,8 +188,16 @@ class IncrementalUpdater:
         from app.core.storage.update_lock import UpdateLockError, exclusive_update
 
         try:
-            with exclusive_update(self.duck.db_path):
-                return self._run_incremental_update_locked(max_stocks, progress_cb)
+            with exclusive_update(
+                self.duck.db_path,
+                on_stale_lock=self._reconcile_crashed_incremental_jobs,
+            ):
+                try:
+                    return self._run_incremental_update_locked(max_stocks, progress_cb)
+                finally:
+                    close = getattr(self.adapter_mgr, "close", None)
+                    if callable(close):
+                        close()
         except UpdateLockError:
             logger.warning("增量更新被跨进程锁拒绝：另一更新正在运行")
             return {
@@ -198,6 +206,32 @@ class IncrementalUpdater:
                 "started_at": datetime.now(timezone.utc).isoformat(),
                 "finished_at": datetime.now(timezone.utc).isoformat(),
             }
+
+    def _reconcile_crashed_incremental_jobs(self) -> None:
+        """Close jobs abandoned by the dead process that owned the update lock."""
+        finished_at = datetime.now(timezone.utc).isoformat()
+        running = self.sqlite.query(
+            """SELECT id, details_json FROM job_logs
+               WHERE job_type = 'incremental_update' AND status = 'running'"""
+        )
+        if not running:
+            return
+        with self.sqlite.transaction() as connection:
+            for job in running:
+                try:
+                    details = json.loads(job.get("details_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    details = {"legacy_details": job.get("details_json")}
+                details["reconciliation"] = {
+                    "reason_code": "dead_update_lock_owner",
+                    "reconciled_at": finished_at,
+                }
+                connection.execute(
+                    """UPDATE job_logs SET status = 'failed', finished_at = ?, details_json = ?
+                       WHERE id = ? AND status = 'running'""",
+                    [finished_at, json.dumps(details, ensure_ascii=False), job["id"]],
+                )
+        logger.warning("已回收死亡更新锁并结算 %d 条悬挂增量作业", len(running))
 
     def _run_incremental_update_locked(
         self,
@@ -248,7 +282,9 @@ class IncrementalUpdater:
     ) -> dict[str, Any]:
         """更新主流程（调用方已持有跨进程更新锁）。"""
         # 先检查
-        check_report = self.run_incremental_check()
+        # 公告会在价格步骤之后以 persist=True 抓取。前置阶段只判断本地
+        # 价格/重试状态，避免一次更新重复抓公告并阻塞每日价格新鲜度。
+        check_report = self.run_incremental_check(include_announcements=False)
 
         report: dict[str, Any] = {
             "check": check_report,
@@ -269,6 +305,28 @@ class IncrementalUpdater:
                 "reason": "authoritative announcement and financial freshness check is unavailable",
             })
 
+        # 1. 价格新鲜度是每日启动的首要目标。低频股票池/行业或公告源
+        # 变慢时，不应阻塞已上市股票的日线补齐。
+        if check_report["new_trading_days"]:
+            report_step("trading_dates", self._update_trading_dates())
+        price_step = report_step("prices", self._update_prices_incremental(max_stocks))
+        updated_price_codes = price_step.pop("_updated_codes", [])
+
+        if max_stocks > 0:
+            if price_step["status"] == "success" and price_step.get("success", 0) > 0:
+                from app.core.indicators.calculator import IndicatorCalculator
+
+                report_step(
+                    "indicators",
+                    IndicatorCalculator(duck=self.duck, sqlite=self.sqlite).compute_snapshot_for_codes(
+                        updated_price_codes
+                    ),
+                )
+            report["status"] = aggregate_job_status(report["steps"])
+            report["finished_at"] = datetime.now(timezone.utc).isoformat()
+            logger.info("有界价格更新完成: %s", report["status"])
+            return report
+
         # PRD §7.7 第 4 项: 股本与上市名单（新股/退市/股本变化），
         # 以及 PRD §24 CSRC 行业分类（低频刷新）。
         # P1: 股本变化后必须触发快照重算，否则 total_market_cap 等
@@ -278,10 +336,6 @@ class IncrementalUpdater:
         shares_after = self._share_capital_fingerprint()
         share_capital_changed = shares_before != shares_after
         report["share_capital_changed"] = share_capital_changed
-
-        # 1. 更新交易日历（如果有新的）
-        if check_report["new_trading_days"]:
-            report_step("trading_dates", self._update_trading_dates())
 
         announcement_check = self._check_new_announcements(persist=True)
         report["check"]["announcement_check"] = announcement_check
@@ -320,21 +374,22 @@ class IncrementalUpdater:
                 continue
             self._mark_announcements_seen(code, announcements)
 
-        # 2. 增量更新价格（只更新有新交易日的股票）
-        step = report_step("prices", self._update_prices_incremental(max_stocks))
         financial_step = report["steps"].get("financials", {"status": "success"})
         financial_refreshed = bool(financials and financials.get("success", 0) > 0)
-        if (
-            (step["status"] == "success" and step.get("success", 0) > 0)
-            or financial_refreshed
-            or share_capital_changed
-        ) and financial_step["status"] == "success":
+        if (financial_refreshed or share_capital_changed) and financial_step["status"] == "success":
             from app.core.indicators.calculator import IndicatorCalculator
 
             snapshot_step = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite).compute_snapshot_for_all()
             report_step("indicators", snapshot_step)
             if snapshot_step["status"] != "success":
                 snapshot_step["reason"] = "price update retained; snapshot publication not ready"
+        elif updated_price_codes and financial_step["status"] == "success":
+            from app.core.indicators.calculator import IndicatorCalculator
+
+            snapshot_step = IndicatorCalculator(
+                duck=self.duck, sqlite=self.sqlite,
+            ).compute_snapshot_for_codes(updated_price_codes)
+            report_step("indicators", snapshot_step)
 
         # 3. 重试失败任务
         if check_report["retry_tasks"]:
@@ -409,7 +464,7 @@ class IncrementalUpdater:
         if self._csrc_refresh_due():
             try:
                 steps["csrc_industry"] = initializer._fetch_csrc_industry()
-                if steps["csrc_industry"].get("status") == "success":
+                if steps["csrc_industry"].get("status") in {"success", "partial"}:
                     self._mark_refreshed("csrc_industry_last_refresh")
             except Exception as error:
                 logger.warning("CSRC 行业刷新失败: %s", error)
@@ -720,21 +775,35 @@ class IncrementalUpdater:
 
         latest_local = self._get_latest_local_price_date()
         today = datetime.now().strftime("%Y-%m-%d")
+        target_date = self._latest_expected_trading_date(today)
 
-        if latest_local and latest_local >= today:
-            logger.info("[增量] 价格已是最新，无需更新")
-            return {"status": "skipped", "reason": "prices_up_to_date"}
-
-        # 获取所有有新交易日需要更新的股票
+        # 按股票自己的最新日期选择缺口，不能用全库 MAX 代表全部股票。
+        # 每只成功股票立即提交，进程中断后下一轮可从剩余缺口继续。
         try:
             stocks = self.duck.read_query(
-                "SELECT stock_code, exchange FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+                """SELECT stock.stock_code, stock.exchange,
+                          raw.latest_raw_date, qfq.latest_qfq_date
+                   FROM stock_meta stock
+                   LEFT JOIN (
+                     SELECT stock_code, MAX(trade_date) AS latest_raw_date
+                     FROM price_daily_raw GROUP BY stock_code
+                   ) raw ON raw.stock_code = stock.stock_code
+                   LEFT JOIN (
+                     SELECT stock_code, MAX(trade_date) AS latest_qfq_date
+                     FROM price_daily_qfq GROUP BY stock_code
+                   ) qfq ON qfq.stock_code = stock.stock_code
+                   WHERE stock.is_listed IS TRUE AND COALESCE(stock.is_suspended, FALSE) IS FALSE
+                     AND (raw.latest_raw_date IS NULL OR qfq.latest_qfq_date IS NULL
+                          OR raw.latest_raw_date < ? OR qfq.latest_qfq_date < ?)
+                   ORDER BY stock.stock_code""",
+                [target_date, target_date],
             )
         except Exception:
             return {"status": "skipped", "reason": "no_stock_meta"}
 
         if not stocks:
-            return {"status": "skipped", "reason": "no_stocks"}
+            logger.info("[增量] 所有非停牌股票价格已是最新，无需更新")
+            return {"status": "skipped", "reason": "prices_up_to_date"}
 
         target_stocks = stocks
         if max_stocks > 0:
@@ -742,8 +811,15 @@ class IncrementalUpdater:
             # 否则每次运行取到的子集随机漂移
             target_stocks = target_stocks[:max_stocks]
 
-        start_date = latest_local or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        end_date = today
+        fallback_start = latest_local or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        target_dates = [
+            str(value)
+            for stock in target_stocks
+            for value in (stock.get("latest_raw_date"), stock.get("latest_qfq_date"))
+            if value is not None
+        ]
+        start_date = min(target_dates) if target_dates else fallback_start
+        end_date = target_date
 
         # 增量窗口内发生除权除息的股票：qfq 需要全历史重拉
         xdxr_window_start = start_date
@@ -765,10 +841,7 @@ class IncrementalUpdater:
 
         success_count = 0
         fail_count = 0
-        all_rows = []
-        all_qfq_rows = []
-        successful_fetches: list[tuple[str, str, Any]] = []
-
+        updated_codes: list[str] = []
         for i, stock in enumerate(target_stocks):
             code = stock["stock_code"]
             if (i + 1) % 100 == 0:
@@ -777,7 +850,9 @@ class IncrementalUpdater:
             need_qfq_full = code in xdxr_codes
             # qfq 全量重拉的股票：从适配器支持的起点拉全历史；
             # raw 在数据陈旧时同样全量。
-            fetch_start = None if (need_qfq_full or raw_full_refetch) else start_date
+            raw_latest = str(stock.get("latest_raw_date") or start_date)
+            qfq_latest = str(stock.get("latest_qfq_date") or start_date)
+            fetch_start = None if (need_qfq_full or raw_full_refetch) else min(raw_latest, qfq_latest)
 
             raw_result = self.adapter_mgr.fetch(FetchRequest(
                 data_type="price_daily",
@@ -807,69 +882,13 @@ class IncrementalUpdater:
                 )
                 continue
 
-            for row in raw_result.data:
-                all_rows.append([
-                    code, row.get("trade_date"), row.get("open"),
-                    row.get("high"), row.get("low"), row.get("close"),
-                    row.get("volume"), row.get("turnover"), row.get("turnover_rate"),
-                ])
-            successful_fetches.append((code, "price_daily_raw", raw_result))
-            for row in qfq_result.data:
-                all_qfq_rows.append([
-                    code, row.get("trade_date"), row.get("open"), row.get("high"),
-                    row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
-                    row.get("turnover_rate"),
-                ])
-            successful_fetches.append((code, "price_daily_qfq", qfq_result))
-            success_count += 1
-
-        # 批量写入数据库（单次连接，单次事务）
-        if all_rows:
             try:
-                from app.core.init import DataInitializer
-
-                lineage = DataInitializer.__new__(DataInitializer)
-                lineage._batch_id = str(uuid.uuid4())
-                with self.duck.transaction() as conn:
-                    conn.executemany(
-                        """INSERT INTO price_daily_raw
-                           (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                           ON CONFLICT(stock_code, trade_date) DO UPDATE SET
-                             open=COALESCE(excluded.open, price_daily_raw.open),
-                             high=COALESCE(excluded.high, price_daily_raw.high),
-                             low=COALESCE(excluded.low, price_daily_raw.low),
-                             close=COALESCE(excluded.close, price_daily_raw.close),
-                             volume=COALESCE(excluded.volume, price_daily_raw.volume),
-                             turnover=COALESCE(excluded.turnover, price_daily_raw.turnover),
-                             turnover_rate=COALESCE(excluded.turnover_rate, price_daily_raw.turnover_rate)""",
-                        all_rows,
-                    )
-                    if all_qfq_rows:
-                        conn.executemany(
-                            """INSERT INTO price_daily_qfq
-                               (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                               ON CONFLICT(stock_code, trade_date) DO UPDATE SET
-                                 open=COALESCE(excluded.open, price_daily_qfq.open),
-                                 high=COALESCE(excluded.high, price_daily_qfq.high),
-                                 low=COALESCE(excluded.low, price_daily_qfq.low),
-                                 close=COALESCE(excluded.close, price_daily_qfq.close),
-                                 volume=COALESCE(excluded.volume, price_daily_qfq.volume),
-                                 turnover=COALESCE(excluded.turnover, price_daily_qfq.turnover),
-                                 turnover_rate=COALESCE(excluded.turnover_rate, price_daily_qfq.turnover_rate)""",
-                            all_qfq_rows,
-                        )
-                    for code, data_type, result in successful_fetches:
-                        batch_id = lineage._record_batch_in_connection(
-                            conn, result, data_type, len(result.data)
-                        )
-                        lineage._record_field_audit_in_connection(
-                            conn, result, result.data, code, "trade_date", batch_id
-                        )
+                self._persist_incremental_price_pair(code, raw_result, qfq_result)
+                success_count += 1
+                updated_codes.append(code)
             except Exception as e:
-                logger.error(f"批量写入价格数据失败: {e}")
-                return {"status": "failed", "error": str(e)}
+                fail_count += 1
+                self._record_failure(code, "price_daily", raw_result.metadata.source, str(e))
 
         logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
         return {
@@ -879,7 +898,63 @@ class IncrementalUpdater:
             "failed": fail_count,
             "xdxr_full_refetch": len(xdxr_codes),
             "raw_full_refetch": raw_full_refetch,
+            "_updated_codes": updated_codes,
         }
+
+    def _latest_expected_trading_date(self, today: str, *, now: datetime | None = None) -> str:
+        """Use the latest closed session, not today's still-open trading date."""
+        local_now = now or datetime.now()
+        cutoff = today
+        if local_now.strftime("%Y-%m-%d") == today and local_now.strftime("%H:%M") < "15:30":
+            cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        try:
+            rows = self.sqlite.query(
+                """SELECT MAX(trade_date) AS trade_date FROM trading_dates
+                   WHERE trade_date <= ?""",
+                [cutoff],
+            )
+            if rows and rows[0].get("trade_date"):
+                return str(rows[0]["trade_date"])
+        except Exception as error:
+            logger.warning("读取交易日历目标日期失败: %s", error)
+        return today
+
+    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
+        """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""
+        from app.core.init import DataInitializer
+
+        lineage = DataInitializer.__new__(DataInitializer)
+        lineage._batch_id = str(uuid.uuid4())
+        with self.duck.transaction() as connection:
+            for table, data_type, result in (
+                ("price_daily_raw", "price_daily_raw", raw_result),
+                ("price_daily_qfq", "price_daily_qfq", qfq_result),
+            ):
+                connection.executemany(
+                    f"""INSERT INTO {table}
+                        (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                          open=COALESCE(excluded.open, {table}.open),
+                          high=COALESCE(excluded.high, {table}.high),
+                          low=COALESCE(excluded.low, {table}.low),
+                          close=COALESCE(excluded.close, {table}.close),
+                          volume=COALESCE(excluded.volume, {table}.volume),
+                          turnover=COALESCE(excluded.turnover, {table}.turnover),
+                          turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
+                    [
+                        [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
+                         row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
+                         row.get("turnover_rate")]
+                        for row in result.data
+                    ],
+                )
+                batch_id = lineage._record_batch_in_connection(
+                    connection, result, data_type, len(result.data)
+                )
+                lineage._record_field_audit_in_connection(
+                    connection, result, result.data, stock_code, "trade_date", batch_id
+                )
 
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
         """重试失败任务"""

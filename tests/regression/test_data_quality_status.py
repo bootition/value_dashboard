@@ -72,6 +72,24 @@ def test_data_dates_supports_snapshot_schema_before_freshness_migration(
     }
 
 
+def test_data_dates_price_uses_latest_available_date(
+    duckdb_store: DuckDBStore,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES
+           ('000001', 'A', 'SZSE', TRUE), ('000002', 'B', 'SZSE', TRUE)"""
+    )
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"""INSERT INTO {table} (stock_code, trade_date, close) VALUES
+                ('000001', '2026-08-05', 10), ('000002', '2026-08-04', 20)"""
+        )
+
+    dates = _data_dates(duckdb_store)
+
+    assert dates["price"] == "2026-08-05"
+
+
 def test_quality_status_flags_missing_inputs_for_a_currently_listed_stock(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
@@ -97,6 +115,42 @@ def test_quality_status_flags_missing_inputs_for_a_currently_listed_stock(
         "lineage_coverage": 1,
     }
     assert "MINIMUM_DATA_NOT_READY" in status["warning_codes"]
+
+
+def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta
+             (stock_code, name, exchange, is_listed, listing_date, is_st, is_suspended)
+           VALUES ('301999', 'NEW', 'SZSE', TRUE, CURRENT_DATE, FALSE, FALSE)"""
+    )
+
+    readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
+
+    assert readiness["ready"] is True
+    assert readiness["missing_counts"]["price_freshness"] == 1
+    assert readiness["missing_counts"]["financial_period"] == 1
+    assert readiness["missing_counts"]["share_capital"] == 1
+
+    duckdb_store.write_query(
+        """UPDATE stock_meta SET total_shares = 100
+           WHERE stock_code = '301999'"""
+    )
+
+    readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
+
+    assert readiness["ready"] is False
+
+    duckdb_store.write_query(
+        """UPDATE stock_meta SET circ_shares = 50
+           WHERE stock_code = '301999'"""
+    )
+
+    readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
+
+    assert readiness["ready"] is True
 
 
 def test_quality_status_flags_active_dividend_alias_and_lineage_archive_gaps(

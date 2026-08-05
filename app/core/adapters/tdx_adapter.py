@@ -258,6 +258,11 @@ class TDXAdapter(BaseAdapter):
 
     # ─── price_daily ──────────────────────────────────────────────
 
+    def can_handle(self, request: FetchRequest) -> bool:
+        if request.data_type == "price_daily" and request.adjust != "raw":
+            return False
+        return super().can_handle(request)
+
     def _fetch_price_daily(self, request: FetchRequest) -> FetchResult:
         """日线行情 (仅 raw)
 

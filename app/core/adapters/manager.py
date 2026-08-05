@@ -209,7 +209,7 @@ class AdapterManager:
         # BaoStock 适配器（价格补充）
         try:
             from app.core.adapters.baostock_adapter import BaoStockAdapter
-            self.register(BaoStockAdapter(self._rate_limits["baostock"]))
+            self.register(BaoStockAdapter(self._rate_limits["baostock"], reuse_session=True))
         except ImportError as e:
             logger.warning(f"BaoStock 适配器未安装: {e}")
         except Exception as e:
@@ -392,3 +392,10 @@ class AdapterManager:
         """按名称获取适配器"""
         self._ensure_initialized()
         return self._adapters.get(name)
+
+    def close(self) -> None:
+        """Release reusable adapter sessions after a long-running update."""
+        for adapter in self._adapters.values():
+            close = getattr(adapter, "close", None)
+            if callable(close):
+                close()

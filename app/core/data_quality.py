@@ -156,6 +156,11 @@ def share_capital_violations(duck: DuckDBStore) -> list[str]:
         FROM stock_meta
         WHERE is_listed IS TRUE
           AND NOT (
+              listing_date IS NOT NULL
+              AND listing_date >= CURRENT_DATE - INTERVAL '90 days'
+              AND total_shares IS NULL AND circ_shares IS NULL
+           )
+          AND NOT (
               total_shares IS NOT NULL AND total_shares > 0
               AND circ_shares IS NOT NULL AND circ_shares > 0
               AND circ_shares <= total_shares
@@ -312,6 +317,9 @@ def minimum_data_readiness(
         )
         SELECT m.stock_code,
             m.listing_date,
+            m.total_shares,
+            m.circ_shares,
+            m.listing_date >= CURRENT_DATE - INTERVAL '90 days' AS is_recent_listing,
             raw.last_date AS raw_last_date,
             qfq.last_date AS qfq_last_date,
             complete_financials.report_date AS financial_report_date,
@@ -483,11 +491,33 @@ def minimum_data_readiness(
         "pending_financial_period",
         "regulatory_fields",
     }
-    missing = {key: codes[:20] for key, codes in issues.items() if codes}
-    blocking = {
-        key: codes for key, codes in issues.items()
-        if key not in disclosure_keys and codes
+    recent_listing_disclosure_keys = {
+        "price_freshness",
+        "financial_period",
+        "snapshot_input_freshness",
+        "snapshot_price_coherence",
     }
+    recent_codes = {
+        row["stock_code"] for row in rows
+        if row.get("listing_date") is not None and row.get("is_recent_listing")
+    }
+    missing = {key: codes[:20] for key, codes in issues.items() if codes}
+    rows_by_code = {row["stock_code"]: row for row in rows}
+    blocking: dict[str, list[str]] = {}
+    for key, codes in issues.items():
+        if key in disclosure_keys:
+            continue
+        blocking_codes = []
+        for code in codes:
+            if key in recent_listing_disclosure_keys and code in recent_codes:
+                continue
+            if key == "share_capital" and code in recent_codes:
+                stock = rows_by_code[code]
+                if stock.get("total_shares") is None and stock.get("circ_shares") is None:
+                    continue
+            blocking_codes.append(code)
+        if blocking_codes:
+            blocking[key] = blocking_codes
     return {
         "ready": bool(rows) and not blocking,
         "stock_count": len(rows),

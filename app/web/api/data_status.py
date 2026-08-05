@@ -58,6 +58,38 @@ def get_summary(request: Request) -> dict:
         summary["price_qfq_count"] = 0
         errors.append("price_qfq_count")
 
+    try:
+        target_rows = sqlite.query(
+            """SELECT MAX(trade_date) AS target_date FROM trading_dates
+               WHERE trade_date <= CASE
+                 WHEN time('now', 'localtime') < '15:30:00'
+                 THEN date('now', 'localtime', '-1 day')
+                 ELSE date('now', 'localtime')
+               END"""
+        )
+        target_date = target_rows[0]["target_date"] if target_rows else None
+        freshness = duck.read_query(
+            """WITH raw AS (
+                 SELECT stock_code, MAX(trade_date) AS latest FROM price_daily_raw GROUP BY stock_code
+               ), qfq AS (
+                 SELECT stock_code, MAX(trade_date) AS latest FROM price_daily_qfq GROUP BY stock_code
+               )
+               SELECT COUNT(*) AS active_count,
+                      COUNT(*) FILTER (WHERE raw.latest >= ?) AS raw_current_count,
+                      COUNT(*) FILTER (WHERE qfq.latest >= ?) AS qfq_current_count,
+                      COUNT(*) FILTER (WHERE raw.latest >= ? AND qfq.latest >= ?) AS complete_count
+               FROM stock_meta stock
+               LEFT JOIN raw ON raw.stock_code = stock.stock_code
+               LEFT JOIN qfq ON qfq.stock_code = stock.stock_code
+               WHERE stock.is_listed IS TRUE
+                 AND COALESCE(stock.is_suspended, FALSE) IS FALSE""",
+            [target_date, target_date, target_date, target_date],
+        )[0]
+        summary["price_freshness"] = {"target_date": target_date, **freshness}
+    except Exception:
+        summary["price_freshness"] = None
+        errors.append("price_freshness")
+
     # 价格回填状态 (PRD §6.1 D4: 上市以来全部可得数据)
     try:
         row = duck.read_query(

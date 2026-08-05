@@ -130,6 +130,44 @@ def test_non_xdxr_stock_keeps_incremental_window(duckdb_store, sqlite_store) -> 
     assert all(request.start_date == "2026-07-29" for request in requests)
 
 
+def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
+    duckdb_store, sqlite_store,
+) -> None:
+    requests = []
+
+    class Adapter:
+        def fetch(self, request):
+            requests.append(request)
+            raw_response = b'{"price_daily":true}'
+            return FetchResult(
+                data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
+                metadata=SourceMetadata(
+                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
+                ),
+                raw_response=raw_response,
+            )
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000004', 'RESUME', 'SZSE')"
+    )
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES ('000004', '2026-08-01', 9)"
+        )
+    duckdb_store.write_query(
+        "INSERT INTO xdxr (stock_code, event_date, category) VALUES ('000004', '2026-08-02', 1)"
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+    updater._get_latest_local_price_date = lambda: "2026-08-05"
+
+    result = updater._update_prices_incremental(max_stocks=1)
+
+    assert result["xdxr_full_refetch"] == 1
+    assert all(request.start_date is None for request in requests)
+
+
 def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store) -> None:
     """本地价格陈旧超过窗口上限（默认 30 天）时，raw 也整段重拉。"""
     requests = []
@@ -170,6 +208,22 @@ def test_get_xdxr_codes_since_returns_only_matching_stocks(duckdb_store, sqlite_
     codes = updater._get_xdxr_codes_since("2026-07-01")
 
     assert codes == {"000001"}
+
+
+def test_expected_price_date_waits_for_market_close(duckdb_store, sqlite_store) -> None:
+    sqlite_store.execute("CREATE TABLE IF NOT EXISTS trading_dates (trade_date TEXT PRIMARY KEY)")
+    sqlite_store.execute("INSERT INTO trading_dates VALUES ('2026-08-04'), ('2026-08-05')")
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+
+    before_close = updater._latest_expected_trading_date(
+        "2026-08-05", now=datetime(2026, 8, 5, 14, 0),
+    )
+    after_close = updater._latest_expected_trading_date(
+        "2026-08-05", now=datetime(2026, 8, 5, 16, 0),
+    )
+
+    assert before_close == "2026-08-04"
+    assert after_close == "2026-08-05"
 
 
 def test_price_refetch_rolls_back_rows_when_source_material_is_invalid(duckdb_store, sqlite_store) -> None:

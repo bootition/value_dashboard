@@ -149,6 +149,8 @@ class AutoUpdateController:
             "progress": dict(self._progress),
             "last_error": self._last_error,
             "last_success_at": self._last_success_at,
+            "last_result": self._progress.get("status"),
+            "last_skip_reason": self._progress.get("reason"),
         }
 
     def status(self) -> dict[str, Any]:
@@ -164,14 +166,17 @@ class AutoUpdateController:
         row = rows[0]
         state = row.get("state")
         paused = bool(row.get("paused"))
+        progress = json.loads(row.get("progress_json") or "{}")
         return {
             "state": "paused" if paused and state == "enabled" else state,
             "enabled": state != "disabled",
             "paused": paused,
             "current_stage": row.get("current_stage"),
-            "progress": json.loads(row.get("progress_json") or "{}"),
+            "progress": progress,
             "last_error": row.get("last_error"),
             "last_success_at": row.get("last_success_at"),
+            "last_result": progress.get("status"),
+            "last_skip_reason": progress.get("reason"),
             "updated_at": row.get("updated_at"),
         }
 
@@ -276,6 +281,7 @@ class AutoUpdateController:
                     "job_id": job_id,
                     "started_at": started_at,
                     "status": report.get("status"),
+                    "reason": report.get("reason"),
                     "steps": {k: v.get("status") for k, v in report.get("steps", {}).items()},
                 }
                 self._persist()
