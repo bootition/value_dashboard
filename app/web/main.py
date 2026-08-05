@@ -301,7 +301,10 @@ def create_app(
             """SPA fallback：所有非 API 路径返回 index.html"""
             index_path = static_dir / "index.html"
             if index_path.exists():
-                return HTMLResponse(index_path.read_text(encoding="utf-8"))
+                return HTMLResponse(
+                    index_path.read_text(encoding="utf-8"),
+                    headers={"Cache-Control": "no-store"},
+                )
             raise HTTPException(status_code=503, detail="frontend static bundle is incomplete")
     else:
         @app.get("/")

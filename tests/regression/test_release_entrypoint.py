@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -28,6 +29,31 @@ def test_start_bat_uses_current_directory_as_release_root() -> None:
     """start.bat 在打包分支把 RELEASE_ROOT 设为当前目录。"""
     source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
     assert 'set "RELEASE_ROOT=%CD%"' in source
+
+
+def test_start_bat_does_not_allow_stale_dist_to_shadow_source() -> None:
+    source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+
+    assert "dist\\value-dashboard\\value-dashboard.exe" not in source
+    assert 'set "EXE_PATH=value-dashboard.exe"' in source
+
+
+def test_development_start_builds_current_frontend_before_server() -> None:
+    source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+
+    build = source.index("call npm --prefix frontend run build")
+    server = source.index('python -m app.web.main 2>>"data\\logs\\start.log"')
+    assert build < server
+    assert "if errorlevel 1 (" in source[build:server]
+
+
+def test_start_bat_fails_closed_when_port_is_occupied() -> None:
+    source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+
+    port_check = source.index('findstr ":8765"')
+    mode_selection = source.index('set "RELEASE_ROOT=%CD%"')
+    block = source[port_check:mode_selection]
+    assert "exit /b 1" in block
 
 
 def test_vd_bat_prefers_development_entrypoint_over_stale_dist_builds() -> None:
@@ -79,10 +105,16 @@ def test_start_bat_executes_under_cmd_and_reaches_packaged_branch(tmp_path: Path
     release.mkdir()
     (release / "start.bat").write_bytes((PROJECT_ROOT / "start.bat").read_bytes())
     (release / "value-dashboard.exe").write_bytes(b"not a real executable")
+    command_shims = tmp_path / "command-shims"
+    command_shims.mkdir()
+    (command_shims / "netstat.cmd").write_bytes(b"@exit /b 1\r\n")
+    env = os.environ.copy()
+    env["PATH"] = f"{command_shims}{os.pathsep}{env['PATH']}"
 
     subprocess.run(
         ["cmd", "/d", "/c", "start.bat < nul"],
         cwd=str(release),
+        env=env,
         capture_output=True,
         text=True,
         errors="replace",

@@ -76,15 +76,21 @@ class DuckDBStore:
         不持有长期连接，避免阻塞 CLI 写操作。
         """
         self._revalidate()
-        conn = duckdb.connect(str(self._db_path), read_only=True)
+        # DuckDB requires every connection to the same file in one process to
+        # use the same configuration. Startup updates use default read/write
+        # connections, so a read_only connection would fail while they run.
+        conn = duckdb.connect(str(self._db_path))
         try:
             yield conn
         finally:
             conn.close()
 
     def read_query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
-        """执行只读查询，返回字典列表"""
+        """执行单条只读查询，返回字典列表。"""
         with self.read_connection() as conn:
+            statements = conn.extract_statements(sql)
+            if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+                raise ValueError("read_query accepts exactly one SELECT statement")
             cursor = conn.execute(sql, params or [])
             columns = [d[0] for d in cursor.description]
             return [dict(zip(columns, row)) for row in cursor.fetchall()]

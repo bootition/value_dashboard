@@ -38,6 +38,43 @@ def test_create_app_wires_explicit_database_state(
     assert app.state.sqlite is sqlite
 
 
+def test_spa_entry_is_never_cached(
+    database_paths: DatabasePathSet,
+) -> None:
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=DuckDBStore(paths=database_paths),
+        sqlite=SQLiteStore(paths=database_paths),
+    )
+
+    response = TestClient(app).get("/screening")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_data_status_remains_available_during_same_process_write(
+    database_paths: DatabasePathSet,
+) -> None:
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    init_duckdb_schema(duck)
+    init_sqlite_schema(sqlite)
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=duck,
+        sqlite=sqlite,
+    )
+
+    with duck.transaction():
+        response = TestClient(app).get("/api/data-status/summary")
+
+    assert response.status_code == 200
+    assert "minimum_data_readiness" in response.json()
+
+
 def test_health_reports_database_unavailability(
     database_paths: DatabasePathSet,
     monkeypatch,

@@ -15,19 +15,22 @@ cd /d "%~dp0"
 
 echo Value Dashboard V1.0
 
-REM Port check: warn if 8765 is already in use, but still try to start.
+REM Port conflicts are fatal. Continuing would leave the browser connected to
+REM an older process while this launcher silently fails to bind.
 netstat -ano | findstr ":8765" >nul 2>&1
 if not errorlevel 1 (
-    echo [WARNING] Port 8765 is already in use; startup may fail or conflict.
+    echo [ERROR] Port 8765 is already in use.
+    echo [ERROR] Close the existing Value Dashboard window/process, then run start.bat again.
+    netstat -ano | findstr ":8765"
+    pause
+    exit /b 1
 )
 
-if exist "value-dashboard.exe" (
-    set "RELEASE_ROOT=%CD%"
-    set "EXE_PATH=value-dashboard.exe"
-) else (
-    set "RELEASE_ROOT=%CD%\dist\value-dashboard"
-    set "EXE_PATH=dist\value-dashboard\value-dashboard.exe"
-)
+REM A repository checkout must always run current source. A stale dist build
+REM must never shadow it. Packaged mode exists only when the exe is beside this
+REM launcher in the release directory.
+set "RELEASE_ROOT=%CD%"
+set "EXE_PATH=value-dashboard.exe"
 
 if exist "%EXE_PATH%" (
     if not exist "%RELEASE_ROOT%\data" mkdir "%RELEASE_ROOT%\data"
@@ -48,6 +51,29 @@ set "VD_DUCKDB_PATH=%CD%\data\valuedashboard.duckdb"
 set "VD_SQLITE_PATH=%CD%\data\valuedashboard.sqlite"
 if not exist "data\logs" mkdir "data\logs"
 REM Fall back to development mode when the packaged directory is absent.
+where npm >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] npm not found in PATH; cannot build the current frontend source.
+    echo Install Node.js 20.19 or newer, then run start.bat again.
+    pause
+    exit /b 1
+)
+if not exist "frontend\node_modules" (
+    echo [INFO] Installing locked frontend dependencies...
+    call npm --prefix frontend ci
+    if errorlevel 1 (
+        echo [ERROR] Frontend dependency installation failed.
+        pause
+        exit /b 1
+    )
+)
+echo [INFO] Building and publishing the current frontend...
+call npm --prefix frontend run build
+if errorlevel 1 (
+    echo [ERROR] Frontend build failed; server was not started.
+    pause
+    exit /b 1
+)
 where python >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Release directory not found: %EXE_PATH%
@@ -56,7 +82,7 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-echo [INFO] Release data not found; falling back to development mode (python -m app.web.main)...
+echo [INFO] No packaged exe beside start.bat; starting current source...
 python -m app.web.main 2>>"data\logs\start.log"
 
 :end
