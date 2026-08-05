@@ -17,6 +17,7 @@ dist/
 *.spec.bak
 *.whl
 app/web/static/assets/
+app/web/static.staging-*/
 .vite/
 value_dashboard.egg-info/
 
