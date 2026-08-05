@@ -20,6 +20,7 @@ last-reviewed: 2026-08-04
 - 个股详情的指标、时间维度与趋势表收敛为同一工作面；关键估值与盈利标签中文优先并保留缩写。
 - 财务趋势与数据溯源组件同步移除默认小卡/线框组合，改为统一研究工作面；周期、指标、趋势表、溯源表和 PDF 管理能力保持不变。
 - 复合指标管理器降为按需展开的筛选次级工作面，保留创建、校验、预览、发布和删除能力，不再打断规则编辑主流程。
+- 数据新鲜度改为日期、版本与可信状态工作面，替代旧描述表；字段语义和滞后告警保持不变。
 
 ## 2. 数据状态数值说明
 
@@ -34,7 +35,7 @@ last-reviewed: 2026-08-04
 
 | 门禁 | 结果 |
 |---|---|
-| `scripts/s1-pytest.ps1 tests/regression` | 424 passed（最终重跑 230.24s） |
+| `scripts/s1-pytest.ps1 tests/regression` | 424 passed（最终重跑 197.49s） |
 | `uv run --locked ruff check app tests/regression` | All checks passed |
 | `frontend/npm run lint` | 通过 |
 | `frontend/npm run test` | 52 Node 契约测试 + 11 Vitest 测试通过 |
