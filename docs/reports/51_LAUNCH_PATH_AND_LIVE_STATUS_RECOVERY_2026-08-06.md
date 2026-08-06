@@ -1,10 +1,11 @@
 ---
 title: 用户启动路径与实时状态恢复报告（2026-08-06）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-06
 last-reviewed: 2026-08-06
 supersedes: reports/50_FINAL_SCREENING_UI_AND_AUTO_UPDATE_RECOVERY_2026-08-05.md
+superseded-by: reports/52_VISUAL_BASELINE_AND_LAUNCH_BUILD_STRATEGY_2026-08-06.md
 ---
 
 # 用户启动路径与实时状态恢复报告（2026-08-06）

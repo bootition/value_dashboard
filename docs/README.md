@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–51） | 仅 29/40/43/44/45/46/47/48/51 ✅；其余为发现/修复事实被后续取代 |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–52） | 仅 29/40/43/44/45/46/47/48/52 ✅；其余为发现/修复事实被后续取代 |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -57,8 +57,9 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/47_DESKTOP_SCREENING_UI_AND_STOCK_SEARCH_2026-08-04.md` — 桌面筛选界面与个股搜索入口实施报告
 - `reports/48_APPROVED_FOUR_PAGE_DESKTOP_UI_INTEGRATION_2026-08-04.md` — 已确认四页桌面界面正式接入报告
 - `reports/49_DESKTOP_UI_PARITY_AND_DATA_STATUS_FIX_2026-08-04.md` — 历史 UI/状态修复事实，当前结论被 reports/50 取代
-- `reports/50_FINAL_SCREENING_UI_AND_AUTO_UPDATE_RECOVERY_2026-08-05.md` — 筛选 UI 与自动更新恢复历史事实，当前结论被 reports/51 取代
-- `reports/51_LAUNCH_PATH_AND_LIVE_STATUS_RECOVERY_2026-08-06.md` — 当前用户启动路径、筛选 UI、自动更新与实时状态一致性依据
+- `reports/50_FINAL_SCREENING_UI_AND_AUTO_UPDATE_RECOVERY_2026-08-05.md` — 筛选 UI 与自动更新恢复历史事实，当前结论被 reports/52 取代
+- `reports/51_LAUNCH_PATH_AND_LIVE_STATUS_RECOVERY_2026-08-06.md` — 连接修复与 dist 遮蔽历史事实，当前结论被 reports/52 取代
+- `reports/52_VISUAL_BASELINE_AND_LAUNCH_BUILD_STRATEGY_2026-08-06.md` — 当前筛选入口、视觉基线、启动策略与状态一致性依据
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新
