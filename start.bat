@@ -51,6 +51,15 @@ set "VD_DUCKDB_PATH=%CD%\data\valuedashboard.duckdb"
 set "VD_SQLITE_PATH=%CD%\data\valuedashboard.sqlite"
 if not exist "data\logs" mkdir "data\logs"
 REM Fall back to development mode when the packaged directory is absent.
+REM A repository checkout must always serve current source. We run the frontend
+REM build only when it is actually stale:
+REM   - frontend/node_modules missing              -> npm ci first
+REM   - app/web/static/index.html missing           -> build
+REM   - the stamp file is missing                   -> build
+REM   - the frontend source fingerprint changed     -> build
+REM   - the served entry references missing assets  -> build
+REM A normal second launch does one cheap Node fingerprint check instead of a
+REM full npm build, so startup no longer spends 10+ seconds rebuilding.
 where npm >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] npm not found in PATH; cannot build the current frontend source.
@@ -58,6 +67,9 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+set "FRONTEND_ROOT=%CD%\frontend"
+if not exist "%CD%\.planning" mkdir "%CD%\.planning"
+set "FE_STAMP=%CD%\.planning\.vd-fe-stamp.txt"
 if not exist "frontend\node_modules" (
     echo [INFO] Installing locked frontend dependencies...
     call npm --prefix frontend ci
@@ -67,13 +79,30 @@ if not exist "frontend\node_modules" (
         exit /b 1
     )
 )
-echo [INFO] Building and publishing the current frontend...
+node "%FRONTEND_ROOT%\scripts\fe-fingerprint.cjs" --check "%FE_STAMP%"
+if errorlevel 1 goto :build_frontend
+goto :serve_source
+
+:build_frontend
+echo [INFO] Frontend bundle is missing or stale; building the current frontend...
 call npm --prefix frontend run build
 if errorlevel 1 (
     echo [ERROR] Frontend build failed; server was not started.
     pause
     exit /b 1
 )
+if not exist "%CD%\app\web\static\index.html" (
+    echo [ERROR] Build did not produce app\web\static\index.html.
+    pause
+    exit /b 1
+)
+node "%FRONTEND_ROOT%\scripts\fe-fingerprint.cjs" --stamp "%FE_STAMP%"
+if errorlevel 1 (
+    echo [ERROR] Could not stamp the frontend bundle.
+    pause
+    exit /b 1
+)
+:serve_source
 where python >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Release directory not found: %EXE_PATH%

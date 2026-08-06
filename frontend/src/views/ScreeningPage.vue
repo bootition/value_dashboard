@@ -34,6 +34,16 @@ const dataReady = ref<boolean | null>(null)
 
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
 const strictOnly = ref(false)
+const inclusionOptions = [
+  { label: '排除', value: 'exclude' },
+  { label: '包含', value: 'include' },
+]
+function setStHandling(value: string) {
+  basePool.exclude_st = value !== 'include'
+}
+function setSuspendedHandling(value: string) {
+  basePool.exclude_suspended = value !== 'include'
+}
 
 interface SavedRule {
   id: number
@@ -398,22 +408,34 @@ onMounted(async () => {
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>01 / UNIVERSE</b><h3>先确定研究范围</h3></div></div>
-          <n-space wrap>
-            <n-switch v-model:value="basePool.exclude_st"><template #checked>排除 ST</template><template #unchecked>包含 ST</template></n-switch>
-            <n-switch v-model:value="basePool.exclude_suspended"><template #checked>排除停牌</template><template #unchecked>包含停牌</template></n-switch>
-            <span class="control-label">最低上市年限</span>
-            <n-input-number v-model:value="basePool.min_listing_years" :min="0" :max="10" size="small" />
-          </n-space>
-        </div>
-
-        <div class="screening-section">
-          <div class="screening-section-title screening-section-title--conditions"><div><b>02 / THESIS</b><h3>把投资判断写成一句规则</h3></div><p>先决定股票需要满足全部条件，还是满足任意条件；再逐条填写判断。</p></div>
+          <div class="screening-section-title screening-section-title--conditions"><div><b>01</b><h3>筛选条件</h3></div><p>范围条件始终生效；投资条件可选择全部成立或任一成立。</p></div>
+          <div class="standing-conditions" aria-label="常驻范围条件">
+            <div class="standing-conditions-heading">
+              <div><strong>常驻范围条件</strong><span>固定参与基础股票池计算</span></div>
+              <span>始终并且</span>
+            </div>
+            <div class="standing-condition-line">
+              <div class="standing-condition-name"><span>股票状态</span><strong>ST 股票</strong></div>
+<label><span>处理方式</span><n-select :value="basePool.exclude_st ? 'exclude' : 'include'" :options="inclusionOptions" size="small" aria-label="ST 股票处理方式" @update:value="setStHandling" /></label>
+              <p>{{ basePool.exclude_st ? '排除名称含 ST、*ST 的股票' : '允许 ST 股票进入基础股票池' }}</p>
+            </div>
+            <div class="standing-condition-line">
+              <div class="standing-condition-name"><span>交易状态</span><strong>停牌股票</strong></div>
+              <label><span>处理方式</span><n-select :value="basePool.exclude_suspended ? 'exclude' : 'include'" :options="inclusionOptions" size="small" aria-label="停牌股票处理方式" @update:value="setSuspendedHandling" /></label>
+              <p>{{ basePool.exclude_suspended ? '排除当前停牌股票' : '允许停牌股票进入基础股票池' }}</p>
+            </div>
+            <div class="standing-condition-line">
+              <div class="standing-condition-name"><span>上市时间</span><strong>最低上市年限</strong></div>
+              <label><span>不少于</span><n-input-number v-model:value="basePool.min_listing_years" :min="0" :max="10" size="small" aria-label="最低上市年限" /></label>
+              <p>上市满 {{ basePool.min_listing_years }} 年后进入基础股票池</p>
+            </div>
+          </div>
+          <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
           <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" />
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>03 / PRIORITY</b><h3>定义结果优先级</h3></div></div>
+          <div class="screening-section-title"><div><b>02</b><h3>结果排序</h3></div></div>
           <n-space vertical>
             <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
               <span class="control-label">优先级 {{ index + 1 }}</span>
@@ -453,7 +475,7 @@ onMounted(async () => {
       </n-alert>
       <ol>
         <li>在「加载规则」输入名称，点击<strong>保存新版本</strong>——筛选必须先保存规则（规则版本化，用于溯源）。</li>
-        <li>设置「基础股票池」（是否排除 ST/停牌、最低上市年限）与「数据质量」严格模式。</li>
+        <li>在「筛选条件」设置常驻范围条件（ST、停牌、上市年限）与投资判断，并选择数据质量口径。</li>
         <li>在「筛选条件」添加条件（如 pe_ttm &lt; 15），在「排序」设置优先级，点击<strong>运行筛选</strong>。</li>
       </ol>
       <div>
@@ -480,50 +502,60 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-/* Final screening pass: an audit worksheet, not a stack of soft cards. */
 .screening-page { max-width: 1380px; color: #202622; }
-.screening-page-header { margin-bottom: 26px; padding-bottom: 20px; border-bottom: 1px solid #cfd5d0; }
-.screening-page-header p { margin: 0 0 8px; color: #68716a; font: 700 9px/1 var(--vd-mono); letter-spacing: .12em; }
-.screening-page-header h1 { margin: 0; font-family: 'Songti SC', 'STSong', serif; font-size: 30px; font-weight: 700; letter-spacing: -.04em; }
-.screening-page-header span { display: block; margin-top: 7px; color: #69716b; font-size: 12px; }
-.screening-workspace { display: grid; grid-template-columns: minmax(650px, 1.72fr) minmax(276px, .58fr); gap: 18px; }
-.screening-editor-card, .screening-empty-card { border: 1px solid #cfd5d0; border-radius: 0; background: #fff; box-shadow: none; }
-.screening-editor-card { padding: 0 28px 26px; }
-.screening-card-heading { margin: 0 -28px; padding: 22px 28px 19px; border-bottom: 3px solid #273c2f; }
-.screening-card-heading h2 { margin: 6px 0 4px; font-family: 'Songti SC', 'STSong', serif; font-size: 21px; letter-spacing: -.03em; }
-.screening-card-heading p { margin: 0; color: #68716a; font: 700 8px/1 var(--vd-mono); letter-spacing: .14em; }
-.screening-card-heading span { color: #747d76; font-size: 11px; }
-.rule-load-row { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(150px, .65fr) auto; align-items: center; gap: 9px; margin: 0 -28px; padding: 13px 28px; border-radius: 0; border-bottom: 1px solid #cfd5d0; background: #f1f2ed; }
-.rule-load-row > span, .control-label { color: #68716a; font: 700 9px/1 var(--vd-mono); }
-.rule-load-row :deep(.n-base-selection), .rule-load-row :deep(.n-input), .rule-load-row :deep(.n-button) { border-radius: 0; }
-.screening-section { padding: 26px 0 27px; border-top: 1px solid #d7dcd8; }
-.rule-load-row + .screening-section { border-top: 0; }
+.screening-page-header { margin-bottom: 27px; }
+.screening-page-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }
+.screening-page-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }
+.screening-page-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }
+.screening-workspace { display: grid; grid-template-columns: minmax(650px, 1.72fr) minmax(276px, .58fr); gap: 21px; }
+.screening-editor-card, .screening-empty-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }
+.screening-editor-card { padding: 28px 29px; }
+.screening-card-heading h2 { margin: 7px 0 5px; font-size: 19px; letter-spacing: -.04em; }
+.screening-card-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }
+.screening-card-heading span { color: #829087; font-size: 11px; }
+.rule-load-row { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(150px, .65fr) auto; align-items: center; gap: 10px; margin: 25px 0; padding: 13px 14px; border-radius: 9px; background: #fafcf9; }
+.rule-load-row > span, .control-label { color: #89958c; font-size: 10px; }
+.screening-section { padding: 21px 0; border-top: 1px solid #edf1ee; }
+.rule-load-row + .screening-section { border-top: 1px solid #edf1ee; }
 .screening-section-title > div { display: flex; align-items: baseline; gap: 11px; }
-.screening-section-title b { color: #557060; font: 700 8px/1 var(--vd-mono); letter-spacing: .09em; }
-.screening-section-title h3 { margin: 0 0 15px; font-family: 'Songti SC', 'STSong', serif; font-size: 16px; font-weight: 700; }
+.screening-section-title b { color: #83b194; font-size: 10px; }
+.screening-section-title h3 { margin: 0 0 13px; font-size: 13px; }
 .screening-section-title--conditions { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; }
-.screening-section-title--conditions p { max-width: 390px; margin-bottom: 14px; color: #747c76; font-size: 10px; text-align: right; }
-.conditions-workbench { margin-top: 3px; border-radius: 0; overflow: visible; }
+.screening-section-title--conditions p { max-width: 390px; margin-bottom: 13px; color: #929d95; font-size: 10px; text-align: right; }
+.standing-conditions { overflow: hidden; border: 1px solid #e6ece7; border-radius: 9px; background: #fff; }
+.standing-conditions-heading { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; background: #fafcf9; }
+.standing-conditions-heading div { display: flex; align-items: baseline; gap: 8px; }
+.standing-conditions-heading strong { color: #506358; font-size: 12px; }
+.standing-conditions-heading div span { color: #98a39b; font-size: 9px; }
+.standing-conditions-heading > span { padding: 3px 8px; border-radius: 999px; background: #edf7ef; color: #609574; font-size: 9px; }
+.standing-condition-line { display: grid; grid-template-columns: minmax(150px, .75fr) minmax(140px, .55fr) minmax(220px, 1fr); align-items: center; gap: 16px; min-height: 62px; padding: 0 14px; border-top: 1px solid #eff2f0; }
+.standing-condition-name span, .standing-condition-line label > span { display: block; margin-bottom: 3px; color: #98a39b; font-size: 9px; }
+.standing-condition-name strong { color: #34443a; font-size: 12px; }
+.standing-condition-line label { display: grid; grid-template-columns: 54px minmax(86px, 1fr); align-items: center; }
+.standing-condition-line label > span { margin: 0; }
+.standing-condition-line p { color: #7e8a82; font-size: 10px; }
+.conditions-join { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; height: 36px; color: #73917d; font-size: 9px; font-weight: 700; }
+.conditions-join::before, .conditions-join::after { content: ''; border-top: 1px solid #edf1ee; }
+.conditions-workbench { overflow: hidden; border-radius: 9px; }
 .dsl-manager { margin-top: 4px; }
-.screening-run-panel { position: sticky; top: 28px; align-self: start; padding: 0; border: 1px solid #23372a; border-radius: 0; background: #283d30; color: #eef1eb; box-shadow: none; }
-.screening-ready { display: flex; align-items: center; gap: 8px; padding: 14px 19px; border-bottom: 1px solid rgba(255,255,255,.16); color: #c5dbc9; font: 700 9px/1 var(--vd-mono); letter-spacing: .08em; }
-.screening-ready i { width: 7px; height: 7px; border-radius: 0; background: #87b994; }
-.screening-ready[data-state='blocked'], .screening-ready[data-state='failed'] { color: #f0b5aa; }
+.screening-run-panel { position: sticky; top: 28px; align-self: start; padding: 25px; border-radius: 16px; background: #eff7f1; box-shadow: 0 5px 17px rgba(47, 114, 74, .055); }
+.screening-ready { display: flex; align-items: center; gap: 6px; color: #659d75; font-size: 10px; }
+.screening-ready i { width: 6px; height: 6px; border-radius: 50%; background: #82ba94; }
+.screening-ready[data-state='blocked'], .screening-ready[data-state='failed'] { color: #bd665d; }
 .screening-ready[data-state='blocked'] i, .screening-ready[data-state='failed'] i { background: #d37869; }
 .screening-ready[data-state='loading'] i { background: #d1bd78; }
-.screening-run-title { padding: 22px 19px; border-bottom: 1px solid rgba(255,255,255,.16); }
-.screening-run-title p { color: #aebbb1; font: 8px/1 var(--vd-mono); letter-spacing: .1em; }
-.screening-run-title h2 { margin: 7px 0 0; color: #fff; font-family: 'Songti SC', 'STSong', serif; font-size: 20px; }
-.screening-run-data { padding: 13px 19px; border-bottom: 1px solid rgba(255,255,255,.16); }
-.screening-run-data p { display: flex; justify-content: space-between; margin: 10px 0; color: #acb9ae; font-size: 10px; }
-.screening-run-data b { color: #eef1eb; font-weight: 600; }
-.screening-strict { padding: 16px 19px; border-top: 0; }
-.screening-strict span { display: block; margin-top: 8px; color: #a8b3aa; font-size: 9px; }
-.screening-run-panel > :deep(.n-button) { width: calc(100% - 38px); margin: 0 19px; border-radius: 0; }
-.screening-run-help { margin: 11px 19px 18px; color: #a5b0a7; font-size: 9px; text-align: center; }
+.screening-run-title { margin: 26px 0 19px; }
+.screening-run-title p { margin: 0 0 6px; color: #8a9b90; font-size: 10px; }
+.screening-run-title h2 { margin: 0; color: #365944; font-size: 20px; letter-spacing: -.05em; }
+.screening-run-data { padding: 13px 0; border-top: 1px solid #dbeade; border-bottom: 1px solid #dbeade; }
+.screening-run-data p { display: flex; justify-content: space-between; margin: 8px 0; color: #809087; font-size: 10px; }
+.screening-run-data b { color: #4d6556; font-weight: 650; }
+.screening-strict { display: grid; gap: 6px; margin: 18px 0; }
+.screening-strict span { color: #8d9b91; font-size: 9px; }
+.screening-run-help { margin: 11px 0 0; color: #8d9b91; font-size: 9px; line-height: 1.5; text-align: center; }
 .screening-empty-card { margin-top: 18px; padding: 28px; }
 .first-screening-help { max-width: 650px; margin: 16px auto 0; color: #68736b; font-size: 11px; line-height: 1.7; }
 .first-screening-help ol { margin: 13px 0; padding-left: 20px; }
-@media (max-width: 1060px) { .screening-workspace { grid-template-columns: 1fr; }.screening-run-panel { position: static; }.rule-load-row { grid-template-columns: 1fr; }.screening-section-title--conditions { display: block; }.screening-section-title--conditions p { max-width: none; text-align: left; } }
-@media (max-width: 620px) { .screening-editor-card { padding: 0 14px 20px; }.screening-card-heading, .rule-load-row { margin-left: -14px; margin-right: -14px; padding-left: 14px; padding-right: 14px; } }
+@media (max-width: 1060px) { .screening-workspace { grid-template-columns: 1fr; }.screening-run-panel { position: static; }.rule-load-row { grid-template-columns: 1fr; }.screening-section-title--conditions { display: block; }.screening-section-title--conditions p { max-width: none; text-align: left; }.standing-condition-line { grid-template-columns: 1fr minmax(150px, .7fr); }.standing-condition-line p { grid-column: 1 / -1; margin: -6px 0 10px; } }
+@media (max-width: 620px) { .screening-editor-card { padding: 20px 14px; }.standing-condition-line { grid-template-columns: 1fr; gap: 8px; padding-top: 12px; padding-bottom: 12px; }.standing-condition-line p { grid-column: 1; margin: 0; }.standing-conditions-heading div span { display: none; } }
 </style>

@@ -162,12 +162,15 @@ function updateRightField(index: number, value: string | undefined): void {
 <style scoped>
 .rule-sheet {
   border: 1px solid #cfd5d0;
+  border-radius: 9px;
   background: #fff;
+  overflow: hidden;
 }
 
 .rule-sheet--nested {
   margin: 0 18px;
   border-color: #9da8a0;
+  border-radius: 9px;
   background: #f8f8f5;
 }
 
@@ -193,7 +196,9 @@ function updateRightField(index: number, value: string | undefined): void {
   display: block;
   margin-bottom: 5px;
   color: #6f776f;
-  font: 700 9px/1.2 var(--vd-mono);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1.2;
   letter-spacing: .13em;
   text-transform: uppercase;
 }
@@ -226,7 +231,9 @@ function updateRightField(index: number, value: string | undefined): void {
   background: transparent;
   color: #6e756f;
   cursor: pointer;
-  font: 600 12px/1 var(--vd-mono);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .logic-switch button:first-child { border-left: 0; }
@@ -255,7 +262,8 @@ function updateRightField(index: number, value: string | undefined): void {
   height: 30px;
   margin: 0 18px;
   color: #68746b;
-  font: 700 10px/1 var(--vd-mono);
+  font-size: 10px;
+  font-weight: 700;
 }
 
 .logic-connector::before,
@@ -289,10 +297,10 @@ function updateRightField(index: number, value: string | undefined): void {
 .rule-actions > span {
   margin-left: auto;
   color: #858c87;
-  font: 10px/1 var(--vd-mono);
+  font-size: 10px;
 }
 
-.rule-actions :deep(.n-button) { border-radius: 0; }
+.rule-actions :deep(.n-button) { border-radius: 6px; }
 
 @media (max-width: 760px) {
   .logic-statement { grid-template-columns: 1fr; }

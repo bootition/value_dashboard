@@ -95,7 +95,9 @@ function toggleFieldComparison(): void {
   min-height: 74px;
   margin: 0 18px;
   border: 1px solid #d8ddd9;
+  border-radius: 8px;
   background: #fff;
+  overflow: hidden;
 }
 
 .condition-index {
@@ -104,7 +106,7 @@ function toggleFieldComparison(): void {
   border-right: 1px solid #d8ddd9;
   background: #f4f5f1;
   color: #7c847e;
-  font: 10px/1 var(--vd-mono);
+  font-size: 10px;
 }
 
 .condition-control {
@@ -119,13 +121,14 @@ function toggleFieldComparison(): void {
 
 .condition-control > span {
   color: #7b847d;
-  font: 700 8px/1 var(--vd-mono);
+  font-size: 8px;
+  font-weight: 700;
   letter-spacing: .12em;
 }
 
 .condition-control :deep(.n-base-selection),
 .condition-control :deep(.n-input) {
-  border-radius: 0;
+  border-radius: 6px;
 }
 
 .condition-range > div { display: flex; align-items: center; gap: 7px; }

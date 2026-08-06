@@ -47,6 +47,31 @@ def test_development_start_builds_current_frontend_before_server() -> None:
     assert "if errorlevel 1 (" in source[build:server]
 
 
+def test_development_start_builds_only_when_bundle_is_stale() -> None:
+    """启动不再每次无条件执行构建；只在前端指纹或入口/资源缺失时构建。"""
+    source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+
+    check = source.index('fe-fingerprint.cjs" --check')
+    stamp = source.index('fe-fingerprint.cjs" --stamp')
+    build_label = source.index(":build_frontend")
+    server = source.index('python -m app.web.main 2>>"data\\logs\\start.log"')
+
+    assert check < build_label
+    assert build_label < server
+    assert stamp > build_label
+    assert ':serve_source' in source
+
+
+def test_fe_fingerprint_script_is_node_based_and_dep_free() -> None:
+    script = (PROJECT_ROOT / "frontend" / "scripts" / "fe-fingerprint.cjs").read_text(encoding="utf-8")
+
+    assert "'use strict'" in script
+    assert '--check' in script
+    assert '--stamp' in script
+    assert "node:fs" in script
+    assert "node:crypto" in script
+
+
 def test_start_bat_fails_closed_when_port_is_occupied() -> None:
     source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
 
