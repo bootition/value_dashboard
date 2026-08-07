@@ -215,7 +215,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
         <section class="status-workbench">
         <!-- 自动更新状态（PRD §7.3 只读展示） -->
         <n-card title="自动更新" size="small" v-if="autoUpdate">
-          <n-descriptions :column="4" size="small">
+          <n-descriptions bordered :column="4" size="small">
             <n-descriptions-item label="状态">
               <n-tag :type="autoUpdateTagType(autoUpdate.state)" size="small">
                 {{ autoUpdateStateLabel(autoUpdate.state) }}
@@ -302,7 +302,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
                 {{ code }}
               </n-tag>
             </n-space>
-            <n-descriptions :column="2" size="small" label-placement="left" bordered>
+            <n-descriptions bordered :column="2" size="small" label-placement="left">
               <n-descriptions-item label="价格日期">
                 {{ summary.data_quality.dates.price || '—' }}
               </n-descriptions-item>
@@ -338,7 +338,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
 
         <!-- 回填状态 -->
         <n-card title="价格回填状态" size="small" v-if="summary.price_backfill">
-          <n-descriptions :column="4" size="small">
+          <n-descriptions bordered :column="4" size="small">
             <n-descriptions-item label="最早日期">{{ summary.price_backfill.earliest_date || '—' }}</n-descriptions-item>
             <n-descriptions-item label="最新日期">{{ summary.price_backfill.latest_date || '—' }}</n-descriptions-item>
             <n-descriptions-item label="覆盖股票">{{ summary.price_backfill.stock_count }}</n-descriptions-item>
@@ -349,7 +349,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
 
         <!-- 财务覆盖范围 -->
         <n-card title="财务报表覆盖范围" size="small" v-if="summary.balance_sheet_range">
-          <n-descriptions :column="3" size="small">
+          <n-descriptions bordered :column="3" size="small">
             <n-descriptions-item label="资产负债表">{{ summary.balance_sheet_range?.earliest }} ~ {{ summary.balance_sheet_range?.latest }}</n-descriptions-item>
             <n-descriptions-item label="利润表">{{ summary.income_statement_count }} 只</n-descriptions-item>
             <n-descriptions-item label="现金流量表">{{ summary.cash_flow_count }} 只</n-descriptions-item>
@@ -357,7 +357,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
         </n-card>
 
         <n-card title="公司行动与分红" size="small">
-          <n-descriptions :column="4" size="small">
+          <n-descriptions bordered :column="4" size="small">
             <n-descriptions-item label="分红记录">{{ summary.dividends?.total_rows ?? 0 }}</n-descriptions-item>
             <n-descriptions-item label="分红覆盖股票">{{ summary.dividends?.stocks ?? 0 }}</n-descriptions-item>
             <n-descriptions-item label="分红日期范围">{{ summary.dividends ? `${summary.dividends.earliest || '—'} ~ ${summary.dividends.latest || '—'}` : '—' }}</n-descriptions-item>
@@ -367,7 +367,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
 
         <!-- PRD §6.4/§15: 各数据域最新日期 -->
         <n-card title="各数据域最新日期" size="small">
-          <n-descriptions :column="3" size="small">
+          <n-descriptions bordered :column="3" size="small">
             <n-descriptions-item label="价格日期">
               {{ summary.data_quality.dates.price || '—' }}
             </n-descriptions-item>
@@ -430,7 +430,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
 
         <!-- 备份摘要 -->
         <n-card title="备份摘要" size="small" v-if="summary.backup">
-          <n-descriptions :column="3" size="small">
+          <n-descriptions bordered :column="3" size="small">
             <n-descriptions-item label="备份总数">{{ summary.backup?.cnt || 0 }}</n-descriptions-item>
             <n-descriptions-item label="全量备份">{{ summary.backup?.full_count || 0 }}</n-descriptions-item>
             <n-descriptions-item label="最近备份">{{ summary.backup?.latest || '—' }}</n-descriptions-item>
@@ -481,4 +481,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
 <style scoped>
 .data-status-page { max-width: 1380px; }.data-status-header { margin-bottom: 27px; }.data-status-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.data-status-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.data-status-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.data-readiness { margin-bottom: 21px; border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.coverage-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 21px; }.coverage-grid article { padding: 19px 20px; border-radius: 14px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.coverage-grid p, .coverage-grid span { margin: 0; color: #8b978f; font-size: 10px; }.coverage-grid strong { display: block; margin: 7px 0 4px; color: #3c5847; font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }.status-workbench { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }.status-workbench > :deep(.n-grid), .status-workbench > :deep(.n-card):nth-child(1), .status-workbench > :deep(.n-card):nth-child(6), .status-workbench > :deep(.n-card):nth-child(7), .status-workbench > :deep(.n-card):nth-child(8), .status-workbench > :deep(.n-card):nth-child(9) { grid-column: 1 / -1; }.data-status-page :deep(.n-card) { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.data-status-page :deep(.n-card-header) { padding-top: 20px; }.data-status-page :deep(.n-card__content) { padding-bottom: 20px; }
 .update-live { margin-top: 14px; padding: 12px 14px; border: 1px solid #e3ebe5; border-radius: 9px; background: #f8fbf8; }.update-live-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }.update-live-title span { color: #4c6a58; font-size: 12px; font-variant-numeric: tabular-nums; }.update-live-hint { margin: 7px 0 0; color: #7d8a82; font-size: 10px; }.update-log { margin-top: 12px; }.update-log-title { margin-bottom: 6px; color: #8b978f; font-size: 9px; font-weight: 700; letter-spacing: .08em; }.update-log-list { margin: 0; padding: 0; list-style: none; max-height: 150px; overflow-y: auto; border: 1px solid #edf1ee; border-radius: 8px; }.update-log-list li { display: flex; gap: 8px; padding: 5px 10px; border-bottom: 1px solid #f1f4f1; color: #5f6b63; font-size: 10px; font-variant-numeric: tabular-nums; }.update-log-list li:last-child { border-bottom: 0; }.update-log-time { flex: 0 0 58px; color: #a0aaa3; }
+.coverage-grid article { position: relative; padding: 18px 20px 16px; border: 1px solid #dfe6e1; border-top: 3px solid #86b798; border-radius: 12px; background: #fff; box-shadow: 0 3px 10px rgba(48, 82, 59, .04); }.coverage-grid article::after { content: ''; position: absolute; left: 0; right: 0; top: 0; bottom: 0; border-radius: 12px; pointer-events: none; }.coverage-grid p { margin: 0; color: #55685c; font-size: 10px; font-weight: 700; letter-spacing: .05em; }.coverage-grid strong { display: block; margin: 9px 0 5px; color: #27432f; font-size: 26px; font-weight: 760; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }.coverage-grid span { color: #87948b; font-size: 10px; }
+.data-status-page :deep(.n-descriptions-table) { width: 100%; border-collapse: collapse; }.data-status-page :deep(.n-descriptions-table td) { border: 1px solid #e6ebe7; padding: 6px 10px; vertical-align: middle; }.data-status-page :deep(.n-descriptions-table td:first-child), .data-status-page :deep(.n-descriptions-item-label) { background: #f6f9f6; color: #516257; font-weight: 700; font-size: 11px; white-space: nowrap; }.data-status-page :deep(.n-descriptions-item-content) { color: #2c4134; font-weight: 600; font-size: 12px; font-variant-numeric: tabular-nums; }.data-status-page :deep(.n-statistic-value-content) { color: #2c4436; font-weight: 760; font-variant-numeric: tabular-nums; }.data-status-page :deep(.n-statistic .n-statistic-label) { color: #6a7d70; font-weight: 600; }.data-status-workbench-card-title, .data-status-page :deep(.n-card-header .n-card-header__main) { color: #33493c; font-weight: 700; }
+.update-live { border-top-color: #7fb18f; }.update-live { margin-top: 14px; padding: 12px 14px; border: 1px solid #dbe6df; border-top: 3px solid #7fb18f; border-radius: 9px; background: #f6faf6; }
 </style>
