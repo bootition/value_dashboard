@@ -1,0 +1,115 @@
+{
+  "generated_at": "2026-08-07T20:22:42.452314",
+  "sample": "600519",
+  "results": {
+    "akshare_eastmoney": {
+      "0.6": {
+        "requests": 8,
+        "min_ms": 188,
+        "p50_ms": 219,
+        "p90_ms": 281,
+        "max_ms": 282,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 8,
+        "total_wall_s": 6.1
+      }
+    },
+    "tdx": {
+      "0.6": {
+        "requests": 8,
+        "min_ms": 531,
+        "p50_ms": 532,
+        "p90_ms": 563,
+        "max_ms": 641,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 8.7
+      },
+      "0.2": {
+        "requests": 10,
+        "min_ms": 500,
+        "p50_ms": 516,
+        "p90_ms": 532,
+        "max_ms": 547,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 7.0
+      }
+    },
+    "tencent": {
+      "0.6": {
+        "requests": 8,
+        "min_ms": 234,
+        "p50_ms": 250,
+        "p90_ms": 250,
+        "max_ms": 250,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 6.2
+      },
+      "0.2": {
+        "requests": 10,
+        "min_ms": 219,
+        "p50_ms": 250,
+        "p90_ms": 266,
+        "max_ms": 266,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 4.3
+      }
+    },
+    "sina": {
+      "0.6": {
+        "requests": 8,
+        "min_ms": 0,
+        "p50_ms": 0,
+        "p90_ms": 0,
+        "max_ms": 0,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 8,
+        "total_wall_s": 4.2
+      }
+    },
+    "baostock": {
+      "0.6": {
+        "requests": 8,
+        "min_ms": 266,
+        "p50_ms": 672,
+        "p90_ms": 750,
+        "max_ms": 1125,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 9.6
+      },
+      "0.2": {
+        "requests": 10,
+        "min_ms": 359,
+        "p50_ms": 891,
+        "p90_ms": 1094,
+        "max_ms": 2172,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 11.3
+      },
+      "0.5": {
+        "requests": 10,
+        "min_ms": 281,
+        "p50_ms": 500,
+        "p90_ms": 734,
+        "max_ms": 1641,
+        "penalty_30s": 0,
+        "penalty_60s": 0,
+        "errors": 0,
+        "total_wall_s": 10.6
+      }
+    }
+  }
+}

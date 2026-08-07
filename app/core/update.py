@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -97,6 +98,10 @@ class IncrementalUpdater:
         # 逐股查询 CNINFO（约 1.5s/股）占用数小时（默认 30 天）
         self.csrc_refresh_interval_days: int = self._load_update_config(
             "csrc_refresh_interval_days", default=30
+        )
+        # 价格批量抓取的并发网络请求数（HTTP 源；socket 源内部强制串行）
+        self.price_fetch_concurrency: int = self._load_update_config(
+            "price_fetch_concurrency", default=4
         )
         # universe 步骤（股票池/上市状态）按日节流：全市场 stock_list 约
         # 51s + listing_info 约 53s，后台线程可接受但无需每轮重拉（默认 1 天）
@@ -855,60 +860,56 @@ class IncrementalUpdater:
         success_count = 0
         fail_count = 0
         updated_codes: list[str] = []
-        for i, stock in enumerate(target_stocks):
-            code = stock["stock_code"]
-            if (i + 1) % 100 == 0:
-                logger.info(f"  增量价格进度: {i+1}/{len(target_stocks)}")
-            if detail_cb is not None:
-                detail_cb("price", {
-                    "done": i + 1,
-                    "total": len(target_stocks),
-                    "current": code,
-                    "label": "股票价格",
-                })
+        completed: list[int] = [0]
+        concurrency = max(1, int(self.price_fetch_concurrency))
 
+        def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None]:
+            """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。"""
+            code = stock["stock_code"]
             need_qfq_full = code in xdxr_codes
-            # qfq 全量重拉的股票：从适配器支持的起点拉全历史；
-            # raw 在数据陈旧时同样全量。
             raw_latest = str(stock.get("latest_raw_date") or start_date)
             qfq_latest = str(stock.get("latest_qfq_date") or start_date)
-            fetch_start = None if (need_qfq_full or raw_full_refetch) else min(raw_latest, qfq_latest)
-
-            raw_result = self.adapter_mgr.fetch(FetchRequest(
-                data_type="price_daily",
-                stock_codes=[code],
-                start_date=fetch_start,
-                end_date=end_date,
-                adjust="raw",
-            ))
-            qfq_result = self.adapter_mgr.fetch(FetchRequest(
-                data_type="price_daily",
-                stock_codes=[code],
-                start_date=fetch_start,
-                end_date=end_date,
-                adjust="qfq",
-            ))
-
-            if raw_result.metadata.error or not raw_result.data:
-                fail_count += 1
-                self._record_failure(code, "price_daily", raw_result.metadata.source,
-                                      raw_result.metadata.error or "empty")
-                continue
-            if qfq_result.metadata.error or not qfq_result.data:
-                fail_count += 1
-                self._record_failure(
-                    code, "price_daily", qfq_result.metadata.source,
-                    qfq_result.metadata.error or "empty", extra_json='{"adjust":"qfq"}',
-                )
-                continue
-
+            fetch_from = None if (need_qfq_full or raw_full_refetch) else min(raw_latest, qfq_latest)
             try:
-                self._persist_incremental_price_pair(code, raw_result, qfq_result)
-                success_count += 1
-                updated_codes.append(code)
-            except Exception as e:
-                fail_count += 1
-                self._record_failure(code, "price_daily", raw_result.metadata.source, str(e))
+                raw_result = self.adapter_mgr.fetch(FetchRequest(
+                    data_type="price_daily", stock_codes=[code],
+                    start_date=fetch_from, end_date=end_date, adjust="raw",
+                ))
+                qfq_result = self.adapter_mgr.fetch(FetchRequest(
+                    data_type="price_daily", stock_codes=[code],
+                    start_date=fetch_from, end_date=end_date, adjust="qfq",
+                ))
+            except Exception as exc:
+                return code, None, None, f"fetch exception: {exc}"
+            if raw_result.metadata.error or not raw_result.data:
+                return code, None, None, raw_result.metadata.error or "empty raw"
+            if qfq_result.metadata.error or not qfq_result.data:
+                return code, None, None, (qfq_result.metadata.error or "empty qfq")
+            return code, raw_result, qfq_result, None
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {executor.submit(fetch_one, stock): stock for stock in target_stocks}
+            for future in as_completed(futures):
+                code, raw_result, qfq_result, err = future.result()
+                completed[0] += 1
+                if err is not None or raw_result is None:
+                    fail_count += 1
+                    self._record_failure(code, "price_daily", "manager", err or "empty")
+                else:
+                    try:
+                        self._persist_incremental_price_pair(code, raw_result, qfq_result)
+                        success_count += 1
+                        updated_codes.append(code)
+                    except Exception as exc:
+                        fail_count += 1
+                        self._record_failure(code, "price_daily", raw_result.metadata.source, str(exc))
+                if detail_cb is not None:
+                    detail_cb("price", {
+                        "done": completed[0],
+                        "total": len(target_stocks),
+                        "current": code,
+                        "label": "股票价格",
+                    })
 
         logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
         return {

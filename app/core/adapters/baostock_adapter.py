@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Iterator
@@ -164,6 +165,10 @@ class BaoStockAdapter(BaseAdapter):
         # thousands of redundant logins). Close explicitly via .close().
         self.reuse_session = reuse_session
         self._logged_in = False
+        # The BaoStock client is a global socket protocol and is not
+        # thread-safe. When price fetching runs concurrently (HTTP adapters in
+        # parallel), bao stock requests must stay serialized.
+        self._fetch_lock = threading.Lock()
 
     # ─── 调度入口 ──────────────────────────────────────────────────
 
@@ -187,7 +192,8 @@ class BaoStockAdapter(BaseAdapter):
         }[request.data_type]
 
         try:
-            return handler(request)
+            with self._fetch_lock:
+                return handler(request)
         except Exception as exc:
             logger.exception("baostock fetch 失败: %s", request.data_type)
             return self._make_empty_result(

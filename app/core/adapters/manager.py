@@ -27,7 +27,7 @@ KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
     "listing_info": ["akshare_eastmoney"],
-    "price_daily": ["baostock", "tdx", "tencent", "akshare_eastmoney"],
+    "price_daily": ["tencent", "baostock", "tdx", "akshare_eastmoney"],
     "balance_sheet": ["sina", "tdx", "akshare_eastmoney"],
     "income_statement": ["sina", "tdx", "akshare_eastmoney"],
     "cash_flow": ["sina", "tdx", "akshare_eastmoney"],
@@ -45,7 +45,7 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "cninfo": 1.5,
     "cninfo_csrc": 1.5,
     "baostock": 0.8,
-    "tdx": 0.1,
+    "tdx": 0.2,
     "tencent": 0.2,
     "sina": 0.35,
 }

@@ -16,8 +16,6 @@ import os
 import hashlib
 from datetime import datetime, timezone
 
-import pytest
-
 from app.core.init import CSRC_BATCH_SIZE, DataInitializer
 from app.core.update import IncrementalUpdater
 from app.core.storage.update_lock import exclusive_update
@@ -425,7 +423,7 @@ class _SimulatedPriceManager:
 
 
 def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store) -> None:
-    """价格逐股原子提交：进程在图 B 中断后，下次启动只补缺失股票，不重抓已提交的图 A。"""
+    """价格逐股原子提交：图 B 抓取失败（等价于中断）后，下次只补缺失股票，不重抓已提交的图 A。"""
     for code, listing in (("000001", "2020-01-01"), ("600519", "2020-01-01")):
         with duckdb_store.write_connection() as conn:
             conn.execute(
@@ -437,19 +435,21 @@ def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store
         conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-08-06')")
 
     manager = _SimulatedPriceManager()
-    manager.fail_codes = {"600519"}  # 模拟处理到 600519 时进程中断
+    manager.fail_codes = {"600519"}  # 模拟 600519 抓取失败，其余正常提交
 
     first = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=manager)
-    with pytest.raises(RuntimeError, match="source down for 600519"):
-        first._update_prices_incremental(max_stocks=0)
+    first_report = first._update_prices_incremental(max_stocks=0)
+    # 并发路径失败不中断整体；失败股计入 report 与重试列表
+    assert first_report["status"] == "partial"
+    assert first_report["success"] == 1
+    assert first_report["failed"] == 1
 
-    before = duckdb_store.read_query(
+    committed = duckdb_store.read_query(
         "SELECT stock_code FROM price_daily_raw WHERE trade_date = '2026-08-06'"
     )
-    retries = sqlite_store.query("SELECT stock_code, error FROM retry_list")
-    if retries:
-        raise AssertionError(f"unexpected retry entries: {retries}")
-    assert {row["stock_code"] for row in before} == {"000001"}, "中断时已提交的股票必须留在库中"
+    retries = sqlite_store.query("SELECT stock_code FROM retry_list")
+    assert {row["stock_code"] for row in committed} == {"000001"}, "失败时已提交的股票必须留在库中"
+    assert {row["stock_code"] for row in retries} == {"600519"}, "失败股票须进入重试列表"
 
     manager.fail_codes = set()  # 模拟下次启动续传
     second = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=manager)

@@ -23,7 +23,7 @@ def test_sina_is_the_default_primary_for_all_three_statements() -> None:
 def test_configured_primary_does_not_remove_other_fallbacks() -> None:
     priority = manager.build_adapter_priority({"price_daily": "tdx"})
 
-    assert priority["price_daily"] == ["tdx", "baostock", "tencent", "akshare_eastmoney"]
+    assert priority["price_daily"] == ["tdx", "tencent", "baostock", "akshare_eastmoney"]
 
 
 def test_unknown_adapter_name_is_rejected() -> None:
