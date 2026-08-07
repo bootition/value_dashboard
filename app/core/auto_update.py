@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -27,6 +28,19 @@ STATE_TABLE = "auto_update_state"
 # "enabled"/"disabled" 是持久化 state 列的实际取值（enable/disable 命令写入），
 # 必须纳入合法状态集，否则 _load_persisted_state 会拒绝加载已持久化的状态。
 VALID_STATES = {"idle", "running", "paused", "disabled", "enabled", "finished", "failed"}
+
+# 步骤名 → 中文展示（进度日志用）
+STEP_LABELS: dict[str, str] = {
+    "check": "更新检查",
+    "trading_dates": "交易日历",
+    "prices": "股票价格",
+    "indicators": "指标快照",
+    "universe": "股票池与股本",
+    "announcements": "公告",
+    "financials": "财务数据",
+    "market_actions": "分红除权",
+    "retries": "失败重试",
+}
 
 
 class AutoUpdateController:
@@ -246,36 +260,81 @@ class AutoUpdateController:
 
         from app.core.update import IncrementalUpdater
 
+        last_persist = [0.0]
+
+        def _append_log(message: str) -> None:
+            log = self._progress.get("log", [])
+            log.append({
+                "t": datetime.now().strftime("%H:%M:%S"),
+                "msg": message,
+            })
+            self._progress["log"] = log[-20:]
+
         def progress(step_name: str, step: dict[str, Any]) -> None:
             with self._lock:
+                previous = self._progress.get("steps", {})
+                status = step.get("status")
                 self._progress = {
                     "phase": f"step:{step_name}",
                     "job_id": job_id,
                     "started_at": started_at,
-                    "steps": {
-                        **self._progress.get("steps", {}),
-                        step_name: step.get("status"),
-                    },
+                    "steps": {**previous, step_name: step.get("status")},
                 }
+                label = STEP_LABELS.get(step_name, step_name)
+                if status == "success":
+                    ok = step.get("success")
+                    message = f"{label} 完成（成功 {step.get('success', 0)}，失败 {step.get('failed', 0)}）" if ok is not None else f"{label} 完成"
+                    _append_log(message)
+                elif status == "skipped":
+                    _append_log(f"{label} 跳过：{step.get('reason', '无变化')}")
+                elif status in {"failed", "partial"}:
+                    _append_log(f"{label} {status}：{step.get('reason') or step.get('error') or ''}")
                 self._persist()
+                last_persist[0] = time.monotonic()
+
+        def detail_cb(step_name: str, info: dict[str, Any]) -> None:
+            """细粒度进度：更新 live 快照并以时间节流持久化。"""
+            with self._lock:
+                self._progress["live"] = {
+                    "step": step_name,
+                    "label": info.get("label", step_name),
+                    "done": int(info.get("done", 0)),
+                    "total": int(info.get("total", 0)),
+                    "current": info.get("current"),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                _append_log(
+                    f"{info.get('label', step_name)} 进行中 {info.get('done', 0)}/{info.get('total', 0)}"
+                    + (f" {info.get('current')}" if info.get("current") else "")
+                )
+                if time.monotonic() - last_persist[0] >= 0.7:
+                    self._persist()
+                    last_persist[0] = time.monotonic()
 
         try:
             updater = IncrementalUpdater(duck=self.duck, sqlite=self.sqlite)
-            report = updater.run_incremental_update(max_stocks=max_stocks, progress_cb=progress)
+            report = updater.run_incremental_update(
+                max_stocks=max_stocks, progress_cb=progress, detail_cb=detail_cb
+            )
 
             with self._lock:
+                self._progress.pop("live", None)
                 if report.get("status") == "success":
                     self._current_stage = "finished"
                     self._last_success_at = datetime.now(timezone.utc).isoformat()
                     self._last_error = None
+                    _append_log("自动更新完成")
                 elif report.get("status") == "skipped":
                     # C9修复(报告41): 跨进程锁被拒/开关关闭等 skipped 状态不得误记
                     # failed——保持可查询的 idle，不产生错误。
                     self._current_stage = "idle"
                     self._last_error = None
+                    _append_log(f"跳过更新：{report.get('reason')}")
                 else:
                     self._current_stage = "failed"
                     self._last_error = f"update status: {report.get('status')}"
+                    if report.get("error"):
+                        _append_log(f"更新失败：{report['error']}")
                 self._progress = {
                     "phase": "done",
                     "job_id": job_id,
@@ -283,6 +342,7 @@ class AutoUpdateController:
                     "status": report.get("status"),
                     "reason": report.get("reason"),
                     "steps": {k: v.get("status") for k, v in report.get("steps", {}).items()},
+                    "log": self._progress.get("log", []),
                 }
                 self._persist()
             return report

@@ -169,6 +169,7 @@ class IncrementalUpdater:
         max_stocks: int = 0,
         *,
         progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """执行增量更新（跨进程单写者串行）
 
@@ -176,6 +177,8 @@ class IncrementalUpdater:
             max_stocks: 最多更新的股票数量（0=全部需要更新的股票）
             progress_cb: 每个步骤完成后回调 (step_name, step_result)，
                 供 AutoUpdateController 持久化可操作进度（PRD §7.3）。
+            detail_cb: 步骤内的细粒度回调（如逐股价格进度
+                {done, total, current, label}），用于实时进度条与日志。
 
         Returns:
             更新报告；被跨进程锁拒绝时返回 {"status": "skipped",
@@ -193,7 +196,7 @@ class IncrementalUpdater:
                 on_stale_lock=self._reconcile_crashed_incremental_jobs,
             ):
                 try:
-                    return self._run_incremental_update_locked(max_stocks, progress_cb)
+                    return self._run_incremental_update_locked(max_stocks, progress_cb, detail_cb)
                 finally:
                     close = getattr(self.adapter_mgr, "close", None)
                     if callable(close):
@@ -237,13 +240,16 @@ class IncrementalUpdater:
         self,
         max_stocks: int,
         progress_cb: Callable[[str, dict[str, Any]], None] | None,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """持锁执行更新主体；job_logs 生命周期（P1: 状态页"最近更新"）。"""
         job_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
         job_row_id = self._start_job(job_id, max_stocks, started_at)
         try:
-            report = self._run_incremental_update_flow(max_stocks, progress_cb, job_id, started_at)
+            report = self._run_incremental_update_flow(
+                max_stocks, progress_cb, job_id, started_at, detail_cb
+            )
         except Exception as error:
             self._finish_job(job_row_id, "failed", {"error": str(error)})
             raise
@@ -279,6 +285,7 @@ class IncrementalUpdater:
         progress_cb: Callable[[str, dict[str, Any]], None] | None,
         job_id: str,
         started_at: str,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """更新主流程（调用方已持有跨进程更新锁）。"""
         # 先检查
@@ -309,7 +316,7 @@ class IncrementalUpdater:
         # 变慢时，不应阻塞已上市股票的日线补齐。
         if check_report["new_trading_days"]:
             report_step("trading_dates", self._update_trading_dates())
-        price_step = report_step("prices", self._update_prices_incremental(max_stocks))
+        price_step = report_step("prices", self._update_prices_incremental(max_stocks, detail_cb))
         updated_price_codes = price_step.pop("_updated_codes", [])
 
         if max_stocks > 0:
@@ -764,12 +771,18 @@ class IncrementalUpdater:
             logger.warning(f"查询 xdxr 股票失败: {e}")
             return set()
 
-    def _update_prices_incremental(self, max_stocks: int) -> dict:
+    def _update_prices_incremental(
+        self, max_stocks: int,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict:
         """增量更新价格——只更新有新数据的股票。
 
         - 普通股票：按 latest_local → today 增量补齐 raw + qfq
         - 发生除权除息（xdxr）的股票：qfq 全历史重拉，保证复权口径一致
         - 本地价格陈旧超过窗口上限：raw 也走全量重拉
+
+        detail_cb: 每只股票处理完后的细粒度回调 (step_name, {done, total,
+            current, label})，供前端实时进度条使用。
         """
         logger.info("[增量] 检查需要价格更新的股票...")
 
@@ -846,6 +859,13 @@ class IncrementalUpdater:
             code = stock["stock_code"]
             if (i + 1) % 100 == 0:
                 logger.info(f"  增量价格进度: {i+1}/{len(target_stocks)}")
+            if detail_cb is not None:
+                detail_cb("price", {
+                    "done": i + 1,
+                    "total": len(target_stocks),
+                    "current": code,
+                    "label": "股票价格",
+                })
 
             need_qfq_full = code in xdxr_codes
             # qfq 全量重拉的股票：从适配器支持的起点拉全历史；

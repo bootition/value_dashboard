@@ -62,7 +62,7 @@ def test_auto_update_run_once_records_result(duckdb_store, sqlite_store, monkeyp
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None, detail_cb=None) -> dict:
             if progress_cb is not None:
                 progress_cb("prices", {"status": "success"})
             return {"status": "success", "steps": {"prices": {"status": "success"}}}
@@ -86,7 +86,7 @@ def test_auto_update_persists_per_step_progress(duckdb_store, sqlite_store, monk
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None, detail_cb=None) -> dict:
             assert progress_cb is not None
             progress_cb("universe", {"status": "success"})
             progress_cb("prices", {"status": "partial"})
@@ -113,7 +113,7 @@ def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, 
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None, detail_cb=None) -> dict:
             return {"status": "partial", "steps": {"prices": {"status": "failed"}}}
 
     monkeypatch.setattr("app.core.update.IncrementalUpdater", FailingUpdater)
@@ -135,7 +135,7 @@ def test_auto_update_skipped_reports_idle_not_failed(duckdb_store, sqlite_store,
         def __init__(self, **kwargs) -> None:
             pass
 
-        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None) -> dict:
+        def run_incremental_update(self, max_stocks: int = 0, progress_cb=None, detail_cb=None) -> dict:
             return {"status": "skipped", "reason": "another_update_running"}
 
     monkeypatch.setattr("app.core.update.IncrementalUpdater", LockedUpdater)

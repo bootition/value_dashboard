@@ -27,7 +27,7 @@ def _stub_network_steps(updater: IncrementalUpdater) -> None:
         "status": "success", "succeeded_codes": codes, "failed_codes": [],
     }
     updater._refresh_market_actions = lambda codes: {"status": "success"}
-    updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+    updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
 
 
 def test_incremental_update_runs_universe_listing_and_csrc_steps(

@@ -33,7 +33,7 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
     }
     updater._refresh_financials = lambda codes: {"status": "success", "succeeded_codes": codes}
     updater._refresh_market_actions = lambda codes: {"status": "success"}
-    updater._update_prices_incremental = lambda max_stocks: {"status": "skipped", "success": 0}
+    updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
 
 
@@ -88,7 +88,7 @@ def test_incremental_update_always_closes_adapter_sessions(duckdb_store, sqlite_
 def test_incremental_update_records_failed_job_on_partial(duckdb_store, sqlite_store) -> None:
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     _stub_update_network_steps(updater)
-    updater._update_prices_incremental = lambda max_stocks: {"status": "failed", "success": 0}
+    updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "failed", "success": 0}
 
     report = updater.run_incremental_update()
 

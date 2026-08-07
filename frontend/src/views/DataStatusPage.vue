@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
-import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert } from 'naive-ui'
+import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert, NProgress } from 'naive-ui'
 import axios from 'axios'
 import type { DataQualityStatus } from '../types'
 
@@ -55,6 +55,15 @@ interface AutoUpdateStatus {
     started_at?: string
     status?: string
     steps?: Record<string, string>
+    live?: {
+      step: string
+      label: string
+      done: number
+      total: number
+      current?: string
+      updated_at?: string
+    }
+    log?: Array<{ t: string; msg: string }>
   }
   last_error: string | null
   last_success_at: string | null
@@ -62,6 +71,14 @@ interface AutoUpdateStatus {
   last_skip_reason?: string | null
   updated_at?: string | null
 }
+
+const updateLive = computed(() => autoUpdate.value?.progress?.live || null)
+const updateLog = computed(() => autoUpdate.value?.progress?.log || [])
+const updateLivePct = computed(() => {
+  const live = updateLive.value
+  if (!live || !live.total) return 0
+  return Math.min(Math.round((live.done / live.total) * 100), 100)
+})
 
 const summary = ref<DataSummary | null>(null)
 const loading = ref(true)
@@ -73,7 +90,7 @@ const autoUpdate = ref<AutoUpdateStatus | null>(null)
 const lastRefreshedAt = ref<string | null>(null)
 let pollTimer: ReturnType<typeof setInterval> | undefined
 
-const isPolling = computed(() => autoUpdate.value?.state === 'running')
+const isPolling = computed(() => autoUpdate.value?.current_stage === 'running')
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
@@ -90,34 +107,36 @@ const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.in
 async function fetchData(silent = false) {
   if (!silent) error.value = ''
   if (!silent) loading.value = true
+  // 自动更新状态独立先行：summary 在写入锁竞争下可能较慢，
+  // 不能让进度卡片被整体拖住（PRD §7.3 界面立即可用）。
+  const autoPromise = axios.get('/api/data-status/auto-update').catch(() => null)
   try {
-    const [sumResp, retryResp, missResp, autoResp] = await Promise.all([
+    const [sumResp, retryResp, missResp] = await Promise.all([
       axios.get('/api/data-status/summary'),
       axios.get('/api/data-status/retry-list'),
       axios.get('/api/data-status/missing-list'),
-      axios.get('/api/data-status/auto-update'),
     ])
     summary.value = sumResp.data
     retryList.value = retryResp.data.items || []
     missingList.value = missResp.data.items || []
-    autoUpdate.value = autoResp.data
-    lastRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   } catch (e: unknown) {
     if (!silent) error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
-  } finally {
-    if (!silent) loading.value = false
-    schedulePolling()
   }
+  const autoResp = await autoPromise
+  autoUpdate.value = autoResp?.data ?? null
+  lastRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  if (!silent) loading.value = false
+  schedulePolling()
 }
 
-// L1-3（报告42）: 更新运行中每 12 秒轮询；停止后自动取消
+// L1-3（报告42）: 更新运行中自动轮询（4s 以平滑展示逐股进度）；停止后自动取消
 function schedulePolling() {
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = undefined
   }
-  if (autoUpdate.value?.state === 'running') {
-    pollTimer = setInterval(() => void fetchData(true), 12000)
+  if (autoUpdate.value?.current_stage === 'running') {
+    pollTimer = setInterval(() => void fetchData(true), 4000)
   }
 }
 
@@ -166,7 +185,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
       <n-space align="center" size="small">
         <!-- L1-3（报告42）: 显示上次刷新时间与自动轮询状态 -->
         <span v-if="lastRefreshedAt" style="color:#999; font-size:12px;">上次刷新 {{ lastRefreshedAt }}</span>
-        <n-tag v-if="isPolling" size="small" type="info">更新运行中，每 12 秒自动刷新</n-tag>
+        <n-tag v-if="isPolling" size="small" type="info">更新运行中，每 4 秒自动刷新</n-tag>
         <n-button :loading="loading" @click="fetchData()">刷新</n-button>
       </n-space>
     </n-space>
@@ -226,6 +245,33 @@ function skipReasonLabel(reason: string | null | undefined): string {
               <span v-else>—</span>
             </n-descriptions-item>
           </n-descriptions>
+          <!-- 实时逐股进度（运行中由 detail_cb 提供） -->
+          <div v-if="updateLive" class="update-live">
+            <div class="update-live-title">
+              <n-tag size="small" type="info">{{ updateLive.label }}</n-tag>
+              <span>{{ updateLive.done }} / {{ updateLive.total }}</span>
+            </div>
+            <n-progress
+              type="line"
+              :percentage="updateLivePct"
+              :height="10"
+              :show-indicator="false"
+              processing
+            />
+            <p class="update-live-hint">
+              正在更新 {{ updateLive.current || '—' }}
+              <span v-if="updateLive.updated_at">· {{ new Date(updateLive.updated_at).toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
+            </p>
+          </div>
+          <!-- 更新日志（最近 10 条） -->
+          <div v-if="updateLog.length" class="update-log">
+            <div class="update-log-title">更新日志</div>
+            <ol class="update-log-list">
+              <li v-for="(entry, idx) in updateLog.slice(-10)" :key="idx">
+                <span class="update-log-time">{{ entry.t }}</span>{{ entry.msg }}
+              </li>
+            </ol>
+          </div>
           <p v-if="autoUpdate.state === 'disabled'" style="color:#999; margin:8px 0 0;">
             自动更新已关闭。可在 CLI 执行 <code>vd data auto-update enable</code> 重新开启。
           </p>
@@ -434,4 +480,5 @@ function skipReasonLabel(reason: string | null | undefined): string {
 
 <style scoped>
 .data-status-page { max-width: 1380px; }.data-status-header { margin-bottom: 27px; }.data-status-header p { margin: 0 0 8px; color: #97a199; font-size: 10px; }.data-status-header h1 { margin: 0; font-size: 25px; letter-spacing: -.05em; }.data-status-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.data-readiness { margin-bottom: 21px; border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.coverage-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 21px; }.coverage-grid article { padding: 19px 20px; border-radius: 14px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.coverage-grid p, .coverage-grid span { margin: 0; color: #8b978f; font-size: 10px; }.coverage-grid strong { display: block; margin: 7px 0 4px; color: #3c5847; font-size: 22px; font-variant-numeric: tabular-nums; letter-spacing: -.04em; }.status-workbench { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }.status-workbench > :deep(.n-grid), .status-workbench > :deep(.n-card):nth-child(1), .status-workbench > :deep(.n-card):nth-child(6), .status-workbench > :deep(.n-card):nth-child(7), .status-workbench > :deep(.n-card):nth-child(8), .status-workbench > :deep(.n-card):nth-child(9) { grid-column: 1 / -1; }.data-status-page :deep(.n-card) { border-radius: 16px; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.data-status-page :deep(.n-card-header) { padding-top: 20px; }.data-status-page :deep(.n-card__content) { padding-bottom: 20px; }
+.update-live { margin-top: 14px; padding: 12px 14px; border: 1px solid #e3ebe5; border-radius: 9px; background: #f8fbf8; }.update-live-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }.update-live-title span { color: #4c6a58; font-size: 12px; font-variant-numeric: tabular-nums; }.update-live-hint { margin: 7px 0 0; color: #7d8a82; font-size: 10px; }.update-log { margin-top: 12px; }.update-log-title { margin-bottom: 6px; color: #8b978f; font-size: 9px; font-weight: 700; letter-spacing: .08em; }.update-log-list { margin: 0; padding: 0; list-style: none; max-height: 150px; overflow-y: auto; border: 1px solid #edf1ee; border-radius: 8px; }.update-log-list li { display: flex; gap: 8px; padding: 5px 10px; border-bottom: 1px solid #f1f4f1; color: #5f6b63; font-size: 10px; font-variant-numeric: tabular-nums; }.update-log-list li:last-child { border-bottom: 0; }.update-log-time { flex: 0 0 58px; color: #a0aaa3; }
 </style>
