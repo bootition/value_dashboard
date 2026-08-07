@@ -9,7 +9,7 @@
 | 层面 | 状态 | 依据 |
 |---|---|---|
 | 整体启用 | ✅ **PASS / 可正式启用**（第八轮独立攻击确认 F4 已关闭：网页与原生 CLI 导出同源，原 F4 隔离复现现在含 `_truncated`；发行包实际启动 smoke、全量门禁及正式库保护均通过） | `reports/40`（取代 `reports/39` 的修复自证结论） |
-| 代码层门禁 | ✅ Ruff、前端 lint/55 node + 19 组件测试/build 全通过；隔离回归 447 passed、1 deselected（正式自动更新持锁，正式库 collect-only 哈希保护项未运行）；入口契约 16 passed | `reports/53` §3；历史发布门禁见 `reports/40` §2 |
+| 代码层门禁 | ✅ Ruff、前端 lint/55 node + 19 组件测试/build 全通过；隔离回归 451 passed、1 deselected（正式自动更新持锁，正式库 collect-only 哈希保护项未运行） | `reports/55` §3；历史发布门禁见 `reports/40` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
 | 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]；正式库测试期残留已清零（`dsl_expressions`/`screening_results` 归零，指标接口无测试 DSL；2026-08-05 复验 5537 只上市股，4 只极新股免费源数据未形成仅披露） | `reports/54`、`reports/52`、`reports/46`、`reports/29` |
@@ -18,7 +18,7 @@
 | 桌面筛选界面 | ✅ 已接入正式路径：浅色侧栏四模块、筛选工作区、中文优先指标与模块内个股搜索；S1 424、Ruff、前端门禁全绿 | `reports/47` |
 | 四页桌面界面 | ✅ 四页静态样稿经用户确认后已全部接入：筛选、自选规则分组、个股搜索/详情、数据状态；S1 424、Ruff、前端门禁全绿 | `reports/48` |
 | 筛选界面与启动路径 | ✅ 范围（ST/停牌/上市年限）作为常驻条件并入筛选条件区，全站字体/圆角一致；`start.bat` 不再被旧 dist 遮蔽且按需构建，二次启动不再多花十几秒；筛选指标全中文（含排名与财务表字段） | `reports/52`、`reports/53` |
-| 自动更新与实时状态 | ✅ Windows 死亡锁回收、逐股原子续传（价格中断后下次只补缺口，回归实证）、价格优先、增量快照已跑通；同进程读写连接配置已统一，后台更新期间状态 API 不再因 DuckDB 配置冲突 503、SPA 入口禁止缓存；数据状态页显示逐股进度条与更新日志（4s 轮询），明细以边框/黑体结构化呈现 | `reports/52`、`reports/53`、`reports/54` |
+| 自动更新与实时状态 | ✅ 写锁期间 summary 秒开（冷 718ms/热 4ms）、4s 轮询独立推进进度条与日志；Windows 死亡锁回收、逐股原子续传（中断后只补缺口，回归实证）、价格优先、增量快照已跑通；后台更新期间状态 API 不再因 DuckDB 连接配置冲突 503；SPA 入口禁止缓存 | `reports/52`、`reports/53`、`reports/54`、`reports/55` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
@@ -56,6 +56,7 @@
 | `docs/reports/52_VISUAL_BASELINE_AND_LAUNCH_BUILD_STRATEGY_2026-08-06.md` | **视觉基线回归与按需构建启动**：范围常驻条件、全站字体/圆角恢复、指纹按需构建、构建入口随 build 提交 | **当前筛选入口、视觉、启动依据；与 reports/53 合并作为当前状态** |
 | `docs/reports/53_INDICATOR_CHINESE_LABELS_AND_UPDATE_PROGRESS_2026-08-07.md` | **指标中文化与自动更新进度可视化**：全量中文指标/排名/财务表字段、逐股进度条与更新日志、4s 轮询与独立先行请求 | **当前指标展示与自动更新进度依据** |
 | `docs/reports/54_TEST_RESIDUE_AND_PROGRESS_REPORT_2026-08-07.md` | **测试残留清理与断点续传实证及数据页结构强化**：测试 DSL/结果清除、价格续传回归、明细表边框黑体 | **当前正式库卫生与续传/UI 依据** |
+| `docs/reports/55_DATA_STATUS_RESPONSIVENESS_2026-08-07.md` | **数据状态页实时响应与写锁降级**：summary 写锁缓存+stale、4s 独立轮询、15s 超时、刷新解耦 | **当前状态页响应与轮询依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
