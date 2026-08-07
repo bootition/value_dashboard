@@ -7,6 +7,7 @@ import {
   type ScreeningRuleNode,
   type ScreeningRuleCondition,
 } from '../src/helpers/screening-quality.ts'
+import { fieldDisplayName } from '../src/utils/screening-format.ts'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // collectRuleFields
@@ -253,4 +254,33 @@ test('computeUntrustedFields: union of sources — field in rule but not in resu
   // dividend_yield from rule, pe_ttm from sort+result.
   assert.ok(result.includes('dividend_yield'))
   assert.ok(result.includes('pe_ttm'))
+})
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// fieldDisplayName 中文化（筛选/自选/详情共用）
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('fieldDisplayName: 核心指标不再显示纯英文', () => {
+  assert.equal(fieldDisplayName('period_return'), '区间收益率')
+  assert.equal(fieldDisplayName('annualized_volatility'), '年化波动率')
+  assert.equal(fieldDisplayName('max_drawdown'), '最大回撤')
+  assert.equal(fieldDisplayName('turnover_rate'), '换手率')
+  assert.equal(fieldDisplayName('roic'), '投入资本回报率（ROIC）')
+  assert.equal(fieldDisplayName('consecutive_div_years'), '连续分红年数')
+  assert.equal(fieldDisplayName('ma20'), '20 日均线')
+  assert.equal(fieldDisplayName('interest_bearing_debt'), '有息负债')
+})
+
+test('fieldDisplayName: 排名后缀字段组合为中文', () => {
+  assert.equal(fieldDisplayName('pe_ttm_market_rank'), '市盈率（PE-TTM） · 全市场排名')
+  assert.equal(fieldDisplayName('roe_industry_percentile'), '净资产收益率（ROE） · 证监会一级分位')
+  assert.equal(fieldDisplayName('period_return_sw2_rank'), '区间收益率 · 证监会二级排名')
+})
+
+test('fieldDisplayName: 标准化财务表字段带中文表前缀', () => {
+  assert.equal(fieldDisplayName('balance.total_assets'), '资产负债表 · 资产总计')
+  assert.equal(fieldDisplayName('income.parent_net_profit'), '利润表 · 归母净利润')
+  assert.equal(fieldDisplayName('cashflow.cf_from_operating'), '现金流量表 · 经营活动现金流量净额')
+  assert.equal(fieldDisplayName('exchange'), '交易所')
 })
