@@ -109,6 +109,13 @@ class TencentAdapter(BaseAdapter):
                 # Move the window end just before the oldest bar received.
                 window_end = (datetime.strptime(oldest, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
                 pages += 1
+
+        # Tencent's endpoint ignores start_date: every request returns the most
+        # recent 640 bars ending at the window end. Drop bars older than the
+        # requested start so incremental callers persist only the missing rows
+        # (a handful per day) instead of re-writing ~2.6 years every time.
+        if request.start_date:
+            records = [row for row in records if row["trade_date"] >= request.start_date]
         if not records:
             return self._make_empty_result("tencent returned no parseable price bars")
         return self._make_result(

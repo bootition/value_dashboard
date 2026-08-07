@@ -101,7 +101,11 @@ class IncrementalUpdater:
         )
         # 价格批量抓取的并发网络请求数（HTTP 源；socket 源内部强制串行）
         self.price_fetch_concurrency: int = self._load_update_config(
-            "price_fetch_concurrency", default=4
+            "price_fetch_concurrency", default=8
+        )
+        # 批量持久化：每批合并到单个 DuckDB 事务，减少 WAL 提交次数
+        self.price_fetch_batch_size: int = self._load_update_config(
+            "price_fetch_batch_size", default=20
         )
         # universe 步骤（股票池/上市状态）按日节流：全市场 stock_list 约
         # 51s + listing_info 约 53s，后台线程可接受但无需每轮重拉（默认 1 天）
@@ -862,22 +866,29 @@ class IncrementalUpdater:
         updated_codes: list[str] = []
         completed: list[int] = [0]
         concurrency = max(1, int(self.price_fetch_concurrency))
+        batch_size = max(1, int(self.price_fetch_batch_size))
 
         def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None]:
-            """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。"""
+            """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。
+
+            增量原则：raw 与 qfq 各自以本地最新日期为起点，仅缺失的一侧
+            才全量拉取。绝不用全局最老日期拖低另一侧的起点——历史已完整的
+            股票每次只拉缺口（通常几行），避免无意义的全历史重拉。
+            """
             code = stock["stock_code"]
             need_qfq_full = code in xdxr_codes
-            raw_latest = str(stock.get("latest_raw_date") or start_date)
-            qfq_latest = str(stock.get("latest_qfq_date") or start_date)
-            fetch_from = None if (need_qfq_full or raw_full_refetch) else min(raw_latest, qfq_latest)
+            raw_latest = stock.get("latest_raw_date")
+            qfq_latest = stock.get("latest_qfq_date")
+            raw_from = None if raw_full_refetch else (str(raw_latest) if raw_latest else None)
+            qfq_from = None if (need_qfq_full or raw_full_refetch) else (str(qfq_latest) if qfq_latest else None)
             try:
                 raw_result = self.adapter_mgr.fetch(FetchRequest(
                     data_type="price_daily", stock_codes=[code],
-                    start_date=fetch_from, end_date=end_date, adjust="raw",
+                    start_date=raw_from, end_date=end_date, adjust="raw",
                 ))
                 qfq_result = self.adapter_mgr.fetch(FetchRequest(
                     data_type="price_daily", stock_codes=[code],
-                    start_date=fetch_from, end_date=end_date, adjust="qfq",
+                    start_date=qfq_from, end_date=end_date, adjust="qfq",
                 ))
             except Exception as exc:
                 return code, None, None, f"fetch exception: {exc}"
@@ -889,6 +900,7 @@ class IncrementalUpdater:
 
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {executor.submit(fetch_one, stock): stock for stock in target_stocks}
+            batch: list[tuple[str, Any, Any]] = []
             for future in as_completed(futures):
                 code, raw_result, qfq_result, err = future.result()
                 completed[0] += 1
@@ -896,13 +908,12 @@ class IncrementalUpdater:
                     fail_count += 1
                     self._record_failure(code, "price_daily", "manager", err or "empty")
                 else:
-                    try:
-                        self._persist_incremental_price_pair(code, raw_result, qfq_result)
-                        success_count += 1
-                        updated_codes.append(code)
-                    except Exception as exc:
-                        fail_count += 1
-                        self._record_failure(code, "price_daily", raw_result.metadata.source, str(exc))
+                    batch.append((code, raw_result, qfq_result))
+                if len(batch) >= batch_size:
+                    success_count, updated_codes, fail_count = self._persist_price_batch(
+                        batch, success_count, updated_codes, fail_count
+                    )
+                    batch = []
                 if detail_cb is not None:
                     detail_cb("price", {
                         "done": completed[0],
@@ -910,6 +921,10 @@ class IncrementalUpdater:
                         "current": code,
                         "label": "股票价格",
                     })
+            if batch:
+                success_count, updated_codes, fail_count = self._persist_price_batch(
+                    batch, success_count, updated_codes, fail_count
+                )
 
         logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
         return {
@@ -940,42 +955,80 @@ class IncrementalUpdater:
             logger.warning("读取交易日历目标日期失败: %s", error)
         return today
 
-    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
-        """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""
+    def _persist_price_pair_in_connection(
+        self, connection: Any, stock_code: str, raw_result: Any, qfq_result: Any,
+    ) -> None:
+        """Write one stock's raw/qfq rows + batch lineage inside a caller transaction."""
         from app.core.init import DataInitializer
 
         lineage = DataInitializer.__new__(DataInitializer)
         lineage._batch_id = str(uuid.uuid4())
+        for table, data_type, result in (
+            ("price_daily_raw", "price_daily_raw", raw_result),
+            ("price_daily_qfq", "price_daily_qfq", qfq_result),
+        ):
+            connection.executemany(
+                f"""INSERT INTO {table}
+                    (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                      open=COALESCE(excluded.open, {table}.open),
+                      high=COALESCE(excluded.high, {table}.high),
+                      low=COALESCE(excluded.low, {table}.low),
+                      close=COALESCE(excluded.close, {table}.close),
+                      volume=COALESCE(excluded.volume, {table}.volume),
+                      turnover=COALESCE(excluded.turnover, {table}.turnover),
+                      turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
+                [
+                    [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
+                     row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
+                     row.get("turnover_rate")]
+                    for row in result.data
+                ],
+            )
+            lineage._record_batch_in_connection(connection, result, data_type, len(result.data))
+            # 价格行数极大（全历史重拉单只可达数千行），逐值审计会把
+            # source_audit 放大成千万行级且非 PRD §14 关键财务字段所需。
+            # 价格采用 batch 级溯源（fetch_batch + raw_response_archive），
+            # 不做逐值 audit；财务/股本等关键字段仍走逐值审计。
+
+    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
+        """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""
         with self.duck.transaction() as connection:
-            for table, data_type, result in (
-                ("price_daily_raw", "price_daily_raw", raw_result),
-                ("price_daily_qfq", "price_daily_qfq", qfq_result),
-            ):
-                connection.executemany(
-                    f"""INSERT INTO {table}
-                        (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(stock_code, trade_date) DO UPDATE SET
-                          open=COALESCE(excluded.open, {table}.open),
-                          high=COALESCE(excluded.high, {table}.high),
-                          low=COALESCE(excluded.low, {table}.low),
-                          close=COALESCE(excluded.close, {table}.close),
-                          volume=COALESCE(excluded.volume, {table}.volume),
-                          turnover=COALESCE(excluded.turnover, {table}.turnover),
-                          turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
-                    [
-                        [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
-                         row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
-                         row.get("turnover_rate")]
-                        for row in result.data
-                    ],
-                )
-                batch_id = lineage._record_batch_in_connection(
-                    connection, result, data_type, len(result.data)
-                )
-                lineage._record_field_audit_in_connection(
-                    connection, result, result.data, stock_code, "trade_date", batch_id
-                )
+            self._persist_price_pair_in_connection(connection, stock_code, raw_result, qfq_result)
+
+    def _persist_price_batch(
+        self,
+        batch: list[tuple[str, Any, Any]],
+        success_count: int,
+        updated_codes: list[str],
+        fail_count: int,
+    ) -> tuple[int, list[str], int]:
+        """Persist many stocks in one DuckDB transaction (few commits, far fewer
+        WAL flushes than per-stock transactions). On failure, falls back to
+        per-stock atomic commits so one bad row never blocks the whole batch."""
+        try:
+            with self.duck.transaction() as connection:
+                for code, raw_result, qfq_result in batch:
+                    self._persist_price_pair_in_connection(connection, code, raw_result, qfq_result)
+            success_count += len(batch)
+            updated_codes.extend(code for code, _, _ in batch)
+            return success_count, updated_codes, fail_count
+        except Exception:
+            for code, raw_result, qfq_result in batch:
+                try:
+                    self._persist_incremental_price_pair(code, raw_result, qfq_result)
+                    success_count += 1
+                    updated_codes.append(code)
+                except Exception as exc:
+                    fail_count += 1
+                    source = getattr(raw_result, "metadata", None)
+                    self._record_failure(
+                        code, "price_daily",
+                        getattr(source, "source", "manager") if source is not None else "manager",
+                        str(exc),
+                    )
+            return success_count, updated_codes, fail_count
 
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
         """重试失败任务"""

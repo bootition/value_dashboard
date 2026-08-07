@@ -44,7 +44,8 @@ update:
   startup: true           # 启动时自动执行增量更新
   incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
-  price_fetch_concurrency: 4  # 价格批量抓取的并发网络请求数（HTTP 源；socket 源强制串行）
+  price_fetch_concurrency: 8  # 价格批量抓取的并发网络请求数（HTTP 源；socket 源强制串行）
+  price_fetch_batch_size: 20  # 价格持久化批量：每批合并为单 DuckDB 事务，减少 WAL 提交
 
 backup:
   keep_full_backups: 3
