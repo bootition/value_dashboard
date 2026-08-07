@@ -48,18 +48,17 @@ def test_development_start_builds_current_frontend_before_server() -> None:
 
 
 def test_development_start_builds_only_when_bundle_is_stale() -> None:
-    """启动不再每次无条件执行构建；只在前端指纹或入口/资源缺失时构建。"""
+    """启动不再每次无条件执行构建；只在前端指纹或入口缺失时构建。"""
     source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
 
     check = source.index('fe-fingerprint.cjs" --check')
     stamp = source.index('fe-fingerprint.cjs" --stamp')
-    build_label = source.index(":build_frontend")
     server = source.index('python -m app.web.main 2>>"data\\logs\\start.log"')
 
-    assert check < build_label
-    assert build_label < server
-    assert stamp > build_label
-    assert ':serve_source' in source
+    assert 'set "NEED_BUILD="' in source
+    assert 'if defined NEED_BUILD (' in source
+    assert check < server
+    assert stamp < server
 
 
 def test_fe_fingerprint_script_is_node_based_and_dep_free() -> None:
@@ -72,13 +71,34 @@ def test_fe_fingerprint_script_is_node_based_and_dep_free() -> None:
     assert "node:crypto" in script
 
 
-def test_start_bat_fails_closed_when_port_is_occupied() -> None:
+def test_start_bat_treats_only_listening_on_8765_as_existing_instance() -> None:
+    """端口检查只认可真正 LISTENING；已有实例时打开浏览器而非失败退出。
+    修复 TIME_WAIT 等短暂状态被 `findstr ":8765"` 误判为占用而“无法启动”。"""
     source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
 
-    port_check = source.index('findstr ":8765"')
-    mode_selection = source.index('set "RELEASE_ROOT=%CD%"')
-    block = source[port_check:mode_selection]
-    assert "exit /b 1" in block
+    assert 'findstr /c:":8765"' in source
+    assert 'findstr /c:"LISTENING"' in source
+    assert 'start "" "http://127.0.0.1:8765/"' in source
+    block_start = source.index('findstr /c:":8765"')
+    block_end = source.index('set "RELEASE_ROOT=%CD%"')
+    block = source[block_start:block_end]
+    assert 'goto :end' in block
+    assert 'exit /b 1' not in block
+
+
+def test_start_bat_fails_cleanly_on_build_error_without_bare_parens_in_block_echo() -> None:
+    """块内 echo 不得含括号，否则 CMD 块解析报「此时不应有 (」导致无法启动。
+    这是用户反馈 start.bat 无法正常启动的根因回归保护。"""
+    source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
+
+    build_block_start = source.index('if defined NEED_BUILD (')
+    next_label = source.index("\n:end")
+    block = source[build_block_start:next_label]
+    assert 'echo ' in block
+    for line in block.splitlines():
+        if line.strip().startswith("echo "):
+            assert "(" not in line
+            assert ")" not in line
 
 
 def test_vd_bat_prefers_development_entrypoint_over_stale_dist_builds() -> None:

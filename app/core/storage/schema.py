@@ -318,6 +318,12 @@ CREATE TABLE IF NOT EXISTS source_audit (
     override_id       BIGINT,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_source_audit_stock_date_field
+    ON source_audit (stock_code, report_date, field_name);
+CREATE INDEX IF NOT EXISTS idx_source_audit_fetch_batch
+    ON source_audit (fetch_batch_id);
+CREATE INDEX IF NOT EXISTS idx_source_audit_hash
+    ON source_audit (raw_response_hash);
 
 -- Legacy records removed from active research remain available as evidence.
 CREATE TABLE IF NOT EXISTS source_audit_quarantine (
