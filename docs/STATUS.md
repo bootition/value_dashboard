@@ -17,7 +17,7 @@
 | 回归/发布验证 | ✅ 前端 + S1 全绿（423 passed，2026-08-04）；正式发行包可构建并经真实 exe `/api/health` smoke；**PRD §19.1 性能验收仪式 PASS（10/10 <5s，avg 256ms）** | `reports/46` §2、`reports/40` §2、`docs/evidence/evidence-performance-20260804.json` |
 | 桌面筛选界面 | ✅ 已接入正式路径：浅色侧栏四模块、筛选工作区、中文优先指标与模块内个股搜索；S1 424、Ruff、前端门禁全绿 | `reports/47` |
 | 四页桌面界面 | ✅ 四页静态样稿经用户确认后已全部接入：筛选、自选规则分组、个股搜索/详情、数据状态；S1 424、Ruff、前端门禁全绿 | `reports/48` |
-| 筛选界面与启动路径 | ✅ 范围（ST/停牌/上市年限）作为常驻条件并入筛选条件区，全站字体/圆角一致；`start.bat` 不再被旧 dist 遮蔽且按需构建，二次启动不再多花十几秒；筛选指标全中文（含排名与财务表字段） | `reports/52`、`reports/53` |
+| 筛选界面与启动路径 | ✅ 范围（ST/停牌/上市年限）作为常驻条件并入筛选条件区，全站字体/圆角一致；`start.bat` 不再被旧 dist 遮蔽且按需构建，二次启动不再多花十几秒；筛选指标全中文（含排名与财务表字段） | `reports/52`、`reports/53`、`reports/56` |
 | 自动更新与实时状态 | ✅ 写锁期间 summary 秒开（冷 718ms/热 4ms）、4s 轮询独立推进进度条与日志；Windows 死亡锁回收、逐股原子续传（中断后只补缺口，回归实证）、价格优先、增量快照已跑通；后台更新期间状态 API 不再因 DuckDB 连接配置冲突 503；SPA 入口禁止缓存 | `reports/52`、`reports/53`、`reports/54`、`reports/55` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
@@ -57,6 +57,7 @@
 | `docs/reports/53_INDICATOR_CHINESE_LABELS_AND_UPDATE_PROGRESS_2026-08-07.md` | **指标中文化与自动更新进度可视化**：全量中文指标/排名/财务表字段、逐股进度条与更新日志、4s 轮询与独立先行请求 | **当前指标展示与自动更新进度依据** |
 | `docs/reports/54_TEST_RESIDUE_AND_PROGRESS_REPORT_2026-08-07.md` | **测试残留清理与断点续传实证及数据页结构强化**：测试 DSL/结果清除、价格续传回归、明细表边框黑体 | **当前正式库卫生与续传/UI 依据** |
 | `docs/reports/55_DATA_STATUS_RESPONSIVENESS_2026-08-07.md` | **数据状态页实时响应与写锁降级**：summary 写锁缓存+stale、4s 独立轮询、15s 超时、刷新解耦 | **当前状态页响应与轮询依据** |
+| `docs/reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md` | **启动修复与启动耗时剖析**：块内 echo 括号引发的 CMD 退出修复、端口仅 LISTENING 判定、启动 13.4s 的瓶颈剖析（minimum_data_readiness） | **当前启动链路依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
