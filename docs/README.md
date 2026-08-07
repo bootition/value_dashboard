@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–58） | 仅 29/40/43/44/45/46/47/48/52/53/54/55/56/57/58 ✅；其余为发现/修复事实被后续取代 |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–59） | 仅 29/40/43/44/45/46/47/48/52/53/54/55/57/59 ✅；其余为发现/修复事实被后续取代 |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -63,9 +63,10 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/53_INDICATOR_CHINESE_LABELS_AND_UPDATE_PROGRESS_2026-08-07.md` — 当前指标中文展示与自动更新进度可视化依据
 - `reports/54_TEST_RESIDUE_AND_PROGRESS_REPORT_2026-08-07.md` — 当前正式库卫生、断点续传实证与数据页结构依据
 - `reports/55_DATA_STATUS_RESPONSIVENESS_2026-08-07.md` — 当前数据状态页响应与写锁降级依据
-- `reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md` — 当前启动链路修复与耗时剖析依据
+- `reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md` — 启动链路修复与历史耗时剖析（readiness 优化结论被 reports/59 取代）
 - `reports/57_UPDATE_SPEED_ANALYSIS_2026-08-07.md` — 当前自动更新速率剖析与限速调优依据
-- `reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` — 当前价格抓取策略（主源/校准/并发）依据
+- `reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` — 官方调研与初版并发事实（当前策略被 reports/59 取代）
+- `reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md` — 当前启动 readiness 与价格抓取策略依据
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新

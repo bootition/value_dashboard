@@ -1,9 +1,10 @@
 ---
 title: 数据源官方调研、限速校准与并发抓取落地报告（2026-08-07）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-07
 last-reviewed: 2026-08-07
+superseded-by: reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md
 ---
 
 # 数据源官方调研、限速校准与并发抓取落地报告（2026-08-07）

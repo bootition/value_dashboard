@@ -1,9 +1,10 @@
 ---
 title: 启动修复与启动耗时剖析报告（2026-08-07）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-07
 last-reviewed: 2026-08-07
+superseded-by: reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md
 ---
 
 # 启动修复与启动耗时剖析报告（2026-08-07）

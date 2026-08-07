@@ -3,13 +3,13 @@
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
-- **最后更新**：2026-08-07
-- **更新人**：opencode 会话（指标中文化与自动更新进度可视化）
+- **最后更新**：2026-08-08
+- **更新人**：opencode 会话（启动 readiness 与价格吞吐自适应）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
 | 整体启用 | ✅ **PASS / 可正式启用**（第八轮独立攻击确认 F4 已关闭：网页与原生 CLI 导出同源，原 F4 隔离复现现在含 `_truncated`；发行包实际启动 smoke、全量门禁及正式库保护均通过） | `reports/40`（取代 `reports/39` 的修复自证结论） |
-| 代码层门禁 | ✅ Ruff、前端 lint/55 node + 19 组件测试/build 全通过；隔离回归 451 passed、1 deselected（正式自动更新持锁，正式库 collect-only 哈希保护项未运行） | `reports/55` §3；历史发布门禁见 `reports/40` §2 |
+| 代码层门禁 | ✅ Ruff、前端 lint/55 node + 20 组件测试/build 全通过；隔离回归 458 passed | `reports/59` §2；历史发布门禁见 `reports/40` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
 | 数据层整体（ready） | ✅ ready=TRUE、warning_codes=[]；正式库测试期残留已清零（`dsl_expressions`/`screening_results` 归零，指标接口无测试 DSL；2026-08-05 复验 5537 只上市股，4 只极新股免费源数据未形成仅披露） | `reports/54`、`reports/52`、`reports/46`、`reports/29` |
@@ -18,18 +18,19 @@
 | 桌面筛选界面 | ✅ 已接入正式路径：浅色侧栏四模块、筛选工作区、中文优先指标与模块内个股搜索；S1 424、Ruff、前端门禁全绿 | `reports/47` |
 | 四页桌面界面 | ✅ 四页静态样稿经用户确认后已全部接入：筛选、自选规则分组、个股搜索/详情、数据状态；S1 424、Ruff、前端门禁全绿 | `reports/48` |
 | 筛选界面与启动路径 | ✅ 范围（ST/停牌/上市年限）作为常驻条件并入筛选条件区，全站字体/圆角一致；`start.bat` 不再被旧 dist 遮蔽且按需构建，二次启动不再多花十几秒；筛选指标全中文（含排名与财务表字段） | `reports/52`、`reports/53`、`reports/56` |
-| 自动更新与实时状态 | ✅ 价格主源切为腾讯（HTTP、可并发）并限速实测校准；抓取并发 4（socket 源加锁串行、DB 写串行）、断点续传保持；写锁期间 summary 秒开（冷 718ms/热 4ms）、4s 轮询推进进度；死亡锁回收、逐股原子续传均有回归 | `reports/52`、`reports/53`、`reports/54`、`reports/55`、`reports/57`、`reports/58` |
+| 自动更新与实时状态 | ✅ 腾讯主源；单股 raw/qfq 并行；45s deadline+retry；近 10 次长尾驱动动态间隔；外层并发 8 起步、稳定后 +4 至 16、惩罚回落；DB 写串行与断点续传保持；自选优先、ETA、job 速率记录均有回归 | `reports/59`（取代 `reports/58` 的当前策略） |
+| 启动 readiness | ✅ 同步全量核对已移出启动关键路径；SQLite 缓存命中时直接展示，无缓存保守显示“正在核对数据”，后台完成后原子发布；正式二次启动耗时待下次真实启动复验 | `reports/59`（取代 `reports/56` 的后续建议） |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
 3. **价格最新日期追赶**：价格历史完整（`price_daily_raw/qfq` 1990-12-19 起，全区间在库）；当前进行中的自动更新把最新未达标股票（raw 口径 1886 只；raw 或 qfq 任一缺口 4213 只）的最新日期推进到 08-05/08-07（每股增量几行），速率为 16.9 股/分（批量持久化后），预计 2~4 小时完成，不能宣称全市场最新日期已全部对齐。
 ## 进行中的工作
-- **价格数据续传**：自动更新控制器已恢复；价格历史完整（1990 起），正在把最新未达标股票推进到目标日（raw 口径 1886 只，速率 16.9 股/分）。CSRC partial 已按 30 天节流，不再阻塞价格。
+- **价格数据续传**：自动更新控制器已恢复；价格历史完整（1990 起），正在把最新未达标股票推进到目标日。新流水线的并发/动态限速/优先名单代码已通过隔离门禁，正式全量 job 的实际股/分待下次启动长跑回看。
 - **正式服务轮换待办**：用户当前打开的正式服务（8765）还是进度可视化之前的旧进程，自动更新照常但无 `live/log` 输出；待其自然结束后用 `start.bat` 重启一次即加载新代码与最新前端，进度条/日志生效。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
-| `docs/decisions/01_PRODUCT_REQUIREMENTS_V1.md` | 产品需求规格（验收合同） | **活文档**：2026-08-05 修订筛选关系、自动更新恢复与新股披露口径 |
+| `docs/decisions/01_PRODUCT_REQUIREMENTS_V1.md` | 产品需求规格（验收合同） | **活文档**：2026-08-08 修订 readiness 后台核对、价格并发/超时/自适应、优先续传与 ETA |
 | `docs/decisions/02_TECH_CONSTRAINTS.md` | 技术约束清单 | 约束冲突时以 README/实施为准时需人工裁决 |
 | `docs/reports/29_DATA_REBUILD_REPORT_2026-07-31.md` | 最新数据重建报告（P0-1 关闭依据） | 数据层当前结论基线 |
 | `docs/reports/30_AUDIT_FIX_CLOSURE_2026-08-02.md` | 审计修复闭环报告（`reports/27` 代码级 P1/P2 全部关闭依据） | 代码层审计结论基线 |
@@ -57,9 +58,10 @@
 | `docs/reports/53_INDICATOR_CHINESE_LABELS_AND_UPDATE_PROGRESS_2026-08-07.md` | **指标中文化与自动更新进度可视化**：全量中文指标/排名/财务表字段、逐股进度条与更新日志、4s 轮询与独立先行请求 | **当前指标展示与自动更新进度依据** |
 | `docs/reports/54_TEST_RESIDUE_AND_PROGRESS_REPORT_2026-08-07.md` | **测试残留清理与断点续传实证及数据页结构强化**：测试 DSL/结果清除、价格续传回归、明细表边框黑体 | **当前正式库卫生与续传/UI 依据** |
 | `docs/reports/55_DATA_STATUS_RESPONSIVENESS_2026-08-07.md` | **数据状态页实时响应与写锁降级**：summary 写锁缓存+stale、4s 独立轮询、15s 超时、刷新解耦 | **当前状态页响应与轮询依据** |
-| `docs/reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md` | **启动修复与启动耗时剖析**：块内 echo 括号引发的 CMD 退出修复、端口仅 LISTENING 判定、启动 13.4s 的瓶颈剖析（minimum_data_readiness） | **当前启动链路依据** |
+| `docs/reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md` | 启动修复与历史耗时剖析 | readiness 优化结论被 `reports/59` 取代 |
 | `docs/reports/57_UPDATE_SPEED_ANALYSIS_2026-08-07.md` | **自动更新速率剖析与限速调优**：90s 隐式节流根因与 baostock 降频 | **当前更新速率依据** |
-| `docs/reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` | **官方调研、限速校准与并发抓取落地**：tencent 主源、并发 4、socket 串行锁 | **当前价格抓取策略依据** |
+| `docs/reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` | 官方调研、限速校准与初版并发事实 | 当前策略被 `reports/59` 取代 |
+| `docs/reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md` | **readiness 后台缓存与价格吞吐自适应**：raw/qfq 并行、45s deadline、8→16、动态间隔、自选优先、ETA/速率记录 | **当前启动核对与价格抓取策略依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
@@ -82,6 +84,8 @@
 - `reports/49`（桌面界面同构与数据状态修复）→ UI/状态当前结论由 `reports/50` 取代；历史修复事实保留。
 - `reports/50`（最终筛选界面与自动更新恢复）→ 修复事实保留；用户启动路径和实时状态当前结论由 `reports/51` 取代，视觉与启动策略由 `reports/52` 修正。
 - `reports/51`（用户启动路径与实时状态恢复）→ 连接修复与 dist 遮蔽事实保留；视觉、范围常驻与按需构建当前结论由 `reports/52` 取代。
+- `reports/56`（启动耗时剖析）→ 根因与历史实测保留；readiness 后台缓存实施结论由 `reports/59` 更新。
+- `reports/58`（腾讯主源与初版并发）→ 官方调研与校准事实保留；当前并发、超时、动态限速和优先续传策略由 `reports/59` 更新。
 - 更早编号报告（05–24、26）→ 全部 superseded，仅作追溯证据。
 ## 维护规则（写文档的人必须遵守）
 1. **状态变化时**：更新本文件 → 将旧报告 front-matter 的 `status` 改为 `superseded` 并写 `superseded-by` → 新报告/文档必须带 front-matter 且 `status: approved`。
