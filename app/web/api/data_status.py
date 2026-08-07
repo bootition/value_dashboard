@@ -2,18 +2,71 @@
 
 只读展示：更新时间、覆盖状态、回填状态、重试/缺失摘要。
 不提供写操作（PRD DS3）。
+
+写竞争降级：自动更新持有 DuckDB 写锁期间，逐股提交间隙读查询仍会被
+串行化拖慢（实测 summary 可达 60s+）。这里在写锁存在时直接返回最近一次
+成功计算的结果缓存并标注 stale=true，避免界面被读阻塞；轮询不再重复触发
+全量聚合。缓存 60s 有效，无锁时每 60s 重算一次。
 """
 
 from __future__ import annotations
+
+import time
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
+_SUMMARY_TTL_SECONDS = 60
+_SUMMARY_CACHE: dict[str, object] = {"at": 0.0, "data": None}
+
+
+def _update_write_lock_active(duck) -> bool:
+    """自动更新写锁存在即认为正在写入（保守：宁愿命中缓存也不要卡读）。"""
+    try:
+        return (duck.db_path.parent / ".value-dashboard.update.lock").exists()
+    except OSError:
+        return False
+
+
+def _cached_summary() -> dict | None:
+    data = _SUMMARY_CACHE.get("data")
+    if data is None:
+        return None
+    at = float(_SUMMARY_CACHE["at"])
+    if (time.monotonic() - at) > _SUMMARY_TTL_SECONDS:
+        return None
+    return dict(data) if isinstance(data, dict) else None
+
+
+def _store_summary(summary: dict) -> None:
+    _SUMMARY_CACHE["at"] = time.monotonic()
+    _SUMMARY_CACHE["data"] = dict(summary)
+
 
 @router.get("/summary")
 def get_summary(request: Request) -> dict:
     """数据状态摘要 (PRD §15 DS2)"""
+    # 自动更新写锁期间：直接返回最近一次成功缓存（stale=true）。
+    # 避免每个轮询请求阻塞在 DuckDB 写锁上（曾实测 60s+）。
+    if _update_write_lock_active(request.app.state.duck):
+        cached = _cached_summary()
+        if cached is not None:
+            cached["stale"] = True
+            cached["stale_reason"] = "auto_update_active"
+            return cached
+        summary = _build_summary_fresh(request)
+        _store_summary(summary)
+        return summary
+    cached = _cached_summary()
+    if cached is not None:
+        return cached
+    summary = _build_summary_fresh(request)
+    _store_summary(summary)
+    return summary
+
+
+def _build_summary_fresh(request: Request) -> dict:
     duck = request.app.state.duck
     sqlite = request.app.state.sqlite
 

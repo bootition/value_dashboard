@@ -86,9 +86,11 @@ const error = ref('')
 const retryList = ref<RetryItem[]>([])
 const missingList = ref<MissingItem[]>([])
 const autoUpdate = ref<AutoUpdateStatus | null>(null)
-// L1-3（报告42）: 更新运行中每 12s 自动轮询；显示"上次刷新"
 const lastRefreshedAt = ref<string | null>(null)
-let pollTimer: ReturnType<typeof setInterval> | undefined
+// 轻量轮询：仅自动更新状态；in-flight guard + 递归定时，防堆积与卡死
+let pollTimer: ReturnType<typeof setTimeout> | undefined
+let autoInFlight = false
+const refreshing = ref(false)
 
 const isPolling = computed(() => autoUpdate.value?.current_stage === 'running')
 
@@ -104,46 +106,72 @@ const priceQfqPct = computed(() => summary.value ? pct(summary.value.price_qfq_c
 const csrcIndustryPct = computed(() => summary.value ? pct(summary.value.csrc_industry_count, summary.value.stock_count) : '0%')
 const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.indicator_snapshot_count, summary.value.stock_count) : '0%')
 
-async function fetchData(silent = false) {
-  if (!silent) error.value = ''
-  if (!silent) loading.value = true
-  // 自动更新状态独立先行：summary 在写入锁竞争下可能较慢，
-  // 不能让进度卡片被整体拖住（PRD §7.3 界面立即可用）。
-  const autoPromise = axios.get('/api/data-status/auto-update').catch(() => null)
+// 轻量路径：只拉自动更新状态，4s 递归轮询（running 时），绝不阻塞于 summary。
+async function fetchAutoOverview(): Promise<void> {
+  if (autoInFlight) return
+  autoInFlight = true
+  try {
+    const autoResp = await axios.get('/api/data-status/auto-update', { timeout: 8000 })
+    autoUpdate.value = autoResp.data
+    lastRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  } catch {
+    // 保留上次状态，不打断轮询链
+  } finally {
+    autoInFlight = false
+    schedulePolling()
+  }
+}
+
+function schedulePolling() {
+  if (pollTimer) {
+    clearTimeout(pollTimer)
+    pollTimer = undefined
+  }
+  if (isPolling.value) {
+    pollTimer = setTimeout(() => void fetchAutoOverview(), 4000)
+  }
+}
+
+// 重量级只读摘要：summary/retry/missing 设 15s 超时，失败仅出错误提示，不阻塞自动更新卡。
+async function fetchHeavy(silent = false): Promise<void> {
+  if (silent) {
+    if (refreshing.value) return
+    refreshing.value = true
+  } else {
+    error.value = ''
+    loading.value = true
+  }
   try {
     const [sumResp, retryResp, missResp] = await Promise.all([
-      axios.get('/api/data-status/summary'),
-      axios.get('/api/data-status/retry-list'),
-      axios.get('/api/data-status/missing-list'),
+      axios.get('/api/data-status/summary', { timeout: 15000 }),
+      axios.get('/api/data-status/retry-list', { timeout: 15000 }),
+      axios.get('/api/data-status/missing-list', { timeout: 15000 }),
     ])
     summary.value = sumResp.data
     retryList.value = retryResp.data.items || []
     missingList.value = missResp.data.items || []
+    error.value = (sumResp.data as { stale?: boolean }).stale ? '数据为自动更新期间的快照缓存（stale）' : ''
   } catch (e: unknown) {
     if (!silent) error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
-  }
-  const autoResp = await autoPromise
-  autoUpdate.value = autoResp?.data ?? null
-  lastRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-  if (!silent) loading.value = false
-  schedulePolling()
-}
-
-// L1-3（报告42）: 更新运行中自动轮询（4s 以平滑展示逐股进度）；停止后自动取消
-function schedulePolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer)
-    pollTimer = undefined
-  }
-  if (autoUpdate.value?.current_stage === 'running') {
-    pollTimer = setInterval(() => void fetchData(true), 4000)
+    else if (!summary.value) error.value = '数据摘要暂时不可用'
+  } finally {
+    if (!silent) loading.value = false
+    refreshing.value = false
   }
 }
 
-onMounted(() => void fetchData())
+function handleRefresh() {
+  void fetchAutoOverview()
+  void fetchHeavy(true)
+}
+
+onMounted(() => {
+  void fetchAutoOverview()
+  void fetchHeavy()
+})
 onBeforeUnmount(() => {
   if (pollTimer) {
-    clearInterval(pollTimer)
+    clearTimeout(pollTimer)
     pollTimer = undefined
   }
 })
@@ -186,14 +214,14 @@ function skipReasonLabel(reason: string | null | undefined): string {
         <!-- L1-3（报告42）: 显示上次刷新时间与自动轮询状态 -->
         <span v-if="lastRefreshedAt" style="color:#999; font-size:12px;">上次刷新 {{ lastRefreshedAt }}</span>
         <n-tag v-if="isPolling" size="small" type="info">更新运行中，每 4 秒自动刷新</n-tag>
-        <n-button :loading="loading" @click="fetchData()">刷新</n-button>
+        <n-button :loading="refreshing" @click="handleRefresh">刷新</n-button>
       </n-space>
     </n-space>
-    <n-spin :show="loading">
-      <n-alert v-if="error" type="error" title="加载失败" style="margin-bottom: 16px;">
+    <n-spin :show="loading && !summary">
+      <n-alert v-if="error" type="error" title="提示" style="margin-bottom: 16px;">
         {{ error }}
       </n-alert>
-      <div v-else-if="summary">
+      <template v-if="summary">
         <!-- L2 V3: 第一问"数据可研究吗" -->
         <n-alert
           :type="summary.data_quality.minimum_data_readiness.ready ? 'success' : 'error'"
@@ -211,6 +239,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
         <p style="color: #999; margin-bottom: 16px;">
           最近更新: {{ summary.last_update || '尚未初始化' }}
         </p>
+      </template>
 
         <section class="status-workbench">
         <!-- 自动更新状态（PRD §7.3 只读展示） -->
@@ -280,7 +309,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
             <code>vd data auto-update status|enable|disable|run|pause|resume</code>
           </p>
         </n-card>
-
+        <template v-if="summary">
         <!-- 数据质量警告 -->
         <n-alert
           v-if="summary.data_quality.warning_codes.length > 0"
@@ -472,8 +501,8 @@ function skipReasonLabel(reason: string | null | undefined): string {
         <n-card v-if="summary.stock_count === 0">
           <n-empty description="尚未初始化数据。请运行: python -m app.cli.main data init" />
         </n-card>
+        </template>
         </section>
-      </div>
     </n-spin>
   </section>
 </template>

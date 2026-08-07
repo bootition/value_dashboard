@@ -303,6 +303,7 @@ class AutoUpdateController:
                     "current": info.get("current"),
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
+                self._progress["phase"] = f"step:{step_name}"
                 _append_log(
                     f"{info.get('label', step_name)} 进行中 {info.get('done', 0)}/{info.get('total', 0)}"
                     + (f" {info.get('current')}" if info.get("current") else "")
