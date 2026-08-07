@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from datetime import datetime, timezone
+
+import pytest
 
 from app.core.init import CSRC_BATCH_SIZE, DataInitializer
 from app.core.update import IncrementalUpdater
 from app.core.storage.update_lock import exclusive_update
-from app.core.adapters.base import FetchRequest
+from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.adapters.tdx_adapter import TDXAdapter
 
 
@@ -387,3 +390,75 @@ class _ChunkAdapter:
             ),
             raw_response=raw,
         )
+
+
+class _SimulatedPriceManager:
+    """Fake adapter manager: 按股票返回标准价格行，fail_codes 命中则抛错模拟中断。"""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+        self.fail_codes: set[str] = set()
+
+    def fetch(self, request: FetchRequest) -> FetchResult:
+        code = request.stock_codes[0]
+        self.calls.append((code, request.adjust))
+        if code in self.fail_codes:
+            raise RuntimeError(f"source down for {code}")
+        rows = [
+            {"trade_date": "2026-08-05", "open": 1.0, "high": 1.5, "low": 0.9,
+             "close": 1.2, "volume": 100, "turnover": 1200.0, "turnover_rate": 0.01},
+            {"trade_date": "2026-08-06", "open": 1.2, "high": 1.6, "low": 1.1,
+             "close": 1.4, "volume": 120, "turnover": 1300.0, "turnover_rate": 0.012},
+        ]
+        return FetchResult(
+            data=rows,
+            raw_response=b"fake-price-payload",
+            metadata=SourceMetadata(
+                source="local_cache",
+                fetch_time=datetime.now(timezone.utc),
+                raw_response_hash=hashlib.sha256(b"fake-price-payload").hexdigest(),
+                confidence="strict",
+                row_count=len(rows),
+                error=None,
+            ),
+        )
+
+
+def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store) -> None:
+    """价格逐股原子提交：进程在图 B 中断后，下次启动只补缺失股票，不重抓已提交的图 A。"""
+    for code, listing in (("000001", "2020-01-01"), ("600519", "2020-01-01")):
+        with duckdb_store.write_connection() as conn:
+            conn.execute(
+                """INSERT INTO stock_meta (stock_code, exchange, name, is_listed, is_suspended, listing_date)
+                   VALUES (?, ?, ?, TRUE, FALSE, ?) ON CONFLICT DO NOTHING""",
+                [code, "SZ" if code == "000001" else "SH", code, listing],
+            )
+    with sqlite_store.transaction() as conn:
+        conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-08-06')")
+
+    manager = _SimulatedPriceManager()
+    manager.fail_codes = {"600519"}  # 模拟处理到 600519 时进程中断
+
+    first = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=manager)
+    with pytest.raises(RuntimeError, match="source down for 600519"):
+        first._update_prices_incremental(max_stocks=0)
+
+    before = duckdb_store.read_query(
+        "SELECT stock_code FROM price_daily_raw WHERE trade_date = '2026-08-06'"
+    )
+    retries = sqlite_store.query("SELECT stock_code, error FROM retry_list")
+    if retries:
+        raise AssertionError(f"unexpected retry entries: {retries}")
+    assert {row["stock_code"] for row in before} == {"000001"}, "中断时已提交的股票必须留在库中"
+
+    manager.fail_codes = set()  # 模拟下次启动续传
+    second = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=manager)
+    report = second._update_prices_incremental(max_stocks=0)
+
+    assert report["status"] == "success"
+    assert report["success"] == 1
+    assert manager.calls.count(("000001", "raw")) == 1, "已达标的股票不得被再次抓取"
+    after = duckdb_store.read_query(
+        "SELECT stock_code FROM price_daily_raw WHERE trade_date = '2026-08-06'"
+    )
+    assert {row["stock_code"] for row in after} == {"000001", "600519"}
