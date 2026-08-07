@@ -44,7 +44,7 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
     "cninfo": 1.5,
     "cninfo_csrc": 1.5,
-    "baostock": 0.1,
+    "baostock": 0.8,
     "tdx": 0.1,
     "tencent": 0.2,
     "sina": 0.35,

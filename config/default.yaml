@@ -16,7 +16,7 @@ adapters:
     cninfo: 1.5
     akshare_eastmoney: 0.5
     tdx: 0.1
-    baostock: 0.1
+    baostock: 0.8
     tencent: 0.2
     sina: 0.35
   primary:
