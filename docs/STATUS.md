@@ -18,7 +18,7 @@
 | 桌面筛选界面 | ✅ 已接入正式路径：浅色侧栏四模块、筛选工作区、中文优先指标与模块内个股搜索；S1 424、Ruff、前端门禁全绿 | `reports/47` |
 | 四页桌面界面 | ✅ 四页静态样稿经用户确认后已全部接入：筛选、自选规则分组、个股搜索/详情、数据状态；S1 424、Ruff、前端门禁全绿 | `reports/48` |
 | 筛选界面与启动路径 | ✅ 范围（ST/停牌/上市年限）作为常驻条件并入筛选条件区，全站字体/圆角一致；`start.bat` 不再被旧 dist 遮蔽且按需构建，二次启动不再多花十几秒；筛选指标全中文（含排名与财务表字段） | `reports/52`、`reports/53`、`reports/56` |
-| 自动更新与实时状态 | ✅ 写锁期间 summary 秒开（冷 718ms/热 4ms）、4s 轮询独立推进进度条与日志；Windows 死亡锁回收、逐股原子续传（中断后只补缺口，回归实证）、价格优先、增量快照已跑通；价格抓取限速已调优（baostock 0.8s/请求，规避高频限流 ~90s 惩罚）；后台更新期间状态 API 不再因 DuckDB 连接配置冲突 503；SPA 入口禁止缓存 | `reports/52`、`reports/53`、`reports/54`、`reports/55`、`reports/57` |
+| 自动更新与实时状态 | ✅ 价格主源切为腾讯（HTTP、可并发）并限速实测校准；抓取并发 4（socket 源加锁串行、DB 写串行）、断点续传保持；写锁期间 summary 秒开（冷 718ms/热 4ms）、4s 轮询推进进度；死亡锁回收、逐股原子续传均有回归 | `reports/52`、`reports/53`、`reports/54`、`reports/55`、`reports/57`、`reports/58` |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
@@ -58,6 +58,8 @@
 | `docs/reports/54_TEST_RESIDUE_AND_PROGRESS_REPORT_2026-08-07.md` | **测试残留清理与断点续传实证及数据页结构强化**：测试 DSL/结果清除、价格续传回归、明细表边框黑体 | **当前正式库卫生与续传/UI 依据** |
 | `docs/reports/55_DATA_STATUS_RESPONSIVENESS_2026-08-07.md` | **数据状态页实时响应与写锁降级**：summary 写锁缓存+stale、4s 独立轮询、15s 超时、刷新解耦 | **当前状态页响应与轮询依据** |
 | `docs/reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md` | **启动修复与启动耗时剖析**：块内 echo 括号引发的 CMD 退出修复、端口仅 LISTENING 判定、启动 13.4s 的瓶颈剖析（minimum_data_readiness） | **当前启动链路依据** |
+| `docs/reports/57_UPDATE_SPEED_ANALYSIS_2026-08-07.md` | **自动更新速率剖析与限速调优**：90s 隐式节流根因与 baostock 降频 | **当前更新速率依据** |
+| `docs/reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` | **官方调研、限速校准与并发抓取落地**：tencent 主源、并发 4、socket 串行锁 | **当前价格抓取策略依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
