@@ -165,6 +165,7 @@ class BaoStockAdapter(BaseAdapter):
         # thousands of redundant logins). Close explicitly via .close().
         self.reuse_session = reuse_session
         self._logged_in = False
+        self._relogin_requested = False
         # The BaoStock client is a global socket protocol and is not
         # thread-safe. When price fetching runs concurrently (HTTP adapters in
         # parallel), bao stock requests must stay serialized.
@@ -193,6 +194,9 @@ class BaoStockAdapter(BaseAdapter):
 
         try:
             with self._fetch_lock:
+                if self._relogin_requested and self.reuse_session:
+                    self._reconnect()
+                    self._relogin_requested = False
                 return handler(request)
         except Exception as exc:
             logger.exception("baostock fetch 失败: %s", request.data_type)
@@ -531,6 +535,10 @@ class BaoStockAdapter(BaseAdapter):
         self._logged_in = False
         self._ensure_login()
         logger.warning("baostock 会话已失效，已重新登录")
+
+    def request_relogin(self) -> None:
+        """Mark the reusable socket for recovery after an outer fetch timeout."""
+        self._relogin_requested = True
 
     def close(self) -> None:
         """Logout explicitly when session-reuse mode is active."""

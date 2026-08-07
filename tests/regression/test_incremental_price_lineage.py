@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import threading
+import time
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
@@ -100,8 +102,8 @@ def test_xdxr_stock_gets_full_qfq_refetch(duckdb_store, sqlite_store) -> None:
     assert result["status"] == "success"
 
 
-def test_non_xdxr_stock_keeps_incremental_window(duckdb_store, sqlite_store) -> None:
-    """无除权事件的股票保持增量窗口（start_date = 本地最新日期）。"""
+def test_non_xdxr_stock_without_local_rows_gets_full_refetch(duckdb_store, sqlite_store) -> None:
+    """无本地价格的一侧必须全量拉取，不借用其他股票的全库日期。"""
     requests = []
 
     class Adapter:
@@ -127,7 +129,7 @@ def test_non_xdxr_stock_keeps_incremental_window(duckdb_store, sqlite_store) -> 
 
     assert result["success"] == 1
     assert result["xdxr_full_refetch"] == 0
-    assert all(request.start_date == "2026-07-29" for request in requests)
+    assert all(request.start_date is None for request in requests)
 
 
 def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
@@ -165,7 +167,8 @@ def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
     result = updater._update_prices_incremental(max_stocks=1)
 
     assert result["xdxr_full_refetch"] == 1
-    assert all(request.start_date is None for request in requests)
+    starts = {request.adjust: request.start_date for request in requests}
+    assert starts == {"raw": "2026-08-01", "qfq": None}
 
 
 def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store) -> None:
@@ -196,6 +199,111 @@ def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store)
     assert result["success"] == 1
     assert result["raw_full_refetch"] is True
     assert all(request.start_date is None for request in requests)
+
+
+def test_raw_and_qfq_fetch_in_parallel(duckdb_store, sqlite_store) -> None:
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+
+    class Adapter:
+        def fetch(self, request):
+            nonlocal active, maximum_active
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.05)
+            with lock:
+                active -= 1
+            raw_response = request.adjust.encode("ascii")
+            return FetchResult(
+                data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
+                metadata=SourceMetadata(
+                    source="local_cache",
+                    fetch_time=datetime.now(timezone.utc),
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
+                    confidence="strict",
+                ),
+                raw_response=raw_response,
+            )
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600000', 'PAR', 'SHSE')"
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+
+    report = updater._update_prices_incremental(max_stocks=1)
+
+    assert report["success"] == 1
+    assert maximum_active == 2
+
+
+def test_watchlist_stocks_are_updated_first_with_limit(duckdb_store, sqlite_store) -> None:
+    calls: list[str] = []
+
+    class Adapter:
+        def fetch(self, request):
+            calls.append(request.stock_codes[0])
+            raw_response = request.adjust.encode("ascii")
+            return FetchResult(
+                data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
+                metadata=SourceMetadata(
+                    source="local_cache",
+                    fetch_time=datetime.now(timezone.utc),
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
+                    confidence="strict",
+                ),
+                raw_response=raw_response,
+            )
+
+    for code in ("000001", "600519"):
+        duckdb_store.write_query(
+            "INSERT INTO stock_meta (stock_code, name, exchange) VALUES (?, ?, 'SZSE')",
+            [code, code],
+        )
+    sqlite_store.execute(
+        "INSERT INTO watchlist (stock_code, group_name) VALUES ('600519', '重点研究')"
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+
+    report = updater._update_prices_incremental(max_stocks=1)
+
+    assert report["priority_count"] == 1
+    assert set(calls) == {"600519"}
+
+
+def test_price_fetch_timeout_records_retry(duckdb_store, sqlite_store) -> None:
+    release = threading.Event()
+
+    class Adapter:
+        def fetch(self, request):
+            release.wait(timeout=2)
+            raise RuntimeError("late response")
+
+        def recover_after_timeout(self) -> None:
+            pass
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600001', 'SLOW', 'SHSE')"
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater.price_fetch_timeout_seconds = 1
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+    started = time.monotonic()
+    try:
+        report = updater._update_prices_incremental(max_stocks=1)
+    finally:
+        release.set()
+
+    assert time.monotonic() - started < 1.8
+    assert report["status"] == "partial"
+    assert report["failed"] == 1
+    retry = sqlite_store.query(
+        "SELECT error FROM retry_list WHERE stock_code = '600001'"
+    )
+    assert "timeout after 1s" in retry[0]["error"]
 
 
 def test_get_xdxr_codes_since_returns_only_matching_stocks(duckdb_store, sqlite_store) -> None:

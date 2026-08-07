@@ -23,7 +23,7 @@ adapters:
     balance_sheet: ["sina", "tdx", "akshare_eastmoney"]
     income_statement: ["sina", "tdx", "akshare_eastmoney"]
     cash_flow: ["sina", "tdx", "akshare_eastmoney"]
-    price_daily: ["tencent", "baostock", "tdx", "akshare_eastmoney"]
+    price_daily: ["tencent", "baostock", "tdx"]
     dividends: ["cninfo", "akshare_eastmoney", "baostock"]
     xdxr: ["tdx"]
     announcements: ["cninfo"]
@@ -44,7 +44,11 @@ update:
   startup: true           # 启动时自动执行增量更新
   incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
-  price_fetch_concurrency: 8  # 价格批量抓取的并发网络请求数（HTTP 源；socket 源强制串行）
+  price_fetch_concurrency: 8  # 自适应起始并发（HTTP 源；socket 源强制串行）
+  price_fetch_max_concurrency: 16  # 连续 5 分钟无长尾/失败时每次 +4，最多 16
+  price_fetch_concurrency_step: 4
+  price_fetch_scale_up_seconds: 300
+  price_fetch_timeout_seconds: 45  # 单股 raw/qfq 并行抓取的有界截止时间
   price_fetch_batch_size: 20  # 价格持久化批量：每批合并为单 DuckDB 事务，减少 WAL 提交
 
 backup:

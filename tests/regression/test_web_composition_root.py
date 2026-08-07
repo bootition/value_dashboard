@@ -168,10 +168,6 @@ def test_run_server_reuses_one_resolved_database_pair(
     monkeypatch.setattr(web_main, "DuckDBStore", build_duck)
     monkeypatch.setattr(web_main, "SQLiteStore", build_sqlite)
     monkeypatch.setattr(
-        "app.core.data_quality.minimum_data_readiness",
-        lambda store: {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}},
-    )
-    monkeypatch.setattr(
         web_main,
         "init_all_schema",
         lambda *, duckdb_store, sqlite_store: calls.update(
@@ -204,13 +200,21 @@ def test_run_server_reuses_one_resolved_database_pair(
         "config": config,
         "duck": duck,
         "sqlite": sqlite,
-        "startup_readiness": {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}},
+        "startup_readiness": {
+            "ready": False,
+            "checking": True,
+            "cached": False,
+            "stock_count": 0,
+            "missing": {},
+            "missing_counts": {},
+            "schema_compatibility": {"compatible": True, "missing": []},
+        },
     }
     maintenance_app, maintenance_duck, maintenance_sqlite, maintenance_readiness = calls["maintenance"]
     assert maintenance_app is calls["uvicorn"][0]
     assert maintenance_duck is duck
     assert maintenance_sqlite is sqlite
-    assert maintenance_readiness == {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}}
+    assert maintenance_readiness["checking"] is True
 
 
 def test_web_sources_have_no_implicit_database_constructors() -> None:

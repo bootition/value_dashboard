@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import hashlib
+import json
 import time
 
 from app.core.storage.duckdb_store import DuckDBStore
@@ -11,6 +12,7 @@ from app.core.storage.sqlite_store import SQLiteStore
 
 DEFAULT_MINIMUM_HISTORY_OBSERVATIONS = 1_300
 DEFAULT_MINIMUM_VOLUME_OBSERVATIONS = 1_300
+READINESS_CACHE_KEY = "minimum_data_readiness"
 _SCREENING_BLOCKING_WARNINGS = {
     "FINANCIAL_SHELL_ROWS",
     "SNAPSHOT_STALE",
@@ -20,6 +22,57 @@ _SCREENING_BLOCKING_WARNINGS = {
     "LIVE_SCHEMA_INCOMPATIBLE",
     "LINEAGE_INVALID",
 }
+
+
+def checking_data_readiness() -> dict:
+    """Return a conservative placeholder while the background check runs."""
+    return {
+        "ready": False,
+        "checking": True,
+        "cached": False,
+        "stock_count": 0,
+        "missing": {},
+        "missing_counts": {},
+        "schema_compatibility": {"compatible": True, "missing": []},
+    }
+
+
+def read_cached_data_readiness(sqlite: SQLiteStore) -> dict | None:
+    """Load the last completed readiness check from the profile SQLite store."""
+    try:
+        rows = sqlite.query(
+            "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
+            [READINESS_CACHE_KEY],
+        )
+        if not rows:
+            return None
+        value = json.loads(rows[0]["value"])
+        if not isinstance(value, dict) or "ready" not in value:
+            return None
+        value["checking"] = False
+        value["cached"] = True
+        value["checked_at"] = rows[0]["updated_at"]
+        return value
+    except Exception:
+        return None
+
+
+def store_cached_data_readiness(sqlite: SQLiteStore, readiness: dict) -> dict:
+    """Persist one completed check and return its display-ready representation."""
+    checked_at = datetime.now().astimezone().isoformat()
+    value = dict(readiness)
+    value.pop("checking", None)
+    value.pop("cached", None)
+    value.pop("checked_at", None)
+    sqlite.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+        [READINESS_CACHE_KEY, json.dumps(value, ensure_ascii=False, default=str), checked_at],
+    )
+    value["checking"] = False
+    value["cached"] = False
+    value["checked_at"] = checked_at
+    return value
 
 
 def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:

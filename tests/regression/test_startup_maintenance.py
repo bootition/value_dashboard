@@ -51,7 +51,9 @@ def test_startup_maintenance_completes_and_reports_done(
     app = _build_app(database_paths)
     readiness = {"ready": True, "stock_count": 1, "missing": {}, "missing_counts": {}}
     monkeypatch.setattr(
-        web_main, "_run_startup_maintenance", lambda duck, sqlite, current: readiness
+        web_main,
+        "_run_startup_maintenance",
+        lambda duck, sqlite, current, readiness_cb=None: readiness,
     )
 
     web_main._start_startup_maintenance(app, app.state.duck, app.state.sqlite, readiness)
@@ -72,7 +74,7 @@ def test_startup_maintenance_does_not_start_twice(
     release = threading.Event()
     calls: list[None] = []
 
-    def blocked(duck, sqlite, readiness) -> dict:
+    def blocked(duck, sqlite, readiness, readiness_cb=None) -> dict:
         calls.append(None)
         entered.set()
         release.wait(timeout=5)
@@ -97,7 +99,7 @@ def test_startup_maintenance_reports_worker_failure(
 ) -> None:
     app = _build_app(database_paths)
 
-    def explode(duck, sqlite, readiness) -> dict:
+    def explode(duck, sqlite, readiness, readiness_cb=None) -> dict:
         raise RuntimeError("network down")
 
     monkeypatch.setattr(web_main, "_run_startup_maintenance", explode)
@@ -139,3 +141,64 @@ def test_startup_maintenance_marks_failed_initialization(
     assert state["status"] == "failed"
     assert "init boom" in state["error"]
     assert app.state.startup_readiness["ready"] is False
+
+
+def test_readiness_placeholder_is_exposed_until_background_check_finishes(
+    database_paths: DatabasePathSet,
+    monkeypatch,
+) -> None:
+    app = _build_app(database_paths)
+    checking = {
+        "ready": False,
+        "checking": True,
+        "cached": False,
+        "stock_count": 0,
+        "missing": {},
+        "missing_counts": {},
+        "schema_compatibility": {"compatible": True, "missing": []},
+    }
+    app.state.startup_readiness = checking
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocked(duck, sqlite, readiness, readiness_cb=None) -> dict:
+        entered.set()
+        release.wait(timeout=5)
+        result = {**readiness, "ready": True, "checking": False, "stock_count": 1}
+        if readiness_cb is not None:
+            readiness_cb(result)
+        return result
+
+    monkeypatch.setattr(web_main, "_run_startup_maintenance", blocked)
+    web_main._start_startup_maintenance(app, app.state.duck, app.state.sqlite, checking)
+    assert entered.wait(timeout=5)
+    response = TestClient(app).get("/api/readiness")
+    assert response.status_code == 503
+    assert response.json()["detail"]["checking"] is True
+    release.set()
+    assert _wait_for_terminal_status(app)["status"] == "done"
+
+
+def test_readiness_cache_round_trip(sqlite_store) -> None:
+    from app.core.data_quality import (
+        read_cached_data_readiness,
+        store_cached_data_readiness,
+    )
+
+    stored = store_cached_data_readiness(
+        sqlite_store,
+        {
+            "ready": True,
+            "stock_count": 2,
+            "missing": {},
+            "missing_counts": {},
+            "schema_compatibility": {"compatible": True, "missing": []},
+        },
+    )
+    loaded = read_cached_data_readiness(sqlite_store)
+
+    assert stored["cached"] is False
+    assert loaded is not None
+    assert loaded["ready"] is True
+    assert loaded["cached"] is True
+    assert loaded["checking"] is False

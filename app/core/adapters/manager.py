@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any, Final
 
 from app.core.adapters.base import (
@@ -27,7 +29,7 @@ KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
     "listing_info": ["akshare_eastmoney"],
-    "price_daily": ["tencent", "baostock", "tdx", "akshare_eastmoney"],
+    "price_daily": ["tencent", "baostock", "tdx"],
     "balance_sheet": ["sina", "tdx", "akshare_eastmoney"],
     "income_statement": ["sina", "tdx", "akshare_eastmoney"],
     "cash_flow": ["sina", "tdx", "akshare_eastmoney"],
@@ -133,6 +135,8 @@ class AdapterManager:
         self._rate_limits = _load_adapter_rate_limits()
         # Circuit breaker: {adapter_name: {"failures": int, "tripped_until": datetime|None}}
         self._circuit_breaker: dict[str, dict[str, Any]] = {}
+        self._state_lock = threading.RLock()
+        self._initialization_lock = threading.Lock()
 
     # ─── Circuit breaker ─────────────────────────────────────────────
     _CIRCUIT_FAILURE_THRESHOLD = 5       # 连续失败5次后熔断
@@ -140,43 +144,45 @@ class AdapterManager:
 
     def _is_circuit_tripped(self, adapter_name: str) -> bool:
         """检查适配器是否被熔断"""
-        state = self._circuit_breaker.get(adapter_name)
-        if not state or not state.get("tripped_until"):
+        with self._state_lock:
+            state = self._circuit_breaker.get(adapter_name)
+            if not state or not state.get("tripped_until"):
+                return False
+            from datetime import datetime, timezone
+            now = datetime.now(timezone.utc)
+            if now < state["tripped_until"]:
+                remaining = (state["tripped_until"] - now).total_seconds()
+                logger.debug(
+                    f"熔断跳过 {adapter_name} (剩余冷却 {remaining:.0f}s, "
+                    f"连续失败 {state['failures']} 次)"
+                )
+                return True
+            state["tripped_until"] = None
+            state["failures"] = 0
             return False
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc)
-        if now < state["tripped_until"]:
-            remaining = (state["tripped_until"] - now).total_seconds()
-            logger.debug(
-                f"熔断跳过 {adapter_name} (剩余冷却 {remaining:.0f}s, "
-                f"连续失败 {state['failures']} 次)"
-            )
-            return True
-        # P1-28修复: 冷却期过后重置failures计数，给探测一个公平机会
-        state["tripped_until"] = None
-        state["failures"] = 0
-        return False
 
     def _record_circuit_success(self, adapter_name: str) -> None:
         """适配器成功，重置熔断计数器"""
-        if adapter_name in self._circuit_breaker:
-            self._circuit_breaker[adapter_name]["failures"] = 0
-            self._circuit_breaker[adapter_name]["tripped_until"] = None
+        with self._state_lock:
+            if adapter_name in self._circuit_breaker:
+                self._circuit_breaker[adapter_name]["failures"] = 0
+                self._circuit_breaker[adapter_name]["tripped_until"] = None
 
     def _record_circuit_failure(self, adapter_name: str) -> None:
         """适配器失败，增加计数器，超阈值则熔断"""
         from datetime import datetime, timezone
-        if adapter_name not in self._circuit_breaker:
-            self._circuit_breaker[adapter_name] = {"failures": 0, "tripped_until": None}
-        state = self._circuit_breaker[adapter_name]
-        state["failures"] += 1
-        if state["failures"] >= self._CIRCUIT_FAILURE_THRESHOLD:
-            state["tripped_until"] = datetime.now(timezone.utc) + \
-                __import__("datetime").timedelta(seconds=self._CIRCUIT_COOLDOWN_SECONDS)
-            logger.warning(
-                f"熔断触发: {adapter_name} 连续失败 {state['failures']} 次, "
-                f"冷却 {self._CIRCUIT_COOLDOWN_SECONDS}s"
-            )
+        with self._state_lock:
+            if adapter_name not in self._circuit_breaker:
+                self._circuit_breaker[adapter_name] = {"failures": 0, "tripped_until": None}
+            state = self._circuit_breaker[adapter_name]
+            state["failures"] += 1
+            if state["failures"] >= self._CIRCUIT_FAILURE_THRESHOLD:
+                state["tripped_until"] = datetime.now(timezone.utc) + \
+                    __import__("datetime").timedelta(seconds=self._CIRCUIT_COOLDOWN_SECONDS)
+                logger.warning(
+                    f"熔断触发: {adapter_name} 连续失败 {state['failures']} 次, "
+                    f"冷却 {self._CIRCUIT_COOLDOWN_SECONDS}s"
+                )
 
     def register(self, adapter: BaseAdapter) -> None:
         """注册适配器"""
@@ -187,6 +193,13 @@ class AdapterManager:
         """延迟初始化适配器（避免导入时连接外部服务）"""
         if self._initialized:
             return
+        with self._initialization_lock:
+            if self._initialized:
+                return
+            self._initialize_adapters()
+
+    def _initialize_adapters(self) -> None:
+        """Register adapters while the caller holds the initialization lock."""
 
         # AKShare 适配器（主适配器）
         try:
@@ -294,6 +307,7 @@ class AdapterManager:
             tried_adapters.append(adapter_name)
             logger.info(f"尝试 {adapter_name} 获取 {request.data_type}...")
 
+            started = time.monotonic()
             try:
                 result = adapter.fetch(request)
                 if result.metadata.error is None and len(result.data) > 0:
@@ -332,6 +346,10 @@ class AdapterManager:
                         error=str(e),
                     ),
                 )
+            finally:
+                recorder = getattr(adapter, "record_response_duration", None)
+                if callable(recorder):
+                    recorder(time.monotonic() - started)
 
         # 所有适配器都失败
         if last_result:
@@ -399,3 +417,11 @@ class AdapterManager:
             close = getattr(adapter, "close", None)
             if callable(close):
                 close()
+
+    def recover_after_timeout(self) -> None:
+        """Ask stateful sources to recreate their session before their next request."""
+        self._ensure_initialized()
+        for adapter in self._adapters.values():
+            request_relogin = getattr(adapter, "request_relogin", None)
+            if callable(request_relogin):
+                request_relogin()

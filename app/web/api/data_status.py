@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import time
+import json
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
@@ -49,8 +50,16 @@ def get_summary(request: Request) -> dict:
     """数据状态摘要 (PRD §15 DS2)"""
     # 自动更新写锁期间：直接返回最近一次成功缓存（stale=true）。
     # 避免每个轮询请求阻塞在 DuckDB 写锁上（曾实测 60s+）。
+    startup_readiness = getattr(request.app.state, "startup_readiness", None)
+    cached = _cached_summary()
+    if (
+        cached is not None
+        and cached.get("checking")
+        and isinstance(startup_readiness, dict)
+        and not startup_readiness.get("checking")
+    ):
+        cached = None
     if _update_write_lock_active(request.app.state.duck):
-        cached = _cached_summary()
         if cached is not None:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
@@ -58,7 +67,6 @@ def get_summary(request: Request) -> dict:
         summary = _build_summary_fresh(request)
         _store_summary(summary)
         return summary
-    cached = _cached_summary()
     if cached is not None:
         return cached
     summary = _build_summary_fresh(request)
@@ -71,6 +79,22 @@ def _build_summary_fresh(request: Request) -> dict:
     sqlite = request.app.state.sqlite
 
     from app.core.data_quality import build_data_quality_status
+
+    startup_readiness = getattr(request.app.state, "startup_readiness", None)
+    if isinstance(startup_readiness, dict) and startup_readiness.get("checking"):
+        return {
+            "data_quality": {
+                "minimum_data_readiness": dict(startup_readiness),
+                "dates": {},
+                "dividends": {},
+                "lineage": {},
+                "code_identity": {},
+                "operations": {},
+                "warning_codes": [],
+            },
+            "minimum_data_readiness": dict(startup_readiness),
+            "checking": True,
+        }
 
     try:
         summary: dict = {"data_quality": build_data_quality_status(duck, sqlite)}
@@ -354,7 +378,7 @@ def _build_summary_fresh(request: Request) -> dict:
             for row in sqlite.query(
                 """SELECT key, value FROM data_refresh_state
                    WHERE key IN ('stock_list_last_refresh', 'listing_info_last_refresh',
-                                 'csrc_industry_last_refresh')"""
+                                  'csrc_industry_last_refresh', 'price_update_last_rate')"""
             )
         }
         summary["listing_info"] = {
@@ -364,9 +388,12 @@ def _build_summary_fresh(request: Request) -> dict:
         summary["csrc_industry_refresh"] = {
             "last_refresh": refresh_rows.get("csrc_industry_last_refresh"),
         }
+        rate_value = refresh_rows.get("price_update_last_rate")
+        summary["price_update_rate"] = json.loads(rate_value) if rate_value else None
     except Exception:
         summary["listing_info"] = None
         summary["csrc_industry_refresh"] = None
+        summary["price_update_rate"] = None
         errors.append("data_refresh_state")
 
     if errors:

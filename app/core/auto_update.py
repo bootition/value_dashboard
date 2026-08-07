@@ -261,6 +261,7 @@ class AutoUpdateController:
         from app.core.update import IncrementalUpdater
 
         last_persist = [0.0]
+        live_started: dict[str, tuple[float, int]] = {}
 
         def _append_log(message: str) -> None:
             log = self._progress.get("log", [])
@@ -295,12 +296,28 @@ class AutoUpdateController:
         def detail_cb(step_name: str, info: dict[str, Any]) -> None:
             """细粒度进度：更新 live 快照并以时间节流持久化。"""
             with self._lock:
+                done = int(info.get("done", 0))
+                total = int(info.get("total", 0))
+                if step_name not in live_started:
+                    live_started[step_name] = (time.monotonic(), 0)
+                elif done <= live_started[step_name][1]:
+                    live_started[step_name] = (time.monotonic(), done)
+                step_started, initial_done = live_started[step_name]
+                elapsed_seconds = max(time.monotonic() - step_started, 0.001)
+                processed = max(done - initial_done, done if initial_done == 0 else 0)
+                rate_per_minute = processed * 60 / elapsed_seconds if processed else 0.0
+                remaining = max(total - done, 0)
+                eta_seconds = (
+                    remaining * 60 / rate_per_minute if rate_per_minute > 0 else None
+                )
                 self._progress["live"] = {
                     "step": step_name,
                     "label": info.get("label", step_name),
-                    "done": int(info.get("done", 0)),
-                    "total": int(info.get("total", 0)),
+                    "done": done,
+                    "total": total,
                     "current": info.get("current"),
+                    "rate_per_minute": round(rate_per_minute, 1),
+                    "eta_seconds": round(eta_seconds) if eta_seconds is not None else None,
                     "updated_at": datetime.now(timezone.utc).isoformat(),
                 }
                 self._progress["phase"] = f"step:{step_name}"

@@ -15,7 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 from app.core.adapters.base import FetchRequest
@@ -85,14 +85,29 @@ def probe(adapter, interval: float, count: int, code: str) -> dict:
     }
 
 
-def run(manager: AdapterManager, source: str, interval: float, count: int) -> dict:
+def run(source: str, interval: float, count: int) -> dict:
+    manager = AdapterManager()
     adapter = manager.get_adapter(source)
     if adapter is None:
         return {"error": "adapter not registered"}
     started = time.monotonic()
-    stats = probe(adapter, interval, count, SAMPLE_CODE)
-    stats["total_wall_s"] = round(time.monotonic() - started, 1)
-    return stats
+    try:
+        stats = probe(adapter, interval, count, SAMPLE_CODE)
+        stats["total_wall_s"] = round(time.monotonic() - started, 1)
+        return stats
+    finally:
+        manager.close()
+
+
+def run_source(source: str, intervals: list[float], count: int) -> tuple[str, dict]:
+    """Calibrate one source serially so intervals do not contaminate each other."""
+    row: dict = {}
+    for interval in intervals:
+        print(f"[run] {source} interval={interval}s count={count} ...", flush=True)
+        stats = run(source, interval, count)
+        row[str(interval)] = stats
+        print(json.dumps(stats, ensure_ascii=False))
+    return source, row
 
 
 def main() -> int:
@@ -100,24 +115,20 @@ def main() -> int:
     parser.add_argument("--source", choices=SOURCES, default=None)
     parser.add_argument("--interval", type=float, default=None)
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT)
+    parser.add_argument("--parallel", type=int, default=1)
     parser.add_argument("--out", default=None)
     args = parser.parse_args()
-
-    manager = AdapterManager()
-    manager._ensure_initialized()
 
     sources = [args.source] if args.source else SOURCES
     intervals = [args.interval] if args.interval is not None else ([0.6, 1.0] if args.source else [0.6])
 
     report: dict = {"generated_at": datetime.now().isoformat(), "sample": SAMPLE_CODE, "results": {}}
-    for source in sources:
-        row: dict = {}
-        for interval in intervals:
-            print(f"[run] {source} interval={interval}s count={args.count} ...", flush=True)
-            stats = run(manager, source, interval, args.count)
-            row[str(interval)] = stats
-            print(json.dumps(stats, ensure_ascii=False))
-        report["results"][source] = row
+    parallel = max(1, min(args.parallel, len(sources)))
+    with ThreadPoolExecutor(max_workers=parallel) as pool:
+        futures = [pool.submit(run_source, source, intervals, args.count) for source in sources]
+        for future in as_completed(futures):
+            source, row = future.result()
+            report["results"][source] = row
 
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:

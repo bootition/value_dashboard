@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -106,6 +107,18 @@ class IncrementalUpdater:
         # 批量持久化：每批合并到单个 DuckDB 事务，减少 WAL 提交次数
         self.price_fetch_batch_size: int = self._load_update_config(
             "price_fetch_batch_size", default=20
+        )
+        self.price_fetch_timeout_seconds: int = self._load_update_config(
+            "price_fetch_timeout_seconds", default=45
+        )
+        self.price_fetch_max_concurrency: int = self._load_update_config(
+            "price_fetch_max_concurrency", default=16
+        )
+        self.price_fetch_concurrency_step: int = self._load_update_config(
+            "price_fetch_concurrency_step", default=4
+        )
+        self.price_fetch_scale_up_seconds: int = self._load_update_config(
+            "price_fetch_scale_up_seconds", default=300
         )
         # universe 步骤（股票池/上市状态）按日节流：全市场 stock_list 约
         # 51s + listing_info 约 53s，后台线程可接受但无需每轮重拉（默认 1 天）
@@ -277,16 +290,33 @@ class IncrementalUpdater:
 
     def _finish_job(self, job_row_id: int, status: str, details: dict[str, Any]) -> None:
         """结束增量更新作业（success 之外一律记 failed，供状态页只读展示）。"""
+        finished_at = datetime.now(timezone.utc).isoformat()
         self.sqlite.execute(
             """UPDATE job_logs SET status = ?, finished_at = ?, details_json = ?
                WHERE id = ?""",
             [
                 "success" if status == "success" else "failed",
-                datetime.now(timezone.utc).isoformat(),
+                finished_at,
                 json.dumps(details, ensure_ascii=False, default=str),
                 job_row_id,
             ],
         )
+        price_step = details.get("steps", {}).get("prices", {})
+        if price_step.get("total"):
+            value = {
+                "rate_per_minute": price_step.get("rate_per_minute"),
+                "elapsed_seconds": price_step.get("elapsed_seconds"),
+                "total": price_step.get("total"),
+                "success": price_step.get("success"),
+                "failed": price_step.get("failed"),
+                "finished_at": finished_at,
+            }
+            self.sqlite.execute(
+                """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                                  updated_at=excluded.updated_at""",
+                ["price_update_last_rate", json.dumps(value, ensure_ascii=False), finished_at],
+            )
 
     def _run_incremental_update_flow(
         self,
@@ -828,6 +858,22 @@ class IncrementalUpdater:
             return {"status": "skipped", "reason": "prices_up_to_date"}
 
         target_stocks = stocks
+        try:
+            priority_codes = {
+                row["stock_code"]
+                for row in self.sqlite.query("SELECT DISTINCT stock_code FROM watchlist")
+            }
+        except Exception as error:
+            priority_codes = set()
+            logger.warning("读取研究优先名单失败，保持代码顺序: %s", error)
+        if priority_codes:
+            target_stocks = sorted(
+                target_stocks,
+                key=lambda stock: (
+                    stock["stock_code"] not in priority_codes,
+                    stock["stock_code"],
+                ),
+            )
         if max_stocks > 0:
             # C10修复(报告41): 取前 N 只必须稳定排序（ORDER BY stock_code），
             # 否则每次运行取到的子集随机漂移
@@ -866,9 +912,19 @@ class IncrementalUpdater:
         updated_codes: list[str] = []
         completed: list[int] = [0]
         concurrency = max(1, int(self.price_fetch_concurrency))
+        max_concurrency = max(concurrency, int(self.price_fetch_max_concurrency))
+        concurrency_step = max(1, int(self.price_fetch_concurrency_step))
+        scale_up_seconds = max(1, int(self.price_fetch_scale_up_seconds))
+        fetch_timeout = max(1, int(self.price_fetch_timeout_seconds))
         batch_size = max(1, int(self.price_fetch_batch_size))
+        update_started = time.monotonic()
 
-        def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None]:
+        request_executor = ThreadPoolExecutor(
+            max_workers=max_concurrency * 2,
+            thread_name_prefix="vd-price-request",
+        )
+
+        def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None, bool]:
             """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。
 
             增量原则：raw 与 qfq 各自以本地最新日期为起点，仅缺失的一侧
@@ -881,52 +937,103 @@ class IncrementalUpdater:
             qfq_latest = stock.get("latest_qfq_date")
             raw_from = None if raw_full_refetch else (str(raw_latest) if raw_latest else None)
             qfq_from = None if (need_qfq_full or raw_full_refetch) else (str(qfq_latest) if qfq_latest else None)
-            try:
-                raw_result = self.adapter_mgr.fetch(FetchRequest(
+            def fetch_adjust(adjust: str, start: str | None) -> tuple[Any, float]:
+                started = time.monotonic()
+                result = self.adapter_mgr.fetch(FetchRequest(
                     data_type="price_daily", stock_codes=[code],
-                    start_date=raw_from, end_date=end_date, adjust="raw",
+                    start_date=start, end_date=end_date, adjust=adjust,
                 ))
-                qfq_result = self.adapter_mgr.fetch(FetchRequest(
-                    data_type="price_daily", stock_codes=[code],
-                    start_date=qfq_from, end_date=end_date, adjust="qfq",
-                ))
-            except Exception as exc:
-                return code, None, None, f"fetch exception: {exc}"
-            if raw_result.metadata.error or not raw_result.data:
-                return code, None, None, raw_result.metadata.error or "empty raw"
-            if qfq_result.metadata.error or not qfq_result.data:
-                return code, None, None, (qfq_result.metadata.error or "empty qfq")
-            return code, raw_result, qfq_result, None
+                return result, time.monotonic() - started
 
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {executor.submit(fetch_one, stock): stock for stock in target_stocks}
-            batch: list[tuple[str, Any, Any]] = []
-            for future in as_completed(futures):
-                code, raw_result, qfq_result, err = future.result()
-                completed[0] += 1
-                if err is not None or raw_result is None:
-                    fail_count += 1
-                    self._record_failure(code, "price_daily", "manager", err or "empty")
-                else:
-                    batch.append((code, raw_result, qfq_result))
-                if len(batch) >= batch_size:
-                    success_count, updated_codes, fail_count = self._persist_price_batch(
-                        batch, success_count, updated_codes, fail_count
+            futures = {
+                request_executor.submit(fetch_adjust, "raw", raw_from): "raw",
+                request_executor.submit(fetch_adjust, "qfq", qfq_from): "qfq",
+            }
+            done, pending = wait(futures, timeout=fetch_timeout)
+            if pending:
+                recover = getattr(self.adapter_mgr, "recover_after_timeout", None)
+                if callable(recover):
+                    recover()
+                return code, None, None, f"fetch timeout after {fetch_timeout}s", True
+            results: dict[str, Any] = {}
+            slow = False
+            try:
+                for future in done:
+                    result, elapsed = future.result()
+                    results[futures[future]] = result
+                    slow = slow or elapsed > 30
+            except Exception as exc:
+                return code, None, None, f"fetch exception: {exc}", False
+            raw_result = results["raw"]
+            qfq_result = results["qfq"]
+            if raw_result.metadata.error or not raw_result.data:
+                return code, None, None, raw_result.metadata.error or "empty raw", slow
+            if qfq_result.metadata.error or not qfq_result.data:
+                return code, None, None, (qfq_result.metadata.error or "empty qfq"), slow
+            return code, raw_result, qfq_result, None, slow
+
+        batch: list[tuple[str, Any, Any]] = []
+        stable_since = time.monotonic()
+        index = 0
+        observed_concurrency = concurrency
+        try:
+            while index < len(target_stocks):
+                window = target_stocks[index:index + max(concurrency * 4, concurrency)]
+                executor = ThreadPoolExecutor(
+                    max_workers=concurrency,
+                    thread_name_prefix="vd-price-stock",
+                )
+                futures = [executor.submit(fetch_one, stock) for stock in window]
+                window_penalty = False
+                for future in futures:
+                    code, raw_result, qfq_result, err, slow = future.result()
+                    window_penalty = window_penalty or slow or err is not None
+                    completed[0] += 1
+                    if err is not None or raw_result is None:
+                        fail_count += 1
+                        self._record_failure(code, "price_daily", "manager", err or "empty")
+                    else:
+                        batch.append((code, raw_result, qfq_result))
+                    if len(batch) >= batch_size:
+                        success_count, updated_codes, fail_count = self._persist_price_batch(
+                            batch, success_count, updated_codes, fail_count
+                        )
+                        batch = []
+                    if detail_cb is not None:
+                        detail_cb("price", {
+                            "done": completed[0],
+                            "total": len(target_stocks),
+                            "current": code,
+                            "label": "股票价格",
+                        })
+                executor.shutdown(wait=True, cancel_futures=True)
+                index += len(window)
+                if window_penalty:
+                    new_concurrency = max(
+                        int(self.price_fetch_concurrency),
+                        concurrency - concurrency_step,
                     )
-                    batch = []
-                if detail_cb is not None:
-                    detail_cb("price", {
-                        "done": completed[0],
-                        "total": len(target_stocks),
-                        "current": code,
-                        "label": "股票价格",
-                    })
+                    stable_since = time.monotonic()
+                elif time.monotonic() - stable_since >= scale_up_seconds:
+                    new_concurrency = min(max_concurrency, concurrency + concurrency_step)
+                    stable_since = time.monotonic()
+                else:
+                    new_concurrency = concurrency
+                if new_concurrency != concurrency:
+                    logger.warning(
+                        "价格抓取自适应并发 %d -> %d", concurrency, new_concurrency,
+                    )
+                    concurrency = new_concurrency
+                    observed_concurrency = max(observed_concurrency, concurrency)
             if batch:
                 success_count, updated_codes, fail_count = self._persist_price_batch(
                     batch, success_count, updated_codes, fail_count
                 )
+        finally:
+            request_executor.shutdown(wait=False, cancel_futures=True)
 
         logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
+        elapsed_seconds = max(time.monotonic() - update_started, 0.001)
         return {
             "status": "success" if fail_count == 0 else "partial",
             "total": len(target_stocks),
@@ -934,6 +1041,12 @@ class IncrementalUpdater:
             "failed": fail_count,
             "xdxr_full_refetch": len(xdxr_codes),
             "raw_full_refetch": raw_full_refetch,
+            "elapsed_seconds": round(elapsed_seconds, 3),
+            "rate_per_minute": round(completed[0] * 60 / elapsed_seconds, 2),
+            "max_concurrency_used": observed_concurrency,
+            "priority_count": sum(
+                stock["stock_code"] in priority_codes for stock in target_stocks
+            ),
             "_updated_codes": updated_codes,
         }
 

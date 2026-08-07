@@ -45,21 +45,34 @@ def _server_host(server_config: dict) -> str:
 
 
 def _run_startup_maintenance(
-    duck: DuckDBStore, sqlite: SQLiteStore, startup_readiness: dict,
+    duck: DuckDBStore,
+    sqlite: SQLiteStore,
+    startup_readiness: dict,
+    readiness_cb=None,
 ) -> dict:
     """Run network-backed first-start work after the local web server binds."""
-    from app.core.data_quality import minimum_data_readiness
+    from app.core.data_quality import minimum_data_readiness, store_cached_data_readiness
 
     current = startup_readiness
+    initialization_error: str | None = None
+    initialization_report: dict | None = None
     try:
-        if current["stock_count"] == 0:
+        try:
+            stock_rows = duck.read_query(
+                "SELECT COUNT(*) AS count FROM stock_meta WHERE is_listed IS TRUE"
+            )
+            stock_count = int(stock_rows[0]["count"]) if stock_rows else 0
+        except Exception:
+            stock_count = 0
+        if stock_count == 0:
             from app.core.init import DataInitializer
 
             logger.info("检测到空数据库，后台开始最小可用初始化...")
-            init_report = DataInitializer(duck=duck, sqlite=sqlite).run_full_init()
-            current = minimum_data_readiness(duck)
-            current["initialization"] = init_report
+            initialization_report = DataInitializer(duck=duck, sqlite=sqlite).run_full_init()
+            current = minimum_data_readiness(duck, sqlite)
+            current["initialization"] = initialization_report
     except Exception as error:
+        initialization_error = str(error)
         current = {
             "ready": False,
             "stock_count": 0,
@@ -68,6 +81,26 @@ def _run_startup_maintenance(
         }
         logger.warning("后台最小初始化失败: %s", error)
 
+    try:
+        current = store_cached_data_readiness(
+            sqlite, minimum_data_readiness(duck, sqlite),
+        )
+        if initialization_report is not None:
+            current["initialization"] = initialization_report
+        if initialization_error:
+            current.setdefault("missing", {})["initialization"] = [initialization_error]
+            current.setdefault("missing_counts", {})["initialization"] = 1
+            current["ready"] = False
+        if readiness_cb is not None:
+            readiness_cb(current)
+        logger.info("后台数据就绪核对完成: ready=%s", current["ready"])
+    except Exception as error:
+        current = {
+            **current,
+            "checking": False,
+            "readiness_error": str(error),
+        }
+        logger.warning("后台数据就绪核对失败: %s", error)
     try:
         from app.core.auto_update import AutoUpdateController
 
@@ -80,6 +113,17 @@ def _run_startup_maintenance(
             logger.info("自动更新已关闭或暂停，跳过")
     except Exception as error:
         logger.warning("后台自动更新失败(非致命): %s", error)
+
+    try:
+        current = store_cached_data_readiness(
+            sqlite, minimum_data_readiness(duck, sqlite),
+        )
+        if initialization_report is not None:
+            current["initialization"] = initialization_report
+        if readiness_cb is not None:
+            readiness_cb(current)
+    except Exception as error:
+        logger.warning("自动更新后数据就绪复核失败(非致命): %s", error)
 
     # C8/C16修复(报告41): 启动时对有界操作表做 GC（过期 plan / 旧 job_logs /
     # 已解析 missing_list），幂等、保守、不涉及审计记录。
@@ -98,7 +142,14 @@ def _start_startup_maintenance(
     """Publish an immediately responsive server before slow remote work begins."""
     def worker() -> None:
         try:
-            current = _run_startup_maintenance(duck, sqlite, startup_readiness)
+            current = _run_startup_maintenance(
+                duck,
+                sqlite,
+                startup_readiness,
+                readiness_cb=lambda readiness: setattr(
+                    app.state, "startup_readiness", readiness,
+                ),
+            )
         except Exception as error:
             logger.warning("启动维护线程失败: %s", error)
             app.state.startup_maintenance = {"status": "failed", "error": str(error)}
@@ -260,12 +311,10 @@ def create_app(
 
     @app.get("/api/readiness")
     def readiness(request: Request) -> dict:
-        from app.core.data_quality import minimum_data_readiness
-
-        try:
-            current = minimum_data_readiness(request.app.state.duck, request.app.state.sqlite)
-        except Exception as error:
-            raise HTTPException(status_code=503, detail={"ready": False, "error": str(error)}) from error
+        current = request.app.state.startup_readiness
+        if not isinstance(current, dict):
+            from app.core.data_quality import checking_data_readiness
+            current = checking_data_readiness()
         if not current["ready"]:
             raise HTTPException(status_code=503, detail=current)
         return current
@@ -335,9 +384,9 @@ def run_server() -> None:
     logger.info("正在初始化数据库...")
     init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
 
-    from app.core.data_quality import minimum_data_readiness
+    from app.core.data_quality import checking_data_readiness, read_cached_data_readiness
 
-    startup_readiness = minimum_data_readiness(duck)
+    startup_readiness = read_cached_data_readiness(sqlite) or checking_data_readiness()
 
     # 启动服务器
     server_cfg = cfg["server"]

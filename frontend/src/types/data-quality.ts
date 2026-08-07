@@ -255,6 +255,9 @@ export interface DataQualityStatus {
 
 export interface MinimumDataReadiness {
   readonly ready: boolean
+  readonly checking?: boolean
+  readonly cached?: boolean
+  readonly checked_at?: string
   readonly stock_count: number
   readonly missing: Readonly<Record<string, readonly string[]>>
   readonly missing_counts: Readonly<Record<string, number>>

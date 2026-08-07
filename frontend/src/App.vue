@@ -27,6 +27,7 @@ const statusTag = computed(() => {
   const q = quality.value
   if (qualityFailed.value) return { type: 'error' as const, label: '状态读取失败', color: undefined }
   if (q === null) return { type: 'default' as const, label: '状态加载中…', color: undefined }
+  if (q.minimum_data_readiness.checking) return { type: 'default' as const, label: '正在核对数据', color: undefined }
   if (!q.minimum_data_readiness.ready) return { type: 'error' as const, label: '数据未就绪', color: undefined }
   if (q.warning_codes.length > 0) return { type: 'warning' as const, label: `警告 ${q.warning_codes.length}`, color: undefined }
   return { type: 'success' as const, label: '数据就绪', color: undefined }

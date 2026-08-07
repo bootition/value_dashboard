@@ -19,6 +19,7 @@ interface MissingItem {
 }
 
 interface DataSummary {
+  checking?: boolean
   stock_count: number
   price_raw_count: number
   price_qfq_count: number
@@ -61,6 +62,8 @@ interface AutoUpdateStatus {
       done: number
       total: number
       current?: string
+      rate_per_minute?: number
+      eta_seconds?: number | null
       updated_at?: string
     }
     log?: Array<{ t: string; msg: string }>
@@ -78,6 +81,16 @@ const updateLivePct = computed(() => {
   const live = updateLive.value
   if (!live || !live.total) return 0
   return Math.min(Math.round((live.done / live.total) * 100), 100)
+})
+const updateEtaLabel = computed(() => {
+  const seconds = updateLive.value?.eta_seconds
+  if (seconds === null || seconds === undefined) return ''
+  if (seconds < 60) return '不到 1 分钟'
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `约 ${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const rest = minutes % 60
+  return rest ? `约 ${hours} 小时 ${rest} 分钟` : `约 ${hours} 小时`
 })
 
 const summary = ref<DataSummary | null>(null)
@@ -224,14 +237,16 @@ function skipReasonLabel(reason: string | null | undefined): string {
       <template v-if="summary">
         <!-- L2 V3: 第一问"数据可研究吗" -->
         <n-alert
-          :type="summary.data_quality.minimum_data_readiness.ready ? 'success' : 'error'"
+          :type="summary.data_quality.minimum_data_readiness.checking ? 'info' : summary.data_quality.minimum_data_readiness.ready ? 'success' : 'error'"
           :show-icon="true"
           class="data-readiness"
         >
           <template #header>
-            {{ summary.data_quality.minimum_data_readiness.ready ? '数据可研究' : '数据尚未就绪' }}
+            {{ summary.data_quality.minimum_data_readiness.checking ? '正在核对数据' : summary.data_quality.minimum_data_readiness.ready ? '数据可研究' : '数据尚未就绪' }}
           </template>
-          {{ summary.data_quality.minimum_data_readiness.ready
+          {{ summary.data_quality.minimum_data_readiness.checking
+            ? '正在后台核对数据完整性，完成后会显示最终状态。'
+            : summary.data_quality.minimum_data_readiness.ready
             ? `最近更新: ${summary.last_update || '—'}；价格/财报日期见下方详情。`
             : `有 ${summary.data_quality.warning_codes.length} 个警告，请查看下方详情；更新完成后自动恢复。` }}
         </n-alert>
@@ -289,6 +304,8 @@ function skipReasonLabel(reason: string | null | undefined): string {
             />
             <p class="update-live-hint">
               正在更新 {{ updateLive.current || '—' }}
+              <span v-if="updateLive.rate_per_minute">· {{ updateLive.rate_per_minute }} 股/分</span>
+              <span v-if="updateEtaLabel">· 预计剩余 {{ updateEtaLabel }}</span>
               <span v-if="updateLive.updated_at">· {{ new Date(updateLive.updated_at).toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
             </p>
           </div>
@@ -309,7 +326,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
             <code>vd data auto-update status|enable|disable|run|pause|resume</code>
           </p>
         </n-card>
-        <template v-if="summary">
+        <template v-if="summary && !summary.checking">
         <!-- 数据质量警告 -->
         <n-alert
           v-if="summary.data_quality.warning_codes.length > 0"

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import threading
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -124,6 +126,9 @@ class BaseAdapter:
         self._supported = supported
         self._rate_limit = rate_limit
         self._last_request_time: float = 0.0  # P2修复: 实例属性而非类属性
+        self._rate_limit_lock = threading.Lock()
+        self._response_durations: deque[float] = deque(maxlen=10)
+        self._adaptive_rate_limit = rate_limit
 
     @property
     def name(self) -> SourceName:
@@ -135,17 +140,44 @@ class BaseAdapter:
 
     @property
     def rate_limit_interval(self) -> float:
-        return self._rate_limit
+        return self._adaptive_rate_limit
 
     def can_handle(self, request: FetchRequest) -> bool:
         return request.data_type in self._supported
 
     def _wait_rate_limit(self) -> None:
         """确保请求间隔不低于 rate_limit"""
-        elapsed = time.monotonic() - self._last_request_time
-        if elapsed < self._rate_limit:
-            time.sleep(self._rate_limit - elapsed)
-        self._last_request_time = time.monotonic()
+        with self._rate_limit_lock:
+            elapsed = time.monotonic() - self._last_request_time
+            if elapsed < self._adaptive_rate_limit:
+                time.sleep(self._adaptive_rate_limit - elapsed)
+            self._last_request_time = time.monotonic()
+
+    def record_response_duration(self, seconds: float) -> None:
+        """Adapt request spacing to recent source latency without changing config."""
+        with self._rate_limit_lock:
+            self._response_durations.append(max(0.0, seconds))
+            previous = self._adaptive_rate_limit
+            if seconds > 30:
+                self._adaptive_rate_limit = (
+                    0.5 if self._adaptive_rate_limit < 0.5 else 1.0
+                )
+            elif (
+                len(self._response_durations) == self._response_durations.maxlen
+                and max(self._response_durations) < 10
+            ):
+                self._adaptive_rate_limit = max(
+                    self._rate_limit,
+                    self._adaptive_rate_limit - 0.1,
+                )
+            if previous != self._adaptive_rate_limit:
+                logger.warning(
+                    "%s 自适应请求间隔 %.1fs -> %.1fs（最近响应 %.1fs）",
+                    self._name,
+                    previous,
+                    self._adaptive_rate_limit,
+                    seconds,
+                )
 
     def _make_metadata(
         self,

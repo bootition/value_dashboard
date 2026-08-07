@@ -95,6 +95,8 @@ def test_auto_update_live_snapshot_is_visible_while_running(
     assert holder["live"]["done"] == 3
     assert holder["live"]["total"] == 10
     assert holder["live"]["current"] == "000001"
+    assert holder["live"]["rate_per_minute"] > 0
+    assert holder["live"]["eta_seconds"] is not None
 
 
 def test_step_labels_cover_update_steps() -> None:

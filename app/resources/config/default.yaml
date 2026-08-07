@@ -15,14 +15,15 @@ adapters:
   rate_limit_interval:
     cninfo: 1.5
     akshare_eastmoney: 0.5
-    tdx: 0.1
-    baostock: 0.1
+    tdx: 0.2
+    baostock: 0.8
+    tencent: 0.2
     sina: 0.35
   primary:
     balance_sheet: ["sina", "tdx", "akshare_eastmoney"]
     income_statement: ["sina", "tdx", "akshare_eastmoney"]
     cash_flow: ["sina", "tdx", "akshare_eastmoney"]
-    price_daily: ["baostock", "tdx", "akshare_eastmoney"]
+    price_daily: ["tencent", "baostock", "tdx"]
     dividends: ["cninfo", "akshare_eastmoney", "baostock"]
     xdxr: ["tdx"]
     announcements: ["cninfo"]
@@ -43,6 +44,12 @@ update:
   startup: true           # 启动时自动执行增量更新
   incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
+  price_fetch_concurrency: 8
+  price_fetch_max_concurrency: 16
+  price_fetch_concurrency_step: 4
+  price_fetch_scale_up_seconds: 300
+  price_fetch_timeout_seconds: 45
+  price_fetch_batch_size: 20
 
 backup:
   keep_full_backups: 3
