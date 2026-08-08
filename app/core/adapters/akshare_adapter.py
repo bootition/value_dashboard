@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import re
 from typing import Any, Callable
 
 import pandas as pd
@@ -562,24 +563,35 @@ class AKShareAdapter(BaseAdapter):
             api_version=_AKSHARE_VERSION,
         )
 
-    @staticmethod
-    def _normalize_dividend_fields(rec: dict[str, Any]) -> None:
+    _DIVIDEND_CASH_RE = re.compile(r"派\s*([\d.]+)\s*元")
+
+    @classmethod
+    def _normalize_dividend_fields(cls, rec: dict[str, Any]) -> None:
         """将 akshare "每10股" ratio 口径归一化为标准 "每股" 字段。
 
         - cash_dividend_ratio（每10股派X元）→ dividend_per_share（每股X元）
         - bonus_share_ratio（每10股送X股）→ stock_dividend（每股X股）
         - capitalization_ratio（每10股转增X股）→ transfer_share（每股X股）
         - akshare 接口不含配股 → rights_issue 保持 None
+
+        已退市 B 股等记录中 cash_dividend_ratio 常为 NaN，但 description
+        （如"10派2.90元(含税)"）包含每10股现金派发额——从文本解析补全，
+        否则有分红事实的记录会缺失每股派息数值。
         """
         try:
             cash = rec.get("cash_dividend_ratio")
-            if cash is not None:
+            if cash is not None and not (isinstance(cash, float) and cash != cash):
                 rec["dividend_per_share"] = float(cash) / 10.0
+            else:
+                description = rec.get("description") or ""
+                match = cls._DIVIDEND_CASH_RE.search(description)
+                if match:
+                    rec["dividend_per_share"] = float(match.group(1)) / 10.0
             bonus = rec.get("bonus_share_ratio")
-            if bonus is not None:
+            if bonus is not None and not (isinstance(bonus, float) and bonus != bonus):
                 rec["stock_dividend"] = float(bonus) / 10.0
             cap = rec.get("capitalization_ratio")
-            if cap is not None:
+            if cap is not None and not (isinstance(cap, float) and cap != cap):
                 rec["transfer_share"] = float(cap) / 10.0
         except (TypeError, ValueError):
             pass

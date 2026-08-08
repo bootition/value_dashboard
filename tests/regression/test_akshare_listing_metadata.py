@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 from types import SimpleNamespace
 
 from app.core.adapters.akshare_adapter import AKShareAdapter
@@ -98,3 +99,39 @@ def test_dividend_ratios_are_normalized_to_per_share_fields(monkeypatch) -> None
     assert row["stock_dividend"] == 0.1  # 每10股送1股 → 每股0.1股
     assert row["transfer_share"] == 0.2  # 每10股转增2股 → 每股0.2股
     assert row["rights_issue"] is None
+
+
+def test_dividend_cash_from_description_when_ratio_missing(monkeypatch) -> None:
+    """已退市 B 股等记录 cash_dividend_ratio 为 NaN 时，从 description 解析每股派息。"""
+    import numpy as np
+
+    import pandas as pd
+
+    import app.core.adapters.akshare_adapter as module
+
+    fake_akshare = SimpleNamespace(
+        stock_dividend_cninfo=lambda symbol: pd.DataFrame([{
+            "实施方案公告日期": "1997-06-14",
+            "分红类型": "年度分红",
+            "送股比例": 1.7,
+            "转增比例": 3.3,
+            "派息比例": np.nan,
+            "股权登记日": None,
+            "除权日": "1997-06-23",
+            "派息日": None,
+            "股份到账日": None,
+            "实施方案分红说明": "10送1.7转增3.3派2.90元(含税)",
+            "报告时间": "1996年报",
+        }]),
+    )
+    monkeypatch.setattr(module, "ak", fake_akshare)
+
+    adapter = AKShareAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(data_type="dividends", stock_codes=["200429"]))
+
+    assert result.metadata.error is None
+    row = result.data[0]
+    assert row["ex_date"] == "1997-06-23"
+    assert row["dividend_per_share"] == 0.29  # 每10股派2.90元 → 每股0.29元
+    assert row["stock_dividend"] == pytest.approx(0.17)  # 每10股送1.7股 → 每股0.17股
+    assert row["transfer_share"] == pytest.approx(0.33)  # 每10股转增3.3股 → 每股0.33股
