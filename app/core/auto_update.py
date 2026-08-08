@@ -353,6 +353,13 @@ class AutoUpdateController:
                     self._current_stage = "idle"
                     self._last_error = None
                     _append_log(f"跳过更新：{report.get('reason')}")
+                elif report.get("status") == "partial":
+                    # 部分步骤降级（如 universe 源不可用但价格/指标正常）不是失败：
+                    # readiness 门禁仍 PASS，失败股票已进 retry_list 由后续轮次重试。
+                    # 不得设置 last_error，否则状态页误报"状态读取失败"。
+                    self._current_stage = "finished"
+                    self._last_error = None
+                    _append_log("自动更新完成（部分步骤降级，详见各步骤状态）")
                 else:
                     self._current_stage = "failed"
                     self._last_error = f"update status: {report.get('status')}"

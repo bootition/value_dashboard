@@ -106,24 +106,25 @@ def test_auto_update_persists_per_step_progress(duckdb_store, sqlite_store, monk
     assert progress.get("phase") in {"done", "step:prices"}
 
 
-def test_auto_update_run_once_failure_records_error(duckdb_store, sqlite_store, monkeypatch) -> None:
+def test_auto_update_partial_does_not_report_failure(duckdb_store, sqlite_store, monkeypatch) -> None:
+    """部分步骤降级（如 universe 源不可用）不是失败：不设 last_error，stage 为 finished。"""
     controller = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
 
-    class FailingUpdater:
+    class PartialUpdater:
         def __init__(self, **kwargs) -> None:
             pass
 
         def run_incremental_update(self, max_stocks: int = 0, progress_cb=None, detail_cb=None) -> dict:
-            return {"status": "partial", "steps": {"prices": {"status": "failed"}}}
+            return {"status": "partial", "steps": {"universe": {"status": "partial"}, "prices": {"status": "success"}}}
 
-    monkeypatch.setattr("app.core.update.IncrementalUpdater", FailingUpdater)
+    monkeypatch.setattr("app.core.update.IncrementalUpdater", PartialUpdater)
 
     report = controller.run_once()
 
     assert report["status"] == "partial"
     status = controller.status()
-    assert status["current_stage"] == "failed"
-    assert status["last_error"] is not None
+    assert status["current_stage"] == "finished"
+    assert status["last_error"] is None
 
 
 def test_auto_update_skipped_reports_idle_not_failed(duckdb_store, sqlite_store, monkeypatch) -> None:
