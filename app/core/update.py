@@ -437,7 +437,8 @@ class IncrementalUpdater:
             ).compute_snapshot_for_codes(updated_price_codes)
             report_step("indicators", snapshot_step)
 
-        # 3. 重试失败任务（先清理已达标的历史冗余条目，避免全历史重抓）
+        # 3. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
+        self._cleanup_unretryable_tasks()
         if check_report["retry_tasks"]:
             expected_date = self._latest_expected_trading_date(
                 datetime.now().strftime("%Y-%m-%d")
@@ -1345,6 +1346,39 @@ class IncrementalUpdater:
             )
             logger.info("[增量] 清理 %d 条已达标的价格重试条目", len(clean_ids))
         return len(clean_ids)
+
+    # 无逐股重试路径、由 universe/行业步骤统一维护的数据域：历史失败条目
+    # 是死循环垃圾（如 akshare 被封窗口产生的 listing_info 失败）。
+    # announcements 除外：其 retry 条目是公告 pending 的持久化标记（PRD §7.4）。
+    _CLEANUP_RETRY_DATA_TYPES = {
+        "listing_info", "stock_list", "trading_dates", "sw_industry",
+        "csrc_industry",
+    }
+
+    def _cleanup_unretryable_tasks(self) -> int:
+        """Drop retry entries whose data domain has no per-stock refetch path.
+
+        listing_info / stock_list / trading_dates etc. are maintained by the
+        universe step, not by refetch_one. Historical failures of those types
+        (e.g. the akshare outage window) would otherwise fail forever on every
+        retry round. Their remaining gaps stay visible in missing_list.
+        """
+        rows = self.sqlite.query(
+            f"""SELECT id FROM retry_list
+                WHERE data_type IN ({", ".join("?" for _ in self._CLEANUP_RETRY_DATA_TYPES)})""",
+            list(self._CLEANUP_RETRY_DATA_TYPES),
+        )
+        if not rows:
+            return 0
+        ids = [row["id"] for row in rows]
+        self.sqlite.execute(
+            "DELETE FROM retry_list WHERE id IN ({})".format(
+                ", ".join("?" for _ in ids)
+            ),
+            ids,
+        )
+        logger.info("[增量] 清理 %d 条无重试路径的失败任务", len(ids))
+        return len(ids)
 
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
         """重试失败任务"""
