@@ -105,7 +105,9 @@ let pollTimer: ReturnType<typeof setTimeout> | undefined
 let autoInFlight = false
 const refreshing = ref(false)
 
-const isPolling = computed(() => autoUpdate.value?.current_stage === 'running')
+// running 时 4s 高频轮询；空闲/完成后 60s 低频轮询，
+// 让自动更新启动/结束、stale 提示变化无需手动刷新即可看到。
+const isPolling = computed(() => true)
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
@@ -119,7 +121,15 @@ const priceQfqPct = computed(() => summary.value ? pct(summary.value.price_qfq_c
 const csrcIndustryPct = computed(() => summary.value ? pct(summary.value.csrc_industry_count, summary.value.stock_count) : '0%')
 const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.indicator_snapshot_count, summary.value.stock_count) : '0%')
 
-// 轻量路径：只拉自动更新状态，4s 递归轮询（running 时），绝不阻塞于 summary。
+// 后端时间均为 UTC ISO 字符串，展示为本地时间
+function formatLocalTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString('zh-CN', { hour12: false })
+}
+
+// 轻量路径：只拉自动更新状态，递归轮询，绝不阻塞于 summary。
 async function fetchAutoOverview(): Promise<void> {
   if (autoInFlight) return
   autoInFlight = true
@@ -140,9 +150,22 @@ function schedulePolling() {
     clearTimeout(pollTimer)
     pollTimer = undefined
   }
-  if (isPolling.value) {
-    pollTimer = setTimeout(() => void fetchAutoOverview(), 4000)
+  const running = autoUpdate.value?.current_stage === 'running'
+  pollTimer = setTimeout(() => void fetchAutoOverview(), running ? 4000 : 60000)
+}
+
+// 空闲时低频刷新重量摘要（stale 提示会在自动更新结束后自动消失）
+let heavyTimer: ReturnType<typeof setTimeout> | undefined
+function scheduleHeavyPolling() {
+  if (heavyTimer) {
+    clearTimeout(heavyTimer)
+    heavyTimer = undefined
   }
+  const running = autoUpdate.value?.current_stage === 'running'
+  heavyTimer = setTimeout(() => {
+    void fetchHeavy(true)
+    scheduleHeavyPolling()
+  }, running ? 15000 : 60000)
 }
 
 // 重量级只读摘要：summary/retry/missing 设 15s 超时，失败仅出错误提示，不阻塞自动更新卡。
@@ -181,11 +204,16 @@ function handleRefresh() {
 onMounted(() => {
   void fetchAutoOverview()
   void fetchHeavy()
+  scheduleHeavyPolling()
 })
 onBeforeUnmount(() => {
   if (pollTimer) {
     clearTimeout(pollTimer)
     pollTimer = undefined
+  }
+  if (heavyTimer) {
+    clearTimeout(heavyTimer)
+    heavyTimer = undefined
   }
 })
 
@@ -247,12 +275,12 @@ function skipReasonLabel(reason: string | null | undefined): string {
           {{ summary.data_quality.minimum_data_readiness.checking
             ? '正在后台核对数据完整性，完成后会显示最终状态。'
             : summary.data_quality.minimum_data_readiness.ready
-            ? `最近更新: ${summary.last_update || '—'}；价格/财报日期见下方详情。`
+            ? `最近更新: ${formatLocalTime(summary.last_update)}；价格/财报日期见下方详情。`
             : `有 ${summary.data_quality.warning_codes.length} 个警告，请查看下方详情；更新完成后自动恢复。` }}
         </n-alert>
 
         <p style="color: #999; margin-bottom: 16px;">
-          最近更新: {{ summary.last_update || '尚未初始化' }}
+          最近更新: {{ formatLocalTime(summary.last_update) }}
         </p>
       </template>
 
@@ -277,7 +305,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
               </span>
             </n-descriptions-item>
             <n-descriptions-item label="作业ID">{{ autoUpdate.progress?.job_id || '—' }}</n-descriptions-item>
-            <n-descriptions-item label="上次成功">{{ autoUpdate.last_success_at || '—' }}</n-descriptions-item>
+            <n-descriptions-item label="上次成功">{{ formatLocalTime(autoUpdate.last_success_at) }}</n-descriptions-item>
             <n-descriptions-item label="最近结果">
               {{ autoUpdate.last_result || '尚未执行' }}
               <span v-if="autoUpdate.last_result === 'skipped'" style="color:#d48806;">

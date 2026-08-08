@@ -88,10 +88,11 @@ def test_qfq_retry_persists_before_queue_removal(
     assert remaining == []
 
 
-def test_retry_is_retained_when_target_persistence_is_unsupported(
+def test_unretryable_domain_entry_is_retained_without_dead_loop(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    """无逐股重试路径的条目（stock_list 等）保留为标记，但不进入重试循环反复失败。"""
     with sqlite_store.transaction() as connection:
         cursor = connection.execute(
             """
@@ -117,8 +118,8 @@ def test_retry_is_retained_when_target_persistence_is_unsupported(
         "SELECT retry_count FROM retry_list WHERE id = ?",
         [retry_id],
     )
-    assert report["status"] == "failed"
-    assert remaining == [{"retry_count": 1}]
+    assert report["status"] == "success"
+    assert remaining == [{"retry_count": 0}], "条目保留且不得反复递增 retry_count（死循环）"
 
 
 def test_price_retry_refetches_incrementally_from_local_latest(

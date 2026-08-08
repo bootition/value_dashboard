@@ -102,8 +102,8 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
     expect(text).toContain('2026-07-20')
     expect(text).toContain('2026-08-01T08:00:00+00:00')
     expect(text).toContain('2026-07-01T00:00:00+00:00')
-    // 最近更新来自 job_logs（增量更新写 job_logs 后可见）
-    expect(text).toContain('2026-08-01T09:00:00+00:00')
+    // 最近更新来自 job_logs（增量更新写 job_logs 后可见）；时间为本地化显示
+    expect(text).toContain('最近更新: 2026/8/1 17:00:00')
   })
 
   it('数据质量日期不可用时显示占位符而非崩溃', async () => {

@@ -1461,6 +1461,14 @@ class IncrementalUpdater:
             stock_code = task["stock_code"]
             data_type = task["data_type"]
             if data_type != "price_daily":
+                if data_type not in {
+                    "balance_sheet", "income_statement", "cash_flow",
+                    "dividends", "xdxr",
+                }:
+                    # 无逐股重试路径的数据域（announcements 等）：retry 条目
+                    # 是 pending 标记，由对应维护流程消费；在这里重试只会
+                    # 每轮失败并递增 retry_count（死循环），必须跳过。
+                    continue
                 outcome = self.refetch_one(stock_code, data_type)
                 if outcome["status"] == "success":
                     self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])

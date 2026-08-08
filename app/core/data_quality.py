@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import time
@@ -856,8 +856,13 @@ def build_data_quality_status(
             WHERE status != 'published' AND rolled_back_at IS NULL
             """
         )[0]["count"],
+        # 仅当 running job 悬挂（超过 2 小时未结束）才算 stale：
+        # 正常的自动更新运行时 job 处于 running 是预期状态，
+        # 若一律计数会误报 STALE_RUNNING_JOBS 警告。
         "running_jobs": sqlite.query(
-            "SELECT COUNT(*) AS count FROM job_logs WHERE status = 'running'"
+            """SELECT COUNT(*) AS count FROM job_logs
+               WHERE status = 'running' AND started_at < ?""",
+            [(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()],
         )[0]["count"],
     }
 
@@ -972,7 +977,11 @@ def _incompatible_schema_status(readiness: dict, sqlite: SQLiteStore) -> dict:
         "unpublished_overrides": sqlite.query(
             "SELECT COUNT(*) AS count FROM manual_overrides WHERE status != 'published' AND rolled_back_at IS NULL"
         )[0]["count"],
-        "running_jobs": sqlite.query("SELECT COUNT(*) AS count FROM job_logs WHERE status = 'running'")[0]["count"],
+        "running_jobs": sqlite.query(
+            "SELECT COUNT(*) AS count FROM job_logs "
+            "WHERE status = 'running' AND started_at < ?",
+            [(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()],
+        )[0]["count"],
     }
     return {
         "minimum_data_readiness": readiness,
