@@ -330,7 +330,9 @@ def _build_summary_fresh(request: Request) -> dict:
         errors.append("retry_count")
 
     try:
-        row = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
+        row = sqlite.query(
+            "SELECT COUNT(*) as cnt FROM missing_list WHERE resolved_at IS NULL"
+        )
         summary["missing_count"] = row[0]["cnt"]
     except Exception:
         summary["missing_count"] = 0
@@ -455,7 +457,7 @@ def get_missing_list(request: Request, limit: int = Query(50, ge=1, le=500)) -> 
     try:
         rows = sqlite.query(
             "SELECT stock_code, field_name, reason_code "
-            "FROM missing_list LIMIT ?",
+            "FROM missing_list WHERE resolved_at IS NULL LIMIT ?",
             [limit],
         )
         return {"count": len(rows), "items": rows}
