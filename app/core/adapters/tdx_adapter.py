@@ -27,6 +27,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import time
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator
 
@@ -358,9 +359,13 @@ class TDXAdapter(BaseAdapter):
                 break
             offset = page_idx * _BARS_PAGE_SIZE
             self._wait_rate_limit()
-            df = client.get_security_bars(
-                market, code, KlineCategory.DAY, start=offset, count=_BARS_PAGE_SIZE
-            )
+            request_started = time.monotonic()
+            try:
+                df = client.get_security_bars(
+                    market, code, KlineCategory.DAY, start=offset, count=_BARS_PAGE_SIZE
+                )
+            finally:
+                self.record_response_duration(time.monotonic() - request_started)
             if df is None or df.empty:
                 break
             pages.append(df)

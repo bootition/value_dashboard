@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from typing import Any, Final
 
 from app.core.adapters.base import (
@@ -307,7 +306,6 @@ class AdapterManager:
             tried_adapters.append(adapter_name)
             logger.info(f"尝试 {adapter_name} 获取 {request.data_type}...")
 
-            started = time.monotonic()
             try:
                 result = adapter.fetch(request)
                 if result.metadata.error is None and len(result.data) > 0:
@@ -346,10 +344,6 @@ class AdapterManager:
                         error=str(e),
                     ),
                 )
-            finally:
-                recorder = getattr(adapter, "record_response_duration", None)
-                if callable(recorder):
-                    recorder(time.monotonic() - started)
 
         # 所有适配器都失败
         if last_result:

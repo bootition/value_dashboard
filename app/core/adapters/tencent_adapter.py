@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -61,6 +62,7 @@ class TencentAdapter(BaseAdapter):
                     return self._make_empty_result("tencent price deadline exceeded")
                 self._wait_rate_limit()
                 suffix = "qfq" if request.adjust == "qfq" else ""
+                request_started = time.monotonic()
                 try:
                     response = requests.get(
                         _KLINE_URL,
@@ -72,6 +74,8 @@ class TencentAdapter(BaseAdapter):
                     payload = response.json()
                 except (requests.RequestException, ValueError) as error:
                     return self._make_empty_result(f"tencent price request failed: {error}")
+                finally:
+                    self.record_response_duration(time.monotonic() - request_started)
 
                 item = payload.get("data", {}).get(symbol, {})
                 key = "qfqday" if request.adjust == "qfq" else "day"

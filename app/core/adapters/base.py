@@ -164,17 +164,25 @@ class BaseAdapter:
             self._last_request_time = time.monotonic()
 
     def record_response_duration(self, seconds: float) -> None:
-        """Adapt request spacing to recent source latency without changing config."""
+        """Adapt request spacing to recent source latency without changing config.
+
+        Only the actual network request duration must be reported (excluding
+        rate-limit queue waits), otherwise parallel load inflates the window
+        and the spacing is permanently pushed upward. Escalation requires two
+        long-tail responses within the recent window, not a single one.
+        """
         with self._rate_limit_lock:
             self._response_durations.append(max(0.0, seconds))
             previous = self._adaptive_rate_limit
-            if seconds > 30:
+            window = list(self._response_durations)
+            long_tails = sum(1 for duration in window if duration > 30)
+            if seconds > 30 and long_tails >= 2:
                 self._adaptive_rate_limit = (
                     0.5 if self._adaptive_rate_limit < 0.5 else 1.0
                 )
             elif (
-                len(self._response_durations) == self._response_durations.maxlen
-                and max(self._response_durations) < 10
+                len(window) == self._response_durations.maxlen
+                and max(window) < 10
             ):
                 self._adaptive_rate_limit = max(
                     self._rate_limit,
@@ -182,11 +190,12 @@ class BaseAdapter:
                 )
             if previous != self._adaptive_rate_limit:
                 logger.warning(
-                    "%s 自适应请求间隔 %.1fs -> %.1fs（最近响应 %.1fs）",
+                    "%s 自适应请求间隔 %.1fs -> %.1fs（近 %d 次长尾 %d）",
                     self._name,
                     previous,
                     self._adaptive_rate_limit,
-                    seconds,
+                    len(window),
+                    long_tails,
                 )
 
     def _make_metadata(

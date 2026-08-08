@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from contextlib import contextmanager
 from datetime import datetime
 from typing import Any, Iterator
@@ -235,18 +236,8 @@ class BaoStockAdapter(BaseAdapter):
                     continue
 
                 self._wait_rate_limit()
-                rs = bs.query_history_k_data_plus(
-                    bs_code,
-                    _PRICE_FIELDS,
-                    start_date=start_date,
-                    end_date=end_date,
-                    frequency="d",
-                    adjustflag=adjustflag,
-                )
-
-                if rs.error_code != "0" and self.reuse_session and self._is_not_logged_in(rs.error_msg):
-                    self._reconnect()
-                    self._wait_rate_limit()
+                request_started = time.monotonic()
+                try:
                     rs = bs.query_history_k_data_plus(
                         bs_code,
                         _PRICE_FIELDS,
@@ -255,6 +246,24 @@ class BaoStockAdapter(BaseAdapter):
                         frequency="d",
                         adjustflag=adjustflag,
                     )
+                finally:
+                    self.record_response_duration(time.monotonic() - request_started)
+
+                if rs.error_code != "0" and self.reuse_session and self._is_not_logged_in(rs.error_msg):
+                    self._reconnect()
+                    self._wait_rate_limit()
+                    request_started = time.monotonic()
+                    try:
+                        rs = bs.query_history_k_data_plus(
+                            bs_code,
+                            _PRICE_FIELDS,
+                            start_date=start_date,
+                            end_date=end_date,
+                            frequency="d",
+                            adjustflag=adjustflag,
+                        )
+                    finally:
+                        self.record_response_duration(time.monotonic() - request_started)
 
                 if rs.error_code != "0":
                     msg = f"query_history_k_data_plus({bs_code}) 失败: {rs.error_msg}"
