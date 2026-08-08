@@ -13,36 +13,53 @@ from __future__ import annotations
 
 import time
 import json
+import threading
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
 _SUMMARY_TTL_SECONDS = 60
-_SUMMARY_CACHE: dict[str, object] = {"at": 0.0, "data": None}
+_SUMMARY_CACHE: dict[str, dict[str, object]] = {}
+_SUMMARY_CACHE_LOCK = threading.Lock()
 
 
 def _update_write_lock_active(duck) -> bool:
     """自动更新写锁存在即认为正在写入（保守：宁愿命中缓存也不要卡读）。"""
     try:
-        return (duck.db_path.parent / ".value-dashboard.update.lock").exists()
+        from app.core.storage.update_lock import _owner_is_dead
+
+        lock_path = duck.db_path.parent / ".value-dashboard.update.lock"
+        return lock_path.exists() and not _owner_is_dead(lock_path)
     except OSError:
         return False
 
 
-def _cached_summary() -> dict | None:
-    data = _SUMMARY_CACHE.get("data")
-    if data is None:
-        return None
-    at = float(_SUMMARY_CACHE["at"])
-    if (time.monotonic() - at) > _SUMMARY_TTL_SECONDS:
-        return None
-    return dict(data) if isinstance(data, dict) else None
+def _summary_cache_key(request: Request) -> str:
+    app = getattr(request, "app", request)
+    return f"{app.state.duck.db_path}|{app.state.sqlite.db_path}"
 
 
-def _store_summary(summary: dict) -> None:
-    _SUMMARY_CACHE["at"] = time.monotonic()
-    _SUMMARY_CACHE["data"] = dict(summary)
+def _cached_summary(request: Request, *, allow_stale: bool = False) -> dict | None:
+    with _SUMMARY_CACHE_LOCK:
+        entry = _SUMMARY_CACHE.get(_summary_cache_key(request))
+        if not entry:
+            return None
+        data = entry.get("data")
+        if data is None:
+            return None
+        at = float(entry["at"])
+        if not allow_stale and (time.monotonic() - at) > _SUMMARY_TTL_SECONDS:
+            return None
+        return dict(data) if isinstance(data, dict) else None
+
+
+def _store_summary(request: Request, summary: dict) -> None:
+    with _SUMMARY_CACHE_LOCK:
+        _SUMMARY_CACHE[_summary_cache_key(request)] = {
+            "at": time.monotonic(),
+            "data": dict(summary),
+        }
 
 
 @router.get("/summary")
@@ -51,7 +68,8 @@ def get_summary(request: Request) -> dict:
     # 自动更新写锁期间：直接返回最近一次成功缓存（stale=true）。
     # 避免每个轮询请求阻塞在 DuckDB 写锁上（曾实测 60s+）。
     startup_readiness = getattr(request.app.state, "startup_readiness", None)
-    cached = _cached_summary()
+    write_lock_active = _update_write_lock_active(request.app.state.duck)
+    cached = _cached_summary(request, allow_stale=write_lock_active)
     if (
         cached is not None
         and cached.get("checking")
@@ -59,18 +77,18 @@ def get_summary(request: Request) -> dict:
         and not startup_readiness.get("checking")
     ):
         cached = None
-    if _update_write_lock_active(request.app.state.duck):
+    if write_lock_active:
         if cached is not None:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
             return cached
         summary = _build_summary_fresh(request)
-        _store_summary(summary)
+        _store_summary(request, summary)
         return summary
     if cached is not None:
         return cached
     summary = _build_summary_fresh(request)
-    _store_summary(summary)
+    _store_summary(request, summary)
     return summary
 
 

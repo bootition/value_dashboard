@@ -287,7 +287,7 @@ class TDXAdapter(BaseAdapter):
         raw_lines: list[str] = []
         skipped: list[str] = []
 
-        with self._bars_session() as client:
+        with self._bars_session(request) as client:
             if client is None:
                 return self._make_empty_result(
                     reason="无法连接到能提供 K 线数据的 TDX 主机",
@@ -303,7 +303,7 @@ class TDXAdapter(BaseAdapter):
                     continue
 
                 bars = self._fetch_bars_for_code(
-                    client, market, plain_code, start_str, end_str
+                    client, market, plain_code, start_str, end_str, request
                 )
 
                 for _, row in bars.iterrows():
@@ -348,11 +348,14 @@ class TDXAdapter(BaseAdapter):
         code: str,
         start_str: str,
         end_str: str,
+        request: FetchRequest,
     ) -> pd.DataFrame:
         """分页获取单只股票的日线数据, 按日期范围过滤"""
         pages: list[pd.DataFrame] = []
 
         for page_idx in range(_MAX_BARS_PAGES):
+            if request.deadline_exceeded():
+                break
             offset = page_idx * _BARS_PAGE_SIZE
             self._wait_rate_limit()
             df = client.get_security_bars(
@@ -624,10 +627,12 @@ class TDXAdapter(BaseAdapter):
         client: TdxClient | None = None
         try:
             client = TdxClient.from_best_host(timeout=10.0, auto_reconnect=True)
-            yield client
         except (TdxConnectionError, TdxError, Exception) as e:
             logger.warning("TDX 连接失败: %s", e)
             yield None
+            return
+        try:
+            yield client
         finally:
             if client is not None:
                 try:
@@ -636,7 +641,7 @@ class TDXAdapter(BaseAdapter):
                     pass
 
     @contextmanager
-    def _bars_session(self) -> "Iterator[TdxClient | None]":
+    def _bars_session(self, request: FetchRequest) -> "Iterator[TdxClient | None]":
         """K 线专用会话: 需要找到能返回 K 线数据的主机
 
         from_best_host 选最低延迟主机, 但该主机可能只提供财务数据不提供 K 线。
@@ -644,11 +649,13 @@ class TDXAdapter(BaseAdapter):
         """
         client: TdxClient | None = None
         try:
-            client = self._connect_for_bars()
-            yield client
+            client = self._connect_for_bars(request)
         except (TdxConnectionError, TdxError, Exception) as e:
             logger.warning("TDX K线主机连接失败: %s", e)
             yield None
+            return
+        try:
+            yield client
         finally:
             if client is not None:
                 try:
@@ -656,7 +663,7 @@ class TDXAdapter(BaseAdapter):
                 except Exception:
                     pass
 
-    def _connect_for_bars(self) -> "TdxClient":
+    def _connect_for_bars(self, request: FetchRequest) -> "TdxClient":
         """连接到能返回 K 线数据的 TDX 主机
 
         from_best_host 选最低延迟主机, 但该主机可能只提供财务数据不提供 K 线。
@@ -676,11 +683,14 @@ class TDXAdapter(BaseAdapter):
 
         tried = 0
         for host in candidates:
+            if request.deadline_exceeded():
+                break
             if tried >= len(_KNOWN_BARS_HOSTS) + _BARS_HOST_MAX_ATTEMPTS:
                 break
             tried += 1
             try:
-                client = TdxClient(host=host, timeout=5.0, auto_reconnect=False)
+                timeout = max(0.1, request.remaining_seconds(5.0))
+                client = TdxClient(host=host, timeout=timeout, auto_reconnect=False)
                 client.connect()
                 if self._test_bars(client):
                     self.__class__._bars_host = host
@@ -693,7 +703,8 @@ class TDXAdapter(BaseAdapter):
 
         # 全部失败: 返回 from_best_host (至少能用于 xdxr 等其他操作)
         logger.warning("未找到能返回 K 线的主机, 已尝试 %d 台", tried)
-        return TdxClient.from_best_host(timeout=10.0)
+        timeout = max(0.1, request.remaining_seconds(10.0))
+        return TdxClient.from_best_host(timeout=timeout)
 
     @staticmethod
     def _test_bars(client: "TdxClient") -> bool:

@@ -65,6 +65,11 @@ def test_incremental_bse_price_update_requires_qfq(duckdb_store, sqlite_store) -
     assert [request.adjust for request in requests] == ["raw", "qfq"]
     assert duckdb_store.read_query("SELECT close FROM price_daily_raw WHERE stock_code = '430001'") == [{"close": 10.0}]
     assert duckdb_store.read_query("SELECT close FROM price_daily_qfq WHERE stock_code = '430001'") == [{"close": 10.0}]
+    audits = duckdb_store.read_query(
+        """SELECT field_name, COUNT(*) AS count FROM source_audit
+           WHERE stock_code = '430001' GROUP BY field_name"""
+    )
+    assert audits == [{"field_name": "latest_close", "count": 2}]
 
 
 def test_xdxr_stock_gets_full_qfq_refetch(duckdb_store, sqlite_store) -> None:
@@ -237,6 +242,47 @@ def test_raw_and_qfq_fetch_in_parallel(duckdb_store, sqlite_store) -> None:
 
     assert report["success"] == 1
     assert maximum_active == 2
+
+
+def test_current_prices_without_latest_lineage_are_refetched(
+    duckdb_store, sqlite_store,
+) -> None:
+    calls: list[str] = []
+
+    class Adapter:
+        def fetch(self, request):
+            calls.append(request.adjust)
+            raw_response = request.adjust.encode("ascii")
+            return FetchResult(
+                data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
+                metadata=SourceMetadata(
+                    source="local_cache",
+                    fetch_time=datetime.now(timezone.utc),
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
+                    confidence="strict",
+                ),
+                raw_response=raw_response,
+            )
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600002', 'LINEAGE', 'SHSE')"
+    )
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES ('600002', '2026-08-05', 9)"
+        )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+    updater._get_latest_local_price_date = lambda: "2026-08-05"
+
+    report = updater._update_prices_incremental(max_stocks=1)
+
+    assert report["success"] == 1
+    assert set(calls) == {"raw", "qfq"}
+    audits = duckdb_store.read_query(
+        "SELECT COUNT(*) AS count FROM source_audit WHERE stock_code = '600002' AND field_name = 'latest_close'"
+    )
+    assert audits[0]["count"] == 2
 
 
 def test_watchlist_stocks_are_updated_first_with_limit(duckdb_store, sqlite_store) -> None:

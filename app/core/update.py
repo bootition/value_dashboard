@@ -845,8 +845,24 @@ class IncrementalUpdater:
                      FROM price_daily_qfq GROUP BY stock_code
                    ) qfq ON qfq.stock_code = stock.stock_code
                    WHERE stock.is_listed IS TRUE AND COALESCE(stock.is_suspended, FALSE) IS FALSE
-                     AND (raw.latest_raw_date IS NULL OR qfq.latest_qfq_date IS NULL
-                          OR raw.latest_raw_date < ? OR qfq.latest_qfq_date < ?)
+                      AND (raw.latest_raw_date IS NULL OR qfq.latest_qfq_date IS NULL
+                           OR raw.latest_raw_date < ? OR qfq.latest_qfq_date < ?
+                           OR NOT EXISTS (
+                               SELECT 1 FROM source_audit audit
+                               JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+                               WHERE audit.stock_code = stock.stock_code
+                                 AND audit.field_name = 'latest_close'
+                                 AND audit.report_date = raw.latest_raw_date
+                                 AND batch.data_type = 'price_daily_raw'
+                           )
+                           OR NOT EXISTS (
+                               SELECT 1 FROM source_audit audit
+                               JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+                               WHERE audit.stock_code = stock.stock_code
+                                 AND audit.field_name = 'latest_close'
+                                 AND audit.report_date = qfq.latest_qfq_date
+                                 AND batch.data_type = 'price_daily_qfq'
+                           ))
                    ORDER BY stock.stock_code""",
                 [target_date, target_date],
             )
@@ -942,6 +958,9 @@ class IncrementalUpdater:
                 result = self.adapter_mgr.fetch(FetchRequest(
                     data_type="price_daily", stock_codes=[code],
                     start_date=start, end_date=end_date, adjust=adjust,
+                    extra_params={
+                        "deadline_monotonic": started + fetch_timeout,
+                    },
                 ))
                 return result, time.monotonic() - started
 
@@ -1099,11 +1118,37 @@ class IncrementalUpdater:
                     for row in result.data
                 ],
             )
-            lineage._record_batch_in_connection(connection, result, data_type, len(result.data))
+            batch_id = lineage._record_batch_in_connection(
+                connection, result, data_type, len(result.data)
+            )
+            latest_row = max(
+                result.data,
+                key=lambda row: str(row.get("trade_date") or ""),
+            )
+            latest_close = latest_row.get("close")
+            if isinstance(latest_close, (int, float)):
+                connection.execute(
+                    """INSERT INTO source_audit
+                       (stock_code, field_name, report_date, value, source,
+                        fetch_batch_id, fetch_time, raw_response_hash, confidence,
+                        reason_code, api_version)
+                       VALUES (?, 'latest_close', ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                    [
+                        stock_code,
+                        latest_row.get("trade_date"),
+                        latest_close,
+                        result.metadata.source,
+                        batch_id,
+                        result.metadata.fetch_time,
+                        result.metadata.raw_response_hash,
+                        result.metadata.confidence,
+                        result.metadata.api_version,
+                    ],
+                )
             # 价格行数极大（全历史重拉单只可达数千行），逐值审计会把
             # source_audit 放大成千万行级且非 PRD §14 关键财务字段所需。
-            # 价格采用 batch 级溯源（fetch_batch + raw_response_archive），
-            # 不做逐值 audit；财务/股本等关键字段仍走逐值审计。
+            # 价格采用 batch 级溯源，并仅审计每股最新收盘价；财务/股本等
+            # 关键字段仍走逐值审计。
 
     def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
         """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""

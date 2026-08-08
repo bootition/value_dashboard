@@ -202,3 +202,20 @@ def test_readiness_cache_round_trip(sqlite_store) -> None:
     assert loaded["ready"] is True
     assert loaded["cached"] is True
     assert loaded["checking"] is False
+
+
+def test_stale_readiness_cache_is_ignored(sqlite_store) -> None:
+    import json
+
+    from app.core.data_quality import read_cached_data_readiness
+
+    sqlite_store.execute(
+        "INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)",
+        [
+            "minimum_data_readiness",
+            json.dumps({"ready": True, "stock_count": 1}),
+            "2020-01-01T00:00:00+00:00",
+        ],
+    )
+
+    assert read_cached_data_readiness(sqlite_store) is None

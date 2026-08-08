@@ -298,14 +298,19 @@ class AutoUpdateController:
             with self._lock:
                 done = int(info.get("done", 0))
                 total = int(info.get("total", 0))
-                if step_name not in live_started:
+                first_sample = step_name not in live_started
+                if first_sample:
                     live_started[step_name] = (time.monotonic(), 0)
                 elif done <= live_started[step_name][1]:
                     live_started[step_name] = (time.monotonic(), done)
                 step_started, initial_done = live_started[step_name]
                 elapsed_seconds = max(time.monotonic() - step_started, 0.001)
                 processed = max(done - initial_done, done if initial_done == 0 else 0)
-                rate_per_minute = processed * 60 / elapsed_seconds if processed else 0.0
+                rate_per_minute = (
+                    processed * 60 / elapsed_seconds
+                    if not first_sample and processed >= 2
+                    else 0.0
+                )
                 remaining = max(total - done, 0)
                 eta_seconds = (
                     remaining * 60 / rate_per_minute if rate_per_minute > 0 else None

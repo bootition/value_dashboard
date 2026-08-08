@@ -57,6 +57,8 @@ class TencentAdapter(BaseAdapter):
             window_end = end
             pages = 0
             while window_end >= start and pages < 12:
+                if request.deadline_exceeded():
+                    return self._make_empty_result("tencent price deadline exceeded")
                 self._wait_rate_limit()
                 suffix = "qfq" if request.adjust == "qfq" else ""
                 try:
@@ -64,7 +66,7 @@ class TencentAdapter(BaseAdapter):
                         _KLINE_URL,
                         params={"param": f"{symbol},day,{start},{window_end},{_MAX_BARS_PER_REQUEST},{suffix}"},
                         headers=_HEADERS,
-                        timeout=30,
+                        timeout=max(0.1, request.remaining_seconds(30)),
                     )
                     response.raise_for_status()
                     payload = response.json()

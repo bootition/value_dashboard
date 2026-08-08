@@ -8,6 +8,7 @@ import secrets
 import sys
 import threading
 import webbrowser
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -179,6 +180,7 @@ def create_app(
     duck: DuckDBStore | None = None,
     sqlite: SQLiteStore | None = None,
     startup_readiness: dict | None = None,
+    start_maintenance_on_lifespan: bool = False,
 ) -> FastAPI:
     """创建 FastAPI 应用实例"""
     if paths is None:
@@ -199,10 +201,23 @@ def create_app(
     if sqlite_store.db_path != validated.sqlite_path:
         raise PathIsolationError("Web SQLite store does not match injected paths")
 
+    @asynccontextmanager
+    async def lifespan(app_instance: FastAPI):
+        if start_maintenance_on_lifespan:
+            current = app_instance.state.startup_readiness
+            _start_startup_maintenance(
+                app_instance,
+                app_instance.state.duck,
+                app_instance.state.sqlite,
+                current,
+            )
+        yield
+
     app = FastAPI(
         title="Value Dashboard",
         description="A股价值投资研究与筛选工具",
         version="0.1.0",
+        lifespan=lifespan,
     )
     # Loopback binding is not an origin boundary: reject hostile Host headers
     # and require this per-launch token for every browser-originated mutation.
@@ -399,17 +414,16 @@ def run_server() -> None:
         webbrowser.open(url)
 
     logger.info(f"Value Dashboard 启动中... http://{host}:{port}")
-    app = create_app(
-        paths=paths, config=cfg, duck=duck, sqlite=sqlite,
-        startup_readiness=startup_readiness,
-    )
     skip_maintenance = (
         paths.env.value in {"test", "staging"}
         and os.environ.get("VD_SKIP_STARTUP_MAINTENANCE") == "1"
     )
-    if not skip_maintenance:
-        _start_startup_maintenance(app, duck, sqlite, startup_readiness)
-    else:
+    app = create_app(
+        paths=paths, config=cfg, duck=duck, sqlite=sqlite,
+        startup_readiness=startup_readiness,
+        start_maintenance_on_lifespan=not skip_maintenance,
+    )
+    if skip_maintenance:
         logger.info("隔离 profile 已显式跳过启动维护")
     uvicorn.run(app, host=host, port=port, log_level="info")
 

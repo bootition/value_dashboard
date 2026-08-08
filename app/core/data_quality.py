@@ -13,6 +13,7 @@ from app.core.storage.sqlite_store import SQLiteStore
 DEFAULT_MINIMUM_HISTORY_OBSERVATIONS = 1_300
 DEFAULT_MINIMUM_VOLUME_OBSERVATIONS = 1_300
 READINESS_CACHE_KEY = "minimum_data_readiness"
+READINESS_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 _SCREENING_BLOCKING_WARNINGS = {
     "FINANCIAL_SHELL_ROWS",
     "SNAPSHOT_STALE",
@@ -45,6 +46,11 @@ def read_cached_data_readiness(sqlite: SQLiteStore) -> dict | None:
             [READINESS_CACHE_KEY],
         )
         if not rows:
+            return None
+        checked_at = datetime.fromisoformat(rows[0]["updated_at"])
+        if checked_at.tzinfo is None:
+            checked_at = checked_at.astimezone()
+        if (datetime.now().astimezone() - checked_at).total_seconds() > READINESS_CACHE_MAX_AGE_SECONDS:
             return None
         value = json.loads(rows[0]["value"])
         if not isinstance(value, dict) or "ready" not in value:

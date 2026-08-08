@@ -194,6 +194,8 @@ class BaoStockAdapter(BaseAdapter):
 
         try:
             with self._fetch_lock:
+                if request.deadline_exceeded():
+                    return self._make_empty_result("baostock request deadline exceeded")
                 if self._relogin_requested and self.reuse_session:
                     self._reconnect()
                     self._relogin_requested = False
@@ -224,6 +226,8 @@ class BaoStockAdapter(BaseAdapter):
 
         with self._session():
             for raw_code in request.stock_codes:
+                if request.deadline_exceeded():
+                    return self._make_empty_result("baostock price deadline exceeded")
                 bs_code = _to_baostock_code(raw_code)
                 if bs_code is None:
                     skipped_bse.append(_normalize_stock_code(raw_code))
@@ -542,12 +546,13 @@ class BaoStockAdapter(BaseAdapter):
 
     def close(self) -> None:
         """Logout explicitly when session-reuse mode is active."""
-        if not self.reuse_session or not self._logged_in:
-            return
-        try:
-            bs.logout()
-            logger.debug("baostock 登出成功 (session reuse)")
-        except Exception:
-            logger.warning("baostock logout 异常", exc_info=True)
-        finally:
-            self._logged_in = False
+        with self._fetch_lock:
+            if not self.reuse_session or not self._logged_in:
+                return
+            try:
+                bs.logout()
+                logger.debug("baostock 登出成功 (session reuse)")
+            except Exception:
+                logger.warning("baostock logout 异常", exc_info=True)
+            finally:
+                self._logged_in = False

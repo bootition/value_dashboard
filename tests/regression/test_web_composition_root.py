@@ -176,13 +176,6 @@ def test_run_server_reuses_one_resolved_database_pair(
     )
     monkeypatch.setattr(web_main, "create_app", create_app)
     monkeypatch.setattr(
-        web_main,
-        "_start_startup_maintenance",
-        lambda app, current_duck, current_sqlite, readiness: calls.update(
-            maintenance=(app, current_duck, current_sqlite, readiness)
-        ),
-    )
-    monkeypatch.setattr(
         web_main.uvicorn,
         "run",
         lambda app, **kwargs: calls.update(uvicorn=(app, kwargs)),
@@ -209,12 +202,8 @@ def test_run_server_reuses_one_resolved_database_pair(
             "missing_counts": {},
             "schema_compatibility": {"compatible": True, "missing": []},
         },
+        "start_maintenance_on_lifespan": True,
     }
-    maintenance_app, maintenance_duck, maintenance_sqlite, maintenance_readiness = calls["maintenance"]
-    assert maintenance_app is calls["uvicorn"][0]
-    assert maintenance_duck is duck
-    assert maintenance_sqlite is sqlite
-    assert maintenance_readiness["checking"] is True
 
 
 def test_web_sources_have_no_implicit_database_constructors() -> None:

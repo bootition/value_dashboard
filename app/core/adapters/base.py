@@ -55,6 +55,16 @@ class FetchRequest(BaseModel):
 
     model_config = {"arbitrary_types_allowed": True}
 
+    def deadline_exceeded(self) -> bool:
+        deadline = self.extra_params.get("deadline_monotonic")
+        return deadline is not None and time.monotonic() >= float(deadline)
+
+    def remaining_seconds(self, default: float) -> float:
+        deadline = self.extra_params.get("deadline_monotonic")
+        if deadline is None:
+            return default
+        return max(0.0, min(default, float(deadline) - time.monotonic()))
+
 
 class SourceMetadata(BaseModel):
     """每次抓取的溯源元数据"""

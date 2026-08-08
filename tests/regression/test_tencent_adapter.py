@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.tencent_adapter import TencentAdapter
 
@@ -100,3 +102,24 @@ def test_tencent_bse_qfq_falls_back_to_raw_when_no_adjustment_exists(monkeypatch
 
     assert result.metadata.error is None
     assert result.data[0]["close"] == 14.58
+
+
+def test_tencent_price_deadline_bounds_http_timeout(monkeypatch) -> None:
+    seen: dict[str, float] = {}
+
+    def capture(*args, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return _Response()
+
+    monkeypatch.setattr("app.core.adapters.tencent_adapter.requests.get", capture)
+    result = TencentAdapter(rate_limit=0).fetch(
+        FetchRequest(
+            data_type="price_daily",
+            stock_codes=["920000"],
+            adjust="qfq",
+            extra_params={"deadline_monotonic": time.monotonic() + 0.5},
+        )
+    )
+
+    assert result.metadata.error is None
+    assert 0 < seen["timeout"] <= 0.5
