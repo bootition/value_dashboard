@@ -82,7 +82,10 @@ def get_summary(request: Request) -> dict:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
             return cached
-        summary = _build_summary_fresh(request)
+        # 写锁活跃且进程内无缓存（如服务刚重启）：返回轻量占位，
+        # 不得同步全量构建——build_data_quality_status 在写锁下可达
+        # 60s+，前端 15s 超时直接报错。
+        summary = _lightweight_summary(request)
         _store_summary(request, summary)
         return summary
     if cached is not None:
@@ -90,6 +93,42 @@ def get_summary(request: Request) -> dict:
     summary = _build_summary_fresh(request)
     _store_summary(request, summary)
     return summary
+
+
+def _lightweight_summary(request: Request) -> dict:
+    """Return a minimal summary when the writer lock is active and no cache exists.
+
+    Mirrors the checking placeholder shape so the frontend renders
+    "正在核对数据/自动更新中" instead of timing out.
+    """
+    startup_readiness = getattr(request.app.state, "startup_readiness", None)
+    if not isinstance(startup_readiness, dict):
+        from app.core.data_quality import checking_data_readiness
+
+        startup_readiness = checking_data_readiness()
+    readiness = dict(startup_readiness)
+    return {
+        "data_quality": {
+            "minimum_data_readiness": readiness,
+            "dates": {},
+            "dividends": {},
+            "lineage": {},
+            "code_identity": {},
+            "operations": {},
+            "warning_codes": [],
+        },
+        "minimum_data_readiness": readiness,
+        "stock_count": 0,
+        "price_raw_count": 0,
+        "price_qfq_count": 0,
+        "retry_count": 0,
+        "missing_count": 0,
+        "last_update": None,
+        "recent_jobs": [],
+        "stale": True,
+        "stale_reason": "auto_update_active_no_cache",
+        "checking": True,
+    }
 
 
 def _build_summary_fresh(request: Request) -> dict:

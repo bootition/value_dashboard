@@ -120,3 +120,29 @@ def test_dead_update_lock_does_not_mark_summary_stale(
         lock_path.unlink(missing_ok=True)
     assert response.status_code == 200
     assert response.json().get("stale") is not True
+
+
+def test_live_update_lock_without_cache_returns_placeholder_not_full_build(
+    database_paths: DatabasePathSet, monkeypatch,
+) -> None:
+    """写锁活跃且进程内无缓存（服务刚重启）时不得同步全量构建（曾致前端 15s 超时）。"""
+    import os
+
+    _reset_cache(monkeypatch)
+    client, duck = _make_app(database_paths)
+    lock_path = duck.db_path.parent / ".value-dashboard.update.lock"
+    lock_path.write_text(f"pid={os.getpid()}\ntime=0\n", encoding="ascii")
+    monkeypatch.setattr(
+        data_status,
+        "_build_summary_fresh",
+        lambda request: (_ for _ in ()).throw(AssertionError("must not build")),
+    )
+    try:
+        response = client.get("/api/data-status/summary")
+    finally:
+        lock_path.unlink(missing_ok=True)
+    assert response.status_code == 200
+    body = response.json()
+    assert body.get("stale") is True
+    assert body.get("stale_reason") == "auto_update_active_no_cache"
+    assert body.get("checking") is True
