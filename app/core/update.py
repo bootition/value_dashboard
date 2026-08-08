@@ -1474,7 +1474,7 @@ class IncrementalUpdater:
                     JOIN cash_flow cf
                       ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
                     WHERE bs.stock_code IN ({slots})
-                      AND bs.report_date >= DATE 'now' - INTERVAL '18 months'
+                      AND bs.report_date >= CURRENT_DATE - INTERVAL '18 months'
                     GROUP BY bs.stock_code""",
                 codes,
             )
