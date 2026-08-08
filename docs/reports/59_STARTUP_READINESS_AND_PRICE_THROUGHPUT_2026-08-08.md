@@ -1,9 +1,10 @@
 ---
 title: 启动 readiness 与价格吞吐自适应实施报告（2026-08-08）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-08
 last-reviewed: 2026-08-08
+superseded-by: reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md
 supersedes: reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md, reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md
 ---
 
