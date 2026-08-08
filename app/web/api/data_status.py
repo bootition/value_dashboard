@@ -11,17 +11,22 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import json
 import threading
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
 _SUMMARY_TTL_SECONDS = 60
 _SUMMARY_CACHE: dict[str, dict[str, object]] = {}
 _SUMMARY_CACHE_LOCK = threading.Lock()
+_SUMMARY_REFRESH_LOCK = threading.Lock()
+_SUMMARY_REFRESHING: set[str] = set()
 
 
 def _update_write_lock_active(duck) -> bool:
@@ -40,18 +45,19 @@ def _summary_cache_key(request: Request) -> str:
     return f"{app.state.duck.db_path}|{app.state.sqlite.db_path}"
 
 
-def _cached_summary(request: Request, *, allow_stale: bool = False) -> dict | None:
+def _cached_summary(request: Request, *, allow_stale: bool = False) -> tuple[dict | None, float | None]:
     with _SUMMARY_CACHE_LOCK:
         entry = _SUMMARY_CACHE.get(_summary_cache_key(request))
         if not entry:
-            return None
+            return None, None
         data = entry.get("data")
         if data is None:
-            return None
+            return None, None
         at = float(entry["at"])
-        if not allow_stale and (time.monotonic() - at) > _SUMMARY_TTL_SECONDS:
-            return None
-        return dict(data) if isinstance(data, dict) else None
+        age = time.monotonic() - at
+        if not allow_stale and age > _SUMMARY_TTL_SECONDS:
+            return None, age
+        return (dict(data) if isinstance(data, dict) else None), age
 
 
 def _store_summary(request: Request, summary: dict) -> None:
@@ -64,12 +70,15 @@ def _store_summary(request: Request, summary: dict) -> None:
 
 @router.get("/summary")
 def get_summary(request: Request) -> dict:
-    """数据状态摘要 (PRD §15 DS2)"""
-    # 自动更新写锁期间：直接返回最近一次成功缓存（stale=true）。
-    # 避免每个轮询请求阻塞在 DuckDB 写锁上（曾实测 60s+）。
+    """数据状态摘要 (PRD §15 DS2)，stale-while-revalidate。
+
+    同步全量构建（build_data_quality_status）在正式库上需 20s+，
+    绝不能阻塞请求线程（曾致前端 15s 超时）。任何情况下都立即返回
+    最近缓存（含过期值）或轻量占位，刷新由单例后台线程完成。
+    """
     startup_readiness = getattr(request.app.state, "startup_readiness", None)
     write_lock_active = _update_write_lock_active(request.app.state.duck)
-    cached = _cached_summary(request, allow_stale=write_lock_active)
+    cached, age = _cached_summary(request, allow_stale=True)
     if (
         cached is not None
         and cached.get("checking")
@@ -77,22 +86,47 @@ def get_summary(request: Request) -> dict:
         and not startup_readiness.get("checking")
     ):
         cached = None
-    if write_lock_active:
-        if cached is not None:
+    if cached is None:
+        cached = _lightweight_summary(request)
+        _store_summary(request, cached)
+        age = 0.0
+    else:
+        cached = dict(cached)
+        if write_lock_active:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
-            return cached
-        # 写锁活跃且进程内无缓存（如服务刚重启）：返回轻量占位，
-        # 不得同步全量构建——build_data_quality_status 在写锁下可达
-        # 60s+，前端 15s 超时直接报错。
-        summary = _lightweight_summary(request)
-        _store_summary(request, summary)
-        return summary
-    if cached is not None:
-        return cached
-    summary = _build_summary_fresh(request)
-    _store_summary(request, summary)
-    return summary
+    needs_refresh = age is None or age > _SUMMARY_TTL_SECONDS or bool(cached.get("checking"))
+    if needs_refresh:
+        _ensure_summary_refresh(request)
+    return cached
+
+
+def _ensure_summary_refresh(request: Request) -> None:
+    """Start a single-flight background refresh; never blocks the request."""
+    key = _summary_cache_key(request)
+    with _SUMMARY_REFRESH_LOCK:
+        if key in _SUMMARY_REFRESHING:
+            return
+        _SUMMARY_REFRESHING.add(key)
+    threading.Thread(
+        target=_refresh_summary_worker,
+        args=(request.app.state, key),
+        name="vd-summary-refresh",
+        daemon=True,
+    ).start()
+
+
+def _refresh_summary_worker(state, key: str) -> None:
+    """Rebuild the summary off the request path and publish it atomically."""
+    try:
+        summary = _build_summary_from_state(state)
+        with _SUMMARY_CACHE_LOCK:
+            _SUMMARY_CACHE[key] = {"at": time.monotonic(), "data": dict(summary)}
+    except Exception as error:
+        logger.warning("后台 summary 刷新失败: %s", error)
+    finally:
+        with _SUMMARY_REFRESH_LOCK:
+            _SUMMARY_REFRESHING.discard(key)
 
 
 def _lightweight_summary(request: Request) -> dict:
@@ -131,13 +165,14 @@ def _lightweight_summary(request: Request) -> dict:
     }
 
 
-def _build_summary_fresh(request: Request) -> dict:
-    duck = request.app.state.duck
-    sqlite = request.app.state.sqlite
+def _build_summary_from_state(state) -> dict:
+    """Full summary build off the request path (background refresh)."""
+    duck = state.duck
+    sqlite = state.sqlite
 
     from app.core.data_quality import build_data_quality_status
 
-    startup_readiness = getattr(request.app.state, "startup_readiness", None)
+    startup_readiness = getattr(state, "startup_readiness", None)
     if isinstance(startup_readiness, dict) and startup_readiness.get("checking"):
         return {
             "data_quality": {
