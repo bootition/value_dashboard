@@ -437,9 +437,15 @@ class IncrementalUpdater:
             ).compute_snapshot_for_codes(updated_price_codes)
             report_step("indicators", snapshot_step)
 
-        # 3. 重试失败任务
+        # 3. 重试失败任务（先清理已达标的历史冗余条目，避免全历史重抓）
         if check_report["retry_tasks"]:
-            report_step("retries", self._retry_failed_tasks(check_report["retry_tasks"]))
+            expected_date = self._latest_expected_trading_date(
+                datetime.now().strftime("%Y-%m-%d")
+            )
+            self._cleanup_redundant_retries(expected_date)
+            refreshed_tasks = self._check_retry_tasks()
+            if refreshed_tasks:
+                report_step("retries", self._retry_failed_tasks(refreshed_tasks))
 
         report["status"] = aggregate_job_status(report["steps"])
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -1092,7 +1098,7 @@ class IncrementalUpdater:
 
     def _persist_price_pair_in_connection(
         self, connection: Any, stock_code: str, raw_result: Any, qfq_result: Any,
-        *, full_replace: bool = False,
+        *, full_replace_raw: bool = False, full_replace_qfq: bool = False,
     ) -> None:
         """Write one stock's raw/qfq rows + batch lineage inside a caller transaction.
 
@@ -1102,14 +1108,16 @@ class IncrementalUpdater:
         per stock. Large responses use an in-transaction delete+insert
         replace instead, guarded against truncated sources by a row-count
         ratio check. Incremental responses keep the conflict-safe upsert.
+        Raw and qfq are judged independently: one side may be a small
+        incremental while the other is a full-history replacement.
         """
         from app.core.init import DataInitializer
 
         lineage = DataInitializer.__new__(DataInitializer)
         lineage._batch_id = str(uuid.uuid4())
-        for table, data_type, result in (
-            ("price_daily_raw", "price_daily_raw", raw_result),
-            ("price_daily_qfq", "price_daily_qfq", qfq_result),
+        for table, data_type, result, full_replace in (
+            ("price_daily_raw", "price_daily_raw", raw_result, full_replace_raw),
+            ("price_daily_qfq", "price_daily_qfq", qfq_result, full_replace_qfq),
         ):
             if full_replace:
                 local_rows = connection.execute(
@@ -1188,12 +1196,11 @@ class IncrementalUpdater:
             # 价格采用 batch 级溯源，并仅审计每股最新收盘价；财务/股本等
             # 关键字段仍走逐值审计。
 
-    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any, *, full_replace: bool = False) -> None:
+    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
         """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""
         with self.duck.transaction() as connection:
             self._persist_price_pair_in_connection(
                 connection, stock_code, raw_result, qfq_result,
-                full_replace=full_replace,
             )
 
     def _persist_price_batch(
@@ -1215,17 +1222,26 @@ class IncrementalUpdater:
         large, small = [], []
         for item in batch:
             _, raw_result, qfq_result = item
-            if (
-                raw_result is not None and len(raw_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
-            ) or (
-                qfq_result is not None and len(qfq_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
-            ):
-                large.append(item)
+            raw_large = (
+                raw_result is not None
+                and len(raw_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
+            )
+            qfq_large = (
+                qfq_result is not None
+                and len(qfq_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
+            )
+            if raw_large or qfq_large:
+                large.append((item, raw_large, qfq_large))
             else:
                 small.append(item)
-        for code, raw_result, qfq_result in large:
+        for (code, raw_result, qfq_result), raw_large, qfq_large in large:
             try:
-                self._persist_incremental_price_pair(code, raw_result, qfq_result, full_replace=True)
+                with self.duck.transaction() as connection:
+                    self._persist_price_pair_in_connection(
+                        connection, code, raw_result, qfq_result,
+                        full_replace_raw=raw_large,
+                        full_replace_qfq=qfq_large,
+                    )
                 success_count += 1
                 updated_codes.append(code)
             except Exception as exc:
@@ -1258,6 +1274,78 @@ class IncrementalUpdater:
                     )
             return success_count, updated_codes, fail_count
 
+    def _cleanup_redundant_retries(self, target_date: str) -> int:
+        """Drop price retry entries whose data is already up to date.
+
+        Historical failures (e.g. the "no available adapter" batch from a
+        broken source window) leave entries behind even after the underlying
+        price data was recovered by the incremental pass. Rechecking those
+        with a full-history refetch would burn minutes per stock for nothing.
+        """
+        try:
+            rows = self.sqlite.query(
+                "SELECT id, stock_code FROM retry_list WHERE data_type = 'price_daily'"
+            )
+        except Exception as error:
+            logger.warning("读取 price retry 列表失败: %s", error)
+            return 0
+        if not rows:
+            return 0
+        codes = [row["stock_code"] for row in rows]
+        slots = ", ".join("?" for _ in codes)
+        try:
+            coverage = self.duck.read_query(
+                f"""WITH raw AS (
+                        SELECT stock_code, MAX(trade_date) AS latest FROM price_daily_raw GROUP BY stock_code
+                    ), qfq AS (
+                        SELECT stock_code, MAX(trade_date) AS latest FROM price_daily_qfq GROUP BY stock_code
+                    )
+                    SELECT stock.stock_code,
+                           raw.latest AS raw_latest,
+                           qfq.latest AS qfq_latest,
+                           EXISTS (
+                               SELECT 1 FROM source_audit audit
+                               JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+                               WHERE audit.stock_code = stock.stock_code
+                                 AND audit.field_name = 'latest_close'
+                                 AND batch.data_type = 'price_daily_raw'
+                           ) AS raw_lineaged,
+                           EXISTS (
+                               SELECT 1 FROM source_audit audit
+                               JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+                               WHERE audit.stock_code = stock.stock_code
+                                 AND audit.field_name = 'latest_close'
+                                 AND batch.data_type = 'price_daily_qfq'
+                           ) AS qfq_lineaged
+                    FROM stock_meta stock
+                    LEFT JOIN raw ON raw.stock_code = stock.stock_code
+                    LEFT JOIN qfq ON qfq.stock_code = stock.stock_code
+                    WHERE stock.stock_code IN ({slots})""",
+                codes,
+            )
+        except Exception as error:
+            logger.warning("查询 price retry 覆盖状态失败: %s", error)
+            return 0
+        clean_ids = [
+            row["id"]
+            for row in rows
+            for cover in coverage
+            if cover["stock_code"] == row["stock_code"]
+            and str(cover.get("raw_latest") or "")[:10] >= target_date
+            and str(cover.get("qfq_latest") or "")[:10] >= target_date
+            and cover.get("raw_lineaged")
+            and cover.get("qfq_lineaged")
+        ]
+        if clean_ids:
+            self.sqlite.execute(
+                "DELETE FROM retry_list WHERE id IN ({})".format(
+                    ", ".join("?" for _ in clean_ids)
+                ),
+                clean_ids,
+            )
+            logger.info("[增量] 清理 %d 条已达标的价格重试条目", len(clean_ids))
+        return len(clean_ids)
+
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
         """重试失败任务"""
         logger.info(f"[增量] 重试 {len(tasks)} 个失败任务...")
@@ -1287,11 +1375,28 @@ class IncrementalUpdater:
                 continue
             adjust = extra.get("adjust", "raw")
 
+            # 增量重试：从本地最新日期起拉缺口，避免对已恢复历史的股票
+            # 重复全历史抓取（每条约 3000+ 行，串行处理时拖慢整个重试轮）。
+            table = "price_daily_raw" if adjust == "raw" else "price_daily_qfq"
+            start_from: str | None = None
+            try:
+                latest_rows = self.duck.read_query(
+                    f"SELECT MAX(trade_date) AS latest FROM {table} WHERE stock_code = ?",
+                    [stock_code],
+                )
+                latest_value = latest_rows[0]["latest"] if latest_rows else None
+                if latest_value:
+                    start_from = str(latest_value)[:10]
+            except Exception:
+                start_from = None
+
             # 重新抓取
             result = self.adapter_mgr.fetch(FetchRequest(
                 data_type=data_type,
                 stock_codes=[stock_code],
                 adjust=adjust,
+                start_date=start_from,
+                end_date=datetime.now().strftime("%Y-%m-%d"),
             ))
 
             if result.metadata.error or not result.data:
