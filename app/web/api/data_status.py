@@ -133,7 +133,8 @@ def _lightweight_summary(request: Request) -> dict:
     """Return a minimal summary when the writer lock is active and no cache exists.
 
     Mirrors the checking placeholder shape so the frontend renders
-    "正在核对数据/自动更新中" instead of timing out.
+    "正在核对数据/自动更新中" instead of timing out. Carries the last
+    successful job time so the page never falls back to "尚未初始化".
     """
     startup_readiness = getattr(request.app.state, "startup_readiness", None)
     if not isinstance(startup_readiness, dict):
@@ -141,6 +142,16 @@ def _lightweight_summary(request: Request) -> dict:
 
         startup_readiness = checking_data_readiness()
     readiness = dict(startup_readiness)
+    last_update: str | None = None
+    try:
+        rows = request.app.state.sqlite.query(
+            "SELECT finished_at FROM job_logs "
+            "WHERE status = 'success' ORDER BY finished_at DESC LIMIT 1"
+        )
+        if rows and rows[0].get("finished_at"):
+            last_update = str(rows[0]["finished_at"])
+    except Exception:
+        last_update = None
     return {
         "data_quality": {
             "minimum_data_readiness": readiness,
@@ -157,7 +168,7 @@ def _lightweight_summary(request: Request) -> dict:
         "price_qfq_count": 0,
         "retry_count": 0,
         "missing_count": 0,
-        "last_update": None,
+        "last_update": last_update,
         "recent_jobs": [],
         "stale": True,
         "stale_reason": "auto_update_active_no_cache",
