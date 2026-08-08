@@ -1,0 +1,64 @@
+{
+  "date": "2026-08-08",
+  "note": "生产 AdapterManager 路径，每适配器单请求、串行、间隔=适配器限流配置",
+  "results": [
+    {
+      "adapter": "tencent",
+      "data_type": "price_daily",
+      "ok": true,
+      "rows": 5,
+      "elapsed_s": 0.24,
+      "error": null
+    },
+    {
+      "adapter": "baostock",
+      "data_type": "price_daily",
+      "ok": true,
+      "rows": 5,
+      "elapsed_s": 0.85,
+      "error": null
+    },
+    {
+      "adapter": "tdx",
+      "data_type": "price_daily",
+      "ok": true,
+      "rows": 5,
+      "elapsed_s": 0.72,
+      "error": null
+    },
+    {
+      "adapter": "sina",
+      "data_type": "balance_sheet",
+      "ok": true,
+      "rows": 102,
+      "elapsed_s": 0.56,
+      "error": null
+    },
+    {
+      "adapter": "cninfo",
+      "data_type": "dividends",
+      "ok": false,
+      "rows": 0,
+      "elapsed_s": 4.77,
+      "error": null
+    },
+    {
+      "adapter": "cninfo_csrc",
+      "data_type": "csrc_industry",
+      "ok": true,
+      "rows": 1,
+      "elapsed_s": 0.37,
+      "error": null
+    },
+    {
+      "adapter": "akshare_eastmoney",
+      "data_type": "balance_sheet",
+      "ok": true,
+      "rows": 102,
+      "elapsed_s": 6.06,
+      "error": null
+    }
+  ],
+  "ok_count": 6,
+  "total": 7
+}

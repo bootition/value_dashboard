@@ -68,7 +68,7 @@ vd data compute_indicators     # 重算全市场指标快照（经发布门禁�
 | 更新卡在 running | `vd data reconcile_jobs` 生成确认 plan → `reconcile_jobs_execute` |
 | 部分源失败 | 适配器自动回退链生效；查看 retry 列表，网络恢复后重试 |
 | legacy 空 payload | `vd data quarantine_legacy_records` + `_execute`（只隔离不删除证据） |
-| 东财源被封 | 已自动迁移腾讯/Sina/BaoStock；无需人工干预 |
+| 东财行情源被封 | 仅 push2/push2his（行情/逐股信息）被封，IP 级临时封锁；F10 财报/股本/分红源仍可用。价格已回退腾讯/BaoStock/TDX，自动更新无需干预。冷却期至 2026-08-15 勿触碰 push2 系；到期后单次探测（见 `reports/61`） |
 
 ## 6. 参考
 

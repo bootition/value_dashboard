@@ -1,0 +1,72 @@
+{
+  "tool": "akshare 1.18.81",
+  "date": "2026-08-08",
+  "note": "串行单请求轻量探测，间隔 6s；用于判定东财封锁范围",
+  "results": [
+    {
+      "case": "price_daily_push2his",
+      "ok": false,
+      "rows": 0,
+      "elapsed_s": 2.96,
+      "error": "ConnectionError: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    },
+    {
+      "case": "balance_sheet_f10",
+      "ok": true,
+      "rows": 102,
+      "elapsed_s": 5.8,
+      "error": null
+    },
+    {
+      "case": "income_statement_f10",
+      "ok": true,
+      "rows": 102,
+      "elapsed_s": 4.75,
+      "error": null
+    },
+    {
+      "case": "cash_flow_f10",
+      "ok": true,
+      "rows": 98,
+      "elapsed_s": 3.46,
+      "error": null
+    },
+    {
+      "case": "dividends_cninfo",
+      "ok": true,
+      "rows": 31,
+      "elapsed_s": 0.31,
+      "error": null
+    },
+    {
+      "case": "listing_info_push2",
+      "ok": false,
+      "rows": 0,
+      "elapsed_s": 0.24,
+      "error": "ConnectionError: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))"
+    },
+    {
+      "case": "stock_list_a_code_name",
+      "ok": true,
+      "rows": 5539,
+      "elapsed_s": 7.83,
+      "error": null
+    },
+    {
+      "case": "tfp_datacenter",
+      "ok": true,
+      "rows": 6,
+      "elapsed_s": 0.38,
+      "error": null
+    },
+    {
+      "case": "trade_calendar_sina",
+      "ok": true,
+      "rows": 8797,
+      "elapsed_s": 0.18,
+      "error": null
+    }
+  ],
+  "ok_count": 7,
+  "total": 9
+}

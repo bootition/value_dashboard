@@ -68,6 +68,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` — 官方调研与初版并发事实（当前策略被 reports/59 取代）
 - `reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md` — readiness 与吞吐初版实现（当前结论被 reports/60 取代）
 - `reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md` — 当前启动/抓取红队实践与正式库 BLOCK 裁决依据
+- `reports/61_SOURCE_STATUS_PROBE_AND_EASTMONEY_BAN_2026-08-08.md` — 当前数据源连通性依据（东财封禁范围、各源现状、CNINFO 分红 bug、冷却重试计划）
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新

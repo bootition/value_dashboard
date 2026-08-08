@@ -22,10 +22,11 @@
 | 启动 readiness | ✅ 正式实测首次 health 1.616s、后台核对约 19.55s；二次启动 health 1.682s、1.731s 即返回缓存核对结果；真实 BLOCK 状态保持 503，无假阳性 | `reports/60` §2（取代 `reports/59`） |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
-2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；东财源被封（已自动回退腾讯/Sina/BaoStock）；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
+2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
 3. **正式库质量修复未完成**：价格最新日期已达 2026-08-07，但 3,196 只快照价格一致性与 433 只最新价格 lineage 仍待受控续传修复；`retry_list=10001` 是历史遗留，不能宣称全市场研究快照 ready。
 ## 进行中的工作
 - **质量缺口续传**：本轮已用 450 股正式任务验证性能和 lineage 恢复；自动更新当前保持 disabled、服务已停止。后续应继续分批修复 3,196/433 缺口并清理 10,001 条历史 retry，每批后复验质量门禁。
+- **东财行情源冷却**：push2/push2his 封锁冷却期至 2026-08-15（期间勿触碰）；到期后单次探测，恢复后限速 ≤2 req/s、并发 ≤5。另：CNINFO 分红适配器恒返回空（ex_date 永不填充，`reports/61` §3.2），当前靠回退链填充，修复评估待办。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
@@ -62,6 +63,7 @@
 | `docs/reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md` | 官方调研、限速校准与初版并发事实 | 当前策略被 `reports/59` 取代 |
 | `docs/reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md` | readiness 后台缓存与价格吞吐初版实现 | 红队与正式实践结论被 `reports/60` 取代 |
 | `docs/reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md` | **红队修复与正式实践**：启动实测、450 股任务、lineage 回归发现/修复、正式库 BLOCK 裁决 | **当前启动/抓取策略与正式数据状态依据** |
+| `docs/reports/61_SOURCE_STATUS_PROBE_AND_EASTMONEY_BAN_2026-08-08.md` | **数据源状态探测与东财封禁范围调查**：东财仅 push2/push2his 被封、F10/股本/分红源可用；各源现状；CNINFO 分红适配器 bug 发现；冷却重试计划 | **当前数据源连通性依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
