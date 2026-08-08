@@ -526,7 +526,13 @@ class AKShareAdapter(BaseAdapter):
         )
 
     def _fetch_dividends(self, request: FetchRequest) -> FetchResult:
-        """分红记录 (CNINFO) — symbol 为纯代码 (600519)"""
+        """分红记录 (CNINFO) — symbol 为纯代码 (600519)
+
+        akshare 的 stock_dividend_cninfo 返回"每10股"口径的 ratio 字段
+        （cash_dividend_ratio/bonus_share_ratio/capitalization_ratio），
+        必须归一化为标准"每股"字段（dividend_per_share 等），否则正式库
+        dividends 表的数值字段会全部为空。
+        """
         if not request.stock_codes:
             return self._make_empty_result("dividends 需要 stock_codes")
 
@@ -541,6 +547,7 @@ class AKShareAdapter(BaseAdapter):
                 records = _df_to_records(df, _DIVIDEND_FIELD_MAP)
                 for rec in records:
                     rec["stock_code"] = plain_code
+                    self._normalize_dividend_fields(rec)
                 all_records.extend(records)
             except Exception as e:
                 logger.warning(f"stock_dividend_cninfo({plain_code}) 失败: {e}")
@@ -554,6 +561,30 @@ class AKShareAdapter(BaseAdapter):
             confidence="strict",
             api_version=_AKSHARE_VERSION,
         )
+
+    @staticmethod
+    def _normalize_dividend_fields(rec: dict[str, Any]) -> None:
+        """将 akshare "每10股" ratio 口径归一化为标准 "每股" 字段。
+
+        - cash_dividend_ratio（每10股派X元）→ dividend_per_share（每股X元）
+        - bonus_share_ratio（每10股送X股）→ stock_dividend（每股X股）
+        - capitalization_ratio（每10股转增X股）→ transfer_share（每股X股）
+        - akshare 接口不含配股 → rights_issue 保持 None
+        """
+        try:
+            cash = rec.get("cash_dividend_ratio")
+            if cash is not None:
+                rec["dividend_per_share"] = float(cash) / 10.0
+            bonus = rec.get("bonus_share_ratio")
+            if bonus is not None:
+                rec["stock_dividend"] = float(bonus) / 10.0
+            cap = rec.get("capitalization_ratio")
+            if cap is not None:
+                rec["transfer_share"] = float(cap) / 10.0
+        except (TypeError, ValueError):
+            pass
+        rec["rights_issue"] = None
+        rec["rights_issue_price"] = None
 
     def _fetch_trading_dates(self, request: FetchRequest) -> FetchResult:
         """交易日历 (Sina)"""

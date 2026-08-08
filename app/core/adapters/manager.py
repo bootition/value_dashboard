@@ -32,7 +32,10 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "balance_sheet": ["sina", "tdx", "akshare_eastmoney"],
     "income_statement": ["sina", "tdx", "akshare_eastmoney"],
     "cash_flow": ["sina", "tdx", "akshare_eastmoney"],
-    "dividends": ["cninfo", "akshare_eastmoney", "baostock"],
+    # cninfo 分红适配器无法提供 ex_date（需解析公告 PDF，未实现），主源恒空，
+    # 仅保留在链尾作为未来 PDF 解析能力就绪位；akshare/baostock 提供完整
+    # 带 ex_date 与每股数值的分红记录。
+    "dividends": ["akshare_eastmoney", "baostock", "cninfo"],
     "xdxr": ["tdx"],
     "announcements": ["cninfo"],
     "sw_industry": ["local_cache"],

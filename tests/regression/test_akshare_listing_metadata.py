@@ -63,3 +63,38 @@ def test_listing_info_uses_exchange_lists_and_current_suspension_data(monkeypatc
     assert by_code["000002"]["listing_date"] is None
     assert by_code["000002"]["is_st"] is None
     assert by_code["000002"]["is_suspended"] is False
+
+
+def test_dividend_ratios_are_normalized_to_per_share_fields(monkeypatch) -> None:
+    import pandas as pd
+
+    import app.core.adapters.akshare_adapter as module
+
+    fake_akshare = SimpleNamespace(
+        stock_dividend_cninfo=lambda symbol: pd.DataFrame([{
+            "实施方案公告日期": "2026-06-22",
+            "分红类型": "年度分红",
+            "送股比例": 1.0,
+            "转增比例": 2.0,
+            "派息比例": 6.0,
+            "股权登记日": "2026-06-25",
+            "除权日": "2026-06-26",
+            "派息日": "2026-06-30",
+            "股份到账日": None,
+            "实施方案分红说明": "10送1转2派6元(含税)",
+            "报告时间": "2025年报",
+        }]),
+    )
+    monkeypatch.setattr(module, "ak", fake_akshare)
+
+    adapter = AKShareAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(data_type="dividends", stock_codes=["600519"]))
+
+    assert result.metadata.error is None
+    row = result.data[0]
+    assert row["ex_date"] == "2026-06-26"
+    assert row["announcement_date"] == "2026-06-22"
+    assert row["dividend_per_share"] == 0.6  # 每10股派6元 → 每股0.6元
+    assert row["stock_dividend"] == 0.1  # 每10股送1股 → 每股0.1股
+    assert row["transfer_share"] == 0.2  # 每10股转增2股 → 每股0.2股
+    assert row["rights_issue"] is None

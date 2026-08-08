@@ -24,7 +24,7 @@ adapters:
     income_statement: ["sina", "tdx", "akshare_eastmoney"]
     cash_flow: ["sina", "tdx", "akshare_eastmoney"]
     price_daily: ["tencent", "baostock", "tdx"]
-    dividends: ["cninfo", "akshare_eastmoney", "baostock"]
+    dividends: ["akshare_eastmoney", "baostock", "cninfo"]
     xdxr: ["tdx"]
     announcements: ["cninfo"]
     listing_info: ["akshare_eastmoney"]
