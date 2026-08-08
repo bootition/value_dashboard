@@ -444,6 +444,7 @@ class IncrementalUpdater:
 
         # 3. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
         self._cleanup_unretryable_tasks()
+        self._cleanup_completed_announcement_retries()
         self._resolve_complete_missing_records()
         if check_report["retry_tasks"]:
             expected_date = self._latest_expected_trading_date(
@@ -1447,6 +1448,51 @@ class IncrementalUpdater:
             ids,
         )
         logger.info("[增量] 清理 %d 条无重试路径的失败任务", len(ids))
+        return len(ids)
+
+    def _cleanup_completed_announcement_retries(self) -> int:
+        """Drop announcement-pending entries whose financial data is now complete.
+
+        An announcements retry entry is a pending marker written when a
+        financial-triggering announcement could not be refreshed (PRD §7.4).
+        Once the stock's three statements share a complete period within
+        18 months, the marker's purpose is fulfilled and it must not linger
+        in the visible retry list forever.
+        """
+        rows = self.sqlite.query(
+            "SELECT id, stock_code FROM retry_list WHERE data_type = 'announcements'"
+        )
+        if not rows:
+            return 0
+        codes = [row["stock_code"] for row in rows]
+        slots = ", ".join("?" for _ in codes)
+        try:
+            complete = self.duck.read_query(
+                f"""SELECT bs.stock_code FROM balance_sheet bs
+                    JOIN income_statement ic
+                      ON ic.stock_code = bs.stock_code AND ic.report_date = bs.report_date
+                    JOIN cash_flow cf
+                      ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
+                    WHERE bs.stock_code IN ({slots})
+                      AND bs.report_date >= DATE 'now' - INTERVAL '18 months'
+                    GROUP BY bs.stock_code""",
+                codes,
+            )
+        except Exception as error:
+            logger.warning("查询公告待处理财务状态失败: %s", error)
+            return 0
+        if not complete:
+            return 0
+        complete_codes = {row["stock_code"] for row in complete}
+        ids = [row["id"] for row in rows if row["stock_code"] in complete_codes]
+        if ids:
+            self.sqlite.execute(
+                "DELETE FROM retry_list WHERE id IN ({})".format(
+                    ", ".join("?" for _ in ids)
+                ),
+                ids,
+            )
+            logger.info("[增量] 清理 %d 条财务已就绪的公告待处理", len(ids))
         return len(ids)
 
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
