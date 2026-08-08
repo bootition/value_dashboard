@@ -429,13 +429,18 @@ class IncrementalUpdater:
             report_step("indicators", snapshot_step)
             if snapshot_step["status"] != "success":
                 snapshot_step["reason"] = "price update retained; snapshot publication not ready"
-        elif updated_price_codes and financial_step["status"] == "success":
+        elif financial_step["status"] == "success":
             from app.core.indicators.calculator import IndicatorCalculator
 
-            snapshot_step = IndicatorCalculator(
-                duck=self.duck, sqlite=self.sqlite,
-            ).compute_snapshot_for_codes(updated_price_codes)
-            report_step("indicators", snapshot_step)
+            # 除价格刚变化的股票外，还要覆盖"价格已最新但快照日期落后"的
+            # 股票（此类股票无价格缺口，不会被 prices 选中，快照会一直过期）。
+            stale_snapshot_codes = self._stale_snapshot_codes()
+            codes_to_compute = list(dict.fromkeys([*updated_price_codes, *stale_snapshot_codes]))
+            if codes_to_compute:
+                snapshot_step = IndicatorCalculator(
+                    duck=self.duck, sqlite=self.sqlite,
+                ).compute_snapshot_for_codes(codes_to_compute)
+                report_step("indicators", snapshot_step)
 
         # 3. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
         self._cleanup_unretryable_tasks()
@@ -453,6 +458,27 @@ class IncrementalUpdater:
 
         logger.info(f"增量更新完成: {report['status']}")
         return report
+
+    def _stale_snapshot_codes(self) -> list[str]:
+        """Listed stocks whose snapshot price date is behind the raw price date."""
+        try:
+            rows = self.duck.read_query(
+                """WITH raw AS (
+                       SELECT stock_code, MAX(trade_date) AS latest
+                       FROM price_daily_raw GROUP BY stock_code
+                   )
+                   SELECT snap.stock_code
+                   FROM indicator_snapshot snap
+                   JOIN raw ON raw.stock_code = snap.stock_code
+                   JOIN stock_meta m ON m.stock_code = snap.stock_code
+                   WHERE m.is_listed IS TRUE
+                     AND snap.latest_price_date != raw.latest
+                   ORDER BY snap.stock_code"""
+            )
+            return [row["stock_code"] for row in rows]
+        except Exception as error:
+            logger.warning("查询过期指标快照失败: %s", error)
+            return []
 
     def _share_capital_fingerprint(self) -> str:
         """Return a cheap fingerprint of the share-capital pool state.
