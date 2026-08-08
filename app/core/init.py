@@ -315,11 +315,21 @@ class DataInitializer:
             FetchRequest(data_type="listing_info", stock_codes=stock_codes)
         )
         if result.metadata.error or not result.data:
-            self._record_failures("listing_info", stock_codes, result)
+            # 源失败不等于数据缺失：本地已有完整上市元数据的股票保留旧值
+            # （PRD §7.4），仅对本地确实缺字段的股票记录失败/缺口。
+            incomplete = self.duck.read_query(
+                """SELECT stock_code FROM stock_meta
+                   WHERE is_listed IS TRUE
+                     AND (listing_date IS NULL OR is_st IS NULL OR is_suspended IS NULL)"""
+            )
+            incomplete_codes = [row["stock_code"] for row in incomplete]
+            if incomplete_codes:
+                self._record_failures("listing_info", incomplete_codes, result)
             return {
-                "status": "failed",
+                "status": "partial" if incomplete_codes else "failed",
                 "error": result.metadata.error or "empty result",
                 "count": 0,
+                "missing": len(incomplete_codes),
             }
 
         records_by_code = {

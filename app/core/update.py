@@ -444,6 +444,7 @@ class IncrementalUpdater:
 
         # 3. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
         self._cleanup_unretryable_tasks()
+        self._resolve_complete_missing_records()
         if check_report["retry_tasks"]:
             expected_date = self._latest_expected_trading_date(
                 datetime.now().strftime("%Y-%m-%d")
@@ -1380,6 +1381,48 @@ class IncrementalUpdater:
         "listing_info", "stock_list", "trading_dates", "sw_industry",
         "csrc_industry",
     }
+
+    def _resolve_complete_missing_records(self) -> int:
+        """Mark listing_info missing entries resolved when local fields are complete.
+
+        The universe source outage recorded missing entries for the whole
+        universe even though most stocks already had complete listing data.
+        Once the local fields are verified complete, the entry is resolved
+        (housekeeping purges resolved rows after 30 days).
+        """
+        rows = self.sqlite.query(
+            "SELECT stock_code FROM missing_list "
+            "WHERE field_name = 'listing_info' AND resolved_at IS NULL"
+        )
+        if not rows:
+            return 0
+        codes = [row["stock_code"] for row in rows]
+        slots = ", ".join("?" for _ in codes)
+        try:
+            complete = self.duck.read_query(
+                f"""SELECT stock_code FROM stock_meta
+                    WHERE stock_code IN ({slots})
+                      AND listing_date IS NOT NULL
+                      AND is_st IS NOT NULL
+                      AND is_suspended IS NOT NULL""",
+                codes,
+            )
+        except Exception as error:
+            logger.warning("查询 listing_info 缺失覆盖状态失败: %s", error)
+            return 0
+        if not complete:
+            return 0
+        complete_codes = [row["stock_code"] for row in complete]
+        now = datetime.now(timezone.utc).isoformat()
+        self.sqlite.execute(
+            "UPDATE missing_list SET resolved_at = ? "
+            "WHERE field_name = 'listing_info' AND stock_code IN ({})".format(
+                ", ".join("?" for _ in complete_codes)
+            ),
+            [now, *complete_codes],
+        )
+        logger.info("[增量] 标记 %d 条 listing_info 缺失已补齐", len(complete_codes))
+        return len(complete_codes)
 
     def _cleanup_unretryable_tasks(self) -> int:
         """Drop retry entries whose data domain has no per-stock refetch path.
