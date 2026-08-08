@@ -400,3 +400,98 @@ def test_price_refetch_rolls_back_rows_when_source_material_is_invalid(duckdb_st
     assert duckdb_store.read_query("SELECT * FROM price_daily_raw") == []
     assert duckdb_store.read_query("SELECT * FROM price_daily_qfq") == []
     assert duckdb_store.read_query("SELECT * FROM fetch_batch") == []
+
+
+def test_large_response_uses_full_replace_and_preserves_lineage(
+    duckdb_store, sqlite_store,
+) -> None:
+    def make_result(adjust: str, rows: list[dict]) -> FetchResult:
+        raw_response = (adjust + ":" + str(len(rows))).encode("ascii")
+        return FetchResult(
+            data=rows,
+            metadata=SourceMetadata(
+                source="local_cache", fetch_time=datetime.now(timezone.utc),
+                raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
+                confidence="strict",
+            ),
+            raw_response=raw_response,
+        )
+
+    class Adapter:
+        def fetch(self, request):
+            rows = [
+                {"trade_date": f"2026-07-{i:02d}", "close": 10.0, "volume": 100.0}
+                for i in range(1, 31)
+            ]
+            return make_result(request.adjust, rows)
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600600', 'REPLACE', 'SHSE')"
+    )
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
+            "('600600', '2026-06-01', 9), ('600600', '2026-06-02', 9)"
+        )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._PRICE_FULL_REPLACE_THRESHOLD = 10
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+
+    report = updater._update_prices_incremental(max_stocks=1)
+
+    assert report["success"] == 1
+    assert report["failed"] == 0
+    old_rows = duckdb_store.read_query(
+        "SELECT COUNT(*) AS count FROM price_daily_raw WHERE stock_code = '600600' "
+        "AND trade_date < '2026-07-01'"
+    )
+    assert old_rows[0]["count"] == 0, "full replace must drop replaced rows"
+    audits = duckdb_store.read_query(
+        "SELECT COUNT(*) AS count FROM source_audit "
+        "WHERE stock_code = '600600' AND field_name = 'latest_close'"
+    )
+    assert audits[0]["count"] == 2
+
+
+def test_full_replace_rejects_truncated_source_and_keeps_old_data(
+    duckdb_store, sqlite_store,
+) -> None:
+    def make_result(adjust: str, rows: list[dict]) -> FetchResult:
+        raw_response = (adjust + ":" + str(len(rows))).encode("ascii")
+        return FetchResult(
+            data=rows,
+            metadata=SourceMetadata(
+                source="local_cache", fetch_time=datetime.now(timezone.utc),
+                raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
+                confidence="strict",
+            ),
+            raw_response=raw_response,
+        )
+
+    class Adapter:
+        def fetch(self, request):
+            return make_result(request.adjust, [
+                {"trade_date": "2026-07-01", "close": 10.0, "volume": 100.0},
+            ])
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600601', 'TRUNC', 'SHSE')"
+    )
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
+            "('600601', '2026-06-01', 9), ('600601', '2026-06-02', 9), "
+            "('600601', '2026-06-03', 9)"
+        )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._PRICE_FULL_REPLACE_THRESHOLD = 0
+    updater._PRICE_FULL_REPLACE_MIN_RATIO = 0.5
+    updater._latest_expected_trading_date = lambda today: "2026-08-05"
+
+    report = updater._update_prices_incremental(max_stocks=1)
+
+    assert report["failed"] == 1
+    kept = duckdb_store.read_query(
+        "SELECT COUNT(*) AS count FROM price_daily_raw WHERE stock_code = '600601'"
+    )
+    assert kept[0]["count"] == 3, "truncated source must not replace old rows"

@@ -1087,10 +1087,22 @@ class IncrementalUpdater:
             logger.warning("读取交易日历目标日期失败: %s", error)
         return today
 
+    _PRICE_FULL_REPLACE_THRESHOLD = 200
+    _PRICE_FULL_REPLACE_MIN_RATIO = 0.5
+
     def _persist_price_pair_in_connection(
         self, connection: Any, stock_code: str, raw_result: Any, qfq_result: Any,
+        *, full_replace: bool = False,
     ) -> None:
-        """Write one stock's raw/qfq rows + batch lineage inside a caller transaction."""
+        """Write one stock's raw/qfq rows + batch lineage inside a caller transaction.
+
+        DuckDB's ON CONFLICT DO UPDATE is linear in the target table size
+        (benchmarked ~4-5s per 2000 rows on a 1M-row table), so full-history
+        responses on the 17M-row formal table stall the writer for a minute
+        per stock. Large responses use an in-transaction delete+insert
+        replace instead, guarded against truncated sources by a row-count
+        ratio check. Incremental responses keep the conflict-safe upsert.
+        """
         from app.core.init import DataInitializer
 
         lineage = DataInitializer.__new__(DataInitializer)
@@ -1099,25 +1111,51 @@ class IncrementalUpdater:
             ("price_daily_raw", "price_daily_raw", raw_result),
             ("price_daily_qfq", "price_daily_qfq", qfq_result),
         ):
-            connection.executemany(
-                f"""INSERT INTO {table}
-                    (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(stock_code, trade_date) DO UPDATE SET
-                      open=COALESCE(excluded.open, {table}.open),
-                      high=COALESCE(excluded.high, {table}.high),
-                      low=COALESCE(excluded.low, {table}.low),
-                      close=COALESCE(excluded.close, {table}.close),
-                      volume=COALESCE(excluded.volume, {table}.volume),
-                      turnover=COALESCE(excluded.turnover, {table}.turnover),
-                      turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
-                [
-                    [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
-                     row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
-                     row.get("turnover_rate")]
-                    for row in result.data
-                ],
-            )
+            if full_replace:
+                local_rows = connection.execute(
+                    f"SELECT COUNT(*) AS count FROM {table} WHERE stock_code = ?",
+                    [stock_code],
+                ).fetchone()
+                local_count = int(local_rows[0]) if local_rows else 0
+                if len(result.data) < local_count * self._PRICE_FULL_REPLACE_MIN_RATIO:
+                    raise ValueError(
+                        f"{stock_code} {data_type} full replace truncated "
+                        f"({len(result.data)} remote vs {local_count} local); keeping old data"
+                    )
+                connection.execute(
+                    f"DELETE FROM {table} WHERE stock_code = ?", [stock_code]
+                )
+                connection.executemany(
+                    f"""INSERT INTO {table}
+                        (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [
+                        [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
+                         row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
+                         row.get("turnover_rate")]
+                        for row in result.data
+                    ],
+                )
+            else:
+                connection.executemany(
+                    f"""INSERT INTO {table}
+                        (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(stock_code, trade_date) DO UPDATE SET
+                          open=COALESCE(excluded.open, {table}.open),
+                          high=COALESCE(excluded.high, {table}.high),
+                          low=COALESCE(excluded.low, {table}.low),
+                          close=COALESCE(excluded.close, {table}.close),
+                          volume=COALESCE(excluded.volume, {table}.volume),
+                          turnover=COALESCE(excluded.turnover, {table}.turnover),
+                          turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
+                    [
+                        [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
+                         row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
+                         row.get("turnover_rate")]
+                        for row in result.data
+                    ],
+                )
             batch_id = lineage._record_batch_in_connection(
                 connection, result, data_type, len(result.data)
             )
@@ -1150,10 +1188,13 @@ class IncrementalUpdater:
             # 价格采用 batch 级溯源，并仅审计每股最新收盘价；财务/股本等
             # 关键字段仍走逐值审计。
 
-    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
+    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any, *, full_replace: bool = False) -> None:
         """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""
         with self.duck.transaction() as connection:
-            self._persist_price_pair_in_connection(connection, stock_code, raw_result, qfq_result)
+            self._persist_price_pair_in_connection(
+                connection, stock_code, raw_result, qfq_result,
+                full_replace=full_replace,
+            )
 
     def _persist_price_batch(
         self,
@@ -1164,16 +1205,45 @@ class IncrementalUpdater:
     ) -> tuple[int, list[str], int]:
         """Persist many stocks in one DuckDB transaction (few commits, far fewer
         WAL flushes than per-stock transactions). On failure, falls back to
-        per-stock atomic commits so one bad row never blocks the whole batch."""
+        per-stock atomic commits so one bad row never blocks the whole batch.
+
+        Large full-history responses are split out and committed as single-stock
+        full-replace transactions: DuckDB upserts degrade linearly with table
+        size, so a 2000-row conflict upsert stalls ~1 minute on the formal
+        table, while delete+insert completes in seconds.
+        """
+        large, small = [], []
+        for item in batch:
+            _, raw_result, qfq_result = item
+            if (
+                raw_result is not None and len(raw_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
+            ) or (
+                qfq_result is not None and len(qfq_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
+            ):
+                large.append(item)
+            else:
+                small.append(item)
+        for code, raw_result, qfq_result in large:
+            try:
+                self._persist_incremental_price_pair(code, raw_result, qfq_result, full_replace=True)
+                success_count += 1
+                updated_codes.append(code)
+            except Exception as exc:
+                fail_count += 1
+                self._record_failure(
+                    code, "price_daily", "manager", str(exc),
+                )
+        if not small:
+            return success_count, updated_codes, fail_count
         try:
             with self.duck.transaction() as connection:
-                for code, raw_result, qfq_result in batch:
+                for code, raw_result, qfq_result in small:
                     self._persist_price_pair_in_connection(connection, code, raw_result, qfq_result)
-            success_count += len(batch)
-            updated_codes.extend(code for code, _, _ in batch)
+            success_count += len(small)
+            updated_codes.extend(code for code, _, _ in small)
             return success_count, updated_codes, fail_count
         except Exception:
-            for code, raw_result, qfq_result in batch:
+            for code, raw_result, qfq_result in small:
                 try:
                     self._persist_incremental_price_pair(code, raw_result, qfq_result)
                     success_count += 1
