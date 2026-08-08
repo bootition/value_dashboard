@@ -95,7 +95,10 @@ def get_summary(request: Request) -> dict:
         if write_lock_active:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
-    needs_refresh = age is None or age > _SUMMARY_TTL_SECONDS or bool(cached.get("checking"))
+    needs_refresh = (
+        (age is None or age > _SUMMARY_TTL_SECONDS or bool(cached.get("checking")))
+        and not write_lock_active
+    )
     if needs_refresh:
         _ensure_summary_refresh(request)
     return cached
@@ -117,8 +120,16 @@ def _ensure_summary_refresh(request: Request) -> None:
 
 
 def _refresh_summary_worker(state, key: str) -> None:
-    """Rebuild the summary off the request path and publish it atomically."""
+    """Rebuild the summary off the request path and publish it atomically.
+
+    Skips while the auto-update writer lock is active: the background build
+    would otherwise open the DuckDB file concurrently with the update's own
+    connections (Windows race, see duckdb_store.read_connection), and a stale
+    cache is exactly what the writer-active contract already promises.
+    """
     try:
+        if _update_write_lock_active(state.duck):
+            return
         summary = _build_summary_from_state(state)
         with _SUMMARY_CACHE_LOCK:
             _SUMMARY_CACHE[key] = {"at": time.monotonic(), "data": dict(summary)}

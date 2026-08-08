@@ -79,11 +79,25 @@ class DuckDBStore:
         # DuckDB requires every connection to the same file in one process to
         # use the same configuration. Startup updates use default read/write
         # connections, so a read_only connection would fail while they run.
-        conn = duckdb.connect(str(self._db_path))
-        try:
-            yield conn
-        finally:
-            conn.close()
+        # On Windows, concurrent connects from another thread while a writer
+        # is mid-transaction can transiently fail with "file already open";
+        # retry briefly to ride over the race instead of failing the caller.
+        last_error: Exception | None = None
+        for attempt in range(5):
+            try:
+                conn = duckdb.connect(str(self._db_path))
+            except Exception as error:
+                last_error = error
+                if attempt < 4:
+                    time.sleep(0.5)
+                continue
+            try:
+                yield conn
+            finally:
+                conn.close()
+            return
+        assert last_error is not None
+        raise last_error
 
     def read_query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
         """执行单条只读查询，返回字典列表。"""
