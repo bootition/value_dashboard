@@ -1,10 +1,11 @@
 ---
 title: 启动与价格吞吐红队复审及正式实践报告（2026-08-08）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-08
 last-reviewed: 2026-08-08
 supersedes: reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md
+superseded-by: reports/62_FORMAL_AUTO_RECOVERY_COMPLETE_2026-08-08.md
 ---
 
 # 启动与价格吞吐红队复审及正式实践报告
