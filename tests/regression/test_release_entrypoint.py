@@ -71,15 +71,15 @@ def test_fe_fingerprint_script_is_node_based_and_dep_free() -> None:
     assert "node:crypto" in script
 
 
-def test_start_bat_treats_only_listening_on_8765_as_existing_instance() -> None:
-    """端口检查只认可真正 LISTENING；已有实例时打开浏览器而非失败退出。
-    修复 TIME_WAIT 等短暂状态被 `findstr ":8765"` 误判为占用而“无法启动”。"""
+def test_start_bat_validates_the_existing_instance_health_response() -> None:
+    """端口被其他服务占用时必须继续启动，而非误打开未知服务。"""
     source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
 
-    assert 'findstr /c:":8765"' in source
-    assert 'findstr /c:"LISTENING"' in source
+    assert "Invoke-WebRequest" in source
+    assert "http://127.0.0.1:8765/api/health" in source
+    assert "status\\\"\\s*:\\s*\\\"ok" in source
     assert 'start "" "http://127.0.0.1:8765/"' in source
-    block_start = source.index('findstr /c:":8765"')
+    block_start = source.index("Invoke-WebRequest")
     block_end = source.index('set "RELEASE_ROOT=%CD%"')
     block = source[block_start:block_end]
     assert 'goto :end' in block

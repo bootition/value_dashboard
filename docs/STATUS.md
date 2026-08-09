@@ -4,12 +4,12 @@
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-08-09
-- **更新人**：opencode 会话（独立系统红队复审完成）
+- **更新人**：opencode 会话（红队 P2 风险修复完成）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
-| 整体启用 | ✅ **PASS / 可正式研究**：正式库 readiness ready=true、warning_codes=[]；retry 与 missing 未解决项清零；服务保持自动更新 enabled；2026-08-09 独立红队复审未发现 P0/P1 | `reports/63`（数据状态见 `reports/62`） |
-| 代码层门禁 | ✅ 红队修复后 Ruff、前端 lint/55 node + 20 组件测试/build 全通过；隔离回归 474 passed | `reports/62` §2；历史发布门禁见 `reports/40` §2 |
+| 整体启用 | ✅ **PASS / 可正式研究**：正式库 readiness ready=true、warning_codes=[]；retry 与 missing 未解决项清零；服务保持自动更新 enabled；2026-08-09 红队 P2 风险全部关闭 | `reports/64`（数据状态见 `reports/62`） |
+| 代码层门禁 | ✅ 红队 P2 修复后 Ruff、前端 lint/55 node + 20 组件测试/build 全通过；隔离回归 481 passed | `reports/64` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
 | 数据层整体（ready） | ✅ **ready=TRUE、warning_codes=[]**：快照一致性 3196→6（仅新股披露项）、lineage 433→0、retry 10302→1（公告 pending 合法标记）、missing 未解决 0；审计 archive/hash/orphan 全 0 | `reports/62`（取代 `reports/60` BLOCK） |
@@ -67,7 +67,8 @@
 | `docs/reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md` | **红队修复与正式实践**：启动实测、450 股任务、lineage 回归发现/修复、正式库 BLOCK 裁决 | **当前启动/抓取策略与正式数据状态依据** |
 | `docs/reports/61_SOURCE_STATUS_PROBE_AND_EASTMONEY_BAN_2026-08-08.md` | **数据源状态探测与东财封禁范围调查**：东财仅 push2/push2his 被封、F10/股本/分红源可用；各源现状；CNINFO 分红适配器 bug 发现；冷却重试计划 | **当前数据源连通性依据** |
 | `docs/reports/62_FORMAL_AUTO_RECOVERY_COMPLETE_2026-08-08.md` | **正式库普通用户路径恢复完成**：7 轮修复、最终 PASS、性能实测、剩余披露项清单 | **当前数据与恢复状态依据** |
-| `docs/reports/63_SYSTEM_RED_TEAM_REVIEW_2026-08-09.md` | **独立系统红队复审**：全门禁通过，无 P0/P1，PASS | **当前独立可用性复审依据** |
+| `docs/reports/63_SYSTEM_RED_TEAM_REVIEW_2026-08-09.md` | 独立系统红队复审：P2-1 至 P2-4 发现基线 | **已被 `reports/64` 关闭** |
+| `docs/reports/64_RED_TEAM_P2_REMEDIATION_2026-08-09.md` | **红队 P2 风险修复**：启动、静态资源、状态轮询、价格重抓原子性全部关闭 | **当前红队修复与门禁依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
@@ -94,6 +95,7 @@
 - `reports/58`（腾讯主源与初版并发）→ 官方调研与校准事实保留；当前并发、超时、动态限速和优先续传策略由 `reports/59` 更新。
 - `reports/59`（readiness 缓存与吞吐初版）→ 实现事实保留；红队修复、正式实测速率和正式库 BLOCK 裁决由 `reports/60` 更新。
 - `reports/60`（红队与正式实践 BLOCK 裁决）→ 修复事实保留；数据现状由 `reports/62` 更新为 PASS。
+- `reports/63`（独立系统红队复审）→ 其 P2-1 至 P2-4 已由 `reports/64` 关闭。
 - 更早编号报告（05–24、26）→ 全部 superseded，仅作追溯证据。
 ## 维护规则（写文档的人必须遵守）
 1. **状态变化时**：更新本文件 → 将旧报告 front-matter 的 `status` 改为 `superseded` 并写 `superseded-by` → 新报告/文档必须带 front-matter 且 `status: approved`。

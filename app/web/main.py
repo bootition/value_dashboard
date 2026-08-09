@@ -362,7 +362,9 @@ def create_app(
 
         @app.get("/{full_path:path}")
         async def serve_spa(full_path: str) -> HTMLResponse:
-            """SPA fallback：所有非 API 路径返回 index.html"""
+            """Serve only client-side routes; missing files must remain 404s."""
+            if Path(full_path).suffix:
+                raise HTTPException(status_code=404, detail="static resource not found")
             index_path = static_dir / "index.html"
             if index_path.exists():
                 return HTMLResponse(

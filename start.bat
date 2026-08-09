@@ -10,10 +10,10 @@ REM
 cd /d "%~dp0"
 echo Value Dashboard V1.0
 
-REM Only a process actually LISTENING on 8765 counts as an existing instance.
-netstat -ano | findstr /c:":8765" | findstr /c:"LISTENING" >nul 2>&1
+REM Only this application's healthy endpoint counts as an existing instance.
+powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:8765/api/health'; if ($r.StatusCode -eq 200 -and $r.Content -match '\"status\"\s*:\s*\"ok\"') { exit 0 } } catch {}; exit 1" >nul 2>&1
 if not errorlevel 1 (
-    echo [INFO] Value Dashboard is already running on 127.0.0.1:8765; opening the browser.
+    echo [INFO] Value Dashboard is already running; opening the browser.
     start "" "http://127.0.0.1:8765/"
     goto :end
 )

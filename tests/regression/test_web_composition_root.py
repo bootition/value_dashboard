@@ -54,6 +54,44 @@ def test_spa_entry_is_never_cached(
     assert response.headers["cache-control"] == "no-store"
 
 
+def test_missing_static_file_does_not_fall_back_to_spa_entry(
+    database_paths: DatabasePathSet,
+) -> None:
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=DuckDBStore(paths=database_paths),
+        sqlite=SQLiteStore(paths=database_paths),
+    )
+
+    response = TestClient(app).get("/missing-chunk.js")
+
+    assert response.status_code == 404
+
+
+def test_auto_update_status_is_read_only_and_handles_uninitialized_state(
+    database_paths: DatabasePathSet,
+) -> None:
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    init_duckdb_schema(duck)
+    init_sqlite_schema(sqlite)
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=duck,
+        sqlite=sqlite,
+    )
+
+    response = TestClient(app).get("/api/data-status/auto-update")
+
+    assert response.status_code == 200
+    assert response.json()["state"] == "enabled"
+    assert sqlite.query(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'auto_update_state'"
+    ) == []
+
+
 def test_data_status_remains_available_during_same_process_write(
     database_paths: DatabasePathSet,
 ) -> None:

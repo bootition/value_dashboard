@@ -522,11 +522,49 @@ def _build_summary_from_state(state) -> dict:
 def get_auto_update_status(request: Request) -> dict:
     """自动更新状态（PRD §15 只读展示）"""
     sqlite = request.app.state.sqlite
-    from app.core.auto_update import AutoUpdateController
 
     try:
-        controller = AutoUpdateController(duck=request.app.state.duck, sqlite=sqlite)
-        return controller.persisted_status()
+        table_exists = sqlite.query(
+            "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'auto_update_state'"
+        )
+        if not table_exists:
+            return {
+                "state": "enabled", "enabled": True, "paused": False,
+                "current_stage": "idle", "progress": {}, "last_error": None,
+                "last_success_at": None, "last_result": None,
+                "last_skip_reason": None, "updated_at": None,
+            }
+        rows = sqlite.query(
+            """SELECT state, paused, current_stage, progress_json, last_error,
+                      last_success_at, updated_at
+               FROM auto_update_state WHERE id = 1"""
+        )
+        if not rows:
+            return {
+                "state": "enabled", "enabled": True, "paused": False,
+                "current_stage": "idle", "progress": {}, "last_error": None,
+                "last_success_at": None, "last_result": None,
+                "last_skip_reason": None, "updated_at": None,
+            }
+        row = rows[0]
+        try:
+            progress = json.loads(row.get("progress_json") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            progress = {}
+        state = row.get("state") or "enabled"
+        paused = bool(row.get("paused"))
+        return {
+            "state": "paused" if paused and state == "enabled" else state,
+            "enabled": state != "disabled",
+            "paused": paused,
+            "current_stage": row.get("current_stage") or "idle",
+            "progress": progress,
+            "last_error": row.get("last_error"),
+            "last_success_at": row.get("last_success_at"),
+            "last_result": progress.get("status"),
+            "last_skip_reason": progress.get("reason"),
+            "updated_at": row.get("updated_at"),
+        }
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"auto update status is unavailable: {error}") from error
 

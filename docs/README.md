@@ -9,7 +9,7 @@
 |---|---|---|---|
 | `STATUS.md` | 状态 | **当前状态唯一权威**（Verdict、剩余缺口、进行中工作） | ✅ 是 |
 | `decisions/` | 决策 | PRD、技术约束、规划类（长期有效的合同与决策） | 01/02 ✅；03/04 historical |
-| `reports/` | 报告 | 审计/验收/审查等事件型快照（05–60） | 仅 29/40/43/44/45/46/47/48/52/53/54/55/57/60 ✅；其余为发现/修复事实被后续取代 |
+| `reports/` | 报告 | 审计/验收/审查等事件型快照 | 当前结论以 `STATUS.md` 所列报告为准；其余仅为发现/修复事实 |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
@@ -69,6 +69,9 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md` — readiness 与吞吐初版实现（当前结论被 reports/60 取代）
 - `reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md` — 当前启动/抓取红队实践与正式库 BLOCK 裁决依据
 - `reports/61_SOURCE_STATUS_PROBE_AND_EASTMONEY_BAN_2026-08-08.md` — 当前数据源连通性依据（东财封禁范围、各源现状、CNINFO 分红 bug、冷却重试计划）
+- `reports/62_FORMAL_AUTO_RECOVERY_COMPLETE_2026-08-08.md` — 正式库自动恢复完成与数据 PASS 依据
+- `reports/63_SYSTEM_RED_TEAM_REVIEW_2026-08-09.md` — 独立红队 P2 发现基线，已被 reports/64 取代
+- `reports/64_RED_TEAM_P2_REMEDIATION_2026-08-09.md` — 当前红队 P2 风险关闭与门禁依据
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新

@@ -1,9 +1,10 @@
 ---
 title: 系统红队复审报告（2026-08-09）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-09
 last-reviewed: 2026-08-09
+superseded-by: reports/64_RED_TEAM_P2_REMEDIATION_2026-08-09.md
 ---
 
 # 系统红队复审报告

@@ -402,6 +402,38 @@ def test_price_refetch_rolls_back_rows_when_source_material_is_invalid(duckdb_st
     assert duckdb_store.read_query("SELECT * FROM fetch_batch") == []
 
 
+def test_price_refetch_rolls_back_both_adjustments_when_pair_write_fails(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    class Adapter:
+        def fetch(self, request):
+            raw_response = f'{{"adjust":"{request.adjust}"}}'.encode()
+            return FetchResult(
+                data=[{"trade_date": "2025-12-31", "close": 10.0, "volume": 100.0}],
+                metadata=SourceMetadata(
+                    source="local_cache", fetch_time=datetime.now(timezone.utc),
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="strict",
+                ),
+                raw_response=raw_response,
+            )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    original = updater._persist_price_pair_in_connection
+
+    def fail_after_raw(connection, stock_code, raw_result, qfq_result, **kwargs):
+        original(connection, stock_code, raw_result, qfq_result, **kwargs)
+        raise RuntimeError("simulated pair failure")
+
+    monkeypatch.setattr(updater, "_persist_price_pair_in_connection", fail_after_raw)
+
+    result = updater.refetch_one("000001", "price_daily")
+
+    assert result["status"] == "failed"
+    assert duckdb_store.read_query("SELECT * FROM price_daily_raw") == []
+    assert duckdb_store.read_query("SELECT * FROM price_daily_qfq") == []
+    assert duckdb_store.read_query("SELECT * FROM fetch_batch") == []
+
+
 def test_large_response_uses_full_replace_and_preserves_lineage(
     duckdb_store, sqlite_store,
 ) -> None:

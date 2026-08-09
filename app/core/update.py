@@ -1128,6 +1128,7 @@ class IncrementalUpdater:
     def _persist_price_pair_in_connection(
         self, connection: Any, stock_code: str, raw_result: Any, qfq_result: Any,
         *, full_replace_raw: bool = False, full_replace_qfq: bool = False,
+        full_field_audit: bool = False,
     ) -> None:
         """Write one stock's raw/qfq rows + batch lineage inside a caller transaction.
 
@@ -1196,6 +1197,10 @@ class IncrementalUpdater:
             batch_id = lineage._record_batch_in_connection(
                 connection, result, data_type, len(result.data)
             )
+            if full_field_audit:
+                lineage._record_field_audit_in_connection(
+                    connection, result, result.data, stock_code, "trade_date", batch_id,
+                )
             latest_row = max(
                 result.data,
                 key=lambda row: str(row.get("trade_date") or ""),
@@ -1225,11 +1230,13 @@ class IncrementalUpdater:
             # 价格采用 batch 级溯源，并仅审计每股最新收盘价；财务/股本等
             # 关键字段仍走逐值审计。
 
-    def _persist_incremental_price_pair(self, stock_code: str, raw_result: Any, qfq_result: Any) -> None:
+    def _persist_incremental_price_pair(
+        self, stock_code: str, raw_result: Any, qfq_result: Any, *, full_field_audit: bool = False,
+    ) -> None:
         """Commit one stock's raw/qfq rows and lineage atomically for restart safety."""
         with self.duck.transaction() as connection:
             self._persist_price_pair_in_connection(
-                connection, stock_code, raw_result, qfq_result,
+                connection, stock_code, raw_result, qfq_result, full_field_audit=full_field_audit,
             )
 
     def _persist_price_batch(
@@ -1608,8 +1615,7 @@ class IncrementalUpdater:
                     or "empty result",
                 }
             try:
-                self._persist_price_with_lineage(stock_code, "raw", raw)
-                self._persist_price_with_lineage(stock_code, "qfq", qfq)
+                self._persist_incremental_price_pair(stock_code, raw, qfq, full_field_audit=True)
             except Exception as error:
                 return {"status": "failed", "error": str(error)}
             return {"status": "success", "stock_code": stock_code, "data_type": data_type}
