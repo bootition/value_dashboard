@@ -4,11 +4,12 @@
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-08-09
-- **更新人**：opencode 会话（红队 P2 风险修复完成）
+- **更新人**：opencode 会话（记账式国债需求评估、PRD 与开发计划完成）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
 | 整体启用 | ✅ **PASS / 可正式研究**：正式库 readiness ready=true、warning_codes=[]；retry 与 missing 未解决项清零；服务保持自动更新 enabled；2026-08-09 红队 P2 风险全部关闭 | `reports/64`（数据状态见 `reports/62`） |
+| 国债数据域规划 | ✅ 需求已确认：仅记账式国债、独立第五页、日终双口径参考、仅个人本地研究；实施前须完成中债来源条款与有界探测 | `reports/65`；`.planning/2026-08-09-treasury-bond-domain/task_plan.md` |
 | 代码层门禁 | ✅ 红队 P2 修复后 Ruff、前端 lint/55 node + 20 组件测试/build 全通过；隔离回归 481 passed | `reports/64` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
@@ -29,6 +30,7 @@
 - **自动更新保持 enabled**：服务每轮启动自动执行增量更新；当前无缺口轮次 3-5 分钟完成，东财行情 host 冷却结束后 universe 自动补齐。
 - **东财行情源冷却**：push2/push2his 封锁冷却期至 2026-08-15（期间勿触碰）；到期后单次探测，恢复后限速 ≤2 req/s、并发 ≤5。
 - **待办**：CNINFO 分红 ex_date 修复评估（见已知缺口 #4）。
+- **待开发**：记账式国债独立数据域，按 `.planning/2026-08-09-treasury-bond-domain/task_plan.md` 阶段 0 开始；不得写入 A 股表或阻塞 A 股更新。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
@@ -69,6 +71,7 @@
 | `docs/reports/62_FORMAL_AUTO_RECOVERY_COMPLETE_2026-08-08.md` | **正式库普通用户路径恢复完成**：7 轮修复、最终 PASS、性能实测、剩余披露项清单 | **当前数据与恢复状态依据** |
 | `docs/reports/63_SYSTEM_RED_TEAM_REVIEW_2026-08-09.md` | 独立系统红队复审：P2-1 至 P2-4 发现基线 | **已被 `reports/64` 关闭** |
 | `docs/reports/64_RED_TEAM_P2_REMEDIATION_2026-08-09.md` | **红队 P2 风险修复**：启动、静态资源、状态轮询、价格重抓原子性全部关闭 | **当前红队修复与门禁依据** |
+| `docs/reports/65_TREASURY_BOND_REQUIREMENTS_ASSESSMENT_2026-08-09.md` | **记账式国债需求评估**：范围、数据源与隔离架构裁决 | **当前国债数据域规划依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
