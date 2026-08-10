@@ -1,9 +1,10 @@
 ---
 title: 记账式国债数据域需求评估报告（2026-08-09）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-09
 last-reviewed: 2026-08-09
+superseded-by: reports/68_STOCK_DETAIL_AND_TREASURY_FEASIBILITY_2026-08-10.md
 ---
 
 # 记账式国债数据域需求评估报告
