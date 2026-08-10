@@ -246,3 +246,31 @@ export interface AuditResponse {
   readonly field_audit: readonly AuditFieldRow[]
   readonly batch_audit: readonly AuditBatchRow[]
 }
+
+// ─── Treasury Comparison（P3，reports/68）─────────────────────────────────
+
+export interface TreasurySeriesPoint {
+  readonly price_date: string
+  readonly ttm_div_yield: number | null
+  readonly curve_yield: number | null
+  readonly spread: number | null
+  readonly curve_date: string | null
+  readonly staleness_days: number | null
+  readonly reason: string | null
+}
+
+export interface TreasuryComparisonResponse {
+  readonly stock_code: string
+  readonly tenor: number
+  readonly tenors_available: readonly number[]
+  readonly max_staleness_days: number
+  readonly series: readonly TreasurySeriesPoint[]
+  readonly missing: boolean
+  readonly provenance: {
+    readonly source: string
+    readonly fetch_time: string | null
+    readonly raw_hash: string
+    readonly batch_id: string
+    readonly confidence: string
+  } | null
+}

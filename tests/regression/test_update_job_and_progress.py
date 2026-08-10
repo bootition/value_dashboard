@@ -36,6 +36,9 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
     updater._refresh_market_actions = lambda codes: {"status": "success"}
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
+    # P2/P3 独立低频域：测试环境不得发起真实网络请求
+    updater._refresh_business_overview = lambda: {"status": "skipped", "reason": "test_stub"}
+    updater._refresh_treasury_curve = lambda: {"status": "skipped", "reason": "test_stub"}
 
 
 def test_tdx_declines_adjusted_prices_before_fetch() -> None:

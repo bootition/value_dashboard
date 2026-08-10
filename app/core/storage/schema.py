@@ -278,6 +278,17 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     period_return    DOUBLE,
     annualized_volatility DOUBLE,
     max_drawdown     DOUBLE,
+    -- 国债基准与股息率利差（reports/68 P3：TTM已实施股息率与相对各期限利差）
+    ttm_dividend_yield DOUBLE,          -- TTM已实施现金股息率(%)
+    div_yield_spread_0p25y DOUBLE,      -- 相对0.25年期国债利差(%)
+    div_yield_spread_0p5y DOUBLE,       -- 相对0.5年期国债利差(%)
+    div_yield_spread_1y DOUBLE,         -- 相对1年期国债利差(%)
+    div_yield_spread_2y DOUBLE,         -- 相对2年期国债利差(%)
+    div_yield_spread_3y DOUBLE,         -- 相对3年期国债利差(%)
+    div_yield_spread_5y DOUBLE,         -- 相对5年期国债利差(%)
+    div_yield_spread_7y DOUBLE,         -- 相对7年期国债利差(%)
+    div_yield_spread_10y DOUBLE,        -- 相对10年期国债利差(%)
+    div_yield_spread_30y DOUBLE,        -- 相对30年期国债利差(%)
     calculated_at    TIMESTAMP,
     data_version     VARCHAR,
     PRIMARY KEY (stock_code, report_date)
@@ -412,6 +423,23 @@ CREATE TABLE IF NOT EXISTS business_breakdown (
 );
 CREATE INDEX IF NOT EXISTS idx_business_breakdown_stock_report
     ON business_breakdown (stock_code, report_date);
+
+-- 财政部-中国国债收益率曲线（reports/68 P3 独立低频基准域）
+-- 每个点保存曲线日期、期限、收益率、来源、抓取时间、原始响应哈希和置信度；
+-- 独立于 A 股 stock_meta / 价格 / 财报 / 筛选池 / readiness，失败不得阻塞股票研究。
+CREATE TABLE IF NOT EXISTS treasury_yield_curve (
+    curve_date   DATE NOT NULL,        -- 曲线日期（交易日）
+    tenor_years  DOUBLE NOT NULL,      -- 期限（年），如 10.0 / 0.25
+    yield_pct    DOUBLE NOT NULL,      -- 收益率（%）
+    source       VARCHAR NOT NULL,     -- 来源（czb_mof）
+    fetch_time   TIMESTAMP NOT NULL,   -- 抓取时间
+    raw_hash     VARCHAR NOT NULL,     -- 原始响应 SHA-256
+    confidence   VARCHAR NOT NULL,     -- strict / approximate / missing
+    batch_id     VARCHAR NOT NULL,     -- 批次
+    PRIMARY KEY (curve_date, tenor_years)
+);
+CREATE INDEX IF NOT EXISTS idx_treasury_yield_curve_date
+    ON treasury_yield_curve (curve_date);
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -701,6 +729,33 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (8, 'Independent low-frequency business overview tables')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v9: 财政部国债收益率曲线 + 快照股息率利差列（P3，reports/68）
+        for column in (
+            "ttm_dividend_yield DOUBLE",
+            "div_yield_spread_0p25y DOUBLE",
+            "div_yield_spread_0p5y DOUBLE",
+            "div_yield_spread_1y DOUBLE",
+            "div_yield_spread_2y DOUBLE",
+            "div_yield_spread_3y DOUBLE",
+            "div_yield_spread_5y DOUBLE",
+            "div_yield_spread_7y DOUBLE",
+            "div_yield_spread_10y DOUBLE",
+            "div_yield_spread_30y DOUBLE",
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {column}"
+            )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_treasury_yield_curve_date "
+            "ON treasury_yield_curve (curve_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (9, 'Treasury yield curve domain and dividend yield spread columns')
             ON CONFLICT (version) DO NOTHING
             """
         )

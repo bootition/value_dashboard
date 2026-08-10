@@ -18,12 +18,14 @@ import math
 import hashlib
 import uuid
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.treasury import MAX_STALENESS_DAYS
+from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,9 @@ class IndicatorCalculator:
 
         # ─── 6. 行情指标 ──────────────────────────────────────────
         result.update(self._calc_technical(stock_code))
+
+        # ─── 7. 国债基准与股息率利差（reports/68 P3） ───────────────
+        result.update(self._calc_treasury_spread(stock_code))
 
         return result
 
@@ -676,6 +681,85 @@ class IndicatorCalculator:
             dps = rows[0]["dps"]
             return dps / close if close > 0 else None
         return None
+
+    def _calc_treasury_spread(self, stock_code: str) -> dict[str, Any]:
+        """TTM 已实施现金股息率与相对各关键期限国债收益率的利差（P3）。
+
+        口径（reports/68 §5）：
+        - TTM 股息率：价格日前 12 个月内已除权（ex_date<=D）且已公告
+          （announcement_date<=D）的实际现金分红合计 / D 收盘价。
+        - 曲线对齐：取不晚于 D 的最近曲线点，最大陈旧 5 个自然日；
+          超限或曲线缺失时该期限利差为 NULL（不得用更旧值替代）。
+        """
+        result: dict[str, Any] = {
+            "ttm_dividend_yield": None,
+        }
+        for tenor in KEY_TENORS:
+            result[CZB_CURVE_YIELD_TENOR_LABELS[tenor]] = None
+
+        price_rows = self._read_query(
+            """SELECT trade_date, close FROM price_daily_raw
+               WHERE stock_code = ? AND close IS NOT NULL
+               ORDER BY trade_date DESC LIMIT 1""",
+            [stock_code],
+        )
+        if not price_rows or not price_rows[0].get("close"):
+            return result
+        price_date = str(price_rows[0]["trade_date"])[:10]
+        close = float(price_rows[0]["close"])
+
+        div_rows = self._read_query(
+            """SELECT SUM(dividend_per_share) AS dps
+               FROM dividends
+               WHERE stock_code = ?
+                 AND dividend_per_share IS NOT NULL
+                 AND dividend_per_share > 0
+                 AND announcement_date IS NOT NULL
+                 AND announcement_date <= CAST(? AS DATE)
+                 AND ex_date <= CAST(? AS DATE)
+                 AND ex_date >= CAST(? AS DATE) - INTERVAL '1 year'""",
+            [stock_code, price_date, price_date, price_date],
+        )
+        ttm_dps = div_rows[0].get("dps") if div_rows else None
+        ttm_div_yield = (float(ttm_dps) / close) * 100.0 if ttm_dps and close > 0 else None
+        result["ttm_dividend_yield"] = ttm_div_yield
+
+        # 曲线对齐：批量按期限查询 ≤ 价格日最近点
+        curve_rows = self._read_query(
+            """SELECT tenor_years, curve_date, yield_pct
+               FROM treasury_yield_curve
+               WHERE curve_date <= CAST(? AS DATE)
+                 AND tenor_years IN ({tenors})
+                 AND curve_date IN (
+                     SELECT MAX(curve_date) FROM treasury_yield_curve
+                     WHERE curve_date <= CAST(? AS DATE)
+                     GROUP BY tenor_years
+                 )
+            """.format(tenors=", ".join("?" for _ in KEY_TENORS)),
+            [price_date, *list(KEY_TENORS), price_date],
+        )
+        aligned: dict[float, dict[str, Any]] = {}
+        for row in curve_rows:
+            aligned[float(row["tenor_years"])] = row
+
+        for tenor in KEY_TENORS:
+            column = CZB_CURVE_YIELD_TENOR_LABELS[tenor]
+            curve = aligned.get(tenor)
+            if curve is None:
+                result[column] = None
+                continue
+            curve_date = str(curve["curve_date"])[:10]
+            staleness = (
+                date.fromisoformat(price_date) - date.fromisoformat(curve_date)
+            ).days
+            if staleness > MAX_STALENESS_DAYS or curve.get("yield_pct") is None:
+                result[column] = None
+                continue
+            if ttm_div_yield is None:
+                result[column] = None
+                continue
+            result[column] = ttm_div_yield - float(curve["yield_pct"])
+        return result
 
     def _calc_profitability(self, ttm: dict, financials: dict, stock_code: str = "") -> dict[str, Any]:
         """2. 盈利能力指标"""

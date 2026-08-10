@@ -430,6 +430,33 @@ def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], col
             "source": "published_override", "value": override["override_value"],
             "reason": override["reason"], "published_at": override["created_at"],
         }
+    # P3（reports/68）：利差列附加曲线对齐溯源（期限/曲线日/日期差）
+    spread_fields = [field for field in audit_names if field.startswith("div_yield_spread_")]
+    if spread_fields:
+        from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS
+        from app.core.treasury import TreasuryCurveUpdater
+
+        tenor_by_column = {column: tenor for tenor, column in CZB_CURVE_YIELD_TENOR_LABELS.items()}
+        aligner = TreasuryCurveUpdater(duck=duck, sqlite=sqlite)
+        for row in results:
+            price_date = row.get("_report_date")
+            if not price_date:
+                continue
+            key = (row.get("stock_code", ""), str(price_date))
+            entry = dict(by_stock.get(key, {}))
+            for field in spread_fields:
+                tenor = tenor_by_column.get(field)
+                if tenor is None:
+                    continue
+                aligned = aligner.align(str(price_date), tenor)
+                base = dict(entry.get(field) or {})
+                base.update({
+                    "tenor_years": tenor,
+                    "curve_date": aligned["curve_date"],
+                    "staleness_days": aligned["staleness_days"],
+                })
+                entry[field] = base
+            by_stock[key] = entry
     return [by_stock.get((row.get("stock_code", ""), str(row["_report_date"])), {}) for row in results]
 
 

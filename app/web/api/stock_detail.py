@@ -756,6 +756,127 @@ def get_business_overview(stock_code: str, request: Request) -> dict:
     }
 
 
+@router.get("/{stock_code}/treasury-comparison")
+def get_treasury_comparison(
+    stock_code: str,
+    request: Request,
+    tenor: float = Query(10.0),
+    limit: int = Query(250, ge=1, le=1000),
+) -> dict:
+    """国债比较 (reports/68 P3): TTM 已实施股息率与所选期限国债收益率
+
+    - series: 按该股价格日降序取最新 limit 天，每天返回 TTM 已实施股息率、
+      对齐国债收益率（≤价格日最近点、最大陈旧 5 自然日）、利差与对齐信息。
+    - 曲线缺失/陈旧/股息率不可算时该天对应字段为 null 并带 reason。
+    - 未知股票 404；股票存在但无曲线数据 → series 逐点 reason=curve_missing。
+    """
+    from app.core.adapters.czb_mof_adapter import KEY_TENORS
+    from app.core.treasury import MAX_STALENESS_DAYS, TreasuryCurveUpdater
+
+    duck = request.app.state.duck
+    sqlite = request.app.state.sqlite
+    exists = duck.read_query(
+        "SELECT 1 FROM stock_meta WHERE stock_code = ?", [stock_code]
+    )
+    if not exists:
+        raise HTTPException(status_code=404, detail="stock not found")
+    if tenor not in KEY_TENORS:
+        raise HTTPException(status_code=422, detail=f"不支持的期限: {tenor}")
+
+    price_rows = duck.read_query(
+        """SELECT trade_date, close FROM price_daily_raw
+           WHERE stock_code = ? AND close IS NOT NULL
+           ORDER BY trade_date DESC LIMIT ?""",
+        [stock_code, limit],
+    )
+    if not price_rows:
+        return {
+            "stock_code": stock_code,
+            "tenor": tenor,
+            "tenors_available": list(KEY_TENORS),
+            "series": [],
+            "missing": True,
+            "provenance": None,
+        }
+
+    curve_align = TreasuryCurveUpdater(duck=duck, sqlite=sqlite)
+    series: list[dict] = []
+    for row in price_rows:
+        price_date = str(row["trade_date"])[:10]
+        close = float(row["close"]) if row.get("close") is not None else None
+        item: dict = {
+            "price_date": price_date,
+            "ttm_div_yield": None,
+            "curve_yield": None,
+            "spread": None,
+            "curve_date": None,
+            "staleness_days": None,
+            "reason": None,
+        }
+        if close is None or close <= 0:
+            item["reason"] = "no_price"
+            series.append(item)
+            continue
+        div_rows = duck.read_query(
+            """SELECT SUM(dividend_per_share) AS dps
+               FROM dividends
+               WHERE stock_code = ?
+                 AND dividend_per_share IS NOT NULL
+                 AND dividend_per_share > 0
+                 AND announcement_date IS NOT NULL
+                 AND announcement_date <= CAST(? AS DATE)
+                 AND ex_date <= CAST(? AS DATE)
+                 AND ex_date >= CAST(? AS DATE) - INTERVAL '1 year'""",
+            [stock_code, price_date, price_date, price_date],
+        )
+        ttm_dps = div_rows[0].get("dps") if div_rows else None
+        ttm_div_yield = (float(ttm_dps) / close) * 100.0 if ttm_dps and close > 0 else None
+        item["ttm_div_yield"] = ttm_div_yield
+
+        align = curve_align.align(price_date, tenor)
+        item["curve_date"] = align["curve_date"]
+        item["staleness_days"] = align["staleness_days"]
+        if align["status"] != "ok" or align["yield_pct"] is None:
+            item["reason"] = align["reason"]
+            series.append(item)
+            continue
+        item["curve_yield"] = align["yield_pct"]
+        if ttm_div_yield is None:
+            item["reason"] = "no_dividend"
+        else:
+            item["spread"] = ttm_div_yield - align["yield_pct"]
+        series.append(item)
+
+    # 溯源（曲线侧最新一批）
+    curve_rows = duck.read_query(
+        """SELECT source, fetch_time, raw_hash, batch_id, confidence
+           FROM treasury_yield_curve
+           WHERE tenor_years = ?
+           ORDER BY curve_date DESC LIMIT 1""",
+        [tenor],
+    )
+    provenance = None
+    if curve_rows:
+        row = curve_rows[0]
+        provenance = {
+            "source": row.get("source"),
+            "fetch_time": str(row.get("fetch_time")) if row.get("fetch_time") else None,
+            "raw_hash": row.get("raw_hash"),
+            "batch_id": row.get("batch_id"),
+            "confidence": row.get("confidence"),
+        }
+
+    return {
+        "stock_code": stock_code,
+        "tenor": tenor,
+        "tenors_available": list(KEY_TENORS),
+        "max_staleness_days": MAX_STALENESS_DAYS,
+        "series": series,
+        "missing": all(item.get("reason") is not None for item in series),
+        "provenance": provenance,
+    }
+
+
 @router.get("/{stock_code}/source-audit")
 def get_source_audit(
     stock_code: str,

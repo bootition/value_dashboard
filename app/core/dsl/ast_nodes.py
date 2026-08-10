@@ -253,4 +253,15 @@ INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     "period_return": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
     "annualized_volatility": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
     "max_drawdown": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    # 国债基准与股息率利差（P3，reports/68；当前值，历史统计属 P4）
+    "ttm_dividend_yield": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_0p25y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_0p5y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_1y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_2y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_3y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_5y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_7y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_10y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "div_yield_spread_30y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
 }

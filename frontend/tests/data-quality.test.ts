@@ -36,13 +36,23 @@ test('KNOWN_WARNING_CODES is a readonly tuple of the known codes', () => {
   }
 })
 
-test('DIVIDEND_INDICATOR_FIELDS lists the four dividend indicators', () => {
+test('DIVIDEND_INDICATOR_FIELDS lists dividend and treasury spread indicators', () => {
   const fields = [...DIVIDEND_INDICATOR_FIELDS]
   assert.deepEqual(fields.sort(), [
     'consecutive_div_years',
+    'div_yield_spread_0p25y',
+    'div_yield_spread_0p5y',
+    'div_yield_spread_10y',
+    'div_yield_spread_1y',
+    'div_yield_spread_2y',
+    'div_yield_spread_30y',
+    'div_yield_spread_3y',
+    'div_yield_spread_5y',
+    'div_yield_spread_7y',
     'dividend_yield',
     'dps',
     'payout_ratio',
+    'ttm_dividend_yield',
   ])
 })
 

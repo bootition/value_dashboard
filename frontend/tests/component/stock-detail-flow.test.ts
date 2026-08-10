@@ -140,9 +140,24 @@ async function mountDetailWithCode(code: string) {
   return { wrapper, router }
 }
 
+const TREASURY_COMPARISON = {
+  stock_code: '600519',
+  tenor: 10,
+  tenors_available: [0.25, 0.5, 1, 2, 3, 5, 7, 10, 30],
+  max_staleness_days: 5,
+  series: [
+    { price_date: '2026-08-07', ttm_div_yield: 3.1, curve_yield: 1.71, spread: 1.39, curve_date: '2026-08-07', staleness_days: 0, reason: null },
+    { price_date: '2026-08-06', ttm_div_yield: 3.1, curve_yield: 1.7, spread: 1.4, curve_date: '2026-08-06', staleness_days: 0, reason: null },
+    { price_date: '2026-08-03', ttm_div_yield: 3.0, curve_yield: null, spread: null, curve_date: null, staleness_days: null, reason: 'curve_missing' },
+  ],
+  missing: false,
+  provenance: { source: 'czb_mof', fetch_time: '2026-08-10 12:00:00', raw_hash: 'h', batch_id: 'b1', confidence: 'strict' },
+}
+
 function setupAxiosMock(
   payload: Record<string, unknown> | null = null,
   businessOverviewPayload: Record<string, unknown> | null = null,
+  treasuryPayload: Record<string, unknown> | null = null,
 ) {
   const klineRequests: Array<Record<string, unknown>> = []
   const get = axios.get as Mock
@@ -162,6 +177,9 @@ function setupAxiosMock(
     }
     if (url.includes('/business-overview')) {
       return Promise.resolve({ data: businessOverviewPayload ?? BUSINESS_OVERVIEW })
+    }
+    if (url.includes('/treasury-comparison')) {
+      return Promise.resolve({ data: treasuryPayload ?? TREASURY_COMPARISON })
     }
     if (url.includes('/source-audit')) {
       return Promise.resolve({ data: { field_audit: [], batch_audit: [] } })
@@ -332,5 +350,37 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
     expect(wrapper.text()).not.toContain('股票不存在或暂无数据')
     expect(wrapper.find('#overview').text()).toContain('暂无业务概览数据')
     expect(wrapper.find('#operations').text()).toContain('暂无主营构成数据')
+  })
+
+  it('股东回报章节展示国债比较（利差默认）', async () => {
+    setupAxiosMock()
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    const returnText = wrapper.find('#return').text()
+    expect(returnText).toContain('国债比较')
+    expect(returnText).toContain('利差')
+    expect(returnText).toContain('TTM已实施股息率')
+    expect(returnText).toContain('czb_mof')
+    // 默认请求 10 年期限
+    const requests = (axios.get as Mock).mock.calls
+      .filter(([url]: [string]) => String(url).includes('/treasury-comparison'))
+      .map(([, config]: [string, { params?: Record<string, unknown> } | undefined]) => config?.params)
+    expect(requests[0]).toMatchObject({ tenor: 10, limit: 250 })
+  })
+
+  it('国债曲线缺失时显示局部空态', async () => {
+    const missing = {
+      ...TREASURY_COMPARISON,
+      series: [],
+      missing: true,
+      provenance: null,
+    }
+    setupAxiosMock(null, null, missing)
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    const returnText = wrapper.find('#return').text()
+    expect(returnText).toContain('暂无国债比较数据')
   })
 })

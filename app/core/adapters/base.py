@@ -35,12 +35,13 @@ DataType = Literal[
     "trading_dates",        # 交易日历
     "company_profile",      # 公司资料（东财 F10 低频业务概览）
     "business_breakdown",   # 主营构成（东财 F10 低频业务概览）
+    "treasury_yield_curve", # 财政部国债收益率曲线（独立低频基准域，P3）
 ]
 
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
 # P0-1: cninfo_csrc 是 CSRC 行业适配器的独立源名（与 cninfo 公告/分红适配器区分）
-SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache", "eastmoney_f10"]
+SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache", "eastmoney_f10", "czb_mof"]
 
 
 # ─── 请求/响应模型 ──────────────────────────────────────────────────

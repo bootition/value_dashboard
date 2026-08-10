@@ -15,6 +15,7 @@ import type { IndicatorGroup, MetricStatItem } from '../components/IndicatorGrou
 import StockTocNav from '../components/StockTocNav.vue'
 import type { TocItem } from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
+import TreasuryComparisonCard from '../components/TreasuryComparisonCard.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataTraceability from '../components/DataTraceability.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
@@ -594,7 +595,11 @@ onUnmounted(() => {
             kicker="SHAREHOLDER RETURN"
             title="股东回报"
             :groups="returnGroup"
-          />
+          >
+            <div class="section-inner-block">
+              <TreasuryComparisonCard :stock-code="stockCode" />
+            </div>
+          </IndicatorGroupSection>
 
           <!-- 来源材料 -->
           <section id="sources" :ref="setSectionRef('sources')" class="stock-section sources-section">

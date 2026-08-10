@@ -74,6 +74,16 @@ export const DIVIDEND_INDICATOR_FIELDS = [
   'payout_ratio',
   'dps',
   'consecutive_div_years',
+  'ttm_dividend_yield',
+  'div_yield_spread_0p25y',
+  'div_yield_spread_0p5y',
+  'div_yield_spread_1y',
+  'div_yield_spread_2y',
+  'div_yield_spread_3y',
+  'div_yield_spread_5y',
+  'div_yield_spread_7y',
+  'div_yield_spread_10y',
+  'div_yield_spread_30y',
 ] as const
 
 /**

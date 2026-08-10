@@ -253,6 +253,41 @@ def data_business_overview(
     typer.echo(json.dumps(make_response("data.business-overview", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("treasury-curve")
+def data_treasury_curve(
+    backfill: bool = typer.Option(False, "--backfill", help="按关键期限回填全部历史"),
+    tenors: str = typer.Option("", "--tenors", help="回填期限，逗号分隔（如 0.25,10）"),
+    max_tenors: int = typer.Option(0, "--max-tenors", help="回填最多N个期限(0=全部)"),
+    daily: bool = typer.Option(False, "--daily", help="抓取指定/当日曲线并 upsert"),
+    work_date: str = typer.Option("", "--work-date", help="日终增量日期 YYYY-MM-DD（默认今天）"),
+    check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖/队列状态，不抓取"),
+) -> None:
+    """财政部国债收益率曲线更新 (reports/68 P3 独立基准域)
+
+    - 历史回填：单期限一次请求（czbQueryYz），单期限事务原子替换。
+    - 日终增量：czbQueryXy 单日全曲线 upsert；未来日期拒绝。
+    - 失败保留旧值并写入独立 retry/missing；不进入 A 股表或 readiness。
+    """
+    from app.cli.protocol import make_response
+    from app.core.treasury import TreasuryCurveUpdater
+
+    _, duck, sqlite = _database_context()
+    updater = TreasuryCurveUpdater(duck=duck, sqlite=sqlite)
+    if check_only:
+        report = updater.status_report()
+    elif backfill:
+        tenor_list = (
+            [float(t.strip()) for t in tenors.split(",") if t.strip()]
+            if tenors.strip() else None
+        )
+        report = updater.backfill(tenor_list, max_tenors=max_tenors)
+    elif daily:
+        report = updater.update_daily([work_date] if work_date.strip() else None)
+    else:
+        report = updater.refresh_if_due()
+    typer.echo(json.dumps(make_response("data.treasury-curve", report), ensure_ascii=False, indent=2, default=str))
+
+
 @data_app.command("replenish_missing_core_data")
 def data_replenish_missing_core_data(
     max_stocks: int = typer.Option(0, "--max-stocks", min=0, help="最多补齐 N 只股票，0=全部缺项"),

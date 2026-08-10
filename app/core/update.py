@@ -446,7 +446,11 @@ class IncrementalUpdater:
         #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
         report_step("business_overview", self._refresh_business_overview())
 
-        # 4. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
+        # 4. 国债曲线低频域（reports/68 P3 独立基准域）：价格/财务优先后执行；
+        #    失败保留旧值并进入独立 retry/missing，绝不阻断股票更新/筛选/readiness。
+        report_step("treasury_curve", self._refresh_treasury_curve())
+
+        # 5. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
         self._cleanup_unretryable_tasks()
         self._cleanup_completed_announcement_retries()
         self._resolve_complete_missing_records()
@@ -479,6 +483,21 @@ class IncrementalUpdater:
             ).refresh_if_due()
         except Exception as error:
             logger.warning("业务概览刷新失败(非致命): %s", error)
+            return {"status": "failed", "error": str(error)}
+
+    def _refresh_treasury_curve(self) -> dict[str, Any]:
+        """低频国债曲线自动集成入口（最小安全）。
+
+        每日检查当日曲线并补齐近 30 天缺失的关键期限；任何异常都被捕获，
+        绝不让国债源失败阻断价格/财务/readiness 增量更新。
+        """
+        try:
+            from app.core.treasury import TreasuryCurveUpdater
+            return TreasuryCurveUpdater(
+                duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+            ).refresh_if_due()
+        except Exception as error:
+            logger.warning("国债曲线刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
     def _stale_snapshot_codes(self) -> list[str]:

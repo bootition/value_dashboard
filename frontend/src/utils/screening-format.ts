@@ -62,6 +62,16 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   period_return: '区间收益率',
   annualized_volatility: '年化波动率',
   max_drawdown: '最大回撤',
+  ttm_dividend_yield: 'TTM已实施股息率',
+  div_yield_spread_0p25y: '股息率-国债0.25年利差',
+  div_yield_spread_0p5y: '股息率-国债0.5年利差',
+  div_yield_spread_1y: '股息率-国债1年利差',
+  div_yield_spread_2y: '股息率-国债2年利差',
+  div_yield_spread_3y: '股息率-国债3年利差',
+  div_yield_spread_5y: '股息率-国债5年利差',
+  div_yield_spread_7y: '股息率-国债7年利差',
+  div_yield_spread_10y: '股息率-国债10年利差',
+  div_yield_spread_30y: '股息率-国债30年利差',
 }
 
 /** 排名类字段的展示后缀（指标 + 排名）。 */
@@ -212,6 +222,10 @@ const PCT_FIELDS = new Set([
   'revenue_yoy', 'net_profit_yoy', 'deducted_profit_yoy',
   'revenue_cagr3', 'revenue_cagr5', 'net_profit_cagr5',
   'dividend_yield', 'goodwill_ratio', 'payout_ratio',
+  'ttm_dividend_yield',
+  'div_yield_spread_0p25y', 'div_yield_spread_0p5y', 'div_yield_spread_1y',
+  'div_yield_spread_2y', 'div_yield_spread_3y', 'div_yield_spread_5y',
+  'div_yield_spread_7y', 'div_yield_spread_10y', 'div_yield_spread_30y',
 ])
 
 const PRICE_FIELDS = new Set(['latest_close', 'open', 'high', 'low', 'close'])
@@ -264,6 +278,16 @@ export const FIELD_UNITS: Readonly<Record<string, string>> = {
   net_profit_cagr5: '(%)',
   goodwill_ratio: '(%)',
   payout_ratio: '(%)',
+  ttm_dividend_yield: '(%)',
+  div_yield_spread_0p25y: '(%)',
+  div_yield_spread_0p5y: '(%)',
+  div_yield_spread_1y: '(%)',
+  div_yield_spread_2y: '(%)',
+  div_yield_spread_3y: '(%)',
+  div_yield_spread_5y: '(%)',
+  div_yield_spread_7y: '(%)',
+  div_yield_spread_10y: '(%)',
+  div_yield_spread_30y: '(%)',
 }
 
 export function fieldTitleWithUnit(field: string, baseLabel: string): string {

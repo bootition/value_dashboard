@@ -53,6 +53,11 @@ SNAPSHOT_COLUMNS: set[str] = {
     "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
     "latest_close", "turnover_rate", "avg_volume", "period_return",
     "annualized_volatility", "max_drawdown",
+    # 国债基准与股息率利差（P3，reports/68）
+    "ttm_dividend_yield",
+    "div_yield_spread_0p25y", "div_yield_spread_0p5y", "div_yield_spread_1y",
+    "div_yield_spread_2y", "div_yield_spread_3y", "div_yield_spread_5y",
+    "div_yield_spread_7y", "div_yield_spread_10y", "div_yield_spread_30y",
 }
 
 # Every normalized statement column is available to screening under its stable
@@ -97,6 +102,10 @@ RANKABLE_INDICATORS: set[str] = {
     "debt_ratio", "current_ratio", "quick_ratio",
     "payout_ratio", "dps", "consecutive_div_years",
     "total_market_cap", "latest_close",
+    "ttm_dividend_yield",
+    "div_yield_spread_0p25y", "div_yield_spread_0p5y", "div_yield_spread_1y",
+    "div_yield_spread_2y", "div_yield_spread_3y", "div_yield_spread_5y",
+    "div_yield_spread_7y", "div_yield_spread_10y", "div_yield_spread_30y",
 } | NORMALIZED_FIELDS
 
 RANK_SUFFIXES = (
