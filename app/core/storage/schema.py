@@ -373,6 +373,45 @@ CREATE TABLE IF NOT EXISTS raw_response_archive (
     integrity_verified BOOLEAN DEFAULT FALSE,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 个股业务概览（reports/67 独立低频域）──────────────────────────────────
+-- 独立于 stock_meta / indicator_snapshot / readiness；失败保留旧值，
+-- 不进筛选池，不阻断日常价格、财务与 A 股 readiness。
+CREATE TABLE IF NOT EXISTS company_profile (
+    stock_code     VARCHAR PRIMARY KEY,
+    code           VARCHAR,
+    name           VARCHAR,
+    org_name       VARCHAR,
+    profile        TEXT,               -- 公司简介（事实概览，confidence=approximate）
+    scope          TEXT,               -- 经营范围
+    employee_num   BIGINT,
+    csrc_industry  VARCHAR,
+    trade_market   VARCHAR,
+    source         VARCHAR NOT NULL,   -- 来源（eastmoney_f10）
+    fetch_time     TIMESTAMP NOT NULL, -- 抓取时间
+    raw_hash       VARCHAR NOT NULL,   -- 原始响应 SHA-256
+    confidence     VARCHAR NOT NULL,   -- approximate / missing
+    batch_id       VARCHAR NOT NULL,   -- 批次
+    updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS business_breakdown (
+    stock_code   VARCHAR NOT NULL,
+    report_date  DATE NOT NULL,        -- 主营构成报告期
+    type         INTEGER NOT NULL,     -- 1=产品 2=行业 3=地区
+    item_name    VARCHAR NOT NULL,
+    amount       DOUBLE,               -- 主营收入金额
+    ratio        DOUBLE,               -- 占比(%)
+    rank         INTEGER,
+    source       VARCHAR NOT NULL,
+    fetch_time   TIMESTAMP NOT NULL,
+    raw_hash     VARCHAR NOT NULL,
+    confidence   VARCHAR NOT NULL,
+    batch_id     VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date, type, item_name)
+);
+CREATE INDEX IF NOT EXISTS idx_business_breakdown_stock_report
+    ON business_breakdown (stock_code, report_date);
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -658,6 +697,13 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (8, 'Independent low-frequency business overview tables')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
     logger.info("DuckDB schema 初始化完成")
 
 
@@ -939,6 +985,22 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
             "ON CONFLICT(version) DO NOTHING",
             (14, "数据域刷新状态（如 CSRC 行业低频刷新时间戳）"),
+        )
+        # 每只股票每个字段最多保留一条未解决缺失，去重后由数据到达时解决
+        # （业务概览等独立低频域复用同一 missing_list 语义）。
+        conn.execute(
+            "DELETE FROM missing_list WHERE resolved_at IS NULL AND id NOT IN ("
+            "SELECT MAX(id) FROM missing_list WHERE resolved_at IS NULL "
+            "GROUP BY stock_code, field_name)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_missing_list_stock_field_open "
+            "ON missing_list(stock_code, field_name) WHERE resolved_at IS NULL"
+        )
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description) VALUES (?, ?) "
+            "ON CONFLICT(version) DO NOTHING",
+            (15, "missing_list 未解决条目按股票+字段去重"),
         )
 
 

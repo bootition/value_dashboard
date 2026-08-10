@@ -226,6 +226,33 @@ def data_update(
     typer.echo(json.dumps(make_response("data.update", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("business-overview")
+def data_business_overview(
+    stocks: str = typer.Option("", "--stocks", help="只更新指定股票，逗号分隔"),
+    max_stocks: int = typer.Option(0, "--max-stocks", help="最多更新N只上市股票(0=全部)"),
+    check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖/队列状态，不抓取"),
+) -> None:
+    """低频业务概览更新 (reports/67 独立域)
+
+    更新 company_profile / business_breakdown（东财 F10 独立源）。
+    - 单股事务原子替换；失败保留旧值并写入独立 retry/missing
+    - 不进入 stock_meta / indicator_snapshot / readiness，不阻断价格与筛选
+    """
+    from app.cli.protocol import make_response
+    from app.core.business import BusinessOverviewUpdater
+
+    _, duck, sqlite = _database_context()
+    updater = BusinessOverviewUpdater(duck=duck, sqlite=sqlite)
+    if check_only:
+        report = updater.status_report()
+    elif stocks.strip():
+        codes = [code.strip() for code in stocks.split(",") if code.strip()]
+        report = updater.update_many(codes)
+    else:
+        report = updater.update_all(max_stocks=max_stocks)
+    typer.echo(json.dumps(make_response("data.business-overview", report), ensure_ascii=False, indent=2, default=str))
+
+
 @data_app.command("replenish_missing_core_data")
 def data_replenish_missing_core_data(
     max_stocks: int = typer.Option(0, "--max-stocks", min=0, help="最多补齐 N 只股票，0=全部缺项"),

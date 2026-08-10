@@ -4,13 +4,14 @@
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-08-10
-- **更新人**：opencode 会话（个股研究工作台 P1 实施通过）
+- **更新人**：opencode 会话（个股研究工作台 P1 与业务概览 P2 实施通过）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
 | 整体启用 | ✅ **PASS / 可正式研究**：正式库 readiness ready=true、warning_codes=[]；retry 与 missing 未解决项清零；服务保持自动更新 enabled；2026-08-09 红队 P2 风险全部关闭 | `reports/64`（数据状态见 `reports/62`） |
 | 国债基准与历史统计 | ✅ 需求与可行性门禁通过：财政部曲线独立域、默认10年期、TTM股息率利差、统计型筛选；不做逐券债券投资、提示或结论 | `reports/68`（2026-08-10） |
 | 个股研究工作台 P1 | ✅ 驾驶舱、四组摘要、纵向章节、粘性目录、日/周/月研究型 K 线和全局偏好已实施；S1 490、Ruff、前端门禁全绿 | `reports/69`（2026-08-10） |
+| 业务概览 P2 | ✅ 独立低频域、东财 F10 适配器、保旧值/retry/missing、详情接入已实施；20股探测沪深18/18可用，北交所2只如实 missing；S1 516、前端门禁全绿 | `reports/70`（2026-08-10） |
 | 个股详情信息架构 | ✅ PRD 已定义：研究驾驶舱、业务概览、纵向研究章节、粘性目录和研究型K线；按 P1-P4 分阶段开发 | `reports/68`；`.planning/2026-08-09-stock-detail-and-treasury-discovery/task_plan.md` |
 | 代码层门禁 | ✅ 红队 P2 修复后 Ruff、前端 lint/55 node + 20 组件测试/build 全通过；隔离回归 481 passed | `reports/64` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
@@ -32,7 +33,7 @@
 - **自动更新保持 enabled**：服务每轮启动自动执行增量更新；当前无缺口轮次 3-5 分钟完成，东财行情 host 冷却结束后 universe 自动补齐。
 - **东财行情源冷却**：push2/push2his 封锁冷却期至 2026-08-15（期间勿触碰）；到期后单次探测，恢复后限速 ≤2 req/s、并发 ≤5。
 - **待办**：CNINFO 分红 ex_date 修复评估（见已知缺口 #4）。
-- **进行中**：P1 已完成；按 `.planning/2026-08-09-stock-detail-and-treasury-discovery/task_plan.md` 继续实施 P2-P4。P4 必须先通过历史总股本链的 CNINFO锚点、双源核验、90%连续覆盖和20股事件抽样门禁。
+- **阶段暂停**：P1/P2 已完成；按用户要求停在 P3 之前，下次会话继续财政部国债曲线与股息率利差。P4 必须先通过历史总股本链的 CNINFO锚点、双源核验、90%连续覆盖和20股事件抽样门禁。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
@@ -78,6 +79,7 @@
 | `docs/reports/67_BUSINESS_OVERVIEW_DATA_FEASIBILITY_2026-08-09.md` | **个股业务概览数据可行性**：东财 F10 主源、字段和风险边界 | **当前业务概览范围评估依据** |
 | `docs/reports/68_STOCK_DETAIL_AND_TREASURY_FEASIBILITY_2026-08-10.md` | **个股研究工作台与国债基准可行性**：P1-P4 门槛、来源和隔离架构 | **当前需求与实施前提依据** |
 | `docs/reports/69_STOCK_RESEARCH_WORKBENCH_P1_2026-08-10.md` | **个股研究工作台 P1**：驾驶舱、纵向章节、粘性目录与日/周/月 K 线 | **当前详情页信息架构与 K 线依据** |
+| `docs/reports/70_BUSINESS_OVERVIEW_P2_2026-08-10.md` | **业务概览 P2**：独立低频域、来源门禁、更新隔离和详情展示 | **当前业务概览实施依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |

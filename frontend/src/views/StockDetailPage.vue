@@ -14,6 +14,7 @@ import IndicatorGroupSection from '../components/IndicatorGroupSection.vue'
 import type { IndicatorGroup, MetricStatItem } from '../components/IndicatorGroupSection.vue'
 import StockTocNav from '../components/StockTocNav.vue'
 import type { TocItem } from '../components/StockTocNav.vue'
+import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataTraceability from '../components/DataTraceability.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
@@ -29,6 +30,7 @@ import type {
   KlinePeriod,
   IndicatorMetric,
   FinancialTrendRow,
+  BusinessOverviewResponse,
 } from '../types/stock-detail.ts'
 import type { WarningCode } from '../types/data-quality.ts'
 
@@ -49,6 +51,7 @@ const indicators = ref<IndicatorsResponse | null>(null)
 const klineData = ref<KlineResponse>({ candles: [] })
 const trendData = ref<TrendResponse>({ trend: [], period: 'annual', count: 0 })
 const auditData = ref<AuditResponse>({ field_audit: [], batch_audit: [] })
+const businessOverview = ref<BusinessOverviewResponse | null>(null)
 const warningCodes = ref<readonly WarningCode[]>([])
 
 // K线配置（localStorage 全局记忆，非法值回退默认）
@@ -83,6 +86,7 @@ async function fetchAll() {
       fetchKline(gen),
       fetchTrend(gen),
       fetchAudit(gen),
+      fetchBusinessOverview(gen),
     ])
   } finally {
     loading.value = false
@@ -174,6 +178,25 @@ async function fetchAudit(gen: number) {
     if (gen !== generation.value) return
     auditData.value = { field_audit: [], batch_audit: [] }
     message.warning(friendlyErrorMessage(e, '加载溯源信息失败'))
+  }
+}
+
+async function fetchBusinessOverview(gen: number) {
+  try {
+    const resp = await axios.get<BusinessOverviewResponse>(
+      `/api/stock/${stockCode.value}/business-overview`,
+    )
+    if (gen !== generation.value) return
+    businessOverview.value = resp.data
+  } catch (e) {
+    if (gen !== generation.value) return
+    businessOverview.value = null
+    // 局部缺失（profile/breakdown status=missing）在组件内就地空态，不升页面级
+    if (isAxiosError(e) && e.response?.status === 404) {
+      stockUnavailable.value = true
+      return
+    }
+    message.warning(friendlyErrorMessage(e, '加载业务概览失败'))
   }
 }
 
@@ -476,6 +499,8 @@ onUnmounted(() => {
               </dl>
             </div>
 
+            <BusinessOverviewSection :data="businessOverview" mode="overview" />
+
             <div class="overview-summaries" aria-label="核心研究摘要">
               <article v-for="group in overviewGroups" :key="group.title" class="summary-panel">
                 <h2>{{ group.title }}</h2>
@@ -547,6 +572,9 @@ onUnmounted(() => {
                 :pagination="{ pageSize: 20 }"
                 :scroll-x="800"
               />
+            </div>
+            <div class="section-inner-block">
+              <BusinessOverviewSection :data="businessOverview" mode="operations" />
             </div>
           </IndicatorGroupSection>
 

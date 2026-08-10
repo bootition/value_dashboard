@@ -156,6 +156,64 @@ export interface TrendResponse {
   readonly period_semantic?: string
 }
 
+// ─── Business Overview ────────────────────────────────────────────────────
+
+/**
+ * 业务概览溯源信息（来源 / 抓取时间 / 置信度 / 批次）。
+ * 语义来自 reports/67：东财 F10 低频主源，confidence 为 "approximate"。
+ */
+export interface BusinessOverviewProvenance {
+  readonly source: string | null
+  readonly fetch_time: string | null
+  readonly raw_hash?: string | null
+  readonly confidence?: string | null
+  readonly batch_id?: string | null
+}
+
+/** 公司资料（company_profile）。status 为 "missing" 时不含业务字段。 */
+export interface CompanyProfile {
+  readonly status: 'ok' | 'missing'
+  readonly code?: string | null
+  readonly name?: string | null
+  readonly org_name?: string | null
+  readonly profile?: string | null
+  readonly scope?: string | null
+  readonly employee_num?: number | null
+  readonly csrc_industry?: string | null
+  readonly trade_market?: string | null
+  readonly provenance?: BusinessOverviewProvenance | null
+}
+
+/** 主营构成条目（business_breakdown）。type: 1=产品 2=行业 3=地区。 */
+export interface BreakdownItem {
+  readonly report_date: string
+  readonly type: number
+  readonly type_label: string
+  readonly item_name: string | null
+  readonly amount: number | null
+  readonly ratio: number | null
+  readonly rank: number | null
+}
+
+/** 主营构成：最近报告期 composition（按 type 分组）+ 可得历史。 */
+export interface BusinessBreakdown {
+  readonly status: 'ok' | 'missing'
+  readonly latest_report_date: string | null
+  readonly composition: Readonly<Record<string, readonly BreakdownItem[]>>
+  readonly history: readonly BreakdownItem[]
+  readonly provenance: BusinessOverviewProvenance | null
+}
+
+export interface BusinessOverviewResponse {
+  readonly stock_code: string
+  readonly profile: CompanyProfile
+  readonly breakdown: BusinessBreakdown
+  readonly provenance: {
+    readonly profile: BusinessOverviewProvenance | null
+    readonly breakdown: BusinessOverviewProvenance | null
+  }
+}
+
 // ─── Source Audit ─────────────────────────────────────────────────────────
 
 export interface AuditFieldRow {

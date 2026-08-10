@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
 KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache"}
+    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache", "eastmoney_f10"}
 )
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
@@ -43,6 +43,9 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     # 不再覆盖 cninfo（announcements/dividends 的适配器）。
     "csrc_industry": ["cninfo_csrc"],
     "trading_dates": ["akshare_eastmoney", "baostock"],
+    # 业务概览（reports/67）：东财 F10 独立低频主源，独立实例与限速
+    "company_profile": ["eastmoney_f10"],
+    "business_breakdown": ["eastmoney_f10"],
 }
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
@@ -52,6 +55,7 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "tdx": 0.2,
     "tencent": 0.2,
     "sina": 0.35,
+    "eastmoney_f10": 0.5,
 }
 
 
@@ -265,6 +269,15 @@ class AdapterManager:
             logger.warning(f"CSRC 行业适配器未安装: {e}")
         except Exception as e:
             logger.warning(f"CSRC 行业适配器初始化失败: {e}")
+
+        # 东财 F10 业务概览适配器（独立低频域，独立实例与限速）
+        try:
+            from app.core.adapters.eastmoney_f10_adapter import EastMoneyF10Adapter
+            self.register(EastMoneyF10Adapter(self._rate_limits["eastmoney_f10"]))
+        except ImportError as e:
+            logger.warning(f"东财 F10 业务概览适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"东财 F10 业务概览适配器初始化失败: {e}")
 
         self._initialized = True
         logger.info(f"适配器管理器初始化完成: {list(self._adapters.keys())}")

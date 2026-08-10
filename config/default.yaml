@@ -19,6 +19,7 @@ adapters:
     baostock: 0.8
     tencent: 0.2
     sina: 0.35
+    eastmoney_f10: 0.5
   primary:
     balance_sheet: ["sina", "tdx", "akshare_eastmoney"]
     income_statement: ["sina", "tdx", "akshare_eastmoney"]
@@ -30,6 +31,8 @@ adapters:
     listing_info: ["akshare_eastmoney"]
     sw_industry: ["local_cache"]
     csrc_industry: ["cninfo"]
+    company_profile: ["eastmoney_f10"]
+    business_breakdown: ["eastmoney_f10"]
 
 screening:
   default_exclude_st: true
@@ -50,6 +53,11 @@ update:
   price_fetch_scale_up_seconds: 300
   price_fetch_timeout_seconds: 45  # 单股 raw/qfq 并行抓取的有界截止时间
   price_fetch_batch_size: 20  # 价格持久化批量：每批合并为单 DuckDB 事务，减少 WAL 提交
+  # 业务概览低频域（reports/67）：价格优先后按月有界续传，自选股票优先；
+  # 失败保留旧值，绝不阻断价格/财务/readiness。
+  business_overview_auto_enabled: true
+  business_overview_refresh_interval_days: 30
+  business_overview_max_stocks_per_run: 20
 
 backup:
   keep_full_backups: 3

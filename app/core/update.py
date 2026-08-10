@@ -442,7 +442,11 @@ class IncrementalUpdater:
                 ).compute_snapshot_for_codes(codes_to_compute)
                 report_step("indicators", snapshot_step)
 
-        # 3. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
+        # 3. 业务概览低频域（reports/67 独立域）：仅当自动集成启用且间隔到期
+        #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
+        report_step("business_overview", self._refresh_business_overview())
+
+        # 4. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
         self._cleanup_unretryable_tasks()
         self._cleanup_completed_announcement_retries()
         self._resolve_complete_missing_records()
@@ -460,6 +464,22 @@ class IncrementalUpdater:
 
         logger.info(f"增量更新完成: {report['status']}")
         return report
+
+    def _refresh_business_overview(self) -> dict[str, Any]:
+        """低频业务概览自动集成入口（最小安全）。
+
+        仅当 update.business_overview_auto_enabled=true 且刷新间隔到期时
+        才执行；否则返回 skipped，不产生任何网络请求。任何异常都被捕获，
+        绝不让业务概览源失败阻断价格/财务增量更新。
+        """
+        try:
+            from app.core.business import BusinessOverviewUpdater
+            return BusinessOverviewUpdater(
+                duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+            ).refresh_if_due()
+        except Exception as error:
+            logger.warning("业务概览刷新失败(非致命): %s", error)
+            return {"status": "failed", "error": str(error)}
 
     def _stale_snapshot_codes(self) -> list[str]:
         """Listed stocks whose snapshot price date is behind the raw price date."""
@@ -1517,10 +1537,23 @@ class IncrementalUpdater:
                 if data_type not in {
                     "balance_sheet", "income_statement", "cash_flow",
                     "dividends", "xdxr",
+                    "company_profile", "business_breakdown",
                 }:
                     # 无逐股重试路径的数据域（announcements 等）：retry 条目
                     # 是 pending 标记，由对应维护流程消费；在这里重试只会
                     # 每轮失败并递增 retry_count（死循环），必须跳过。
+                    continue
+                if data_type in {"company_profile", "business_breakdown"}:
+                    from app.core.business import BusinessOverviewUpdater
+                    outcome = BusinessOverviewUpdater(
+                        duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+                    ).update_stock(stock_code)
+                    if outcome["status"] == "success":
+                        self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+                        success_count += 1
+                    else:
+                        still_failing += 1
+                        self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
                     continue
                 outcome = self.refetch_one(stock_code, data_type)
                 if outcome["status"] == "success":

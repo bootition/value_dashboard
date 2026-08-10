@@ -653,6 +653,109 @@ def _apply_published_overrides(rows: list[dict], sqlite, stock_code: str) -> Non
             target[override["field_name"]] = override["override_value"]
 
 
+@router.get("/{stock_code}/business-overview")
+def get_business_overview(stock_code: str, request: Request) -> dict:
+    """业务概览 (reports/67 独立低频域: 公司资料 + 主营构成 + 溯源)
+
+    - profile: 公司简介 / 经营范围 / 行业 / 员工数 + 来源 / 抓取时间 / 哈希 / 批次
+    - breakdown: 最近报告期按产品/行业/地区构成 + 历史可得数据
+    - provenance: 来源、抓取时间、raw hash、置信度、batch
+    - 未知股票 → 404；已知股票但无业务数据（含北交所缺失）→ 显式 missing，不造值
+    """
+    duck = request.app.state.duck
+    exists = duck.read_query(
+        "SELECT 1 FROM stock_meta WHERE stock_code = ?", [stock_code]
+    )
+    if not exists:
+        raise HTTPException(status_code=404, detail="stock not found")
+
+    profile_rows = duck.read_query(
+        """SELECT code, name, org_name, profile, scope, employee_num,
+                  csrc_industry, trade_market, source, fetch_time, raw_hash,
+                  confidence, batch_id
+           FROM company_profile WHERE stock_code = ?""",
+        [stock_code],
+    )
+    breakdown_rows = duck.read_query(
+        """SELECT report_date, type, item_name, amount, ratio, rank,
+                  source, fetch_time, raw_hash, confidence, batch_id
+           FROM business_breakdown
+           WHERE stock_code = ?
+           ORDER BY report_date DESC, type, rank""",
+        [stock_code],
+    )
+
+    type_labels = {1: "产品", 2: "行业", 3: "地区"}
+
+    def _provenance(row: dict) -> dict:
+        return {
+            "source": row.get("source"),
+            "fetch_time": str(row.get("fetch_time")) if row.get("fetch_time") else None,
+            "raw_hash": row.get("raw_hash"),
+            "confidence": row.get("confidence"),
+            "batch_id": row.get("batch_id"),
+        }
+
+    profile = None
+    if profile_rows:
+        row = profile_rows[0]
+        profile = {
+            "status": "ok",
+            "code": row.get("code"),
+            "name": row.get("name"),
+            "org_name": row.get("org_name"),
+            "profile": row.get("profile"),
+            "scope": row.get("scope"),
+            "employee_num": row.get("employee_num"),
+            "csrc_industry": row.get("csrc_industry"),
+            "trade_market": row.get("trade_market"),
+        }
+        profile["provenance"] = _provenance(row)
+    else:
+        profile = {"status": "missing"}
+
+    latest_report_date = None
+    if breakdown_rows:
+        latest_report_date = str(breakdown_rows[0]["report_date"])[:10]
+
+    composition: dict[str, list[dict]] = {}
+    history: list[dict] = []
+    breakdown_provenance = None
+    for row in breakdown_rows:
+        report_date = str(row["report_date"])[:10]
+        breakdown_type = int(row["type"] or 0)
+        item = {
+            "report_date": report_date,
+            "type": breakdown_type,
+            "type_label": type_labels.get(breakdown_type, str(breakdown_type)),
+            "item_name": row.get("item_name"),
+            "amount": row.get("amount"),
+            "ratio": row.get("ratio"),
+            "rank": row.get("rank"),
+        }
+        history.append(item)
+        if report_date == latest_report_date:
+            composition.setdefault(str(breakdown_type), []).append(item)
+        if breakdown_provenance is None:
+            breakdown_provenance = _provenance(row)
+
+    return {
+        "stock_code": stock_code,
+        "profile": profile,
+        "breakdown": {
+            "status": "ok" if breakdown_rows else "missing",
+            "latest_report_date": latest_report_date,
+            "composition": composition,
+            "history": history,
+            "provenance": breakdown_provenance,
+        },
+        "provenance": {
+            "profile": profile.get("provenance") if profile else None,
+            "breakdown": breakdown_provenance,
+        },
+    }
+
+
 @router.get("/{stock_code}/source-audit")
 def get_source_audit(
     stock_code: str,

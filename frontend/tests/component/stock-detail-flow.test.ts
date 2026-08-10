@@ -50,6 +50,82 @@ const INDICATORS_NORMAL = {
 
 const KLINE_SETTINGS_KEY = 'vd.stock-detail.kline-settings'
 
+const BUSINESS_OVERVIEW = {
+  stock_code: '600519',
+  profile: {
+    status: 'ok',
+    code: '600519',
+    name: '贵州茅台',
+    org_name: '贵州茅台酒股份有限公司',
+    profile: '从事茅台酒及系列酒的生产与销售。',
+    scope: '茅台酒及系列酒生产与销售',
+    employee_num: 30000,
+    csrc_industry: '酒、饮料和精制茶制造业',
+    trade_market: '沪市主板',
+    provenance: {
+      source: 'eastmoney_f10',
+      fetch_time: '2026-08-09 10:00:00',
+      raw_hash: 'abc',
+      confidence: 'approximate',
+      batch_id: 'b1',
+    },
+  },
+  breakdown: {
+    status: 'ok',
+    latest_report_date: '2025-12-31',
+    composition: {
+      '1': [
+        { report_date: '2025-12-31', type: 1, type_label: '产品', item_name: '茅台酒', amount: 1.5e11, ratio: 85, rank: 1 },
+        { report_date: '2025-12-31', type: 1, type_label: '产品', item_name: '系列酒', amount: 2e10, ratio: 12, rank: 2 },
+      ],
+      '2': [
+        { report_date: '2025-12-31', type: 2, type_label: '行业', item_name: '白酒制造', amount: 1.7e11, ratio: 100, rank: 1 },
+      ],
+      '3': [
+        { report_date: '2025-12-31', type: 3, type_label: '地区', item_name: '境内', amount: 1.5e11, ratio: 90, rank: 1 },
+        { report_date: '2025-12-31', type: 3, type_label: '地区', item_name: '境外', amount: 2e10, ratio: 10, rank: 2 },
+      ],
+    },
+    history: [],
+    provenance: {
+      source: 'eastmoney_f10',
+      fetch_time: '2026-08-09 10:00:00',
+      raw_hash: 'abc',
+      confidence: 'approximate',
+      batch_id: 'b1',
+    },
+  },
+  provenance: {
+    profile: {
+      source: 'eastmoney_f10',
+      fetch_time: '2026-08-09 10:00:00',
+      raw_hash: 'abc',
+      confidence: 'approximate',
+      batch_id: 'b1',
+    },
+    breakdown: {
+      source: 'eastmoney_f10',
+      fetch_time: '2026-08-09 10:00:00',
+      raw_hash: 'abc',
+      confidence: 'approximate',
+      batch_id: 'b1',
+    },
+  },
+}
+
+const BUSINESS_OVERVIEW_MISSING = {
+  stock_code: '600519',
+  profile: { status: 'missing' },
+  breakdown: {
+    status: 'missing',
+    latest_report_date: null,
+    composition: {},
+    history: [],
+    provenance: null,
+  },
+  provenance: { profile: null, breakdown: null },
+}
+
 async function mountDetailWithCode(code: string) {
   const router = createRouter({
     history: createMemoryHistory(),
@@ -64,7 +140,10 @@ async function mountDetailWithCode(code: string) {
   return { wrapper, router }
 }
 
-function setupAxiosMock(payload: Record<string, unknown> | null = null) {
+function setupAxiosMock(
+  payload: Record<string, unknown> | null = null,
+  businessOverviewPayload: Record<string, unknown> | null = null,
+) {
   const klineRequests: Array<Record<string, unknown>> = []
   const get = axios.get as Mock
   get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
@@ -80,6 +159,9 @@ function setupAxiosMock(payload: Record<string, unknown> | null = null) {
     }
     if (url.includes('/financial-trend')) {
       return Promise.resolve({ data: { trend: [], period: 'annual', count: 0 } })
+    }
+    if (url.includes('/business-overview')) {
+      return Promise.resolve({ data: businessOverviewPayload ?? BUSINESS_OVERVIEW })
     }
     if (url.includes('/source-audit')) {
       return Promise.resolve({ data: { field_audit: [], batch_audit: [] } })
@@ -196,5 +278,59 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
     const saved = JSON.parse(localStorage.getItem(KLINE_SETTINGS_KEY)!)
     expect(saved).toMatchObject({ period: 'week' })
     expect(klineRequests[klineRequests.length - 1]).toMatchObject({ period: 'week' })
+  })
+})
+
+describe('StockDetailPage 业务概览（reports/67/68）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('首屏 identity 后显示 profile 摘要、报告期与每类 top 标签及溯源', async () => {
+    setupAxiosMock()
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    const overviewText = wrapper.find('#overview').text()
+    // identity 在前，业务概览在后
+    expect(overviewText.indexOf('贵州茅台')).toBeGreaterThanOrEqual(0)
+    expect(overviewText.indexOf('贵州茅台')).toBeLessThan(overviewText.indexOf('业务概览'))
+    // 一句话主营 + 报告期
+    expect(overviewText).toContain('从事茅台酒及系列酒的生产与销售。')
+    expect(overviewText).toContain('报告期 2025-12-31')
+    // 每类 top 标签
+    expect(overviewText).toContain('茅台酒')
+    expect(overviewText).toContain('85.00%')
+    expect(overviewText).toContain('白酒制造')
+    // 溯源：approximate / source / fetch_time
+    expect(overviewText).toContain('approximate')
+    expect(overviewText).toContain('eastmoney_f10')
+    expect(overviewText).toContain('2026-08-09 10:00:00')
+  })
+
+  it('经营章节显示最近报告期主营构成明细表', async () => {
+    setupAxiosMock()
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    const operationsText = wrapper.find('#operations').text()
+    expect(operationsText).toContain('主营构成')
+    expect(operationsText).toContain('报告期 2025-12-31')
+    // 表格列与行
+    expect(operationsText).toContain('排名')
+    expect(operationsText).toContain('占比')
+    expect(operationsText).toContain('系列酒')
+    expect(operationsText).toContain('境内')
+  })
+
+  it('missing 是局部空态，不触发页面级 stockUnavailable', async () => {
+    setupAxiosMock(null, BUSINESS_OVERVIEW_MISSING)
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    expect(wrapper.text()).not.toContain('股票不存在或暂无数据')
+    expect(wrapper.find('#overview').text()).toContain('暂无业务概览数据')
+    expect(wrapper.find('#operations').text()).toContain('暂无主营构成数据')
   })
 })

@@ -39,6 +39,7 @@ STEP_LABELS: dict[str, str] = {
     "announcements": "公告",
     "financials": "财务数据",
     "market_actions": "分红除权",
+    "business_overview": "业务概览",
     "retries": "失败重试",
 }
 
