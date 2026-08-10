@@ -104,6 +104,11 @@ export interface IndicatorsResponse {
 
 // ─── Kline ────────────────────────────────────────────────────────────────
 
+/**
+ * K 线周期。后端对 day 直读日线，对 week/month 服务端读时聚合日线。
+ */
+export type KlinePeriod = 'day' | 'week' | 'month'
+
 export interface KlineCandle {
   readonly trade_date: string
   readonly open: number
@@ -112,10 +117,20 @@ export interface KlineCandle {
   readonly close: number
   readonly volume?: number
   readonly turnover?: number
+  readonly turnover_rate?: number | null
+  readonly ma5?: number | null
+  readonly ma10?: number | null
+  readonly ma20?: number | null
+  readonly ma60?: number | null
+  readonly ma120?: number | null
+  readonly ma250?: number | null
 }
 
 export interface KlineResponse {
   readonly candles: readonly KlineCandle[]
+  readonly adjust?: 'raw' | 'qfq'
+  readonly period?: KlinePeriod
+  readonly count?: number
 }
 
 // ─── Financial Trend ──────────────────────────────────────────────────────

@@ -76,6 +76,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/66_TREASURY_BOND_DISCOVERY_RESET_2026-08-09.md` — 早期国债需求探索重置，已被 reports/68 取代
 - `reports/67_BUSINESS_OVERVIEW_DATA_FEASIBILITY_2026-08-09.md` — 当前个股业务概览来源可行性与风险评估
 - `reports/68_STOCK_DETAIL_AND_TREASURY_FEASIBILITY_2026-08-10.md` — 当前个股研究工作台、国债基准与历史统计可行性门禁
+- `reports/69_STOCK_RESEARCH_WORKBENCH_P1_2026-08-10.md` — 当前个股研究工作台信息架构与日/周/月 K 线实施依据
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新

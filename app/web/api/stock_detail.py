@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse
@@ -275,8 +275,18 @@ def get_kline(
     request: Request,
     adjust: Literal["raw", "qfq"] = "raw",
     days: int = Query(250, ge=1, le=2000),
+    period: Literal["day", "week", "month"] = "day",
 ) -> dict:
-    """K线数据 (PRD §14 SD2: 日K/成交量/均线/raw与qfq切换)"""
+    """K线数据 (PRD §14 SD2: 日/周/月K, 成交量, 均线, raw与qfq切换)
+
+    period=day 保持原行为；period=week/month 服务端读时聚合日线：
+    - trade_date 取桶内最后一个真实交易日
+    - open/close 取桶内首个/末个真实交易日价格，high/low 取桶内极值，
+      volume/turnover 求和
+    - turnover_rate 周/月 fail-closed 置 null
+    - days 表示返回的 K 线根数（取最新 days 根后升序）
+    聚合后复用 _calc_ma 计算均线。
+    """
     duck = request.app.state.duck
     table = "price_daily_raw" if adjust == "raw" else "price_daily_qfq"
     columns = duck.read_query(
@@ -291,34 +301,136 @@ def get_kline(
         if "turnover_rate" in {row["column_name"] for row in columns}
         else "NULL::DOUBLE AS turnover_rate"
     )
-    rows = duck.read_query(
-        f"""SELECT trade_date, open, high, low, close, volume, turnover,
-                   {turnover_rate_column}
-            FROM {table}
-            WHERE stock_code = ? AND close IS NOT NULL
-            ORDER BY trade_date DESC
-            LIMIT ?""",
-        [stock_code, days],
-    )
 
-    if not rows:
-        return {"candles": [], "adjust": adjust}
-
-    # 按时间正序排列（旧→新）
-    rows.reverse()
+    if period == "day":
+        rows = duck.read_query(
+            f"""SELECT trade_date, open, high, low, close, volume, turnover,
+                       {turnover_rate_column}
+                FROM {table}
+                WHERE stock_code = ? AND close IS NOT NULL
+                ORDER BY trade_date DESC
+                LIMIT ?""",
+            [stock_code, days],
+        )
+        if not rows:
+            return {"candles": [], "adjust": adjust, "period": period}
+        # 按时间正序排列（旧→新）
+        rows.reverse()
+    else:
+        daily_rows = _fetch_daily_for_aggregation(duck, table, stock_code, days, period)
+        if not daily_rows:
+            return {"candles": [], "adjust": adjust, "period": period}
+        rows = _aggregate_candles(daily_rows, period)[-days:]
 
     # 计算 MA 线
     closes = [r["close"] for r in rows]
-    for period in [5, 10, 20, 60, 120, 250]:
-        ma_values = _calc_ma(closes, period)
+    for ma_period in [5, 10, 20, 60, 120, 250]:
+        ma_values = _calc_ma(closes, ma_period)
         for i, r in enumerate(rows):
-            r[f"ma{period}"] = ma_values[i]
+            r[f"ma{ma_period}"] = ma_values[i]
 
     return {
         "candles": rows,
         "adjust": adjust,
+        "period": period,
         "count": len(rows),
     }
+
+
+def _fetch_daily_for_aggregation(
+    duck: object, table: str, stock_code: str, days: int, period: str
+) -> list[dict]:
+    """取构建最近 days 根周/月 K 线所需的升序日线窗口（带时间边界下界）"""
+    max_row = duck.read_query(
+        f"SELECT max(trade_date) AS latest FROM {table} "
+        "WHERE stock_code = ? AND close IS NOT NULL",
+        [stock_code],
+    )
+    latest = max_row[0]["latest"] if max_row else None
+    if latest is None:
+        return []
+    span_days = days * 7 + 7 if period == "week" else days * 31 + 15
+    start = latest - timedelta(days=span_days)
+    return duck.read_query(
+        f"""SELECT trade_date, open, high, low, close, volume, turnover
+            FROM {table}
+            WHERE stock_code = ? AND close IS NOT NULL AND trade_date >= ?
+            ORDER BY trade_date ASC""",
+        [stock_code, start],
+    )
+
+
+def _aggregate_candles(rows: list[dict], period: str) -> list[dict]:
+    """将升序日线聚合为周/月 K 线（服务端读时聚合）
+
+    - trade_date: 桶内最后一个真实交易日
+    - open/close: 桶内首个/末个真实交易日价格；首日 open 缺失时保持缺失
+    - high/low: 桶内极值；volume/turnover: 桶内求和
+    - turnover_rate: 周/月聚合 fail-closed 置 None
+    """
+    bars: list[dict] = []
+    current: dict | None = None
+    current_key: tuple | None = None
+
+    def _bucket_key(trade_date: date) -> tuple:
+        if period == "week":
+            iso = trade_date.isocalendar()
+            return (iso[0], iso[1])
+        return (trade_date.year, trade_date.month)
+
+    for row in rows:
+        raw = row["trade_date"]
+        trade_date = raw if isinstance(raw, date) else date.fromisoformat(str(raw)[:10])
+        key = _bucket_key(trade_date)
+        if key != current_key:
+            current_key = key
+            current = {
+                "trade_date": row["trade_date"],
+                "open": row.get("open"),
+                "high": row.get("high"),
+                "low": row.get("low"),
+                "close": row.get("close"),
+                "volume": row.get("volume"),
+                "turnover": row.get("turnover"),
+                "turnover_rate": None,
+            }
+            bars.append(current)
+            continue
+        # 合并进当前桶
+        current["trade_date"] = row["trade_date"]
+        current["close"] = row.get("close")
+        current["high"] = _merge_max(current["high"], row.get("high"))
+        current["low"] = _merge_min(current["low"], row.get("low"))
+        current["volume"] = _merge_sum(current["volume"], row.get("volume"))
+        current["turnover"] = _merge_sum(current["turnover"], row.get("turnover"))
+    return bars
+
+
+def _merge_max(a: float | None, b: float | None) -> float | None:
+    """取两者较大者，None 视为缺失"""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _merge_min(a: float | None, b: float | None) -> float | None:
+    """取两者较小者，None 视为缺失"""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return min(a, b)
+
+
+def _merge_sum(a: float | None, b: float | None) -> float | None:
+    """累加两者，None 视为缺失"""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a + b
 
 
 @router.get("/{stock_code}/indicators")

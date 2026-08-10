@@ -124,10 +124,20 @@ const klineCandleFixture: KlineCandle = {
   close: 1680.5,
   volume: 12345678,
   turnover: 2.1e9,
+  turnover_rate: 1.2,
+  ma5: 1660.0,
+  ma10: 1650.0,
+  ma20: 1640.0,
+  ma60: 1600.0,
+  ma120: 1550.0,
+  ma250: 1500.0,
 }
 
 const klineResponseFixture: KlineResponse = {
   candles: [klineCandleFixture],
+  adjust: 'qfq',
+  period: 'day',
+  count: 1,
 }
 
 const trendRowFixture: FinancialTrendRow = {
@@ -178,6 +188,9 @@ test('fixtures prove accepted shape', () => {
   assert.equal(stockInfoFixture.stock_code, '600519')
   assert.ok(indicatorsResponseFixture.freshness !== null)
   assert.equal(klineResponseFixture.candles.length, 1)
+  assert.equal(klineResponseFixture.candles[0].ma5, 1660.0)
+  assert.equal(klineResponseFixture.period, 'day')
+  assert.equal(klineResponseFixture.adjust, 'qfq')
   assert.equal(trendResponseFixture.trend[0].roe, 0.40)
   assert.equal(auditResponseFixture.field_audit[0].confidence, 'strict')
 })

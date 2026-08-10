@@ -1,12 +1,37 @@
 from __future__ import annotations
 
+from datetime import date
+from types import SimpleNamespace
+
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from fastapi import Request
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import _to_single_quarter
+from app.web.api.stock_detail import get_kline
 from app.web.api.stock_detail import router
+
+
+def _insert_kline_rows(
+    duck: DuckDBStore, stock_code: str, rows: list[tuple]
+) -> None:
+    """插入日线原始数据（换手率统一 1.23，用于验证周/月 fail-closed 置 null）"""
+    for trade_date, open_, high, low, close, volume, turnover in rows:
+        duck.write_query(
+            """INSERT INTO price_daily_raw
+               (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [stock_code, trade_date, open_, high, low, close, volume, turnover, 1.23],
+        )
+
+
+def _kline_request(duck: DuckDBStore) -> Request:
+    return Request(
+        {"type": "http", "app": SimpleNamespace(state=SimpleNamespace(duck=duck))}
+    )
 
 
 def test_quarterly_trend_converts_cumulative_flows_but_preserves_balances() -> None:
@@ -147,3 +172,234 @@ def test_quarterly_trend_mid_year_gap_keeps_later_quarters_derivable() -> None:
     assert by_date["2025-03-31"]["revenue"] == 100.0
     assert by_date["2025-09-30"]["revenue"] is None
     assert by_date["2025-12-31"]["revenue"] == 240.0
+
+
+# ─── GET /api/stock/{code}/kline period=day|week|month ─────────────────
+
+
+def test_monthly_kline_aggregates_ohlcv_with_last_trading_day(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _insert_kline_rows(
+        duckdb_store,
+        "600519",
+        [
+            (date(2026, 1, 5), 10, 12, 9, 11, 100, 1000),
+            (date(2026, 1, 6), 11, 13, 10, 12, 100, 1000),
+            (date(2026, 1, 30), 12, 14, 11, 13, 100, 1000),
+            (date(2026, 2, 2), 13, 15, 12, 14, 100, 1000),
+            (date(2026, 2, 27), 14, 16, 13, 15, 100, 1000),
+        ],
+    )
+
+    result = get_kline("600519", request=_kline_request(duckdb_store), days=10, period="month")
+
+    assert result["period"] == "month"
+    assert result["count"] == 2
+    bars = result["candles"]
+    # 每根月K的 trade_date 取桶内最后一个真实交易日，升序
+    assert [bar["trade_date"] for bar in bars] == [date(2026, 1, 30), date(2026, 2, 27)]
+    jan, feb = bars
+    assert (jan["open"], jan["high"], jan["low"], jan["close"]) == (10, 14, 9, 13)
+    assert (jan["volume"], jan["turnover"]) == (300, 3000)
+    # 周/月聚合 turnover_rate fail-closed 置 null
+    assert jan["turnover_rate"] is None
+    assert (feb["open"], feb["high"], feb["low"], feb["close"]) == (13, 16, 12, 15)
+    assert (feb["volume"], feb["turnover"]) == (200, 2000)
+    assert feb["turnover_rate"] is None
+
+
+def test_weekly_kline_uses_iso_week_buckets_across_year_boundary(
+    duckdb_store: DuckDBStore,
+) -> None:
+    # 2025-12-29(周一) 与 2026-01-02 属于同一 ISO 周(2026-W01)；2026-01-05 起为 2026-W02
+    _insert_kline_rows(
+        duckdb_store,
+        "600519",
+        [
+            (date(2025, 12, 29), 1, 3, 1, 2, 10, 100),
+            (date(2026, 1, 2), 2, 4, 2, 3, 10, 100),
+            (date(2026, 1, 5), 3, 6, 3, 5, 10, 100),
+            (date(2026, 1, 6), 5, 7, 4, 6, 10, 100),
+        ],
+    )
+
+    result = get_kline("600519", request=_kline_request(duckdb_store), days=10, period="week")
+
+    assert result["period"] == "week"
+    bars = result["candles"]
+    assert len(bars) == 2
+    first, second = bars
+    # 跨年同一周合并为一根，trade_date 取桶内最后交易日
+    assert first["trade_date"] == date(2026, 1, 2)
+    assert (first["open"], first["high"], first["low"], first["close"]) == (1, 4, 1, 3)
+    assert (first["volume"], first["turnover"]) == (20, 200)
+    assert first["turnover_rate"] is None
+    assert second["trade_date"] == date(2026, 1, 6)
+    assert (second["open"], second["high"], second["low"], second["close"]) == (3, 7, 3, 6)
+
+
+def test_kline_month_days_limits_bars_and_reuses_ma(
+    duckdb_store: DuckDBStore,
+) -> None:
+    monthly_rows = [
+        (date(2025, 8, 1), 1, 1.5, 0.5, 1.0, 10, 100),
+        (date(2025, 9, 1), 2, 2.5, 1.5, 2.0, 10, 100),
+        (date(2025, 10, 1), 3, 3.5, 2.5, 3.0, 10, 100),
+        (date(2025, 11, 3), 4, 4.5, 3.5, 4.0, 10, 100),
+        (date(2025, 12, 1), 5, 5.5, 4.5, 5.0, 10, 100),
+        (date(2026, 1, 5), 6, 6.5, 5.5, 6.0, 10, 100),
+    ]
+    _insert_kline_rows(duckdb_store, "600519", monthly_rows)
+    request = _kline_request(duckdb_store)
+
+    # days 表示返回的 K 线根数：取最新 days 根后升序
+    limited = get_kline("600519", request=request, days=2, period="month")
+    assert limited["count"] == 2
+    assert [bar["trade_date"] for bar in limited["candles"]] == [
+        date(2025, 12, 1),
+        date(2026, 1, 5),
+    ]
+
+    full = get_kline("600519", request=request, days=2000, period="month")
+    assert full["count"] == 6
+    assert [bar["trade_date"] for bar in full["candles"]] == [
+        date(2025, 8, 1),
+        date(2025, 9, 1),
+        date(2025, 10, 1),
+        date(2025, 11, 3),
+        date(2025, 12, 1),
+        date(2026, 1, 5),
+    ]
+    assert [bar["close"] for bar in full["candles"]] == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    # MA 基于聚合后的收盘价复用 _calc_ma
+    assert full["candles"][0]["ma5"] is None
+    assert full["candles"][4]["ma5"] == pytest.approx(3.0)
+    assert full["candles"][5]["ma5"] == pytest.approx(4.0)
+    assert full["candles"][5]["ma10"] is None
+
+
+def test_kline_default_period_day_is_backward_compatible(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _insert_kline_rows(
+        duckdb_store,
+        "600519",
+        [
+            (date(2026, 1, 5), 10, 12, 9, 11, 100, 1000),
+            (date(2026, 1, 6), 11, 13, 10, 12, 100, 1000),
+        ],
+    )
+
+    result = get_kline("600519", request=_kline_request(duckdb_store), days=250)
+
+    assert result["period"] == "day"
+    assert result["count"] == 2
+    bars = result["candles"]
+    # 默认 day 不聚合：原始日线升序返回
+    assert [bar["trade_date"] for bar in bars] == [date(2026, 1, 5), date(2026, 1, 6)]
+    assert bars[0]["open"] == 10
+    assert bars[1]["close"] == 12
+    # 日K保留表内换手率（不被周/月的 fail-closed 影响）
+    assert bars[0]["turnover_rate"] == pytest.approx(1.23)
+
+
+def test_kline_week_month_null_turnover_rate_ignores_source_values(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """周/月聚合即使源表换手率有值，也必须 fail-closed 置 null"""
+    _insert_kline_rows(
+        duckdb_store,
+        "600519",
+        [(date(2026, 1, 5), 10, 12, 9, 11, 100, 1000)],
+    )
+
+    for period in ("week", "month"):
+        result = get_kline(
+            "600519", request=_kline_request(duckdb_store), days=10, period=period
+        )
+        assert result["count"] == 1
+        assert result["candles"][0]["turnover_rate"] is None
+
+
+def test_kline_period_open_fails_closed_when_first_trading_day_open_is_missing(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _insert_kline_rows(
+        duckdb_store,
+        "600519",
+        [
+            (date(2026, 1, 5), None, 12, 9, 11, 100, 1000),
+            (date(2026, 1, 6), 11, 13, 10, 12, 100, 1000),
+        ],
+    )
+
+    for period in ("week", "month"):
+        result = get_kline(
+            "600519", request=_kline_request(duckdb_store), days=10, period=period
+        )
+        assert result["candles"][0]["open"] is None
+
+
+def test_kline_empty_data_returns_period(
+    duckdb_store: DuckDBStore,
+) -> None:
+    request = _kline_request(duckdb_store)
+    for period in ("day", "week", "month"):
+        result = get_kline("600519", request=request, days=250, period=period)
+        assert result["candles"] == []
+        assert result["adjust"] == "raw"
+        assert result["period"] == period
+
+
+def test_kline_invalid_params_rejected_over_http(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(router)
+    client = TestClient(app)
+
+    for params in (
+        {"period": "quarter"},
+        {"period": "weekly"},
+        {"days": 0},
+        {"days": 3000},
+    ):
+        response = client.get("/api/stock/000001/kline", params=params)
+        assert response.status_code == 422, params
+
+
+def test_kline_period_over_http_echoes_period_and_ohlcv(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    _insert_kline_rows(
+        duckdb_store,
+        "000001",
+        [
+            (date(2026, 1, 5), 10, 12, 9, 11, 100, 1000),
+            (date(2026, 1, 30), 12, 14, 11, 13, 100, 1000),
+        ],
+    )
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(router)
+    client = TestClient(app)
+
+    response = client.get(
+        "/api/stock/000001/kline", params={"period": "month", "days": 10}
+    )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["period"] == "month"
+    assert payload["count"] == 1
+    bar = payload["candles"][0]
+    assert bar["trade_date"] == "2026-01-30"
+    assert (bar["open"], bar["high"], bar["low"], bar["close"]) == (10, 14, 9, 13)
+    assert bar["volume"] == 200
+    assert bar["turnover"] == 2000
+    assert bar["turnover_rate"] is None
