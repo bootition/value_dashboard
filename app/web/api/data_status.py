@@ -570,30 +570,53 @@ def get_auto_update_status(request: Request) -> dict:
 
 
 @router.get("/retry-list")
-def get_retry_list(request: Request, limit: int = Query(50, ge=1, le=500)) -> dict:
-    """重试列表摘要"""
+def get_retry_list(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    data_type: str | None = Query(None, description="按 data_type 过滤（如 treasury_yield_curve）"),
+) -> dict:
+    """重试列表摘要（D-4：支持按数据域过滤，区分国债/股本等低频域条目）"""
     sqlite = request.app.state.sqlite
     try:
-        rows = sqlite.query(
-            "SELECT stock_code, data_type, adapter, error, retry_count "
-            "FROM retry_list LIMIT ?",
-            [limit],
-        )
+        if data_type:
+            rows = sqlite.query(
+                "SELECT stock_code, data_type, adapter, error, retry_count "
+                "FROM retry_list WHERE data_type = ? LIMIT ?",
+                [data_type, limit],
+            )
+        else:
+            rows = sqlite.query(
+                "SELECT stock_code, data_type, adapter, error, retry_count "
+                "FROM retry_list LIMIT ?",
+                [limit],
+            )
         return {"count": len(rows), "items": rows}
     except Exception as error:
         raise HTTPException(status_code=503, detail="retry list is unavailable") from error
 
 
 @router.get("/missing-list")
-def get_missing_list(request: Request, limit: int = Query(50, ge=1, le=500)) -> dict:
-    """缺失列表摘要"""
+def get_missing_list(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    field_prefix: str | None = Query(None, description="按 field_name 前缀过滤（如 treasury_curve）"),
+) -> dict:
+    """缺失列表摘要（D-4：支持按字段前缀过滤）"""
     sqlite = request.app.state.sqlite
     try:
-        rows = sqlite.query(
-            "SELECT stock_code, field_name, reason_code "
-            "FROM missing_list WHERE resolved_at IS NULL LIMIT ?",
-            [limit],
-        )
+        if field_prefix:
+            rows = sqlite.query(
+                "SELECT stock_code, field_name, reason_code "
+                "FROM missing_list WHERE resolved_at IS NULL "
+                "AND field_name LIKE ? LIMIT ?",
+                [f"{field_prefix}%", limit],
+            )
+        else:
+            rows = sqlite.query(
+                "SELECT stock_code, field_name, reason_code "
+                "FROM missing_list WHERE resolved_at IS NULL LIMIT ?",
+                [limit],
+            )
         return {"count": len(rows), "items": rows}
     except Exception as error:
         raise HTTPException(status_code=503, detail="missing list is unavailable") from error

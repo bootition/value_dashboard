@@ -698,11 +698,23 @@ _SNAPSHOT_BLOCKING_WARNINGS = frozenset({
 # Warnings that invalidate only dividend-derived indicator fields.
 _DIVIDEND_BLOCKING_WARNINGS = frozenset({"DIVIDEND_DATES_UNVERIFIED"})
 
+# P3-3 修复（reports/73）：国债/股息率域字段与前端 data-quality.ts 对齐，
+# DIVIDEND_DATES_UNVERIFIED 时一并遮蔽。
 DIVIDEND_INDICATOR_FIELDS = (
     "consecutive_div_years",
     "dividend_yield",
     "dps",
     "payout_ratio",
+    "ttm_dividend_yield",
+    "div_yield_spread_0p25y",
+    "div_yield_spread_0p5y",
+    "div_yield_spread_1y",
+    "div_yield_spread_2y",
+    "div_yield_spread_3y",
+    "div_yield_spread_5y",
+    "div_yield_spread_7y",
+    "div_yield_spread_10y",
+    "div_yield_spread_30y",
 )
 
 

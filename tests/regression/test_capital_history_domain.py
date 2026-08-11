@@ -228,8 +228,16 @@ def test_empty_main_chain_records_missing(
 def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     _seed_stock(duck)
     # 1250 个价格日（覆盖 10 年窗口最小 1200 样本；数值变化保证 σ>0）
-    for i in range(1250):
-        _seed_price(duck, "600519", date(2022, 8, 1) + timedelta(days=i), 10.0 + (i % 100))
+    # 批量写入避免逐行 open-per-query 拖慢整个回归
+    price_rows = [
+        ("600519", date(2022, 8, 1) + timedelta(days=i), 10.0 + (i % 100))
+        for i in range(1250)
+    ]
+    with duck.write_connection() as conn:
+        conn.executemany(
+            "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
+            price_rows,
+        )
     _seed_price(duck, "600519", date(2026, 8, 7), 25.0)
     _seed_financials(duck, "600519", date(2021, 12, 31), 80e8, 450e8)
     _seed_financials(duck, "600519", date(2022, 12, 31), 90e8, 470e8)
@@ -423,3 +431,171 @@ def test_schema_migration_v10_tables(
         "SELECT description FROM schema_migrations WHERE version = 10"
     )
     assert migration and "capital" in migration[0]["description"].lower()
+
+
+# ─── P4-1/P4-2/P4-3/P4-4/P4-9 修复回归（reports/73）──────────────────────
+
+
+def test_cninfo_adapter_forwards_explicit_dates_and_guards_staleness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """P4-1：显式日期参数（防 akshare 默认 20091227~20241021 截断）+
+    最新锚点新鲜度断言（fail-closed → retry）。"""
+    from app.core.adapters.capital_history_adapter import CapitalHistoryAdapter
+    import akshare as ak
+
+    calls: list[dict] = []
+
+    def fake_cninfo(symbol: str, start_date: str, end_date: str):
+        calls.append({"symbol": symbol, "start_date": start_date, "end_date": end_date})
+        import pandas as pd
+        return pd.DataFrame([
+            {"变动日期": "2026-06-30", "总股本": 94380.0, "变动原因简称": ""},
+            {"变动日期": "2025-12-31", "总股本": 94380.0, "变动原因简称": "定期报告"},
+        ])
+
+    monkeypatch.setattr(ak, "stock_share_change_cninfo", fake_cninfo)
+    adapter = CapitalHistoryAdapter(rate_limit=0)
+    rows = adapter._fetch_cninfo("600519")
+
+    assert calls and calls[0]["start_date"] == "19900101"
+    assert calls[0]["end_date"] == str(date.today()).replace("-", "")
+    assert rows[0]["total_shares"] == pytest.approx(94380.0 * 10000)
+
+    # 新鲜度断言：最新锚点过旧 → 抛异常（源被截断回归）
+    def stale_cninfo(symbol: str, start_date: str, end_date: str):
+        import pandas as pd
+        return pd.DataFrame([
+            {"变动日期": "2020-12-31", "总股本": 94380.0, "变动原因简称": ""},
+        ])
+
+    monkeypatch.setattr(ak, "stock_share_change_cninfo", stale_cninfo)
+    with pytest.raises(RuntimeError, match="最新锚点"):
+        adapter._fetch_cninfo("600519")
+
+
+def test_update_all_uses_due_cursor(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P4-2：update_all 只处理缺失/陈旧的上市股票（真正的续传游标）。"""
+    _seed_stock(duckdb_store, "600519")
+    _seed_stock(duckdb_store, "600000")
+    # 600519 已有覆盖到 2026-08-07 的股本链 + 价格 → 非 due
+    _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
+    _seed_capital(duckdb_store, "600519", [(date(2026, 8, 7), 943800000.0)])
+    # 600000 有价格但无股本链 → due
+    _seed_price(duckdb_store, "600000", date(2026, 8, 7), 10.0)
+
+    updater = _updater(duckdb_store, sqlite_store, _FakeCapitalAdapter(
+        main=[{
+            "effective_date": "2026-08-07", "total_shares": 1000000000.0,
+            "change_reason": None, "is_anchor": True,
+        }],
+    ))
+    report = updater.update_all(max_stocks=20)
+
+    assert report["status"] == "success"
+    assert report["targeted"] == 1
+    assert report["results"].get("600000") is not None
+    assert "600519" not in report["results"], "已覆盖股票不得重复入选"
+    rows = duckdb_store.read_query(
+        "SELECT stock_code FROM share_capital_history WHERE stock_code = '600000'"
+    )
+    assert rows and rows[0]["stock_code"] == "600000"
+
+
+def test_coverage_per_window_uses_verified_chain(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P4-3/P4-6：覆盖按窗口计算且只认 verified 延续。
+
+    价格历史早于股本链首点的老股：10 年窗口覆盖不足，但 1 年窗口
+    （股本已覆盖）仍可出统计；unverified 点不计覆盖。
+    """
+    _seed_statistics_inputs(duckdb_store, sqlite_store)
+    # 股本链 2025-08-01 起（窗口起点前）：1 年窗口全覆盖，全历史（2022 起价格）覆盖不足
+    duckdb_store.write_query(
+        """DELETE FROM share_capital_history WHERE stock_code = '600519'"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO share_capital_history
+           (stock_code, effective_date, total_shares, change_reason, is_anchor,
+            verified, source, raw_hash, batch_id)
+           VALUES ('600519', '2025-08-01', 1000000000.0, NULL, true, true,
+                   'cninfo_capital', 'x', 'b1')"""
+    )
+    builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
+    series = builder.build_series("600519")
+
+    coverage_99y = builder._capital_coverage("600519", 99)
+    coverage_1y = builder._capital_coverage("600519", 1)
+    assert coverage_99y < COVERAGE_THRESHOLD_PCT, "老股全历史覆盖应不足"
+    assert coverage_1y == 100.0, "近期窗口（股本已覆盖）应 100%"
+
+    stats_99y = builder.window_stats(series, "pe_ttm", 99, 1200, coverage_pct=coverage_99y)
+    stats_1y = builder.window_stats(series, "pe_ttm", 1, WINDOW_MIN_SAMPLES[1], coverage_pct=coverage_1y)
+    assert stats_99y["reason"] == "coverage_below_threshold"
+    assert stats_1y.get("reason") is None
+
+    # unverified 主链点不计覆盖
+    duckdb_store.write_query(
+        """UPDATE share_capital_history SET verified = false WHERE stock_code = '600519'"""
+    )
+    assert builder._capital_coverage("600519", 1) == 0.0
+
+
+def test_publish_columns_fixed_when_first_record_is_reason(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P4-4：首记录为 reason 行时，后续成功行的 min_date/max_date 不丢失。"""
+    _seed_statistics_inputs(duckdb_store, sqlite_store)
+    # 制造 pe_ttm 覆盖失败（reason 行在前），ttm_dividend_yield 在 1y 窗口成功
+    duckdb_store.write_query(
+        """DELETE FROM share_capital_history WHERE stock_code = '600519'"""
+    )
+    # 分红生效期覆盖窗口内价格日（ex 2025-06-30 / ann 2025-01-01）
+    duckdb_store.write_query(
+        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600519', '2025-06-30', '2025-01-01', 1.0)
+           ON CONFLICT DO NOTHING"""
+    )
+    builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
+    report = builder.rebuild_all(["600519"])
+    assert report["status"] == "success"
+
+    rows = duckdb_store.read_query(
+        """SELECT metric, method, window_years, min_date, max_date, value
+           FROM research_statistics
+           WHERE stock_code = '600519' AND method = 'zscore'
+           ORDER BY metric, window_years"""
+    )
+    ttm_1y = [
+        r for r in rows
+        if r["metric"] == "ttm_dividend_yield" and r["window_years"] == 1
+    ]
+    assert ttm_1y and ttm_1y[0]["value"] is not None
+    assert ttm_1y[0]["min_date"] is not None, "成功行不得丢失 min_date/max_date"
+    assert ttm_1y[0]["max_date"] is not None
+    pe = [r for r in rows if r["metric"] == "pe_ttm"]
+    assert pe and pe[0]["value"] is None and pe[0]["min_date"] is None
+
+
+def test_input_fingerprint_includes_dividends(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P4-9：分红变化必须改变输入指纹（触发统计重建）。"""
+    _seed_statistics_inputs(duckdb_store, sqlite_store)
+    builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
+    before = builder._input_fingerprint()
+
+    duckdb_store.write_query(
+        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600519', '2026-06-30', '2026-05-01', 1.0)
+           ON CONFLICT DO NOTHING"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600519', '2026-07-30', '2026-07-01', 0.5)"""
+    )
+    after = builder._input_fingerprint()
+    assert after != before

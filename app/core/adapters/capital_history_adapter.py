@@ -33,6 +33,17 @@ __all__ = ["CapitalHistoryAdapter"]
 
 WAN_TO_SHARE = 10_000.0  # CNINFO 总股本单位：万股 → 股
 
+# P4-1 修复（reports/73）：akshare 1.18.x 的 stock_share_change_cninfo 默认
+# start_date='20091227'、end_date='20241021'，会把 CNINFO 股本变动硬截断在
+# 2024-10-21，导致后续股本变动缺失并以陈旧股本延续。必须显式传全量日期区间。
+_CNINFO_START = "19900101"  # CNINFO 覆盖范围起点（早于任何 A 股上市）
+# 新鲜度守卫：主链最新锚点不得早于一年前，否则视为源被截断（fail-closed → retry）
+_MAX_ANCHOR_AGE_DAYS = 365
+
+
+def _cninfo_today() -> str:
+    return date.today().isoformat().replace("-", "")
+
 
 def _parse_date(value: Any) -> str | None:
     text = str(value or "")[:10]
@@ -124,8 +135,17 @@ class CapitalHistoryAdapter(BaseAdapter):
     # ─── CNINFO 主链 ──────────────────────────────────────────────
 
     def _fetch_cninfo(self, stock_code: str) -> list[dict[str, Any]]:
-        """CNINFO p_stock2215：锚点（半年报/年报期末）+ 变动事件。"""
-        df = ak.stock_share_change_cninfo(symbol=stock_code)
+        """CNINFO p_stock2215：锚点（半年报/年报期末）+ 变动事件。
+
+        P4-1 修复：显式传 start_date/end_date，避免 akshare 默认参数把
+        请求硬截断在 20091227~20241021（reports/73）；返回记录同时做
+        新鲜度断言，源截断回归时 fail-closed（异常 → retry，保留旧值）。
+        """
+        df = ak.stock_share_change_cninfo(
+            symbol=stock_code,
+            start_date=_CNINFO_START,
+            end_date=_cninfo_today(),
+        )
         rows: list[dict[str, Any]] = []
         if df is None or df.empty:
             return rows
@@ -148,6 +168,13 @@ class CapitalHistoryAdapter(BaseAdapter):
                 "is_anchor": not reason,  # 无变动原因 → 定期报告期末锚点
             })
         rows.sort(key=lambda r: r["effective_date"])
+        if rows:
+            latest = date.fromisoformat(rows[-1]["effective_date"])
+            if (date.today() - latest).days > _MAX_ANCHOR_AGE_DAYS:
+                raise RuntimeError(
+                    f"CNINFO 股本链最新锚点 {latest} 早于 {_MAX_ANCHOR_AGE_DAYS} 天"
+                    f"（疑似日期参数截断回归，拒绝入库）"
+                )
         return rows
 
     # ─── 东财 F10 交叉校验 ────────────────────────────────────────

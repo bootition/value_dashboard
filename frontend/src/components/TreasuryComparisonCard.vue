@@ -43,14 +43,31 @@ const W = 620
 const H = 210
 const PAD = { top: 14, right: 12, bottom: 26, left: 46 }
 
+// P3-6 修复（reports/73）：API 按价格日降序返回，图表按时间正序（左旧右新），
+// 并用日期线性映射 x 轴，节假日/停牌日自然压缩，不再按样本索引等距。
 const viewRows = computed(() => {
-  // 只绘制该视图下有意义的点（利差视图用 spread，双线视图用两线之一）
-  return series.value.filter((item) =>
+  const rows = [...series.value].reverse()
+  return rows.filter((item) =>
     viewMode.value === 'spread'
       ? item.spread != null
       : item.ttm_div_yield != null || item.curve_yield != null,
   )
 })
+
+const dateRange = computed(() => {
+  const rows = viewRows.value
+  if (!rows.length) return { min: 0, max: 1 }
+  const first = Date.parse(rows[0].price_date)
+  const last = Date.parse(rows[rows.length - 1].price_date)
+  return { min: first, max: Math.max(last, first + 86400000) }
+})
+
+const x = (i: number) => {
+  const rows = viewRows.value
+  if (rows.length <= 1) return PAD.left + (W - PAD.left - PAD.right) / 2
+  const t = (Date.parse(rows[i].price_date) - dateRange.value.min) / (dateRange.value.max - dateRange.value.min)
+  return PAD.left + t * (W - PAD.left - PAD.right)
+}
 
 const valueRange = computed(() => {
   let min = Number.POSITIVE_INFINITY
@@ -70,18 +87,18 @@ const valueRange = computed(() => {
   return { min: min - span * 0.12, max: max + span * 0.12 }
 })
 
-function pointPath(values: Array<number | null>): string {
+function pointPath(lines: Array<number | null>): string {
   const rows = viewRows.value
   if (!rows.length) return ''
   const y = (v: number) =>
     PAD.top + (1 - (v - valueRange.value.min) / (valueRange.value.max - valueRange.value.min)) * (H - PAD.top - PAD.bottom)
-  const x = (i: number) => PAD.left + (rows.length === 1 ? (W - PAD.left - PAD.right) / 2 : (i / (rows.length - 1)) * (W - PAD.left - PAD.right))
   const segments: string[] = []
-  for (let lineIndex = 0; lineIndex < values.length; lineIndex += 1) {
+  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+    if (lines[lineIndex] === null) continue
     const points: string[] = []
     let started = false
     for (let i = 0; i < rows.length; i += 1) {
-      const v = values[lineIndex] === null ? null : rows[i][viewMode.value === 'spread' ? 'spread' : lineIndex === 0 ? 'ttm_div_yield' : 'curve_yield'] as number | null
+      const v = rows[i][viewMode.value === 'spread' ? 'spread' : lineIndex === 0 ? 'ttm_div_yield' : 'curve_yield'] as number | null
       if (v == null) {
         started = false
         continue
@@ -95,8 +112,11 @@ function pointPath(values: Array<number | null>): string {
   return segments.join(' ')
 }
 
+// P3-1 修复（reports/73）：双线视图两条序列各自独立路径，
+// 不再用同一合并路径画两遍（蓝色覆盖绿色）。
 const spreadPath = computed(() => pointPath([1]))
-const doublePaths = computed(() => pointPath([1, 1]))
+const ttmPath = computed(() => pointPath([1, null]))
+const bondPath = computed(() => pointPath([null, 1]))
 
 const yTicks = computed(() => {
   const ticks: Array<{ pos: number; label: string }> = []
@@ -176,8 +196,8 @@ onMounted(fetchData)
             <path :d="spreadPath" fill="none" stroke="#57966d" stroke-width="2" />
           </template>
           <template v-else>
-            <path :d="doublePaths" fill="none" stroke="#57966d" stroke-width="2" />
-            <path :d="pointPath([1, 1])" fill="none" stroke="#185482" stroke-width="2" />
+            <path :d="ttmPath" fill="none" stroke="#57966d" stroke-width="2" />
+            <path :d="bondPath" fill="none" stroke="#185482" stroke-width="2" />
           </template>
         </svg>
         <div class="treasury-legend">

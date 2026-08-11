@@ -772,6 +772,13 @@ def get_treasury_comparison(
     """
     from app.core.adapters.czb_mof_adapter import KEY_TENORS
     from app.core.treasury import MAX_STALENESS_DAYS, TreasuryCurveUpdater
+    # P3-3 修复（reports/73）：与服务端信任遮蔽模型一致——
+    # DIVIDEND_DATES_UNVERIFIED 或快照级警告生效时遮蔽 TTM 股息率/利差。
+    from app.core.data_quality import (
+        indicator_trust,
+        mask_untrusted_values,
+        read_warning_codes,
+    )
 
     duck = request.app.state.duck
     sqlite = request.app.state.sqlite
@@ -782,6 +789,13 @@ def get_treasury_comparison(
         raise HTTPException(status_code=404, detail="stock not found")
     if tenor not in KEY_TENORS:
         raise HTTPException(status_code=422, detail=f"不支持的期限: {tenor}")
+
+    trust = indicator_trust(read_warning_codes(duck, sqlite))
+    masked = mask_untrusted_values(
+        {"ttm_dividend_yield": 0.0, "div_yield_spread_10y": 0.0}, trust
+    )
+    # 遮蔽仅影响股息率/利差字段值；curve_yield（国债基准本身）不受分红可信度影响
+    div_trusted = masked.get("ttm_dividend_yield") is not None
 
     price_rows = duck.read_query(
         """SELECT trade_date, close FROM price_daily_raw
@@ -841,11 +855,23 @@ def get_treasury_comparison(
             series.append(item)
             continue
         item["curve_yield"] = align["yield_pct"]
-        if ttm_div_yield is None:
+        # P3-3 修复（reports/73）：股息率/利差按信任遮蔽（曲线基准不受影响）
+        if not div_trusted:
+            item["reason"] = "dividend_untrusted"
+        elif ttm_div_yield is None:
             item["reason"] = "no_dividend"
         else:
             item["spread"] = ttm_div_yield - align["yield_pct"]
         series.append(item)
+
+    # 响应级信任标注（P3-3）：快照级警告（untrusted_all）遮蔽全部字段
+    if not div_trusted:
+        mask_reason = "dividend_untrusted" if trust["untrusted_fields"] else "snapshot_untrusted"
+        for item in series:
+            if item.get("spread") is not None or item.get("ttm_div_yield") is not None:
+                item["ttm_div_yield"] = None
+                item["spread"] = None
+                item["reason"] = mask_reason
 
     # 溯源（曲线侧最新一批）
     curve_rows = duck.read_query(
@@ -874,6 +900,11 @@ def get_treasury_comparison(
         "series": series,
         "missing": all(item.get("reason") is not None for item in series),
         "provenance": provenance,
+        "trust": {
+            "dividend_trusted": div_trusted,
+            "warning_codes": trust["warning_codes"],
+            "untrusted_all": trust["untrusted_all"],
+        },
     }
 
 
@@ -919,6 +950,10 @@ def get_research_statistics(
         "series": series,
         "statistics": statistics,
         "coverage_threshold_pct": COVERAGE_THRESHOLD_PCT,
+        # P4-13 修复（reports/73）：标注实时计算口径——详情页统计为实时构建，
+        # 与筛选使用的已发布统计域（research_statistics 表）可能存在时差，
+        # 发布域过期时两者分位/z-score 可能不一致。
+        "computed": "realtime",
         "disclaimer": "最新重述回看口径：历史日使用该日对应报告期当前最新重述财务值与历史有效总股本，不代表当时市场可见信息，不用于回测",
     }
 

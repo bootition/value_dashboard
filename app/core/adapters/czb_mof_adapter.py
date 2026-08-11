@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -72,6 +73,9 @@ def _to_float(value: Any) -> float | None:
     try:
         number = float(value)
     except (TypeError, ValueError):
+        return None
+    # P3-10 修复（reports/73）：拒绝 NaN/±Infinity，收益率必须为有限正数
+    if not math.isfinite(number):
         return None
     return number
 

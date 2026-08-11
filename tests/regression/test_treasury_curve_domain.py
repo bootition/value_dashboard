@@ -97,16 +97,24 @@ def _result(
 
 
 def _seed_stock(duck: DuckDBStore, code: str = "600519") -> None:
+    """完备可筛选种子（P3-3 修复后：trust 遮蔽由 warning_codes 驱动，
+    需要 readiness 通过、warning_codes=[]，否则 /treasury-comparison 会
+    按数据质量遮蔽股息率/利差）。"""
+    from tests.conftest import insert_minimum_screenable_data
+
     duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES (?, ?, 'SSE', true)",
+        """INSERT INTO stock_meta
+           (stock_code, name, exchange, listing_date, is_st, is_suspended, is_listed)
+           VALUES (?, ?, 'SSE', '2020-01-01', false, false, true)""",
         [code, code],
     )
+    insert_minimum_screenable_data(duck, code)
 
 
 def _seed_price(duck: DuckDBStore, code: str, trade_date: date, close: float) -> None:
     duck.write_query(
         """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-           VALUES (?, ?, ?)""",
+           VALUES (?, ?, ?) ON CONFLICT DO NOTHING""",
         [code, trade_date, close],
     )
 
@@ -116,7 +124,7 @@ def _seed_dividend(
 ) -> None:
     duck.write_query(
         """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES (?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING""",
         [code, ex_date, announcement_date, dps],
     )
 
@@ -441,8 +449,8 @@ def test_snapshot_ttm_dividend_yield_and_spread(
                    date(2025, 6, 30), date(2025, 5, 1), 0.5)   # 12 个月外
     _seed_dividend(duckdb_store, "600519",
                    date(2026, 9, 30), date(2026, 9, 1), 2.0)   # 未来除权不计入
-    _seed_curve(duckdb_store, date(2026, 8, 5), 10.0, 1.5)
-    _seed_curve(duckdb_store, date(2026, 8, 5), 5.0, 1.4)
+    _seed_curve(duckdb_store, date(2026, 8, 10), 10.0, 1.5)
+    _seed_curve(duckdb_store, date(2026, 8, 10), 5.0, 1.4)
     _seed_curve(duckdb_store, date(2026, 7, 20), 2.0, 1.3)     # 超过 5 日陈旧
 
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
@@ -500,17 +508,21 @@ def test_treasury_comparison_api_series_and_alignment(
     assert payload["tenor"] == 10.0
     assert payload["tenors_available"] == list(KEY_TENORS)
     assert payload["max_staleness_days"] == 5
-    assert len(payload["series"]) == 2
-    latest, previous = payload["series"]
-    # series 按价格日降序（最新在前）：8-07、8-06
-    assert latest["price_date"] == "2026-08-07"
-    assert latest["ttm_div_yield"] == pytest.approx(10.0)
-    assert latest["curve_yield"] == pytest.approx(1.5)
-    assert latest["spread"] == pytest.approx(8.5)
-    assert latest["curve_date"] == "2026-08-05"
-    assert latest["reason"] is None
+    # fixture 价格覆盖到今日：series 按价格日降序（最新在前）
+    assert payload["series"][0]["price_date"] == str(date.today())
+    day_0807 = next(
+        item for item in payload["series"] if item["price_date"] == "2026-08-07"
+    )
+    assert day_0807["ttm_div_yield"] == pytest.approx(10.0)
+    assert day_0807["curve_yield"] == pytest.approx(1.5)
+    assert day_0807["spread"] == pytest.approx(8.5)
+    assert day_0807["curve_date"] == "2026-08-05"
+    assert day_0807["reason"] is None
     # 8-06 同样可用
-    assert previous["spread"] == pytest.approx(8.5)
+    day_0806 = next(
+        item for item in payload["series"] if item["price_date"] == "2026-08-06"
+    )
+    assert day_0806["spread"] == pytest.approx(8.5)
     assert payload["provenance"]["source"] == "czb_mof"
     assert payload["provenance"]["batch_id"] == "b1"
 
@@ -574,3 +586,144 @@ def test_export_provenance_includes_curve_alignment_for_spread(
     assert entry["curve_date"] == "2026-08-05"
     assert entry["staleness_days"] == 2
     assert entry["source"] == "derived_calculator"
+
+
+def test_export_provenance_aligns_on_latest_price_date(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P3-2 修复（reports/73）：导出溯源对齐锚点应为快照实际使用的
+    最新价格日（latest_price_date），而非财务报告期 _report_date。"""
+    from app.web.api.screening import _field_provenance
+
+    _seed_stock(duckdb_store)
+    _seed_curve(duckdb_store, date(2026, 8, 5), 10.0, 1.5)
+    duckdb_store.write_query(
+        """INSERT INTO source_audit
+           (stock_code, field_name, report_date, value, source, fetch_batch_id,
+            fetch_time, raw_response_hash, confidence)
+           VALUES ('600519', 'div_yield_spread_10y', '2026-06-30', 8.5,
+                   'derived_calculator', 'b1', CURRENT_TIMESTAMP, ?, 'approximate')""",
+        ["0" * 64],
+    )
+    results = [{
+        "stock_code": "600519",
+        "div_yield_spread_10y": 8.5,
+        # 财务报告期为 6-30，但快照利差实际按 8-07 价格日计算
+        "_report_date": "2026-06-30",
+        "latest_price_date": "2026-08-07",
+    }]
+
+    provenance = _field_provenance(
+        duckdb_store, sqlite_store, results, ["div_yield_spread_10y"],
+    )
+
+    entry = provenance[0].get("div_yield_spread_10y", {})
+    # 8-05 曲线点距 8-07 价格日 2 天；若错误对齐 6-30 报告期则陈旧 36 天
+    assert entry["curve_date"] == "2026-08-05"
+    assert entry["staleness_days"] == 2
+
+
+def test_treasury_comparison_masks_dividend_when_unverified(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P3-3 修复（reports/73）：DIVIDEND_DATES_UNVERIFIED 时
+    /treasury-comparison 遮蔽股息率与利差，与全站信任模型一致。"""
+    _seed_stock(duckdb_store)
+    _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
+    _seed_dividend(duckdb_store, "600519",
+                   date(2026, 6, 30), date(2026, 5, 1), 1.0)
+    _seed_curve(duckdb_store, date(2026, 8, 5), 10.0, 1.5)
+    duckdb_store.write_query(
+        """INSERT INTO dividends
+           (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600519', DATE '2024-06-28', NULL, 1.0)"""
+    )
+
+    client = _api_client(duckdb_store, sqlite_store)
+    response = client.get("/api/stock/600519/treasury-comparison", params={"tenor": 10.0})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["trust"]["dividend_trusted"] is False
+    assert payload["trust"]["warning_codes"] == ["DIVIDEND_DATES_UNVERIFIED"]
+    # 8-05 当日曲线可用：股息率与利差被遮蔽，国债基准不受分红可信度影响
+    day = next(
+        item for item in payload["series"] if item["price_date"] == "2026-08-05"
+    )
+    assert day["ttm_div_yield"] is None
+    assert day["spread"] is None
+    assert day["reason"] == "dividend_untrusted"
+    assert day["curve_yield"] == pytest.approx(1.5)
+
+
+def test_adapter_rejects_non_finite_yields(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P3-10 修复（reports/73）：NaN/±Infinity 收益率不得入库。"""
+    from app.core.adapters.czb_mof_adapter import _to_float
+
+    assert _to_float("nan") is None
+    assert _to_float("inf") is None
+    assert _to_float("-inf") is None
+    assert _to_float(1.7) == pytest.approx(1.7)
+
+    payload = [{
+        "ycDefName": "10年", "worktime": "2026-08-07",
+        "seriesData": [[1785686400000, float("nan")], [1785772800000, 1.7126]],
+    }]
+    client = _mock_client(history=payload)
+    adapter = TreasuryMofAdapter(rate_limit=0, session=client)
+    result = adapter.fetch(FetchRequest(
+        data_type="treasury_yield_curve",
+        extra_params={"mode": "history", "tenor": 10.0,
+                      "start": "2006-01-01", "end": "2026-08-07"},
+    ))
+    assert len(result.data) == 1
+    assert result.data[0]["yield_pct"] == pytest.approx(1.7126)
+    client.close()
+
+
+def test_backfill_invalid_tenors_fails_explicitly(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P3-8 修复（reports/73）：显式传入非法期限不再静默空转。"""
+    updater = _treasury_updater(
+        duckdb_store, sqlite_store, _FakeCzbAdapter(history=[]),
+    )
+    report = updater.backfill([99.0, 999.0])
+    assert report["status"] == "failed"
+    assert report["reason"] == "no_valid_tenors"
+    assert report["targeted"] == 0
+
+
+def test_refresh_if_due_gates_on_marker(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P3-4 修复（reports/73）：当日已刷新则 skip，不再重复请求源站。"""
+    from app.core.treasury import REFRESH_MARKER_KEY
+
+    fake = _FakeCzbAdapter(daily=[
+        {"curve_date": "2026-08-07", "tenor_years": 10.0, "yield_pct": 1.7},
+    ])
+    updater = _treasury_updater(duckdb_store, sqlite_store, fake)
+    first = updater.refresh_if_due()
+    assert first["status"] != "failed"
+    assert len(fake.calls) >= 1
+
+    # 标记已写入 → 第二次直接 skip，无网络请求
+    calls_after_first = len(fake.calls)
+    second = updater.refresh_if_due()
+    assert second["status"] == "skipped"
+    assert second["reason"] == "refreshed_today"
+    assert len(fake.calls) == calls_after_first
+
+    # 标记过期（两天前）→ 重新执行
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+        [REFRESH_MARKER_KEY,
+         (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+         datetime.now(timezone.utc).isoformat()],
+    )
+    third = updater.refresh_if_due()
+    assert third["status"] != "skipped"

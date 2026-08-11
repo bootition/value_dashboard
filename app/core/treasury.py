@@ -85,6 +85,16 @@ class TreasuryCurveUpdater:
         未来日期在适配器层拒绝；失败保留旧值并写 retry；空结果写 missing。
         """
         targets = [t for t in (tenors or list(KEY_TENORS)) if t in KEY_TENORS]
+        # P3-8 修复（reports/73）：用户显式传了期限但全部非法 → 明确失败，
+        # 不再静默空转返回 success。
+        if tenors and not targets:
+            return {
+                "status": "failed",
+                "reason": "no_valid_tenors",
+                "requested": [float(t) for t in tenors],
+                "supported": list(KEY_TENORS),
+                "targeted": 0,
+            }
         if max_tenors > 0:
             targets = targets[:max_tenors]
 
@@ -255,11 +265,17 @@ class TreasuryCurveUpdater:
         *,
         max_tenors_backfill: int = 0,
     ) -> dict[str, Any]:
-        """低频自动集成：默认每日检查当日曲线并补齐缺失期限（最小安全）。
+        """低频自动集成：每日最多一次（P3-4 修复，reports/73）。
 
-        先更新当日曲线；随后对近 30 天无数据的关键期限执行历史回填。
-        任何失败均不抛异常（不阻断价格/财务/readiness）。
+        标记 key 记录上次刷新时间；当日（UTC+8）已刷新则直接 skip，
+        不发起任何网络请求。未到期/未刷新时：更新当日曲线，并对近 30 天
+        无数据的关键期限执行历史回填。任何失败均不抛异常。
         """
+        if self._refreshed_today():
+            return {
+                "status": "skipped", "reason": "refreshed_today",
+                "last_refresh": self._last_refresh_value(),
+            }
         try:
             daily = self.update_daily()
             stale_tenors = self._tenors_missing_recently(days=30)
@@ -279,6 +295,22 @@ class TreasuryCurveUpdater:
         except Exception as error:
             logger.warning("国债曲线刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
+
+    def _refreshed_today(self) -> bool:
+        value = self._last_refresh_value()
+        if not value:
+            return False
+        try:
+            refreshed = datetime.fromisoformat(value)
+        except (ValueError, TypeError):
+            return False
+        return refreshed.astimezone(_CN_TZ).date() >= _cn_today()
+
+    def _last_refresh_value(self) -> str | None:
+        rows = self.sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?", [REFRESH_MARKER_KEY]
+        )
+        return rows[0].get("value") if rows else None
 
     def _tenors_missing_recently(self, days: int = 30) -> list[float]:
         cutoff = str(_cn_today() - timedelta(days=days))
@@ -347,11 +379,55 @@ class TreasuryCurveUpdater:
         price_dates: list[str | date],
         tenors: list[float],
     ) -> dict[tuple[str, float], dict[str, Any]]:
-        """批量对齐（快照计算用）。"""
+        """批量对齐（P3-9 修复，reports/73）：单次 SQL 查询全部
+        (价格日 × 期限) 组合的最近曲线点，消除逐项 N+1 查询。"""
         results: dict[tuple[str, float], dict[str, Any]] = {}
-        for price_date in price_dates:
-            for tenor in tenors:
-                results[(str(price_date)[:10], tenor)] = self.align(price_date, tenor)
+        unique_dates = sorted({str(price_date)[:10] for price_date in price_dates})
+        if not unique_dates or not tenors:
+            return results
+        rows = self.duck.read_query(
+            """WITH days AS (
+                   SELECT UNNEST(?) AS price_date
+               ), combos AS (
+                   SELECT d.price_date, t.tenor
+                   FROM days d, (SELECT UNNEST(?) AS tenor) t
+               )
+               SELECT c.price_date, c.tenor, a.curve_date, a.yield_pct
+               FROM combos c
+               LEFT JOIN LATERAL (
+                   SELECT curve_date, yield_pct
+                   FROM treasury_yield_curve
+                   WHERE tenor_years = c.tenor
+                     AND curve_date <= CAST(c.price_date AS DATE)
+                   ORDER BY curve_date DESC LIMIT 1
+               ) a ON TRUE""",
+            [unique_dates, list(tenors)],
+        )
+        for row in rows:
+            key = (str(row["price_date"])[:10], float(row["tenor"]))
+            curve_date = row.get("curve_date")
+            if curve_date is None or row.get("yield_pct") is None:
+                results[key] = {
+                    "status": "missing", "curve_date": None, "yield_pct": None,
+                    "staleness_days": None, "reason": "curve_missing",
+                }
+                continue
+            curve_date = str(curve_date)[:10]
+            staleness = (
+                date.fromisoformat(key[0]) - date.fromisoformat(curve_date)
+            ).days
+            if staleness > MAX_STALENESS_DAYS:
+                results[key] = {
+                    "status": "stale", "curve_date": curve_date,
+                    "yield_pct": None, "staleness_days": staleness,
+                    "reason": "curve_stale",
+                }
+                continue
+            results[key] = {
+                "status": "ok", "curve_date": curve_date,
+                "yield_pct": float(row["yield_pct"]),
+                "staleness_days": staleness, "reason": None,
+            }
         return results
 
     def status_report(self) -> dict[str, Any]:
@@ -370,8 +446,15 @@ class TreasuryCurveUpdater:
             "SELECT COUNT(*) AS count FROM retry_list WHERE data_type = ?",
             [RETRY_DATA_TYPE],
         )[0]["count"]
+        # P3-7 修复（reports/73）：missing 统计按国债域过滤（stock_code=
+        # '__market__' 且 field_name 以 treasury_curve 开头），与 retry_open
+        # 口径一致，不再混入全库股票缺失数。
         missing_open = self.sqlite.query(
-            "SELECT COUNT(*) AS count FROM missing_list WHERE resolved_at IS NULL",
+            """SELECT COUNT(*) AS count FROM missing_list
+               WHERE resolved_at IS NULL
+                 AND stock_code = ?
+                 AND field_name LIKE ?""",
+            ["__market__", "treasury_curve%"],
         )[0]["count"]
         last_refresh = None
         rows = self.sqlite.query(

@@ -17,7 +17,9 @@ CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`p
 3. 「**筛选**」页：输入规则名称 →「保存新版本」→ 添加条件（如 `pe_ttm < 15`）→「运行筛选」。
 4. 「**保存结果**」→「导出 CSV」或「加入自选」。
 5. 匹配超过 5000 条时会「结果已截断」：缩小条件或确认 CSV 中的 `_truncated` 标注。
-6. 日常维护用 `vd` CLI（`vd data auto-update status`、`vd backup`）。
+6. 个股详情页可研究：K 线、业务概览、历史股本与研究统计（PE/PB/股息率/利差的分位与 z-score）、
+   国债利差比较（默认 10 年期，可切换期限）。
+7. 日常维护用 `vd` CLI（`vd data auto-update status`、`vd data treasury-curve --check-only`、`vd backup`）。
 
 ---
 
@@ -29,7 +31,7 @@ CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`p
 | 分析型存储 | DuckDB — 财务报告、价格、分红、快照 |
 | 操作型存储 | SQLite — 筛选结果、人工覆写、作业日志 |
 | 前端 | Vue 3, TypeScript, Vite 8, Naive UI 2.44 |
-| 数据适配器 | AKShare/Eastmoney, BaoStock, CNINFO, TDX |
+| 数据适配器 | AKShare/Eastmoney, BaoStock, CNINFO, TDX, 财政部国债收益率（czb_mof） |
 
 ## 目录结构
 
@@ -178,12 +180,13 @@ Get-FileHash -LiteralPath `
 
 ## 当前状态
 
-**项目状态唯一权威见 [docs/STATUS.md](docs/STATUS.md)**。要点（2026-08-02）：
+**项目状态唯一权威见 [docs/STATUS.md](docs/STATUS.md)**。要点（2026-08-11）：
 
-- 代码层门禁全部通过（S1 隔离回归 392、Ruff 零 F821、前端 lint/build/52 node 合约 + 10 组件流程测试、uv lock、完整发行构建退出码 0）。
-- 数据层 ready=TRUE、warning_codes=[]、`snapshot_period_mismatches`=0（正式库只读复验，筛选可用）；P0-1 股本混用已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0）。
-- 发布级红队 P0/P1/P2 与第五轮系统红队 4 项 P1 全部关闭；剩余为披露性数据缺口（见 `docs/STATUS.md`）。
-- 历史审计结论（BLOCK 等）已被 `docs/reports/29`–`35` 与 `docs/STATUS.md` 取代，**请勿再引用为当前结论**。
+- 代码层门禁通过（S1 隔离回归、Ruff、前端 lint/55 Node + 40 组件测试/build）。
+- 数据层 ready=TRUE、warning_codes=[]（正式库，详见 STATUS）。
+- P1-P4 功能已实施：个股研究工作台、业务概览、国债曲线与利差、历史股本链与历史研究统计；
+  2026-08-11 系统红队审查（`docs/reports/73`）发现的 P1/P2/P3 问题已全部修复并通过回归。
+- 历史审计结论（BLOCK 等）已被 `docs/reports/29`–`40` 与 `docs/STATUS.md` 取代，**请勿再引用为当前结论**。
 
 历史审计链（仅追溯用，均 superseded）：
 

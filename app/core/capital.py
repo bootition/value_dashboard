@@ -194,22 +194,50 @@ class CapitalHistoryUpdater:
                 cross_by_date[d] = float(total)
 
         for index, row in enumerate(rows):
-            prev_date = rows[index - 1]["effective_date"] if index > 0 else None
-            # 检查本点与前一点区间内是否存在东财冲突事件；
-            # 冲突影响的是 [prev, current] 之间的延续，区间的起点与终点都 fail-closed
-            has_conflict = False
+            # P4-7 修复（reports/73）：东财事件按 ±CROSS_NEIGHBOR_DAYS 近邻匹配
+            # 主链点（阶段0 实测双源日期集不重叠，区间包含匹配无法核验）；
+            # 有近邻点 → 数值比对判冲突；无近邻点 → 区间无法核验，fail-closed
+            # （事件前后最近主链点均不可验证，保持保守语义）。
+            conflict_indexes: set[int] = set()
             for event_date, event_total in sorted(cross_by_date.items()):
-                if prev_date is not None and event_date < prev_date:
+                event_day = date.fromisoformat(event_date)
+                best_index: int | None = None
+                best_gap = 10**9
+                for i, point in enumerate(rows):
+                    gap = abs(
+                        (date.fromisoformat(point["effective_date"]) - event_day).days
+                    )
+                    if gap < best_gap:
+                        best_index, best_gap = i, gap
+                if best_index is None:
                     continue
-                if event_date > row["effective_date"]:
+                if best_gap > CROSS_NEIGHBOR_DAYS:
+                    # 无近邻主链点：定位事件所在区间并 fail-closed。
+                    # 事件落在 [point_lo, point_lo+1] → 两端均不可验证；
+                    # 早于首点 → 影响首点；晚于末点 → 影响末点。
+                    lower_index = None
+                    for i, point in enumerate(rows):
+                        if date.fromisoformat(point["effective_date"]) <= event_day:
+                            lower_index = i
+                        else:
+                            break
+                    if lower_index is None:
+                        conflict_indexes.add(0)
+                    elif lower_index + 1 < len(rows):
+                        conflict_indexes.add(lower_index)
+                        conflict_indexes.add(lower_index + 1)
+                    else:
+                        conflict_indexes.add(lower_index)
                     continue
-                rel = abs(event_total - row["total_shares"]) / max(event_total, row["total_shares"])
+                rel = abs(event_total - rows[best_index]["total_shares"]) / max(
+                    event_total, rows[best_index]["total_shares"]
+                )
                 if rel >= CROSS_TOLERANCE:
-                    has_conflict = True
-            if has_conflict:
-                row["verified"] = False
-                if index > 0:
-                    rows[index - 1]["verified"] = False
+                    conflict_indexes.add(best_index)
+                    if best_index > 0:
+                        conflict_indexes.add(best_index - 1)
+            for i in conflict_indexes:
+                rows[i]["verified"] = False
         return rows
 
     # ─── 批量 / 全量 ──────────────────────────────────────────────
@@ -224,7 +252,16 @@ class CapitalHistoryUpdater:
         results: dict[str, dict[str, Any]] = {}
         failed: list[str] = []
         for code in stock_codes:
-            outcome = self.update_stock(code, cross_check=cross_check)
+            # P4-11 修复（reports/73）：per-stock 异常隔离，单股失败不中断整批
+            try:
+                outcome = self.update_stock(code, cross_check=cross_check)
+            except Exception as error:
+                logger.warning("回填 %s 历史股本异常: %s", code, error)
+                self._record_retry(code, str(error)[:500])
+                outcome = {
+                    "status": "failed", "stock_code": code,
+                    "error": str(error), "retained": True,
+                }
             results[code] = outcome
             if outcome["status"] != "success":
                 failed.append(code)
@@ -239,9 +276,15 @@ class CapitalHistoryUpdater:
         }
 
     def update_all(self, max_stocks: int = 0, *, cross_check: bool = True) -> dict[str, Any]:
-        codes = self._listed_stock_codes()
+        """有界续传（P4-2 修复，reports/73）：只处理"缺失/陈旧"的上市股票。
+
+        陈旧判定：无股本链记录，或最新锚点早于该股最新价格日（价格史尚未被
+        股本覆盖）——已成功的股票下一轮自然不再入选，实现真正游标续传，
+        不再永远重复前 20 只。
+        """
+        codes = self._due_stock_codes()
         if not codes:
-            return {"status": "skipped", "reason": "no_listed_stocks"}
+            return {"status": "skipped", "reason": "no_due_stocks"}
         try:
             priority = {
                 row["stock_code"]
@@ -254,6 +297,27 @@ class CapitalHistoryUpdater:
         if max_stocks > 0:
             codes = codes[:max_stocks]
         return self.update_many(codes, cross_check=cross_check)
+
+    def _due_stock_codes(self) -> list[str]:
+        """上市股票中股本链缺失或落后于价格史的部分（P4-2，参照 business.py）。"""
+        rows = self.duck.read_query(
+            """SELECT m.stock_code
+               FROM stock_meta m
+               LEFT JOIN (
+                   SELECT stock_code, MAX(effective_date) AS latest_cap
+                   FROM share_capital_history GROUP BY stock_code
+               ) h ON h.stock_code = m.stock_code
+               LEFT JOIN (
+                   SELECT stock_code, MAX(trade_date) AS latest_price
+                   FROM price_daily_raw GROUP BY stock_code
+               ) p ON p.stock_code = m.stock_code
+               WHERE m.is_listed IS TRUE
+                 AND (h.stock_code IS NULL
+                      OR h.latest_cap < COALESCE(
+                          p.latest_price, CURRENT_DATE - INTERVAL '7 days'))
+               ORDER BY (h.stock_code IS NULL) DESC, m.stock_code"""
+        )
+        return [row["stock_code"] for row in rows]
 
     def _listed_stock_codes(self) -> list[str]:
         rows = self.duck.read_query(
@@ -282,29 +346,47 @@ class CapitalHistoryUpdater:
     # ─── 覆盖核验（只读） ─────────────────────────────────────────
 
     def coverage_report(self, stock_code: str, window_years: int = 10) -> dict[str, Any]:
-        """窗口内有行情交易日的历史股本可验证覆盖（reports/68 §3.5）。"""
+        """窗口内有行情交易日的历史股本可验证覆盖（reports/68 §3.5）。
+
+        P4-6 修复（reports/73）：真实计算"窗口内被 verified 主链点延续覆盖的
+        价格日占比"，不再有记录即报 100%；与 statistics._capital_coverage 同口径。
+        """
         start = date.today().replace(year=date.today().year - window_years).isoformat()
-        price_days = self.duck.read_query(
-            "SELECT COUNT(*) AS c FROM price_daily_raw "
-            "WHERE stock_code = ? AND trade_date >= ? AND close IS NOT NULL",
-            [stock_code, start],
-        )[0]["c"]
-        history = self.duck.read_query(
-            "SELECT effective_date, total_shares, verified FROM share_capital_history "
-            "WHERE stock_code = ? AND effective_date >= ? ORDER BY effective_date",
+        price_rows = self.duck.read_query(
+            "SELECT trade_date FROM price_daily_raw "
+            "WHERE stock_code = ? AND trade_date >= ? AND close IS NOT NULL "
+            "ORDER BY trade_date",
             [stock_code, start],
         )
-        if not history:
-            return {"stock_code": stock_code, "coverage_pct": 0.0, "price_days": price_days,
+        if not price_rows:
+            return {"stock_code": stock_code, "coverage_pct": 0.0, "price_days": 0,
                     "verified_days": 0, "verified_points": 0, "points": 0}
-        # 简化连续覆盖：从首个主链点到窗口末，区间均视为已覆盖；
-        # verified 占比 = verified 主链点 / 主链点
+        history = self.duck.read_query(
+            "SELECT effective_date, total_shares, verified FROM share_capital_history "
+            "WHERE stock_code = ? ORDER BY effective_date",
+            [stock_code],
+        )
+        covered = 0
+        point_index = 0
+        for price in price_rows:
+            price_day = str(price["trade_date"])[:10]
+            while (
+                point_index + 1 < len(history)
+                and str(history[point_index + 1]["effective_date"])[:10] <= price_day
+            ):
+                point_index += 1
+            if (
+                point_index < len(history)
+                and str(history[point_index]["effective_date"])[:10] <= price_day
+                and bool(history[point_index]["verified"])
+            ):
+                covered += 1
         verified_points = sum(1 for h in history if h["verified"])
         return {
             "stock_code": stock_code,
-            "coverage_pct": 100.0 if price_days else 0.0,
-            "price_days": price_days,
-            "verified_days": price_days,
+            "coverage_pct": round(covered / len(price_rows) * 100.0, 2),
+            "price_days": len(price_rows),
+            "verified_days": covered,
             "verified_points": verified_points,
             "points": len(history),
         }

@@ -52,11 +52,27 @@ const stats = computed(() => data.value?.statistics ?? {})
 const activeStats = computed(() => stats.value[`${window.value}y`] ?? {})
 
 const hasSeries = computed(() => series.value.some((item) => item[metric.value as keyof typeof item] != null))
-const usableSeries = computed(() =>
-  series.value
+// P4-12 修复（reports/73）：序列按所选窗口过滤（与统计窗口一致），
+// 不再全历史序列 + 窗口统计线并存造成误导。
+const usableSeries = computed(() => {
+  const rows = series.value
     .filter((item) => item[metric.value as keyof typeof item] != null)
-    .map((item) => ({ date: item.price_date, value: item[metric.value as keyof typeof item] as number })),
-)
+    .map((item) => ({ date: item.price_date, value: item[metric.value as keyof typeof item] as number }))
+  if (window.value === 99) return rows
+  const start = new Date()
+  start.setFullYear(start.getFullYear() - window.value)
+  const startMs = start.getTime()
+  return rows.filter((item) => Date.parse(item.date) >= startMs)
+})
+
+// P4-12：x 轴按日期线性映射（节假日/停牌日自然压缩）
+const dateRange = computed(() => {
+  const points = usableSeries.value
+  if (!points.length) return { min: 0, max: 1 }
+  const first = Date.parse(points[0].date)
+  const last = Date.parse(points[points.length - 1].date)
+  return { min: first, max: Math.max(last, first + 86400000) }
+})
 
 const valueRange = computed(() => {
   const points = usableSeries.value
@@ -80,7 +96,12 @@ const valueRange = computed(() => {
   return { min: min - span * 0.08, max: max + span * 0.08 }
 })
 
-const x = (i: number) => PAD.left + (usableSeries.value.length === 1 ? (W - PAD.left - PAD.right) / 2 : (i / (usableSeries.value.length - 1)) * (W - PAD.left - PAD.right))
+const x = (i: number) => {
+  const points = usableSeries.value
+  if (points.length <= 1) return PAD.left + (W - PAD.left - PAD.right) / 2
+  const t = (Date.parse(points[i].date) - dateRange.value.min) / (dateRange.value.max - dateRange.value.min)
+  return PAD.left + t * (W - PAD.left - PAD.right)
+}
 const y = (v: number) => PAD.top + (1 - (v - valueRange.value.min) / (valueRange.value.max - valueRange.value.min)) * (H - PAD.top - PAD.bottom)
 
 const linePath = computed(() => {
@@ -185,6 +206,7 @@ onMounted(fetchData)
     <p class="stat-note">
       口径：最新重述回看（历史日使用该日对应报告期当前最新重述财务值与历史有效总股本），
       不代表当时市场可见信息，不用于回测。PE≤0 不参与统计；历史股本未覆盖日 PE/PB 为缺失。
+      本卡为实时计算，与筛选使用的已发布统计域可能存在时差。
     </p>
 
     <n-spin :show="loading">

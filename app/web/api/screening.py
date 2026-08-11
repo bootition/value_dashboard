@@ -414,6 +414,7 @@ def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], col
         [*stock_codes, *audit_names],
     )
     by_stock: dict[tuple[str, str], dict[str, Any]] = {}
+    price_date_by_stock: dict[str, str] = {}
     for row in rows:
         by_stock.setdefault((row["stock_code"], str(row["report_date"])), {})[row["field_name"]] = {
             key: value for key, value in row.items() if key not in {"stock_code", "report_date", "field_name"}
@@ -430,7 +431,9 @@ def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], col
             "source": "published_override", "value": override["override_value"],
             "reason": override["reason"], "published_at": override["created_at"],
         }
-    # P3（reports/68）：利差列附加曲线对齐溯源（期限/曲线日/日期差）
+    # P3（reports/68）+ P3-2/P3-9 修复（reports/73）：利差列附加曲线对齐溯源
+    # （期限/曲线日/日期差）。对齐锚点用快照实际计算用的最新价格日
+    # （latest_price_date，缺省回退 _report_date），且批量一次查询。
     spread_fields = [field for field in audit_names if field.startswith("div_yield_spread_")]
     if spread_fields:
         from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS
@@ -439,25 +442,52 @@ def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], col
         tenor_by_column = {column: tenor for tenor, column in CZB_CURVE_YIELD_TENOR_LABELS.items()}
         aligner = TreasuryCurveUpdater(duck=duck, sqlite=sqlite)
         for row in results:
-            price_date = row.get("_report_date")
+            stock = row.get("stock_code", "")
+            if not stock or stock in price_date_by_stock:
+                continue
+            price_date = str(row.get("latest_price_date") or row.get("_report_date") or "")[:10]
+            if price_date:
+                price_date_by_stock[stock] = price_date
+        alignments = aligner.align_many(
+            list(price_date_by_stock.values()),
+            [tenor_by_column[field] for field in spread_fields],
+        )
+        for row in results:
+            stock = row.get("stock_code", "")
+            price_date = price_date_by_stock.get(stock, "")
             if not price_date:
                 continue
-            key = (row.get("stock_code", ""), str(price_date))
+            key = (stock, str(price_date))
             entry = dict(by_stock.get(key, {}))
             for field in spread_fields:
                 tenor = tenor_by_column.get(field)
                 if tenor is None:
                     continue
-                aligned = aligner.align(str(price_date), tenor)
+                aligned = alignments.get((price_date, tenor)) or {
+                    "curve_date": None, "staleness_days": None,
+                }
                 base = dict(entry.get(field) or {})
                 base.update({
                     "tenor_years": tenor,
-                    "curve_date": aligned["curve_date"],
-                    "staleness_days": aligned["staleness_days"],
+                    "curve_date": aligned.get("curve_date"),
+                    "staleness_days": aligned.get("staleness_days"),
                 })
                 entry[field] = base
             by_stock[key] = entry
-    return [by_stock.get((row.get("stock_code", ""), str(row["_report_date"])), {}) for row in results]
+    # P3-2 修复：返回按实际对齐锚点（latest_price_date 优先）匹配，
+    # 与写入 by_stock 的 key 保持一致。
+    return [
+        by_stock.get(
+            (
+                row.get("stock_code", ""),
+                price_date_by_stock.get(
+                    row.get("stock_code", ""), str(row.get("_report_date", ""))
+                ),
+            ),
+            {},
+        )
+        for row in results
+    ]
 
 
 def _attach_result_report_dates(duck: Any, results: list[dict[str, Any]]) -> None:

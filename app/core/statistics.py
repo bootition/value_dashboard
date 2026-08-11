@@ -166,7 +166,7 @@ class StatisticsBuilder:
                 item["pe_ttm"] = pe if pe <= 1000 else None
             else:
                 item["pe_ttm"] = None
-            if shares and equity:
+            if shares and equity and equity > 0:
                 pb = (close * shares) / equity
                 item["pb_mrq"] = pb if pb <= 200 else None
             else:
@@ -359,13 +359,17 @@ class StatisticsBuilder:
     ) -> list[dict[str, Any]]:
         if not series:
             return []
-        # 覆盖核验（PE/PB 依赖股本）：窗口内有行情日中股本可验证的比例
-        coverage = self._capital_coverage(stock_code)
         records: list[dict[str, Any]] = []
         for metric in STAT_METRICS:
             for window in WINDOW_YEARS:
                 min_samples = WINDOW_MIN_SAMPLES[window]
-                cap = coverage if metric in ("pe_ttm", "pb_mrq") else None
+                # P4-3 修复（reports/73）：覆盖按窗口单独计算（窗口内有行情日
+                # 中 verified 股本延续占比），不再用全历史单一覆盖套所有窗口。
+                cap = (
+                    self._capital_coverage(stock_code, window)
+                    if metric in ("pe_ttm", "pb_mrq")
+                    else None
+                )
                 stats = self.window_stats(series, metric, window, min_samples, coverage_pct=cap)
                 if stats.get("reason") is not None:
                     records.append({
@@ -392,7 +396,7 @@ class StatisticsBuilder:
                     "window_years": window, "method": "percentile",
                     "value": percentile,
                     "samples": stats["samples"],
-                    "coverage_pct": coverage,
+                    "coverage_pct": cap,
                     "min_date": stats["min_date"], "max_date": stats["max_date"],
                     "reason": None,
                 })
@@ -401,48 +405,64 @@ class StatisticsBuilder:
                     "window_years": window, "method": "zscore",
                     "value": stats["zscore"],
                     "samples": stats["samples"],
-                    "coverage_pct": coverage,
+                    "coverage_pct": cap,
                     "min_date": stats["min_date"], "max_date": stats["max_date"],
                     "reason": None,
                 })
         return records
 
-    def _capital_coverage(self, stock_code: str) -> float:
-        """窗口内有行情日的股本可验证覆盖（近似：主链首点至最新点视为连续）。"""
-        price_count = self.duck.read_query(
-            "SELECT COUNT(*) AS c FROM price_daily_raw "
-            "WHERE stock_code = ? AND close IS NOT NULL",
-            [stock_code],
-        )[0]["c"]
-        capital_count = self.duck.read_query(
-            "SELECT COUNT(*) AS c FROM share_capital_history WHERE stock_code = ?",
-            [stock_code],
-        )[0]["c"]
-        if not price_count:
+    def _capital_coverage(self, stock_code: str, window_years: int = 99) -> float:
+        """窗口内有行情日的股本可验证覆盖（P4-3/P4-6 修复，reports/73）。
+
+        口径（PRD §8.4 / reports/68 §3.5）：窗口内每个有行情日，取 ≤当日
+        最新主链点；该点存在且 verified 才算覆盖（只有来源明确持续有效的
+        区间才可延续）。按窗口计算，不再用全历史覆盖套所有窗口。
+        """
+        window_start = None
+        if window_years != 99:
+            today = date.today()
+            window_start = today.replace(
+                year=today.year - window_years
+            ).isoformat()
+        price_rows = self.duck.read_query(
+            """SELECT trade_date FROM price_daily_raw
+               WHERE stock_code = ? AND close IS NOT NULL
+                 AND (? IS NULL OR trade_date >= CAST(? AS DATE))
+               ORDER BY trade_date""",
+            [stock_code, window_start, window_start],
+        )
+        if not price_rows:
             return 0.0
-        if not capital_count:
+        capital_rows = self.duck.read_query(
+            """SELECT effective_date, verified FROM share_capital_history
+               WHERE stock_code = ? ORDER BY effective_date""",
+            [stock_code],
+        )
+        if not capital_rows:
             return 0.0
-        # 主链覆盖从首个锚点至窗口末；前段（上市初期无记录）按缺失计
-        first_capital = self.duck.read_query(
-            "SELECT MIN(effective_date) AS d FROM share_capital_history WHERE stock_code = ?",
-            [stock_code],
-        )[0]["d"]
-        first_price = self.duck.read_query(
-            "SELECT MIN(trade_date) AS d FROM price_daily_raw "
-            "WHERE stock_code = ? AND close IS NOT NULL",
-            [stock_code],
-        )[0]["d"]
-        if not first_capital or not first_price:
-            return 100.0 if capital_count else 0.0
-        before = self.duck.read_query(
-            "SELECT COUNT(*) AS c FROM price_daily_raw "
-            "WHERE stock_code = ? AND close IS NOT NULL AND trade_date < ?",
-            [stock_code, str(first_capital)[:10]],
-        )[0]["c"]
-        return max(0.0, min(100.0, (price_count - before) / price_count * 100.0))
+        covered = 0
+        point_index = 0
+        for price in price_rows:
+            price_day = str(price["trade_date"])[:10]
+            while (
+                point_index + 1 < len(capital_rows)
+                and str(capital_rows[point_index + 1]["effective_date"])[:10] <= price_day
+            ):
+                point_index += 1
+            if (
+                point_index < len(capital_rows)
+                and str(capital_rows[point_index]["effective_date"])[:10] <= price_day
+                and bool(capital_rows[point_index]["verified"])
+            ):
+                covered += 1
+        return round(covered / len(price_rows) * 100.0, 2)
 
     def _input_fingerprint(self) -> str:
-        """输入指纹：价格/财务/股本/曲线最新日期与行数摘要。"""
+        """输入指纹：价格/财务/股本/曲线/分红最新日期与行数摘要。
+
+        P4-9 修复（reports/73）：加入 dividends——仅分红变化也触发统计重建，
+        避免发布域 TTM 股息率/利差陈旧。
+        """
         parts: list[str] = []
         date_columns = {
             "price_daily_raw": "trade_date",
@@ -450,6 +470,7 @@ class StatisticsBuilder:
             "balance_sheet": "report_date",
             "share_capital_history": "effective_date",
             "treasury_yield_curve": "curve_date",
+            "dividends": "ex_date",
         }
         for table, date_column in date_columns.items():
             row = self.duck.read_query(
@@ -464,15 +485,23 @@ class StatisticsBuilder:
         )[0]
         return int(row["v"]) + 1
 
+    # P4-4 修复（reports/73）：固定规范列集合，避免首记录为 reason 行时
+    # 成功行的 min_date/max_date 丢失、列顺序脆弱。
+    _PUBLISH_COLUMNS = (
+        "stock_code", "metric", "window_years", "method", "value", "samples",
+        "coverage_pct", "min_date", "max_date", "reason",
+        "version", "input_fingerprint", "published_at",
+    )
+
     def _write_records(self, staging_table: str, records: list[dict[str, Any]]) -> None:
         if not records:
             return
-        placeholders = ", ".join(["?"] * len(records[0]))
-        columns = ", ".join(records[0].keys())
+        placeholders = ", ".join(["?"] * len(self._PUBLISH_COLUMNS))
+        columns = ", ".join(self._PUBLISH_COLUMNS)
         with self.duck.write_connection() as conn:
             conn.executemany(
                 f'INSERT INTO "{staging_table}" ({columns}) VALUES ({placeholders})',
-                [[row.get(col) for col in records[0]] for row in records],
+                [[row.get(col) for col in self._PUBLISH_COLUMNS] for row in records],
             )
 
 

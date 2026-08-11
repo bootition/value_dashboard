@@ -533,7 +533,9 @@ class IncrementalUpdater:
             if rows and rows[0].get("value") == fingerprint:
                 return {"status": "skipped", "reason": "fingerprint_unchanged"}
             report = builder.rebuild_all()
-            if report["status"] in {"success", "partial"}:
+            # P4-10 修复（reports/73）：仅全部成功才持久化指纹；
+            # partial（部分股票失败）不落指纹，下一轮自动重试失败股。
+            if report["status"] == "success":
                 with self.sqlite.transaction() as conn:
                     conn.execute(
                         """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -1604,6 +1606,7 @@ class IncrementalUpdater:
                     "balance_sheet", "income_statement", "cash_flow",
                     "dividends", "xdxr",
                     "company_profile", "business_breakdown",
+                    "share_capital_history", "treasury_yield_curve",
                 }:
                     # 无逐股重试路径的数据域（announcements 等）：retry 条目
                     # 是 pending 标记，由对应维护流程消费；在这里重试只会
@@ -1620,6 +1623,46 @@ class IncrementalUpdater:
                     else:
                         still_failing += 1
                         self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
+                    continue
+                if data_type == "share_capital_history":
+                    # P4-5 修复（reports/73）：历史股本链 retry 由回填器消费
+                    from app.core.capital import CapitalHistoryUpdater
+                    outcome = CapitalHistoryUpdater(
+                        duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+                    ).update_stock(stock_code)
+                    if outcome["status"] == "success":
+                        self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+                        success_count += 1
+                    else:
+                        still_failing += 1
+                        self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
+                    continue
+                if data_type == "treasury_yield_curve":
+                    # P3-5 修复（reports/73）：国债曲线 retry 按 extra_json
+                    # 恢复对应模式（history=按期限回填，daily=按日期日终）
+                    from app.core.treasury import TreasuryCurveUpdater
+                    try:
+                        extra = json.loads(task.get("extra_json") or "{}")
+                    except json.JSONDecodeError:
+                        extra = {}
+                    updater = TreasuryCurveUpdater(
+                        duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+                    )
+                    if extra.get("mode") == "history" and extra.get("tenor") is not None:
+                        outcome = updater._backfill_one(float(extra["tenor"]))
+                    else:
+                        outcome = updater.update_daily(
+                            [str(extra.get("work_date") or "")[:10]]
+                            if extra.get("work_date") else None
+                        )
+                    if outcome["status"] == "success":
+                        self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+                        success_count += 1
+                    else:
+                        still_failing += 1
+                        self._mark_retry_failed(
+                            retry_id, outcome.get("error") or outcome.get("reason") or "retry failed"
+                        )
                     continue
                 outcome = self.refetch_one(stock_code, data_type)
                 if outcome["status"] == "success":
