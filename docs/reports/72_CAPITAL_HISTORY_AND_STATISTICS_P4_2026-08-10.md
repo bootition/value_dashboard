@@ -1,9 +1,10 @@
 ---
 title: 历史总股本链与历史研究统计 P4 实施报告（2026-08-10）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-10
-last-reviewed: 2026-08-10
+last-reviewed: 2026-08-11
+superseded-by: reports/73_SYSTEM_RED_TEAM_REVIEW_P3_P4_2026-08-11.md
 ---
 
 # 历史总股本链与历史研究统计 P4 实施报告
