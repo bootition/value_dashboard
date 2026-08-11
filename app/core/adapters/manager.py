@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
 KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache", "eastmoney_f10", "czb_mof"}
+    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital"}
 )
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
@@ -48,6 +48,8 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "business_breakdown": ["eastmoney_f10"],
     # 财政部国债曲线（reports/68 P3）：独立低频基准域，独立实例与限速
     "treasury_yield_curve": ["czb_mof"],
+    # 历史总股本链（reports/68 P4）：CNINFO 主链；东财交叉经 eastmoney_f10
+    "share_capital_history": ["cninfo_capital", "eastmoney_f10"],
 }
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
@@ -59,6 +61,7 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "sina": 0.35,
     "eastmoney_f10": 0.5,
     "czb_mof": 0.5,
+    "cninfo_capital": 1.5,
 }
 
 
@@ -290,6 +293,15 @@ class AdapterManager:
             logger.warning(f"财政部国债曲线适配器未安装: {e}")
         except Exception as e:
             logger.warning(f"财政部国债曲线适配器初始化失败: {e}")
+
+        # 历史总股本链适配器（CNINFO 主链，P4）
+        try:
+            from app.core.adapters.capital_history_adapter import CapitalHistoryAdapter
+            self.register(CapitalHistoryAdapter(self._rate_limits["cninfo_capital"]))
+        except ImportError as e:
+            logger.warning(f"历史股本链适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"历史股本链适配器初始化失败: {e}")
 
         self._initialized = True
         logger.info(f"适配器管理器初始化完成: {list(self._adapters.keys())}")

@@ -16,6 +16,7 @@ import StockTocNav from '../components/StockTocNav.vue'
 import type { TocItem } from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import TreasuryComparisonCard from '../components/TreasuryComparisonCard.vue'
+import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataTraceability from '../components/DataTraceability.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
@@ -536,7 +537,11 @@ onUnmounted(() => {
             kicker="VALUATION & MARKET"
             title="估值与市场"
             :groups="valuationGroup"
-          />
+          >
+            <div class="section-inner-block">
+              <ResearchStatisticsCard :stock-code="stockCode" default-metric="pe_ttm" />
+            </div>
+          </IndicatorGroupSection>
 
           <!-- 经营与成长 -->
           <IndicatorGroupSection
@@ -596,6 +601,9 @@ onUnmounted(() => {
             title="股东回报"
             :groups="returnGroup"
           >
+            <div class="section-inner-block">
+              <ResearchStatisticsCard :stock-code="stockCode" default-metric="ttm_dividend_yield" />
+            </div>
             <div class="section-inner-block">
               <TreasuryComparisonCard :stock-code="stockCode" />
             </div>

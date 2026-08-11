@@ -288,6 +288,50 @@ def data_treasury_curve(
     typer.echo(json.dumps(make_response("data.treasury-curve", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("capital-history")
+def data_capital_history(
+    stocks: str = typer.Option("", "--stocks", help="只回填指定股票，逗号分隔"),
+    max_stocks: int = typer.Option(0, "--max-stocks", help="最多回填N只上市股票(0=全部)"),
+    no_cross: bool = typer.Option(False, "--no-cross", help="跳过东财交叉核验"),
+    check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖/队列状态，不抓取"),
+) -> None:
+    """历史总股本链回填 (reports/68 P4)
+
+    CNINFO p_stock2215 主链（半年/年报锚点 + 变动事件），东财 F10 近邻交叉核验；
+    冲突区间 fail-closed；缺失日禁止当前股本或插值回填。
+    """
+    from app.cli.protocol import make_response
+    from app.core.capital import CapitalHistoryUpdater
+
+    _, duck, sqlite = _database_context()
+    updater = CapitalHistoryUpdater(duck=duck, sqlite=sqlite)
+    if check_only:
+        report = updater.coverage_report("") if False else updater._coverage_all()
+    elif stocks.strip():
+        codes = [code.strip() for code in stocks.split(",") if code.strip()]
+        report = updater.update_many(codes, cross_check=not no_cross)
+    else:
+        report = updater.update_all(max_stocks=max_stocks, cross_check=not no_cross)
+    typer.echo(json.dumps(make_response("data.capital-history", report), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("research-statistics")
+def data_research_statistics(
+    max_stocks: int = typer.Option(0, "--max-stocks", help="最多构建N只上市股票(0=全部)"),
+) -> None:
+    """历史研究统计域构建与原子发布 (reports/68 P4)
+
+    PE/PB/TTM股息率/10年利差 × 1/3/5/10/全部窗口 × 分位/z-score；
+    staging → 原子发布；覆盖与最小样本门槛不满足时该字段为 null + 原因码。
+    """
+    from app.cli.protocol import make_response
+    from app.core.statistics import StatisticsBuilder
+
+    _, duck, sqlite = _database_context()
+    report = StatisticsBuilder(duck=duck, sqlite=sqlite).rebuild_all(max_stocks=max_stocks)
+    typer.echo(json.dumps(make_response("data.research-statistics", report), ensure_ascii=False, indent=2, default=str))
+
+
 @data_app.command("replenish_missing_core_data")
 def data_replenish_missing_core_data(
     max_stocks: int = typer.Option(0, "--max-stocks", min=0, help="最多补齐 N 只股票，0=全部缺项"),

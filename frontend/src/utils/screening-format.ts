@@ -84,6 +84,25 @@ const RANK_SUFFIX_LABELS: Readonly<Record<string, string>> = {
   sw2_percentile: '证监会二级分位',
 }
 
+/** P4 历史统计字段（已发布统计域）指标与窗口中文名。 */
+const STAT_METRIC_LABELS: Readonly<Record<string, string>> = {
+  pe_ttm: 'PE-TTM',
+  pb_mrq: 'PB-MRQ',
+  ttm_dividend_yield: 'TTM已实施股息率',
+  spread_10y: '股息率-国债10年利差',
+}
+const STAT_WINDOW_LABELS: Readonly<Record<string, string>> = {
+  '1': '1年',
+  '3': '3年',
+  '5': '5年',
+  '10': '10年',
+  '99': '全部历史',
+}
+const STAT_METHOD_LABELS: Readonly<Record<string, string>> = {
+  percentile: '历史分位',
+  zscore: 'z-score',
+}
+
 /** 标准化财务表前缀。 */
 const STATEMENT_PREFIX_LABELS: Readonly<Record<string, string>> = {
   balance: '资产负债表',
@@ -197,6 +216,14 @@ const STATEMENT_FIELD_LABELS: Readonly<Record<string, Readonly<Record<string, st
 
 export function fieldDisplayName(field: string, fallback?: string): string {
   if (FIELD_LABELS[field]) return FIELD_LABELS[field]
+  // P4 历史统计字段：<metric>_stat_<window>y_<method>
+  const statMatch = field.match(/^(.+)_stat_(\d+)y_(percentile|zscore)$/)
+  if (statMatch) {
+    const metricLabel = STAT_METRIC_LABELS[statMatch[1]] ?? statMatch[1]
+    const windowLabel = STAT_WINDOW_LABELS[statMatch[2]] ?? `${statMatch[2]}年`
+    const methodLabel = STAT_METHOD_LABELS[statMatch[3]] ?? statMatch[3]
+    return `${metricLabel} · ${windowLabel} · ${methodLabel}`
+  }
   for (const [suffix, suffixLabel] of Object.entries(RANK_SUFFIX_LABELS)) {
     if (field.endsWith(`_${suffix}`)) {
       const base = field.slice(0, -(suffix.length + 1))

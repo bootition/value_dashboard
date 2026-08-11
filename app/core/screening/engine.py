@@ -119,6 +119,22 @@ MAX_IN_VALUES = 1_000
 # P1-C修复: 结果行数上限（内存/导出保护）；超限时显式 truncated 标记
 MAX_RESULT_ROWS = 5_000
 
+# ─── 历史研究统计字段（P4，reports/68 §5/§6）────────────────────────────
+# 已发布统计域字段：<metric>_stat_<window>y_<method>；筛选引擎 join 最新版本。
+STAT_METRICS: tuple[str, ...] = ("pe_ttm", "pb_mrq", "ttm_dividend_yield", "spread_10y")
+STAT_WINDOWS: tuple[int, ...] = (1, 3, 5, 10, 99)
+STAT_METHODS: tuple[str, ...] = ("percentile", "zscore")
+STAT_FIELDS: frozenset[str] = frozenset(
+    f"{metric}_stat_{window}y_{method}"
+    for metric in STAT_METRICS
+    for window in STAT_WINDOWS
+    for method in STAT_METHODS
+)
+
+_STAT_FIELD_RE = re.compile(
+    r"^(?P<metric>pe_ttm|pb_mrq|ttm_dividend_yield|spread_10y)_stat_(?P<window>\d+)y_(?P<method>percentile|zscore)$"
+)
+
 
 class ScreeningEngine:
     """筛选引擎
@@ -413,6 +429,42 @@ base_pool AS (
         else:
             source_table = rank_source
 
+        # ─── 阶段2.5: 历史研究统计字段 join（P4）──────────────────
+        # 只 join 已发布统计域的最新版本；不触碰快照主路径（reports/68 §6）。
+        stat_fields_used = self._collect_stat_fields(conditions, sort_spec, columns_spec, rank_fields)
+        if stat_fields_used:
+            stat_joins: list[str] = []
+            stat_selects: list[str] = []
+            for field in sorted(stat_fields_used):
+                parsed = _STAT_FIELD_RE.match(field)
+                if parsed is None:
+                    continue
+                alias = f"rs_{parsed.group('metric')}_{parsed.group('window')}_{parsed.group('method')}"
+                stat_joins.append(
+                    f"""LEFT JOIN research_statistics {alias}
+                        ON {alias}.stock_code = {source_table}.stock_code
+                       AND {alias}.metric = '{parsed.group('metric')}'
+                       AND {alias}.window_years = {int(parsed.group('window'))}
+                       AND {alias}.method = '{parsed.group('method')}'
+                       AND {alias}.version = (
+                           SELECT MAX(version) FROM research_statistics rv
+                           WHERE rv.stock_code = {source_table}.stock_code
+                             AND rv.metric = '{parsed.group('metric')}'
+                             AND rv.window_years = {int(parsed.group('window'))}
+                             AND rv.method = '{parsed.group('method')}'
+                       )"""
+                )
+                stat_selects.append(f"{alias}.value AS {self._field_sql_name(field)}")
+            if stat_selects:
+                sql_parts.append(f"""
+, stat_join AS (
+    SELECT {source_table}.*,
+        {', '.join(stat_selects)}
+    FROM {source_table}
+    {''.join(stat_joins)}
+)""")
+                source_table = "stat_join"
+
         # ─── 阶段3: 条件过滤 ────────────────────────────────────
         where_clause, where_params = self._build_where(conditions)
         params.extend(where_params)
@@ -615,9 +667,45 @@ LIMIT {MAX_RESULT_ROWS}
             field in SNAPSHOT_COLUMNS
             or field in NORMALIZED_FIELDS
             or field in METADATA_COLUMNS
+            or field in STAT_FIELDS
             or field in self._custom_fields
             or self._rank_base(field) is not None
         )
+
+    @staticmethod
+    def _collect_stat_fields(
+        conditions: dict,
+        sort_spec: list[dict],
+        columns_spec: list[str],
+        rank_fields: set[str],
+    ) -> set[str]:
+        """收集规则/排序/列/排名中引用的历史统计字段。"""
+        used: set[str] = set()
+
+        def walk(node: dict) -> None:
+            for rule in node.get("rules", []):
+                if "rules" in rule:
+                    walk(rule)
+                    continue
+                field = rule.get("field", "")
+                if field in STAT_FIELDS:
+                    used.add(field)
+                right_field = rule.get("right_field", "")
+                if right_field in STAT_FIELDS:
+                    used.add(right_field)
+
+        if isinstance(conditions, dict):
+            walk(conditions)
+        for sort in sort_spec:
+            if sort.get("field") in STAT_FIELDS:
+                used.add(sort["field"])
+        for column in columns_spec:
+            if column in STAT_FIELDS:
+                used.add(column)
+        for field in rank_fields:
+            if field in STAT_FIELDS:
+                used.add(field)
+        return used
 
     def _published_statement_overrides(self) -> list[tuple[str, str, str, float]]:
         if self.sqlite is None:

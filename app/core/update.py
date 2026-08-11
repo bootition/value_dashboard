@@ -450,7 +450,11 @@ class IncrementalUpdater:
         #    失败保留旧值并进入独立 retry/missing，绝不阻断股票更新/筛选/readiness。
         report_step("treasury_curve", self._refresh_treasury_curve())
 
-        # 5. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
+        # 5. 历史股本链 + 统计域（reports/68 P4）：有界续传；失败不阻断其他步骤
+        report_step("capital_history", self._refresh_capital_history())
+        report_step("research_statistics", self._refresh_research_statistics())
+
+        # 6. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
         self._cleanup_unretryable_tasks()
         self._cleanup_completed_announcement_retries()
         self._resolve_complete_missing_records()
@@ -498,6 +502,49 @@ class IncrementalUpdater:
             ).refresh_if_due()
         except Exception as error:
             logger.warning("国债曲线刷新失败(非致命): %s", error)
+            return {"status": "failed", "error": str(error)}
+
+    def _refresh_capital_history(self) -> dict[str, Any]:
+        """历史股本链有界续传（P4）：每轮最多 20 只上市股票，按代码序。
+
+        自选优先；失败保留旧值 + retry/missing；绝不阻断价格/财务/readiness。
+        """
+        try:
+            from app.core.capital import CapitalHistoryUpdater
+            return CapitalHistoryUpdater(
+                duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+            ).update_all(max_stocks=20)
+        except Exception as error:
+            logger.warning("历史股本链刷新失败(非致命): %s", error)
+            return {"status": "failed", "error": str(error)}
+
+    def _refresh_research_statistics(self) -> dict[str, Any]:
+        """历史统计域重建（P4）：仅当股本链或价格/财务/曲线输入变化时执行。
+
+        以输入指纹为判据避免每轮全量重建；任何异常均不阻断其他步骤。
+        """
+        try:
+            from app.core.statistics import StatisticsBuilder
+            builder = StatisticsBuilder(duck=self.duck, sqlite=self.sqlite)
+            fingerprint = builder._input_fingerprint()
+            rows = self.sqlite.query(
+                "SELECT value FROM data_refresh_state WHERE key = 'research_statistics_fingerprint'"
+            )
+            if rows and rows[0].get("value") == fingerprint:
+                return {"status": "skipped", "reason": "fingerprint_unchanged"}
+            report = builder.rebuild_all()
+            if report["status"] in {"success", "partial"}:
+                with self.sqlite.transaction() as conn:
+                    conn.execute(
+                        """INSERT INTO data_refresh_state (key, value, updated_at)
+                           VALUES ('research_statistics_fingerprint', ?, ?)
+                           ON CONFLICT(key) DO UPDATE SET
+                             value=excluded.value, updated_at=excluded.updated_at""",
+                        [fingerprint, datetime.now(timezone.utc).isoformat()],
+                    )
+            return report
+        except Exception as error:
+            logger.warning("历史统计域重建失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
     def _stale_snapshot_codes(self) -> list[str]:

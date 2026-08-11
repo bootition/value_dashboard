@@ -12,10 +12,10 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+from typing import Any, Literal
 
 from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse
-from typing import Literal
 
 from app.core.pdf.manager import PDFManager
 
@@ -874,6 +874,52 @@ def get_treasury_comparison(
         "series": series,
         "missing": all(item.get("reason") is not None for item in series),
         "provenance": provenance,
+    }
+
+
+@router.get("/{stock_code}/research-statistics")
+def get_research_statistics(
+    stock_code: str,
+    request: Request,
+    metric: Literal["pe_ttm", "pb_mrq", "ttm_dividend_yield", "spread_10y"] = "pe_ttm",
+    window_years: Literal[1, 3, 5, 10, 99] = 10,
+) -> dict:
+    """历史研究统计 (reports/68 P5/P4): 序列 + 窗口聚合统计
+
+    - series: 按价格日升序的研究序列（最新重述回看口径，不用于回测）
+    - statistics: 各窗口聚合（样本数/分位带/μσ/z-score/覆盖/原因码）
+    - 股本缺失日 PE/PB 为 null；窗口不足最小样本或覆盖<90% → reason
+    """
+    from app.core.statistics import (
+        COVERAGE_THRESHOLD_PCT,
+        StatisticsBuilder,
+        WINDOW_MIN_SAMPLES,
+    )
+
+    duck = request.app.state.duck
+    sqlite = request.app.state.sqlite
+    exists = duck.read_query(
+        "SELECT 1 FROM stock_meta WHERE stock_code = ?", [stock_code]
+    )
+    if not exists:
+        raise HTTPException(status_code=404, detail="stock not found")
+
+    builder = StatisticsBuilder(duck=duck, sqlite=sqlite)
+    series = builder.build_series(stock_code)
+    statistics: dict[str, Any] = {}
+    for window in (1, 3, 5, 10, 99):
+        stats = builder.window_stats(
+            series, metric, window, WINDOW_MIN_SAMPLES[window],
+        )
+        statistics[f"{window}y"] = stats
+    return {
+        "stock_code": stock_code,
+        "metric": metric,
+        "window_years": window_years,
+        "series": series,
+        "statistics": statistics,
+        "coverage_threshold_pct": COVERAGE_THRESHOLD_PCT,
+        "disclaimer": "最新重述回看口径：历史日使用该日对应报告期当前最新重述财务值与历史有效总股本，不代表当时市场可见信息，不用于回测",
     }
 
 

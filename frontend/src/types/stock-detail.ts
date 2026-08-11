@@ -274,3 +274,41 @@ export interface TreasuryComparisonResponse {
     readonly confidence: string
   } | null
 }
+
+// ─── Research Statistics（P4，reports/68 §5）───────────────────────────────
+
+export interface ResearchSeriesPoint {
+  readonly price_date: string
+  readonly close: number
+  readonly pe_ttm: number | null
+  readonly pb_mrq: number | null
+  readonly ttm_dividend_yield: number | null
+  readonly spread_10y: number | null
+}
+
+export interface WindowStatistics {
+  readonly samples?: number | null
+  readonly min_date?: string | null
+  readonly max_date?: string | null
+  readonly p10?: number | null
+  readonly p20?: number | null
+  readonly p50?: number | null
+  readonly p80?: number | null
+  readonly max?: number | null
+  readonly mean?: number | null
+  readonly sigma?: number | null
+  readonly zscore?: number | null
+  readonly current?: number | null
+  readonly coverage_pct?: number | null
+  readonly reason?: string | null
+}
+
+export interface ResearchStatisticsResponse {
+  readonly stock_code: string
+  readonly metric: string
+  readonly window_years: number
+  readonly series: readonly ResearchSeriesPoint[]
+  readonly statistics: Record<string, WindowStatistics>
+  readonly coverage_threshold_pct: number
+  readonly disclaimer: string
+}

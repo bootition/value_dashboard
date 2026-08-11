@@ -154,10 +154,27 @@ const TREASURY_COMPARISON = {
   provenance: { source: 'czb_mof', fetch_time: '2026-08-10 12:00:00', raw_hash: 'h', batch_id: 'b1', confidence: 'strict' },
 }
 
+const RESEARCH_STATISTICS = {
+  stock_code: '600519',
+  metric: 'pe_ttm',
+  window_years: 10,
+  series: [
+    { price_date: '2023-01-03', close: 20, pe_ttm: 15.2, pb_mrq: 3.1, ttm_dividend_yield: 1.2, spread_10y: -0.3 },
+    { price_date: '2024-01-02', close: 22, pe_ttm: 16.8, pb_mrq: 3.4, ttm_dividend_yield: 1.4, spread_10y: -0.1 },
+  ],
+  statistics: {
+    '1y': { samples: null, reason: 'insufficient_samples' },
+    '10y': { samples: 150, p10: 10.1, p20: 12.2, p50: 15.9, p80: 18.4, max: 22.5, mean: 15.6, sigma: 2.3, zscore: 0.52, current: 16.8, coverage_pct: 96.5, reason: null },
+  },
+  coverage_threshold_pct: 90,
+  disclaimer: '最新重述回看口径',
+}
+
 function setupAxiosMock(
   payload: Record<string, unknown> | null = null,
   businessOverviewPayload: Record<string, unknown> | null = null,
   treasuryPayload: Record<string, unknown> | null = null,
+  statisticsPayload: Record<string, unknown> | null = null,
 ) {
   const klineRequests: Array<Record<string, unknown>> = []
   const get = axios.get as Mock
@@ -180,6 +197,9 @@ function setupAxiosMock(
     }
     if (url.includes('/treasury-comparison')) {
       return Promise.resolve({ data: treasuryPayload ?? TREASURY_COMPARISON })
+    }
+    if (url.includes('/research-statistics')) {
+      return Promise.resolve({ data: statisticsPayload ?? RESEARCH_STATISTICS })
     }
     if (url.includes('/source-audit')) {
       return Promise.resolve({ data: { field_audit: [], batch_audit: [] } })
@@ -382,5 +402,37 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
 
     const returnText = wrapper.find('#return').text()
     expect(returnText).toContain('暂无国债比较数据')
+  })
+
+  it('估值章节展示历史研究统计（分位带与z-score）', async () => {
+    setupAxiosMock()
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    const valuationText = wrapper.find('#valuation').text()
+    expect(valuationText).toContain('历史研究统计')
+    expect(valuationText).toContain('经验分位带')
+    expect(valuationText).toContain('z-score 0.52')
+    expect(valuationText).toContain('样本 150')
+    expect(valuationText).toContain('最新重述回看')
+  })
+
+  it('股东回报章节基本渲染且统计组件默认股息率序列', async () => {
+    const statisticCalls: Array<Record<string, unknown>> = []
+    setupAxiosMock()
+    const get = axios.get as Mock
+    const original = get.getMockImplementation()
+    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (String(url).includes('/research-statistics')) {
+        statisticCalls.push(config?.params ?? {})
+      }
+      return original?.(url, config)
+    })
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    expect(wrapper.find('#return').text()).toContain('历史研究统计')
+    const defaultMetric = statisticCalls.find((p) => p.metric === 'ttm_dividend_yield')
+    expect(defaultMetric).toBeTruthy()
   })
 })

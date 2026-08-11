@@ -41,6 +41,8 @@ STEP_LABELS: dict[str, str] = {
     "market_actions": "分红除权",
     "business_overview": "业务概览",
     "treasury_curve": "国债曲线",
+    "capital_history": "历史股本",
+    "research_statistics": "历史统计",
     "retries": "失败重试",
 }
 

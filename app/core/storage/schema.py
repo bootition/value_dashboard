@@ -440,6 +440,45 @@ CREATE TABLE IF NOT EXISTS treasury_yield_curve (
 );
 CREATE INDEX IF NOT EXISTS idx_treasury_yield_curve_date
     ON treasury_yield_curve (curve_date);
+
+-- 历史总股本链（P4，reports/68 §3 主链：CNINFO p_stock2215）
+-- 半年/年报期末锚点 + 变动事件共同构成历史骨架；verified 由东财 F10 近邻交叉核验。
+-- 仅用于历史 PE/PB 研究序列，不替代 stock_meta 的当前股本；缺失日 fail-closed。
+CREATE TABLE IF NOT EXISTS share_capital_history (
+    stock_code     VARCHAR NOT NULL,
+    effective_date DATE NOT NULL,     -- 生效日（变动日期或定期报告锚点日）
+    total_shares   DOUBLE NOT NULL,   -- 总股本（股）
+    change_reason  VARCHAR,           -- 变动原因（CN 变动原因简称，锚点为 NULL）
+    is_anchor      BOOLEAN,           -- 是否定期报告期末锚点
+    verified       BOOLEAN,           -- 是否经东财近邻交叉核验无冲突
+    source         VARCHAR NOT NULL,  -- cninfo_capital
+    raw_hash       VARCHAR NOT NULL,
+    batch_id       VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, effective_date)
+);
+CREATE INDEX IF NOT EXISTS idx_share_capital_history_stock
+    ON share_capital_history (stock_code, effective_date);
+
+-- 历史研究统计域（P4，reports/68 §5/§6 独立只读域）
+-- 每股票×序列×窗口×方法一行；staging→原子发布，版本+输入指纹；筛选只能 join 已发布域。
+CREATE TABLE IF NOT EXISTS research_statistics (
+    stock_code       VARCHAR NOT NULL,
+    metric           VARCHAR NOT NULL,   -- pe_ttm / pb_mrq / ttm_dividend_yield / spread_10y
+    window_years     INTEGER NOT NULL,   -- 1/3/5/10/99(全部)
+    method           VARCHAR NOT NULL,   -- percentile / zscore
+    value            DOUBLE,             -- 当前值的历史分位(0-100) 或 z-score
+    samples          INTEGER,            -- 有效样本数
+    coverage_pct     DOUBLE,             -- 有效日 / 有行情日（%）
+    min_date         DATE,
+    max_date         DATE,
+    reason           VARCHAR,            -- 不可用时原因码
+    version          INTEGER NOT NULL,
+    input_fingerprint VARCHAR NOT NULL,
+    published_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, metric, window_years, method, version)
+);
+CREATE INDEX IF NOT EXISTS idx_research_statistics_lookup
+    ON research_statistics (metric, window_years, method, version);
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -756,6 +795,22 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (9, 'Treasury yield curve domain and dividend yield spread columns')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v10: 历史总股本链 + 历史研究统计域（P4，reports/68）
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_share_capital_history_stock "
+            "ON share_capital_history (stock_code, effective_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_research_statistics_lookup "
+            "ON research_statistics (metric, window_years, method, version)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (10, 'Share capital history chain and research statistics domain')
             ON CONFLICT (version) DO NOTHING
             """
         )

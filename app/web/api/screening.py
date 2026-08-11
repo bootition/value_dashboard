@@ -482,7 +482,14 @@ def _attach_result_report_dates(duck: Any, results: list[dict[str, Any]]) -> Non
 @router.get("/indicators")
 def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标"""
-    from app.core.screening.engine import NORMALIZED_FIELDS, SNAPSHOT_COLUMNS, RANKABLE_INDICATORS
+    from app.core.screening.engine import (
+        NORMALIZED_FIELDS,
+        SNAPSHOT_COLUMNS,
+        RANKABLE_INDICATORS,
+        STAT_METRICS,
+        STAT_WINDOWS,
+        STAT_METHODS,
+    )
 
     indicators: list[dict] = []
     for col in sorted(SNAPSHOT_COLUMNS):
@@ -501,6 +508,19 @@ def list_available_indicators(request: Request) -> dict:
             ("sw2_rank", "证监会二级排名"), ("sw2_percentile", "证监会二级分位"),
         ):
             indicators.append({"name": f"{col}_{suffix}", "rankable": False, "label": f"{col} {label}"})
+    # P4 历史研究统计字段（已发布统计域，reports/68 §6）
+    for metric in STAT_METRICS:
+        for window in STAT_WINDOWS:
+            for method in STAT_METHODS:
+                field = f"{metric}_stat_{window}y_{method}"
+                indicators.append({
+                    "name": field,
+                    "rankable": False,
+                    "stat": True,
+                    "metric": metric,
+                    "window_years": window,
+                    "method": method,
+                })
     published = request.app.state.sqlite.query(
         "SELECT name, version, content_hash FROM dsl_expressions WHERE status = 'published' ORDER BY name, version"
     )
