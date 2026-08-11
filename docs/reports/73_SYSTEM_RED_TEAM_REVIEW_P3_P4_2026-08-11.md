@@ -1,9 +1,10 @@
 ---
 title: P3/P4 系统红队审查（国债曲线与利差 + 历史股本链与统计）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-11
-last-reviewed: 2026-08-11
+last-reviewed: 2026-08-12
+superseded-by: reports/74_P3_P4_RED_TEAM_FIX_AND_DATA_COMPLETION_2026-08-12.md
 supersedes:
   - reports/71_TREASURY_CURVE_P3_2026-08-10.md
   - reports/72_CAPITAL_HISTORY_AND_STATISTICS_P4_2026-08-10.md

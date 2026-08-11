@@ -80,7 +80,8 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/70_BUSINESS_OVERVIEW_P2_2026-08-10.md` — 当前业务概览独立低频域与详情展示实施依据
 - `reports/71_TREASURY_CURVE_P3_2026-08-10.md` — 国债曲线与利差 P3 实施事实（PASS 裁决已被 reports/73 更新）
 - `reports/72_CAPITAL_HISTORY_AND_STATISTICS_P4_2026-08-10.md` — 历史股本链与统计 P4 实施事实（PASS 裁决已被 reports/73 更新）
-- `reports/73_SYSTEM_RED_TEAM_REVIEW_P3_P4_2026-08-11.md` — 当前 P3/P4 系统红队审查（NOT PASS）：P1×3、P2×9、P3×15 + 交付缺口与修复优先级
+- `reports/73_SYSTEM_RED_TEAM_REVIEW_P3_P4_2026-08-11.md` — P3/P4 系统红队审查（发现基线，修复与裁决见 reports/74）
+- `reports/74_P3_P4_RED_TEAM_FIX_AND_DATA_COMPLETION_2026-08-12.md` — 当前 P3/P4 修复与正式库补全依据（全部发现关闭，S1 562 全绿）
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新
