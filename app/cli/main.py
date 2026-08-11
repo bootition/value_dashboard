@@ -318,17 +318,21 @@ def data_capital_history(
 @data_app.command("research-statistics")
 def data_research_statistics(
     max_stocks: int = typer.Option(0, "--max-stocks", help="最多构建N只上市股票(0=全部)"),
+    parallel: int = typer.Option(0, "--parallel", help="进程池并行数(0=串行；全量建议8)"),
 ) -> None:
     """历史研究统计域构建与原子发布 (reports/68 P4)
 
     PE/PB/TTM股息率/10年利差 × 1/3/5/10/全部窗口 × 分位/z-score；
     staging → 原子发布；覆盖与最小样本门槛不满足时该字段为 null + 原因码。
+    --parallel: 全量构建可用多进程并行（只读分析，发布仍主进程原子完成）。
     """
     from app.cli.protocol import make_response
     from app.core.statistics import StatisticsBuilder
 
     _, duck, sqlite = _database_context()
-    report = StatisticsBuilder(duck=duck, sqlite=sqlite).rebuild_all(max_stocks=max_stocks)
+    report = StatisticsBuilder(duck=duck, sqlite=sqlite).rebuild_all(
+        max_stocks=max_stocks, parallel=parallel,
+    )
     typer.echo(json.dumps(make_response("data.research-statistics", report), ensure_ascii=False, indent=2, default=str))
 
 

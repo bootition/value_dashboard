@@ -81,7 +81,11 @@ class StatisticsBuilder:
         stock_code: str,
         tenor: float = DEFAULT_TENOR,
     ) -> list[dict[str, Any]]:
-        """构建单股逐价格日的研究序列（内存算法，单股毫秒级）。"""
+        """构建单股逐价格日的研究序列（内存算法）。
+
+        reports/73 修复阶段性能优化：日期一次性预解析为 date 对象，
+        分红预解析并按 ex_date 排序（单指针滑窗，不再逐日全表扫描）。
+        """
         price_rows = self.duck.read_query(
             """SELECT trade_date, close FROM price_daily_raw
                WHERE stock_code = ? AND close IS NOT NULL
@@ -102,11 +106,12 @@ class StatisticsBuilder:
                ORDER BY ic.report_date ASC""",
             [stock_code],
         )
-        ttm_by_report: dict[str, float | None] = {}
-        equity_by_report: dict[str, float | None] = {}
-        report_dates = [str(r["report_date"])[:10] for r in financial_rows]
+        ttm_by_report: dict[date, float | None] = {}
+        equity_by_report: dict[date, float | None] = {}
+        report_dates: list[date] = []
         for index, row in enumerate(financial_rows):
-            rdate = str(row["report_date"])[:10]
+            rdate = date.fromisoformat(str(row["report_date"])[:10])
+            report_dates.append(rdate)
             ttm_by_report[rdate] = self._ttm_profit(financial_rows, index)
             equity_by_report[rdate] = row.get("total_equity_parent")
 
@@ -116,10 +121,10 @@ class StatisticsBuilder:
                WHERE stock_code = ? ORDER BY effective_date""",
             [stock_code],
         )
-        capital_dates = [str(r["effective_date"])[:10] for r in capital_rows]
+        capital_dates = [date.fromisoformat(str(r["effective_date"])[:10]) for r in capital_rows]
         capital_values = [float(r["total_shares"]) for r in capital_rows]
 
-        # 分红
+        # 分红（预解析 + 排序，遍历时按 ex_date 滑窗）
         dividend_rows = self.duck.read_query(
             """SELECT ex_date, announcement_date, dividend_per_share
                FROM dividends
@@ -128,6 +133,13 @@ class StatisticsBuilder:
                ORDER BY ex_date ASC""",
             [stock_code],
         )
+        dividend_ex: list[date] = []
+        dividend_ann: list[date] = []
+        dividend_dps: list[float] = []
+        for row in dividend_rows:
+            dividend_ex.append(date.fromisoformat(str(row["ex_date"])[:10]))
+            dividend_ann.append(date.fromisoformat(str(row["announcement_date"])[:10]))
+            dividend_dps.append(float(row["dividend_per_share"]))
 
         # 国债曲线（tenor）
         curve_rows = self.duck.read_query(
@@ -135,32 +147,49 @@ class StatisticsBuilder:
                WHERE tenor_years = ? ORDER BY curve_date ASC""",
             [tenor],
         )
-        curve_dates = [str(r["curve_date"])[:10] for r in curve_rows]
+        curve_dates = [date.fromisoformat(str(r["curve_date"])[:10]) for r in curve_rows]
         curve_values = [float(r["yield_pct"]) for r in curve_rows]
 
+        ttm_profit_values = [ttm_by_report.get(rd) for rd in report_dates]
+        equity_values = [equity_by_report.get(rd) for rd in report_dates]
+
         series: list[dict[str, Any]] = []
+        div_lo = 0
         for price in price_rows:
-            d = str(price["trade_date"])[:10]
+            d = date.fromisoformat(str(price["trade_date"])[:10])
             close = float(price["close"])
             if close <= 0:
                 continue
 
-            def _latest(pairs_dates: list[str], pairs_values: list[float]) -> float | None:
+            def _latest(pairs_dates: list[date], pairs_values: list[float]) -> float | None:
                 idx = bisect_right(pairs_dates, d) - 1
                 return pairs_values[idx] if idx >= 0 else None
 
             shares = _latest(capital_dates, capital_values)
-            ttm_profit = _latest(report_dates, [ttm_by_report.get(rd) for rd in report_dates])
-            equity = _latest(report_dates, [equity_by_report.get(rd) for rd in report_dates])
+            ttm_profit = _latest(report_dates, ttm_profit_values)
+            equity = _latest(report_dates, equity_values)
             curve = _latest(curve_dates, curve_values)
             if curve is not None:
                 curve_day = curve_dates[bisect_right(curve_dates, d) - 1]
-                if (date.fromisoformat(d) - date.fromisoformat(curve_day)).days > MAX_STALENESS_DAYS:
+                if (d - curve_day).days > MAX_STALENESS_DAYS:
                     curve = None
 
-            ttm_div_yield = self._ttm_div_yield(d, close, dividend_rows)
+            # TTM 分红：ex_date ∈ [d-365, d] 且 announcement <= d（单指针滑窗）
+            cutoff = d - timedelta(days=365)
+            while div_lo < len(dividend_ex) and dividend_ex[div_lo] < cutoff:
+                div_lo += 1
+            total_dps = 0.0
+            found = False
+            for i in range(div_lo, len(dividend_ex)):
+                ex = dividend_ex[i]
+                if ex > d:
+                    break
+                if dividend_ann[i] <= d:
+                    total_dps += dividend_dps[i]
+                    found = True
+            ttm_div_yield = (total_dps / close) * 100.0 if found and close > 0 else None
 
-            item: dict[str, Any] = {"price_date": d, "close": close}
+            item: dict[str, Any] = {"price_date": str(d), "close": close}
             if shares and ttm_profit and ttm_profit > 0:
                 pe = (close * shares) / ttm_profit
                 item["pe_ttm"] = pe if pe <= 1000 else None
@@ -289,10 +318,13 @@ class StatisticsBuilder:
         *,
         max_stocks: int = 0,
         progress_cb: Any = None,
+        parallel: int = 0,
     ) -> dict[str, Any]:
         """为全部（或给定）上市股票构建统计并原子发布。
 
         单写者语义：全量 staging → 校验 → 原子替换 research_statistics。
+        parallel>1 且目标 ≥200 时用进程池并行构建（只读分析；
+        发布仍在主进程原子完成）。
         """
         if stock_codes is None:
             rows = self.duck.read_query(
@@ -306,20 +338,50 @@ class StatisticsBuilder:
         version = self._next_version()
         records: list[dict[str, Any]] = []
         failed: list[str] = []
-        for code in stock_codes:
-            try:
-                series = self.build_series(code)
-                stats = self._stats_for_stock(code, series)
-                for row in stats:
-                    row["version"] = version
-                    row["input_fingerprint"] = fingerprint
-                    row["published_at"] = datetime.now(timezone.utc)
-                records.extend(stats)
-            except Exception as error:
-                logger.warning("构建 %s 历史统计失败: %s", code, error)
-                failed.append(code)
-            if progress_cb is not None:
-                progress_cb(code, {"status": "done"})
+        published_at = datetime.now(timezone.utc)
+
+        def _finish(code: str, stats: list[dict[str, Any]]) -> None:
+            for row in stats:
+                row["version"] = version
+                row["input_fingerprint"] = fingerprint
+                row["published_at"] = published_at
+            records.extend(stats)
+
+        if parallel > 1 and len(stock_codes) >= 200:
+            import concurrent.futures
+
+            with concurrent.futures.ProcessPoolExecutor(
+                max_workers=parallel,
+                initializer=_statistics_worker_init,
+                initargs=(str(self.duck.db_path), str(self.sqlite.db_path)),
+            ) as executor:
+                future_to_code = {
+                    executor.submit(_statistics_worker_build, code): code
+                    for code in stock_codes
+                }
+                for future in concurrent.futures.as_completed(future_to_code):
+                    code = future_to_code[future]
+                    try:
+                        result = future.result()
+                        if result[1] is None:
+                            failed.append(code)
+                        else:
+                            _finish(code, result[1])
+                    except Exception as error:
+                        logger.warning("构建 %s 历史统计失败: %s", code, error)
+                        failed.append(code)
+                    if progress_cb is not None:
+                        progress_cb(code, {"status": "done"})
+        else:
+            for code in stock_codes:
+                try:
+                    series = self.build_series(code)
+                    _finish(code, self._stats_for_stock(code, series))
+                except Exception as error:
+                    logger.warning("构建 %s 历史统计失败: %s", code, error)
+                    failed.append(code)
+                if progress_cb is not None:
+                    progress_cb(code, {"status": "done"})
 
         if not records:
             return {"status": "failed", "reason": "no_records", "failed": failed}
@@ -357,56 +419,135 @@ class StatisticsBuilder:
         stock_code: str,
         series: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
+        """单股全指标×全窗口统计（reports/73 修复阶段性能优化）。
+
+        单次遍历 series 填充所有窗口的值桶（避免每窗口重复遍历）；
+        percentile 用 bisect_right 替代线性计数；覆盖每股一批查询
+        （价格日 + 股本链）后内存滑动计算各窗口，避免 per-window N+1。
+        """
         if not series:
             return []
+        today = date.today()
+        window_starts: dict[int, date | None] = {
+            w: (today.replace(year=today.year - w) if w != 99 else None)
+            for w in WINDOW_YEARS
+        }
+
+        # 覆盖计算输入（每股一次查询，供 PE/PB 窗口门槛）
+        price_day_rows = self.duck.read_query(
+            "SELECT trade_date FROM price_daily_raw "
+            "WHERE stock_code = ? AND close IS NOT NULL ORDER BY trade_date",
+            [stock_code],
+        )
+        capital_rows = self.duck.read_query(
+            "SELECT effective_date, verified FROM share_capital_history "
+            "WHERE stock_code = ? ORDER BY effective_date",
+            [stock_code],
+        )
+        price_days = [str(row["trade_date"])[:10] for row in price_day_rows]
+        capital_days = [str(row["effective_date"])[:10] for row in capital_rows]
+        capital_verified = [bool(row["verified"]) for row in capital_rows]
+
+        def coverage_for(window_years: int) -> float | None:
+            """窗口内 verified 股本延续覆盖（与 _capital_coverage 同口径）。"""
+            if not price_days:
+                return 0.0
+            start = window_starts[window_years]
+            covered = 0
+            total = 0
+            point_index = 0
+            for price_day in price_days:
+                if start is not None and date.fromisoformat(price_day) < start:
+                    continue
+                total += 1
+                while (
+                    point_index + 1 < len(capital_days)
+                    and capital_days[point_index + 1] <= price_day
+                ):
+                    point_index += 1
+                if (
+                    point_index < len(capital_days)
+                    and capital_days[point_index] <= price_day
+                    and capital_verified[point_index]
+                ):
+                    covered += 1
+            return round(covered / total * 100.0, 2) if total else 0.0
+
         records: list[dict[str, Any]] = []
         for metric in STAT_METRICS:
-            for window in WINDOW_YEARS:
-                min_samples = WINDOW_MIN_SAMPLES[window]
-                # P4-3 修复（reports/73）：覆盖按窗口单独计算（窗口内有行情日
-                # 中 verified 股本延续占比），不再用全历史单一覆盖套所有窗口。
-                cap = (
-                    self._capital_coverage(stock_code, window)
-                    if metric in ("pe_ttm", "pb_mrq")
-                    else None
-                )
-                stats = self.window_stats(series, metric, window, min_samples, coverage_pct=cap)
-                if stats.get("reason") is not None:
+            # 单次遍历：按窗口归桶
+            buckets: dict[int, list[float]] = {w: [] for w in WINDOW_YEARS}
+            bucket_dates: dict[int, list[str]] = {w: [] for w in WINDOW_YEARS}
+            current: dict[int, float | None] = {w: None for w in WINDOW_YEARS}
+            for item in series:
+                day = date.fromisoformat(item["price_date"])
+                value = item.get(metric)
+                if value is None:
+                    continue
+                for w in WINDOW_YEARS:
+                    start = window_starts[w]
+                    if start is not None and day < start:
+                        continue
+                    buckets[w].append(float(value))
+                    bucket_dates[w].append(item["price_date"])
+                    current[w] = float(value)
+
+            for w in WINDOW_YEARS:
+                min_samples = WINDOW_MIN_SAMPLES[w]
+                cap = coverage_for(w) if metric in ("pe_ttm", "pb_mrq") else None
+                values = buckets[w]
+                if cap is not None and cap < COVERAGE_THRESHOLD_PCT:
+                    reason: dict[str, Any] = {
+                        "reason": "coverage_below_threshold", "coverage_pct": cap,
+                    }
+                elif len(values) < min_samples:
+                    reason = {
+                        "reason": "insufficient_samples",
+                        "samples": len(values), "min_samples": min_samples,
+                    }
+                else:
+                    reason = None
+
+                if reason is not None:
                     records.append({
                         "stock_code": stock_code, "metric": metric,
-                        "window_years": window, "method": "percentile",
-                        "value": None, "samples": stats.get("samples"),
-                        "coverage_pct": stats.get("coverage_pct"),
-                        "reason": stats.get("reason"),
+                        "window_years": w, "method": "percentile",
+                        "value": None, "samples": reason.get("samples"),
+                        "coverage_pct": reason.get("coverage_pct"),
+                        "reason": reason["reason"],
                     })
                     records.append({
                         "stock_code": stock_code, "metric": metric,
-                        "window_years": window, "method": "zscore",
-                        "value": None, "samples": stats.get("samples"),
-                        "coverage_pct": stats.get("coverage_pct"),
-                        "reason": stats.get("reason"),
+                        "window_years": w, "method": "zscore",
+                        "value": None, "samples": reason.get("samples"),
+                        "coverage_pct": reason.get("coverage_pct"),
+                        "reason": reason["reason"],
                     })
                     continue
-                # percentile = 当前值在窗口内经验分布中的分位（0-100）
-                rank = sum(1 for v in series_values(series, metric, window) if v <= stats["current"])
-                total = stats["samples"]
-                percentile = (rank / total) * 100.0 if total else None
+
+                values_sorted = sorted(values)
+                n = len(values_sorted)
+                mean = statistics.fmean(values_sorted)
+                sigma = statistics.stdev(values_sorted) if n > 1 else 0.0
+                cur = current[w]
+                zscore = (cur - mean) / sigma if cur is not None and sigma > 0 else None
+                # percentile = 当前值 ≤ 窗口内值的占比（bisect 等价线性计数）
+                rank = bisect_right(values_sorted, cur)
+                percentile = (rank / n) * 100.0 if n else None
                 records.append({
                     "stock_code": stock_code, "metric": metric,
-                    "window_years": window, "method": "percentile",
+                    "window_years": w, "method": "percentile",
                     "value": percentile,
-                    "samples": stats["samples"],
-                    "coverage_pct": cap,
-                    "min_date": stats["min_date"], "max_date": stats["max_date"],
+                    "samples": n, "coverage_pct": cap,
+                    "min_date": bucket_dates[w][0], "max_date": bucket_dates[w][-1],
                     "reason": None,
                 })
                 records.append({
                     "stock_code": stock_code, "metric": metric,
-                    "window_years": window, "method": "zscore",
-                    "value": stats["zscore"],
-                    "samples": stats["samples"],
-                    "coverage_pct": cap,
-                    "min_date": stats["min_date"], "max_date": stats["max_date"],
+                    "window_years": w, "method": "zscore",
+                    "value": zscore,
+                    "samples": n, "coverage_pct": cap,
+                    "min_date": bucket_dates[w][0], "max_date": bucket_dates[w][-1],
                     "reason": None,
                 })
         return records
@@ -503,6 +644,40 @@ class StatisticsBuilder:
                 f'INSERT INTO "{staging_table}" ({columns}) VALUES ({placeholders})',
                 [[row.get(col) for col in self._PUBLISH_COLUMNS] for row in records],
             )
+
+
+# ─── 进程池 worker（reports/73 修复阶段：全量重建并行化）──────────────────
+
+_WORKER_STORE: DuckDBStore | None = None
+_WORKER_SQLITE: SQLiteStore | None = None
+
+
+def _statistics_worker_init(duck_path: str, sqlite_path: str) -> None:
+    """进程池 initializer：在工作进程内建立只读 store（Windows spawn 安全）。"""
+    from pathlib import Path
+
+    from app.core.storage.path_policy import DatabasePathSet, VdEnv
+
+    global _WORKER_STORE, _WORKER_SQLITE
+    run_root = Path(duck_path).parent
+    paths = DatabasePathSet(
+        env=VdEnv.FORMAL,
+        duckdb_path=Path(duck_path),
+        sqlite_path=Path(sqlite_path),
+        run_root=run_root,
+    ).validate()
+    _WORKER_STORE = DuckDBStore(paths=paths)
+    _WORKER_SQLITE = SQLiteStore(paths=paths)
+
+
+def _statistics_worker_build(code: str) -> tuple[str, list[dict[str, Any]]] | tuple[str, None, str]:
+    """工作函数：单股 build_series + _stats_for_stock（只读，可 pickle）。"""
+    try:
+        builder = StatisticsBuilder(duck=_WORKER_STORE, sqlite=_WORKER_SQLITE)
+        series = builder.build_series(code)
+        return code, builder._stats_for_stock(code, series)
+    except Exception as error:
+        return code, None, str(error)
 
 
 def series_values(
