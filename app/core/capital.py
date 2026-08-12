@@ -68,6 +68,89 @@ class CapitalHistoryUpdater:
         self.duck = duck
         self.sqlite = sqlite
         self.adapter = adapter or AdapterManager()
+        self._ensure_cross_cache_table()
+
+    # ─── 东财交叉数据本地缓存（reports/74 修复：中断/失败后只续未核验，
+    #     绝不重跑已核验股票，避免反复全量请求东财）───────────────────
+    _CROSS_CACHE_TTL_DAYS = 7  # 东财事件日终低频变化，7 天内复用
+
+    def _ensure_cross_cache_table(self) -> None:
+        try:
+            with self.sqlite.transaction() as conn:
+                conn.execute(
+                    """CREATE TABLE IF NOT EXISTS capital_cross_cache (
+                        stock_code    TEXT PRIMARY KEY,
+                        events_json   TEXT NOT NULL,
+                        verified_points INTEGER NOT NULL,
+                        total_points  INTEGER NOT NULL,
+                        fetched_at    TEXT NOT NULL
+                    )"""
+                )
+        except Exception as e:
+            logger.warning("创建东财交叉缓存表失败: %s", e)
+
+    def _load_cross_cache(
+        self, stock_code: str,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        """返回 (events, fresh)。fresh=False 表示无缓存或已过期（需重新请求）。"""
+        try:
+            rows = self.sqlite.query(
+                "SELECT events_json, fetched_at FROM capital_cross_cache "
+                "WHERE stock_code = ?",
+                [stock_code],
+            )
+        except Exception:
+            return [], False
+        if not rows:
+            return [], False
+        fetched_at = rows[0].get("fetched_at") or ""
+        try:
+            fetched = datetime.fromisoformat(fetched_at)
+        except ValueError:
+            return [], False
+        if (datetime.now(timezone.utc) - fetched).days > self._CROSS_CACHE_TTL_DAYS:
+            return [], False
+        try:
+            events = json.loads(rows[0]["events_json"])
+        except (json.JSONDecodeError, TypeError):
+            return [], False
+        return events, True
+
+    def _save_cross_cache(
+        self,
+        stock_code: str,
+        events: list[dict[str, Any]],
+        verified_points: int,
+        total_points: int,
+    ) -> None:
+        try:
+            with self.sqlite.transaction() as conn:
+                conn.execute(
+                    """INSERT INTO capital_cross_cache
+                       (stock_code, events_json, verified_points, total_points, fetched_at)
+                       VALUES (?, ?, ?, ?, ?)
+                       ON CONFLICT(stock_code) DO UPDATE SET
+                         events_json=excluded.events_json,
+                         verified_points=excluded.verified_points,
+                         total_points=excluded.total_points,
+                         fetched_at=excluded.fetched_at""",
+                    [stock_code, json.dumps(events, ensure_ascii=False),
+                     verified_points, total_points,
+                     datetime.now(timezone.utc).isoformat()],
+                )
+        except Exception as e:
+            logger.warning("保存东财交叉缓存失败: %s", e)
+
+    def _cross_cache_covered(self, stock_code: str) -> bool:
+        """该股票是否已有可复用交叉缓存（用于 due 游标）。"""
+        try:
+            rows = self.sqlite.query(
+                "SELECT 1 FROM capital_cross_cache WHERE stock_code = ?",
+                [stock_code],
+            )
+            return bool(rows)
+        except Exception:
+            return False
 
     # ─── 单股回填 + 交叉核验 ──────────────────────────────────────
 
@@ -105,16 +188,22 @@ class CapitalHistoryUpdater:
         cross_events: list[dict[str, Any]] = []
         cross_status = "unverified"
         if cross_check:
-            cross_result = self.adapter.fetch(FetchRequest(
-                data_type="share_capital_history",
-                stock_codes=[stock_code],
-                extra_params={"cross_source": "eastmoney"},
-            ))
-            if cross_result.metadata.error:
-                cross_status = f"cross_unavailable: {cross_result.metadata.error[:80]}"
-            elif cross_result.data:
-                cross_events = cross_result.data
-                cross_status = "verified"
+            # 优先复用本地缓存（中断/失败后不重复请求东财）
+            cached_events, fresh = self._load_cross_cache(stock_code)
+            if fresh:
+                cross_events = cached_events
+                cross_status = "cached"
+            else:
+                cross_result = self.adapter.fetch(FetchRequest(
+                    data_type="share_capital_history",
+                    stock_codes=[stock_code],
+                    extra_params={"cross_source": "eastmoney"},
+                ))
+                if cross_result.metadata.error:
+                    cross_status = f"cross_unavailable: {cross_result.metadata.error[:80]}"
+                elif cross_result.data:
+                    cross_events = cross_result.data
+                    cross_status = "verified"
 
         rows = self._verify_and_build(stock_code, result.data, cross_events)
         if not rows:
@@ -123,6 +212,14 @@ class CapitalHistoryUpdater:
                 "status": "failed", "stock_code": stock_code,
                 "reason": "no_valid_records", "retained": True,
             }
+
+        verified_points = sum(1 for r in rows if r.get("verified"))
+        if cross_check and cross_events:
+            # 核验结果立即落盘（无论主链是否成功，交叉数据都值得缓存；
+            # 主链成功后缓存避免未来重跑）
+            self._save_cross_cache(
+                stock_code, cross_events, verified_points, len(rows),
+            )
 
         batch_id = uuid.uuid4().hex
         raw_material = json.dumps(
@@ -299,7 +396,12 @@ class CapitalHistoryUpdater:
         return self.update_many(codes, cross_check=cross_check)
 
     def _due_stock_codes(self) -> list[str]:
-        """上市股票中股本链缺失或落后于价格史的部分（P4-2，参照 business.py）。"""
+        """上市股票中"主链缺失/陈旧 或 无交叉核验缓存"的部分（续传游标）。
+
+        P4-2 修复：只处理缺失/陈旧的股票，已成功的股票下一轮自然不再入选。
+        交叉核验缓存落盘后（capital_cross_cache），已核验股票也不再入选，
+        中断/失败后恢复只续未完成部分，绝不重跑已核验股票。
+        """
         rows = self.duck.read_query(
             """SELECT m.stock_code
                FROM stock_meta m
@@ -317,7 +419,17 @@ class CapitalHistoryUpdater:
                           p.latest_price, CURRENT_DATE - INTERVAL '7 days'))
                ORDER BY (h.stock_code IS NULL) DESC, m.stock_code"""
         )
-        return [row["stock_code"] for row in rows]
+        # 过滤掉已有交叉缓存（verified 已完成）的股票——一次性查询避免 N+1
+        try:
+            cached_rows = self.sqlite.query(
+                "SELECT stock_code FROM capital_cross_cache"
+            )
+            cached_codes = {row["stock_code"] for row in cached_rows}
+        except Exception:
+            cached_codes = set()
+        due = [code for code in [row["stock_code"] for row in rows]
+               if code not in cached_codes]
+        return due
 
     def _listed_stock_codes(self) -> list[str]:
         rows = self.duck.read_query(

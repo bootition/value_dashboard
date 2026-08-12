@@ -186,6 +186,51 @@ def test_cross_check_agreement_verifies_chain(
     assert rows[1]["verified"] is True
 
 
+def test_cross_cache_reused_and_skips_eastmoney(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """reports/74 修复：交叉核验结果落盘后，重跑不再请求东财（绝不重跑已核验）。"""
+    _seed_stock(duckdb_store)
+    main = [
+        {"effective_date": "2021-06-30", "total_shares": 1250000000.0, "change_reason": None, "is_anchor": True},
+        {"effective_date": "2022-12-31", "total_shares": 1256000000.0, "change_reason": "增发", "is_anchor": False},
+    ]
+    cross = [
+        {"effective_date": "2022-12-31", "total_shares": 1256000000.0, "change_reason": "增发", "is_anchor": False},
+    ]
+    fake = _FakeCapitalAdapter(main=main, cross=cross)
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_stock("600519")
+    assert report["status"] == "success"
+    assert report.get("cross_status") == "verified"
+    assert len(fake.calls) == 2  # 主链 + 东财各一次
+
+    # 缓存已写入；再次 update_stock 直接复用缓存，不再请求东财
+    # （主链仍刷新一次，这是预期；东财交叉请求必须为零新增）
+    cross_calls = [c for c in fake.calls if c.get("cross_source") == "eastmoney"]
+    assert len(cross_calls) == 1, "已缓存股票不得再请求东财"
+    report2 = updater.update_stock("600519")
+    assert report2["status"] == "success"
+    assert report2.get("cross_status") == "cached"
+    cross_calls = [c for c in fake.calls if c.get("cross_source") == "eastmoney"]
+    assert len(cross_calls) == 1, "已缓存股票不得再请求东财"
+
+    # due 游标：已缓存股票不再入选
+    fake.calls.clear()
+    report_all = updater.update_all(max_stocks=20)
+    assert report_all.get("status") in ("skipped", "success")
+    assert fake.calls == [], "已缓存股票不得进入 due 重跑"
+
+    # 缓存过期后重新请求（TLT 7 天）
+    sqlite_store.execute(
+        "UPDATE capital_cross_cache SET fetched_at = ? WHERE stock_code = '600519'",
+        [(datetime.now(timezone.utc) - timedelta(days=8)).isoformat()],
+    )
+    report3 = updater.update_stock("600519")
+    assert report3.get("cross_status") == "verified"
+
+
 def test_main_chain_failure_preserves_old_values_and_retry(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
