@@ -566,14 +566,11 @@ def test_update_all_uses_due_cursor(
     assert rows and rows[0]["stock_code"] == "600000"
 
 
-def test_coverage_per_window_uses_verified_chain(
+def test_coverage_per_window_uses_main_chain(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    """P4-3/P4-6：覆盖按窗口计算且只认 verified 延续。
-
-    价格历史早于股本链首点的老股：10 年窗口覆盖不足，但 1 年窗口
-    （股本已覆盖）仍可出统计；unverified 点不计覆盖。
-    """
+    """P4-3 + 2026-08-12 决策：覆盖按窗口计算，口径为 CNINFO 主链存在
+    （verified 仅披露，不阻断）；unverified 点仍计覆盖。"""
     _seed_statistics_inputs(duckdb_store, sqlite_store)
     # 股本链 2025-08-01 起（窗口起点前）：1 年窗口全覆盖，全历史（2022 起价格）覆盖不足
     duckdb_store.write_query(
@@ -599,11 +596,11 @@ def test_coverage_per_window_uses_verified_chain(
     assert stats_99y["reason"] == "coverage_below_threshold"
     assert stats_1y.get("reason") is None
 
-    # unverified 主链点不计覆盖
+    # 2026-08-12 决策：主链口径——unverified 点仍计覆盖（校验后续补强）
     duckdb_store.write_query(
         """UPDATE share_capital_history SET verified = false WHERE stock_code = '600519'"""
     )
-    assert builder._capital_coverage("600519", 1) == 0.0
+    assert builder._capital_coverage("600519", 1) == 100.0, "主链存在即覆盖（verified 仅披露）"
 
 
 def test_publish_columns_fixed_when_first_record_is_reason(

@@ -446,10 +446,14 @@ class StatisticsBuilder:
         )
         price_days = [str(row["trade_date"])[:10] for row in price_day_rows]
         capital_days = [str(row["effective_date"])[:10] for row in capital_rows]
-        capital_verified = [bool(row["verified"]) for row in capital_rows]
 
         def coverage_for(window_years: int) -> float | None:
-            """窗口内 verified 股本延续覆盖（与 _capital_coverage 同口径）。"""
+            """窗口内主链股本延续覆盖。
+
+            2026-08-12 决策（用户）：PE/PB 统计先行按 CNINFO 主链口径可用
+            （主链点存在即覆盖），东财交叉核验（verified）后续补强；
+            verified 仅作披露，不再阻断统计发布。
+            """
             if not price_days:
                 return 0.0
             start = window_starts[window_years]
@@ -468,7 +472,6 @@ class StatisticsBuilder:
                 if (
                     point_index < len(capital_days)
                     and capital_days[point_index] <= price_day
-                    and capital_verified[point_index]
                 ):
                     covered += 1
             return round(covered / total * 100.0, 2) if total else 0.0
@@ -553,11 +556,11 @@ class StatisticsBuilder:
         return records
 
     def _capital_coverage(self, stock_code: str, window_years: int = 99) -> float:
-        """窗口内有行情日的股本可验证覆盖（P4-3/P4-6 修复，reports/73）。
+        """窗口内有行情日的主链股本覆盖。
 
-        口径（PRD §8.4 / reports/68 §3.5）：窗口内每个有行情日，取 ≤当日
-        最新主链点；该点存在且 verified 才算覆盖（只有来源明确持续有效的
-        区间才可延续）。按窗口计算，不再用全历史覆盖套所有窗口。
+        2026-08-12 决策（用户）：PE/PB 统计先行按 CNINFO 主链口径可用
+        （主链点存在即覆盖）；东财交叉核验（verified）后续补强，
+        verified 仅作披露，不再阻断覆盖判定。
         """
         window_start = None
         if window_years != 99:
@@ -575,7 +578,7 @@ class StatisticsBuilder:
         if not price_rows:
             return 0.0
         capital_rows = self.duck.read_query(
-            """SELECT effective_date, verified FROM share_capital_history
+            """SELECT effective_date FROM share_capital_history
                WHERE stock_code = ? ORDER BY effective_date""",
             [stock_code],
         )
@@ -593,7 +596,6 @@ class StatisticsBuilder:
             if (
                 point_index < len(capital_rows)
                 and str(capital_rows[point_index]["effective_date"])[:10] <= price_day
-                and bool(capital_rows[point_index]["verified"])
             ):
                 covered += 1
         return round(covered / len(price_rows) * 100.0, 2)

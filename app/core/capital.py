@@ -466,10 +466,11 @@ class CapitalHistoryUpdater:
     # ─── 覆盖核验（只读） ─────────────────────────────────────────
 
     def coverage_report(self, stock_code: str, window_years: int = 10) -> dict[str, Any]:
-        """窗口内有行情交易日的历史股本可验证覆盖（reports/68 §3.5）。
+        """窗口内有行情交易日的历史股本覆盖（与 statistics.coverage_for 同口径）。
 
-        P4-6 修复（reports/73）：真实计算"窗口内被 verified 主链点延续覆盖的
-        价格日占比"，不再有记录即报 100%；与 statistics._capital_coverage 同口径。
+        2026-08-12 决策（用户）：PE/PB 统计先行按 CNINFO 主链口径可用
+        （主链点存在即覆盖）；verified（东财交叉）仅作披露字段，
+        不再阻断覆盖判定。
         """
         start = date.today().replace(year=date.today().year - window_years).isoformat()
         price_rows = self.duck.read_query(
@@ -498,7 +499,6 @@ class CapitalHistoryUpdater:
             if (
                 point_index < len(history)
                 and str(history[point_index]["effective_date"])[:10] <= price_day
-                and bool(history[point_index]["verified"])
             ):
                 covered += 1
         verified_points = sum(1 for h in history if h["verified"])
