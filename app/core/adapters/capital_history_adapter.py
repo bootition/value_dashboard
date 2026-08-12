@@ -188,17 +188,19 @@ class CapitalHistoryAdapter(BaseAdapter):
         rows: list[dict[str, Any]] = []
         if df is None or df.empty:
             return rows
+        # 东财列名可能因编码问题乱码，用列索引访问：
+        # 0=变动日期, 1=总股本, 8=变动原因
         for _, record in df.iterrows():
-            effective = _parse_date(record.get("变动日期"))
+            effective = _parse_date(record.iloc[0] if len(record) > 0 else None)
             if not effective:
                 continue
             try:
-                total = float(record.get("总股本"))
+                total = float(record.iloc[1] if len(record) > 1 else 0)
             except (TypeError, ValueError):
                 continue
             if total <= 0:
                 continue
-            reason = str(record.get("变动原因") or "").strip()
+            reason = str(record.iloc[8] if len(record) > 8 else "").strip()
             rows.append({
                 "stock_code": stock_code,
                 "effective_date": effective,
