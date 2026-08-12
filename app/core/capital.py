@@ -398,9 +398,10 @@ class CapitalHistoryUpdater:
     def _due_stock_codes(self) -> list[str]:
         """上市股票中"主链缺失/陈旧 或 无交叉核验缓存"的部分（续传游标）。
 
-        P4-2 修复：只处理缺失/陈旧的股票，已成功的股票下一轮自然不再入选。
-        交叉核验缓存落盘后（capital_cross_cache），已核验股票也不再入选，
-        中断/失败后恢复只续未完成部分，绝不重跑已核验股票。
+        P4-2 修复：主链按价格史判定陈旧；交叉核验缓存落盘后
+        （capital_cross_cache），已核验股票不再入选。due = 主链 due ∪ 无缓存，
+        保证"主链已全量但缓存为空"时交叉核验仍会执行；一旦缓存写入，
+        中断/失败后恢复只续未核验部分，绝不重跑已核验股票。
         """
         rows = self.duck.read_query(
             """SELECT m.stock_code
@@ -419,7 +420,13 @@ class CapitalHistoryUpdater:
                           p.latest_price, CURRENT_DATE - INTERVAL '7 days'))
                ORDER BY (h.stock_code IS NULL) DESC, m.stock_code"""
         )
-        # 过滤掉已有交叉缓存（verified 已完成）的股票——一次性查询避免 N+1
+        main_due = [row["stock_code"] for row in rows]
+
+        # 无交叉缓存 → 也入选（确保交叉核验执行）
+        listed_rows = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE"
+        )
+        listed = [row["stock_code"] for row in listed_rows]
         try:
             cached_rows = self.sqlite.query(
                 "SELECT stock_code FROM capital_cross_cache"
@@ -427,8 +434,9 @@ class CapitalHistoryUpdater:
             cached_codes = {row["stock_code"] for row in cached_rows}
         except Exception:
             cached_codes = set()
-        due = [code for code in [row["stock_code"] for row in rows]
-               if code not in cached_codes]
+        no_cache = [code for code in listed if code not in cached_codes]
+
+        due = list(dict.fromkeys([*main_due, *no_cache]))
         return due
 
     def _listed_stock_codes(self) -> list[str]:

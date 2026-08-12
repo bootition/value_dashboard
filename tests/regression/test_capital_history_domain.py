@@ -216,11 +216,20 @@ def test_cross_cache_reused_and_skips_eastmoney(
     cross_calls = [c for c in fake.calls if c.get("cross_source") == "eastmoney"]
     assert len(cross_calls) == 1, "已缓存股票不得再请求东财"
 
-    # due 游标：已缓存股票不再入选
+    # 补价格，使主链不"陈旧"：有缓存 + 主链新鲜 → 不再入选 due
+    _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
+    # 主链最新点也推进到价格日（避免"主链陈旧"再次入选）
+    duckdb_store.write_query(
+        """INSERT INTO share_capital_history
+           (stock_code, effective_date, total_shares, change_reason, is_anchor,
+            verified, source, raw_hash, batch_id)
+           VALUES ('600519', '2026-08-07', 1256000000.0, NULL, true, true,
+                   'cninfo_capital', 'x', 'b1')"""
+    )
     fake.calls.clear()
     report_all = updater.update_all(max_stocks=20)
-    assert report_all.get("status") in ("skipped", "success")
-    assert fake.calls == [], "已缓存股票不得进入 due 重跑"
+    assert report_all.get("status") == "skipped"
+    assert fake.calls == [], "已缓存且主链新鲜的股票不得进入 due 重跑"
 
     # 缓存过期后重新请求（TLT 7 天）
     sqlite_store.execute(
@@ -525,9 +534,17 @@ def test_update_all_uses_due_cursor(
     """P4-2：update_all 只处理缺失/陈旧的上市股票（真正的续传游标）。"""
     _seed_stock(duckdb_store, "600519")
     _seed_stock(duckdb_store, "600000")
-    # 600519 已有覆盖到 2026-08-07 的股本链 + 价格 → 非 due
+    # 600519 已有覆盖到 2026-08-07 的股本链 + 价格 + 交叉缓存 → 非 due
     _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
     _seed_capital(duckdb_store, "600519", [(date(2026, 8, 7), 943800000.0)])
+    # 构造 updater 以建缓存表，然后写入 600519 的交叉缓存
+    _updater(duckdb_store, sqlite_store, _FakeCapitalAdapter(main=[], cross=[]))
+    sqlite_store.execute(
+        """INSERT INTO capital_cross_cache
+           (stock_code, events_json, verified_points, total_points, fetched_at)
+           VALUES ('600519', '[]', 1, 1, ?)""",
+        [datetime.now(timezone.utc).isoformat()],
+    )
     # 600000 有价格但无股本链 → due
     _seed_price(duckdb_store, "600000", date(2026, 8, 7), 10.0)
 
