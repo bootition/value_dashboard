@@ -51,6 +51,23 @@ def _wait_for_real_summary(client, timeout: float = 5.0) -> dict | None:
     return None
 
 
+def _unlink_with_retry(lock_path, attempts: int = 40, delay: float = 0.05) -> None:
+    """Unlink a lock file tolerating transient Windows sharing races.
+
+    后台 summary 刷新线程可能在 finally 的 unlink 瞬间正在读取锁文件
+    （_update_write_lock_active → read_text），Windows 上偶发
+    PermissionError(WinError 32)（reports/79 构建门禁两度撞见）。重试
+    2 秒覆盖线程完成读写的窗口。
+    """
+    for _ in range(attempts):
+        try:
+            lock_path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(delay)
+    lock_path.unlink(missing_ok=True)
+
+
 def test_summary_first_request_returns_placeholder_and_background_refreshes(
     database_paths: DatabasePathSet, monkeypatch,
 ) -> None:
@@ -85,7 +102,7 @@ def test_summary_serves_stale_while_update_lock_active(
         assert second.status_code == 200
         assert second.json().get("stale") is True
     finally:
-        lock_path.unlink(missing_ok=True)
+        _unlink_with_retry(lock_path)
 
 
 def test_summary_reuses_cache_until_ttl_expires(
@@ -126,7 +143,7 @@ def test_summary_expired_cache_served_while_lock_active_without_rebuild(
     try:
         response = client.get("/api/data-status/summary")
     finally:
-        lock_path.unlink(missing_ok=True)
+        _unlink_with_retry(lock_path)
     assert response.status_code == 200
     assert response.json()["stale"] is True
     assert built["n"] <= 1, "后台刷新 single-flight，最多构建一次"
@@ -143,7 +160,7 @@ def test_dead_update_lock_does_not_mark_summary_stale(
         first = client.get("/api/data-status/summary")
         assert first.status_code == 200
     finally:
-        lock_path.unlink(missing_ok=True)
+        _unlink_with_retry(lock_path)
     # 死锁不视为写锁：后台刷新完成后返回真实 summary，不标 stale
     refreshed = _wait_for_real_summary(client)
     assert refreshed is not None
@@ -168,7 +185,7 @@ def test_live_update_lock_without_cache_returns_placeholder_not_full_build(
     try:
         response = client.get("/api/data-status/summary")
     finally:
-        lock_path.unlink(missing_ok=True)
+        _unlink_with_retry(lock_path)
     assert response.status_code == 200
     body = response.json()
     assert body.get("stale") is True

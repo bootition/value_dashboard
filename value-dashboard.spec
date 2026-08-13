@@ -85,7 +85,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=True,
-    icon=None,
+    icon=os.path.join(PROJECT_ROOT, 'resources', 'app-icon.ico'),
 )
 
 coll = COLLECT(
