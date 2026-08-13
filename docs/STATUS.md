@@ -4,11 +4,11 @@
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-08-13
-- **更新人**：opencode 会话（东财交叉核验补全，STATUS 缺口 #7 关闭）
+- **更新人**：opencode 会话（红队全面审查 BLOCK 修复闭环，reports/76→77）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
-| 整体启用 | ✅ **PASS / 可正式研究**：正式库 readiness ready=true、warning_codes=[]；retry 与 missing 未解决项清零；服务保持自动更新 enabled；2026-08-09 红队 P2 风险全部关闭 | `reports/64`（数据状态见 `reports/62`） |
+| 整体启用 | ✅ **PASS / 可正式研究**：2026-08-13 红队全面审查 BLOCK（更新窗口核心研究链路失效）已修复关闭；S1 586、Ruff、前端门禁全绿；真实服务更新窗口实测 indicators 0.1s / treasury 0.2s / screening 409 即时 | `reports/77`（发现基线 `reports/76`） |
 | 国债基准与历史统计 | ✅ 需求与可行性门禁通过：财政部曲线独立域、默认10年期、TTM股息率利差、统计型筛选；不做逐券债券投资、提示或结论 | `reports/68`（2026-08-10） |
 | 个股研究工作台 P1 | ✅ 驾驶舱、四组摘要、纵向章节、粘性目录、日/周/月研究型 K 线和全局偏好已实施；S1 490、Ruff、前端门禁全绿 | `reports/69`（2026-08-10） |
 | 业务概览 P2 | ✅ 独立低频域、东财 F10 适配器、保旧值/retry/missing、详情接入已实施；20股探测沪深18/18可用，北交所2只如实 missing；S1 516、前端门禁全绿 | `reports/70`（2026-08-10） |
@@ -34,13 +34,15 @@
 5. **P1-P4 新域待正式库推进**：业务概览、国债曲线、历史股本链与统计域均未在正式库全量回填；启动自动更新将有界续传（业务概览 20 只/轮、股本链 20 只/轮、统计域按输入指纹原子重建）。东财交叉源偶发风控期间主链独立成立但 verified=false。
 6. **P3/P4 红队已修复（`reports/74`，2026-08-12）**：reports/73 全部 P1/P2/P3 与交付缺口关闭，S1 562 全绿。**剩余约束**：① CNINFO 源风控冷却中（约 4,700 只股本链待续传，PE/PB 统计按覆盖门槛如实缺失；自动更新有界续传+retry 消费，无需干预）；② 2026-08-12 当日国债曲线未发布（合法缺失，次日自动补齐）；③ 统计域构建 partial（新股/无价格股票如实无记录，指纹变化后自动重建）。
 7. **东财交叉核验已补全（2026-08-13 关闭，见 `reports/75`）**：① `cross_status`/`error` 落盘缓存表（失败含原因可见）；② 批 50 + 冷却 30-60s 安全组合（探测 150 连发无风控、全量约 5,400 次请求 0 风控）；③ 批次审查固化进 `--check-only` 审计视图；④ 收紧评估完成，**用户决策：维持主链口径 + verified 披露**。正式库结果：沪深 5,207 只全部交叉核验（链上 203,149 verified 点/5,175 只）、北交所 334 只如实无交叉源、002731 主链缺失披露。过程中修复 P1 根因：vd.bat/start.bat 改用项目 venv（系统 akshare 1.18.64 无 SECUCODE 归一化且截断 20 条）；北交所不再请求东财（防熔断殃及沪深）。
+8. **红队 BLOCK 修复闭环（2026-08-13，见 `reports/77`）**：更新窗口核心研究链路失效（P1：indicators 43-67s/500、treasury >60s、screening 500/74s、全遮蔽）已修复——DuckDB 连接指数退避、warning codes stale-while-revalidate、treasury 批量查询、筛选门禁写锁 409；P3×6（qfq 负值披露、staging 表清理、/api 404、规则字段校验、assets 清理、watchlist 行数）关闭；**环境修复**：`.venv` 补齐 akshare 1.18.81/baostock/easy-tdx（此前 `uv sync --locked` 不含 extras，akshare 依赖的数据源在用户路径不可用）、ruff 0.16 默认规则集变更已显式锁定传统集（E4/E7/E9/F）。**遗留观察**：`test_dead_update_lock_does_not_mark_summary_stale` 完整 S1 中偶发 WinError 32（既有测试时序竞态，单跑/重跑均通过）；更新中断中间态（价格已更新、快照未重建）下 readiness=false 为真实状态。
 ## 进行中的工作
 - **东财交叉核验已全量完成（2026-08-13）**：沪深 5,207 只全部核验、北交所 334 只无交叉源如实记录、error 行 0；见 `reports/75`。
-- **CNINFO 股本链续传**：主链 5,541 只已全量落盘；仅 002731（*ST萃华）因 CNINFO 源最新锚点陈旧 fail-closed 保留 retry（如实披露）。
-- **自动更新保持 enabled**：服务每轮启动自动执行增量更新；价格已补齐至 2026-08-11。
+- **红队 BLOCK 修复已闭环（2026-08-13）**：P1×4 + P3×6 + 环境修复 N1/N2 全部落地，S1 586 全绿，更新窗口实测达标；见 `reports/77`。
+- **CNINFO 股本链续传**：主链 5,541 只已全量落盘；仅 002731（*ST萃华）因 CNINFO 源最新锚点陈旧 fail-closed 保留 retry（如实披露）；CNINFO 风控冷却期续传由自动更新有界推进。
+- **自动更新保持 enabled**：服务每轮启动自动执行增量更新；价格已补齐至 2026-08-11，08-12 已补 1,554 只（两轮启动累积），后续轮次有界续传；akshare 1.18.81 已补齐至项目 venv。
 - **东财行情源冷却**：push2/push2his 封锁冷却期至 2026-08-15（期间勿触碰）；到期后单次探测，恢复后限速 ≤2 req/s、并发 ≤5。
 - **待办**：CNINFO 分红 ex_date 修复评估（见已知缺口 #4）。
-- **已完结**：P1-P4 全部实施；P3/P4 系统红队发现全部修复（见 `reports/73/74`）；东财交叉核验补全（`reports/75`）。
+- **已完结**：P1-P4 全部实施；P3/P4 系统红队发现全部修复（见 `reports/73/74`）；东财交叉核验补全（`reports/75`）；红队全面审查 BLOCK 修复（`reports/76/77`）。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
@@ -92,6 +94,8 @@
 | `docs/reports/73_SYSTEM_RED_TEAM_REVIEW_P3_P4_2026-08-11.md` | P3/P4 系统红队审查（发现基线：P1×3、P2×9、P3×15 + 交付缺口） | **发现基线；修复与裁决见 `reports/74`** |
 | `docs/reports/74_P3_P4_RED_TEAM_FIX_AND_DATA_COMPLETION_2026-08-12.md` | **P3/P4 修复与正式库补全（当前裁决）**：全部发现关闭、S1 562 全绿、国债/快照/统计/价格补全、CNINFO 续传约束 | **当前 P3/P4 状态唯一依据** |
 | `docs/reports/75_CROSS_VERIFICATION_COMPLETION_2026-08-13.md` | **东财交叉核验补全（STATUS 缺口 #7 关闭）**：4 项待办全部落地、沪深 5,207 只全量核验、vd.bat venv 根因修复、统计域口径用户决策 | **当前交叉核验与核验披露依据** |
+| `docs/reports/76_SYSTEM_RED_TEAM_USER_FLOW_REVIEW_2026-08-13.md` | 系统红队全面审查发现基线（BLOCK：更新窗口核心研究链路失效 + 6 项 P3） | **发现基线；裁决已被 `reports/77` 更新为 PASS** |
+| `docs/reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md` | **红队 BLOCK 修复与验收（当前裁决）**：P1×4 + P3×6 + 环境发现 N1/N2 全部关闭，S1 586 全绿、更新窗口实测达标 | **当前整体可用性与修复唯一依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
@@ -123,6 +127,7 @@
 - `reports/71`（国债曲线与利差 P3 实施 PASS）→ **实施事实保留；PASS 裁决被 `reports/73` 更新为 NOT PASS**（2026-08-11 系统红队）。
 - `reports/72`（历史股本链与统计 P4 实施 PASS）→ **实施事实保留；PASS 裁决被 `reports/73` 更新为 NOT PASS**（2026-08-11 系统红队）。
 - `reports/73`（P3/P4 系统红队 NOT PASS）→ **发现基线保留；全部发现已由 `reports/74` 修复关闭**（2026-08-12）。
+- `reports/76`（系统红队全面审查 BLOCK）→ **发现基线保留；BLOCK 裁决已被 `reports/77` 更新为 PASS**（2026-08-13 修复闭环）。
 - 更早编号报告（05–24、26）→ 全部 superseded，仅作追溯证据。
 ## 维护规则（写文档的人必须遵守）
 1. **状态变化时**：更新本文件 → 将旧报告 front-matter 的 `status` 改为 `superseded` 并写 `superseded-by` → 新报告/文档必须带 front-matter 且 `status: approved`。
