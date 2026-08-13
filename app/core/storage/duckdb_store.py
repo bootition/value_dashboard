@@ -74,22 +74,33 @@ class DuckDBStore:
 
         open-per-query 模式：DuckDB 嵌入式打开开销 ~1ms，
         不持有长期连接，避免阻塞 CLI 写操作。
+
+        竞态（reports/76 P1-1）：Windows 上写线程持事务期间，另一线程
+        connect 可能短暂失败 "file already open"（同进程亦可能，DuckDB
+        平台特性）。固定 5×0.5s 重试在批量写事务（数秒级）前必然耗尽。
+        此处改为指数退避（0.25s 起，3s 封顶，共 12 次，约 28s 窗口），
+        写锁活跃时另加 2s 基础等待，骑跨批量写事务而非让调用方 500。
         """
         self._revalidate()
-        # DuckDB requires every connection to the same file in one process to
-        # use the same configuration. Startup updates use default read/write
-        # connections, so a read_only connection would fail while they run.
-        # On Windows, concurrent connects from another thread while a writer
-        # is mid-transaction can transiently fail with "file already open";
-        # retry briefly to ride over the race instead of failing the caller.
         last_error: Exception | None = None
-        for attempt in range(5):
+        lock_active = False
+        try:
+            from app.core.storage.update_lock import update_lock_active
+
+            lock_active = update_lock_active(self._db_path)
+        except Exception:
+            lock_active = False
+        attempts = 12
+        for attempt in range(attempts):
             try:
                 conn = duckdb.connect(str(self._db_path))
             except Exception as error:
                 last_error = error
-                if attempt < 4:
-                    time.sleep(0.5)
+                base_delay = 0.25 * (2 ** min(attempt, 4))
+                delay = min(base_delay, 3.0)
+                if lock_active and attempt == 0:
+                    delay += 2.0
+                time.sleep(delay)
                 continue
             try:
                 yield conn

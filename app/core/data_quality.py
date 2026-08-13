@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
+import logging
+import threading
 import time
+from datetime import date, datetime, timedelta, timezone
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MINIMUM_HISTORY_OBSERVATIONS = 1_300
 DEFAULT_MINIMUM_VOLUME_OBSERVATIONS = 1_300
@@ -752,6 +756,9 @@ def mask_untrusted_values(values: dict, trust: dict) -> dict:
 
 _WARNING_CODES_CACHE_TTL_SECONDS = 30.0
 _warning_codes_cache: dict[str, tuple[float, list[str]]] = {}
+# reports/76 P1-2 增强：TTL 过期后不阻塞请求——返回 stale 结果并后台单飞重建
+_warning_codes_refresh_lock = threading.Lock()
+_warning_codes_refreshing: set[str] = set()
 
 
 def read_warning_codes(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
@@ -759,8 +766,22 @@ def read_warning_codes(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
 
     The full status build re-verifies readiness across the whole pool; hot
     read paths (stock indicators, watchlist) reuse the process-local result
-    for a short TTL instead of rebuilding it per request. Fail closed: a
-    build failure reports LINEAGE_INVALID, and failures are never cached.
+    instead of rebuilding it per request. Fail closed: a build failure
+    reports LINEAGE_INVALID, and failures are never cached.
+
+    Write-lock awareness (reports/76 P1-2): while the auto-update writer
+    holds the DuckDB file, the full build (3,280 万行 source_audit 扫描 +
+    全市场一致性子查询) would take 40~60s or fail with file-open races.
+    During that window we serve the last idle-time result when present and
+    otherwise skip the rebuild entirely (return []); callers detect the
+    window via update_lock_active and label responses with
+    auto_update_in_progress instead of blocking. Integrity is preserved:
+    screening is separately gated, and the next idle build restores exact
+    codes within one TTL.
+
+    Stale-while-revalidate: an expired cache returns the previous result
+    immediately and rebuilds in a single-flight background thread, so hot
+    paths never wait for a 20~60s full-universe scan.
     """
     cache_key = f"{duck.db_path}|{sqlite.db_path}"
     now = time.monotonic()
@@ -768,11 +789,52 @@ def read_warning_codes(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
     if cached is not None and now - cached[0] < _WARNING_CODES_CACHE_TTL_SECONDS:
         return list(cached[1])
     try:
+        from app.core.storage.update_lock import update_lock_active
+
+        if update_lock_active(duck.db_path):
+            if cached is not None:
+                return list(cached[1])
+            return []
+    except Exception:
+        pass
+    if cached is not None:
+        _ensure_warning_codes_refresh(duck, sqlite, cache_key)
+        return list(cached[1])
+    try:
         warning_codes = list(build_data_quality_status(duck, sqlite)["warning_codes"])
     except Exception:
         return ["LINEAGE_INVALID"]
     _warning_codes_cache[cache_key] = (now, warning_codes)
     return list(warning_codes)
+
+
+def _ensure_warning_codes_refresh(duck: DuckDBStore, sqlite: SQLiteStore, key: str) -> None:
+    """Start a single-flight background rebuild; never blocks the request."""
+    with _warning_codes_refresh_lock:
+        if key in _warning_codes_refreshing:
+            return
+        _warning_codes_refreshing.add(key)
+    threading.Thread(
+        target=_warning_codes_refresh_worker,
+        args=(duck, sqlite, key),
+        name="vd-warning-codes-refresh",
+        daemon=True,
+    ).start()
+
+
+def _warning_codes_refresh_worker(duck: DuckDBStore, sqlite: SQLiteStore, key: str) -> None:
+    try:
+        from app.core.storage.update_lock import update_lock_active
+
+        if update_lock_active(duck.db_path):
+            return
+        warning_codes = list(build_data_quality_status(duck, sqlite)["warning_codes"])
+        _warning_codes_cache[key] = (time.monotonic(), warning_codes)
+    except Exception as error:
+        logger.warning("后台 warning codes 刷新失败: %s", error)
+    finally:
+        with _warning_codes_refresh_lock:
+            _warning_codes_refreshing.discard(key)
 
 
 def build_data_quality_status(

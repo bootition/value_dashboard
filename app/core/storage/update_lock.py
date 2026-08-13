@@ -62,6 +62,19 @@ def _owner_is_dead(lock_path: Path) -> bool:
         return False
 
 
+def update_lock_active(database_path: Path) -> bool:
+    """True when a live process holds the incremental-update write lock.
+
+    Cheap check (single stat + read) used by read paths to decide whether to
+    serve stale-cached results / skip expensive consistency scans while the
+    auto-update writer holds the DuckDB file (reports/76 P1).
+    """
+    lock_path = _lock_path(database_path)
+    if not lock_path.exists():
+        return False
+    return not _owner_is_dead(lock_path)
+
+
 @contextlib.contextmanager
 def exclusive_update(
     database_path: Path,

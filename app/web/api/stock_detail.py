@@ -527,7 +527,20 @@ def get_indicators(stock_code: str, request: Request) -> dict:
         "latest_price_date": str(indicators.get("latest_price_date", "")) if indicators.get("latest_price_date") else None,
         "freshness": freshness,
         "trust": trust,
+        # reports/76 P1-2: 自动更新窗口内跳过全量质量重建，前端据此展示
+        # "自动更新中"横幅而非误读为数据不可信。
+        "auto_update_in_progress": _update_lock_active(duck),
     }
+
+
+def _update_lock_active(duck: Any) -> bool:
+    """True while the auto-update writer holds the update lock (reports/76)."""
+    try:
+        from app.core.storage.update_lock import update_lock_active
+
+        return update_lock_active(duck.db_path)
+    except Exception:
+        return False
 
 
 @router.get("/{stock_code}/financial-trend")
@@ -813,7 +826,31 @@ def get_treasury_comparison(
             "provenance": None,
         }
 
+    # reports/76 P1-3: 消除逐价格日 N+1。分红一次全量读取后在内存中做
+    # 滑动窗口（窗口 [price_date-1y, price_date]，需公告日与除权日均
+    # 不晚于 price_date），曲线对齐改用 align_many 单次批量查询。
+    div_rows = duck.read_query(
+        """SELECT announcement_date, ex_date, dividend_per_share
+           FROM dividends
+           WHERE stock_code = ?
+             AND dividend_per_share IS NOT NULL AND dividend_per_share > 0
+             AND announcement_date IS NOT NULL AND ex_date IS NOT NULL
+           ORDER BY ex_date""",
+        [stock_code],
+    )
+    dividends_by_date: list[tuple[date, date, float]] = []
+    for row in div_rows:
+        try:
+            ex = date.fromisoformat(str(row["ex_date"])[:10])
+            ann = date.fromisoformat(str(row["announcement_date"])[:10])
+        except (ValueError, TypeError):
+            continue
+        dividends_by_date.append((ex, ann, float(row["dividend_per_share"])))
+
     curve_align = TreasuryCurveUpdater(duck=duck, sqlite=sqlite)
+    price_dates = [str(row["trade_date"])[:10] for row in price_rows]
+    alignments = curve_align.align_many(price_dates, [tenor])
+
     series: list[dict] = []
     for row in price_rows:
         price_date = str(row["trade_date"])[:10]
@@ -831,23 +868,26 @@ def get_treasury_comparison(
             item["reason"] = "no_price"
             series.append(item)
             continue
-        div_rows = duck.read_query(
-            """SELECT SUM(dividend_per_share) AS dps
-               FROM dividends
-               WHERE stock_code = ?
-                 AND dividend_per_share IS NOT NULL
-                 AND dividend_per_share > 0
-                 AND announcement_date IS NOT NULL
-                 AND announcement_date <= CAST(? AS DATE)
-                 AND ex_date <= CAST(? AS DATE)
-                 AND ex_date >= CAST(? AS DATE) - INTERVAL '1 year'""",
-            [stock_code, price_date, price_date, price_date],
-        )
-        ttm_dps = div_rows[0].get("dps") if div_rows else None
-        ttm_div_yield = (float(ttm_dps) / close) * 100.0 if ttm_dps and close > 0 else None
+        if dividends_by_date:
+            try:
+                pday = date.fromisoformat(price_date)
+                window_start = pday - timedelta(days=365)
+                ttm_dps = sum(
+                    dps
+                    for ex, ann, dps in dividends_by_date
+                    if ex <= pday and ex >= window_start and ann <= pday
+                )
+            except ValueError:
+                ttm_dps = 0.0
+        else:
+            ttm_dps = 0.0
+        ttm_div_yield = (ttm_dps / close) * 100.0 if ttm_dps > 0 else None
         item["ttm_div_yield"] = ttm_div_yield
 
-        align = curve_align.align(price_date, tenor)
+        align = alignments.get((price_date, tenor)) or {
+            "curve_date": None, "staleness_days": None,
+            "status": "missing", "yield_pct": None, "reason": "curve_missing",
+        }
         item["curve_date"] = align["curve_date"]
         item["staleness_days"] = align["staleness_days"]
         if align["status"] != "ok" or align["yield_pct"] is None:
@@ -905,6 +945,8 @@ def get_treasury_comparison(
             "warning_codes": trust["warning_codes"],
             "untrusted_all": trust["untrusted_all"],
         },
+        # reports/76 P1-2: 自动更新窗口标注（前端横幅），不遮罩曲线基准。
+        "auto_update_in_progress": _update_lock_active(duck),
     }
 
 

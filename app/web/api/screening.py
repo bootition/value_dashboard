@@ -75,6 +75,20 @@ def _require_current_screenability(request: Request) -> None:
     """Enforce the current database gate for screen-derived durable output."""
     from app.core.data_quality import screening_readiness
 
+    # reports/76 P1-4: 写锁活跃（自动更新中）时直接 409，跳过重型一致性
+    # 扫描——原实现会在窗口内耗尽 DuckDB 连接重试并 500，或排队 74s+。
+    from app.core.storage.update_lock import update_lock_active
+
+    try:
+        lock_active = update_lock_active(request.app.state.duck.db_path)
+    except Exception:
+        lock_active = False
+    if lock_active:
+        raise HTTPException(status_code=409, detail={
+            "reason_code": "auto_update_in_progress",
+            "message": "数据正在自动更新，请稍候再试",
+        })
+
     decision = screening_readiness(request.app.state.duck, request.app.state.sqlite)
     request.app.state.startup_readiness = decision["readiness"]
     if not decision["ready"]:
@@ -577,6 +591,21 @@ def save_rule(req: SaveRuleRequest, request: Request) -> dict:
     sqlite = request.app.state.sqlite
     if len(json.dumps(req.rule_json, ensure_ascii=False).encode("utf-8")) > MAX_RULE_JSON_BYTES:
         raise HTTPException(status_code=400, detail="rule JSON is too large")
+
+    # reports/76 P3-4: 保存时即校验字段名（与 engine.run 运行时校验同口径），
+    # 未知字段/排序/结果列在保存时拒绝，不再拖到运行筛选才报错。
+    from app.core.screening.engine import validate_rule_fields
+
+    try:
+        published_names = {
+            row["name"]
+            for row in sqlite.query(
+                "SELECT name FROM dsl_expressions WHERE status = 'published'"
+            )
+        }
+        validate_rule_fields(req.rule_json, published_names)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
     try:
         locks = resolve_rule_indicator_locks(sqlite, req.rule_json, req.locked_indicators or {})

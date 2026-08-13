@@ -387,6 +387,7 @@ class StatisticsBuilder:
             return {"status": "failed", "reason": "no_records", "failed": failed}
 
         staging_table = f"research_statistics_staging_{uuid.uuid4().hex}"
+        self._cleanup_staging_tables()
         self.duck.write_query(
             f'CREATE TABLE "{staging_table}" AS SELECT * FROM research_statistics WHERE FALSE'
         )
@@ -413,6 +414,25 @@ class StatisticsBuilder:
             "failed": failed[:20],
             "fingerprint": fingerprint,
         }
+
+    def _cleanup_staging_tables(self) -> None:
+        """Drop orphaned research_statistics_staging_* tables (reports/76 P3-2).
+
+        A killed rebuild leaves its staging table behind; sweep them before
+        the next atomic publish so the formal schema stays clean.
+        """
+        tables = self.duck.read_query(
+            """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_name LIKE 'research_statistics_staging_%'
+            """
+        )
+        if not tables:
+            return
+        with self.duck.write_connection() as connection:
+            for table in tables:
+                connection.execute(f'DROP TABLE IF EXISTS "{table["table_name"]}"')
 
     def _stats_for_stock(
         self,

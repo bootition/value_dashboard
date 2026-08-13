@@ -67,8 +67,10 @@ Vue / TypeScript 语言服务器 (LSP) 未配置且已拒绝安装。前端门�
 ### 后端依赖
 
 ```bash
-# uv 方式（推荐，锁文件已在仓库内）
-uv sync --locked
+# uv 方式（推荐，锁文件已在仓库内；含数据源适配器 akshare/baostock/easy-tdx，
+# 必须带 --all-extras 或 --extra data-sources，否则 .venv 缺适配器、自动更新
+# 依赖 akshare 的步骤会失败，见 docs/reports/77 N1）
+uv sync --locked --all-extras
 
 # pip 方式（为每个依赖包单独安装）
 pip install fastapi uvicorn duckdb typer httpx pydantic lark cryptography pyarrow PyYAML pandas pypinyin

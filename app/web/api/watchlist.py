@@ -142,7 +142,18 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
         "FROM watchlist GROUP BY group_name ORDER BY group_name"
     )
 
-    return {"items": items, "count": len(items), "groups": groups, "trust": trust}
+    # reports/76 P1-2: 自动更新窗口标注，前端展示横幅而非误读为不可信。
+    try:
+        from app.core.storage.update_lock import update_lock_active
+
+        auto_update_in_progress = update_lock_active(duck.db_path)
+    except Exception:
+        auto_update_in_progress = False
+
+    return {
+        "items": items, "count": len(items), "groups": groups, "trust": trust,
+        "auto_update_in_progress": auto_update_in_progress,
+    }
 
 
 @router.post("/add")
@@ -193,19 +204,24 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
 
 @router.delete("/remove")
 def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
-    """从自选移除 (PRD §13: 手动移除)"""
+    """从自选移除 (PRD §13: 手动移除)
+
+    reports/76 P3-6: 返回实际删除行数；无匹配行时 404，避免前端误以为成功。
+    """
     sqlite = request.app.state.sqlite
     if req.group_name:
-        sqlite.execute(
+        removed = sqlite.execute(
             "DELETE FROM watchlist WHERE stock_code = ? AND group_name = ?",
             [req.stock_code, req.group_name],
         )
     else:
-        sqlite.execute(
+        removed = sqlite.execute(
             "DELETE FROM watchlist WHERE stock_code = ?",
             [req.stock_code],
         )
-    return {"status": "ok", "removed": req.stock_code}
+    if removed == 0:
+        raise HTTPException(status_code=404, detail="watchlist entry not found")
+    return {"status": "ok", "removed": req.stock_code, "rows": removed}
 
 
 @router.post("/move")

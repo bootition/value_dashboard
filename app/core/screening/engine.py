@@ -976,3 +976,60 @@ LIMIT {MAX_RESULT_ROWS}
                     )
 
         return f" {logic} ".join(explanations)
+
+
+def _rank_base_for(field: str, custom_fields: set[str]) -> str | None:
+    """Module-level rank-field check used by save-time validation."""
+    for suffix in RANK_SUFFIXES:
+        if field.endswith(suffix):
+            base = field.removesuffix(suffix)
+            return base if base in RANKABLE_INDICATORS or base in custom_fields else None
+    return None
+
+
+def validate_rule_fields(rule: dict, custom_fields: set[str] = frozenset()) -> None:
+    """Save-time field validation (reports/76 P3-4).
+
+    Mirrors the engine's run-time checks (engine.py:545-553, 599-624) so
+    rules referencing unknown fields/sorts/columns are rejected when saved
+    instead of failing only when run. Raises ValueError with the same
+    messages the engine uses.
+    """
+    def _known(field: str) -> bool:
+        if not isinstance(field, str) or not field:
+            return False
+        return (
+            field in SNAPSHOT_COLUMNS
+            or field in NORMALIZED_FIELDS
+            or field in METADATA_COLUMNS
+            or field in STAT_FIELDS
+            or field in custom_fields
+            or _rank_base_for(field, custom_fields) is not None
+        )
+
+    def _walk(node: dict) -> None:
+        if not isinstance(node, dict):
+            raise ValueError("规则节点必须是对象")
+        for rule in node.get("rules", []):
+            if not isinstance(rule, dict):
+                raise ValueError("筛选条件必须是对象")
+            if "logic" in rule:
+                _walk(rule)
+                continue
+            field = rule.get("field", "")
+            if not _known(field):
+                raise ValueError(f"未知筛选字段: {field}")
+            right_field = rule.get("right_field")
+            if right_field is not None:
+                if not isinstance(right_field, str) or not _known(right_field):
+                    raise ValueError(f"未知比较字段: {right_field}")
+
+    conditions = rule.get("conditions")
+    if conditions is not None:
+        _walk(conditions)
+    for sort in rule.get("sort", []):
+        if isinstance(sort, dict) and sort.get("field") and not _known(sort["field"]):
+            raise ValueError(f"未知排序字段: {sort['field']}")
+    for column in rule.get("columns", []):
+        if not _known(column):
+            raise ValueError(f"未知结果字段: {column}")

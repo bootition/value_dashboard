@@ -44,6 +44,7 @@ interface WatchlistResponse {
   count: number
   groups: WatchlistGroup[]
   trust?: IndicatorTrust
+  auto_update_in_progress?: boolean
 }
 
 const router = useRouter()
@@ -53,6 +54,7 @@ const dialog = useDialog()
 const items = ref<WatchlistItem[]>([])
 const groups = ref<WatchlistGroup[]>([])
 const trust = ref<IndicatorTrust | null>(null)
+const autoUpdateInProgress = ref(false)
 const loading = ref(false)
 const selectedGroup = ref<string | null>('default')
 const showColumnSettings = ref(false)
@@ -184,6 +186,7 @@ async function fetchWatchlist() {
     items.value = resp.data.items
     groups.value = resp.data.groups
     trust.value = resp.data.trust ?? null
+  autoUpdateInProgress.value = resp.data.auto_update_in_progress === true
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '加载自选失败'))
   } finally {
@@ -242,6 +245,7 @@ onMounted(fetchWatchlist)
         <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="手动分组名" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
       </aside>
       <section class="watchlist-content">
+        <n-alert v-if="autoUpdateInProgress" type="info" :show-icon="true" class="watchlist-warning">数据正在自动更新，以下指标为更新前快照，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" class="watchlist-warning">当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <div class="watchlist-card"><div class="watchlist-card-heading"><div><p>{{ selectedGroupLabel === '默认组' ? '手动收录' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedGroupLabel === '默认组' ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><div class="watchlist-actions"><span>显示 {{ items.length }} 家公司</span><n-button size="small" @click="showColumnSettings = !showColumnSettings">配置列</n-button></div></div><div v-if="showColumnSettings" class="watchlist-toolbar"><n-checkbox-group v-model:value="selectedColumns"><n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" /></n-checkbox-group></div><n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped /><n-empty v-else description="该分组暂无公司" class="watchlist-empty" /></div>
       </section>

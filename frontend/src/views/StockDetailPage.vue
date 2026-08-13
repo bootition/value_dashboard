@@ -71,6 +71,11 @@ const hasUntrustedIndicators = computed(
   () => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value),
 )
 
+// reports/76 P1-2: 自动更新窗口由服务端标注（避免把窗口误读为数据不可信）
+const autoUpdateInProgress = computed(
+  () => indicators.value?.auto_update_in_progress === true,
+)
+
 function isFieldUntrusted(field: string): boolean {
   return isIndicatorUntrusted(field, warningCodes.value)
 }
@@ -516,6 +521,9 @@ onUnmounted(() => {
             </div>
 
             <div class="data-status-block">
+              <n-alert v-if="autoUpdateInProgress" type="info" :show-icon="true">
+                数据正在自动更新，以下指标截至 {{ indicators?.latest_price_date ?? '最新价格日' }}，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。
+              </n-alert>
               <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true">
                 当前数据库状态不可信，以下指标数据可能不准确或不完整。请先检查<router-link to="/data-status">数据状态页</router-link>。
               </n-alert>

@@ -16,6 +16,7 @@ export interface ErrorGuidance {
 
 /** 具体模式优先于通用模式（长字符串在前）。 */
 const DETAIL_RULES: ReadonlyArray<{ match: RegExp; title: string; action?: string }> = [
+  { match: /auto_update_in_progress/, title: '数据正在自动更新中', action: '请稍候片刻，更新完成后重新运行筛选' },
   { match: /saved result rule provenance is missing/, title: '筛选结果缺少规则溯源', action: '请重新运行筛选并保存结果' },
   { match: /screening_data_quality_not_ready/, title: '数据质量不满足筛选要求', action: '请前往「数据状态」页查看警告（warning_codes），修复后再试' },
   { match: /screening_data_not_ready|screening_data_quality_not_ready/, title: '筛选数据尚未就绪', action: '请前往「数据状态」页查看就绪进度，就绪后再试' },

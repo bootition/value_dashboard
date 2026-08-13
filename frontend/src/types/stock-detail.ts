@@ -100,6 +100,7 @@ export interface IndicatorsResponse {
   readonly latest_price_date: string | null
   readonly freshness: StockFreshness | null
   readonly trust?: IndicatorTrust
+  readonly auto_update_in_progress?: boolean
 }
 
 // ─── Kline ────────────────────────────────────────────────────────────────

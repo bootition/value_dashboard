@@ -365,6 +365,10 @@ def create_app(
             """Serve only client-side routes; missing files must remain 404s."""
             if Path(full_path).suffix:
                 raise HTTPException(status_code=404, detail="static resource not found")
+            # reports/76 P3-3: 未知 /api/* 必须返回 404 JSON，不得落入 SPA
+            # 兜底返回 index.html（前端 fetch 未知接口时避免收到 HTML 200）。
+            if full_path == "api" or full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="API endpoint not found")
             index_path = static_dir / "index.html"
             if index_path.exists():
                 return HTMLResponse(
