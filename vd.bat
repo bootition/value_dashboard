@@ -5,13 +5,19 @@ REM Development/repository mode is always preferred: an old dist\value-dashboard
 REM build must never shadow the repo's python entrypoint (P1 fix).
 REM The packaged exe is used only in the release layout, where this launcher
 REM sits in the same directory as value-dashboard.exe.
+REM Prefer the project venv (uv.lock pinned deps, e.g. akshare 1.18.81 with
+REM SECUCODE normalization + full pagination). System python must not run
+REM the data path: older akshare (1.18.64) breaks stock_zh_a_gbjg_em and
+REM truncates cross-check history at 20 events (2026-08-13).
+set "VD_PY=python"
+if exist "%~dp0.venv\Scripts\python.exe" set "VD_PY=%~dp0.venv\Scripts\python.exe"
 if not exist "%~dp0value-dashboard.exe" (
     if not exist "data" mkdir "data"
     set "VD_ENV=formal"
     set "VD_FORMAL_ACK=confirmed"
     set "VD_DUCKDB_PATH=%CD%\data\valuedashboard.duckdb"
     set "VD_SQLITE_PATH=%CD%\data\valuedashboard.sqlite"
-    python -m app.cli.main %*
+    "%VD_PY%" -m app.cli.main %*
     goto :eof
 )
 set "RELEASE_ROOT=%~dp0"

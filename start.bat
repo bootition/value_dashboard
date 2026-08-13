@@ -69,8 +69,13 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+REM Prefer the project venv (uv.lock pinned deps). System python must not run
+REM the data path: older akshare (1.18.64) breaks stock_zh_a_gbjg_em and
+REM truncates cross-check history at 20 events (2026-08-13).
+set "VD_PY=python"
+if exist "%CD%\.venv\Scripts\python.exe" set "VD_PY=%CD%\.venv\Scripts\python.exe"
 echo [INFO] No packaged exe beside start.bat; starting current source...
-python -m app.web.main 2>>"data\logs\start.log"
+"%VD_PY%" -m app.web.main 2>>"data\logs\start.log"
 goto :eof
 
 :packaged

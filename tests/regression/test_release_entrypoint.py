@@ -42,7 +42,7 @@ def test_development_start_builds_current_frontend_before_server() -> None:
     source = (PROJECT_ROOT / "start.bat").read_text(encoding="utf-8")
 
     build = source.index("call npm --prefix frontend run build")
-    server = source.index('python -m app.web.main 2>>"data\\logs\\start.log"')
+    server = source.index('"%VD_PY%" -m app.web.main 2>>"data\\logs\\start.log"')
     assert build < server
     assert "if errorlevel 1 (" in source[build:server]
 
@@ -53,7 +53,7 @@ def test_development_start_builds_only_when_bundle_is_stale() -> None:
 
     check = source.index('fe-fingerprint.cjs" --check')
     stamp = source.index('fe-fingerprint.cjs" --stamp')
-    server = source.index('python -m app.web.main 2>>"data\\logs\\start.log"')
+    server = source.index('"%VD_PY%" -m app.web.main 2>>"data\\logs\\start.log"')
 
     assert 'set "NEED_BUILD="' in source
     assert 'if defined NEED_BUILD (' in source
@@ -103,10 +103,14 @@ def test_start_bat_fails_cleanly_on_build_error_without_bare_parens_in_block_ech
 
 def test_vd_bat_prefers_development_entrypoint_over_stale_dist_builds() -> None:
     """P1: vd.bat 只在使用发行布局（与 exe 同目录）时走打包模式；
-    仓库根目录始终走 python 入口，避免 dist 旧发行遮蔽开发 CLI。"""
+    仓库根目录始终走 python 入口，避免 dist 旧发行遮蔽开发 CLI。
+    2026-08-13：数据路径优先项目 venv（uv.lock 锁定依赖），系统 Python
+    不得运行数据路径（旧 akshare 破坏东财交叉源并截断事件）。"""
     source = (PROJECT_ROOT / "vd.bat").read_text(encoding="utf-8")
     assert 'if not exist "%~dp0value-dashboard.exe" (' in source
-    assert "python -m app.cli.main %*" in source
+    assert '"%VD_PY%" -m app.cli.main %*' in source
+    assert 'set "VD_PY=python"' in source
+    assert '%~dp0.venv\\Scripts\\python.exe' in source
     # 打包分支仍把数据放在 exe 旁的 data 目录
     assert 'set "EXE_PATH=%~dp0value-dashboard.exe"' in source
 
