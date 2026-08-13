@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { NSelect, NInputNumber } from 'naive-ui'
 import type { ScreeningRuleCondition } from '../types/screening.ts'
+import { fieldFormat } from '../utils/screening-format.ts'
 
 const props = defineProps<{
   condition: ScreeningRuleCondition
@@ -20,12 +21,32 @@ const emit = defineEmits<{
 
 const compareByField = computed(() => Boolean(props.condition.right_field))
 const hasValue = computed(() => !['is_not_null', 'is_null'].includes(props.condition.op))
-const numericValue = computed(() => typeof props.condition.value === 'number' ? props.condition.value : null)
+
+// reports/79 三-1: 百分比字段条件值按"百分数"输入与显示（底层仍存小数）。
+// 输入 2 = 2%，存 0.02；显示 0.0529 → 5.29。历史统计分位字段（0-100）不受影响。
+const isPct = computed(() => fieldFormat(props.condition.field) === 'pct')
+
+function toRaw(value: number): number {
+  return isPct.value ? value / 100 : value
+}
+
+function toDisplay(value: number): number {
+  return isPct.value ? Number((value * 100).toFixed(4)) : value
+}
+
+const numericValue = computed(() =>
+  typeof props.condition.value === 'number' ? toDisplay(props.condition.value) : null,
+)
+
+const rangeValues = computed((): [number, number] => {
+  const current = Array.isArray(props.condition.value) ? props.condition.value : [0, 0]
+  return [toDisplay(current[0]), toDisplay(current[1])]
+})
 
 function updateRange(index: number, value: number): void {
   const current = Array.isArray(props.condition.value) ? props.condition.value : [0, 0]
   const next: [number, number] = [current[0], current[1]]
-  next[index] = value
+  next[index] = toRaw(value)
   emit('update:value', next)
 }
 
@@ -59,11 +80,13 @@ function toggleFieldComparison(): void {
       />
     </label>
     <div v-if="condition.op === 'between'" class="condition-control condition-control--value condition-range">
-      <span>取值范围</span>
+      <span>取值范围{{ isPct ? '（百分数，如 2 = 2%）' : '' }}</span>
       <div>
-        <n-input-number :value="Array.isArray(condition.value) ? condition.value[0] : 0" size="small" aria-label="区间下限" @update:value="updateRange(0, $event ?? 0)" />
-        <i>至</i>
-        <n-input-number :value="Array.isArray(condition.value) ? condition.value[1] : 0" size="small" aria-label="区间上限" @update:value="updateRange(1, $event ?? 0)" />
+        <n-input-number :value="rangeValues[0]" size="small" aria-label="区间下限" @update:value="updateRange(0, $event ?? 0)" />
+        <i v-if="isPct">%</i>
+        <i v-else>至</i>
+        <n-input-number :value="rangeValues[1]" size="small" aria-label="区间上限" @update:value="updateRange(1, $event ?? 0)" />
+        <i v-if="isPct">%</i>
       </div>
     </div>
     <label v-else-if="compareByField && hasValue" class="condition-control condition-control--value">
@@ -71,8 +94,11 @@ function toggleFieldComparison(): void {
       <n-select :value="condition.right_field" :options="indicatorOptions" size="small" filterable aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
     </label>
     <label v-else-if="hasValue" class="condition-control condition-control--value">
-      <span>目标值</span>
-      <n-input-number :value="numericValue" size="small" aria-label="目标值" @update:value="emit('update:value', $event ?? 0)" />
+      <span>目标值{{ isPct ? '（百分数，如 2 = 2%）' : '' }}</span>
+      <div class="condition-value-row">
+        <n-input-number :value="numericValue" size="small" aria-label="目标值" @update:value="emit('update:value', toRaw($event ?? 0))" />
+        <i v-if="isPct" class="value-unit">%</i>
+      </div>
     </label>
     <div v-else class="condition-control condition-control--value condition-no-value">
       <span>目标值</span>
@@ -134,6 +160,9 @@ function toggleFieldComparison(): void {
 .condition-range > div { display: flex; align-items: center; gap: 7px; }
 .condition-range i { color: #7c847e; font-size: 10px; font-style: normal; }
 .condition-no-value b { color: #8b918d; font-size: 11px; font-weight: 500; }
+
+.condition-value-row { display: flex; align-items: center; gap: 7px; }
+.value-unit { color: #7c847e; font-size: 11px; font-style: normal; font-weight: 600; }
 
 .condition-tools {
   display: flex;
