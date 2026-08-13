@@ -293,12 +293,21 @@ def data_capital_history(
     stocks: str = typer.Option("", "--stocks", help="只回填指定股票，逗号分隔"),
     max_stocks: int = typer.Option(0, "--max-stocks", help="最多回填N只上市股票(0=全部)"),
     no_cross: bool = typer.Option(False, "--no-cross", help="跳过东财交叉核验"),
-    check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖/队列状态，不抓取"),
+    cross_only: bool = typer.Option(
+        False, "--cross-only",
+        help="仅交叉核验：主链不重新抓取，直接读库中已有股本链重算 verified",
+    ),
+    batch_size: int = typer.Option(20, "--batch-size", help="每批N只，批间冷却(0=不分批)"),
+    batch_cooldown: int = typer.Option(120, "--batch-cooldown", help="批间冷却秒数"),
+    verbose: bool = typer.Option(False, "--verbose", help="逐股/逐批进度输出到 stderr"),
+    check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖/队列/交叉核验状态，不抓取"),
 ) -> None:
     """历史总股本链回填 (reports/68 P4)
 
     CNINFO p_stock2215 主链（半年/年报锚点 + 变动事件），东财 F10 近邻交叉核验；
     冲突区间 fail-closed；缺失日禁止当前股本或插值回填。
+    --cross-only：交叉核验补强模式（STATUS 缺口 #7），东财批量约 46-50 次连续
+    请求触发风控，务必配合 --batch-size/--batch-cooldown 使用。
     """
     from app.cli.protocol import make_response
     from app.core.capital import CapitalHistoryUpdater
@@ -306,12 +315,31 @@ def data_capital_history(
     _, duck, sqlite = _database_context()
     updater = CapitalHistoryUpdater(duck=duck, sqlite=sqlite)
     if check_only:
-        report = updater.coverage_report("") if False else updater._coverage_all()
+        report = {
+            "coverage": updater._coverage_all(),
+            "cross": updater.cross_audit(),
+        }
     elif stocks.strip():
         codes = [code.strip() for code in stocks.split(",") if code.strip()]
-        report = updater.update_many(codes, cross_check=not no_cross)
+
+        def cb(code: str, outcome: dict) -> None:
+            if verbose:
+                print(
+                    f"[{code}] {outcome.get('status')} "
+                    f"cross={outcome.get('cross_status', '-')}",
+                    file=__import__("sys").stderr, flush=True,
+                )
+
+        report = updater.update_many(
+            codes, cross_check=not no_cross, cross_only=cross_only,
+            batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
+            progress_cb=cb if verbose else None,
+        )
     else:
-        report = updater.update_all(max_stocks=max_stocks, cross_check=not no_cross)
+        report = updater.update_all(
+            max_stocks=max_stocks, cross_check=not no_cross, cross_only=cross_only,
+            batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
+        )
     typer.echo(json.dumps(make_response("data.capital-history", report), ensure_ascii=False, indent=2, default=str))
 
 

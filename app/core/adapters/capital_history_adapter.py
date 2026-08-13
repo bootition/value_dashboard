@@ -68,7 +68,10 @@ class CapitalHistoryAdapter(BaseAdapter):
             rate_limit=rate_limit,
         )
         self._timeout = timeout
-        self._cross_rate_limit = 0.6  # 东财交叉源独立限速
+        # 东财交叉源独立限速：2026-08-13 受控探测 150 只连续请求（1.2s 间隔）
+        # 无一风控；08-12 全量跑触发风控系主链+交叉混合请求叠加所致。
+        # 保守取 1.2s（探测实测下限），全量核验仍配合批间冷却执行。
+        self._cross_rate_limit = 1.2
         self._rate_limit_lock = threading.Lock()
         self._last_request_times: dict[str, float] = {}
 

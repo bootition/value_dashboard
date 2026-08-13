@@ -605,6 +605,8 @@ class StatisticsBuilder:
 
         P4-9 修复（reports/73）：加入 dividends——仅分红变化也触发统计重建，
         避免发布域 TTM 股息率/利差陈旧。
+        2026-08-13：share_capital_history 追加 verified 计数——交叉核验
+        （verified 标志变化）也触发重建，防止披露口径与发布域脱节。
         """
         parts: list[str] = []
         date_columns = {
@@ -620,6 +622,10 @@ class StatisticsBuilder:
                 f"SELECT COUNT(*) AS c, MAX({date_column}) AS latest FROM {table}"
             )[0]
             parts.append(f"{table}:{row['c']}:{str(row['latest'])[:10]}")
+        verified = self.duck.read_query(
+            "SELECT COUNT(*) AS c FROM share_capital_history WHERE verified"
+        )[0]
+        parts.append(f"share_capital_verified:{verified['c']}")
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
     def _next_version(self) -> int:

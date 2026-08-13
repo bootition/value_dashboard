@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import json
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
@@ -55,19 +56,27 @@ def _result(data: list[dict], *, error: str | None = None) -> FetchResult:
 
 
 class _FakeCapitalAdapter:
-    def __init__(self, *, main=None, cross=None, error: str | None = None) -> None:
+    def __init__(
+        self, *,
+        main=None, cross=None,
+        error: str | None = None,
+        cross_error: str | None = None,
+    ) -> None:
         self.main = main
         self.cross = cross
         self.error = error
+        self.cross_error = cross_error
         self.calls: list[dict] = []
 
     def fetch(self, request: FetchRequest) -> FetchResult:
         params = dict(request.extra_params)
         self.calls.append(params)
+        if params.get("cross_source") == "eastmoney":
+            if self.cross_error:
+                return _result([], error=self.cross_error)
+            return _result(self.cross or [])
         if self.error:
             return _result([], error=self.error)
-        if params.get("cross_source") == "eastmoney":
-            return _result(self.cross or [])
         return _result(self.main or [])
 
 
@@ -658,3 +667,266 @@ def test_input_fingerprint_includes_dividends(
     )
     after = builder._input_fingerprint()
     assert after != before
+
+
+# ─── 交叉核验补全（STATUS 缺口 #7，2026-08-13）────────────────────────────
+
+
+def _cross_main(code: str = "600519") -> list[dict]:
+    return [
+        {"effective_date": "2021-06-30", "total_shares": 1250000000.0,
+         "change_reason": None, "is_anchor": True},
+        {"effective_date": "2022-12-31", "total_shares": 1256000000.0,
+         "change_reason": "增发", "is_anchor": False},
+    ]
+
+
+def _cross_events() -> list[dict]:
+    return [
+        {"effective_date": "2022-12-31", "total_shares": 1256000000.0,
+         "change_reason": "增发", "is_anchor": False},
+    ]
+
+
+def test_cross_error_persisted_with_reason(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """待办①：交叉失败也落盘（status=error + 原因），批次审查可见。"""
+    _seed_stock(duckdb_store)
+    fake = _FakeCapitalAdapter(
+        main=_cross_main(), cross_error="Expecting value: 风控",
+    )
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_stock("600519")
+
+    assert report["status"] == "success"  # 主链成功，交叉失败不阻塞
+    assert report["cross_status"].startswith("cross_unavailable")
+    rows = sqlite_store.query(
+        "SELECT cross_status, error FROM capital_cross_cache WHERE stock_code = '600519'"
+    )
+    assert rows and rows[0]["cross_status"] == "error"
+    assert "风控" in (rows[0]["error"] or "")
+
+
+def test_cross_empty_persisted_and_covered_by_due_cursor(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """待办①：空响应落盘 status=empty；due 游标视为已覆盖，不重复请求。"""
+    _seed_stock(duckdb_store)
+    _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
+    fake = _FakeCapitalAdapter(main=_cross_main(), cross=[])
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_stock("600519")
+    assert report["status"] == "success"
+    assert report["cross_status"] == "cross_empty"
+    rows = sqlite_store.query(
+        "SELECT cross_status FROM capital_cross_cache WHERE stock_code = '600519'"
+    )
+    assert rows and rows[0]["cross_status"] == "empty"
+
+    # 主链补齐到最新价格日（否则因主链陈旧仍会入选 due，与缓存无关）
+    _seed_capital(duckdb_store, "600519", [(date(2026, 8, 7), 1256000000.0)])
+    fake.calls.clear()
+    report_all = updater.update_all(max_stocks=20)
+    assert report_all.get("status") == "skipped", "empty 行已覆盖，不得重跑"
+    assert fake.calls == []
+
+
+def test_error_row_does_not_degrade_verified_cache(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """瞬时失败/空响应绝不抹掉既有 verified 缓存证据。"""
+    _seed_stock(duckdb_store)
+    fake = _FakeCapitalAdapter(main=_cross_main(), cross=_cross_events())
+    updater = _updater(duckdb_store, sqlite_store, fake)
+    report = updater.update_stock("600519")
+    assert report["cross_status"] == "verified"
+
+    # 源故障后重试（缓存已过期）：错误响应回退使用旧核验证据（cached_stale），
+    # 缓存行仍是 verified，绝不降级为 error/empty
+    sqlite_store.execute(
+        "UPDATE capital_cross_cache SET fetched_at = ? WHERE stock_code = '600519'",
+        [(datetime.now(timezone.utc) - timedelta(days=8)).isoformat()],
+    )
+    fake2 = _FakeCapitalAdapter(main=_cross_main(), cross_error="风控")
+    updater2 = _updater(duckdb_store, sqlite_store, fake2)
+    report2 = updater2.update_stock("600519")
+    assert report2["status"] == "success"
+    assert report2["cross_status"] == "cached_stale"
+    rows = sqlite_store.query(
+        "SELECT cross_status, events_json FROM capital_cross_cache WHERE stock_code = '600519'"
+    )
+    assert rows and rows[0]["cross_status"] == "verified"
+    assert json.loads(rows[0]["events_json"]) != []
+
+
+def test_due_cursor_error_rows_cooling_window(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """error 行在冷却窗口内不入 due（防轰炸），冷却结束后重新入选。"""
+    _seed_stock(duckdb_store)
+    _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
+    fake = _FakeCapitalAdapter(main=_cross_main(), cross_error="风控")
+    updater = _updater(duckdb_store, sqlite_store, fake)
+    updater.update_stock("600519")
+    # 主链补齐到最新价格日（隔离主链陈旧因子，只测交叉缓存的冷却逻辑）
+    _seed_capital(duckdb_store, "600519", [(date(2026, 8, 7), 1256000000.0)])
+
+    # 冷却窗口内：不入 due（主链新鲜 + 缓存 error 冷却中）
+    due = updater._due_stock_codes()
+    assert "600519" not in due
+
+    # 冷却结束：重新入 due
+    sqlite_store.execute(
+        "UPDATE capital_cross_cache SET fetched_at = ? WHERE stock_code = '600519'",
+        [(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()],
+    )
+    due = updater._due_stock_codes()
+    assert "600519" in due
+
+
+def test_cross_only_mode_skips_main_fetch_and_updates_verified(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """cross_only：主链不重抓（零 CNINFO 请求），读库中链重算 verified。"""
+    _seed_stock(duckdb_store)
+    _seed_capital(duckdb_store, "600519", [
+        (date(2021, 6, 30), 1250000000.0),
+        (date(2022, 12, 31), 1256000000.0),
+    ])
+    fake = _FakeCapitalAdapter(main=_cross_main(), cross=_cross_events())
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_stock("600519", cross_only=True)
+
+    assert report["status"] == "success"
+    assert report["cross_status"] == "verified"
+    cross_only_calls = [c for c in fake.calls if c.get("cross_source") == "eastmoney"]
+    main_calls = [c for c in fake.calls if not c.get("cross_source")]
+    assert len(cross_only_calls) == 1
+    assert main_calls == [], "cross_only 模式禁止重抓主链"
+    rows = duckdb_store.read_query(
+        "SELECT verified FROM share_capital_history ORDER BY effective_date"
+    )
+    assert all(row["verified"] for row in rows)
+
+
+def test_cross_only_no_evidence_preserves_existing_verified(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """cross_only 无新证据（空响应）→ 不重写链，保留既有 verified 标志。"""
+    _seed_stock(duckdb_store)
+    _seed_capital(duckdb_store, "600519", [(date(2021, 6, 30), 1250000000.0)])
+    duckdb_store.write_query(
+        "UPDATE share_capital_history SET verified = true WHERE stock_code = '600519'"
+    )
+    fake = _FakeCapitalAdapter(main=[], cross=[])
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_stock("600519", cross_only=True)
+
+    assert report["status"] == "skipped"
+    assert report["reason"] == "no_cross_evidence"
+    rows = duckdb_store.read_query(
+        "SELECT verified FROM share_capital_history WHERE stock_code = '600519'"
+    )
+    assert all(row["verified"] for row in rows), "无证据时不得抹掉既有核验标志"
+
+
+def test_cross_only_without_main_chain_skips(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    _seed_stock(duckdb_store)
+    updater = _updater(duckdb_store, sqlite_store, _FakeCapitalAdapter(main=[]))
+    report = updater.update_stock("600519", cross_only=True)
+    assert report["status"] == "skipped"
+    assert report["reason"] == "no_main_chain"
+
+
+def test_update_many_batch_pacing_sleeps_between_batches(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    """待办②：批间冷却生效（仅批间睡，末批不睡）。"""
+    import app.core.capital as capital_module
+
+    sleeps: list[float] = []
+    monkeypatch.setattr(capital_module.time, "sleep", lambda s: sleeps.append(s))
+
+    codes = ["600519", "600000", "000001", "000002"]
+    for code in codes:
+        _seed_stock(duckdb_store, code)
+    fake = _FakeCapitalAdapter(main=_cross_main())
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_many(
+        codes, cross_check=False, batch_size=2, batch_cooldown_seconds=5.0,
+    )
+
+    assert report["status"] == "success"
+    assert sleeps == [5.0], "4 只 × 批大小 2 → 恰一次批间冷却"
+
+
+def test_update_many_aborts_on_consecutive_cross_errors(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """待办②：连续交叉错误 ≥ 阈值中止剩余批次（不轰炸风控源）。"""
+    codes = [f"6005{i:02d}" for i in range(20)]
+    for code in codes:
+        _seed_stock(duckdb_store, code)
+    fake = _FakeCapitalAdapter(main=_cross_main(), cross_error="风控")
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_many(codes)
+
+    assert report.get("aborted") is True
+    assert len(report["results"]) == updater.CROSS_ERROR_ABORT_THRESHOLD
+    assert report["abort_reason"]
+
+
+def test_cross_audit_view(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """待办③：审计视图按状态汇总 + 错误样本。"""
+    _seed_stock(duckdb_store, "600519")
+    _seed_stock(duckdb_store, "600000")
+    updater = _updater(duckdb_store, sqlite_store, _FakeCapitalAdapter(main=[]))
+    updater._save_cross_cache("600519", _cross_events(), 2, 2, status="verified")
+    updater._save_cross_cache("600000", [], 0, 0, status="error", error="风控")
+
+    audit = updater.cross_audit()
+
+    assert audit["status"] == "ok"
+    assert audit["by_status"]["verified"] == 1
+    assert audit["by_status"]["error"] == 1
+    assert audit["covered"] == 1
+    assert audit["unattempted"] == audit["listed"] - 2
+    assert audit["error_samples"][0]["stock_code"] == "600000"
+    assert "风控" in audit["error_samples"][0]["error"]
+
+
+def test_bse_stock_skips_eastmoney_cross(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """北交所无东财 F10 交叉源：不请求（防无效请求触发熔断），如实记录。"""
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
+        "VALUES ('920002', '920002', 'BSE', true)"
+    )
+    fake = _FakeCapitalAdapter(main=_cross_main())
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    report = updater.update_stock("920002")
+
+    assert report["status"] == "success"
+    assert report["cross_status"] == "no_cross_source"
+    cross_calls = [c for c in fake.calls if c.get("cross_source") == "eastmoney"]
+    assert cross_calls == [], "北交所不得请求东财交叉源"
+    rows = sqlite_store.query(
+        "SELECT cross_status, error FROM capital_cross_cache WHERE stock_code = '920002'"
+    )
+    assert rows and rows[0]["cross_status"] == "empty"
+    assert "no_cross_source" in (rows[0]["error"] or "")
+    audit = updater.cross_audit()
+    assert audit["empty_no_cross_source"] == 1
