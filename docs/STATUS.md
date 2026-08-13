@@ -35,6 +35,7 @@
 6. **P3/P4 红队已修复（`reports/74`，2026-08-12）**：reports/73 全部 P1/P2/P3 与交付缺口关闭，S1 562 全绿。**剩余约束**：① CNINFO 源风控冷却中（约 4,700 只股本链待续传，PE/PB 统计按覆盖门槛如实缺失；自动更新有界续传+retry 消费，无需干预）；② 2026-08-12 当日国债曲线未发布（合法缺失，次日自动补齐）；③ 统计域构建 partial（新股/无价格股票如实无记录，指纹变化后自动重建）。
 7. **东财交叉核验已补全（2026-08-13 关闭，见 `reports/75`）**：① `cross_status`/`error` 落盘缓存表（失败含原因可见）；② 批 50 + 冷却 30-60s 安全组合（探测 150 连发无风控、全量约 5,400 次请求 0 风控）；③ 批次审查固化进 `--check-only` 审计视图；④ 收紧评估完成，**用户决策：维持主链口径 + verified 披露**。正式库结果：沪深 5,207 只全部交叉核验（链上 203,149 verified 点/5,175 只）、北交所 334 只如实无交叉源、002731 主链缺失披露。过程中修复 P1 根因：vd.bat/start.bat 改用项目 venv（系统 akshare 1.18.64 无 SECUCODE 归一化且截断 20 条）；北交所不再请求东财（防熔断殃及沪深）。
 8. **红队 BLOCK 修复闭环（2026-08-13，见 `reports/77`）**：更新窗口核心研究链路失效（P1：indicators 43-67s/500、treasury >60s、screening 500/74s、全遮蔽）已修复——DuckDB 连接指数退避、warning codes stale-while-revalidate、treasury 批量查询、筛选门禁写锁 409；P3×6（qfq 负值披露、staging 表清理、/api 404、规则字段校验、assets 清理、watchlist 行数）关闭；**环境修复**：`.venv` 补齐 akshare 1.18.81/baostock/easy-tdx（此前 `uv sync --locked` 不含 extras，akshare 依赖的数据源在用户路径不可用）、ruff 0.16 默认规则集变更已显式锁定传统集（E4/E7/E9/F）。**遗留观察**：`test_dead_update_lock_does_not_mark_summary_stale` 完整 S1 中偶发 WinError 32（既有测试时序竞态，单跑/重跑均通过）；更新中断中间态（价格已更新、快照未重建）下 readiness=false 为真实状态。
+9. **用户层体验评估（2026-08-13，见 `reports/78`，待用户决策）**：启动 8~12s（方案 C 可压至 3~4s）；筛选在更新窗口（错过 1 个交易日约 70 分钟）保持 409 禁用（方案 A 建议改"最新完整快照+标注"口径）；U1-U6（控制台误关、国债卡片横幅、安装门槛、exe 未复验、浏览器绑定竞态、筛选链路未真人走查）均已列入候选方案 A-F。
 ## 进行中的工作
 - **东财交叉核验已全量完成（2026-08-13）**：沪深 5,207 只全部核验、北交所 334 只无交叉源如实记录、error 行 0；见 `reports/75`。
 - **红队 BLOCK 修复已闭环（2026-08-13）**：P1×4 + P3×6 + 环境修复 N1/N2 全部落地，S1 586 全绿，更新窗口实测达标；见 `reports/77`。
@@ -96,6 +97,7 @@
 | `docs/reports/75_CROSS_VERIFICATION_COMPLETION_2026-08-13.md` | **东财交叉核验补全（STATUS 缺口 #7 关闭）**：4 项待办全部落地、沪深 5,207 只全量核验、vd.bat venv 根因修复、统计域口径用户决策 | **当前交叉核验与核验披露依据** |
 | `docs/reports/76_SYSTEM_RED_TEAM_USER_FLOW_REVIEW_2026-08-13.md` | 系统红队全面审查发现基线（BLOCK：更新窗口核心研究链路失效 + 6 项 P3） | **发现基线；裁决已被 `reports/77` 更新为 PASS** |
 | `docs/reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md` | **红队 BLOCK 修复与验收（当前裁决）**：P1×4 + P3×6 + 环境发现 N1/N2 全部关闭，S1 586 全绿、更新窗口实测达标 | **当前整体可用性与修复唯一依据** |
+| `docs/reports/78_USER_EXPERIENCE_ASSESSMENT_2026-08-13.md` | **用户层体验评估**：启动耗时、更新窗口、打包形态、安装门槛实测 + 候选方案 A-F | **当前用户体验发现与方案讨论依据**（待用户决策） |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
