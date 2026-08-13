@@ -28,6 +28,13 @@ const dataDate = ref<string | null>(null)
 const runId = ref<string | null>(null)
 const truncated = ref(false)
 const totalMatched = ref(0)
+// reports/79 方案 A: 更新窗口内快照口径运行标注
+const autoUpdateSnapshot = ref(false)
+const snapshotAsOf = ref<string | null>(null)
+const autoUpdateRunning = ref(false)
+
+// 运行按钮可用性：数据就绪，或更新窗口内（快照口径，后端同 gate）
+const runEnabled = computed(() => dataReady.value === true || autoUpdateRunning.value === true)
 const warningCodes = ref<readonly WarningCode[]>([])
 const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
 const dataReady = ref<boolean | null>(null)
@@ -90,9 +97,10 @@ const opOptions = [
 const readinessCopy = computed(() => {
   if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
   if (dataReady.value === null) return { state: 'loading', label: '正在核对数据' }
-  return dataReady.value
-    ? { state: 'ready', label: '数据已就绪' }
-    : { state: 'blocked', label: '数据尚未就绪' }
+  if (dataReady.value) return { state: 'ready', label: '数据已就绪' }
+  // reports/79 方案 A: 更新窗口内快照口径可用
+  if (autoUpdateRunning.value) return { state: 'ready', label: '更新中（快照口径）' }
+  return { state: 'blocked', label: '数据尚未就绪' }
 })
 
 const indicatorOptions = computed(() =>
@@ -152,8 +160,14 @@ async function runScreening() {
     runId.value = resp.data.run_id
     truncated.value = resp.data.truncated ?? false
     totalMatched.value = resp.data.total
+    // reports/79 方案 A: 更新窗口内基于快照的运行，明确告知口径
+    autoUpdateSnapshot.value = resp.data.auto_update_in_progress === true
+    snapshotAsOf.value = resp.data.data_as_of ?? null
     if (resp.data.truncated) {
       message.warning(`结果超过 5000 条，仅展示前 5000 条（共 ${resp.data.total} 条匹配）`)
+    }
+    if (resp.data.auto_update_in_progress) {
+      message.info(`数据自动更新中：本次筛选基于最近完整快照（数据截至 ${resp.data.data_as_of ?? dataDate.value}）`)
     }
     message.success(`筛选完成: ${resp.data.total} 条 (${resp.data.execution_time_ms}ms)`)
   } catch (e: unknown) {
@@ -382,6 +396,16 @@ onMounted(async () => {
     qualityStatus.value = 'failed'
     message.warning('无法加载数据质量状态')
   }
+
+  // reports/79 方案 A: 更新窗口内允许以最近完整快照运行（后端同口径）
+  try {
+    const au = await axios.get<{ state: string; current_stage: string }>(
+      '/api/data-status/auto-update',
+    )
+    autoUpdateRunning.value = au.data.state === 'enabled' && au.data.current_stage === 'running'
+  } catch {
+    autoUpdateRunning.value = false
+  }
 })
 </script>
 
@@ -455,11 +479,15 @@ onMounted(async () => {
         <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
         <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>排序方式</span><b>{{ sortRules.length }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
         <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
-        <n-button type="primary" block :loading="loading" :disabled="dataReady === false" @click="runScreening">运行筛选 →</n-button>
-        <p class="screening-run-help">运行结果可保存、导出或加入自选列表。</p>
+        <n-button type="primary" block :loading="loading" :disabled="!runEnabled" @click="runScreening">运行筛选 →</n-button>
+        <p v-if="autoUpdateRunning && dataReady === false" class="screening-run-help">数据正在自动更新：将以最近完整快照运行（后端将标注数据截至日期）。</p>
+        <p v-else class="screening-run-help">运行结果可保存、导出或加入自选列表。</p>
       </aside>
     </div>
 
+    <n-alert v-if="autoUpdateSnapshot" type="info" :show-icon="true" class="screening-snapshot-note">
+      数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
+    </n-alert>
     <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :sort="sortRules" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
 
     <section v-if="results.length === 0" class="screening-empty-card">

@@ -17,6 +17,11 @@ from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
+# 当前 schema 版本（reports/79 方案 C 快速启动依据）：
+# 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
+DUCKDB_SCHEMA_VERSION = 10
+SQLITE_SCHEMA_VERSION = 15
+
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
 
 DUCKDB_SCHEMA_V1 = """
@@ -1119,12 +1124,19 @@ def init_all_schema(
     sqlite_store: SQLiteStore | None = None,
     *,
     paths: DatabasePathSet | None = None,
+    skip_if_current: bool = False,
 ) -> None:
     """Initialize both schemas through an explicit validated boundary.
 
     If no arguments are provided, this function will attempt to create
     paths from environment variables (VD_ENV, VD_DUCKDB_PATH, VD_SQLITE_PATH).
     This is a convenience for CLI commands that run after _ensure_formal_env_vars().
+
+    skip_if_current (reports/79 方案 C): 当两个库的 schema_migrations 已到
+    最新版本时跳过全部 DDL——正式库上这段幂等 DDL 实测约 5s（10GB DuckDB
+    上逐条 CREATE/ALTER 检查目录），是启动 8~12s 的主要成分。跳过后的启动
+    路径约 3~4s。迁移版本必须随每次 schema 变更递增（DUCKDB_SCHEMA_VERSION /
+    SQLITE_SCHEMA_VERSION），否则此快速路径会错误跳过待应用迁移。
     """
     if paths is None and duckdb_store is None and sqlite_store is None:
         from app.core.storage.path_policy import resolve_and_validate_paths
@@ -1142,7 +1154,28 @@ def init_all_schema(
 
     assert duckdb_store is not None and sqlite_store is not None
 
+    if skip_if_current and _schemas_at_current_version(duckdb_store, sqlite_store):
+        logger.info("数据库 schema 已是最新版本，跳过初始化（快速启动）")
+        return
+
     init_duckdb_schema(duckdb_store)
     init_sqlite_schema(sqlite_store)
 
     logger.info("所有数据库 schema 初始化完成")
+
+
+def _schemas_at_current_version(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> bool:
+    """Cheap version probe for the fast-start path; any failure falls back
+    to the full idempotent init."""
+    try:
+        rows = sqlite_store.query("SELECT MAX(version) AS v FROM schema_migrations")
+        sqlite_version = rows[0].get("v") if rows else None
+        if sqlite_version != SQLITE_SCHEMA_VERSION:
+            return False
+        rows = duckdb_store.read_query("SELECT MAX(version) AS v FROM schema_migrations")
+        duckdb_version = rows[0].get("v") if rows else None
+        return duckdb_version == DUCKDB_SCHEMA_VERSION
+    except Exception:
+        return False

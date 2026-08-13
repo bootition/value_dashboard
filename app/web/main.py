@@ -403,7 +403,8 @@ def run_server() -> None:
     duck = DuckDBStore(paths=paths)
     sqlite = SQLiteStore(paths=paths)
     logger.info("正在初始化数据库...")
-    init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
+    # reports/79 方案 C：schema 已是最新版本时跳过幂等 DDL（正式库实测省 ~5s）
+    init_all_schema(duckdb_store=duck, sqlite_store=sqlite, skip_if_current=True)
 
     from app.core.data_quality import checking_data_readiness, read_cached_data_readiness
 
@@ -417,7 +418,15 @@ def run_server() -> None:
     if server_cfg.get("open_browser", True):
         url = f"http://{host}:{port}"
         logger.info(f"将在浏览器打开 {url}")
-        webbrowser.open(url)
+
+        # reports/79 方案 C / U5：等 uvicorn 绑定成功后再打开浏览器，
+        # 消除"页面先于服务就绪"的竞态（历史偶发需手动刷新一次）。
+        def _open_browser_late() -> None:
+            webbrowser.open(url)
+
+        browser_timer = threading.Timer(2.0, _open_browser_late)
+        browser_timer.daemon = True
+        browser_timer.start()
 
     logger.info(f"Value Dashboard 启动中... http://{host}:{port}")
     skip_maintenance = (

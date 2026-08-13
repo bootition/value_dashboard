@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { NEmpty, NRadioButton, NRadioGroup, NSelect, NSpin } from 'naive-ui'
+import { NAlert, NEmpty, NRadioButton, NRadioGroup, NSelect, NSpin } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import type { TreasuryComparisonResponse } from '../types/stock-detail.ts'
@@ -178,6 +178,15 @@ onMounted(fetchData)
       口径：TTM已实施股息率（过去12个月已除权现金分红 / 收盘价）减去所选期限国债收益率；
       曲线取不晚于价格日的最近发布点，最大陈旧 5 个自然日。仅作研究展示，不构成投资结论。
     </p>
+
+    <n-alert
+      v-if="data?.auto_update_in_progress"
+      type="info"
+      :show-icon="true"
+      class="treasury-update-note"
+    >
+      数据正在自动更新：曲线与股息数据为更新前快照，更新完成后自动恢复。
+    </n-alert>
 
     <n-spin :show="loading">
       <div v-if="errorText" class="treasury-error">{{ errorText }}</div>

@@ -208,7 +208,7 @@ def test_run_server_reuses_one_resolved_database_pair(
     monkeypatch.setattr(
         web_main,
         "init_all_schema",
-        lambda *, duckdb_store, sqlite_store: calls.update(
+        lambda *, duckdb_store, sqlite_store, skip_if_current=False: calls.update(
             schema=(duckdb_store, sqlite_store)
         ),
     )

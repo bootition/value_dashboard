@@ -274,6 +274,7 @@ export interface TreasuryComparisonResponse {
     readonly batch_id: string
     readonly confidence: string
   } | null
+  readonly auto_update_in_progress?: boolean
 }
 
 // ─── Research Statistics（P4，reports/68 §5）───────────────────────────────

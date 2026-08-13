@@ -26,7 +26,7 @@ def test_screening_executes_a_hash_locked_published_dsl_indicator(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("app.web.api.screening._require_current_screenability", lambda request: None)
+    monkeypatch.setattr("app.web.api.screening._require_current_screenability", lambda request: {"lock_active": False, "data_as_of": None})
     duckdb_store.write_query(
         """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
            VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false),
@@ -135,7 +135,7 @@ def test_screening_executes_published_cross_section_dsl_function(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr("app.web.api.screening._require_current_screenability", lambda request: None)
+    monkeypatch.setattr("app.web.api.screening._require_current_screenability", lambda request: {"lock_active": False, "data_as_of": None})
     duckdb_store.write_query(
         """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
            VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false),

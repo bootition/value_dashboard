@@ -39,11 +39,17 @@ _CSV_META_COLUMNS = [
 ]
 
 
-def _csv_export_header(columns: list[str], truncated: bool) -> list[str]:
+def _csv_export_header(
+    columns: list[str], truncated: bool, auto_update: bool = False,
+) -> list[str]:
     header = columns + _CSV_META_COLUMNS
     if truncated:
         # P1-C: 截断结果必须在导出的 CSV 中显式标注，禁止静默丢尾
         header.append("_truncated")
+    if auto_update:
+        # reports/79 方案 A：更新窗口内基于快照的运行必须显式标注口径
+        header.append("_data_as_of")
+        header.append("_auto_update_in_progress")
     return header
 
 
@@ -57,6 +63,8 @@ def _csv_export_row(
     strict_only: Any,
     provenance: dict[str, Any],
     truncated: bool,
+    auto_update: bool = False,
+    data_as_of: str | None = None,
 ) -> list[Any]:
     line = [_csv_cell(row.get(col, "")) for col in columns]
     line.append(data_date)
@@ -68,15 +76,22 @@ def _csv_export_row(
     line.append(_csv_cell(row.get("_entry_explanation", "")))
     if truncated:
         line.append(True)
+    if auto_update:
+        line.append(data_as_of or "")
+        line.append(True)
     return line
 
 
-def _require_current_screenability(request: Request) -> None:
-    """Enforce the current database gate for screen-derived durable output."""
-    from app.core.data_quality import screening_readiness
+def _require_current_screenability(request: Request) -> dict:
+    """Enforce the current database gate for screen-derived durable output.
 
-    # reports/76 P1-4: 写锁活跃（自动更新中）时直接 409，跳过重型一致性
-    # 扫描——原实现会在窗口内耗尽 DuckDB 连接重试并 500，或排队 74s+。
+    reports/79 方案 A（用户决策）：写锁活跃（自动更新中）时不再 409 禁用——
+    引擎只读原子替换的 indicator_snapshot 与财务表（不直读 raw 价格），
+    快照口径下筛选结果内部一致；放行并返回 data_as_of（快照价格日）供
+    标注。快照完全缺失时仍 409 兜底。
+
+    Returns: {"lock_active": bool, "data_as_of": str | None}
+    """
     from app.core.storage.update_lock import update_lock_active
 
     try:
@@ -84,10 +99,23 @@ def _require_current_screenability(request: Request) -> None:
     except Exception:
         lock_active = False
     if lock_active:
-        raise HTTPException(status_code=409, detail={
-            "reason_code": "auto_update_in_progress",
-            "message": "数据正在自动更新，请稍候再试",
-        })
+        rows = request.app.state.duck.read_query(
+            "SELECT COUNT(*) AS c, MAX(latest_price_date) AS d FROM indicator_snapshot"
+        )
+        count = rows[0]["c"] if rows else 0
+        data_as_of = (
+            str(rows[0]["d"])[:10]
+            if rows and rows[0].get("d") is not None
+            else None
+        )
+        if count == 0:
+            raise HTTPException(status_code=409, detail={
+                "reason_code": "minimum_data_not_ready",
+                "message": "基础数据尚未就绪（无可用指标快照）",
+            })
+        return {"lock_active": True, "data_as_of": data_as_of}
+
+    from app.core.data_quality import screening_readiness
 
     decision = screening_readiness(request.app.state.duck, request.app.state.sqlite)
     request.app.state.startup_readiness = decision["readiness"]
@@ -102,6 +130,7 @@ def _require_current_screenability(request: Request) -> None:
             "readiness": decision["readiness"],
             "warning_codes": decision["warning_codes"],
         })
+    return {"lock_active": False, "data_as_of": None}
 
 
 class ScreeningRequest(BaseModel):
@@ -141,10 +170,10 @@ class ScreeningDraftRequest(BaseModel):
 
 @router.post("/run")
 def run_screening(req: ScreeningRequest, request: Request) -> dict:
-    """运行筛选 (PRD §12.2 SC8: 手动运行, 以最新数据为准)"""
+    """运行筛选 (PRD §12.2 SC8: 手动运行, 以最新完整快照为准)"""
     from app.core.screening.engine import ScreeningEngine
 
-    _require_current_screenability(request)
+    gate = _require_current_screenability(request)
 
     rule_rows = request.app.state.sqlite.query(
         "SELECT rule_json, locked_indicators FROM screening_rules WHERE id = ? AND version = ?",
@@ -188,11 +217,16 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
         "include_suspended": req.include_suspended,
         "min_listing_years": req.min_listing_years,
     }
+    # reports/79 方案 A: 更新窗口内的快照口径运行必须随结果持久化标注
+    auto_update = bool(gate["lock_active"])
+    data_as_of = gate.get("data_as_of")
     confidence_summary = {
         "total": result["total"], "strict_only": req.strict_only,
         "locked_indicators": locked_indicators,
         # P1-C: 截断状态随结果持久化，导出 CSV 时标注
         "truncated": bool(result.get("truncated")),
+        "auto_update_in_progress": auto_update,
+        "data_as_of": data_as_of,
     }
     request.app.state.sqlite.execute(
         """INSERT INTO screening_runs
@@ -208,6 +242,8 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
         ],
     )
     result["run_id"] = run_id
+    result["auto_update_in_progress"] = auto_update
+    result["data_as_of"] = data_as_of
     return {
         **result,
         "results": [
@@ -338,6 +374,9 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="saved result rule provenance is missing")
     summary = json.loads(record.get("confidence_summary") or "{}")
     truncated = bool(summary.get("truncated"))
+    # reports/79 方案 A: 更新窗口内保存的结果导出时显式标注快照口径
+    auto_update = bool(summary.get("auto_update_in_progress"))
+    data_as_of = summary.get("data_as_of")
 
     if not results:
         raise HTTPException(status_code=400, detail="no results to export")
@@ -352,14 +391,14 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         provenance = _field_provenance(request.app.state.duck, request.app.state.sqlite, results, columns)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    writer.writerow(_csv_export_header(columns, truncated))
+    writer.writerow(_csv_export_header(columns, truncated, auto_update))
 
     # 数据行
     for index, row in enumerate(results):
         writer.writerow(_csv_export_row(
             columns, row, data_date, record["rule_id"], record["rule_version"],
             rule[0]["locked_indicators"], summary.get("strict_only", False),
-            provenance[index], truncated,
+            provenance[index], truncated, auto_update, data_as_of,
         ))
 
     csv_content = output.getvalue()

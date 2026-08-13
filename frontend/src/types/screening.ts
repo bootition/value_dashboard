@@ -67,6 +67,8 @@ export interface ScreeningRunResponse {
   readonly execution_time_ms: number
   readonly base_pool_size: number
   readonly data_date: string | null
+  readonly auto_update_in_progress?: boolean
+  readonly data_as_of?: string | null
 }
 
 /** Response from GET /api/data-status/summary (only the quality slice we need). */

@@ -94,8 +94,9 @@ def test_store_revalidates_untrusted_path_set_before_side_effects(
 
 def test_init_all_schema_requires_explicit_boundary() -> None:
     parameters = inspect.signature(init_all_schema).parameters
-    assert set(parameters) == {"duckdb_store", "sqlite_store", "paths"}
+    assert set(parameters) == {"duckdb_store", "sqlite_store", "paths", "skip_if_current"}
     assert parameters["paths"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert parameters["skip_if_current"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_init_all_schema_accepts_explicit_stores(tmp_path: Path) -> None:

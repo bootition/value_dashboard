@@ -74,7 +74,9 @@ REM the data path: older akshare (1.18.64) breaks stock_zh_a_gbjg_em and
 REM truncates cross-check history at 20 events (2026-08-13).
 set "VD_PY=python"
 if exist "%CD%\.venv\Scripts\python.exe" set "VD_PY=%CD%\.venv\Scripts\python.exe"
-echo [INFO] No packaged exe beside start.bat; starting current source...
+echo [INFO] Starting source service... browser opens at http://127.0.0.1:8765
+echo [INFO] Service is running. Closing THIS window will STOP the software.
+echo [INFO] To stop: close this window or press Ctrl+C, then close the browser tab.
 "%VD_PY%" -m app.web.main 2>>"data\logs\start.log"
 goto :eof
 
@@ -86,6 +88,7 @@ set "VD_DUCKDB_PATH=%RELEASE_ROOT%\data\valuedashboard.duckdb"
 set "VD_SQLITE_PATH=%RELEASE_ROOT%\data\valuedashboard.sqlite"
 if not exist "%RELEASE_ROOT%\data\logs" mkdir "%RELEASE_ROOT%\data\logs"
 echo Starting Value Dashboard - packaged mode
+echo [INFO] Service is running. Closing THIS window will STOP the software.
 "%EXE_PATH%" 2>>"%RELEASE_ROOT%\data\logs\start.log"
 
 :end

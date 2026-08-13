@@ -176,6 +176,7 @@ def _app_with_schema(database_paths: DatabasePathSet):
 def test_screening_gate_returns_409_during_update_lock(
     database_paths: DatabasePathSet,
 ) -> None:
+    """reports/79 方案 A：写锁活跃且快照为空 → 仍 409 兜底（minimum_data_not_ready）。"""
     from app.core.storage.update_lock import exclusive_update
 
     app, _duck = _app_with_schema(database_paths)
@@ -192,7 +193,38 @@ def test_screening_gate_returns_409_during_update_lock(
                   "strict_only": False},
         )
     assert response.status_code == 409
-    assert response.json()["detail"]["reason_code"] == "auto_update_in_progress"
+    assert response.json()["detail"]["reason_code"] == "minimum_data_not_ready"
+
+
+def test_screening_run_allowed_on_snapshot_during_update_lock(
+    database_paths: DatabasePathSet,
+) -> None:
+    """reports/79 方案 A：写锁活跃但快照存在 → 门禁放行（快照口径）。
+
+    到达规则查找（400 saved rule not found）即证明门禁已放行；
+    旧行为此处为 409 auto_update_in_progress。
+    """
+    from app.core.storage.update_lock import exclusive_update
+
+    app, duck = _app_with_schema(database_paths)
+    duck.write_query(
+        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close, latest_price_date)
+           VALUES ('600519', '2026-06-30', 10.0, '2026-08-11')"""
+    )
+    client = TestClient(app)
+    token = client.get("/api/session").json()["write_token"]
+    headers = {"X-VD-Write-Token": token}
+
+    with exclusive_update(app.state.duck.db_path):
+        response = client.post(
+            "/api/screening/run",
+            headers=headers,
+            json={"rule_id": 1, "rule_version": 1, "include_st": False,
+                  "include_suspended": False, "min_listing_years": 1,
+                  "strict_only": False},
+        )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "saved rule version not found"
 
 
 # ─── P1-3: treasury-comparison 批量语义等价性 ───────────────────────────
@@ -376,3 +408,68 @@ def test_watchlist_remove_reports_deleted_rows(
     )
     assert response.status_code == 200
     assert response.json()["rows"] == 1
+
+
+# ─── reports/79 方案 C: schema 版本一致跳过初始化 ────────────────────────
+
+def test_init_all_schema_skips_ddl_when_versions_current(
+    database_paths: DatabasePathSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.storage import schema as schema_module
+
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    schema_module.init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
+
+    def exploding_duckddl(*args, **kwargs):
+        raise AssertionError("DuckDB DDL must be skipped when versions are current")
+
+    def exploding_sqliteddl(*args, **kwargs):
+        raise AssertionError("SQLite DDL must be skipped when versions are current")
+
+    monkeypatch.setattr(schema_module, "init_duckdb_schema", exploding_duckddl)
+    monkeypatch.setattr(schema_module, "init_sqlite_schema", exploding_sqliteddl)
+    schema_module.init_all_schema(
+        duckdb_store=duck, sqlite_store=sqlite, skip_if_current=True,
+    )
+
+
+def test_init_all_schema_runs_ddl_on_fresh_database(
+    database_paths: DatabasePathSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.storage import schema as schema_module
+
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+
+    # 全新库：skip 快速路径因版本探测失败而回落到完整初始化
+    schema_module.init_all_schema(duckdb_store=duck, sqlite_store=sqlite, skip_if_current=True)
+    rows = sqlite.query("SELECT MAX(version) AS v FROM schema_migrations")
+    assert rows[0]["v"] == schema_module.SQLITE_SCHEMA_VERSION
+    duck_rows = duck.read_query("SELECT MAX(version) AS v FROM schema_migrations")
+    assert duck_rows[0]["v"] == schema_module.DUCKDB_SCHEMA_VERSION
+
+
+def test_init_all_schema_runs_ddl_when_version_stale(
+    database_paths: DatabasePathSet,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.storage import schema as schema_module
+
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    schema_module.init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
+    # 人为回退版本 → skip 快速路径必须回落到完整初始化
+    sqlite.execute("DELETE FROM schema_migrations WHERE version > 1")
+    ran = {"n": 0}
+
+    def counting_duckddl(store):
+        ran["n"] += 1
+
+    monkeypatch.setattr(schema_module, "init_duckdb_schema", counting_duckddl)
+    schema_module.init_all_schema(
+        duckdb_store=duck, sqlite_store=sqlite, skip_if_current=True,
+    )
+    assert ran["n"] == 1

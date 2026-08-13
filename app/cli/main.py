@@ -1543,12 +1543,15 @@ def screening_export_csv(
         summary = json.loads(record["confidence_summary"] or "{}")
         # F4修复: 与网页导出对齐，截断结果必须显式标注 _truncated，禁止静默丢尾
         truncated = bool(summary.get("truncated"))
-        writer.writerow(_csv_export_header(keys, truncated))
+        # reports/79 方案 A: 与网页导出对齐的快照口径标注
+        auto_update = bool(summary.get("auto_update_in_progress"))
+        data_as_of = summary.get("data_as_of")
+        writer.writerow(_csv_export_header(keys, truncated, auto_update))
         for index, row in enumerate(results):
             writer.writerow(_csv_export_row(
                 keys, row, record["data_date"], record["rule_id"], record["rule_version"],
                 rule[0]["locked_indicators"], summary.get("strict_only", False),
-                provenance[index], truncated,
+                provenance[index], truncated, auto_update, data_as_of,
             ))
 
     typer.echo(json.dumps(make_response("screening.export_csv", {"status": "ok", "rows": len(results), "file": output_file}), ensure_ascii=False))

@@ -64,7 +64,12 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
         })
       }
       if (url === '/api/data-status/summary') {
-        return Promise.resolve({ data: { data_quality: { warning_codes: [] } } })
+        return Promise.resolve({
+          data: { data_quality: { warning_codes: [], minimum_data_readiness: { ready: true } } },
+        })
+      }
+      if (url === '/api/data-status/auto-update') {
+        return Promise.resolve({ data: { state: 'enabled', current_stage: 'finished' } })
       }
       return Promise.resolve({ data: {} })
     })
@@ -110,5 +115,78 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     )
     expect(wrapper.text()).toContain('600519')
     expect(wrapper.text()).toContain('贵州茅台')
+  })
+
+  it('更新窗口内 ready=false 仍可按快照口径运行并显示标注（reports/79 方案 A）', async () => {
+    const get = axios.get as Mock
+    get.mockImplementation((url: string) => {
+      if (url === '/api/screening/draft') {
+        return Promise.resolve({ data: { draft: null, revision: 0 } })
+      }
+      if (url === '/api/screening/rules') {
+        return Promise.resolve({
+          data: {
+            rules: [{
+              id: 1, name: 'test-rule', version: 1,
+              rule_json: {
+                conditions: { logic: 'AND', rules: [{ field: 'pe_ttm', op: '>', value: 0 }] },
+                sort: [{ field: 'pe_ttm', direction: 'asc' }],
+                columns: ['stock_code', 'pe_ttm'],
+              },
+              locked_indicators: {}, status: 'saved', created_at: '2026-08-01',
+            }],
+          },
+        })
+      }
+      if (url === '/api/screening/indicators') {
+        return Promise.resolve({
+          data: { indicators: [{ name: 'pe_ttm', rankable: true }], count: 1 },
+        })
+      }
+      if (url === '/api/data-status/summary') {
+        return Promise.resolve({
+          data: { data_quality: { warning_codes: [], minimum_data_readiness: { ready: false } } },
+        })
+      }
+      if (url === '/api/data-status/auto-update') {
+        return Promise.resolve({ data: { state: 'enabled', current_stage: 'running' } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    const post = axios.post as Mock
+    post.mockImplementation((url: string) => {
+      if (url === '/api/screening/run') {
+        return Promise.resolve({
+          data: {
+            results: [{ stock_code: '600519', name: '贵州茅台', pe_ttm: 10 }],
+            total: 1, execution_time_ms: 5, base_pool_size: 100,
+            data_date: '2026-06-30', run_id: 'run-1',
+            auto_update_in_progress: true, data_as_of: '2026-08-11',
+          },
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    const { wrapper } = mountScreeningPage()
+    await flushPromises()
+    const ruleSelect = wrapper.findComponent({ name: 'Select' })
+    await ruleSelect.vm.$emit('update:value', 1)
+    await flushPromises()
+
+    // ready=false + 更新运行中：按钮必须可用
+    const runButton = wrapper.findAll('button').find((b) => b.text().includes('运行筛选'))
+    expect(runButton).toBeTruthy()
+    expect(runButton!.attributes('disabled')).toBeUndefined()
+    await runButton!.trigger('click')
+    await flushPromises()
+
+    expect(post).toHaveBeenCalledWith(
+      '/api/screening/run',
+      expect.objectContaining({ rule_id: 1, rule_version: 1 }),
+    )
+    // 快照口径标注可见（截至日期来自 data_as_of）
+    expect(wrapper.text()).toContain('2026-08-11')
+    expect(wrapper.text()).toContain('快照')
   })
 })
