@@ -1,6 +1,6 @@
 # Value Dashboard — A股价值投资研究与筛选工具
 
-**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-14 第八轮全域红队审查）：**修复收敛中**——阻断级缺陷（F1 索引重建、F2 国债补抓、F3 单位语义、F4 路径默认、F5/F6 前端崩溃）已修复，修复报告与门禁结论见 [docs/reports/81_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md](docs/reports/81_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md)，审查基线见 [docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md](docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md)。
+**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-14 第八轮全域红队审查修复闭环）：**PASS**——审查基线（`reports/80`）的 6×P1 + 21×P2 + 20×P3 全部关闭（含正式库 share_capital 索引重建与 dividends ex_date 数据修复），S1 613 passed、Ruff、前端 lint/62 node/50 vitest/build 全绿。修复闭环见 [docs/reports/81_RED_TEAM_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md](docs/reports/81_RED_TEAM_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md)，发现基线见 [docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md](docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md)。
 
 CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`python -m app.cli.main`）并显式建立 formal profile；发行目录中与 `value-dashboard.exe` 同目录时使用打包入口。直接 `python -m app.cli.main` 在缺少 profile 环境变量时会拒绝数据库操作。
 

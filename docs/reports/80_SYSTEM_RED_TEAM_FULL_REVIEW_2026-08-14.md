@@ -1,10 +1,11 @@
 ---
 title: 系统红队全面审查（第二轮）发现基线 — NOT PASS
-status: approved
+status: superseded
 category: reports
 created: 2026-08-14
 last-reviewed: 2026-08-14
 supersedes: reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md
+superseded-by: reports/81_RED_TEAM_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md
 ---
 
 # 80. 系统红队全面审查（第二轮）发现基线 — NOT PASS

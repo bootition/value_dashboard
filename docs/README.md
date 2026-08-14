@@ -87,7 +87,8 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md` — BLOCK 修复事实（PASS 裁决已被 80 更新为 NOT PASS）
 - `reports/78_USER_EXPERIENCE_ASSESSMENT_2026-08-13.md` — 用户体验评估与候选方案（方案已实施见 79）
 - `reports/79_USER_EXPERIENCE_IMPLEMENTATION_2026-08-13.md` — 用户体验方案实施报告（单位换算修复缺陷由 81 修复）
-- `reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md` — **当前整体裁决依据（NOT PASS）**：第二轮系统红队全面审查发现基线（F1-F6 + P2×21 + P3×20），修复闭环见 81
+- `reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md` — 第二轮系统红队全面审查发现基线（NOT PASS：F1-F6 + P2×21 + P3×20；全部发现已由 81 修复关闭）
+- `reports/81_RED_TEAM_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md` — **当前整体裁决依据（PASS）**：第二轮红队修复闭环（6×P1 + 21×P2 + 20×P3 + dividends ex_date 数据修复，S1 613 全绿）
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新

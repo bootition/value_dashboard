@@ -4,11 +4,11 @@
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-08-14
-- **更新人**：opencode 会话（2026-08-14 第二轮系统红队全面审查：发现基线 `reports/80`，NOT PASS → 修复中）
+- **更新人**：opencode 会话（2026-08-14 第二轮系统红队全面审查修复闭环：`reports/80` 全部发现关闭，裁决 PASS，见 `reports/81`）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
-| 整体启用 | ❌ **NOT PASS / 修复中**：2026-08-14 第二轮全项目红队审查发现 6 个已复现 P1（F1 自动更新死循环、F2 国债缺口永久化、F3 筛选单位口径双向不一致、F4 双击 exe 崩溃、F5 自选页白屏、F6 详情卡片串数据）+ 21 P2 + 20 P3；修复与复核见 `reports/81`（进行中） | `reports/80`（发现基线，2026-08-14） |
+| 整体启用 | ✅ **PASS**：2026-08-14 第二轮全项目红队审查（`reports/80`）的 6×P1（F1 自动更新死循环、F2 国债缺口永久化、F3 筛选单位口径、F4 双击 exe 崩溃、F5 自选页白屏、F6 详情卡片串数据）+ 21×P2 + 20×P3 全部关闭；S1 613 passed（正式库前后指纹一致）、Ruff、前端 lint/62 node/50 vitest/build 全绿；正式库数据修复（share_capital 索引重建 10/10 验证、dividends ex_date 恢复 278 + 去重 41,614） | `reports/81`（2026-08-14）；发现基线 `reports/80` |
 | 国债基准与历史统计 | ✅ 需求与可行性门禁通过：财政部曲线独立域、默认10年期、TTM股息率利差、统计型筛选；不做逐券债券投资、提示或结论 | `reports/68`（2026-08-10） |
 | 个股研究工作台 P1 | ✅ 驾驶舱、四组摘要、纵向章节、粘性目录、日/周/月研究型 K 线和全局偏好已实施；S1 490、Ruff、前端门禁全绿 | `reports/69`（2026-08-10） |
 | 业务概览 P2 | ✅ 独立低频域、东财 F10 适配器、保旧值/retry/missing、详情接入已实施；20股探测沪深18/18可用，北交所2只如实 missing；S1 516、前端门禁全绿 | `reports/70`（2026-08-10） |
@@ -30,21 +30,22 @@
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
 3. **正式库质量修复已完成**：价格最新日期 2026-08-07 全市场达标；快照一致性与 lineage 缺口已清零（仅 6 只新股披露项）；`retry_list=1`（公告 pending 合法标记）；missing_list 未解决 0。
-4. **CNINFO 分红适配器 ex_date 死代码待办**（`reports/61` §3.2）：主源恒空、回退链（akshare 31 行/baostock 25 行）当前可用无数据缺口；修复评估（PDF 解析 / ex_date 降级 / 明确依赖回退链）已列入待办。
+4. **CNINFO 分红适配器 ex_date 死代码待办**（`reports/61` §3.2）：主源恒空、回退链（akshare 31 行/baostock 25 行）当前可用无数据缺口；修复评估（PDF 解析 / ex_date 降级 / 明确依赖回退链）已列入待办。**2026-08-14 由 `reports/81` 部分推进**：`dividends_quarantine` 50,359 行占位符经 xdxr 除权除息事件保守匹配完成修复——恢复真实 ex_date 278 行、判定重复件去重 41,614 行，剩余 8,467 行为真正不可核验项（无候选/歧义/冲突），继续如实隔离（证据 `docs/evidence/evidence-dividend-exdate-repair-20260814-131744.json`）。
 5. **P1-P4 新域待正式库推进**：业务概览、国债曲线、历史股本链与统计域均未在正式库全量回填；启动自动更新将有界续传（业务概览 20 只/轮、股本链 20 只/轮、统计域按输入指纹原子重建）。东财交叉源偶发风控期间主链独立成立但 verified=false。
 6. **P3/P4 红队已修复（`reports/74`，2026-08-12）**：reports/73 全部 P1/P2/P3 与交付缺口关闭，S1 562 全绿。**剩余约束**：① CNINFO 源风控冷却中（约 4,700 只股本链待续传，PE/PB 统计按覆盖门槛如实缺失；自动更新有界续传+retry 消费，无需干预）；② 2026-08-12 当日国债曲线未发布（合法缺失，次日自动补齐）；③ 统计域构建 partial（新股/无价格股票如实无记录，指纹变化后自动重建）。
 7. **东财交叉核验已补全（2026-08-13 关闭，见 `reports/75`）**：① `cross_status`/`error` 落盘缓存表（失败含原因可见）；② 批 50 + 冷却 30-60s 安全组合（探测 150 连发无风控、全量约 5,400 次请求 0 风控）；③ 批次审查固化进 `--check-only` 审计视图；④ 收紧评估完成，**用户决策：维持主链口径 + verified 披露**。正式库结果：沪深 5,207 只全部交叉核验（链上 203,149 verified 点/5,175 只）、北交所 334 只如实无交叉源、002731 主链缺失披露。过程中修复 P1 根因：vd.bat/start.bat 改用项目 venv（系统 akshare 1.18.64 无 SECUCODE 归一化且截断 20 条）；北交所不再请求东财（防熔断殃及沪深）。
 8. **红队 BLOCK 修复闭环（2026-08-13，见 `reports/77`）**：更新窗口核心研究链路失效（P1：indicators 43-67s/500、treasury >60s、screening 500/74s、全遮蔽）已修复——DuckDB 连接指数退避、warning codes stale-while-revalidate、treasury 批量查询、筛选门禁写锁 409；P3×6（qfq 负值披露、staging 表清理、/api 404、规则字段校验、assets 清理、watchlist 行数）关闭；**环境修复**：`.venv` 补齐 akshare 1.18.81/baostock/easy-tdx（此前 `uv sync --locked` 不含 extras，akshare 依赖的数据源在用户路径不可用）、ruff 0.16 默认规则集变更已显式锁定传统集（E4/E7/E9/F）。**遗留观察**：`test_dead_update_lock_does_not_mark_summary_stale` 完整 S1 中偶发 WinError 32（既有测试时序竞态，单跑/重跑均通过）；更新中断中间态（价格已更新、快照未重建）下 readiness=false 为真实状态。
 9. **用户层体验评估（2026-08-13，见 `reports/78`，待用户决策）**：启动 8~12s（方案 C 可压至 3~4s）；筛选在更新窗口（错过 1 个交易日约 70 分钟）保持 409 禁用（方案 A 建议改"最新完整快照+标注"口径）；U1-U6（控制台误关、国债卡片横幅、安装门槛、exe 未复验、浏览器绑定竞态、筛选链路未真人走查）均已列入候选方案 A-F。
 10. **用户层体验方案已实施（2026-08-13，见 `reports/79`）**：方案 A（筛选更新窗口快照口径+标注，PRD §12.2 已修订）、C（启动 8~12s→实测 0.9s，schema 版本一致跳过 DDL）、D（exe 重建，health 200 实测 1.2s）、E（start.bat 运行提示）、U2（国债卡片横幅）、U6（筛选完整链路真人走查）全部完成；S1 590、Ruff、前端门禁全绿。**已追加修复**：股息率等百分比字段条件输入单位换算（输入 2=2%，底层存 0.02，带 % 单位提示）；原创应用图标（K 线造型）嵌入 exe 打包。方案 F（常驻托盘）为远期。**注意**：其中"单位换算修复"经 `reports/80` 复核存在回归（ttm_dividend_yield/div_yield_spread_* 百分数存储字段被错误 ÷100），将由 `reports/81` 修复。
-11. **第二轮系统红队全面审查（2026-08-14，见 `reports/80`，NOT PASS）**：发现 6 个已复现 P1——F1 自动更新死循环（`share_capital_history` ART 索引损坏：300479 删除 38 行索引失败致 DuckDB FATAL，`last_success_at` 停在 08-08，retry 永不递增）；F2 国债曲线缺失日永久不补（最新曲线 08-11，missing_list 无人消费）；F3 筛选单位口径双向不一致（簇 A 6 个小数字段漏配 PCT_FIELDS→恒假；簇 B 11 个百分数字段被 ÷100→恒真+显示 529%；簇 C turnover_rate）；F4 双击发行 exe 无 env 崩溃；F5 自选页配置过列后 TDZ 永久白屏；F6 详情页国债利差/历史统计两卡片跨股票串数据。另 21 P2 + 20 P3。修复见 `reports/81`。
+11. **第二轮系统红队全面审查（2026-08-14，见 `reports/80`，NOT PASS）**：发现 6 个已复现 P1——F1 自动更新死循环（`share_capital_history` ART 索引损坏：300479 删除 38 行索引失败致 DuckDB FATAL，`last_success_at` 停在 08-08，retry 永不递增）；F2 国债曲线缺失日永久不补（最新曲线 08-11，missing_list 无人消费）；F3 筛选单位口径双向不一致（簇 A 6 个小数字段漏配 PCT_FIELDS→恒假；簇 B 11 个百分数字段被 ÷100→恒真+显示 529%；簇 C turnover_rate）；F4 双击发行 exe 无 env 崩溃；F5 自选页配置过列后 TDZ 永久白屏；F6 详情页国债利差/历史统计两卡片跨股票串数据。另 21 P2 + 20 P3。
+12. **第二轮红队修复闭环（2026-08-14，见 `reports/81`，PASS）**：`reports/80` 全部 6×P1 + 21×P2 + 20×P3 关闭。要点：F1 分事务索引重建（正式库 delete_verify 10/10 含 300479）+ retry per-task 隔离；F2 `backfill_missing_days` 有界缺口回填；F3 单位元数据单一来源（后端 `/indicators` 下发 unit，前端消费）；F4 frozen 默认路径；F5/F6 前端修复；S1 门禁四项加固（venv python、证据哈希排除备份目录内容、conftest 内层证据、哈希单元测试）+ 证据 JSON -AsHashtable 修复；dividends ex_date 数据修复（缺口 #4）。**遗留（不阻断）**：① DuckDB 1.5.5 同事务索引 bug 以分事务绕过，升级评估待办；② 业务概览全量回填由自动更新有界续传渐进；③ dividends_quarantine 剩余 8,467 行不可核验如实隔离；④ 08-13 单位 bug 期间保存的旧规则原始值建议用户复核另存；⑤ start.log 历史 Traceback 随 10MB 轮转归档。
 ## 进行中的工作
-- **第二轮全项目红队修复（2026-08-14）**：`reports/80` 发现基线已落档；6×P1 + 21×P2 + 20×P3 修复与门禁复核进行中，闭环见 `reports/81`。
+- **第二轮全项目红队修复（2026-08-14）**：已完结——`reports/80` 全部发现关闭（`reports/81`，S1 613 全绿）；遗留长期项见缺口 #12。
 - **CNINFO 股本链续传**：主链 5,541 只已全量落盘；仅 002731（*ST萃华）因 CNINFO 源最新锚点陈旧 fail-closed 保留 retry（如实披露）；CNINFO 风控冷却期续传由自动更新有界推进。
 - **自动更新保持 enabled**：服务每轮启动自动执行增量更新；价格已补齐至 2026-08-11，08-12 已补 1,554 只（两轮启动累积），后续轮次有界续传；akshare 1.18.81 已补齐至项目 venv。
 - **东财行情源冷却**：push2/push2his 封锁冷却期至 2026-08-15（期间勿触碰）；到期后单次探测，恢复后限速 ≤2 req/s、并发 ≤5。
-- **待办**：CNINFO 分红 ex_date 修复评估（见已知缺口 #4）。
-- **已完结**：P1-P4 全部实施；P3/P4 系统红队发现全部修复（见 `reports/73/74`）；东财交叉核验补全（`reports/75`）；红队全面审查 BLOCK 修复（`reports/76/77`）。
+- **待办（长期）**：DuckDB 1.5.5 同事务索引 bug 升级评估；CNINFO 分红 ex_date 剩余 8,467 行核验路径评估（见缺口 #4）；业务概览全量回填（自动更新有界续传中）。
+- **已完结**：P1-P4 全部实施；P3/P4 系统红队发现全部修复（见 `reports/73/74`）；东财交叉核验补全（`reports/75`）；红队全面审查 BLOCK 修复（`reports/76/77`）；用户体验方案实施（`reports/79`）；第二轮全面审查修复闭环（`reports/81`）。
 ## 当前有效文档（Current Truth）
 | 文档 | 用途 | 注意 |
 | `docs/STATUS.md` | 本文件：当前状态唯一权威 | 每次状态变化必须更新 |
@@ -99,8 +100,9 @@
 | `docs/reports/76_SYSTEM_RED_TEAM_USER_FLOW_REVIEW_2026-08-13.md` | 系统红队全面审查发现基线（BLOCK：更新窗口核心研究链路失效 + 6 项 P3） | 发现基线；裁决已被 `reports/77` 更新为 PASS（`reports/77` 又被 `reports/80` 更新为 NOT PASS） |
 | `docs/reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md` | 红队 BLOCK 修复与验收（修复事实） | 修复事实保留；**PASS 裁决已被 `reports/80` 更新为 NOT PASS** |
 | `docs/reports/78_USER_EXPERIENCE_ASSESSMENT_2026-08-13.md` | **用户层体验评估**：启动耗时、更新窗口、打包形态、安装门槛实测 + 候选方案 A-F | **当前用户体验发现与方案讨论依据**（方案已实施见 reports/79） |
-| `docs/reports/79_USER_EXPERIENCE_IMPLEMENTATION_2026-08-13.md` | **用户层体验方案实施报告**：方案 A/C/D/E/U2/U6 完成，启动 0.9s、exe 1.2s、更新窗口筛选可用实测 | **当前用户体验实施依据**；其中单位换算修复经 `reports/80` 发现缺陷，由 `reports/81` 修复 |
-| `docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md` | **第二轮系统红队全面审查发现基线（NOT PASS）**：6×P1 + 21×P2 + 20×P3 | **当前整体裁决唯一依据（修复前）**；修复闭环见 `reports/81` |
+| `docs/reports/79_USER_EXPERIENCE_IMPLEMENTATION_2026-08-13.md` | **用户层体验方案实施报告**：方案 A/C/D/E/U2/U6 完成，启动 0.9s、exe 1.2s、更新窗口筛选可用实测 | **当前用户体验实施依据**；其中单位换算修复经 `reports/80` 发现缺陷，已由 `reports/81` 以单位元数据单一来源修复 |
+| `docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md` | **第二轮系统红队全面审查发现基线（NOT PASS）**：6×P1 + 21×P2 + 20×P3 | 发现基线保留；**全部发现已由 `reports/81` 修复关闭（PASS）** |
+| `docs/reports/81_RED_TEAM_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md` | **第二轮红队修复闭环（PASS）**：6×P1 + 21×P2 + 20×P3 全部关闭 + dividends ex_date 数据修复；S1 613 全绿 | **当前整体裁决唯一依据** |
 | `docs/runbooks/s0-evidence-preservation.md` | 证据保全运行手册 | |
 | `docs/runbooks/user-first-use.md` | 首次使用与日常操作指南（G1，报告42 迭代 A） | 面向首次用户交付 |
 | `docs/runbooks/ops-backup-restore.md` | 备份与恢复运行手册（O2） | |
@@ -134,6 +136,7 @@
 - `reports/73`（P3/P4 系统红队 NOT PASS）→ **发现基线保留；全部发现已由 `reports/74` 修复关闭**（2026-08-12）。
 - `reports/76`（系统红队全面审查 BLOCK）→ **发现基线保留；BLOCK 裁决已被 `reports/77` 更新为 PASS**（2026-08-13 修复闭环）。
 - `reports/77`（红队 BLOCK 修复与验收 PASS）→ **修复事实保留；整体 PASS 裁决已被 `reports/80` 更新为 NOT PASS**（2026-08-14 第二轮全面审查，F1-F6）。
+- `reports/80`（第二轮系统红队全面审查 NOT PASS）→ **发现基线保留；全部发现已由 `reports/81` 修复关闭**（2026-08-14）。
 - 更早编号报告（05–24、26）→ 全部 superseded，仅作追溯证据。
 ## 维护规则（写文档的人必须遵守）
 1. **状态变化时**：更新本文件 → 将旧报告 front-matter 的 `status` 改为 `superseded` 并写 `superseded-by` → 新报告/文档必须带 front-matter 且 `status: approved`。
