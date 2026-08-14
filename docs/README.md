@@ -82,6 +82,12 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 - `reports/72_CAPITAL_HISTORY_AND_STATISTICS_P4_2026-08-10.md` — 历史股本链与统计 P4 实施事实（PASS 裁决已被 reports/73 更新）
 - `reports/73_SYSTEM_RED_TEAM_REVIEW_P3_P4_2026-08-11.md` — P3/P4 系统红队审查（发现基线，修复与裁决见 reports/74）
 - `reports/74_P3_P4_RED_TEAM_FIX_AND_DATA_COMPLETION_2026-08-12.md` — 当前 P3/P4 修复与正式库补全依据（全部发现关闭，S1 562 全绿）
+- `reports/75_CROSS_VERIFICATION_COMPLETION_2026-08-13.md` — 东财交叉核验补全依据（沪深 5,207 只全量核验）
+- `reports/76_SYSTEM_RED_TEAM_USER_FLOW_REVIEW_2026-08-13.md` — 系统红队全面审查发现基线（BLOCK，已被 77 更新）
+- `reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md` — BLOCK 修复事实（PASS 裁决已被 80 更新为 NOT PASS）
+- `reports/78_USER_EXPERIENCE_ASSESSMENT_2026-08-13.md` — 用户体验评估与候选方案（方案已实施见 79）
+- `reports/79_USER_EXPERIENCE_IMPLEMENTATION_2026-08-13.md` — 用户体验方案实施报告（单位换算修复缺陷由 81 修复）
+- `reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md` — **当前整体裁决依据（NOT PASS）**：第二轮系统红队全面审查发现基线（F1-F6 + P2×21 + P3×20），修复闭环见 81
 - `reports/42_USER_ENABLEMENT_AND_UI_TIERS_2026-08-03.md` — 用户启用指南与 UI 分层审查（基础可用性 vs 高分美化）
 - `reports/34_SYSTEM_RED_TEAM_REVIEW_2026-08-02.md` — 第五轮系统红队复核（BLOCK 发现基线）
 - `reports/35_SYSTEM_RED_TEAM_FIX_2026-08-02.md` — 修复事实；裁决已被 36/37 更新
