@@ -22,16 +22,26 @@ const emit = defineEmits<{
 const compareByField = computed(() => Boolean(props.condition.right_field))
 const hasValue = computed(() => !['is_not_null', 'is_null'].includes(props.condition.op))
 
-// reports/79 三-1: 百分比字段条件值按"百分数"输入与显示（底层仍存小数）。
-// 输入 2 = 2%，存 0.02；显示 0.0529 → 5.29。历史统计分位字段（0-100）不受影响。
-const isPct = computed(() => fieldFormat(props.condition.field) === 'pct')
+// reports/79 三-1: 百分比字段条件值按"百分数"输入与显示。
+// 2026-08-14 红队 F3 修复：区分两种存储口径——
+//   pct（小数存储）：输入 2 = 2%，存 0.02；显示 0.0529 → 5.29%
+//   percent（百分数存储，ttm/利差/换手率）：输入 2 = 2%，原样存 2；
+//     显示 5.29 → 5.29%（不再 ×100）
+// 历史统计分位字段（0-100）不受影响。单位来源：
+//   /api/screening/indicators 下发的 unit 元数据（单一来源）→
+//   screening-format.ts 静态集合（回退）。
+const fieldFmt = computed(() => fieldFormat(props.condition.field))
+const isPct = computed(() => fieldFmt.value === 'pct')
+const isPercent = computed(() => fieldFmt.value === 'percent')
+const showPctHint = computed(() => isPct.value || isPercent.value)
 
 function toRaw(value: number): number {
   return isPct.value ? value / 100 : value
 }
 
 function toDisplay(value: number): number {
-  return isPct.value ? Number((value * 100).toFixed(4)) : value
+  // 2026-08-14 红队 P3：toFixed(4)→(6)，避免反复回显的精度漂移
+  return isPct.value ? Number((value * 100).toFixed(6)) : value
 }
 
 const numericValue = computed(() =>
@@ -80,13 +90,13 @@ function toggleFieldComparison(): void {
       />
     </label>
     <div v-if="condition.op === 'between'" class="condition-control condition-control--value condition-range">
-      <span>取值范围{{ isPct ? '（百分数，如 2 = 2%）' : '' }}</span>
+      <span>取值范围{{ showPctHint ? '（百分数，如 2 = 2%）' : '' }}</span>
       <div>
         <n-input-number :value="rangeValues[0]" size="small" aria-label="区间下限" @update:value="updateRange(0, $event ?? 0)" />
-        <i v-if="isPct">%</i>
+        <i v-if="showPctHint">%</i>
         <i v-else>至</i>
         <n-input-number :value="rangeValues[1]" size="small" aria-label="区间上限" @update:value="updateRange(1, $event ?? 0)" />
-        <i v-if="isPct">%</i>
+        <i v-if="showPctHint">%</i>
       </div>
     </div>
     <label v-else-if="compareByField && hasValue" class="condition-control condition-control--value">
@@ -94,10 +104,10 @@ function toggleFieldComparison(): void {
       <n-select :value="condition.right_field" :options="indicatorOptions" size="small" filterable aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
     </label>
     <label v-else-if="hasValue" class="condition-control condition-control--value">
-      <span>目标值{{ isPct ? '（百分数，如 2 = 2%）' : '' }}</span>
+      <span>目标值{{ showPctHint ? '（百分数，如 2 = 2%）' : '' }}</span>
       <div class="condition-value-row">
         <n-input-number :value="numericValue" size="small" aria-label="目标值" @update:value="emit('update:value', toRaw($event ?? 0))" />
-        <i v-if="isPct" class="value-unit">%</i>
+        <i v-if="showPctHint" class="value-unit">%</i>
       </div>
     </label>
     <div v-else class="condition-control condition-control--value condition-no-value">

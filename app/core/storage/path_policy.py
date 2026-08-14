@@ -75,10 +75,23 @@ class DatabasePathSet:
     @classmethod
     def from_env(cls) -> DatabasePathSet:
         """Create paths from environment variables.
+
+        2026-08-14 红队 F4：冻结态（打包 exe）下未显式提供环境变量时，
+        自动推导 exe 同级 `data/` 正式路径——发行版"双击即用"入口
+        （docs/runbooks/user-first-use.md）此前直接抛 PathIsolationError。
+        双击 exe 本身就是显式使用意图，冻结态豁免 VD_FORMAL_ACK。
         """
         env_raw = os.environ.get("VD_ENV")
         duckdb_raw = os.environ.get("VD_DUCKDB_PATH")
         sqlite_raw = os.environ.get("VD_SQLITE_PATH")
+
+        frozen = getattr(sys, "frozen", False)
+        if frozen:
+            if env_raw is None:
+                env_raw = VdEnv.FORMAL.value
+            if env_raw == VdEnv.FORMAL.value:
+                duckdb_raw = duckdb_raw or str(_FORMAL_DUCKDB)
+                sqlite_raw = sqlite_raw or str(_FORMAL_SQLITE)
 
         missing = [
             name
@@ -105,7 +118,8 @@ class DatabasePathSet:
             if not root_raw:
                 raise PathIsolationError("VD_STAGING_ROOT is required for staging profile")
         else:
-            if os.environ.get("VD_FORMAL_ACK") != "confirmed":
+            # 冻结态豁免 ACK（F4：双击 exe 即显式意图）
+            if not getattr(sys, "frozen", False) and os.environ.get("VD_FORMAL_ACK") != "confirmed":
                 raise PathIsolationError("VD_FORMAL_ACK=confirmed is required for formal profile")
             root_raw = str(Path(duckdb_raw).parent)
 
@@ -144,7 +158,8 @@ class DatabasePathSet:
                 raise PathIsolationError("Formal DuckDB path does not match the canonical file")
             if sqlite_path != canonicalize_path(_FORMAL_SQLITE):
                 raise PathIsolationError("Formal SQLite path does not match the canonical file")
-            if os.environ.get("VD_FORMAL_ACK") != "confirmed":
+            # 冻结态豁免 ACK（F4：双击 exe 即显式意图）
+            if not getattr(sys, "frozen", False) and os.environ.get("VD_FORMAL_ACK") != "confirmed":
                 raise PathIsolationError("VD_FORMAL_ACK=confirmed is required for formal profile")
 
         return _validated_path_set(self.env, duckdb_path, sqlite_path, run_root)

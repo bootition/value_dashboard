@@ -149,6 +149,12 @@ async function fetchData() {
 }
 
 watch(tenor, fetchData)
+// 2026-08-14 红队 F6：股票切换（/stock/A → /stock/B 复用组件实例）时
+// 此前不重拉，卡片持续显示上一只股票的序列；现清空并重拉。
+watch(() => props.stockCode, () => {
+  data.value = null
+  fetchData()
+})
 onMounted(fetchData)
 </script>
 

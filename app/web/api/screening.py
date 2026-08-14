@@ -573,15 +573,22 @@ def list_available_indicators(request: Request) -> dict:
         STAT_WINDOWS,
         STAT_METHODS,
     )
+    from app.core.screening.field_units import field_unit
 
     indicators: list[dict] = []
     for col in sorted(SNAPSHOT_COLUMNS):
         indicators.append({
             "name": col,
             "rankable": col in RANKABLE_INDICATORS,
+            # 2026-08-14 红队 F3：单位元数据单一来源，前端据此做输入换算与展示
+            "unit": field_unit(col),
         })
     for field in sorted(NORMALIZED_FIELDS):
-        indicators.append({"name": field, "rankable": field in RANKABLE_INDICATORS})
+        indicators.append({
+            "name": field,
+            "rankable": field in RANKABLE_INDICATORS,
+            "unit": field_unit(field),
+        })
     for col in sorted(RANKABLE_INDICATORS):
         for suffix, label in (
             ("market_rank", "全市场排名"), ("market_percentile", "全市场分位"),
@@ -590,7 +597,7 @@ def list_available_indicators(request: Request) -> dict:
             ("industry_rank", "证监会一级排名"), ("industry_percentile", "证监会一级分位"),
             ("sw2_rank", "证监会二级排名"), ("sw2_percentile", "证监会二级分位"),
         ):
-            indicators.append({"name": f"{col}_{suffix}", "rankable": False, "label": f"{col} {label}"})
+            indicators.append({"name": f"{col}_{suffix}", "rankable": False, "label": f"{col} {label}", "unit": "plain"})
     # P4 历史研究统计字段（已发布统计域，reports/68 §6）
     for metric in STAT_METRICS:
         for window in STAT_WINDOWS:

@@ -13,7 +13,7 @@ vi.mock('axios', () => {
     delete: vi.fn(),
     isAxiosError: (e: unknown) => (e as { isAxiosError?: boolean })?.isAxiosError === true,
   }
-  return { default: mock }
+  return { default: mock, ...mock }
 })
 
 import axios from 'axios'
@@ -66,5 +66,26 @@ describe('WatchlistPage 自选展示与信任遮蔽（PRD §13）', () => {
     expect(text).toContain('贵州茅台')
     // 全局不可信告警
     expect(text).toContain('数据不可信')
+  })
+
+  it('预置列配置后挂载不白屏（reports/80 F5 TDZ 回归）', async () => {
+    // 用户在自选页配置过列 → localStorage 存有列配置 → 每次进入页面
+    // 必须正常渲染（此前 filter 回调访问未初始化 allColumnOptions 抛错白屏）。
+    localStorage.setItem('vd.watchlist.columns', JSON.stringify(['stock_code', 'name']))
+    try {
+      const router = createRouter({ history: createMemoryHistory(), routes: [] })
+      const wrapper = mount(NDialogProvider, {
+        slots: {
+          default: () =>
+            h(NMessageProvider, null, { default: () => h(WatchlistPage) }),
+        },
+        global: { plugins: [router] },
+      })
+      await flushPromises()
+      expect(wrapper.text()).toContain('600519')
+      expect(wrapper.text()).toContain('贵州茅台')
+    } finally {
+      localStorage.removeItem('vd.watchlist.columns')
+    }
   })
 })

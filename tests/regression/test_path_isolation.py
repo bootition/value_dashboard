@@ -225,3 +225,65 @@ def test_write_lock_checks_windows_process_exit_code() -> None:
     )
     assert "GetExitCodeProcess" in source
     assert "exit_code.value == 259" in source
+
+
+# ─── 2026-08-14 红队 F4：冻结态双击 exe 无环境变量自动推导正式路径 ───
+
+def test_from_env_frozen_formal_defaults_without_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """冻结态（打包 exe）无任何 VD_* 环境变量时推导 exe 同级 data/ 正式路径。"""
+    import sys
+
+    clear_path_environment(monkeypatch)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    try:
+        paths = DatabasePathSet.from_env()
+    finally:
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+
+    assert paths.env is VdEnv.FORMAL
+    assert paths.duckdb_path.name == "valuedashboard.duckdb"
+    assert paths.sqlite_path.name == "valuedashboard.sqlite"
+    assert paths.run_root.name == "data"
+
+
+def test_from_env_frozen_formal_skips_ack_requirement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """冻结态下 VD_FORMAL_ACK 缺失不报错（双击即显式意图）。"""
+    import sys
+
+    clear_path_environment(monkeypatch)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("VD_ENV", "formal")
+    try:
+        paths = DatabasePathSet.from_env()
+    finally:
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+    assert paths.env is VdEnv.FORMAL
+
+
+def test_from_env_frozen_test_profile_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """冻结态下显式 test 环境不得回退正式路径（隔离防线不变）。"""
+    import sys
+
+    clear_path_environment(monkeypatch)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setenv("VD_ENV", "test")
+    try:
+        with pytest.raises(PathIsolationError, match="Missing environment variables"):
+            DatabasePathSet.from_env()
+    finally:
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+
+
+def test_non_frozen_missing_environment_still_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """源码/venv 形态不受 F4 影响：无环境变量必须 fail-closed。"""
+    clear_path_environment(monkeypatch)
+    with pytest.raises(PathIsolationError, match="VD_ENV"):
+        DatabasePathSet.from_env()

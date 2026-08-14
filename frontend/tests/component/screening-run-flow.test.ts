@@ -13,7 +13,9 @@ vi.mock('axios', () => {
     delete: vi.fn(),
     isAxiosError: (e: unknown) => (e as { isAxiosError?: boolean })?.isAxiosError === true,
   }
-  return { default: mock }
+  // 命名导出必须与 default 一起提供，否则组件里 `import { isAxiosError } from 'axios'`
+  // 得到 undefined，草稿自动保存 catch 分支会二次抛错（2026-08-14 红队修复）。
+  return { default: mock, ...mock }
 })
 
 import axios from 'axios'
@@ -39,6 +41,9 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     const get = axios.get as Mock
+    // 草稿自动保存（防抖定时器）可能在测试收尾后触发：put 必须给出 resolved 响应，
+    // 否则 persistDraft 进入 catch 造成未处理拒绝（红队 P2-13 同型测试泄漏）。
+    ;(axios.put as Mock).mockResolvedValue({ data: { revision: 1 } })
     get.mockImplementation((url: string) => {
       if (url === '/api/screening/draft') {
         return Promise.resolve({ data: { draft: null, revision: 0 } })

@@ -171,6 +171,13 @@ async function fetchData() {
 }
 
 watch(metric, fetchData)
+// 2026-08-14 红队 F6：与 TreasuryComparisonCard 同因——股票切换时
+// 组件实例被复用且此前无 watch(stockCode)，历史分位图持续显示旧股票；
+// 现清空并重拉。
+watch(() => props.stockCode, () => {
+  data.value = null
+  fetchData()
+})
 onMounted(fetchData)
 </script>
 

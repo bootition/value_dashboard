@@ -4,14 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "engines": {
-    "node": ">=20.19.0"
+    "node": ">=22.6.0"
   },
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build && node scripts/sync-static.mjs",
     "preview": "vite preview",
     "lint": "eslint src --ext .vue,.ts",
-    "test": "node --experimental-strip-types --test tests/data-quality.test.ts tests/stock-detail.test.ts tests/screening-quality.test.ts tests/indicator-trust.test.ts && vitest run"
+    "test": "node scripts/run-unit-tests.mjs && vitest run"
   },
   "dependencies": {
     "axios": "^1.18.1",

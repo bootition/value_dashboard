@@ -16,7 +16,7 @@ import type {
 import { generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
-import { fieldDisplayName } from '../utils/screening-format.ts'
+import { applyIndicatorUnits, fieldDisplayName } from '../utils/screening-format.ts'
 
 const message = useMessage()
 const indicators = ref<readonly ScreeningIndicator[]>([])
@@ -375,6 +375,13 @@ onMounted(async () => {
       '/api/screening/indicators',
     )
     indicators.value = resp.data.indicators
+    // 2026-08-14 红队 F3：应用后端下发的单位元数据（单一来源），
+    // 修复小数/百分数双口径下条件输入与结果展示的 100 倍误差。
+    const units: Record<string, string> = {}
+    for (const indicator of resp.data.indicators) {
+      if (indicator.unit) units[indicator.name] = indicator.unit
+    }
+    applyIndicatorUnits(units)
     // 确保 sortRules 的第一个字段在可用指标列表中
     if (indicators.value.length > 0 && sortRules.value.length > 0) {
       const firstField = sortRules.value[0].field

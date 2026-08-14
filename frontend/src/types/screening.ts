@@ -13,6 +13,8 @@ import type { DataQualityStatus, WarningCode } from './data-quality.ts'
 export interface ScreeningIndicator {
   readonly name: string
   readonly rankable: boolean
+  /** 单位口径（pct|percent|price|ratio|plain），2026-08-14 红队 F3 后端下发 */
+  readonly unit?: string
 }
 
 /** Leaf condition in a screening rule tree. */

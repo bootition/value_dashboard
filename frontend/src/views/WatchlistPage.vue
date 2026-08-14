@@ -84,6 +84,27 @@ function loadSavedColumns(): string[] {
   }
 }
 
+// 列选项必须先于 loadSavedColumns 的过滤逻辑声明：
+// 2026-08-14 红队 F5 —— 此前 allColumnOptions 声明在其后（TDZ），
+// 用户配置过列后每次进入自选页都在 :filter 回调中抛
+// ReferenceError: Cannot access 'allColumnOptions' before initialization，
+// 导致整页白屏。
+const allColumnOptions = [
+  { label: '股票代码', value: 'stock_code' },
+  { label: '股票名称', value: 'name' },
+  { label: '交易所', value: 'exchange' },
+  { label: '分组', value: 'group_name' },
+  { label: fieldDisplayName('latest_close'), value: 'latest_close' },
+  { label: fieldDisplayName('pe_ttm'), value: 'pe_ttm' },
+  { label: fieldDisplayName('pb_mrq'), value: 'pb_mrq' },
+  { label: fieldDisplayName('roe'), value: 'roe' },
+  { label: fieldDisplayName('gross_margin'), value: 'gross_margin' },
+  { label: fieldDisplayName('net_margin'), value: 'net_margin' },
+  { label: fieldDisplayName('debt_ratio'), value: 'debt_ratio' },
+  { label: fieldDisplayName('revenue_yoy'), value: 'revenue_yoy' },
+  { label: '来源', value: 'source' },
+]
+
 const savedColumns = loadSavedColumns()
 const validSaved = savedColumns.filter((col) => allColumnOptions.some((o) => o.value === col))
 const selectedColumns = ref<string[]>(validSaved.length > 0 ? validSaved : [...DEFAULT_COLUMNS])
@@ -105,22 +126,6 @@ async function copyStockCode(code: string) {
     message.warning('复制失败，请手动选择复制')
   }
 }
-
-const allColumnOptions = [
-  { label: '股票代码', value: 'stock_code' },
-  { label: '股票名称', value: 'name' },
-  { label: '交易所', value: 'exchange' },
-  { label: '分组', value: 'group_name' },
-  { label: fieldDisplayName('latest_close'), value: 'latest_close' },
-  { label: fieldDisplayName('pe_ttm'), value: 'pe_ttm' },
-  { label: fieldDisplayName('pb_mrq'), value: 'pb_mrq' },
-  { label: fieldDisplayName('roe'), value: 'roe' },
-  { label: fieldDisplayName('gross_margin'), value: 'gross_margin' },
-  { label: fieldDisplayName('net_margin'), value: 'net_margin' },
-  { label: fieldDisplayName('debt_ratio'), value: 'debt_ratio' },
-  { label: fieldDisplayName('revenue_yoy'), value: 'revenue_yoy' },
-  { label: '来源', value: 'source' },
-]
 
 type NumericField =
   | 'latest_close' | 'pe_ttm' | 'pb_mrq' | 'roe' | 'gross_margin'

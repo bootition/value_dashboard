@@ -1,16 +1,24 @@
 /**
  * 字段级展示格式（L0-2：单位/口径统一，筛选/自选/详情同义显示）。
  *
- * 口径约定（与 StockDetail/IndicatorTabs 一致）：
- * - pct  字段：底层为小数比例，展示 ×100 加 %（roe、负债率、同比等）
- * - ratio 字段：本身即倍数（流动比率、速动比率、利息保障倍数等）
- * - price 字段：价格，保留 2 位小数
+ * 口径约定（与后端 app/core/screening/field_units.py 单一来源对齐，
+ * 2026-08-14 红队 F3 修复）：
+ * - pct     底层为小数比例，展示 ×100 加 %（roe、负债率、同比、
+ *           net_profit_cagr3、period_return 等）；条件输入 ÷100
+ * - percent 底层为百分数（5.29 = 5.29%），展示直接加 %、
+ *           条件输入原样比较（ttm_dividend_yield、div_yield_spread_*、
+ *           turnover_rate）
+ * - ratio   本身即倍数（流动比率、速动比率、利息保障倍数等）
+ * - price   价格，保留 2 位小数
  * - 其余数值：走 fmt()（亿/万/小数自适应）
+ *
+ * 运行时元数据（applyIndicatorUnits）来自 /api/screening/indicators 的
+ * unit 字段，优先级高于下方静态集合——静态集合只是无后端元数据时的回退。
  */
 
 import { fmtPct } from './formatters.ts'
 
-export type FieldFormat = 'pct' | 'ratio' | 'price' | 'plain'
+export type FieldFormat = 'pct' | 'percent' | 'ratio' | 'price' | 'plain'
 
 /** 用户界面使用中文优先名称；稳定字段名仍只用于 API、规则 JSON 与导出。 */
 export const FIELD_LABELS: Readonly<Record<string, string>> = {
@@ -243,16 +251,25 @@ const separator = field.indexOf('.')
 return fallback || field
 }
 
+/** 小数比例存储的百分比字段（条件输入 ÷100、展示 ×100+%）。 */
 const PCT_FIELDS = new Set([
   'roe', 'roa', 'roic',
   'gross_margin', 'net_margin', 'debt_ratio',
   'revenue_yoy', 'net_profit_yoy', 'deducted_profit_yoy',
-  'revenue_cagr3', 'revenue_cagr5', 'net_profit_cagr5',
+  'revenue_cagr3', 'revenue_cagr5',
+  'net_profit_cagr3', 'net_profit_cagr5',
+  'deducted_profit_cagr3', 'deducted_profit_cagr5',
   'dividend_yield', 'goodwill_ratio', 'payout_ratio',
+  'period_return', 'annualized_volatility', 'max_drawdown',
+])
+
+/** 百分数存储的百分比字段（输入原样比较、展示直接加 %）。 */
+const PERCENT_FIELDS = new Set([
   'ttm_dividend_yield',
   'div_yield_spread_0p25y', 'div_yield_spread_0p5y', 'div_yield_spread_1y',
   'div_yield_spread_2y', 'div_yield_spread_3y', 'div_yield_spread_5y',
   'div_yield_spread_7y', 'div_yield_spread_10y', 'div_yield_spread_30y',
+  'turnover_rate',
 ])
 
 const PRICE_FIELDS = new Set(['latest_close', 'open', 'high', 'low', 'close'])
@@ -261,7 +278,22 @@ const RATIO_FIELDS = new Set([
   'current_ratio', 'quick_ratio', 'cf_to_net_profit', 'interest_coverage',
 ])
 
+/** 后端下发的运行时单位元数据（优先级最高，单一来源）。 */
+const RUNTIME_UNITS = new Map<string, FieldFormat>()
+
+/** 应用 /api/screening/indicators 返回的 unit 元数据。 */
+export function applyIndicatorUnits(units: Readonly<Record<string, string>>): void {
+  for (const [field, unit] of Object.entries(units)) {
+    if (unit === 'pct' || unit === 'percent' || unit === 'ratio' || unit === 'price' || unit === 'plain') {
+      RUNTIME_UNITS.set(field, unit)
+    }
+  }
+}
+
 export function fieldFormat(field: string): FieldFormat {
+  const runtime = RUNTIME_UNITS.get(field)
+  if (runtime) return runtime
+  if (PERCENT_FIELDS.has(field)) return 'percent'
   if (PCT_FIELDS.has(field)) return 'pct'
   if (PRICE_FIELDS.has(field)) return 'price'
   if (RATIO_FIELDS.has(field)) return 'ratio'
@@ -275,6 +307,9 @@ export function formatFieldValue(field: string, value: unknown): string {
   switch (fieldFormat(field)) {
     case 'pct':
       return fmtPct(value)
+    case 'percent':
+      // 百分数存储：直接展示（5.29 = 5.29%），不再 ×100
+      return `${value.toFixed(2)}%`
     case 'price':
     case 'ratio':
       return value.toFixed(2)
@@ -302,9 +337,16 @@ export const FIELD_UNITS: Readonly<Record<string, string>> = {
   deducted_profit_yoy: '(%)',
   revenue_cagr3: '(%)',
   revenue_cagr5: '(%)',
+  net_profit_cagr3: '(%)',
   net_profit_cagr5: '(%)',
+  deducted_profit_cagr3: '(%)',
+  deducted_profit_cagr5: '(%)',
   goodwill_ratio: '(%)',
   payout_ratio: '(%)',
+  period_return: '(%)',
+  annualized_volatility: '(%)',
+  max_drawdown: '(%)',
+  turnover_rate: '(%)',
   ttm_dividend_yield: '(%)',
   div_yield_spread_0p25y: '(%)',
   div_yield_spread_0p5y: '(%)',
