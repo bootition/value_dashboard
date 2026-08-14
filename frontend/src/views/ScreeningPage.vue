@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch } from 'vue'
-import { NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, useMessage } from 'naive-ui'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
+import { NButton, NSwitch, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, useMessage, useDialog } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
@@ -19,6 +19,7 @@ import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import { applyIndicatorUnits, fieldDisplayName } from '../utils/screening-format.ts'
 
 const message = useMessage()
+const dialog = useDialog()
 const indicators = ref<readonly ScreeningIndicator[]>([])
 const loading = ref(false)
 const results = ref<readonly ScreeningResult[]>([])
@@ -229,6 +230,20 @@ let draftSaveQueued = false
 // L0-4（报告42）: 草稿 409 冲突后不再永久停用自动保存，而是给出明确选项
 const showDraftConflictModal = ref(false)
 
+// 2026-08-14 红队 P3：未保存修改判定基于"上次已同步的编辑区快照"
+// （草稿恢复/自动保存/规则加载/保存新版本时刷新），而不是与目标规则
+// 比较——加载目标几乎必然不同，旧逻辑会误弹覆盖确认。
+let lastSyncedSnapshot = ''
+function editorSnapshot(): string {
+  return JSON.stringify({ conditions: ruleTree, sort: sortRules.value })
+}
+function syncEditorSnapshot() {
+  lastSyncedSnapshot = editorSnapshot()
+}
+function hasUnsavedEdits(): boolean {
+  return lastSyncedSnapshot !== '' && editorSnapshot() !== lastSyncedSnapshot
+}
+
 function draftPayload() {
   return {
     conditions: ruleTree,
@@ -251,6 +266,7 @@ async function persistDraft() {
       revision: draftRevision.value,
     })
     draftRevision.value = response.data.revision
+    syncEditorSnapshot()
   } catch (error) {
     if (isAxiosError(error) && error.response?.status === 409) {
       draftHydrated = false
@@ -294,6 +310,7 @@ async function resolveDraftConflict(choice: 'server' | 'local' | 'refresh') {
     })
     draftRevision.value = resp.data.revision
     draftHydrated = true
+    syncEditorSnapshot()
     message.success('已保留本地草稿（覆盖服务器版本），自动保存已恢复')
   } catch {
     message.error('保留本地草稿失败，请刷新页面')
@@ -318,11 +335,15 @@ async function restoreDraft() {
     } | null; revision?: number }>('/api/screening/draft')
     const draft = response.data.draft
     draftRevision.value = response.data.revision ?? 0
-    if (!draft) return
+    if (!draft) {
+      syncEditorSnapshot()
+      return
+    }
     if (draft.conditions) Object.assign(ruleTree, draft.conditions)
     if (draft.sort) sortRules.value = draft.sort
     if (draft.base_pool) Object.assign(basePool, draft.base_pool)
     if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
+    syncEditorSnapshot()
   } catch {
     message.warning('无法恢复最近筛选草稿')
   }
@@ -350,29 +371,53 @@ async function saveRule() {
     })
     await loadSavedRules()
     selectedRuleId.value = resp.data.rule_id
+    syncEditorSnapshot()
     message.success(`规则已保存为 v${resp.data.version}`)
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '保存规则失败'))
   }
 }
 
-function loadRule(ruleId: number) {
-  if (!ruleId || ruleId === 0) return
-  
-  const rule = savedRules.value.find(r => r.id === ruleId)
-  if (!rule) return
-  
-  // Load the rule conditions
+function applyLoadedRule(rule: SavedRule) {
+  // 先重置编辑区再覆盖，确保目标规则不含 conditions/sort 时不残留旧内容
+  ruleTree.logic = 'AND'
+  ruleTree.rules.splice(0, ruleTree.rules.length)
   if (rule.rule_json.conditions) {
     Object.assign(ruleTree, rule.rule_json.conditions)
   }
-  
+
   // Load sort rules
-  if (rule.rule_json.sort && rule.rule_json.sort.length > 0) {
-    sortRules.value = [...rule.rule_json.sort]
-  }
-  
+  sortRules.value = (rule.rule_json.sort && rule.rule_json.sort.length > 0)
+    ? [...rule.rule_json.sort]
+    : []
+
   message.success(`已加载规则: ${rule.name} v${rule.version}`)
+}
+
+function loadRule(ruleId: number) {
+  if (!ruleId || ruleId === 0) return
+
+  const rule = savedRules.value.find(r => r.id === ruleId)
+  if (!rule) return
+
+  // 2026-08-14 红队 P3：加载已保存规则会覆盖编辑区草稿；仅当编辑区有
+  // 未保存修改（相对上次已同步快照）时确认，取消保持原选中项不变。
+  const apply = () => {
+    selectedRuleId.value = ruleId
+    applyLoadedRule(rule)
+    syncEditorSnapshot()
+  }
+  if (!hasUnsavedEdits()) {
+    apply()
+    return
+  }
+  dialog.warning({
+    title: '覆盖未保存的草稿？',
+    content: `加载「${rule.name} v${rule.version}」将覆盖编辑区里未保存的修改。`,
+    positiveText: '覆盖并加载',
+    negativeText: '取消',
+    onPositiveClick: apply,
+  })
 }
 
 const ruleOptions = computed(() => {
@@ -428,6 +473,22 @@ onMounted(async () => {
   }
 
   // reports/79 方案 A: 更新窗口内允许以最近完整快照运行（后端同口径）
+  refreshAutoUpdate()
+  // 2026-08-14 红队 P3：自动更新状态不再只在挂载时读一次——
+  // 更新窗口（数分钟级）内运行按钮会随状态自动切换可用性。
+  autoUpdateTimer = window.setTimeout(function pollAutoUpdate() {
+    refreshAutoUpdate()
+    autoUpdateTimer = window.setTimeout(pollAutoUpdate, autoUpdateRunning.value ? 10000 : 60000)
+  }, 10000)
+})
+
+// 单飞 guard：避免上一次查询未返回时堆积请求
+let autoUpdateInFlight = false
+let autoUpdateTimer: number | undefined
+
+async function refreshAutoUpdate(): Promise<void> {
+  if (autoUpdateInFlight) return
+  autoUpdateInFlight = true
   try {
     const au = await axios.get<{ state: string; current_stage: string }>(
       '/api/data-status/auto-update',
@@ -435,6 +496,15 @@ onMounted(async () => {
     autoUpdateRunning.value = au.data.state === 'enabled' && au.data.current_stage === 'running'
   } catch {
     autoUpdateRunning.value = false
+  } finally {
+    autoUpdateInFlight = false
+  }
+}
+
+onUnmounted(() => {
+  if (autoUpdateTimer !== undefined) {
+    window.clearTimeout(autoUpdateTimer)
+    autoUpdateTimer = undefined
   }
 })
 </script>
@@ -456,7 +526,7 @@ onMounted(async () => {
         </div>
         <div class="rule-load-row">
           <span>已保存规则</span>
-          <n-select v-model:value="selectedRuleId" :options="ruleOptions" size="small" @update:value="loadRule" />
+          <n-select :value="selectedRuleId" :options="ruleOptions" size="small" @update:value="loadRule" />
           <n-input v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称" />
           <n-button size="small" @click="saveRule">保存新版本</n-button>
         </div>

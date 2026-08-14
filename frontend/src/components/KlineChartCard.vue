@@ -70,13 +70,28 @@ function mapCandles(): KLineData[] {
 
 function renderChart() {
   if (!container.value) return
-  if (chartInstance.value) {
-    dispose(chartInstance.value)
-    chartInstance.value = null
+  if (props.candles.length === 0) {
+    if (chartInstance.value) {
+      dispose(chartInstance.value)
+      chartInstance.value = null
+    }
+    return
   }
-  if (props.candles.length === 0) return
 
   const candles = mapCandles()
+  const dataLoader = {
+    getBars: ({ type, callback }: { type: string; callback: (data: KLineData[], more?: boolean) => void }) =>
+      callback(type === 'init' ? candles : [], false),
+  }
+  // 2026-08-14 红队 P3：非首次数据更新不再整图 dispose+init 重建——
+  // klinecharts 10 移除了 applyNewData，改为 换新 loader + resetData
+  // （resetData 内部以 'init' 重新走 loader 载入），保留画布与指标状态。
+  if (chartInstance.value) {
+    chartInstance.value.setDataLoader(dataLoader)
+    chartInstance.value.resetData()
+    return
+  }
+
   let chart: Chart | null
   try {
     chart = init(container.value, {      styles: {
@@ -118,9 +133,7 @@ function renderChart() {
   if (!chart) return
   chartInstance.value = chart
 
-  chart.setDataLoader({
-    getBars: ({ type, callback }) => callback(type === 'init' ? candles : [], false),
-  })
+  chart.setDataLoader(dataLoader)
   // setPeriod 触发 getBars('init') 载入数据，并让十字光标/时间轴按周期格式化。
   chart.setPeriod({ type: period.value, span: 1 })
   chart.createIndicator({ name: 'MA', calcParams: [5, 10, 20, 60, 120, 250] }, false)

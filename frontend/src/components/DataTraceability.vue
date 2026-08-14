@@ -84,7 +84,8 @@ function viewPdf(filename: string, archived = false) {
     message.info('该 PDF 位于冷归档，请按页面中的恢复指引通过 CLI 恢复后查看')
     return
   }
-  window.open(`/api/stock/${props.stockCode}/pdf/${filename}`, '_blank')
+  // 2026-08-14 红队 P3：文件名可能含空格/# 等 URL 保留字符，必须编码
+  window.open(`/api/stock/${encodeURIComponent(props.stockCode)}/pdf/${encodeURIComponent(filename)}`, '_blank')
 }
 
 function restoreCommand(filename: string): string {

@@ -107,7 +107,8 @@ const refreshing = ref(false)
 
 // running 时 4s 高频轮询；空闲/完成后 60s 低频轮询，
 // 让自动更新启动/结束、stale 提示变化无需手动刷新即可看到。
-const isPolling = computed(() => true)
+// 2026-08-14 红队 P3：不再恒真——由自动更新实际阶段派生。
+const isPolling = computed(() => autoUpdate.value?.current_stage === 'running')
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'

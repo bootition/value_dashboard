@@ -199,19 +199,29 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     vi.useFakeTimers()
     try {
       const post = axios.post as Mock
-      post.mockImplementation((url: string) => {
+      post.mockImplementation((url: string, payload?: unknown) => {
         if (url === '/api/screening/run') {
+          const strict = (payload as { strict_only?: boolean } | undefined)?.strict_only === true
+          if (strict) {
+            return Promise.resolve({
+              data: {
+                results: [],
+                total: 0,
+                execution_time_ms: 5,
+                base_pool_size: 100,
+                data_date: '2026-06-30',
+                run_id: 'run-strict',
+                strict_only: true,
+                strict_mode_warning:
+                  '严格可信模式无匹配：以下指标没有任何 strict 血缘记录，相应条件永远无法满足 —— pe_ttm',
+              },
+            })
+          }
           return Promise.resolve({
             data: {
-              results: [],
-              total: 0,
-              execution_time_ms: 5,
-              base_pool_size: 100,
-              data_date: '2026-06-30',
-              run_id: 'run-1',
-              strict_only: true,
-              strict_mode_warning:
-                '严格可信模式无匹配：以下指标没有任何 strict 血缘记录，相应条件永远无法满足 —— pe_ttm',
+              results: [{ stock_code: '600519', name: '贵州茅台', pe_ttm: 10 }],
+              total: 1, execution_time_ms: 5, base_pool_size: 100,
+              data_date: '2026-06-30', run_id: 'run-1',
             },
           })
         }
@@ -223,6 +233,12 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
       const ruleSelect = wrapper.findComponent({ name: 'Select' })
       await ruleSelect.vm.$emit('update:value', 1)
       await flushPromises()
+
+      // 先完整口径运行一次（watch 只在已有结果时按 strict 口径重跑）
+      const runButton = wrapper.findAll('button').find((b) => b.text().includes('运行筛选'))
+      await runButton!.trigger('click')
+      await flushPromises()
+      expect(wrapper.text()).toContain('600519')
 
       // 打开"仅使用严格可信数据"开关（watch 防抖 400ms 后自动重跑）
       const strictSwitch = wrapper.findComponent({ name: 'Switch' })

@@ -262,6 +262,18 @@ async function addToWatchlist() {
 </script>
 
 <template>
+  <!-- 2026-08-14 红队 P3：strict 模式空结果的警告必须可见，不能随
+       results.length>0 的条件一起隐藏（此前空结果时用户看不到原因）。 -->
+  <n-alert
+    v-if="props.strictOnly && props.strictModeWarning"
+    id="strict-mode-alert"
+    type="warning"
+    title="严格可信模式无匹配"
+    style="margin-bottom: 16px"
+  >
+    {{ props.strictModeWarning }}
+  </n-alert>
+
   <div v-if="results.length > 0">
     <n-alert
       v-if="hasWarnings || qualityStatus === 'failed' || qualityStatus === 'loading'"
@@ -301,16 +313,6 @@ async function addToWatchlist() {
     >
       匹配总数 {{ props.totalMatched ?? '超过上限' }} 条，仅展示前 5000 条。请调整筛选条件缩小范围，
       否则保存的结果与导出的 CSV 同样只包含这 5000 条。
-    </n-alert>
-
-    <n-alert
-      v-if="props.strictOnly && props.strictModeWarning"
-      id="strict-mode-alert"
-      type="warning"
-      title="严格可信模式无匹配"
-      style="margin-bottom: 16px"
-    >
-      {{ props.strictModeWarning }}
     </n-alert>
 
     <section class="screening-results-card">

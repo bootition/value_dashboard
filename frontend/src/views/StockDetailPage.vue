@@ -442,6 +442,10 @@ onMounted(() => {
 
 onUnmounted(() => {
   window.removeEventListener('scroll', updateActiveSection)
+  // 2026-08-14 红队 P3：卸载时中止在途请求，避免离开页面后
+  // 响应落地写入已卸载组件状态 / 触发无意义告警。
+  klineAbortController.value?.abort()
+  klineAbortController.value = null
 })
 </script>
 

@@ -81,6 +81,11 @@ function updateOp(index: number, op: string): void {
   if (!item || isRuleNode(item)) return
   item.op = op
   if (op === 'between' && !Array.isArray(item.value)) item.value = [0, 0]
+  // 2026-08-14 红队 P3：between → 单值操作符时残留 [lo,hi] 数组会
+  // 污染校验/执行，塌缩为标量（取左端点）。
+  else if (op !== 'between' && Array.isArray(item.value)) {
+    item.value = typeof item.value[0] === 'number' ? item.value[0] : 0
+  }
   if (['between', 'in', 'is_not_null', 'is_null'].includes(op)) item.right_field = undefined
 }
 
