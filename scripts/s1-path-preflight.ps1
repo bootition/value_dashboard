@@ -190,6 +190,21 @@ function Get-FormalStateOnce {
 
         # 2026-08-14 红队 P2 门禁：除 5 个具名文件外，指纹整个 data/
         # 树（CSV、日志、锁文件等），任何数据面变更都会被 S1 捕获。
+        # 2026-08-14 红队 P3：备份/归档产物目录（~13GB）不做内容哈希，
+        # 只记录 存在性+长度+修改时间——内容哈希使每轮证据读取 ~67GB，
+        # 且这些目录本就是写操作产物而非正式状态；新增/修改文件仍会
+        # 被路径清单与长度/时间戳捕获。
+        $contentExcludedRoots = [System.Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase
+        )
+        foreach ($name in @(
+            "backup", "backup_accept", "backup_s2",
+            "archive_accept", "archive_uat", "archive_s2",
+            "archive_pdf", "archive_pdf_e2e", "archive_pdf_pass", "archive_pdf_test"
+        )) {
+            [void]$contentExcludedRoots.Add($name)
+        }
+
         $tree = [ordered]@{}
         if (Test-Path -LiteralPath $script:FormalDataRoot -PathType Container) {
             $named = [System.Collections.Generic.HashSet[string]]::new()
@@ -201,10 +216,21 @@ function Get-FormalStateOnce {
             foreach ($file in $allFiles) {
                 $rel = $file.FullName.Substring($rootLength).TrimStart("\", "/").Replace("\", "/")
                 if ($named.Contains($rel)) { continue }
+                $topDir = ($rel -split "/")[0]
+                if ($contentExcludedRoots.Contains($topDir)) {
+                    $tree[$rel] = [ordered]@{
+                        exists = $true
+                        length = $file.Length
+                        mtime = $file.LastWriteTime.Ticks
+                        sha256 = $null
+                    }
+                    continue
+                }
                 $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
                 $tree[$rel] = [ordered]@{
                     exists = $true
                     length = $file.Length
+                    mtime = $file.LastWriteTime.Ticks
                     sha256 = $hash
                 }
             }
@@ -225,7 +251,7 @@ function Test-FormalTreesEqual {
     $rightKeys = @($Right.Keys)
     if (($leftKeys -join ",") -ne ($rightKeys -join ",")) { return $false }
     foreach ($key in $leftKeys) {
-        foreach ($field in @("exists", "length", "sha256")) {
+        foreach ($field in @("exists", "length", "mtime", "sha256")) {
             if ($Left[$key][$field] -ne $Right[$key][$field]) { return $false }
         }
     }

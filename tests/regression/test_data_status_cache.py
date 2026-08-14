@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 import app.web.api.data_status as data_status
@@ -18,6 +19,23 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
+
+# 2026-08-14 红队 P2-13：TestClient 后台 portal 线程若不关闭会在
+# tmp_path 清理时与临时库文件冲突（Windows 文件锁 flaky 根因之一）。
+# 统一登记并在测试结束后 close；同时等后台 refresh 线程退出。
+_active_clients: list[TestClient] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_test_clients() -> None:
+    _active_clients.clear()
+    yield
+    for client in _active_clients:
+        client.close()
+    _active_clients.clear()
+    deadline = time.monotonic() + 5.0
+    while getattr(data_status, "_SUMMARY_REFRESHING", set()) and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def _reset_cache(monkeypatch) -> None:
@@ -36,7 +54,9 @@ def _make_app(database_paths: DatabasePathSet):
         duck=duck,
         sqlite=sqlite,
     )
-    return TestClient(app), duck
+    client = TestClient(app)
+    _active_clients.append(client)
+    return client, duck
 
 
 def _wait_for_real_summary(client, timeout: float = 5.0) -> dict | None:
@@ -51,13 +71,16 @@ def _wait_for_real_summary(client, timeout: float = 5.0) -> dict | None:
     return None
 
 
-def _unlink_with_retry(lock_path, attempts: int = 40, delay: float = 0.05) -> None:
+def _unlink_with_retry(lock_path, attempts: int = 60, delay: float = 0.05) -> None:
     """Unlink a lock file tolerating transient Windows sharing races.
 
     后台 summary 刷新线程可能在 finally 的 unlink 瞬间正在读取锁文件
     （_update_write_lock_active → read_text），Windows 上偶发
     PermissionError(WinError 32)（reports/79 构建门禁两度撞见）。重试
-    2 秒覆盖线程完成读写的窗口。
+    覆盖线程完成读写的窗口。2026-08-14 红队 P2-13：重试耗尽后不再
+    裸 unlink（旧行为要么静默成功要么抛 WinError 32 打断测试），
+    直接抛错暴露真实持锁方；测试端已先 close TestClient 并等线程退出，
+    不应走到耗尽分支。
     """
     for _ in range(attempts):
         try:
@@ -65,7 +88,7 @@ def _unlink_with_retry(lock_path, attempts: int = 40, delay: float = 0.05) -> No
             return
         except PermissionError:
             time.sleep(delay)
-    lock_path.unlink(missing_ok=True)
+    raise RuntimeError(f"lock file still held after {attempts * delay:.0f}s: {lock_path}")
 
 
 def test_summary_first_request_returns_placeholder_and_background_refreshes(

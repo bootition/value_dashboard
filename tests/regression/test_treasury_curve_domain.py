@@ -413,6 +413,125 @@ def test_align_5_day_staleness_boundary(
     assert missing["status"] == "missing"
 
 
+# ─── 缺口补齐（2026-08-14 红队 F2 回归）：backfill_missing_days ─────────
+
+
+_FIXED_TODAY = date(2026, 8, 14)
+
+
+def _seed_trading_dates(sqlite: SQLiteStore, days: list[str]) -> None:
+    with sqlite.transaction() as conn:
+        conn.executemany(
+            "INSERT OR IGNORE INTO trading_dates (trade_date) VALUES (?)",
+            [(day,) for day in days],
+        )
+
+
+def _seed_full_curve(duck: DuckDBStore, curve_date: date) -> None:
+    for tenor in KEY_TENORS:
+        _seed_curve(duck, curve_date, tenor, 1.5)
+
+
+def _seed_missing_entry(sqlite: SQLiteStore, day: str) -> None:
+    with sqlite.transaction() as conn:
+        conn.execute(
+            "INSERT INTO missing_list (stock_code, field_name, reason_code) VALUES (?, ?, ?)",
+            ["__market__", f"treasury_curve_daily_{day}", "source_empty"],
+        )
+
+
+def _gap_fill_stub(recorded: list):
+    def fake(self, work_date):
+        recorded.append(work_date)
+        return {"status": "success"}
+
+    return fake
+
+
+def test_gap_fill_targets_uncovered_days_ascending_bounded(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
+    days = ["2026-08-10", "2026-08-11", "2026-08-12", "2026-08-13", "2026-08-14"]
+    _seed_trading_dates(sqlite_store, days)
+    # 8-10 / 8-11 已全期限覆盖，8-12..8-14 缺失
+    _seed_full_curve(duckdb_store, date(2026, 8, 10))
+    _seed_full_curve(duckdb_store, date(2026, 8, 11))
+    recorded: list = []
+    monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
+    updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
+
+    report = updater.backfill_missing_days(max_days=3, lookback_trading_days=10)
+
+    assert report["status"] == "success"
+    assert report["targeted"] == ["2026-08-12", "2026-08-13", "2026-08-14"]
+    assert recorded == [date(2026, 8, 12), date(2026, 8, 13), date(2026, 8, 14)]
+    assert report["succeeded"] == 3
+    assert report["failed"] == []
+
+
+def test_gap_fill_respects_max_days_cap(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
+    _seed_trading_dates(sqlite_store, ["2026-08-12", "2026-08-13", "2026-08-14"])
+    recorded: list = []
+    monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
+    updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
+
+    report = updater.backfill_missing_days(max_days=1, lookback_trading_days=10)
+
+    assert report["targeted"] == ["2026-08-12"]
+    assert recorded == [date(2026, 8, 12)]
+
+
+def test_gap_fill_includes_unresolved_missing_list_entries(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
+    _seed_missing_entry(sqlite_store, "2026-08-09")
+    recorded: list = []
+    monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
+    updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
+
+    report = updater.backfill_missing_days(max_days=5, lookback_trading_days=10)
+
+    assert report["targeted"] == ["2026-08-09"]
+    assert recorded == [date(2026, 8, 9)]
+
+
+def test_gap_fill_excludes_future_days(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
+    _seed_missing_entry(sqlite_store, "2026-08-20")  # 未来日期
+    recorded: list = []
+    monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
+    updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
+
+    report = updater.backfill_missing_days(max_days=5, lookback_trading_days=10)
+
+    assert report == {"status": "skipped", "reason": "no_missing_days"}
+    assert recorded == []
+
+
+def test_gap_fill_skips_when_all_days_covered(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
+    _seed_trading_dates(sqlite_store, ["2026-08-13", "2026-08-14"])
+    _seed_full_curve(duckdb_store, date(2026, 8, 13))
+    _seed_full_curve(duckdb_store, date(2026, 8, 14))
+    recorded: list = []
+    monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
+    updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
+
+    report = updater.backfill_missing_days(max_days=3, lookback_trading_days=10)
+
+    assert report == {"status": "skipped", "reason": "no_missing_days"}
+    assert recorded == []
+
+
 def test_readiness_unchanged_by_treasury_domain(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:

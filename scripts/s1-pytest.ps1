@@ -119,12 +119,14 @@ function Compare-FormalState {
         }
     }
     # 2026-08-14 红队 P2 门禁：整棵 data/ 树对比（具名文件之外的
-    # CSV/日志/锁等同样不得变化）。
+    # CSV/日志/锁等同样不得变化）。2026-08-14 P3：备份/归档目录条目
+    # 只含 exists/length/mtime（sha256=null，见 preflight 内容排除），
+    # 对比字段相应扩展到 mtime。
     $beforeTree = $Before.tree
     $afterTree = $After.tree
     $treeRelPaths = @($beforeTree.Keys + $afterTree.Keys) | Sort-Object -Unique
     foreach ($rel in $treeRelPaths) {
-        foreach ($field in @("exists", "length", "sha256")) {
+        foreach ($field in @("exists", "length", "mtime", "sha256")) {
             $beforeValue = if ($beforeTree.Contains($rel)) { $beforeTree[$rel][$field] } else { $null }
             $afterValue = if ($afterTree.Contains($rel)) { $afterTree[$rel][$field] } else { $null }
             if ($beforeValue -ne $afterValue) {
@@ -300,7 +302,7 @@ try {
     try {
         try {
             $beforePath = Join-Path $runDir "pre\before-evidence.json"
-            $before = Get-Content -LiteralPath $beforePath -Raw | ConvertFrom-Json
+            $before = Get-Content -LiteralPath $beforePath -Raw | ConvertFrom-Json -AsHashtable
             $beforeParsed = $true
 
             if ($PolicyOnly) {
@@ -317,7 +319,15 @@ try {
                 $effectiveArgs = @("--basetemp", (Join-Path $runRoot "pytest-tmp")) + $PytestArgs
             }
 
-            $pythonExe = (Get-Command python -ErrorAction Stop).Source
+            # 2026-08-14 红队 P3：优先仓库 venv 解释器（与 vd.bat 一致），
+            # 避免 PATH 上的系统 Python（曾为 3.14，依赖集不匹配）静默换血。
+            $venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+            if (Test-Path -LiteralPath $venvPython) {
+                $pythonExe = $venvPython
+            }
+            else {
+                $pythonExe = (Get-Command python -ErrorAction Stop).Source
+            }
             # 2026-08-14 红队 P2 门禁：freeze 收窄——允许用户无关 python
             # 进程存在，只追踪本次运行新增且存活的进程。
             $pythonProcessesBefore = @(Get-PythonProcessIds)
@@ -356,7 +366,7 @@ try {
         if ($LASTEXITCODE -eq 0) {
             try {
                 $afterPath = Join-Path $runDir "post\after-evidence.json"
-                $after = Get-Content -LiteralPath $afterPath -Raw | ConvertFrom-Json
+                $after = Get-Content -LiteralPath $afterPath -Raw | ConvertFrom-Json -AsHashtable
                 if (-not $beforeParsed) {
                     throw "Before evidence could not be parsed"
                 }
@@ -427,7 +437,7 @@ try {
                         throw "Post-cleanup formal-state capture failed"
                 }
                     $postCleanupAfter = Get-Content -LiteralPath (Join-Path $runDir "post\after-cleanup-evidence.json") -Raw |
-                        ConvertFrom-Json
+                        ConvertFrom-Json -AsHashtable
                     $postCleanupDelta = Compare-FormalState `
                         -Before $before `
                         -After $postCleanupAfter `
