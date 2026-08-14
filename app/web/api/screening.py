@@ -92,10 +92,11 @@ def _require_current_screenability(request: Request) -> dict:
 
     Returns: {"lock_active": bool, "data_as_of": str | None}
     """
-    from app.core.storage.update_lock import update_lock_active
+    from app.core.storage.update_lock import any_write_lock_active
 
     try:
-        lock_active = update_lock_active(request.app.state.duck.db_path)
+        # 2026-08-14 红队 P2-1：写窗口判定统一（update 锁 OR duckdb 写锁）
+        lock_active = any_write_lock_active(request.app.state.duck.db_path)
     except Exception:
         lock_active = False
     if lock_active:

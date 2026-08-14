@@ -38,6 +38,8 @@ const runEnabled = computed(() => dataReady.value === true || autoUpdateRunning.
 const warningCodes = ref<readonly WarningCode[]>([])
 const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
 const dataReady = ref<boolean | null>(null)
+// 2026-08-14 红队 P2-4：严格模式空结果反馈文案（来自 /run 响应）
+const strictModeWarning = ref<string | null>(null)
 
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
 const strictOnly = ref(false)
@@ -163,6 +165,8 @@ async function runScreening() {
     // reports/79 方案 A: 更新窗口内基于快照的运行，明确告知口径
     autoUpdateSnapshot.value = resp.data.auto_update_in_progress === true
     snapshotAsOf.value = resp.data.data_as_of ?? null
+    // 2026-08-14 红队 P2-4：严格模式空结果的原因反馈（无 strict 血缘等）
+    strictModeWarning.value = resp.data.strict_mode_warning ?? null
     if (resp.data.truncated) {
       message.warning(`结果超过 5000 条，仅展示前 5000 条（共 ${resp.data.total} 条匹配）`)
     }
@@ -495,7 +499,7 @@ onMounted(async () => {
     <n-alert v-if="autoUpdateSnapshot" type="info" :show-icon="true" class="screening-snapshot-note">
       数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
     </n-alert>
-    <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :sort="sortRules" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
+    <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :sort="sortRules" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
 
     <section v-if="results.length === 0" class="screening-empty-card">
       <n-empty description="运行筛选后显示候选公司" />

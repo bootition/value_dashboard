@@ -72,3 +72,34 @@ def test_data_diagnose_uses_the_read_only_database_composition(
     data_diagnose()
 
     assert calls == [False]
+
+
+def test_database_context_reports_path_isolation_friendly(
+    monkeypatch,
+    capsys,
+) -> None:
+    """P2-17：路径策略拒绝时输出协议化错误并以退出码 2 结束，不抛 traceback。"""
+    import typer
+
+    from app.core.storage.path_policy import PathIsolationError
+
+    def raise_isolation():
+        raise PathIsolationError("VD_FORMAL_ACK=confirmed is required for formal profile")
+
+    monkeypatch.setattr(
+        "app.core.storage.path_policy.resolve_and_validate_paths", raise_isolation
+    )
+
+    try:
+        __import__("app.cli.main", fromlist=["_database_context"])._database_context(
+            initialize=False
+        )
+    except typer.Exit as error:
+        assert error.exit_code == 2
+    else:  # pragma: no cover - must always exit
+        raise AssertionError("expected typer.Exit(2)")
+
+    response = json.loads(capsys.readouterr().out)
+    assert response["result"]["error_code"] == "E004"
+    assert response["result"]["error_message"] == "path_isolation_violation"
+    assert "VD_FORMAL_ACK" in response["result"]["data"]["detail"]

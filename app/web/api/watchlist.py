@@ -67,8 +67,15 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             "FROM watchlist ORDER BY group_name, added_at DESC"
         )
 
+    # 分组列表必须先于空行短路计算：当前过滤分组为空时也必须返回全量分组，
+    # 否则前端侧栏分组按钮全部消失、无法切回其他分组（2026-08-14 红队 P2-19）。
+    groups = sqlite.query(
+        "SELECT group_name, COUNT(*) as cnt "
+        "FROM watchlist GROUP BY group_name ORDER BY group_name"
+    )
+
     if not rows:
-        return {"items": [], "count": 0, "groups": []}
+        return {"items": [], "count": 0, "groups": groups}
 
     # 关联股票名称和最新指标
     stock_codes = [r["stock_code"] for r in rows]
@@ -136,17 +143,15 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             else sorted(untrusted & set(_SNAPSHOT_VALUE_FIELDS))
         )
 
-    # 获取分组列表
-    groups = sqlite.query(
-        "SELECT DISTINCT group_name, COUNT(*) as cnt "
-        "FROM watchlist GROUP BY group_name ORDER BY group_name"
-    )
+    # 获取分组列表（已上移至空行短路之前，此处删除原重复查询）
 
     # reports/76 P1-2: 自动更新窗口标注，前端展示横幅而非误读为不可信。
+    # 2026-08-14 红队 P2-1：写窗口判定统一——自动更新锁 OR DuckDB 写锁
+    # （维护/回填类 CLI 写操作持 .duckdb.write.lock 而非 update 锁）。
     try:
-        from app.core.storage.update_lock import update_lock_active
+        from app.core.storage.update_lock import any_write_lock_active
 
-        auto_update_in_progress = update_lock_active(duck.db_path)
+        auto_update_in_progress = any_write_lock_active(duck.db_path)
     except Exception:
         auto_update_in_progress = False
 

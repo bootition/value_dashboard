@@ -194,4 +194,51 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     expect(wrapper.text()).toContain('2026-08-11')
     expect(wrapper.text()).toContain('快照')
   })
+
+  it('严格模式空结果时展示原因反馈（reports/80 P2-4）', async () => {
+    vi.useFakeTimers()
+    try {
+      const post = axios.post as Mock
+      post.mockImplementation((url: string) => {
+        if (url === '/api/screening/run') {
+          return Promise.resolve({
+            data: {
+              results: [],
+              total: 0,
+              execution_time_ms: 5,
+              base_pool_size: 100,
+              data_date: '2026-06-30',
+              run_id: 'run-1',
+              strict_only: true,
+              strict_mode_warning:
+                '严格可信模式无匹配：以下指标没有任何 strict 血缘记录，相应条件永远无法满足 —— pe_ttm',
+            },
+          })
+        }
+        return Promise.resolve({ data: {} })
+      })
+
+      const { wrapper } = mountScreeningPage()
+      await flushPromises()
+      const ruleSelect = wrapper.findComponent({ name: 'Select' })
+      await ruleSelect.vm.$emit('update:value', 1)
+      await flushPromises()
+
+      // 打开"仅使用严格可信数据"开关（watch 防抖 400ms 后自动重跑）
+      const strictSwitch = wrapper.findComponent({ name: 'Switch' })
+      expect(strictSwitch.exists()).toBe(true)
+      await strictSwitch.vm.$emit('update:value', true)
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+
+      expect(post).toHaveBeenCalledWith(
+        '/api/screening/run',
+        expect.objectContaining({ strict_only: true }),
+      )
+      expect(wrapper.text()).toContain('严格可信模式无匹配')
+      expect(wrapper.text()).toContain('strict 血缘记录')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

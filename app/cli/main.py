@@ -33,10 +33,23 @@ def _database_context(*, initialize: bool = True):
     """
     from app.core.config import Config
     from app.core.storage.duckdb_store import DuckDBStore
-    from app.core.storage.path_policy import resolve_and_validate_paths
+    from app.core.storage.path_policy import PathIsolationError, resolve_and_validate_paths
     from app.core.storage.sqlite_store import SQLiteStore
 
-    paths = resolve_and_validate_paths()
+    try:
+        paths = resolve_and_validate_paths()
+    except PathIsolationError as error:
+        # 2026-08-14 红队 P2-17：路径策略拒绝（缺 VD_ENV/ACK/路径不符）时
+        # 不再向用户抛裸 traceback，输出协议化错误并以退出码 2 结束。
+        from app.cli.protocol import make_response
+
+        typer.echo(json.dumps(make_response(
+            "cli.database_context",
+            error_code="E004",
+            error_message="path_isolation_violation",
+            data={"detail": str(error)},
+        ), ensure_ascii=False, default=str))
+        raise typer.Exit(code=2) from error
     Config.load_with_paths(paths)
     duck, sqlite = DuckDBStore(paths=paths), SQLiteStore(paths=paths)
     if initialize:
@@ -53,12 +66,12 @@ def _database_stores(*, initialize: bool = True):
     return duck, sqlite
 
 
-def _duck_store():
-    return _database_stores()[0]
+def _duck_store(*, initialize: bool = True):
+    return _database_stores(initialize=initialize)[0]
 
 
-def _sqlite_store():
-    return _database_stores()[1]
+def _sqlite_store(*, initialize: bool = True):
+    return _database_stores(initialize=initialize)[1]
 
 
 def _dsl_engine():
@@ -91,10 +104,10 @@ def _backup_manager(*, initialize: bool = True):
     return BackupManager(duck=duck, sqlite=sqlite)
 
 
-def _pdf_manager():
+def _pdf_manager(*, initialize: bool = True):
     from app.core.pdf.manager import PDFManager
 
-    _, _, sqlite = _database_context()
+    _, _, sqlite = _database_context(initialize=initialize)
     return PDFManager(sqlite=sqlite)
 
 
@@ -853,7 +866,8 @@ def screening_list(limit: int = typer.Option(20, "--limit")) -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    sqlite = _sqlite_store()
+    # 2026-08-14 红队 P2-14：只读命令不得触发 schema 初始化/恢复接管
+    sqlite = _sqlite_store(initialize=False)
     rows = sqlite.query(
         "SELECT id, title, data_date, created_at FROM screening_results ORDER BY created_at DESC LIMIT ?",
         [limit],
@@ -873,7 +887,8 @@ def override_list() -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    duck = _duck_store()
+    # P2-14：只读查询不得初始化 schema/接管恢复
+    duck = _duck_store(initialize=False)
     try:
         rows = duck.read_query(
             "SELECT stock_code, field_name, source, value, confidence "
@@ -1502,7 +1517,8 @@ def screening_export_csv(
     import csv
     from app.core.data_quality import screening_readiness
     from app.web.api.screening import _csv_export_header, _csv_export_row, _field_provenance
-    _, duck, sqlite = _database_context()
+    # P2-14：导出只读数据库并写 CSV 文件，不得初始化 schema/接管恢复
+    _, duck, sqlite = _database_context(initialize=False)
     decision = screening_readiness(duck, sqlite)
     if not decision["ready"]:
         typer.echo(json.dumps(make_response(
@@ -1658,7 +1674,8 @@ def data_list_pdfs(stock_code: str = typer.Argument(...)) -> None:
     Config.load()
     from app.cli.protocol import make_response
 
-    mgr = _pdf_manager()
+    # P2-14：仅列举本地文件，不需要 schema 初始化/恢复接管
+    mgr = _pdf_manager(initialize=False)
     files = mgr.list_local_pdfs(stock_code)
     typer.echo(json.dumps(make_response("data.list_pdfs", {"files": files, "count": len(files)}), ensure_ascii=False, default=str))
 

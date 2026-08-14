@@ -248,6 +248,35 @@ class ScreeningEngine:
         truncated = total_matched > len(results)
         execution_time = (time.monotonic() - start_time) * 1000
 
+        # 2026-08-14 红队 P2-4：strict_only 无结果时给出可行动反馈。
+        # 此前严格模式静默返回空集，用户无法区分"确实无股票符合"与
+        # "指标没有 strict 血缘记录、条件永远无法满足"。
+        strict_availability: dict[str, int] = {}
+        strict_mode_warning: str | None = None
+        if strict_only and strict_fields:
+            fields = sorted(strict_fields)
+            placeholders = ", ".join(["?"] * len(fields))
+            audit_rows = self.duck.read_query(
+                "SELECT field_name, COUNT(*) AS n FROM source_audit "
+                f"WHERE confidence = 'strict' AND field_name IN ({placeholders}) "
+                "GROUP BY field_name",
+                fields,
+            )
+            strict_availability = {r["field_name"]: int(r["n"]) for r in audit_rows}
+            missing = [f for f in fields if f not in strict_availability]
+            if total_matched == 0:
+                if missing:
+                    strict_mode_warning = (
+                        "严格可信模式无匹配：以下指标没有任何 strict 血缘记录，"
+                        "相应条件永远无法满足 —— " + "、".join(missing)
+                    )
+                else:
+                    strict_mode_warning = (
+                        "严格可信模式无匹配：所用指标存在 strict 血缘记录，"
+                        "但当前快照期没有值/报告期完全一致的严格记录；"
+                        "可切换“包含近似可信数据”查看完整口径结果。"
+                    )
+
         # 5. 获取基础池大小（用于报告）
         base_pool_size = self._get_base_pool_size(
             include_st, include_suspended, min_listing_years
@@ -271,6 +300,8 @@ class ScreeningEngine:
             "data_date": data_date,
             "strict_only": strict_only,
             "strict_fields": sorted(strict_fields),
+            "strict_availability": strict_availability,
+            "strict_mode_warning": strict_mode_warning,
             "locked_indicators": locked_indicators or {},
         }
 

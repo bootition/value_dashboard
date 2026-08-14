@@ -71,6 +71,8 @@ export interface ScreeningRunResponse {
   readonly data_date: string | null
   readonly auto_update_in_progress?: boolean
   readonly data_as_of?: string | null
+  // 2026-08-14 红队 P2-4：strict_only 空结果的原因反馈
+  readonly strict_mode_warning?: string | null
 }
 
 /** Response from GET /api/data-status/summary (only the quality slice we need). */

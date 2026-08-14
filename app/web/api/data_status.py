@@ -30,12 +30,17 @@ _SUMMARY_REFRESHING: set[str] = set()
 
 
 def _update_write_lock_active(duck) -> bool:
-    """自动更新写锁存在即认为正在写入（保守：宁愿命中缓存也不要卡读）。"""
-    try:
-        from app.core.storage.update_lock import _owner_is_dead
+    """任意写锁存在即认为正在写入（保守：宁愿命中缓存也不要卡读）。
 
-        lock_path = duck.db_path.parent / ".value-dashboard.update.lock"
-        return lock_path.exists() and not _owner_is_dead(lock_path)
+    2026-08-14 红队 P2-1：此前只查 `.value-dashboard.update.lock`，
+    维护/回填/发布类 CLI 写操作（.duckdb.write.lock）窗口被误判为空闲，
+    stale 缓存降级与筛选快照口径标注双双失效。现统一为
+    any_write_lock_active（update 锁 OR duckdb 写锁）。
+    """
+    try:
+        from app.core.storage.update_lock import any_write_lock_active
+
+        return any_write_lock_active(duck.db_path)
     except OSError:
         return False
 
