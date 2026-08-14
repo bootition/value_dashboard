@@ -213,4 +213,10 @@ def test_clean_release_builder_uses_locked_dependencies() -> None:
     assert "Copy-Item -LiteralPath" in source
     assert "Release must not package formal data" in source
     package = (root / "frontend" / "package.json").read_text(encoding="utf-8")
-    assert '"test": "node --experimental-strip-types --test' in package
+    # 2026-08-14 红队 P2-10：单元测试 runner 防漂移——不再在 package.json
+    # 硬编码测试文件名，改由 scripts/run-unit-tests.mjs 自动扫描 tests/*.test.ts。
+    assert '"test": "node scripts/run-unit-tests.mjs && vitest run"' in package
+    runner = (root / "frontend" / "scripts" / "run-unit-tests.mjs").read_text(encoding="utf-8")
+    assert "--experimental-strip-types" in runner
+    assert "--test" in runner
+    assert 'readdirSync' in runner

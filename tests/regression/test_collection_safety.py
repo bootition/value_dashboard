@@ -1,14 +1,18 @@
 """Verify that archived legacy tests are excluded from pytest collection,
 that the root conftest hook is wired correctly, and that active test files
 contain no module-level calls to known production-DB mutators.
+
+2026-08-14 红队 P2-9（合约 path-isolation-contract.md §8.4）：
+- 移除递归 subprocess 的 collect-only 测试（正式库哈希/嵌套 pytest 由
+  S1 包装器指纹覆盖，见 s1-pytest.ps1 / s1-path-preflight.ps1）。
+- AST 守卫增强：KNOWN_DANGEROUS_MUTATORS 扩至 Config.current，并把
+  DuckDBStore/SQLiteStore 的模块级零参实例化从"仅表达式语句"扩展到
+  赋值/注解赋值等语句（防御纵深）。
 """
 
 from __future__ import annotations
 
 import ast
-import hashlib
-import subprocess
-import sys
 import tomllib
 from pathlib import Path
 
@@ -17,28 +21,6 @@ import pytest
 from _pytest_policy import archived_root, is_archived_legacy_test
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PRODUCTION_DATABASES = (
-    PROJECT_ROOT / "data" / "valuedashboard.duckdb",
-    PROJECT_ROOT / "data" / "valuedashboard.sqlite",
-)
-
-# ── helpers ────────────────────────────────────────────────────────────
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file_handle:
-        for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def _database_file_state() -> dict[Path, str | None]:
-    paths = [
-        *PRODUCTION_DATABASES,
-        *(Path(f"{path}{suffix}") for path in PRODUCTION_DATABASES for suffix in ("-wal", "-shm")),
-    ]
-    return {path: _sha256(path) if path.exists() else None for path in paths}
 
 
 # ── existing tests (unchanged) ─────────────────────────────────────────
@@ -50,29 +32,6 @@ def test_pytest_discovers_only_regression_tests() -> None:
 
     pytest_config = config["tool"]["pytest"]["ini_options"]
     assert pytest_config["testpaths"] == ["tests/regression"]
-
-
-def test_collect_only_does_not_modify_production_databases() -> None:
-    assert all(path.is_file() for path in PRODUCTION_DATABASES)
-    state_before = _database_file_state()
-
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "--collect-only",
-            "-q",
-        ],
-        cwd=PROJECT_ROOT,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-
-    state_after = _database_file_state()
-    assert result.returncode == 0, result.stderr
-    assert state_after == state_before
 
 
 # ── new: policy unit tests ─────────────────────────────────────────────
@@ -122,11 +81,12 @@ class TestRootConftestExists:
         assert "def pytest_ignore_collect" in text
 
 
-# ── new: static AST guard against module-level mutators ─────────────────
+# ── AST guard against module-level mutators (P2-9 增强) ─────────────────
 
 KNOWN_DANGEROUS_MUTATORS = (
     "init_all_schema",
     "Config.load",
+    "Config.current",
 )
 
 KNOWN_DANGEROUS_ZERO_ARG_CALLABLES = (
@@ -154,7 +114,7 @@ def _callable_name(node: ast.AST) -> str | None:
         return node.id
     if isinstance(node, ast.Attribute):
         parts: list[str] = []
-        cur = node
+        cur: ast.AST = node
         while isinstance(cur, ast.Attribute):
             parts.append(cur.attr)
             cur = cur.value  # type: ignore[assignment]
@@ -170,33 +130,52 @@ def _callable_name(node: ast.AST) -> str | None:
     return None
 
 
-def _is_module_level_dangerous_call(tree: ast.AST) -> list[str]:
-    """Return every dangerous callable name found at module level."""
-    found: list[str] = []
-    for child in ast.walk(tree):
-        if not isinstance(child, ast.Module):
-            continue
-        for stmt in child.body:
-            if not (isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)):
-                continue
-            call = stmt.value
-            name = _callable_name(call.func)
-            if name is None:
-                continue
+def _dangerous_calls_in_expression(expr: ast.AST) -> list[str]:
+    """Return dangerous call names inside one module-level expression.
 
-            # Check named mutators
-            for mutator in KNOWN_DANGEROUS_MUTATORS:
-                if name == mutator or name.endswith(f".{mutator}"):
+    Walks the expression tree but never descends into function/lambda bodies
+    (those live in separate statements and are not module-level executions).
+    """
+    found: list[str] = []
+    for node in ast.walk(expr):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _callable_name(node.func)
+        if name is None:
+            continue
+        for mutator in KNOWN_DANGEROUS_MUTATORS:
+            if name == mutator or name.endswith(f".{mutator}"):
+                found.append(name)
+                break
+        else:
+            if name in KNOWN_DANGEROUS_ZERO_ARG_CALLABLES:
+                n_args = len(node.args) + sum(
+                    1 for kw in node.keywords if kw.arg not in ("self", "cls")
+                )
+                if n_args == 0:
                     found.append(name)
-                    break
+    return found
+
+
+def _module_level_dangerous_calls(tree: ast.AST) -> list[str]:
+    """Return every dangerous callable found at module level.
+
+    Covers expression statements (``Config.load()``) and assignments
+    (``store = DuckDBStore()``), which the pre-P2-9 guard missed.
+    """
+    found: list[str] = []
+    for stmt in tree.body:
+        if isinstance(stmt, ast.Expr):
+            found.extend(_dangerous_calls_in_expression(stmt.value))
+        elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            if isinstance(stmt, ast.Assign):
+                expressions = [stmt.value]
+            elif isinstance(stmt, ast.AnnAssign):
+                expressions = [stmt.value] if stmt.value is not None else []
             else:
-                # Check zero-arg instantiation of known store classes
-                if name in KNOWN_DANGEROUS_ZERO_ARG_CALLABLES:
-                    n_args = len(call.args) + sum(
-                        1 for kw in call.keywords if kw.arg not in ("self", "cls")
-                    )
-                    if n_args == 0:
-                        found.append(name)
+                expressions = [stmt.value]
+            for expr in expressions:
+                found.extend(_dangerous_calls_in_expression(expr))
     return found
 
 
@@ -212,7 +191,7 @@ class TestActiveTestsHaveNoModuleLevelMutators:
         results: dict[str, list[str]] = {}
         for path in active_test_files:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            dangerous = _is_module_level_dangerous_call(tree)
+            dangerous = _module_level_dangerous_calls(tree)
             if dangerous:
                 results[str(path.relative_to(PROJECT_ROOT))] = dangerous
         return results
@@ -229,6 +208,13 @@ class TestActiveTestsHaveNoModuleLevelMutators:
     ) -> None:
         assert "Config.load" not in str(scan_results), (
             f"Module-level Config.load() calls found: {scan_results}"
+        )
+
+    def test_no_config_current_at_module_level(
+        self, scan_results: dict[str, list[str]]
+    ) -> None:
+        assert "Config.current" not in str(scan_results), (
+            f"Module-level Config.current() calls found: {scan_results}"
         )
 
     def test_no_zero_arg_duckdbstore_at_module_level(

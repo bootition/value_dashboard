@@ -140,10 +140,29 @@ function removeSortRule(index: number) {
   sortRules.value.splice(index, 1)
 }
 
+// 2026-08-14 红队 P2-20：运行始终按已保存版本（rule_id/version）执行；
+// 此前用户选择规则后再改条件/排序会继续运行却静默忽略编辑。
+// 运行前检测草稿与已保存版本的差异并明确告知。
+function isDraftDirty(): boolean {
+  const rule = activeRule.value
+  if (!rule) return false
+  const savedConditions = (rule.rule_json.conditions ?? null) as unknown
+  const savedSort = (rule.rule_json.sort ?? null) as unknown
+  const conditionsDirty = JSON.stringify(ruleTree) !== JSON.stringify(savedConditions)
+  const sortDirty = JSON.stringify(sortRules.value) !== JSON.stringify(savedSort)
+  return conditionsDirty || sortDirty
+}
+
 async function runScreening() {
   if (activeRule.value === null) {
     message.warning('请先保存并选择规则版本，再运行筛选')
     return
+  }
+  if (isDraftDirty()) {
+    message.warning(
+      `当前草稿有未保存的修改，本次运行仍按已保存版本 v${activeRule.value.version} 执行；如需按新条件运行请先保存规则`,
+      { duration: 8000 },
+    )
   }
   loading.value = true
   try {

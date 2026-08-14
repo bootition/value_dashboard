@@ -14,6 +14,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+# 2026-08-14 红队 P2 门禁：S1 依赖 .NET Core API（如
+# [System.IO.Path]::IsPathFullyQualified），Windows PowerShell 5.1 会中途
+# 报"方法不存在"；入口处显式要求 PowerShell 7+。
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "PowerShell 7+ is required to run S1 gates, got $($PSVersionTable.PSVersion)"
+}
 if ($null -eq $PytestArgs) { $PytestArgs = @() }
 
 $projectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
@@ -108,6 +114,25 @@ function Compare-FormalState {
                     field = $field
                     before = $beforeFile.$field
                     after = $afterFile.$field
+                }
+            }
+        }
+    }
+    # 2026-08-14 红队 P2 门禁：整棵 data/ 树对比（具名文件之外的
+    # CSV/日志/锁等同样不得变化）。
+    $beforeTree = $Before.tree
+    $afterTree = $After.tree
+    $treeRelPaths = @($beforeTree.Keys + $afterTree.Keys) | Sort-Object -Unique
+    foreach ($rel in $treeRelPaths) {
+        foreach ($field in @("exists", "length", "sha256")) {
+            $beforeValue = if ($beforeTree.Contains($rel)) { $beforeTree[$rel][$field] } else { $null }
+            $afterValue = if ($afterTree.Contains($rel)) { $afterTree[$rel][$field] } else { $null }
+            if ($beforeValue -ne $afterValue) {
+                $differences += [ordered]@{
+                    file = "data/$rel"
+                    field = $field
+                    before = $beforeValue
+                    after = $afterValue
                 }
             }
         }
@@ -293,10 +318,9 @@ try {
             }
 
             $pythonExe = (Get-Command python -ErrorAction Stop).Source
+            # 2026-08-14 红队 P2 门禁：freeze 收窄——允许用户无关 python
+            # 进程存在，只追踪本次运行新增且存活的进程。
             $pythonProcessesBefore = @(Get-PythonProcessIds)
-            if ($pythonProcessesBefore.Count -gt 0) {
-                throw "Python/pytest process(es) appeared before launch: $($pythonProcessesBefore -join ',')"
-            }
             $pythonStarted = $true
             $nativeArgs = @("-m", "pytest") + $effectiveArgs
             if ($nativeArgs | Where-Object { $_ -match "\s" }) {
@@ -310,8 +334,12 @@ try {
                 -PassThru
             $pytestExit = $pythonProcess.ExitCode
             $pythonProcessesAfter = @(Get-PythonProcessIds)
-            if ($pythonProcessesAfter.Count -gt 0) {
-                throw "Python/pytest process(es) survived the process-tree wait: $($pythonProcessesAfter -join ',')"
+            $survivors = @(
+                $pythonProcessesAfter |
+                    Where-Object { $_ -notin $pythonProcessesBefore }
+            )
+            if ($survivors.Count -gt 0) {
+                throw "Python/pytest process(es) survived the process-tree wait: $($survivors -join ',')"
             }
         }
         catch {

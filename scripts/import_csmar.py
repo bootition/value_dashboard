@@ -512,6 +512,8 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="只读取不写入")
     parser.add_argument("--tables", nargs="*", default=None,
                         help="指定导入表: balance_sheet income_statement cash_flow dividends stock_meta")
+    # 2026-08-14 红队 P2：破坏性导入显式确认 + 写前自动备份
+    parser.add_argument("--yes", action="store_true", help="确认写入正式数据库（dry-run 不需要）")
     args = parser.parse_args()
 
     if not args.source.exists():
@@ -531,12 +533,18 @@ def main():
 
     store = DuckDBStore(paths=paths)
     if not args.dry_run:
+        from _maintenance_safety import backup_tables, confirm_destructive
+
+        if not confirm_destructive(args.yes):
+            sys.exit(2)
         from app.core.storage.schema import init_duckdb_schema
 
         logger.info("初始化 schema...")
         init_duckdb_schema(store)
 
     tables = args.tables or ["stock_meta", "balance_sheet", "income_statement", "cash_flow", "dividends"]
+    if not args.dry_run:
+        backup_tables(store, tables, tag="import-csmar")
     results = {}
     importers = {
         "stock_meta": import_stock_meta,

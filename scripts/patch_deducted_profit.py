@@ -191,6 +191,8 @@ def main():
     parser = argparse.ArgumentParser(description="补充扣非净利润数据")
     parser.add_argument("--db", type=Path, help="DuckDB 路径（必须与已验证运行环境一致）")
     parser.add_argument("--sample", type=int, default=0, help="只处理前 N 只股票（0=全部）")
+    # 2026-08-14 红队 P2：破坏性脚本显式确认 + 写前自动备份
+    parser.add_argument("--yes", action="store_true", help="确认修改正式数据库（无此参数则交互确认）")
     args = parser.parse_args()
     try:
         paths = require_formal_maintenance_paths()
@@ -204,13 +206,20 @@ def main():
     if not csv_path.exists():
         print(f"[ERROR] CSV 文件不存在: {csv_path}")
         return
+
+    from _maintenance_safety import backup_tables, confirm_destructive
+
+    if not confirm_destructive(args.yes):
+        sys.exit(2)
+    store = DuckDBStore(paths=paths)
+    backup_tables(store, ["income_statement"], tag="patch-deducted-profit")
     
     # 补充扣非净利润数据
     updated = patch_deducted_profit(csv_path, args.sample)
     
     if updated > 0:
         # 导入数据库
-        import_to_db(DuckDBStore(paths=paths), csv_path)
+        import_to_db(store, csv_path)
         print("\n[OK] 完成")
     else:
         print("\n[WARN] 没有更新任何数据")

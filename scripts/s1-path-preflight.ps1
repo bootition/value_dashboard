@@ -13,6 +13,11 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
+# 2026-08-14 红队 P2 门禁：S1 依赖 .NET Core API，
+# Windows PowerShell 5.1 会中途报"方法不存在"；入口处显式要求 PS 7+。
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    throw "PowerShell 7+ is required to run S1 gates, got $($PSVersionTable.PSVersion)"
+}
 
 $script:ProjectRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $script:FormalDataRoot = Join-Path $script:ProjectRoot "data"
@@ -182,13 +187,49 @@ function Get-FormalStateOnce {
                 throw "Formal file existence changed during capture: $path"
             }
         }
-        return $files
+
+        # 2026-08-14 红队 P2 门禁：除 5 个具名文件外，指纹整个 data/
+        # 树（CSV、日志、锁文件等），任何数据面变更都会被 S1 捕获。
+        $tree = [ordered]@{}
+        if (Test-Path -LiteralPath $script:FormalDataRoot -PathType Container) {
+            $named = [System.Collections.Generic.HashSet[string]]::new()
+            foreach ($entry in $script:FormalFiles.Values) {
+                [void]$named.Add($entry)
+            }
+            $rootLength = $script:FormalDataRoot.Length
+            $allFiles = Get-ChildItem -LiteralPath $script:FormalDataRoot -File -Recurse -Force -ErrorAction Stop
+            foreach ($file in $allFiles) {
+                $rel = $file.FullName.Substring($rootLength).TrimStart("\", "/").Replace("\", "/")
+                if ($named.Contains($rel)) { continue }
+                $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                $tree[$rel] = [ordered]@{
+                    exists = $true
+                    length = $file.Length
+                    sha256 = $hash
+                }
+            }
+        }
+        return [ordered]@{ files = $files; tree = $tree }
     }
     finally {
         foreach ($stream in $streams.Values) {
             if ($null -ne $stream) { $stream.Dispose() }
         }
     }
+}
+
+function Test-FormalTreesEqual {
+    param($Left, $Right)
+
+    $leftKeys = @($Left.Keys)
+    $rightKeys = @($Right.Keys)
+    if (($leftKeys -join ",") -ne ($rightKeys -join ",")) { return $false }
+    foreach ($key in $leftKeys) {
+        foreach ($field in @("exists", "length", "sha256")) {
+            if ($Left[$key][$field] -ne $Right[$key][$field]) { return $false }
+        }
+    }
+    return $true
 }
 
 function Test-FormalFilesEqual {
@@ -207,15 +248,17 @@ function Get-FormalState {
     $first = Get-FormalStateOnce
     $second = Get-FormalStateOnce
     $processesAfter = @(Get-PythonProcessIds)
-    if (-not (Test-FormalFilesEqual -Left $first -Right $second)) {
+    if (-not (Test-FormalFilesEqual -Left $first.files -Right $second.files)) {
         throw "Formal file set was not stable across repeated captures"
+    }
+    if (-not (Test-FormalTreesEqual -Left $first.tree -Right $second.tree)) {
+        throw "Formal data tree was not stable across repeated captures"
     }
     if (($processesBefore -join ",") -ne ($processesAfter -join ",")) {
         throw "Python process state changed during formal capture"
     }
-    if (($Phase -eq "Before") -and ($processesAfter.Count -gt 0)) {
-        throw "Python process(es) appeared before the S1 test boundary: $($processesAfter -join ',')"
-    }
+    # 2026-08-14 红队 P2 门禁：不再要求零 python 进程——正式写锁/8765
+    # 监听才是与正式库竞争的真实条件（见 Assert-BeforeEnvironment）。
 
     return [ordered]@{
         schema_version = 1
@@ -223,7 +266,8 @@ function Get-FormalState {
         timestamp = [DateTimeOffset]::Now.ToString("o")
         formal_data_root = $script:FormalDataRoot
         python_process_ids = $processesAfter
-        files = $second
+        files = $second.files
+        tree = $second.tree
     }
 }
 
@@ -232,10 +276,21 @@ function Assert-BeforeEnvironment {
         throw "S1 preflight must run from repository root: $script:ProjectRoot"
     }
 
-    $pythonProcesses = @(Get-PythonProcessIds)
-    if ($pythonProcesses.Count -gt 0) {
-        $pids = $pythonProcesses -join ","
-        throw "Python process(es) running: $pids - freeze S1"
+    # 2026-08-14 红队 P2 门禁：freeze 条件从"任意 python 进程"收窄为
+    # 实际会与正式库竞争的条件——正式写锁活跃、或 Web 服务在 8765 监听。
+    # 无关的 python 进程（用户其他工具）不再误伤。
+    foreach ($lockName in @(".duckdb.write.lock", ".value-dashboard.update.lock")) {
+        $lockPath = Join-Path $script:FormalDataRoot $lockName
+        if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+            $lockItem = Get-Item -LiteralPath $lockPath -Force
+            if (((Get-Date) - $lockItem.LastWriteTime).TotalSeconds -lt 30) {
+                throw "Formal write lock is active: $lockName - freeze S1"
+            }
+        }
+    }
+    $listeners = Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue
+    if ($listeners) {
+        throw "Value Dashboard service is listening on 8765 - freeze S1"
     }
 
     if ($env:VD_ENV -ne "test") {

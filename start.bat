@@ -1,4 +1,5 @@
 @echo off
+setlocal
 REM Value Dashboard launcher (ASCII only so CMD parses it in any code page).
 REM Double-click this file to start the application.
 REM
@@ -29,6 +30,11 @@ set "VD_FORMAL_ACK=confirmed"
 set "VD_DUCKDB_PATH=%CD%\data\valuedashboard.duckdb"
 set "VD_SQLITE_PATH=%CD%\data\valuedashboard.sqlite"
 if not exist "data\logs" mkdir "data\logs"
+set "PYTHONIOENCODING=utf-8"
+
+REM Rotate start.log once it grows past 10 MB so a runaway loop cannot fill the disk.
+set "START_LOG=%CD%\data\logs\start.log"
+if exist "%START_LOG%" for %%A in ("%START_LOG%") do if %%~zA GEQ 10485760 move /y "%START_LOG%" "%START_LOG%.1" >nul 2>&1
 
 set "FRONTEND_ROOT=%CD%\frontend"
 if not exist "%CD%\.planning" mkdir "%CD%\.planning"
@@ -62,23 +68,28 @@ if defined NEED_BUILD (
     node "%FRONTEND_ROOT%\scripts\fe-fingerprint.cjs" --stamp "%FE_STAMP%"
 )
 
-where python >nul 2>&1
-if errorlevel 1 (
-    echo [ERROR] Python not found in PATH; cannot start the source service.
-    echo Install Python 3.12+ and add it to PATH, then run start.bat again.
-    pause
-    exit /b 1
-)
 REM Prefer the project venv (uv.lock pinned deps). System python must not run
 REM the data path: older akshare (1.18.64) breaks stock_zh_a_gbjg_em and
 REM truncates cross-check history at 20 events (2026-08-13).
 set "VD_PY=python"
 if exist "%CD%\.venv\Scripts\python.exe" set "VD_PY=%CD%\.venv\Scripts\python.exe"
+if "%VD_PY%"=="python" (
+    where python >nul 2>&1
+    if errorlevel 1 (
+        echo [ERROR] Python not found in PATH; cannot start the source service.
+        echo Install Python 3.12+ and add it to PATH, then run start.bat again.
+        pause
+        exit /b 1
+    )
+)
 echo [INFO] Starting source service... browser opens at http://127.0.0.1:8765
 echo [INFO] Service is running. Closing THIS window will STOP the software.
 echo [INFO] To stop: close this window or press Ctrl+C, then close the browser tab.
 "%VD_PY%" -m app.web.main 2>>"data\logs\start.log"
-goto :eof
+set "SERVICE_EXIT=%errorlevel%"
+echo [INFO] Service exited with code %SERVICE_EXIT%.
+if not "%SERVICE_EXIT%"=="0" pause
+goto :end
 
 :packaged
 if not exist "%RELEASE_ROOT%\data" mkdir "%RELEASE_ROOT%\data"
@@ -87,10 +98,17 @@ set "VD_FORMAL_ACK=confirmed"
 set "VD_DUCKDB_PATH=%RELEASE_ROOT%\data\valuedashboard.duckdb"
 set "VD_SQLITE_PATH=%RELEASE_ROOT%\data\valuedashboard.sqlite"
 if not exist "%RELEASE_ROOT%\data\logs" mkdir "%RELEASE_ROOT%\data\logs"
+set "PYTHONIOENCODING=utf-8"
+set "START_LOG=%RELEASE_ROOT%\data\logs\start.log"
+if exist "%START_LOG%" for %%A in ("%START_LOG%") do if %%~zA GEQ 10485760 move /y "%START_LOG%" "%START_LOG%.1" >nul 2>&1
 echo Starting Value Dashboard - packaged mode
 echo [INFO] Service is running. Closing THIS window will STOP the software.
 "%EXE_PATH%" 2>>"%RELEASE_ROOT%\data\logs\start.log"
+set "SERVICE_EXIT=%errorlevel%"
+echo [INFO] Service exited with code %SERVICE_EXIT%.
+if not "%SERVICE_EXIT%"=="0" pause
 
 :end
 pause
-goto :eof
+endlocal
+exit /b %errorlevel%

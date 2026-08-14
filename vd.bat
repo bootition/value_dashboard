@@ -1,4 +1,5 @@
 @echo off
+setlocal
 cd /d "%~dp0"
 REM Value Dashboard CLI launcher (ASCII only, CRLF).
 REM Development/repository mode is always preferred: an old dist\value-dashboard
@@ -11,6 +12,7 @@ REM the data path: older akshare (1.18.64) breaks stock_zh_a_gbjg_em and
 REM truncates cross-check history at 20 events (2026-08-13).
 set "VD_PY=python"
 if exist "%~dp0.venv\Scripts\python.exe" set "VD_PY=%~dp0.venv\Scripts\python.exe"
+set "PYTHONIOENCODING=utf-8"
 if not exist "%~dp0value-dashboard.exe" (
     if not exist "data" mkdir "data"
     set "VD_ENV=formal"
@@ -18,7 +20,9 @@ if not exist "%~dp0value-dashboard.exe" (
     set "VD_DUCKDB_PATH=%CD%\data\valuedashboard.duckdb"
     set "VD_SQLITE_PATH=%CD%\data\valuedashboard.sqlite"
     "%VD_PY%" -m app.cli.main %*
-    goto :eof
+    set "CLI_EXIT=%errorlevel%"
+    endlocal
+    exit /b %CLI_EXIT%
 )
 set "RELEASE_ROOT=%~dp0"
 set "EXE_PATH=%~dp0value-dashboard.exe"
@@ -29,4 +33,6 @@ set "VD_DUCKDB_PATH=%RELEASE_ROOT%\data\valuedashboard.duckdb"
 set "VD_SQLITE_PATH=%RELEASE_ROOT%\data\valuedashboard.sqlite"
 if not exist "%RELEASE_ROOT%\data\logs" mkdir "%RELEASE_ROOT%\data\logs"
 "%EXE_PATH%" %*
-goto :eof
+set "CLI_EXIT=%errorlevel%"
+endlocal
+exit /b %CLI_EXIT%
