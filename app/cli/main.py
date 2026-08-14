@@ -8,8 +8,10 @@ M7: 完整命令树
 from __future__ import annotations
 
 import json
+from datetime import UTC
 from pathlib import Path
 from typing import Any
+
 import typer
 
 
@@ -53,8 +55,8 @@ def _database_context(*, initialize: bool = True):
     Config.load_with_paths(paths)
     duck, sqlite = DuckDBStore(paths=paths), SQLiteStore(paths=paths)
     if initialize:
-        from app.core.storage.schema import init_all_schema
         from app.core.backup.manager import recover_pending_restore
+        from app.core.storage.schema import init_all_schema
 
         init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
         recover_pending_restore(paths)
@@ -82,9 +84,9 @@ def _dsl_engine():
 
 
 def _screening_engine():
+    from app.cli.protocol import make_response
     from app.core.data_quality import screening_readiness
     from app.core.screening.engine import ScreeningEngine
-    from app.cli.protocol import make_response
 
     _, duck, sqlite = _database_context()
     readiness = screening_readiness(duck, sqlite)
@@ -929,6 +931,7 @@ def override_revoke(
 ) -> None:
     """撤销人工覆写 (PRD §9.5 R7: 可回滚)"""
     from datetime import datetime
+
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
@@ -1086,9 +1089,9 @@ def archive_create(
     target_dir: str = typer.Option("data/parquet", "--target"),
 ) -> None:
     """创建冷归档 (PRD §18.1 AR1: 热数据→冷归档)"""
-    from app.core.config import Config
     from app.cli.protocol import make_response
     from app.core.archive import DataArchiveManager
+    from app.core.config import Config
 
     paths, duck, sqlite = _database_context()
     Config.load_with_paths(paths)
@@ -1104,9 +1107,9 @@ def archive_verify(
     target_dir: str = typer.Argument("data/parquet"),
 ) -> None:
     """验证归档完整性 (PRD §18.2 AR4: 归档验证成功后才允许清理)"""
+    from app.cli.protocol import make_response
     from app.core.archive import DataArchiveManager
     from app.core.config import Config
-    from app.cli.protocol import make_response
 
     paths, duck, sqlite = _database_context()
     Config.load_with_paths(paths)
@@ -1122,9 +1125,9 @@ def archive_clean(
     target_dir: str = typer.Argument("data/parquet"),
 ) -> None:
     """清理已归档的本地热数据 (PRD §18.2 AR4: 归档验证成功后才允许清理, 两段式确认)"""
+    from app.cli.protocol import create_plan
     from app.core.archive import DataArchiveManager
     from app.core.config import Config
-    from app.cli.protocol import create_plan
 
     operation = "archive.clean"
     paths, duck, sqlite = _database_context()
@@ -1149,9 +1152,9 @@ def archive_clean_execute(
     plan_id: str = typer.Option(..., "--plan-id", help="已确认的清理计划 ID"),
 ) -> None:
     """执行已确认的归档清理，只删除已验证的公共热表数据。"""
+    from app.cli.protocol import consume_confirmed_plan, make_response
     from app.core.archive import ARCHIVE_TABLES, DataArchiveManager
     from app.core.config import Config
-    from app.cli.protocol import consume_confirmed_plan, make_response
 
     paths, duck, sqlite = _database_context()
     Config.load_with_paths(paths)
@@ -1280,12 +1283,12 @@ def data_reconcile_jobs(
     older_than_hours: int = typer.Option(24, "--older-than-hours", min=1, max=24 * 365),
 ) -> None:
     """Create a confirmation plan for stale running jobs; no records change yet."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     from app.cli.protocol import create_plan
 
     _, _, sqlite = _database_context()
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=older_than_hours)
     jobs = sqlite.query(
         """SELECT id, job_type, started_at FROM job_logs
            WHERE status = 'running' AND started_at < ? ORDER BY started_at""",
@@ -1310,7 +1313,7 @@ def data_reconcile_jobs_execute(
     plan_id: str = typer.Option(..., "--plan-id", help="confirmed reconciliation plan ID"),
 ) -> None:
     """Execute a confirmed stale-job reconciliation plan."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.cli.protocol import consume_confirmed_plan, make_response
 
@@ -1338,12 +1341,12 @@ def data_reconcile_jobs_execute(
             details["reconciliation"] = {
                 "reason_code": "stale_running_job",
                 "plan_id": plan_id,
-                "reconciled_at": datetime.now(timezone.utc).isoformat(),
+                "reconciled_at": datetime.now(UTC).isoformat(),
             }
             conn.execute(
                 """UPDATE job_logs SET status = 'failed', finished_at = ?, details_json = ?
                    WHERE id = ? AND status = 'running'""",
-                [datetime.now(timezone.utc).isoformat(), json.dumps(details, ensure_ascii=False), job_id],
+                [datetime.now(UTC).isoformat(), json.dumps(details, ensure_ascii=False), job_id],
             )
             reconciled += 1
     typer.echo(json.dumps(make_response(
@@ -1399,9 +1402,10 @@ def data_switch_source(
     """切换数据源 (M7-问题4)"""
     from app.core.config import Config, is_frozen_runtime
     Config.load()
+    import yaml
+
     from app.cli.protocol import make_response
     from app.core.adapters.manager import build_adapter_priority
-    import yaml
 
     if is_frozen_runtime():
         typer.echo(json.dumps(make_response(
@@ -1513,8 +1517,9 @@ def screening_export_csv(
     output_file: str = typer.Argument(..., help="输出CSV文件路径"),
 ) -> None:
     """导出CSV (M7-问题1, PRD §12.5 SC16)"""
-    from app.cli.protocol import make_response
     import csv
+
+    from app.cli.protocol import make_response
     from app.core.data_quality import screening_readiness
     from app.web.api.screening import _csv_export_header, _csv_export_row, _field_provenance
     # P2-14：导出只读数据库并写 CSV 文件，不得初始化 schema/接管恢复

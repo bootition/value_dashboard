@@ -20,19 +20,20 @@ import json
 import logging
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterator
+from typing import Any
 
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
 try:
     import baostock as bs
+    import baostock.data.resultset as _bs_rs
 
     # ─── monkeypatch 1: get_data() pandas 2.0 兼容 ─────────────────
     # baostock 0.9.3 用了 pd.DataFrame.append() (pandas 2.0 已移除)
     import pandas as _pd
-    import baostock.data.resultset as _bs_rs
 
     def _patched_get_data(self):
         if len(self.data) == 0:

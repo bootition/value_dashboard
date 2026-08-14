@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
@@ -48,7 +48,7 @@ def legacy_quarantine_summary(duck: DuckDBStore) -> dict[str, Any]:
 
 def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
     """Move unsupported legacy records out of active research tables atomically."""
-    timestamp = datetime.now(timezone.utc)
+    timestamp = datetime.now(UTC)
     with duck.transaction() as connection:
         connection.execute(
             """

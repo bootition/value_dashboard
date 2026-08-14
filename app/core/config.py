@@ -1,14 +1,13 @@
 """配置加载器 - 读取 default.yaml 并合并 user.yaml 覆盖"""
 
+import sys
+from importlib.resources import files
 from pathlib import Path
 from typing import Any
-from importlib.resources import files
 
 import yaml
 
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
-
-import sys
 
 # 开发模式: __file__ 的上三级目录
 # 打包模式 (PyInstaller): _MEIPASS 是解压目录, sys.executable 是 exe 路径

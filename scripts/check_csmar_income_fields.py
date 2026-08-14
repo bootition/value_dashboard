@@ -2,8 +2,14 @@
 import pandas as pd
 from pathlib import Path
 
+# 2026-08-14 红队 P3：不再依赖 CWD/绝对路径——锚定脚本所在仓库根
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 # CSMAR 利润表文件路径
-csmar_income_path = Path(r'D:\Mr.Q\掌控经济\value-dashboard\额外资料\C17 a股上市公司财务数据合集（90-25年）\原始数据（dta格式）\利润表\FS_Comins.dta')
+csmar_income_path = (
+    PROJECT_ROOT / "额外资料" / "C17 a股上市公司财务数据合集（90-25年）"
+    / "原始数据（dta格式）" / "利润表" / "FS_Comins.dta"
+)
 
 print(f"检查 CSMAR 利润表文件: {csmar_income_path.name}")
 print(f"文件大小: {csmar_income_path.stat().st_size / 1e6:.1f} MB\n")

@@ -14,10 +14,9 @@ def test_duckdb_transaction_rolls_back_on_exception(duckdb_store: DuckDBStore) -
         "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600519', 'old', 'SSE')"
     )
 
-    with pytest.raises(RuntimeError, match="injected failure"):
-        with duckdb_store.transaction() as connection:
-            connection.execute("UPDATE stock_meta SET name = 'new' WHERE stock_code = '600519'")
-            raise RuntimeError("injected failure")
+    with pytest.raises(RuntimeError, match="injected failure"), duckdb_store.transaction() as connection:
+        connection.execute("UPDATE stock_meta SET name = 'new' WHERE stock_code = '600519'")
+        raise RuntimeError("injected failure")
 
     rows = duckdb_store.read_query(
         "SELECT name FROM stock_meta WHERE stock_code = '600519'"

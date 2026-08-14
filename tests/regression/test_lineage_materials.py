@@ -1,18 +1,18 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
-from app.core.init import DataInitializer
 from app.core.backfill import PriceBackfiller
+from app.core.init import DataInitializer
 
 
 def test_ingestion_retains_raw_response_material_by_hash(duckdb_store, sqlite_store) -> None:
     raw_response = b'{"source":"fixture"}'
     result = FetchResult(
         data=[], raw_response=raw_response,
-        metadata=SourceMetadata(source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+        metadata=SourceMetadata(source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                                 raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate"),
     )
     initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store)
@@ -28,7 +28,7 @@ def test_xdxr_backfill_batch_archives_its_raw_response(duckdb_store, sqlite_stor
     raw_response = b'{"xdxr":true}'
     result = FetchResult(
         data=[{"event_date": "2025-01-01", "category": 1}], raw_response=raw_response,
-        metadata=SourceMetadata(source="tdx", fetch_time=datetime.now(timezone.utc),
+        metadata=SourceMetadata(source="tdx", fetch_time=datetime.now(UTC),
                                 raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate"),
     )
     backfiller = PriceBackfiller(duck=duckdb_store, sqlite=sqlite_store)

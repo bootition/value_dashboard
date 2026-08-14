@@ -17,10 +17,10 @@ PRD §7.2 分阶段: 最小可用初始化(近5年) → 其余历史回填
 
 from __future__ import annotations
 
-import logging
 import hashlib
+import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import duckdb
@@ -96,7 +96,7 @@ class PriceBackfiller:
 
         report: dict[str, Any] = {
             "batch_id": self._batch_id,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
             "steps": {},
         }
 
@@ -123,7 +123,7 @@ class PriceBackfiller:
             report["error"] = str(e)
 
         finally:
-            report["finished_at"] = datetime.now(timezone.utc).isoformat()
+            report["finished_at"] = datetime.now(UTC).isoformat()
             self._log_job_finish(job_id, report["status"], report)
 
         logger.info("=" * 60)
@@ -568,7 +568,7 @@ class PriceBackfiller:
                         data_type,
                         adapter,
                         error[:500],
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                         extra_json,
                     ],
                 )
@@ -593,7 +593,7 @@ class PriceBackfiller:
                 """UPDATE job_logs SET status=?, finished_at=?, details_json=? WHERE id=?""",
                 [
                     status,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                     json.dumps(details, ensure_ascii=False, default=str)[:5000],
                     job_id,
                 ],

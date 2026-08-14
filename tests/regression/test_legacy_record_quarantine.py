@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.data_maintenance import legacy_quarantine_summary, quarantine_legacy_records
 
 
 def test_quarantine_moves_only_unsupported_legacy_records(duckdb_store) -> None:
-    timestamp = datetime.now(timezone.utc)
+    timestamp = datetime.now(UTC)
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """INSERT INTO fetch_batch
@@ -57,7 +57,7 @@ def test_quarantine_moves_only_unsupported_legacy_records(duckdb_store) -> None:
 
 
 def test_quarantine_moves_empty_payload_archives_with_their_audits(duckdb_store) -> None:
-    timestamp = datetime.now(timezone.utc)
+    timestamp = datetime.now(UTC)
     empty_hash = "e" * 64
     other_hash = "f" * 64
     with duckdb_store.write_connection() as connection:

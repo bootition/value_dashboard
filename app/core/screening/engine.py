@@ -16,11 +16,11 @@ import re
 import time
 from typing import Any
 
+from app.core.dsl.codegen import quote_identifier
+from app.core.dsl.registry import validate_expression_identifier
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
-from app.core.dsl.codegen import quote_identifier
-from app.core.dsl.registry import validate_expression_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -507,7 +507,7 @@ base_pool AS (
         order_clause = self._build_order(sort_spec)
 
         # ─── 列选择 ──────────────────────────────────────────────
-        select_cols = self._build_select(columns_spec, rank_fields)
+        select_cols = self._build_select(columns_spec)
 
         sql_parts.append(f"""
 SELECT {select_cols}, COUNT(*) OVER () AS _vd_total
@@ -635,13 +635,13 @@ LIMIT {MAX_RESULT_ROWS}
             return ""
         return "ORDER BY " + ", ".join(parts)
 
-    def _build_select(self, columns_spec: list[str], rank_fields: set[str]) -> str:
-        """构建 SELECT 列"""
-        # P0#13修复: 白名单验证列名, 防止 SQL 注入
-        safe_col_pattern = re.compile(
-            r"^[a-zA-Z_][a-zA-Z0-9_.]*(\s+AS\s+[a-zA-Z_][a-zA-Z0-9_]*)?$",
-            re.IGNORECASE,
-        )
+    def _build_select(self, columns_spec: list[str]) -> str:
+        """构建 SELECT 列。"""
+        # P0#13修复: 白名单验证列名, 防止 SQL 注入。
+        # 2026-08-14 红队 P3：移除死代码——正则里的 `AS 别名` 分支因
+        # _is_known_field 校验永不可能通过（别名不是已知字段名），
+        # 且未使用的 rank_fields 参数一并删除。
+        safe_col_pattern = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_.]*$")
         if not columns_spec:
             # 默认列
             cols = [
@@ -793,7 +793,14 @@ LIMIT {MAX_RESULT_ROWS}
             if key in active:
                 raise ValueError(f"published DSL dependency cycle: {name} v{version}")
             active.add(key)
-            from app.core.dsl.ast_nodes import BinaryOp, FieldRef, FuncCall, IndicatorRef, Literal, UnaryOp
+            from app.core.dsl.ast_nodes import (
+                BinaryOp,
+                FieldRef,
+                FuncCall,
+                IndicatorRef,
+                Literal,
+                UnaryOp,
+            )
             from app.core.dsl.engine import expand_shorthand
             from app.core.dsl.parser import parse
 
@@ -1051,9 +1058,8 @@ def validate_rule_fields(rule: dict, custom_fields: set[str] = frozenset()) -> N
             if not _known(field):
                 raise ValueError(f"未知筛选字段: {field}")
             right_field = rule.get("right_field")
-            if right_field is not None:
-                if not isinstance(right_field, str) or not _known(right_field):
-                    raise ValueError(f"未知比较字段: {right_field}")
+            if right_field is not None and (not isinstance(right_field, str) or not _known(right_field)):
+                raise ValueError(f"未知比较字段: {right_field}")
 
     conditions = rule.get("conditions")
     if conditions is not None:

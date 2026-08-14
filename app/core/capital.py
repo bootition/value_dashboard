@@ -19,8 +19,9 @@ import json
 import logging
 import time
 import uuid
-from datetime import date, datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, date, datetime
+from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.capital_history_adapter import CapitalHistoryAdapter
@@ -137,7 +138,7 @@ class CapitalHistoryUpdater:
             fetched = datetime.fromisoformat(fetched_at)
         except ValueError:
             return [], False, status
-        if (datetime.now(timezone.utc) - fetched).days > self._CROSS_CACHE_TTL_DAYS:
+        if (datetime.now(UTC) - fetched).days > self._CROSS_CACHE_TTL_DAYS:
             return [], False, status
         try:
             events = json.loads(rows[0]["events_json"])
@@ -182,7 +183,7 @@ class CapitalHistoryUpdater:
                          error=excluded.error""",
                     [stock_code, json.dumps(events, ensure_ascii=False),
                      verified_points, total_points,
-                     datetime.now(timezone.utc).isoformat(), status,
+                     datetime.now(UTC).isoformat(), status,
                      (error or "")[:500]],
                 )
         except Exception as e:
@@ -253,10 +254,9 @@ class CapitalHistoryUpdater:
             fetched = datetime.fromisoformat(fetched_at)
         except ValueError:
             return False
-        if (datetime.now(timezone.utc) - fetched).total_seconds() \
-                < self._CROSS_ERROR_RETRY_DELAY_SECONDS:
-            return True  # 冷却期内视为"暂不入选"
-        return False
+        # 冷却期内视为"暂不入选"
+        return (datetime.now(UTC) - fetched).total_seconds() \
+            < self._CROSS_ERROR_RETRY_DELAY_SECONDS
 
     # ─── 单股回填 + 交叉核验 ──────────────────────────────────────
 
@@ -478,7 +478,7 @@ class CapitalHistoryUpdater:
             if d and total:
                 cross_by_date[d] = float(total)
 
-        for index, row in enumerate(rows):
+        for _index, _row in enumerate(rows):
             # P4-7 修复（reports/73）：东财事件按 ±CROSS_NEIGHBOR_DAYS 近邻匹配
             # 主链点（阶段0 实测双源日期集不重叠，区间包含匹配无法核验）；
             # 有近邻点 → 数值比对判冲突；无近邻点 → 区间无法核验，fail-closed
@@ -700,7 +700,7 @@ class CapitalHistoryUpdater:
                 fetched = datetime.fromisoformat(fetched_at)
             except ValueError:
                 continue
-            if (datetime.now(timezone.utc) - fetched).total_seconds() \
+            if (datetime.now(UTC) - fetched).total_seconds() \
                     < self._CROSS_ERROR_RETRY_DELAY_SECONDS:
                 cooling_codes.add(row["stock_code"])
         no_cache = [
@@ -890,7 +890,7 @@ class CapitalHistoryUpdater:
                        ON CONFLICT(stock_code, data_type, adapter, extra_json) DO UPDATE SET
                          error=excluded.error, last_attempt=excluded.last_attempt""",
                     [stock_code, RETRY_DATA_TYPE, "cninfo_capital", error[:500],
-                     datetime.now(timezone.utc).isoformat()],
+                     datetime.now(UTC).isoformat()],
                 )
         except Exception as e:
             logger.warning("记录历史股本失败信息失败: %s", e)
@@ -914,7 +914,7 @@ class CapitalHistoryUpdater:
             self.sqlite.execute(
                 """UPDATE missing_list SET resolved_at = ?
                    WHERE stock_code = ? AND field_name = ? AND resolved_at IS NULL""",
-                [datetime.now(timezone.utc).isoformat(), stock_code, "share_capital_history"],
+                [datetime.now(UTC).isoformat(), stock_code, "share_capital_history"],
             )
         except Exception as e:
             logger.warning("解决历史股本缺失信息失败: %s", e)

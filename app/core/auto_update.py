@@ -14,7 +14,7 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
@@ -151,7 +151,7 @@ class AutoUpdateController:
                     self._state, int(self._paused), self._current_stage,
                     json.dumps(self._progress, ensure_ascii=False, default=str),
                     self._last_error, self._last_success_at,
-                    datetime.now(timezone.utc).isoformat(),
+                    datetime.now(UTC).isoformat(),
                 ],
             )
 
@@ -251,7 +251,7 @@ class AutoUpdateController:
             if self._current_stage == "running":
                 return {"status": "skipped", "reason": "already_running"}
             job_id = str(uuid.uuid4())
-            started_at = datetime.now(timezone.utc).isoformat()
+            started_at = datetime.now(UTC).isoformat()
             self._current_stage = "running"
             self._progress = {
                 "phase": "starting",
@@ -327,7 +327,7 @@ class AutoUpdateController:
                     "current": info.get("current"),
                     "rate_per_minute": round(rate_per_minute, 1),
                     "eta_seconds": round(eta_seconds) if eta_seconds is not None else None,
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "updated_at": datetime.now(UTC).isoformat(),
                 }
                 self._progress["phase"] = f"step:{step_name}"
                 _append_log(
@@ -348,7 +348,7 @@ class AutoUpdateController:
                 self._progress.pop("live", None)
                 if report.get("status") == "success":
                     self._current_stage = "finished"
-                    self._last_success_at = datetime.now(timezone.utc).isoformat()
+                    self._last_success_at = datetime.now(UTC).isoformat()
                     self._last_error = None
                     _append_log("自动更新完成")
                 elif report.get("status") == "skipped":

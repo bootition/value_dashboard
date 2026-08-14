@@ -1,7 +1,12 @@
 """检查 AKShare 补充数据的字段映射"""
 import duckdb
+from pathlib import Path
 
-conn = duckdb.connect('data/valuedashboard.duckdb', read_only=True)
+# 2026-08-14 红队 P3：不再依赖 CWD——锚定脚本所在仓库根
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DB_PATH = PROJECT_ROOT / "data" / "valuedashboard.duckdb"
+
+conn = duckdb.connect(str(DB_PATH), read_only=True)
 
 print("=== AKShare 补充数据字段检查 ===\n")
 

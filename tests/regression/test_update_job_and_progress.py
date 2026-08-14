@@ -11,16 +11,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from app.core.init import CSRC_BATCH_SIZE, DataInitializer
-from app.core.update import IncrementalUpdater
-from app.core.storage.update_lock import exclusive_update
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.adapters.tdx_adapter import TDXAdapter
+from app.core.init import CSRC_BATCH_SIZE, DataInitializer
+from app.core.storage.update_lock import exclusive_update
+from app.core.update import IncrementalUpdater
 
 
 def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
@@ -289,12 +289,13 @@ def test_csrc_fetch_only_targets_missing_classifications(duckdb_store, sqlite_st
             requested.append(list(request.stock_codes))
             rows = [{"stock_code": code, "csrc_l1": "制造业", "csrc_l2": "大类"} for code in request.stock_codes]
             import hashlib
+
             from app.core.adapters.base import FetchResult, SourceMetadata
             raw = json.dumps(rows).encode("utf-8")
             return FetchResult(
                 data=rows,
                 metadata=SourceMetadata(
-                    source="cninfo_csrc", fetch_time=datetime.now(timezone.utc),
+                    source="cninfo_csrc", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw).hexdigest(), confidence="strict",
                 ),
                 raw_response=raw,
@@ -381,15 +382,16 @@ def test_csrc_fetch_handles_empty_success_without_executemany(duckdb_store, sqli
 
 class _ChunkAdapter:
     def fetch(self, request):
-        from app.core.adapters.base import FetchResult, SourceMetadata
         import hashlib
+
+        from app.core.adapters.base import FetchResult, SourceMetadata
 
         rows = [{"stock_code": code, "csrc_l1": "制造业", "csrc_l2": "大类"} for code in request.stock_codes]
         raw = json.dumps(rows).encode("utf-8")
         return FetchResult(
             data=rows,
             metadata=SourceMetadata(
-                source="cninfo_csrc", fetch_time=datetime.now(timezone.utc),
+                source="cninfo_csrc", fetch_time=datetime.now(UTC),
                 raw_response_hash=hashlib.sha256(raw).hexdigest(), confidence="strict",
             ),
             raw_response=raw,
@@ -419,7 +421,7 @@ class _SimulatedPriceManager:
             raw_response=b"fake-price-payload",
             metadata=SourceMetadata(
                 source="local_cache",
-                fetch_time=datetime.now(timezone.utc),
+                fetch_time=datetime.now(UTC),
                 raw_response_hash=hashlib.sha256(b"fake-price-payload").hexdigest(),
                 confidence="strict",
                 row_count=len(rows),

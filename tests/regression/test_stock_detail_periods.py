@@ -4,15 +4,12 @@ from datetime import date
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
-from fastapi import Request
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
-from app.web.api.stock_detail import _to_single_quarter
-from app.web.api.stock_detail import get_kline
-from app.web.api.stock_detail import router
+from app.web.api.stock_detail import _to_single_quarter, get_kline, router
 
 
 def _insert_kline_rows(

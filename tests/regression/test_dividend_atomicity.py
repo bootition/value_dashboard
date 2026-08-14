@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.backfill import PriceBackfiller
@@ -27,7 +27,7 @@ def _result(
         data=rows,
         metadata=SourceMetadata(
             source="baostock",
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
             confidence="missing" if error else "approximate",
             error=error,

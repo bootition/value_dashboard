@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -26,8 +26,8 @@ from app.core.adapters.eastmoney_f10_adapter import EastMoneyF10Adapter
 from app.core.business import BusinessOverviewUpdater
 from app.core.data_quality import minimum_data_readiness
 from app.core.storage.duckdb_store import DuckDBStore
-from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
+from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import router as stock_detail_router
 
 # ─── 东财 F10 fixture（基于 2026-08-10 真实响应结构精简） ─────────────
@@ -103,7 +103,7 @@ def _result(
         data=data,
         metadata=SourceMetadata(
             source="eastmoney_f10",
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw).hexdigest(),
             confidence="approximate" if error is None else "missing",
             error=error,
@@ -499,7 +499,7 @@ def test_due_stock_codes_include_stale_rows(
 ) -> None:
     _seed_stock(duckdb_store)
     _seed_business_rows(duckdb_store)
-    stale = datetime.now(timezone.utc) - timedelta(days=31)
+    stale = datetime.now(UTC) - timedelta(days=31)
     duckdb_store.write_query(
         "UPDATE company_profile SET fetch_time = ? WHERE stock_code = '600519'",
         [stale],

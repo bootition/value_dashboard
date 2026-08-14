@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
 import threading
 import time
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
@@ -19,7 +19,7 @@ def test_price_refetch_records_field_lineage_after_persisting(
             return FetchResult(
                 data=[{"trade_date": "2025-12-31", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
                 ),
                 raw_response=raw_response,
@@ -47,7 +47,7 @@ def test_incremental_bse_price_update_requires_qfq(duckdb_store, sqlite_store) -
             return FetchResult(
                 data=[{"trade_date": "2025-12-31", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
                 ),
                 raw_response=raw_response,
@@ -83,7 +83,7 @@ def test_xdxr_stock_gets_full_qfq_refetch(duckdb_store, sqlite_store) -> None:
             return FetchResult(
                 data=[{"trade_date": "2025-12-31", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
                 ),
                 raw_response=raw_response,
@@ -118,7 +118,7 @@ def test_non_xdxr_stock_without_local_rows_gets_full_refetch(duckdb_store, sqlit
             return FetchResult(
                 data=[{"trade_date": "2026-07-30", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
                 ),
                 raw_response=raw_response,
@@ -149,7 +149,7 @@ def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
             return FetchResult(
                 data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
                 ),
                 raw_response=raw_response,
@@ -187,7 +187,7 @@ def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store)
             return FetchResult(
                 data=[{"trade_date": "2026-07-30", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
                 ),
                 raw_response=raw_response,
@@ -225,7 +225,7 @@ def test_raw_and_qfq_fetch_in_parallel(duckdb_store, sqlite_store) -> None:
                 data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
                     source="local_cache",
-                    fetch_time=datetime.now(timezone.utc),
+                    fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
                     confidence="strict",
                 ),
@@ -257,7 +257,7 @@ def test_current_prices_without_latest_lineage_are_refetched(
                 data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
                     source="local_cache",
-                    fetch_time=datetime.now(timezone.utc),
+                    fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
                     confidence="strict",
                 ),
@@ -296,7 +296,7 @@ def test_watchlist_stocks_are_updated_first_with_limit(duckdb_store, sqlite_stor
                 data=[{"trade_date": "2026-08-05", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
                     source="local_cache",
-                    fetch_time=datetime.now(timezone.utc),
+                    fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
                     confidence="strict",
                 ),
@@ -386,7 +386,7 @@ def test_price_refetch_rolls_back_rows_when_source_material_is_invalid(duckdb_st
             return FetchResult(
                 data=[{"trade_date": "2025-12-31", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(b"expected").hexdigest(), confidence="approximate",
                 ),
                 raw_response=b"tampered",
@@ -411,7 +411,7 @@ def test_price_refetch_rolls_back_both_adjustments_when_pair_write_fails(
             return FetchResult(
                 data=[{"trade_date": "2025-12-31", "close": 10.0, "volume": 100.0}],
                 metadata=SourceMetadata(
-                    source="local_cache", fetch_time=datetime.now(timezone.utc),
+                    source="local_cache", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="strict",
                 ),
                 raw_response=raw_response,
@@ -442,7 +442,7 @@ def test_large_response_uses_full_replace_and_preserves_lineage(
         return FetchResult(
             data=rows,
             metadata=SourceMetadata(
-                source="local_cache", fetch_time=datetime.now(timezone.utc),
+                source="local_cache", fetch_time=datetime.now(UTC),
                 raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
                 confidence="strict",
             ),
@@ -493,7 +493,7 @@ def test_full_replace_rejects_truncated_source_and_keeps_old_data(
         return FetchResult(
             data=rows,
             metadata=SourceMetadata(
-                source="local_cache", fetch_time=datetime.now(timezone.utc),
+                source="local_cache", fetch_time=datetime.now(UTC),
                 raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
                 confidence="strict",
             ),

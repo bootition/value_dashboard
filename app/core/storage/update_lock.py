@@ -17,8 +17,8 @@ import contextvars
 import ctypes
 import os
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Callable, Iterator
 
 _held = contextvars.ContextVar("value_dashboard_update_lock_held", default=False)
 
@@ -196,7 +196,7 @@ def exclusive_update(
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
             reclaimed_stale_lock = True
         else:
-            raise UpdateLockError("another incremental update is running")
+            raise UpdateLockError("another incremental update is running") from None
     try:
         created = _pid_creation_time(os.getpid())
         created_line = f"created={created:.3f}\n" if created is not None else ""

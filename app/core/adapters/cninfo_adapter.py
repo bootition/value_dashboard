@@ -17,10 +17,11 @@ Endpoints:
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -331,7 +332,7 @@ class CNINFOAdapter(BaseAdapter):
         ann_time_ms = raw.get("announcementTime") or 0
         ann_dt: datetime | None = None
         if ann_time_ms:
-            ann_dt = datetime.fromtimestamp(ann_time_ms / 1000.0, tz=timezone.utc)
+            ann_dt = datetime.fromtimestamp(ann_time_ms / 1000.0, tz=UTC)
 
         adjunct_url = raw.get("adjunctUrl") or ""
         pdf_url = f"{_PDF_BASE}/{adjunct_url.lstrip('/')}" if adjunct_url else None
@@ -490,24 +491,18 @@ class CNINFOAdapter(BaseAdapter):
 
         m = _RE_CASH.search(title)
         if m:
-            try:
+            with contextlib.suppress(ValueError):
                 cash_per_10 = float(m.group(1))
-            except ValueError:
-                pass
 
         m = _RE_TRANSFER.search(title)
         if m:
-            try:
+            with contextlib.suppress(ValueError):
                 transfer_per_10 = float(m.group(1))
-            except ValueError:
-                pass
 
         m = _RE_SEND.search(title)
         if m:
-            try:
+            with contextlib.suppress(ValueError):
                 send_per_10 = float(m.group(1))
-            except ValueError:
-                pass
 
         if cash_per_10 is None and transfer_per_10 is None and send_per_10 is None:
             return None

@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-
 Unit = Literal["CNY", "ratio", "percent", "count", "mixed", "unknown"]
 PeriodType = Literal["cumulative", "single_quarter", "ttm", "point_in_time", "current_only"]
 

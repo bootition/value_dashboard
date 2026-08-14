@@ -13,19 +13,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
-import hashlib
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.treasury import MAX_STALENESS_DAYS
-from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +68,7 @@ class IndicatorCalculator:
         """
         result: dict[str, Any] = {
             "stock_code": stock_code,
-            "calculated_at": datetime.now(timezone.utc),
+            "calculated_at": datetime.now(UTC),
             "data_version": "audit-safe-v1",
         }
 
@@ -365,7 +365,7 @@ class IndicatorCalculator:
             return self.duck.read_query(sql, params)
         cursor = connection.execute(sql, params or [])
         columns = [description[0] for description in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     # ─── 数据获取 ──────────────────────────────────────────────────
 
@@ -561,7 +561,7 @@ class IndicatorCalculator:
 
     def _get_dividend_summary(self, stock_code: str, as_of_date: Any | None = None) -> dict[str, Any]:
         """Return only dividends known on the snapshot's reporting date."""
-        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        as_of_date = as_of_date or datetime.now(UTC).date()
         rows = self._read_query("""
             WITH valid_dividends AS (
                 SELECT ex_date, dividend_per_share
@@ -664,7 +664,7 @@ class IndicatorCalculator:
         Only distributions in the trailing twelve months are relevant. Older
         data is a missing-data condition, not a reason to inflate the yield.
         """
-        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        as_of_date = as_of_date or datetime.now(UTC).date()
         rows = self._read_query("""
             SELECT SUM(dividend_per_share) as dps
             FROM dividends
@@ -1176,7 +1176,7 @@ class IndicatorCalculator:
         例如：公司2018/2019/2021/2022年分红 → 返回2（2021-2022连续）
         如果2023也分红 → 返回3（2021-2023连续）
         """
-        as_of_date = as_of_date or datetime.now(timezone.utc).date()
+        as_of_date = as_of_date or datetime.now(UTC).date()
         rows = self._read_query("""
             SELECT DISTINCT EXTRACT(YEAR FROM ex_date) as yr
             FROM dividends
@@ -1251,9 +1251,12 @@ class IndicatorCalculator:
             trade_date = str(row.get("trade_date", ""))[:10]
             if not trade_date:
                 break
-            if newer_date is not None and expected_trading_dates is not None:
-                if any(trade_date < date < newer_date for date in expected_trading_dates):
-                    break
+            if (
+                newer_date is not None
+                and expected_trading_dates is not None
+                and any(trade_date < date < newer_date for date in expected_trading_dates)
+            ):
+                break
             closes.append(float(value))
             newer_date = trade_date
         closes.reverse()
@@ -1390,7 +1393,7 @@ class IndicatorCalculator:
                     continue
                 audit_rows.append((
                     row["stock_code"], field_name, row["report_date"], value,
-                    "derived_calculator", batch_id, datetime.now(timezone.utc), raw_hash,
+                    "derived_calculator", batch_id, datetime.now(UTC), raw_hash,
                     "approximate", "derived_input_lineage_pending", "indicator_calculator/v1",
                     row["report_date"], "latest_restated", formula,
                 ))
@@ -1400,14 +1403,14 @@ class IndicatorCalculator:
                 row_count, confidence)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             [batch_id, "indicator_snapshot", "derived_calculator", "indicator_calculator/v1",
-             datetime.now(timezone.utc), raw_hash, len(audit_rows), "approximate"],
+             datetime.now(UTC), raw_hash, len(audit_rows), "approximate"],
         )
         connection.execute(
             """INSERT INTO raw_response_archive
                (raw_response_hash, source, fetch_time, payload, api_version, integrity_verified)
                VALUES (?, ?, ?, ?, ?, TRUE)
                ON CONFLICT(raw_response_hash) DO NOTHING""",
-            [raw_hash, "derived_calculator", datetime.now(timezone.utc), formula.encode("utf-8"),
+            [raw_hash, "derived_calculator", datetime.now(UTC), formula.encode("utf-8"),
              "indicator_calculator/v1"],
         )
         connection.executemany(

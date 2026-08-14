@@ -9,7 +9,14 @@ import logging
 import re
 
 from app.core.dsl.ast_nodes import (
-    ASTNode, Literal, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp, FIELD_METADATA,
+    FIELD_METADATA,
+    ASTNode,
+    BinaryOp,
+    FieldRef,
+    FuncCall,
+    IndicatorRef,
+    Literal,
+    UnaryOp,
 )
 
 logger = logging.getLogger(__name__)

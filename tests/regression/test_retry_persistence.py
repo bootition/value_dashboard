@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import json
 import hashlib
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.storage.duckdb_store import DuckDBStore
@@ -30,7 +30,7 @@ class PriceAdapter:
             ],
             metadata=SourceMetadata(
                 source="akshare_eastmoney",
-                fetch_time=datetime.now(timezone.utc),
+                fetch_time=datetime.now(UTC),
                 raw_response_hash=hashlib.sha256(payload).hexdigest(),
                 confidence="approximate",
             ),
@@ -60,7 +60,7 @@ def test_qfq_retry_persists_before_queue_removal(
                 "price_daily",
                 "akshare_eastmoney",
                 "temporary",
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 json.dumps({"adjust": "qfq"}),
             ],
         )
@@ -100,7 +100,7 @@ def test_unretryable_domain_entry_is_retained_without_dead_loop(
                 (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
             VALUES ('600519', 'stock_list', 'akshare_eastmoney', 'temporary', 0, ?, '{}')
             """,
-            [datetime.now(timezone.utc).isoformat()],
+            [datetime.now(UTC).isoformat()],
         )
         retry_id = cursor.lastrowid
 
@@ -143,7 +143,7 @@ def test_price_retry_refetches_incrementally_from_local_latest(
                 ],
                 metadata=SourceMetadata(
                     source="tencent",
-                    fetch_time=datetime.now(timezone.utc),
+                    fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(payload).hexdigest(),
                     confidence="approximate",
                 ),
@@ -166,7 +166,7 @@ def test_price_retry_refetches_incrementally_from_local_latest(
             """,
             [
                 "600519",
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 json.dumps({"adjust": "qfq"}),
             ],
         )
@@ -226,7 +226,7 @@ def test_cleanup_redundant_retries_drops_up_to_date_entries(
         sqlite_store.execute(
             "INSERT INTO retry_list (stock_code, data_type, adapter, error, retry_count, last_attempt) "
             "VALUES (?, 'price_daily', 'local_cache', 'no available adapter', 0, ?)",
-            [code, datetime.now(timezone.utc).isoformat()],
+            [code, datetime.now(UTC).isoformat()],
         )
 
     seed("600001")

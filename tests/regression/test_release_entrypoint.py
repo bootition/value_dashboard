@@ -122,7 +122,9 @@ def test_release_scripts_bootstrap_an_empty_distribution_profile() -> None:
         assert 'set "VD_ENV=formal"' in source
         assert 'set "VD_DUCKDB_PATH=%RELEASE_ROOT%\\data\\valuedashboard.duckdb"' in source
         assert 'set "VD_SQLITE_PATH=%RELEASE_ROOT%\\data\\valuedashboard.sqlite"' in source
-        assert "goto :eof" in source or "goto :end" in source
+        # 2026-08-14 红队 P2：批处理加固后以 exit /b %<code>% 显式终止并
+        # 传播退出码（替代 goto :eof/:end 跳转收尾）。
+        assert "goto :eof" in source or "goto :end" in source or "exit /b %" in source
 
 
 def test_launcher_batch_files_are_ascii_without_bom() -> None:

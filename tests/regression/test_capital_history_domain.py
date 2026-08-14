@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from fastapi import FastAPI
@@ -29,12 +29,12 @@ from app.core.screening.engine import (
 )
 from app.core.statistics import (
     COVERAGE_THRESHOLD_PCT,
-    StatisticsBuilder,
     WINDOW_MIN_SAMPLES,
+    StatisticsBuilder,
 )
 from app.core.storage.duckdb_store import DuckDBStore
-from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
+from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import router as stock_detail_router
 
 # ─── fixtures ────────────────────────────────────────────────────────────
@@ -46,7 +46,7 @@ def _result(data: list[dict], *, error: str | None = None) -> FetchResult:
         data=data,
         metadata=SourceMetadata(
             source="cninfo_capital",
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw).hexdigest(),
             confidence="strict" if error is None else "missing",
             error=error,
@@ -243,7 +243,7 @@ def test_cross_cache_reused_and_skips_eastmoney(
     # 缓存过期后重新请求（TLT 7 天）
     sqlite_store.execute(
         "UPDATE capital_cross_cache SET fetched_at = ? WHERE stock_code = '600519'",
-        [(datetime.now(timezone.utc) - timedelta(days=8)).isoformat()],
+        [(datetime.now(UTC) - timedelta(days=8)).isoformat()],
     )
     report3 = updater.update_stock("600519")
     assert report3.get("cross_status") == "verified"
@@ -504,8 +504,9 @@ def test_cninfo_adapter_forwards_explicit_dates_and_guards_staleness(
 ) -> None:
     """P4-1：显式日期参数（防 akshare 默认 20091227~20241021 截断）+
     最新锚点新鲜度断言（fail-closed → retry）。"""
-    from app.core.adapters.capital_history_adapter import CapitalHistoryAdapter
     import akshare as ak
+
+    from app.core.adapters.capital_history_adapter import CapitalHistoryAdapter
 
     calls: list[dict] = []
 
@@ -552,7 +553,7 @@ def test_update_all_uses_due_cursor(
         """INSERT INTO capital_cross_cache
            (stock_code, events_json, verified_points, total_points, fetched_at)
            VALUES ('600519', '[]', 1, 1, ?)""",
-        [datetime.now(timezone.utc).isoformat()],
+        [datetime.now(UTC).isoformat()],
     )
     # 600000 有价格但无股本链 → due
     _seed_price(duckdb_store, "600000", date(2026, 8, 7), 10.0)
@@ -748,7 +749,7 @@ def test_error_row_does_not_degrade_verified_cache(
     # 缓存行仍是 verified，绝不降级为 error/empty
     sqlite_store.execute(
         "UPDATE capital_cross_cache SET fetched_at = ? WHERE stock_code = '600519'",
-        [(datetime.now(timezone.utc) - timedelta(days=8)).isoformat()],
+        [(datetime.now(UTC) - timedelta(days=8)).isoformat()],
     )
     fake2 = _FakeCapitalAdapter(main=_cross_main(), cross_error="风控")
     updater2 = _updater(duckdb_store, sqlite_store, fake2)
@@ -781,7 +782,7 @@ def test_due_cursor_error_rows_cooling_window(
     # 冷却结束：重新入 due
     sqlite_store.execute(
         "UPDATE capital_cross_cache SET fetched_at = ? WHERE stock_code = '600519'",
-        [(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()],
+        [(datetime.now(UTC) - timedelta(hours=1)).isoformat()],
     )
     due = updater._due_stock_codes()
     assert "600519" in due

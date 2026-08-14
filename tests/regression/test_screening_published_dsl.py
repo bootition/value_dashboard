@@ -1,13 +1,12 @@
 from __future__ import annotations
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-import pytest
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
-from app.web.api.screening import router
-from app.web.api.screening import resolve_rule_indicator_locks
+from app.web.api.screening import resolve_rule_indicator_locks, router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
 
 

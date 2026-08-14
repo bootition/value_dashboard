@@ -16,7 +16,6 @@ from app.core.storage.path_policy import (
     require_formal_maintenance_paths,
 )
 
-
 ENVIRONMENT_VARIABLES = (
     "VD_ENV",
     "VD_FORMAL_ACK",

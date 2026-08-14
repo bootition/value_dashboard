@@ -11,7 +11,7 @@ import logging
 import threading
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -221,7 +221,7 @@ class BaseAdapter:
 
         return SourceMetadata(
             source=self._name,
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=raw_hash,
             confidence=confidence,
             api_version=api_version,

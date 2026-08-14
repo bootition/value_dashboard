@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 import hashlib
+from datetime import UTC, date, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.init import DataInitializer
@@ -17,7 +17,7 @@ def test_ingestion_records_normalized_field_level_lineage(
     result = FetchResult(
         data=[],
         metadata=SourceMetadata(
-            source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+            source="akshare_eastmoney", fetch_time=datetime.now(UTC),
             raw_response_hash="a" * 64, confidence="approximate",
         ),
     )
@@ -46,7 +46,7 @@ def test_field_audit_references_the_unique_batch_created_for_its_fetch(
     result = FetchResult(
         data=[],
         metadata=SourceMetadata(
-            source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+            source="akshare_eastmoney", fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
         ),
         raw_response=raw_response,

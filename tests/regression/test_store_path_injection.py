@@ -70,9 +70,8 @@ def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
     store = SQLiteStore(paths=paths)
     store.execute("CREATE TABLE query_boundary (id INTEGER PRIMARY KEY)")
     assert store.query("SELECT COUNT(*) AS count FROM query_boundary") == [{"count": 0}]
-    with pytest.raises(Exception, match="readonly|read-only"):
-        with store.connection() as conn:
-            conn.execute("INSERT INTO query_boundary (id) VALUES (1)")
+    with pytest.raises(Exception, match="readonly|read-only"), store.connection() as conn:
+        conn.execute("INSERT INTO query_boundary (id) VALUES (1)")
 
 
 @pytest.mark.parametrize("store_type", [DuckDBStore, SQLiteStore])

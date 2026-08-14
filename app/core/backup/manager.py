@@ -20,7 +20,7 @@ import shutil
 import tempfile
 import uuid
 import zipfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -363,7 +363,7 @@ class BackupManager:
         manifest: dict[str, Any] = {
             "backup_id": backup_id,
             "type": "full",
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "files": [],
             "encrypted": user_password is not None,
         }
@@ -480,7 +480,7 @@ class BackupManager:
         # 6. 创建 ZIP 包
         zip_path = backup_dir / f"{backup_id}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, dirs, files in os.walk(backup_path):
+            for root, _dirs, files in os.walk(backup_path):
                 for file in files:
                     file_path = Path(root) / file
                     arcname = file_path.relative_to(backup_path)
@@ -980,7 +980,7 @@ def _directory_manifest(path: Path, root: Path) -> dict[str, Any]:
         size = file_path.stat().st_size
         total_size += size
         files.append({"filename": relative, "size_bytes": size, "sha256": checksum})
-        digest.update(f"{relative}\0{size}\0{checksum}\n".encode("utf-8"))
+        digest.update(f"{relative}\0{size}\0{checksum}\n".encode())
     return {"size_bytes": total_size, "sha256": digest.hexdigest(), "files": files}
 
 

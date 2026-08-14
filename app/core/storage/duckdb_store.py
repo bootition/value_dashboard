@@ -15,13 +15,14 @@ import contextlib
 import os
 import secrets
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import duckdb
 
-from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.maintenance import assert_writes_allowed
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 # 空/半写锁文件宽限期（秒）：与 update_lock.py 同口径，超过即视为死锁
 _STALE_MALFORMED_LOCK_SECONDS = 5.0
@@ -85,6 +86,11 @@ class DuckDBStore:
         写锁活跃时另加 2s 基础等待，骑跨批量写事务而非让调用方 500。
         """
         self._revalidate()
+        # 2026-08-14 红队 P3：库文件不存在是永久性条件（首次启动的
+        # 最小初始化会先建库），不进入竞态重试；立即失败让调用方
+        # 决定建库路径，避免 read_only 打开缺失文件空耗 ~28s 退避窗口。
+        if not self._db_path.exists():
+            raise FileNotFoundError(f"database file not found: {self._db_path}")
         last_error: Exception | None = None
         lock_active = False
         try:
@@ -94,24 +100,35 @@ class DuckDBStore:
         except Exception:
             lock_active = False
         attempts = 12
+        allow_same_process_rw = False
         for attempt in range(attempts):
             try:
                 # 2026-08-14 红队 P2-2：读连接显式 read_only，读进程不参与
                 # 文件锁竞争（DuckDB 允许单写者 + 多只读并发）。
-                conn = duckdb.connect(str(self._db_path), read_only=True)
+                # 例外：本进程已持有读写连接时 DuckDB 禁止同文件不同配置
+                # （"different configuration"）——文件锁本就由本进程持有，
+                # 回退同配置读写连接（同进程多连接共享锁，安全）。
+                conn = duckdb.connect(
+                    str(self._db_path),
+                    read_only=not allow_same_process_rw,
+                )
+            except duckdb.ConnectionException as error:
+                last_error = error
+                if "different configuration" in str(error):
+                    allow_same_process_rw = True
             except Exception as error:
                 last_error = error
-                base_delay = 0.25 * (2 ** min(attempt, 4))
-                delay = min(base_delay, 3.0)
-                if lock_active and attempt == 0:
-                    delay += 2.0
-                time.sleep(delay)
-                continue
-            try:
-                yield conn
-            finally:
-                conn.close()
-            return
+            else:
+                try:
+                    yield conn
+                finally:
+                    conn.close()
+                return
+            base_delay = 0.25 * (2 ** min(attempt, 4))
+            delay = min(base_delay, 3.0)
+            if lock_active and attempt == 0:
+                delay += 2.0
+            time.sleep(delay)
         assert last_error is not None
         raise last_error
 
@@ -123,7 +140,7 @@ class DuckDBStore:
                 raise ValueError("read_query accepts exactly one SELECT statement")
             cursor = conn.execute(sql, params or [])
             columns = [d[0] for d in cursor.description]
-            return [dict(zip(columns, row)) for row in cursor.fetchall()]
+            return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     @contextlib.contextmanager
     def _write_lock(self, timeout: float = 30.0) -> Iterator[None]:
@@ -181,7 +198,7 @@ class DuckDBStore:
                     raise DuckDBWriteLockError(
                         f"无法获取 DuckDB 写锁，可能正在执行其他写操作。"
                         f"请稍后重试或检查 {self._lock_path}"
-                    )
+                    ) from None
                 time.sleep(0.5)
 
         try:
@@ -239,10 +256,8 @@ class DuckDBStore:
                 committed = True
             finally:
                 if not committed:
-                    try:
+                    with contextlib.suppress(Exception):
                         conn.rollback()
-                    except Exception:
-                        pass
                 conn.close()
 
     def write_query(self, sql: str, params: list[Any] | None = None) -> None:

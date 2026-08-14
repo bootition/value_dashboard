@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import UTC
 from typing import Any, Final
 
 from app.core.adapters.base import (
@@ -160,8 +161,8 @@ class AdapterManager:
             state = self._circuit_breaker.get(adapter_name)
             if not state or not state.get("tripped_until"):
                 return False
-            from datetime import datetime, timezone
-            now = datetime.now(timezone.utc)
+            from datetime import datetime
+            now = datetime.now(UTC)
             if now < state["tripped_until"]:
                 remaining = (state["tripped_until"] - now).total_seconds()
                 logger.debug(
@@ -182,14 +183,14 @@ class AdapterManager:
 
     def _record_circuit_failure(self, adapter_name: str) -> None:
         """适配器失败，增加计数器，超阈值则熔断"""
-        from datetime import datetime, timezone
+        from datetime import datetime
         with self._state_lock:
             if adapter_name not in self._circuit_breaker:
                 self._circuit_breaker[adapter_name] = {"failures": 0, "tripped_until": None}
             state = self._circuit_breaker[adapter_name]
             state["failures"] += 1
             if state["failures"] >= self._CIRCUIT_FAILURE_THRESHOLD:
-                state["tripped_until"] = datetime.now(timezone.utc) + \
+                state["tripped_until"] = datetime.now(UTC) + \
                     __import__("datetime").timedelta(seconds=self._CIRCUIT_COOLDOWN_SECONDS)
                 logger.warning(
                     f"熔断触发: {adapter_name} 连续失败 {state['failures']} 次, "

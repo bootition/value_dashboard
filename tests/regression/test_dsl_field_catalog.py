@@ -10,8 +10,8 @@ from app.core.storage.sqlite_store import SQLiteStore
 def test_every_normalized_screening_field_has_dsl_metadata() -> None:
     from app.core.screening.engine import NORMALIZED_FIELDS, SNAPSHOT_COLUMNS
 
-    assert NORMALIZED_FIELDS <= set(FIELD_METADATA)
-    assert SNAPSHOT_COLUMNS <= set(INDICATOR_METADATA)
+    assert set(FIELD_METADATA) >= NORMALIZED_FIELDS
+    assert set(INDICATOR_METADATA) >= SNAPSHOT_COLUMNS
 
 
 def test_dsl_rejects_unknown_standardized_field_and_accepts_ttm_shorthand(

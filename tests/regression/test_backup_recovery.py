@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import zipfile
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
 
 from app.core.backup.manager import BackupManager
-from app.core.storage.maintenance import MaintenanceLockError, exclusive_maintenance
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.maintenance import MaintenanceLockError, exclusive_maintenance
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
 

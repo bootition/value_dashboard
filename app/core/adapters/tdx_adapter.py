@@ -24,12 +24,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import logging
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator
+from typing import Any
 
 import pandas as pd
 
@@ -39,7 +41,6 @@ from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
 try:
     import easy_tdx
-
     from easy_tdx import (
         KNOWN_HOSTS,
         KlineCategory,
@@ -124,7 +125,7 @@ def _strip_code(stock_code: str) -> str:
     return code
 
 
-def _code_to_market(stock_code: str) -> "Market | None":
+def _code_to_market(stock_code: str) -> Market | None:
     """6 位股票代码 → TDX Market 枚举
 
     6xxxxx → SH (1), 0/3xxxxx → SZ (0), 8/4/9xxxxx → BJ (2)
@@ -344,8 +345,8 @@ class TDXAdapter(BaseAdapter):
 
     def _fetch_bars_for_code(
         self,
-        client: "TdxClient",
-        market: "Market",
+        client: TdxClient,
+        market: Market,
         code: str,
         start_str: str,
         end_str: str,
@@ -627,7 +628,7 @@ class TDXAdapter(BaseAdapter):
     # ─── 连接管理 ──────────────────────────────────────────────────
 
     @contextmanager
-    def _tdx_session(self) -> "Iterator[TdxClient | None]":
+    def _tdx_session(self) -> Iterator[TdxClient | None]:
         """通用 TDX 会话: from_best_host, 适用于 xdxr / 财报下载"""
         client: TdxClient | None = None
         try:
@@ -640,13 +641,11 @@ class TDXAdapter(BaseAdapter):
             yield client
         finally:
             if client is not None:
-                try:
+                with contextlib.suppress(Exception):
                     client.close()
-                except Exception:
-                    pass
 
     @contextmanager
-    def _bars_session(self, request: FetchRequest) -> "Iterator[TdxClient | None]":
+    def _bars_session(self, request: FetchRequest) -> Iterator[TdxClient | None]:
         """K 线专用会话: 需要找到能返回 K 线数据的主机
 
         from_best_host 选最低延迟主机, 但该主机可能只提供财务数据不提供 K 线。
@@ -663,12 +662,10 @@ class TDXAdapter(BaseAdapter):
             yield client
         finally:
             if client is not None:
-                try:
+                with contextlib.suppress(Exception):
                     client.close()
-                except Exception:
-                    pass
 
-    def _connect_for_bars(self, request: FetchRequest) -> "TdxClient":
+    def _connect_for_bars(self, request: FetchRequest) -> TdxClient:
         """连接到能返回 K 线数据的 TDX 主机
 
         from_best_host 选最低延迟主机, 但该主机可能只提供财务数据不提供 K 线。
@@ -712,7 +709,7 @@ class TDXAdapter(BaseAdapter):
         return TdxClient.from_best_host(timeout=timeout)
 
     @staticmethod
-    def _test_bars(client: "TdxClient") -> bool:
+    def _test_bars(client: TdxClient) -> bool:
         """快速测试主机是否能返回 K 线数据 (用 600519 SH 测试 1 条)"""
         try:
             df = client.get_security_bars(

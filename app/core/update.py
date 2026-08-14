@@ -17,9 +17,10 @@ import json
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, wait
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
@@ -141,7 +142,7 @@ class IncrementalUpdater:
         try:
             from app.core.config import Config
             cfg = Config.current()
-            update_cfg = cfg["update"] if "update" in cfg else {}
+            update_cfg = cfg.get("update", {})
             value = update_cfg.get(key) if isinstance(update_cfg, dict) else None
             return int(value) if value else default
         except Exception:
@@ -154,7 +155,7 @@ class IncrementalUpdater:
         实际更新由 run_incremental_update() 执行。
         """
         report: dict[str, Any] = {
-            "checked_at": datetime.now(timezone.utc).isoformat(),
+            "checked_at": datetime.now(UTC).isoformat(),
             "new_trading_days": [],
             "latest_local_price_date": None,
             "announcement_check": None,
@@ -238,13 +239,13 @@ class IncrementalUpdater:
             return {
                 "status": "skipped",
                 "reason": "another_update_running",
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "started_at": datetime.now(UTC).isoformat(),
+                "finished_at": datetime.now(UTC).isoformat(),
             }
 
     def _reconcile_crashed_incremental_jobs(self) -> None:
         """Close jobs abandoned by the dead process that owned the update lock."""
-        finished_at = datetime.now(timezone.utc).isoformat()
+        finished_at = datetime.now(UTC).isoformat()
         running = self.sqlite.query(
             """SELECT id, details_json FROM job_logs
                WHERE job_type = 'incremental_update' AND status = 'running'"""
@@ -276,7 +277,7 @@ class IncrementalUpdater:
     ) -> dict[str, Any]:
         """持锁执行更新主体；job_logs 生命周期（P1: 状态页"最近更新"）。"""
         job_id = str(uuid.uuid4())
-        started_at = datetime.now(timezone.utc).isoformat()
+        started_at = datetime.now(UTC).isoformat()
         job_row_id = self._start_job(job_id, max_stocks, started_at)
         try:
             report = self._run_incremental_update_flow(
@@ -300,7 +301,7 @@ class IncrementalUpdater:
 
     def _finish_job(self, job_row_id: int, status: str, details: dict[str, Any]) -> None:
         """结束增量更新作业（success 之外一律记 failed，供状态页只读展示）。"""
-        finished_at = datetime.now(timezone.utc).isoformat()
+        finished_at = datetime.now(UTC).isoformat()
         self.sqlite.execute(
             """UPDATE job_logs SET status = ?, finished_at = ?, details_json = ?
                WHERE id = ?""",
@@ -379,7 +380,7 @@ class IncrementalUpdater:
                     ),
                 )
             report["status"] = aggregate_job_status(report["steps"])
-            report["finished_at"] = datetime.now(timezone.utc).isoformat()
+            report["finished_at"] = datetime.now(UTC).isoformat()
             logger.info("有界价格更新完成: %s", report["status"])
             return report
 
@@ -478,7 +479,7 @@ class IncrementalUpdater:
                 report_step("retries", self._retry_failed_tasks(refreshed_tasks))
 
         report["status"] = aggregate_job_status(report["steps"])
-        report["finished_at"] = datetime.now(timezone.utc).isoformat()
+        report["finished_at"] = datetime.now(UTC).isoformat()
 
         logger.info(f"增量更新完成: {report['status']}")
         return report
@@ -552,7 +553,7 @@ class IncrementalUpdater:
                            VALUES ('research_statistics_fingerprint', ?, ?)
                            ON CONFLICT(key) DO UPDATE SET
                              value=excluded.value, updated_at=excluded.updated_at""",
-                        [fingerprint, datetime.now(timezone.utc).isoformat()],
+                        [fingerprint, datetime.now(UTC).isoformat()],
                     )
             return report
         except Exception as error:
@@ -684,7 +685,7 @@ class IncrementalUpdater:
             last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return True
-        return (datetime.now(timezone.utc).date() - last_date).days >= interval_days
+        return (datetime.now(UTC).date() - last_date).days >= interval_days
 
     def _mark_csrc_refreshed(self) -> None:
         """Persist the CSRC refresh date so later runs skip the full scan."""
@@ -698,7 +699,7 @@ class IncrementalUpdater:
                    VALUES (?, ?, ?)
                    ON CONFLICT(key) DO UPDATE SET
                      value=excluded.value, updated_at=excluded.updated_at""",
-                [key, datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat()],
+                [key, datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()],
             )
 
     def _check_new_trading_days(self) -> list[str]:
@@ -1519,7 +1520,7 @@ class IncrementalUpdater:
         if not complete:
             return 0
         complete_codes = [row["stock_code"] for row in complete]
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.sqlite.execute(
             "UPDATE missing_list SET resolved_at = ? "
             "WHERE field_name = 'listing_info' AND stock_code IN ({})".format(
@@ -2018,7 +2019,7 @@ class IncrementalUpdater:
                SET retry_count = retry_count + 1, error = ?, last_attempt = ?,
                    next_retry_at = datetime('now', '+' || MIN(24, 1 << MIN(retry_count + 1, 5)) || ' hours')
                WHERE id = ?""",
-            [error[:500], datetime.now(timezone.utc).isoformat(), retry_id],
+            [error[:500], datetime.now(UTC).isoformat(), retry_id],
         )
 
     def _record_failure(
@@ -2039,7 +2040,7 @@ class IncrementalUpdater:
                        ON CONFLICT(stock_code, data_type, adapter, extra_json) DO UPDATE SET
                          error=excluded.error, last_attempt=excluded.last_attempt""",
                     [stock_code, data_type, adapter, error[:500],
-                     datetime.now(timezone.utc).isoformat(), extra_json or "{}"],
+                     datetime.now(UTC).isoformat(), extra_json or "{}"],
                 )
         except Exception as e:
             logger.warning(f"记录失败信息失败: {e}")

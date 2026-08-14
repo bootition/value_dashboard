@@ -14,9 +14,9 @@ import logging
 import re
 from typing import Any
 
-from app.core.storage.sqlite_store import SQLiteStore
-from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.dsl.ast_nodes import INDICATOR_METADATA
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
+from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 

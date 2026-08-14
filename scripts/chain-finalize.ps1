@@ -3,7 +3,7 @@
 # O6修复(报告41): 正式路径参数化（不再硬编码），证据写入 docs/evidence/ 治理目录。
 param(
     [string]$ProjectRoot = "",
-    [int]$WaitPid = 237348,
+    [int]$WaitPid = 0,
     [string]$EvidenceDir = ""
 )
 
@@ -18,6 +18,10 @@ if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
 if ([string]::IsNullOrWhiteSpace($EvidenceDir)) {
     $EvidenceDir = Join-Path $ProjectRoot "docs\evidence"
 }
+# 2026-08-14 红队 P3：不再依赖 PATH 里的 python（旧版裸 `python` 可能
+# 命中系统解释器并带入错误依赖）；venv 优先，与 vd.bat 一致。
+$VdPy = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $VdPy)) { $VdPy = "python" }
 $duckPath = Join-Path $ProjectRoot "data\valuedashboard.duckdb"
 $sqlitePath = Join-Path $ProjectRoot "data\valuedashboard.sqlite"
 $env:VD_DUCKDB_PATH = $duckPath
@@ -34,15 +38,21 @@ function Log($msg) {
 Log "ProjectRoot=$ProjectRoot  EvidenceDir=$EvidenceDir"
 
 # 1) 等待分红进程结束
-Log "等待分红进程 PID=$WaitPid ..."
-while (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
-    Start-Sleep -Seconds 20
+# 2026-08-14 红队 P3：删除硬编码默认 PID（旧值 237348 是某次会话残留，
+# 不传参数时永远空等或误等）；WaitPid<=0 视为无前置进程，直接跳过。
+if ($WaitPid -gt 0) {
+    Log "等待分红进程 PID=$WaitPid ..."
+    while (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
+        Start-Sleep -Seconds 20
+    }
+    Log "分红进程已结束"
+} else {
+    Log "未指定 WaitPid，跳过前置等待"
 }
-Log "分红进程已结束"
 
 # 2) 隔离遗留 lineage
 Log "== 步骤2: 隔离遗留 lineage =="
-python -c "
+& $VdPy -c "
 import sys, json
 sys.path.insert(0, r'$ProjectRoot')
 from app.core.storage.duckdb_store import DuckDBStore
@@ -58,12 +68,12 @@ Log "隔离完成"
 
 # 3) 财务 lineage 重建（全市场，最长）
 Log "== 步骤3: 财务 lineage 重建（后台内串行执行）=="
-python scripts/repair_financials.py --resume --rate-limit 0.3 2>&1 | Out-File -Append -FilePath $log
+& $VdPy scripts/repair_financials.py --resume --rate-limit 0.3 2>&1 | Out-File -Append -FilePath $log
 Log "财务重建完成 exit=$LASTEXITCODE"
 
 # 4) 快照重算
 Log "== 步骤4: 快照重算 =="
-python -c "
+& $VdPy -c "
 import sys, json
 sys.path.insert(0, r'$ProjectRoot')
 from app.core.storage.duckdb_store import DuckDBStore
@@ -79,7 +89,7 @@ Log "快照重算完成 exit=$LASTEXITCODE"
 
 # 5) 诊断
 Log "== 步骤5: 诊断 =="
-python -c "
+& $VdPy -c "
 import sys, json
 sys.path.insert(0, r'$ProjectRoot')
 from app.core.storage.duckdb_store import DuckDBStore

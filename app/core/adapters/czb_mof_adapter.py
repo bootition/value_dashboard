@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -300,7 +300,7 @@ class TreasuryMofAdapter(BaseAdapter):
             if epoch_ms is None or yield_value is None or yield_value <= 0:
                 continue
             curve_date = datetime.fromtimestamp(
-                epoch_ms / 1000.0, tz=timezone.utc
+                epoch_ms / 1000.0, tz=UTC
             ).astimezone(_CN_TZ).date()
             if curve_date > today:
                 continue

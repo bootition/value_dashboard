@@ -18,8 +18,7 @@ def test_bars_session_does_not_yield_twice_when_body_raises(monkeypatch) -> None
     monkeypatch.setattr(adapter, "_connect_for_bars", lambda request: client)
     request = FetchRequest(data_type="price_daily", stock_codes=["600519"])
 
-    with pytest.raises(RuntimeError, match="body failed"):
-        with adapter._bars_session(request):
-            raise RuntimeError("body failed")
+    with pytest.raises(RuntimeError, match="body failed"), adapter._bars_session(request):
+        raise RuntimeError("body failed")
 
     assert client.closed is True

@@ -4,9 +4,9 @@ import json
 
 from app.cli.main import data_diagnose, data_status
 from app.core.config import Config
+from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
-from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 
 

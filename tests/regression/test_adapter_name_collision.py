@@ -7,7 +7,7 @@ PRD 自动公告发现与分红严格来源失效。
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.adapters.manager import AdapterManager
@@ -47,7 +47,7 @@ def test_announcements_still_route_to_cninfo(monkeypatch) -> None:
                 "announcement_time": "2026-07-28T00:00:00Z",
             }],
             metadata=SourceMetadata(
-                source="cninfo", fetch_time=datetime.now(timezone.utc),
+                source="cninfo", fetch_time=datetime.now(UTC),
                 raw_response_hash="a" * 64, confidence="strict",
             ),
             raw_response=b"{}",

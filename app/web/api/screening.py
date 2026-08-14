@@ -9,7 +9,7 @@ import csv
 import io
 import json
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -312,7 +312,7 @@ def save_result(req: SaveResultRequest, request: Request) -> dict:
                 req.title,
                 req.note,
                 run["rule_id"], run["rule_version"],
-                run["data_date"] or datetime.now(timezone.utc).isoformat(),
+                run["data_date"] or datetime.now(UTC).isoformat(),
                 run["result_json"],
                 json.dumps(req.columns, ensure_ascii=False) if req.columns is not None else run["columns_json"],
                 run["sort_json"], run["confidence_summary"], run["base_pool_config"],
@@ -568,11 +568,11 @@ def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标"""
     from app.core.screening.engine import (
         NORMALIZED_FIELDS,
-        SNAPSHOT_COLUMNS,
         RANKABLE_INDICATORS,
+        SNAPSHOT_COLUMNS,
+        STAT_METHODS,
         STAT_METRICS,
         STAT_WINDOWS,
-        STAT_METHODS,
     )
     from app.core.screening.field_units import field_unit
 
@@ -666,10 +666,7 @@ def save_rule(req: SaveRuleRequest, request: Request) -> dict:
             [req.name],
         ).fetchone()
 
-        if existing and existing[0] is not None:
-            version = existing[0] + 1
-        else:
-            version = 1
+        version = existing[0] + 1 if existing and existing[0] is not None else 1
 
         try:
             cursor = conn.execute(
@@ -684,8 +681,10 @@ def save_rule(req: SaveRuleRequest, request: Request) -> dict:
                     "saved",
                 ],
             )
-        except Exception:
-            raise HTTPException(status_code=409, detail="concurrent rule save conflict; retry")
+        except Exception as error:
+            raise HTTPException(
+                status_code=409, detail="concurrent rule save conflict; retry"
+            ) from error
         rule_id = cursor.lastrowid
 
     return {"status": "ok", "rule_id": rule_id, "version": version}

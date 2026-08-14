@@ -7,12 +7,13 @@ CLI 和 Web 可同时访问，写操作自动排队。
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.maintenance import assert_writes_allowed
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 
 class SQLiteStore:

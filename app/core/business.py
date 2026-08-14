@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.eastmoney_f10_adapter import EastMoneyF10Adapter
@@ -76,7 +77,7 @@ class BusinessOverviewUpdater:
         try:
             from app.core.config import Config
             cfg = Config.current()
-            update_cfg = cfg["update"] if "update" in cfg else {}
+            update_cfg = cfg.get("update", {})
             if isinstance(update_cfg, dict) and key in update_cfg:
                 return update_cfg[key]
         except Exception:
@@ -117,7 +118,7 @@ class BusinessOverviewUpdater:
             }
 
         batch_id = uuid.uuid4().hex
-        fetch_time = datetime.now(timezone.utc)
+        fetch_time = datetime.now(UTC)
         # 单股事务原子替换：资料与构成同一事务提交，任一侧异常整体回滚
         with self.duck.transaction() as conn:
             if profile_result.data:
@@ -316,7 +317,7 @@ class BusinessOverviewUpdater:
         the universe on later launches instead of repeatedly refreshing the same
         first page.
         """
-        cutoff = datetime.now(timezone.utc) - timedelta(days=interval_days)
+        cutoff = datetime.now(UTC) - timedelta(days=interval_days)
         rows = self.duck.read_query(
             """SELECT m.stock_code,
                       LEAST(p.fetch_time, b.fetch_time) AS oldest_fetch
@@ -343,21 +344,8 @@ class BusinessOverviewUpdater:
             priority_codes = set()
         return sorted(codes, key=lambda code: (code not in priority_codes, source_order[code]))
 
-    def _refresh_due(self, interval_days: int) -> bool:
-        rows = self.sqlite.query(
-            "SELECT value FROM data_refresh_state WHERE key = ?", [REFRESH_MARKER_KEY]
-        )
-        if not rows:
-            return True
-        raw = rows[0].get("value")
-        try:
-            last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
-        except (ValueError, TypeError):
-            return True
-        return (datetime.now(timezone.utc).date() - last_date).days >= interval_days
-
     def _mark_refreshed(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self.sqlite.transaction() as conn:
             conn.execute(
                 """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -380,7 +368,7 @@ class BusinessOverviewUpdater:
                        ON CONFLICT(stock_code, data_type, adapter, extra_json) DO UPDATE SET
                          error=excluded.error, last_attempt=excluded.last_attempt""",
                     [stock_code, data_type, adapter, error[:500],
-                     datetime.now(timezone.utc).isoformat()],
+                     datetime.now(UTC).isoformat()],
                 )
         except Exception as e:
             logger.warning("记录业务概览失败信息失败: %s", e)
@@ -406,7 +394,7 @@ class BusinessOverviewUpdater:
             self.sqlite.execute(
                 """UPDATE missing_list SET resolved_at = ?
                    WHERE stock_code = ? AND field_name = ? AND resolved_at IS NULL""",
-                [datetime.now(timezone.utc).isoformat(), stock_code, field_name],
+                [datetime.now(UTC).isoformat(), stock_code, field_name],
             )
         except Exception as e:
             logger.warning("解决业务概览缺失信息失败: %s", e)

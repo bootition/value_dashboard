@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -11,11 +11,11 @@ from fastapi import Request
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.backfill import PriceBackfiller
 from app.core.init import DataInitializer
-from app.core.update import IncrementalUpdater
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.update import IncrementalUpdater
 from app.web.api.stock_detail import get_kline
 
 
@@ -37,7 +37,7 @@ def _result(
         data=data,
         metadata=SourceMetadata(
             source="akshare_eastmoney",
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
             confidence="missing" if error else "approximate",
             error=error,

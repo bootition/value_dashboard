@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-
 import json
 import re
 
@@ -98,7 +97,9 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
         )
         info_map = {r["stock_code"]: r for r in stock_info}
     except Exception as error:
-        raise HTTPException(status_code=503, detail={"error": "database unavailable", "detail": str(error)})
+        raise HTTPException(
+            status_code=503, detail={"error": "database unavailable", "detail": str(error)}
+        ) from error
 
     items = []
     for row in rows:

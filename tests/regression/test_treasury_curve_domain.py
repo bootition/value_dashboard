@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 import pytest
@@ -87,7 +87,7 @@ def _result(
         data=data,
         metadata=SourceMetadata(
             source="czb_mof",
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw).hexdigest(),
             confidence=confidence,
             error=error,
@@ -140,7 +140,7 @@ def _seed_curve(
            (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
            VALUES (?, ?, ?, 'czb_mof', ?, ?, 'strict', ?)""",
         [curve_date, tenor, yield_pct,
-         fetch_time or datetime.now(timezone.utc), "0" * 64, batch],
+         fetch_time or datetime.now(UTC), "0" * 64, batch],
     )
 
 
@@ -236,9 +236,10 @@ def test_adapter_drops_future_points_from_history() -> None:
 
 def test_adapter_empty_and_malformed_are_missing() -> None:
     for payload in (EMPTY_PAYLOAD, MISSING_PAYLOAD, b"not-json{{{"):
-        def handler(request: httpx.Request) -> httpx.Response:
-            content = payload if isinstance(payload, bytes) else \
-                json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        # B023：循环变量通过默认参数绑定，避免晚绑定读取最后一个 payload
+        def handler(request: httpx.Request, _payload: bytes | dict = payload) -> httpx.Response:
+            content = _payload if isinstance(_payload, bytes) else \
+                json.dumps(_payload, ensure_ascii=False).encode("utf-8")
             return httpx.Response(200, content=content)
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -722,8 +723,8 @@ def test_refresh_if_due_gates_on_marker(
         """INSERT INTO data_refresh_state (key, value, updated_at)
            VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
         [REFRESH_MARKER_KEY,
-         (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
-         datetime.now(timezone.utc).isoformat()],
+         (datetime.now(UTC) - timedelta(days=2)).isoformat(),
+         datetime.now(UTC).isoformat()],
     )
     third = updater.refresh_if_due()
     assert third["status"] != "skipped"

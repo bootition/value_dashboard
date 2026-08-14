@@ -7,7 +7,7 @@ import json
 import logging
 import threading
 import time
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
@@ -936,7 +936,7 @@ def build_data_quality_status(
         "running_jobs": sqlite.query(
             """SELECT COUNT(*) AS count FROM job_logs
                WHERE status = 'running' AND started_at < ?""",
-            [(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()],
+            [(datetime.now(UTC) - timedelta(hours=2)).isoformat()],
         )[0]["count"],
     }
 
@@ -1054,7 +1054,7 @@ def _incompatible_schema_status(readiness: dict, sqlite: SQLiteStore) -> dict:
         "running_jobs": sqlite.query(
             "SELECT COUNT(*) AS count FROM job_logs "
             "WHERE status = 'running' AND started_at < ?",
-            [(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()],
+            [(datetime.now(UTC) - timedelta(hours=2)).isoformat()],
         )[0]["count"],
     }
     return {

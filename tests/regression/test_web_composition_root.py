@@ -6,14 +6,14 @@ import ast
 from pathlib import Path
 from typing import Any
 
-import app.web.main as web_main
 from fastapi.testclient import TestClient
+
+import app.web.main as web_main
 from app.core.config import Config
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
-from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
-
+from app.core.storage.sqlite_store import SQLiteStore
 
 WEB_ROOT = Path(__file__).parents[2] / "app" / "web"
 
@@ -259,9 +259,11 @@ def test_web_sources_have_no_implicit_database_constructors() -> None:
             if not isinstance(node, ast.Call):
                 continue
             name = node.func.id if isinstance(node.func, ast.Name) else None
-            if name in {"DuckDBStore", "SQLiteStore", "resolve_and_validate_paths"}:
-                if path.parent.name == "api":
-                    violations.append(f"{path.relative_to(WEB_ROOT)}:{node.lineno}:{name}")
+            if (
+                name in {"DuckDBStore", "SQLiteStore", "resolve_and_validate_paths"}
+                and path.parent.name == "api"
+            ):
+                violations.append(f"{path.relative_to(WEB_ROOT)}:{node.lineno}:{name}")
             if name in forbidden_zero_arg and not node.args and not node.keywords:
                 violations.append(f"{path.relative_to(WEB_ROOT)}:{node.lineno}:{name}()")
 

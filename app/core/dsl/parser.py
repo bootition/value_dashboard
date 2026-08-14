@@ -10,11 +10,18 @@ import logging
 import re
 from pathlib import Path
 
-from lark import Lark, Transformer, Token
+from lark import Lark, Token, Transformer
 
 from app.core.dsl.ast_nodes import (
-    ASTNode, Literal, FieldRef, IndicatorRef, FuncCall,
-    BinaryOp, UnaryOp, FIELD_METADATA, INDICATOR_METADATA,
+    FIELD_METADATA,
+    INDICATOR_METADATA,
+    ASTNode,
+    BinaryOp,
+    FieldRef,
+    FuncCall,
+    IndicatorRef,
+    Literal,
+    UnaryOp,
 )
 
 logger = logging.getLogger(__name__)

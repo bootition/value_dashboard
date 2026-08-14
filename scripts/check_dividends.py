@@ -3,7 +3,11 @@ import duckdb
 import pandas as pd
 from pathlib import Path
 
-conn = duckdb.connect('data/valuedashboard.duckdb', read_only=True)
+# 2026-08-14 红队 P3：不再依赖 CWD——锚定脚本所在仓库根
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DB_PATH = PROJECT_ROOT / "data" / "valuedashboard.duckdb"
+
+conn = duckdb.connect(str(DB_PATH), read_only=True)
 
 total = conn.execute("SELECT COUNT(*) FROM dividends").fetchone()[0]
 stocks = conn.execute("SELECT COUNT(DISTINCT stock_code) FROM dividends").fetchone()[0]
@@ -27,7 +31,10 @@ for r in conn.execute("""
 conn.close()
 
 # 检查 CSMAR FI_T11.dta 文件
-csmar_dividend_path = Path(r'D:\Mr.Q\掌控经济\value-dashboard\额外资料\C17 a股上市公司财务数据合集（90-25年）\原始数据（dta格式）\股利分配\FI_T11.dta')
+csmar_dividend_path = (
+    PROJECT_ROOT / "额外资料" / "C17 a股上市公司财务数据合集（90-25年）"
+    / "原始数据（dta格式）" / "股利分配" / "FI_T11.dta"
+)
 if csmar_dividend_path.exists():
     print(f"\nCSMAR 分红文件: {csmar_dividend_path.stat().st_size / 1e6:.1f} MB")
     reader = pd.read_stata(csmar_dividend_path, iterator=True, chunksize=10)

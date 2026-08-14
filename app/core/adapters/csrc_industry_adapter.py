@@ -88,8 +88,8 @@ class CSRCIndustryAdapter(BaseAdapter):
         """
         try:
             import akshare as ak
-        except ImportError:
-            raise RuntimeError("akshare 不可用，无法查询 CSRC 行业")
+        except ImportError as error:
+            raise RuntimeError("akshare 不可用，无法查询 CSRC 行业") from error
 
         # 变更历史按日期倒序（接口默认返回全部历史），取最新一条当前记录。
         # F008C「最新记录标识」=1 表示当前归属。

@@ -9,7 +9,8 @@ from enum import Enum
 from pathlib import Path
 
 
-class VdEnv(str, Enum):
+# str-Enum 有意为之：VdEnv 需要与配置文件里的纯字符串等价比较
+class VdEnv(str, Enum):  # noqa: UP042
     FORMAL = "formal"
     TEST = "test"
     STAGING = "staging"

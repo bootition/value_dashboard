@@ -22,7 +22,7 @@ import logging
 import statistics
 import uuid
 from bisect import bisect_right
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
@@ -161,8 +161,13 @@ class StatisticsBuilder:
             if close <= 0:
                 continue
 
-            def _latest(pairs_dates: list[date], pairs_values: list[float]) -> float | None:
-                idx = bisect_right(pairs_dates, d) - 1
+            # B023: 循环变量 d 通过默认参数绑定，避免晚绑定误读
+            def _latest(
+                pairs_dates: list[date],
+                pairs_values: list[float],
+                _anchor: date = d,
+            ) -> float | None:
+                idx = bisect_right(pairs_dates, _anchor) - 1
                 return pairs_values[idx] if idx >= 0 else None
 
             shares = _latest(capital_dates, capital_values)
@@ -338,7 +343,7 @@ class StatisticsBuilder:
         version = self._next_version()
         records: list[dict[str, Any]] = []
         failed: list[str] = []
-        published_at = datetime.now(timezone.utc)
+        published_at = datetime.now(UTC)
 
         def _finish(code: str, stats: list[dict[str, Any]]) -> None:
             for row in stats:

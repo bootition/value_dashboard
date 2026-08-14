@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -25,7 +25,6 @@ from app.core.screening.engine import MAX_RESULT_ROWS, ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import router as screening_router
-
 
 # ─── P1-B: 退市门禁 ─────────────────────────────────────────────
 
@@ -54,7 +53,7 @@ class _PartialStockListAdapter:
         return FetchResult(
             data=rows,
             metadata=SourceMetadata(
-                source="akshare_eastmoney", fetch_time=datetime.now(timezone.utc),
+                source="akshare_eastmoney", fetch_time=datetime.now(UTC),
                 raw_response_hash=hashlib.sha256(raw).hexdigest(), confidence="strict",
             ),
             raw_response=raw,
@@ -301,8 +300,9 @@ def test_cli_run_to_web_export_preserves_truncated_marker(
     """
     import json as _json
 
-    import app.cli.main as cli_main
     from typer.testing import CliRunner
+
+    import app.cli.main as cli_main
     from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
 
     # 小截断阈值（3）以便小池子触发截断；10 只可筛选股票
@@ -423,8 +423,9 @@ def test_cli_run_to_cli_export_preserves_truncated_marker(
     必须携带 _truncated 标注（header 与每条数据行），禁止静默丢尾。"""
     import json as _json
 
-    import app.cli.main as cli_main
     from typer.testing import CliRunner
+
+    import app.cli.main as cli_main
 
     monkeypatch.setattr("app.core.screening.engine.MAX_RESULT_ROWS", 3)
     _seed_cli_screenable_pool(duckdb_store, sqlite_store, 10, "cli-trunc-export", monkeypatch)
@@ -468,8 +469,9 @@ def test_cli_export_at_limit_has_no_truncation_marker(
     """F4: 恰好命中上限（不截断）时 CLI export_csv 不得出现 _truncated 列。"""
     import json as _json
 
-    import app.cli.main as cli_main
     from typer.testing import CliRunner
+
+    import app.cli.main as cli_main
 
     monkeypatch.setattr("app.core.screening.engine.MAX_RESULT_ROWS", 3)
     _seed_cli_screenable_pool(duckdb_store, sqlite_store, 3, "cli-at-limit-export", monkeypatch)

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater, classify_announcement
@@ -17,7 +17,7 @@ def test_announcement_check_does_not_mark_a_filing_seen_before_refresh(duckdb_st
             return FetchResult(
                 data=[{"announcement_id": "notice-1", "announcement_time": "2026-07-28T00:00:00Z",
                        "title": "2026年半年度报告", "stock_code": "000001"}],
-                metadata=SourceMetadata(source="cninfo", fetch_time=datetime.now(timezone.utc), raw_response_hash="a" * 64, confidence="strict"),
+                metadata=SourceMetadata(source="cninfo", fetch_time=datetime.now(UTC), raw_response_hash="a" * 64, confidence="strict"),
             )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=AnnouncementAdapter())
@@ -170,7 +170,7 @@ def test_refetch_one_incremental_writes_new_report_period(duckdb_store, sqlite_s
                     "total_assets": 200.0,
                 }],
                 metadata=SourceMetadata(
-                    source="sina", fetch_time=datetime.now(timezone.utc),
+                    source="sina", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="strict",
                 ),
                 raw_response=raw_response,
@@ -208,7 +208,7 @@ def test_refetch_one_incremental_skips_when_source_has_no_new_period(duckdb_stor
                     "total_assets": 99.0,
                 }],
                 metadata=SourceMetadata(
-                    source="sina", fetch_time=datetime.now(timezone.utc),
+                    source="sina", fetch_time=datetime.now(UTC),
                     raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="strict",
                 ),
                 raw_response=raw_response,

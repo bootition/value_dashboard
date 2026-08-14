@@ -5,10 +5,10 @@ from __future__ import annotations
 import threading
 import time
 
-import app.web.main as web_main
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import app.web.main as web_main
 from app.core.config import Config
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet

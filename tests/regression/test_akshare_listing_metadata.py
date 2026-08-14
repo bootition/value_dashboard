@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
-from types import SimpleNamespace
 
 from app.core.adapters.akshare_adapter import AKShareAdapter
 from app.core.adapters.base import FetchRequest
@@ -104,7 +105,6 @@ def test_dividend_ratios_are_normalized_to_per_share_fields(monkeypatch) -> None
 def test_dividend_cash_from_description_when_ratio_missing(monkeypatch) -> None:
     """已退市 B 股等记录 cash_dividend_ratio 为 NaN 时，从 description 解析每股派息。"""
     import numpy as np
-
     import pandas as pd
 
     import app.core.adapters.akshare_adapter as module

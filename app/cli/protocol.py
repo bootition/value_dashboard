@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.storage.sqlite_store import SQLiteStore
@@ -126,7 +126,7 @@ def create_plan(
     PRD §16.3 CL11: plan_id 有效期固定 15 分钟
     """
     plan_id = str(uuid.uuid4())[:12]
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=PLAN_EXPIRY_MINUTES)
+    expires_at = datetime.now(UTC) + timedelta(minutes=PLAN_EXPIRY_MINUTES)
 
     with sqlite.transaction() as conn:
         conn.execute(
@@ -152,7 +152,7 @@ def confirm_plan(plan_id: str, *, sqlite: SQLiteStore) -> dict[str, Any]:
 
     PRD §16.3 CL11: 在有效期内基于 plan_id 确认执行
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with sqlite.transaction() as conn:
         plan = conn.execute("SELECT * FROM plans WHERE plan_id = ?", [plan_id]).fetchone()
         if plan is None:
@@ -211,7 +211,7 @@ def consume_confirmed_plan(
     conditional update occurs in the same SQLite transaction as the summary
     read, preventing concurrent callers from replaying an irreversible plan.
     """
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with sqlite.transaction() as conn:
         row = conn.execute(
             """SELECT plan_summary FROM plans

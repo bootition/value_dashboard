@@ -18,8 +18,8 @@ from typing import Any
 import httpx
 
 from app.core.config import Config
-from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.maintenance import MaintenanceLockError, exclusive_maintenance
+from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -194,8 +194,8 @@ class PDFManager:
 
         通过 CNINFO 适配器获取公告列表, 然后下载 PDF。
         """
-        from app.core.adapters.manager import AdapterManager
         from app.core.adapters.base import FetchRequest
+        from app.core.adapters.manager import AdapterManager
 
         mgr = AdapterManager()
         result = mgr.fetch(FetchRequest(

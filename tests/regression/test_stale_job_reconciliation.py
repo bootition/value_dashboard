@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.cli.protocol import confirm_plan, create_plan
 
@@ -18,13 +18,13 @@ def test_stale_job_reconciliation_requires_a_confirmed_plan(sqlite_store) -> Non
 
 
 def test_reconciliation_plan_records_stale_job_ids(sqlite_store) -> None:
-    old = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     sqlite_store.execute(
         "INSERT INTO job_logs (job_type, status, started_at) VALUES (?, 'running', ?)",
         ["full_init", old],
     )
     jobs = sqlite_store.query(
-        "SELECT id FROM job_logs WHERE status = 'running' AND started_at < ?", [datetime.now(timezone.utc).isoformat()]
+        "SELECT id FROM job_logs WHERE status = 'running' AND started_at < ?", [datetime.now(UTC).isoformat()]
     )
 
     plan = create_plan("data.reconcile_jobs", {"job_ids": [jobs[0]["id"]], "count": 1}, sqlite=sqlite_store)

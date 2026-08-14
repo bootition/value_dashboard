@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import hashlib
+from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.dsl.ast_nodes import FIELD_METADATA
@@ -21,7 +21,7 @@ class XdxrAdapterManager:
                 "fenhong": 1.0, "songzhuangu": 0.2, "peigu": None, "peigujia": None,
             }],
             metadata=SourceMetadata(
-                source="tdx", fetch_time=datetime.now(timezone.utc), raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
+                source="tdx", fetch_time=datetime.now(UTC), raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
                 confidence="approximate",
             ),
             raw_response=raw_response,

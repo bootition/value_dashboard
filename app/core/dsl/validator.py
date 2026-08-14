@@ -12,8 +12,15 @@ import logging
 from typing import Any
 
 from app.core.dsl.ast_nodes import (
-    ASTNode, FieldRef, IndicatorRef, FuncCall, BinaryOp, UnaryOp, Literal,
-    FIELD_METADATA, INDICATOR_METADATA,
+    FIELD_METADATA,
+    INDICATOR_METADATA,
+    ASTNode,
+    BinaryOp,
+    FieldRef,
+    FuncCall,
+    IndicatorRef,
+    Literal,
+    UnaryOp,
 )
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -118,50 +125,60 @@ class Validator:
             right = node.right
             if left and right:
                 # 比较运算: 双方 unit 必须相同
-                if node.op in (">", "<", ">=", "<=", "==", "!="):
-                    if left.unit != right.unit and left.unit != "unknown" and right.unit != "unknown":
-                        self._errors.append(
-                            f"维度不匹配: {left.unit} {node.op} {right.unit} "
-                            f"(PRD §11.4: 不允许{left.unit}与{right.unit}直接比较)"
-                        )
+                if (
+                    node.op in (">", "<", ">=", "<=", "==", "!=")
+                    and left.unit != right.unit
+                    and left.unit != "unknown"
+                    and right.unit != "unknown"
+                ):
+                    self._errors.append(
+                        f"维度不匹配: {left.unit} {node.op} {right.unit} "
+                        f"(PRD §11.4: 不允许{left.unit}与{right.unit}直接比较)"
+                    )
 
                 # 加减法: 双方 unit 必须相同 + period_type 必须兼容
-                if node.op in ("+", "-"):
-                    if left.unit != right.unit and left.unit != "unknown" and right.unit != "unknown":
-                        self._errors.append(
-                            f"维度不匹配: {left.unit} {node.op} {right.unit} "
-                            f"(PRD §11.4: 不允许{left.unit}与{right.unit}相加减)"
-                        )
+                if (
+                    node.op in ("+", "-")
+                    and left.unit != right.unit
+                    and left.unit != "unknown"
+                    and right.unit != "unknown"
+                ):
+                    self._errors.append(
+                        f"维度不匹配: {left.unit} {node.op} {right.unit} "
+                        f"(PRD §11.4: 不允许{left.unit}与{right.unit}相加减)"
+                    )
 
-                    # period_type 兼容性校验 (M5-问题1修复)
-                    incompatible_pairs = {
-                        ("cumulative", "point_in_time"),
-                        ("point_in_time", "cumulative"),
-                        ("cumulative", "single_quarter"),
-                        ("single_quarter", "cumulative"),
-                        ("current_only", "cumulative"),
-                        ("cumulative", "current_only"),
-                        ("current_only", "point_in_time"),
-                        ("point_in_time", "current_only"),
-                    }
-                    pair = (left.period_type, right.period_type)
-                    if pair in incompatible_pairs:
-                        self._errors.append(
-                            f"周期类型不匹配: {left.period_type} {node.op} {right.period_type} "
-                            f"(PRD §11.4: 不允许累计值/时点值/当前值混用)"
-                        )
+                # period_type 兼容性校验 (M5-问题1修复)
+                incompatible_pairs = {
+                    ("cumulative", "point_in_time"),
+                    ("point_in_time", "cumulative"),
+                    ("cumulative", "single_quarter"),
+                    ("single_quarter", "cumulative"),
+                    ("current_only", "cumulative"),
+                    ("cumulative", "current_only"),
+                    ("current_only", "point_in_time"),
+                    ("point_in_time", "current_only"),
+                }
+                pair = (left.period_type, right.period_type)
+                if pair in incompatible_pairs:
+                    self._errors.append(
+                        f"周期类型不匹配: {left.period_type} {node.op} {right.period_type} "
+                        f"(PRD §11.4: 不允许累计值/时点值/当前值混用)"
+                    )
 
                 # 除法: period_type 不同时发出警告
-                if node.op == "/":
-                    if (left.period_type != right.period_type
-                            and left.period_type != "unknown"
-                            and right.period_type != "unknown"
-                            and left.period_type != "mixed"
-                            and right.period_type != "mixed"):
-                        self._warnings.append(
-                            f"除法 period_type 不一致: {left.period_type} / {right.period_type} "
-                            f"(可能产生语义不明确的结果)"
-                        )
+                if (
+                    node.op == "/"
+                    and left.period_type != right.period_type
+                    and left.period_type != "unknown"
+                    and right.period_type != "unknown"
+                    and left.period_type != "mixed"
+                    and right.period_type != "mixed"
+                ):
+                    self._warnings.append(
+                        f"除法 period_type 不一致: {left.period_type} / {right.period_type} "
+                        f"(可能产生语义不明确的结果)"
+                    )
 
             # 递归校验子节点
             if left:
@@ -188,11 +205,13 @@ class Validator:
                 self._errors.append(f"未知指标标识符: {node.name}")
 
         elif isinstance(node, FuncCall):
-            if node.func_name in ("TTM", "YoY", "QoQ"):
-                if len(node.args) != 1 or not isinstance(node.args[0], FieldRef):
-                    self._errors.append(
-                        f"{node.func_name}() requires exactly one normalized financial field"
-                    )
+            if (
+                node.func_name in ("TTM", "YoY", "QoQ")
+                and (len(node.args) != 1 or not isinstance(node.args[0], FieldRef))
+            ):
+                self._errors.append(
+                    f"{node.func_name}() requires exactly one normalized financial field"
+                )
             # TTM() 仅适用于 cumulative 流量字段 (PRD §11.4)
             if node.func_name == "TTM":
                 for arg in node.args:
@@ -202,7 +221,7 @@ class Validator:
                     )
                     if source_period != "cumulative":
                         self._errors.append(
-                            f"TTM() 应用于非累计字段 (period_type={arg.period_type})"
+                            f"TTM() 应用于非累计字段 (period_type={source_period})"
                         )
             if node.func_name == "QoQ":
                 for arg in node.args:
@@ -212,12 +231,14 @@ class Validator:
                     )
                     if source_period != "cumulative":
                         self._errors.append(
-                            f"QoQ() 仅适用于累计流量字段 (period_type={arg.period_type})"
+                            f"QoQ() 仅适用于累计流量字段 (period_type={source_period})"
                         )
 
-            if node.func_name in {"rank", "rank_industry", "percentile", "zscore", "normalize"}:
-                if len(node.args) != 1:
-                    self._errors.append(f"{node.func_name}() requires exactly one argument")
+            if (
+                node.func_name in {"rank", "rank_industry", "percentile", "zscore", "normalize"}
+                and len(node.args) != 1
+            ):
+                self._errors.append(f"{node.func_name}() requires exactly one argument")
 
             if node.func_name in {"CAGR", "rolling_avg", "rolling_max", "rolling_min", "lag"}:
                 if len(node.args) != 2 or not isinstance(node.args[1], Literal):
@@ -233,11 +254,13 @@ class Validator:
                 )
 
             # 横截面函数自动标记 current_only (PRD §11.2 DL4)
-            if node.func_name in ("rank", "rank_industry", "percentile", "zscore", "normalize"):
-                if node.historical_capable:
-                    self._warnings.append(
-                        f"{node.func_name}() 是横截面函数, 应自动标记为 current_only"
-                    )
+            if (
+                node.func_name in ("rank", "rank_industry", "percentile", "zscore", "normalize")
+                and node.historical_capable
+            ):
+                self._warnings.append(
+                    f"{node.func_name}() 是横截面函数, 应自动标记为 current_only"
+                )
 
             # 递归校验参数
             for arg in node.args:

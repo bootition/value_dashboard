@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta, timezone
+from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.czb_mof_adapter import KEY_TENORS, TreasuryMofAdapter
@@ -139,7 +140,7 @@ class TreasuryCurveUpdater:
             }
 
         batch_id = uuid.uuid4().hex
-        fetch_time = datetime.now(timezone.utc)
+        fetch_time = datetime.now(UTC)
         curve_dates = sorted({row["curve_date"] for row in result.data})
         with self.duck.transaction() as conn:
             conn.execute(
@@ -228,7 +229,7 @@ class TreasuryCurveUpdater:
                     "reason": "source_empty", "retained": True}
 
         batch_id = uuid.uuid4().hex
-        fetch_time = datetime.now(timezone.utc)
+        fetch_time = datetime.now(UTC)
         with self.duck.transaction() as conn:
             conn.executemany(
                 """INSERT INTO treasury_yield_curve
@@ -413,7 +414,7 @@ class TreasuryCurveUpdater:
         ]
 
     def _mark_refreshed(self) -> None:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self.sqlite.transaction() as conn:
             conn.execute(
                 """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -572,7 +573,7 @@ class TreasuryCurveUpdater:
                        ON CONFLICT(stock_code, data_type, adapter, extra_json) DO UPDATE SET
                          error=excluded.error, last_attempt=excluded.last_attempt""",
                     ["__market__", RETRY_DATA_TYPE, "czb_mof", error[:500],
-                     datetime.now(timezone.utc).isoformat(),
+                     datetime.now(UTC).isoformat(),
                      __import__("json").dumps(extra, ensure_ascii=False)],
                 )
         except Exception as e:
@@ -603,7 +604,7 @@ class TreasuryCurveUpdater:
             self.sqlite.execute(
                 """UPDATE missing_list SET resolved_at = ?
                    WHERE stock_code = ? AND field_name = ? AND resolved_at IS NULL""",
-                [datetime.now(timezone.utc).isoformat(), "__market__", field_name],
+                [datetime.now(UTC).isoformat(), "__market__", field_name],
             )
         except Exception as e:
             logger.warning("解决国债曲线缺失信息失败: %s", e)

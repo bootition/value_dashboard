@@ -1,6 +1,6 @@
 # Value Dashboard — A股价值投资研究与筛选工具
 
-**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-03 第八轮独立正式启用复审）：**PASS / 可正式启用**。F4 对抗复现已关闭，网页/CLI 导出同源；S1 408、ruff、uv lock、前端 52+10/build、PyInstaller 真实启动 smoke 均通过，正式库未变化。依据见 [docs/reports/40_SYSTEM_RED_TEAM_FORMAL_ENABLEMENT_2026-08-03.md](docs/reports/40_SYSTEM_RED_TEAM_FORMAL_ENABLEMENT_2026-08-03.md)。
+**Verdict: 见 [docs/STATUS.md](docs/STATUS.md)** — 当前状态唯一权威。最新结论（2026-08-14 第八轮全域红队审查）：**修复收敛中**——阻断级缺陷（F1 索引重建、F2 国债补抓、F3 单位语义、F4 路径默认、F5/F6 前端崩溃）已修复，修复报告与门禁结论见 [docs/reports/81_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md](docs/reports/81_FULL_REVIEW_FIX_CLOSURE_2026-08-14.md)，审查基线见 [docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md](docs/reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md)。
 
 CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`python -m app.cli.main`）并显式建立 formal profile；发行目录中与 `value-dashboard.exe` 同目录时使用打包入口。直接 `python -m app.cli.main` 在缺少 profile 环境变量时会拒绝数据库操作。
 
@@ -19,7 +19,7 @@ CLI 使用 `vd.bat <command>`。仓库根目录下 `vd.bat` 走开发入口（`p
 5. 匹配超过 5000 条时会「结果已截断」：缩小条件或确认 CSV 中的 `_truncated` 标注。
 6. 个股详情页可研究：K 线、业务概览、历史股本与研究统计（PE/PB/股息率/利差的分位与 z-score）、
    国债利差比较（默认 10 年期，可切换期限）。
-7. 日常维护用 `vd` CLI（`vd data auto-update status`、`vd data treasury-curve --check-only`、`vd backup`）。
+7. 日常维护用 `vd` CLI（`vd data auto-update status`、`vd data treasury-curve --check-only`、`vd backup create`）。
 
 ---
 

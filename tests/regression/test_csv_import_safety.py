@@ -3,8 +3,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from scripts.import_csv_to_db import _prepare_frame, import_balance_sheet
 from app.web.api.screening import _csv_cell
+from scripts.import_csv_to_db import _prepare_frame, import_balance_sheet
 
 
 class _RecordingConnection:

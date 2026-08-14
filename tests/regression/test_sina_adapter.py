@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
@@ -351,7 +351,7 @@ def test_sina_rows_are_written_canonically_with_batch_archive_audit(
         }],
         metadata=SourceMetadata(
             source="sina",
-            fetch_time=datetime.now(timezone.utc),
+            fetch_time=datetime.now(UTC),
             raw_response_hash=hashlib.sha256(raw_response).hexdigest(),
             confidence="strict",
             api_version="sina-getFinanceReport2022-1",

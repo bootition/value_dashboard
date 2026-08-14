@@ -54,6 +54,12 @@ docs/evidence-s1/
 # In-flight repair run state (checkpoint files, not evidence)
 scripts/evidence/repair_state_*.json
 
+# 2026-08-14 红队 P3：机器证据只允许刻意入库（docs/evidence/），
+# scripts/evidence/ 整体为运行期产物目录；config/ 原始数据不跟踪
+scripts/evidence/
+config/sw_industry_raw.xls
+config/sw_industry_fallback_result.json
+
 # OS/editor
 .DS_Store
 Thumbs.db

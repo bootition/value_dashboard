@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, assert_never
 
 from app.core.adapters.base import FetchRequest, FetchResult
@@ -99,7 +99,7 @@ class DataInitializer:
 
         report: dict[str, Any] = {
             "batch_id": self._batch_id,
-            "started_at": datetime.now(timezone.utc).isoformat(),
+            "started_at": datetime.now(UTC).isoformat(),
             "steps": {},
         }
 
@@ -173,7 +173,7 @@ class DataInitializer:
             report["error"] = str(e)
 
         finally:
-            report["finished_at"] = datetime.now(timezone.utc).isoformat()
+            report["finished_at"] = datetime.now(UTC).isoformat()
             self._log_job_finish(job_id, report["status"], report)
 
         logger.info("=" * 60)
@@ -480,9 +480,9 @@ class DataInitializer:
                         json.dumps({
                             "processed": processed,
                             "total": total,
-                            "as_of": datetime.now(timezone.utc).date().isoformat(),
+                            "as_of": datetime.now(UTC).date().isoformat(),
                         }, ensure_ascii=False),
-                        datetime.now(timezone.utc).isoformat(),
+                        datetime.now(UTC).isoformat(),
                     ],
                 )
         except Exception as error:
@@ -1109,7 +1109,7 @@ class DataInitializer:
             ).fetchone()
             if previous is not None:
                 previous_columns = [column[0] for column in conn.description]
-                merged = dict(zip(previous_columns, previous))
+                merged = dict(zip(previous_columns, previous, strict=True))
                 merged.update(mapped)
                 mapped = {column: value for column, value in merged.items() if column in available_cols}
             conn.execute(
@@ -1315,7 +1315,7 @@ class DataInitializer:
                         extra_json)
                        VALUES (?, ?, ?, ?, 0, ?, ?)""",
                     [stock_code, data_type, adapter, error[:500],
-                     datetime.now(timezone.utc).isoformat(), extra_json or "{}"],
+                     datetime.now(UTC).isoformat(), extra_json or "{}"],
                 )
         except Exception as e:
             logger.warning(f"记录失败信息失败: {e}")
@@ -1359,6 +1359,6 @@ class DataInitializer:
         with self.sqlite.transaction() as conn:
             conn.execute(
                 """UPDATE job_logs SET status=?, finished_at=?, details_json=? WHERE id=?""",
-                [status, datetime.now(timezone.utc).isoformat(),
+                [status, datetime.now(UTC).isoformat(),
                  json.dumps(details, ensure_ascii=False, default=str)[:5000], job_id],
             )

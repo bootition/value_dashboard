@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.core.update import IncrementalUpdater
 
@@ -93,17 +93,17 @@ def test_csrc_refresh_due_initial_run() -> None:
 
 
 def test_csrc_refresh_throttled_by_persisted_marker(duckdb_store, sqlite_store) -> None:
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
            VALUES ('csrc_industry_last_refresh', ?, ?)""",
-        [today, datetime.now(timezone.utc).isoformat()],
+        [today, datetime.now(UTC).isoformat()],
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     assert updater._csrc_refresh_due() is False
 
-    stale = (datetime.now(timezone.utc).date() - timedelta(days=31)).isoformat()
+    stale = (datetime.now(UTC).date() - timedelta(days=31)).isoformat()
     sqlite_store.execute(
         """UPDATE data_refresh_state SET value = ? WHERE key = 'csrc_industry_last_refresh'""",
         [stale],
@@ -116,11 +116,11 @@ def test_universe_step_skips_csrc_when_recently_refreshed(
 ) -> None:
     from app.core.init import DataInitializer
 
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
            VALUES ('csrc_industry_last_refresh', ?, ?)""",
-        [today, datetime.now(timezone.utc).isoformat()],
+        [today, datetime.now(UTC).isoformat()],
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_stock_universe",
@@ -169,7 +169,7 @@ def test_universe_step_marks_csrc_refreshed_after_success(
         "SELECT value FROM data_refresh_state WHERE key = 'csrc_industry_last_refresh'"
     )
     assert rows
-    assert str(rows[0]["value"])[:10] == datetime.now(timezone.utc).date().isoformat()
+    assert str(rows[0]["value"])[:10] == datetime.now(UTC).date().isoformat()
     assert updater._csrc_refresh_due() is False
 
 
@@ -179,7 +179,7 @@ def test_universe_steps_are_throttled_by_daily_marker(
     """P2: universe 步骤（stock_list/listing_info）按日节流，避免每轮 ~104s 网络开销。"""
     from app.core.init import DataInitializer
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for key in ("stock_list_last_refresh", "listing_info_last_refresh"):
         sqlite_store.execute(
             """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -211,7 +211,7 @@ def test_universe_steps_run_when_marker_stale_or_absent(
     """无刷新标记或标记过期时，universe 步骤照常执行。"""
     from app.core.init import DataInitializer
 
-    stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(days=2)).isoformat()
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
            VALUES ('stock_list_last_refresh', ?, ?)""",

@@ -6,7 +6,7 @@ import hashlib
 import json
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +14,6 @@ from app.core.config import Config
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError, VdEnv
 from app.core.storage.sqlite_store import SQLiteStore
-
 
 ARCHIVE_TABLES = (
     "price_daily_raw",
@@ -122,7 +121,7 @@ class DataArchiveManager:
             pdf_files = _copy_and_manifest_cold_pdfs(root / "pdf_archive", pdf_manifest)
             manifest = {
                 "format_version": 2,
-                "created_at": datetime.now(timezone.utc).isoformat(),
+                "created_at": datetime.now(UTC).isoformat(),
                 "tables": files,
                 "pdf_archive_manifest": _file_entry(pdf_manifest_path, root),
                 "cold_pdfs": pdf_files,
@@ -146,7 +145,7 @@ class DataArchiveManager:
         _write_json(root / _VERIFIED_NAME, {
             "format_version": 1,
             "manifest_sha256": manifest_checksum,
-            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "verified_at": datetime.now(UTC).isoformat(),
         })
         return {"status": "ok", "target": str(root), "count": len(ARCHIVE_TABLES) + 2}
 

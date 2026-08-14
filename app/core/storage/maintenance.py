@@ -6,8 +6,8 @@ import contextlib
 import contextvars
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 
 class MaintenanceLockError(RuntimeError):
@@ -48,7 +48,9 @@ def assert_writes_allowed(database_path: Path) -> None:
                 )
         raise MaintenanceLockError("database maintenance is active; retry after it completes")
     except (OSError, ValueError, IndexError):
-        raise MaintenanceLockError("database maintenance is active; retry after it completes")
+        raise MaintenanceLockError(
+            "database maintenance is active; retry after it completes"
+        ) from None
 
 
 def _pid_exists(pid: int) -> bool:

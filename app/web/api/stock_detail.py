@@ -11,10 +11,10 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, Query, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
 from app.core.pdf.manager import PDFManager
@@ -154,17 +154,16 @@ def build_freshness_metadata(
     data_version: str | None,
 ) -> dict:
     """Describe independent financial, price, and snapshot ages (all UTC)."""
-    from datetime import timezone
-    today = datetime.now(timezone.utc).date()
+    today = datetime.now(UTC).date()
     calculated_date: date | None = None
     if isinstance(calculated_at, datetime):
         if calculated_at.tzinfo is None:
             calculated_date = calculated_at.date()
         else:
-            calculated_date = calculated_at.astimezone(timezone.utc).date()
+            calculated_date = calculated_at.astimezone(UTC).date()
     elif isinstance(calculated_at, str):
         try:
-            calculated_date = datetime.fromisoformat(calculated_at.replace("Z", "+00:00")).astimezone(timezone.utc).date()
+            calculated_date = datetime.fromisoformat(calculated_at.replace("Z", "+00:00")).astimezone(UTC).date()
         except ValueError:
             calculated_date = None
     price_age_days = (today - price_date).days if price_date else None
@@ -784,7 +783,7 @@ def get_treasury_comparison(
     - 未知股票 404；股票存在但无曲线数据 → series 逐点 reason=curve_missing。
     """
     from app.core.adapters.czb_mof_adapter import KEY_TENORS
-    from app.core.treasury import MAX_STALENESS_DAYS, TreasuryCurveUpdater
+
     # P3-3 修复（reports/73）：与服务端信任遮蔽模型一致——
     # DIVIDEND_DATES_UNVERIFIED 或快照级警告生效时遮蔽 TTM 股息率/利差。
     from app.core.data_quality import (
@@ -792,6 +791,7 @@ def get_treasury_comparison(
         mask_untrusted_values,
         read_warning_codes,
     )
+    from app.core.treasury import MAX_STALENESS_DAYS, TreasuryCurveUpdater
 
     duck = request.app.state.duck
     sqlite = request.app.state.sqlite
@@ -965,8 +965,8 @@ def get_research_statistics(
     """
     from app.core.statistics import (
         COVERAGE_THRESHOLD_PCT,
-        StatisticsBuilder,
         WINDOW_MIN_SAMPLES,
+        StatisticsBuilder,
     )
 
     duck = request.app.state.duck
@@ -1225,8 +1225,8 @@ def serve_pdf(
     # 二次验证: 确保解析后的路径仍在 pdf_dir 内
     try:
         pdf_path.relative_to(pdf_dir.resolve())
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Path traversal detected")
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Path traversal detected") from error
 
     if pdf_path.exists():
         return FileResponse(

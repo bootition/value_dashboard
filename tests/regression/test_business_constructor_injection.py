@@ -21,7 +21,6 @@ from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.update import IncrementalUpdater
 
-
 PATH_ENVIRONMENT_VARIABLES = (
     "VD_ENV",
     "VD_FORMAL_ACK",

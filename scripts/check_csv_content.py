@@ -1,7 +1,11 @@
 """检查 CSV 文件的实际内容"""
 import pandas as pd
+from pathlib import Path
 
-df = pd.read_csv('data/income_statement_akshare_temp.csv')
+# 2026-08-14 红队 P3：不再依赖 CWD——锚定脚本所在仓库根
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+df = pd.read_csv(PROJECT_ROOT / "data" / "income_statement_akshare_temp.csv")
 
 print("CSV 列数:", len(df.columns))
 print("\n列名:")

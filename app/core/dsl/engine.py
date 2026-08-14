@@ -16,11 +16,11 @@ import logging
 import re
 from typing import Any
 
-from app.core.dsl.parser import parse
-from app.core.dsl.validator import Validator
-from app.core.dsl.codegen import CodeGen
-from app.core.dsl.registry import ExpressionRegistry, STATUS_PUBLISHED
 from app.core.dsl.ast_nodes import FIELD_METADATA, INDICATOR_METADATA, ASTNode
+from app.core.dsl.codegen import CodeGen
+from app.core.dsl.parser import parse
+from app.core.dsl.registry import STATUS_PUBLISHED, ExpressionRegistry
+from app.core.dsl.validator import Validator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -282,7 +282,8 @@ class DSLEngine:
     def _infer_reason_codes(self, ast: ASTNode, stock_code: str) -> list[str]:
         """推断值为 null 的原因码 (PRD §11.4 DL9)"""
         from app.core.dsl.validator import (
-            REASON_DIVISION_BY_ZERO, REASON_FIELD_MISSING,
+            REASON_DIVISION_BY_ZERO,
+            REASON_FIELD_MISSING,
         )
         codes: list[str] = []
 
@@ -303,7 +304,7 @@ class DSLEngine:
 
     def _has_division_by_zero_pattern(self, node: ASTNode) -> bool:
         """检查 AST 中是否有除法运算"""
-        from app.core.dsl.ast_nodes import BinaryOp, UnaryOp, FuncCall
+        from app.core.dsl.ast_nodes import BinaryOp, FuncCall, UnaryOp
         if isinstance(node, BinaryOp):
             if node.op == "/":
                 return True
@@ -322,7 +323,7 @@ class DSLEngine:
 
     def _collect_field_deps(self, node: ASTNode) -> set[str]:
         """收集 AST 中引用的字段"""
-        from app.core.dsl.ast_nodes import FieldRef, BinaryOp, UnaryOp, FuncCall, IndicatorRef
+        from app.core.dsl.ast_nodes import BinaryOp, FieldRef, FuncCall, IndicatorRef, UnaryOp
         deps: set[str] = set()
         if isinstance(node, FieldRef):
             deps.add(f"{node.table}.{node.field}")
@@ -405,9 +406,11 @@ class DSLEngine:
     def discover_reason_codes(self) -> list[str]:
         """发现原因码"""
         from app.core.dsl.validator import (
-            REASON_DIVISION_BY_ZERO, REASON_FIELD_MISSING,
-            REASON_INSUFFICIENT_HISTORY, REASON_DIMENSION_MISMATCH,
             REASON_CYCLE_DETECTED,
+            REASON_DIMENSION_MISMATCH,
+            REASON_DIVISION_BY_ZERO,
+            REASON_FIELD_MISSING,
+            REASON_INSUFFICIENT_HISTORY,
         )
         return [
             REASON_DIVISION_BY_ZERO, REASON_FIELD_MISSING,

@@ -16,8 +16,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import JSONResponse
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.responses import JSONResponse
 
 from app.core.config import Config, is_frozen_runtime
 from app.core.storage.duckdb_store import DuckDBStore
@@ -255,10 +255,10 @@ def create_app(
 
     # ─── 注册 API 路由 ──────────────────────────────────────────────
     from app.web.api.data_status import router as data_status_router
+    from app.web.api.dsl import router as dsl_router
     from app.web.api.screening import router as screening_router
     from app.web.api.stock_detail import router as stock_detail_router
     from app.web.api.watchlist import router as watchlist_router
-    from app.web.api.dsl import router as dsl_router
     app.include_router(data_status_router)
     app.include_router(screening_router)
     app.include_router(stock_detail_router)

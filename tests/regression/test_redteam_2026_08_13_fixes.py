@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 from fastapi.testclient import TestClient
@@ -26,7 +26,6 @@ from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web import main as web_main
 
-
 # ─── P1-1: read_connection 重试 ─────────────────────────────────────────
 
 def test_read_connection_retries_transient_connect_failures(
@@ -36,6 +35,11 @@ def test_read_connection_retries_transient_connect_failures(
     import duckdb
 
     duck = DuckDBStore(paths=database_paths)
+    # 2026-08-14 红队 P3：read_connection 对"库文件不存在"立即失败
+    # （永久条件，不重试）；本测试语义是"已有库上的瞬时连接失败"，
+    # 先真实创建空库文件再注入失败。
+    probe = duckdb.connect(str(database_paths.duckdb_path))
+    probe.close()
     real_connect = duckdb.connect
     attempts = {"n": 0}
 
@@ -265,7 +269,7 @@ def test_treasury_comparison_batch_window_matches_legacy_semantics(
         """INSERT INTO treasury_yield_curve
            (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
            VALUES (?, 10.0, 1.5, 'czb_mof', ?, '0'*64, 'strict', 'b1')""",
-        [date(2026, 7, 31), datetime.now(timezone.utc)],
+        [date(2026, 7, 31), datetime.now(UTC)],
     )
 
     client = TestClient(app)
