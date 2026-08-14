@@ -264,17 +264,25 @@ class TreasuryCurveUpdater:
         self,
         *,
         max_tenors_backfill: int = 0,
+        max_gap_fill_days: int = 3,
     ) -> dict[str, Any]:
         """低频自动集成：每日最多一次（P3-4 修复，reports/73）。
 
         标记 key 记录上次刷新时间；当日（UTC+8）已刷新则直接 skip，
         不发起任何网络请求。未到期/未刷新时：更新当日曲线，并对近 30 天
         无数据的关键期限执行历史回填。任何失败均不抛异常。
+
+        2026-08-14 红队 F2：新增缺失交易日补抓——过去某日曲线因未发布/
+        源临时失败而未入库时，之前没有任何路径会回头补（"次日自动补齐"
+        承诺无代码支撑）。现于每日刷新后/已刷新时均有界补抓最近缺失
+        交易日（有缺口才发起请求，每日最多 max_gap_fill_days 天）。
         """
         if self._refreshed_today():
+            gap_fill = self.backfill_missing_days(max_days=max_gap_fill_days)
             return {
                 "status": "skipped", "reason": "refreshed_today",
                 "last_refresh": self._last_refresh_value(),
+                "gap_fill": gap_fill,
             }
         try:
             daily = self.update_daily()
@@ -284,6 +292,7 @@ class TreasuryCurveUpdater:
                 backfill_report = self.backfill(
                     stale_tenors, max_tenors=max_tenors_backfill,
                 )
+            gap_fill = self.backfill_missing_days(max_days=max_gap_fill_days)
             self._mark_refreshed()
             return {
                 "status": "success"
@@ -291,10 +300,85 @@ class TreasuryCurveUpdater:
                 else "partial",
                 "daily": daily,
                 "backfill": backfill_report,
+                "gap_fill": gap_fill,
             }
         except Exception as error:
             logger.warning("国债曲线刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
+
+    def backfill_missing_days(self, max_days: int = 3, lookback_trading_days: int = 10) -> dict[str, Any]:
+        """有界补抓最近缺失的交易日曲线（2026-08-14 红队 F2）。
+
+        候选日 = sqlite trading_dates 最近 N 个交易日 ∪ missing_list 中
+        `treasury_curve_daily_*` 未解决条目；剔除已满期限覆盖的日期与未来
+        日期；按日期升序最多补 max_days 天。单日成功即自动解决对应
+        missing 条目（_update_daily_one 内已处理）。
+        """
+        today = _cn_today()
+        candidates: list[str] = []
+        try:
+            rows = self.sqlite.query(
+                "SELECT trade_date FROM trading_dates "
+                "WHERE trade_date <= ? ORDER BY trade_date DESC LIMIT ?",
+                [str(today), max(1, lookback_trading_days)],
+            )
+            candidates.extend(str(r["trade_date"])[:10] for r in rows)
+        except Exception as error:
+            logger.warning("查询交易日历失败: %s", error)
+        try:
+            miss_rows = self.sqlite.query(
+                """SELECT field_name FROM missing_list
+                   WHERE resolved_at IS NULL AND stock_code = ?
+                     AND field_name LIKE 'treasury_curve_daily_%'""",
+                ["__market__"],
+            )
+            for row in miss_rows:
+                day = str(row["field_name"]).rsplit("_", 1)[-1]
+                if day and day not in candidates:
+                    candidates.append(day)
+        except Exception as error:
+            logger.warning("查询国债缺失条目失败: %s", error)
+
+        try:
+            cover_rows = self.duck.read_query(
+                """SELECT curve_date, COUNT(*) AS n
+                   FROM treasury_yield_curve GROUP BY curve_date"""
+            )
+            covered = {
+                str(row["curve_date"])[:10]
+                for row in cover_rows if row.get("n", 0) >= len(KEY_TENORS)
+            }
+        except Exception as error:
+            logger.warning("查询国债覆盖日期失败: %s", error)
+            covered = set()
+
+        missing_days = sorted(
+            {
+                day for day in candidates
+                if day <= str(today) and day not in covered
+            }
+        )[:max(0, max_days)]
+        if not missing_days:
+            return {"status": "skipped", "reason": "no_missing_days"}
+
+        results: dict[str, dict[str, Any]] = {}
+        failed: list[str] = []
+        for day in missing_days:
+            try:
+                work_date = date.fromisoformat(day)
+            except ValueError:
+                continue
+            outcome = self._update_daily_one(work_date)
+            results[day] = outcome
+            if outcome["status"] != "success":
+                failed.append(day)
+        return {
+            "status": "success" if not failed else ("failed" if len(failed) == len(missing_days) else "partial"),
+            "targeted": missing_days,
+            "succeeded": len(missing_days) - len(failed),
+            "failed": failed,
+            "results": results,
+        }
 
     def _refreshed_today(self) -> bool:
         value = self._last_refresh_value()

@@ -23,6 +23,9 @@ import duckdb
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.maintenance import assert_writes_allowed
 
+# 空/半写锁文件宽限期（秒）：与 update_lock.py 同口径，超过即视为死锁
+_STALE_MALFORMED_LOCK_SECONDS = 5.0
+
 
 def _is_process_alive(pid: int) -> bool:
     """检查指定 PID 的进程是否仍在运行（Windows 兼容）"""
@@ -93,7 +96,9 @@ class DuckDBStore:
         attempts = 12
         for attempt in range(attempts):
             try:
-                conn = duckdb.connect(str(self._db_path))
+                # 2026-08-14 红队 P2-2：读连接显式 read_only，读进程不参与
+                # 文件锁竞争（DuckDB 允许单写者 + 多只读并发）。
+                conn = duckdb.connect(str(self._db_path), read_only=True)
             except Exception as error:
                 last_error = error
                 base_delay = 0.25 * (2 ** min(attempt, 4))
@@ -161,9 +166,16 @@ class DuckDBStore:
                         self._lock_path.unlink(missing_ok=True)
                         continue
                 except (ValueError, IndexError, OSError):
-                    # 锁文件格式损坏，清理并重试
-                    self._lock_path.unlink(missing_ok=True)
-                    continue
+                    # 锁文件格式损坏：可能是"刚创建、尚未写入"的获取竞态
+                    # （2026-08-14 红队 P3-9）。新鲜损坏锁视为获取进行中，
+                    # 等待重试；超过宽限期才清理，避免双写。
+                    try:
+                        age = time.time() - self._lock_path.stat().st_mtime
+                    except OSError:
+                        age = float("inf")
+                    if age > _STALE_MALFORMED_LOCK_SECONDS:
+                        self._lock_path.unlink(missing_ok=True)
+                        continue
 
                 if time.monotonic() > deadline:
                     raise DuckDBWriteLockError(
@@ -184,30 +196,53 @@ class DuckDBStore:
 
     @contextlib.contextmanager
     def write_connection(self, timeout: float = 30.0) -> Iterator[duckdb.DuckDBPyConnection]:
-        """获取写锁后打开写连接，用完关闭并释放锁"""
+        """获取写锁后打开写连接，用完关闭并释放锁。
+
+        2026-08-14 红队 P2-3：锁已到手后 connect 仍可能瞬时失败
+        （残留句柄/文件系统抖动），与读侧对齐做有界重试再抛出。
+        """
         with self._write_lock(timeout):
             self._revalidate()
-            conn = duckdb.connect(str(self._db_path))
+            conn = self._connect_writer()
             try:
                 yield conn
             finally:
                 conn.close()
+
+    def _connect_writer(self) -> duckdb.DuckDBPyConnection:
+        """Open a read-write connection with bounded retry (caller holds the write lock)."""
+        last_error: Exception | None = None
+        delays = (0.5, 1.0, 2.0, 3.0, 4.0)
+        for attempt in range(len(delays) + 1):
+            try:
+                return duckdb.connect(str(self._db_path))
+            except Exception as error:
+                last_error = error
+                if attempt < len(delays):
+                    time.sleep(delays[attempt])
+        assert last_error is not None
+        raise last_error
 
     @contextlib.contextmanager
     def transaction(self, timeout: float = 30.0) -> Iterator[duckdb.DuckDBPyConnection]:
         """Run all statements on one connection and roll back unless commit succeeds."""
         with self._write_lock(timeout):
             self._revalidate()
-            conn = duckdb.connect(str(self._db_path))
+            conn = self._connect_writer()
             committed = False
-            conn.begin()
             try:
+                # 2026-08-14 红队 P3：begin() 移入 try，失败时连接由
+                # finally 的 rollback/close 兜底，不再依赖 GC。
+                conn.begin()
                 yield conn
                 conn.commit()
                 committed = True
             finally:
                 if not committed:
-                    conn.rollback()
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                 conn.close()
 
     def write_query(self, sql: str, params: list[Any] | None = None) -> None:

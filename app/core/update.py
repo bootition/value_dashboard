@@ -31,6 +31,16 @@ from app.core.storage.sqlite_store import SQLiteStore
 logger = logging.getLogger(__name__)
 
 
+def _is_duckdb_fatal(error: Exception) -> bool:
+    """DuckDB 致命错误（连接失效类）检测，用于 retry 隔离时的原因标注。
+
+    2026-08-14 红队 F1：ART 索引损坏时 DELETE 抛 FatalException 且连接
+    随后 invalidated；此类错误重试无意义，应在原因里引导重建索引。
+    """
+    text = f"{type(error).__name__} {error}".lower()
+    return "fatalexception" in text or "invalidated" in text or "must be restarted" in text
+
+
 # ─── 公告分类（PRD §7.7）───────────────────────────────────────────
 # 只有定期报告/业绩预告/业绩快报类公告触发财务刷新；
 # 其他公告只登记入册，不进入财务刷新队列。
@@ -1626,10 +1636,27 @@ class IncrementalUpdater:
                     continue
                 if data_type == "share_capital_history":
                     # P4-5 修复（reports/73）：历史股本链 retry 由回填器消费
-                    from app.core.capital import CapitalHistoryUpdater
-                    outcome = CapitalHistoryUpdater(
-                        duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
-                    ).update_stock(stock_code)
+                    # 2026-08-14 红队 F1：单股异常（如 DuckDB FatalException
+                    # "Failed to delete all rows from index"）曾逃逸到 run_once，
+                    # 炸掉整轮更新且 retry_count 永不递增（永久死循环）。
+                    # 现加 per-task 隔离：异常只标记该股失败，轮次继续；
+                    # 累计失败仍受 max_retries 上限约束。
+                    try:
+                        from app.core.capital import CapitalHistoryUpdater
+                        outcome = CapitalHistoryUpdater(
+                            duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+                        ).update_stock(stock_code)
+                    except Exception as error:
+                        still_failing += 1
+                        reason = f"retry crashed: {error}"
+                        if _is_duckdb_fatal(error):
+                            reason = f"duckdb_fatal (建议重建 share_capital_history 索引): {error}"
+                        self._mark_retry_failed(retry_id, reason)
+                        logger.error(
+                            "[增量] 股本链重试 %s 异常: %s（该股已隔离，本轮继续）",
+                            stock_code, error,
+                        )
+                        continue
                     if outcome["status"] == "success":
                         self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
                         success_count += 1
