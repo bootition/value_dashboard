@@ -1,0 +1,131 @@
+{
+  "captured_at": "2026-08-01T05:14:53.959547+00:00",
+  "quality": {
+    "minimum_data_readiness": {
+      "ready": true,
+      "stock_count": 5533,
+      "missing": {
+        "corporate_action_dividend_lineage": [
+          "001237",
+          "001239",
+          "001248",
+          "001330",
+          "001365",
+          "001393",
+          "001399",
+          "301292",
+          "301531",
+          "301565",
+          "301583",
+          "301599",
+          "301666",
+          "301669",
+          "600455",
+          "600876",
+          "603293",
+          "603407",
+          "603435",
+          "603459"
+        ]
+      },
+      "missing_counts": {
+        "corporate_action_dividend_lineage": 96
+      },
+      "disclosure_missing_counts": {
+        "corporate_action_dividend_lineage": 96
+      },
+      "schema_compatibility": {
+        "compatible": true,
+        "missing": []
+      }
+    },
+    "dates": {
+      "price": "2026-07-31",
+      "balance_sheet": {
+        "latest_record": "2026-06-30",
+        "latest_complete": "2026-06-30"
+      },
+      "income_statement": {
+        "latest_record": "2026-06-30",
+        "latest_complete": "2026-06-30"
+      },
+      "cash_flow": {
+        "latest_record": "2026-06-30",
+        "latest_complete": "2026-06-30"
+      },
+      "indicator_snapshot": {
+        "latest_complete": "2026-06-30",
+        "calculated_at": "2026-08-01T13:12:43.100826",
+        "latest_price_date": "2026-07-31"
+      }
+    },
+    "dividends": {
+      "total_rows": 56866,
+      "active_missing_announcement_rows": 0,
+      "unverified_period_end_rows": 0
+    },
+    "lineage": {
+      "invalid_hash_rows": 0,
+      "orphan_batch_rows": 0,
+      "audit_archive_gap_rows": 0,
+      "empty_archive_payload_rows": 0,
+      "batch_archive_gap_rows": 0,
+      "archive_gap_rows": 0,
+      "hash_mismatch_rows": 0,
+      "archive_hash_check": {
+        "cached": false,
+        "ttl_seconds": 60
+      }
+    },
+    "code_identity": {
+      "raw_alias_rows": 0
+    },
+    "operations": {
+      "unpublished_overrides": 0,
+      "running_jobs": 0
+    },
+    "warning_codes": []
+  },
+  "screening_ready": {
+    "ready": true,
+    "readiness": {
+      "ready": true,
+      "stock_count": 5533,
+      "missing": {
+        "corporate_action_dividend_lineage": [
+          "001237",
+          "001239",
+          "001248",
+          "001330",
+          "001365",
+          "001393",
+          "001399",
+          "301292",
+          "301531",
+          "301565",
+          "301583",
+          "301599",
+          "301666",
+          "301669",
+          "600455",
+          "600876",
+          "603293",
+          "603407",
+          "603435",
+          "603459"
+        ]
+      },
+      "missing_counts": {
+        "corporate_action_dividend_lineage": 96
+      },
+      "disclosure_missing_counts": {
+        "corporate_action_dividend_lineage": 96
+      },
+      "schema_compatibility": {
+        "compatible": true,
+        "missing": []
+      }
+    },
+    "warning_codes": []
+  }
+}

@@ -1,0 +1,90 @@
+{
+  "prd_section": "19.1",
+  "fixture": "C:\\Users\\qhdjxgm\\AppData\\Local\\Temp\\vd-performance-20260730\\screening-performance-fixture.json",
+  "database_root": "C:\\Users\\qhdjxgm\\AppData\\Local\\Temp\\vd-performance-20260730",
+  "fixture_checks": {
+    "at_least_5000_listed_stocks": true,
+    "exactly_20_conditions": true,
+    "uses_composite_indicator": true,
+    "uses_current_industry_rank": true
+  },
+  "warmup": {
+    "execution_time_ms": 525.8,
+    "result_count": 194
+  },
+  "runs": [
+    {
+      "execution_time_ms": 208.9,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 173.1,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 166.4,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 163.8,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 157.3,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 151.5,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 158.5,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 165.9,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 154.0,
+      "result_count": 194
+    },
+    {
+      "execution_time_ms": 155.7,
+      "result_count": 194
+    }
+  ],
+  "metrics": {
+    "threshold_ms": 5000,
+    "runs": 10,
+    "passing_runs": 10,
+    "complete_results_returned": true,
+    "performance_goal_met": true,
+    "min_ms": 151.5,
+    "max_ms": 208.9,
+    "avg_ms": 165.5
+  },
+  "host_spec": {
+    "host": {
+      "cpu": {
+        "model": "AMD Ryzen 9 7845HX with Radeon Graphics",
+        "physical_cores": 12,
+        "logical_processors": 24
+      },
+      "memory": {
+        "total_gb": 32
+      },
+      "disk": {
+        "model": "YMTC PC41Q-1TB-B",
+        "type": "SSD",
+        "size_gb": 954
+      },
+      "os": "Windows",
+      "python_version": "3.14.2",
+      "node_version": "v24.13.0"
+    }
+  },
+  "host_spec_sha256": "8145814adc1ad1be8962c64a1d2d8bcc8df1f6d6aab33ad0a3ea0ed336cd5e60",
+  "prd_acceptance": "PASS",
+  "residual_requirement": null
+}

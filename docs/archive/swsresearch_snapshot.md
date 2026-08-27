@@ -1,0 +1,56 @@
+---
+title: swsresearch_snapshot
+status: archived
+category: archive
+last-reviewed: 2026-07-26
+---
+
+- generic [ref=e3]:
+  - generic [ref=e5]:
+    - menu [ref=e7]:
+      - menuitem "首页" [ref=e8] [cursor=pointer]
+      - menuitem "研究产品 caret-down" [ref=e9] [cursor=pointer]:
+        - generic [ref=e11]:
+          - text: 研究产品
+          - img "caret-down" [ref=e13]
+      - menuitem "申万指数" [ref=e16] [cursor=pointer]
+      - menuitem "信息披露" [ref=e17] [cursor=pointer]
+      - menuitem "走进我们" [ref=e18] [cursor=pointer]
+      - menuitem "诚聘英才" [ref=e19] [cursor=pointer]
+      - menuitem [disabled]
+    - generic [ref=e20]:
+      - generic [ref=e21] [cursor=pointer]: 搜索
+      - button "登 录" [ref=e23] [cursor=pointer]
+      - generic [ref=e26] [cursor=pointer]:
+        - combobox [ref=e28]
+        - generic "中" [ref=e29]
+  - generic [ref=e31]:
+    - menu [ref=e33]:
+      - menuitem "指数发布" [ref=e34] [cursor=pointer]
+      - menuitem "指数分析" [ref=e36] [cursor=pointer]
+      - menuitem "指数研究" [ref=e38] [cursor=pointer]
+      - menuitem "指数公告" [ref=e40] [cursor=pointer]
+      - menuitem "下载中心" [ref=e42] [cursor=pointer]
+      - menuitem "联系方式" [ref=e44] [cursor=pointer]
+    - generic [ref=e46]:
+      - generic [ref=e48]:
+        - generic [ref=e54]:
+          - text: 展开
+          - img "down" [ref=e55]
+        - generic [ref=e60]:
+          - generic [ref=e141]
+          - generic [ref=e61] [cursor=pointer]
+        - generic [ref=e66]:
+          - generic [ref=e67]: 申万指数
+          - generic [ref=e148]
+        - generic [ref=e71]:
+          - generic [ref=e72]
+          - generic [ref=e81]
+          - generic [ref=e98]
+      - generic [ref=e128]:
+        - generic [ref=e129]:
+          - generic [ref=e130]
+          - generic [ref=e132]: Copyright © SWS Research Co.,Ltd.
+        - generic [ref=e133]:
+          - generic [ref=e134]: 官方订阅号
+          - generic [ref=e136]: 官方服务号

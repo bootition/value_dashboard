@@ -1,0 +1,19 @@
+# 目标主机规格记录
+# PRD §19.1 (PF1) 要求：技术规划开始时记录目标 Windows 主机的 CPU、内存与磁盘类型
+# 作为 5 秒筛选性能验收环境的组成部分
+# 记录日期: 2026-07-17
+
+host:
+  cpu:
+    model: "AMD Ryzen 9 7845HX with Radeon Graphics"
+    physical_cores: 12
+    logical_processors: 24
+  memory:
+    total_gb: 32
+  disk:
+    model: "YMTC PC41Q-1TB-B"
+    type: SSD
+    size_gb: 954
+  os: Windows
+  python_version: "3.14.2"
+  node_version: "v24.13.0"

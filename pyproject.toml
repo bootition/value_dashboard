@@ -1,0 +1,77 @@
+[project]
+name = "value-dashboard"
+version = "0.1.0"
+description = "A股价值投资研究与筛选工具 - 个人本地研究工具"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]",
+    "pydantic>=2.0",
+    "httpx",
+    "duckdb",
+    "typer",
+    "lark",
+    "cryptography",
+    "pyarrow",
+    "PyYAML",
+    "pandas>=2.0",
+    "pypinyin",
+]
+
+[project.optional-dependencies]
+data-sources = [
+    "akshare",
+    "easy-tdx",
+    "baostock",
+]
+windows = [
+    "pywin32;platform_system=='Windows'",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "ruff",
+    "pyinstaller>=6.0",
+]
+release = [
+    "akshare",
+    "easy-tdx",
+    "baostock",
+    "pyinstaller>=6.0",
+]
+
+[project.scripts]
+vd = "app.cli.main:app"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+"app.core.dsl" = ["grammar.lark"]
+"app.resources" = ["config/default.yaml"]
+"app.web" = ["static/**"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+# 基线规则集（ruff 0.16 起默认 select 扩展，会带来 500+ 存量违规；
+# 项目门禁基线见 AGENTS.md）。2026-08-14 红队 P3 扩展：在 E4/E7/E9/F
+# 基础上加入 I（import 排序）、UP（pyupgrade）、B（bugbear）、
+# SIM（简化），全部经 --fix 收敛后再纳入门禁。
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/regression"]
+addopts = "--strict-config --strict-markers"
+markers = [
+    "integration: uses isolated local service or database integration",
+    "data_dependent: requires an explicit read-only data fixture",
+]

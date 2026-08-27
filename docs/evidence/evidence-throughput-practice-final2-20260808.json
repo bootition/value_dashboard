@@ -1,0 +1,229 @@
+{
+  "schema_version": 1,
+  "captured_at": "2026-08-08T04:23:01.556385+00:00",
+  "profile": "formal",
+  "database_paths": {
+    "duckdb": "D:\\Mr.Q\\掌控经济\\value-dashboard\\data\\valuedashboard.duckdb",
+    "sqlite": "D:\\Mr.Q\\掌控经济\\value-dashboard\\data\\valuedashboard.sqlite"
+  },
+  "sha256": {
+    "duckdb": "19c975c1648bd98d7a979ebcfc11ec4eaac0b117b628b00b2a688b911aaa70e4",
+    "sqlite": "0621d69df7b5287cd3a6c10cc1db31cf6feeb3b08cd94521482da71ed49f54cb",
+    "duckdb_wal": null,
+    "sqlite_wal": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sqlite_shm": "fd4c9fda9cd3f9ae7c962b0ddf37232294d55580e1aa165aa06129b8549389eb"
+  },
+  "table_counts": {
+    "duckdb": {
+      "stock_meta": 6237,
+      "price_daily_raw": 17308130,
+      "price_daily_qfq": 17216315,
+      "balance_sheet": 387975,
+      "income_statement": 389391,
+      "cash_flow": 371607,
+      "dividends": 56869,
+      "xdxr": 183238,
+      "indicator_snapshot": 5533,
+      "fetch_batch": 45397,
+      "source_audit": 30729694,
+      "raw_response_archive": 40839
+    },
+    "sqlite": {
+      "manual_overrides": 0,
+      "screening_rules": 0,
+      "screening_results": 0,
+      "watchlist": 0,
+      "retry_list": 10001,
+      "missing_list": 2892,
+      "job_logs": 33
+    }
+  },
+  "data_quality": {
+    "minimum_data_readiness": {
+      "ready": false,
+      "stock_count": 5537,
+      "missing": {
+        "price_freshness": [
+          "920038",
+          "920258"
+        ],
+        "financial_period": [
+          "001232",
+          "301677",
+          "920038",
+          "920258"
+        ],
+        "snapshot_price_coherence": [
+          "000001",
+          "000002",
+          "000006",
+          "000007",
+          "000008",
+          "000009",
+          "000010",
+          "000011",
+          "000012",
+          "000014",
+          "000016",
+          "000017",
+          "000019",
+          "000020",
+          "000021",
+          "000025",
+          "000026",
+          "000027",
+          "000028",
+          "000029"
+        ],
+        "share_capital": [
+          "001232",
+          "301677"
+        ],
+        "corporate_action_dividend_lineage": [
+          "001232",
+          "001237",
+          "001239",
+          "001248",
+          "001330",
+          "001365",
+          "001393",
+          "001399",
+          "301292",
+          "301531",
+          "301565",
+          "301583",
+          "301599",
+          "301666",
+          "301669",
+          "301677",
+          "600455",
+          "600876",
+          "603293",
+          "603407"
+        ],
+        "regulatory_fields": [
+          "000001",
+          "000166",
+          "000623",
+          "000686",
+          "000728",
+          "000750",
+          "000776",
+          "000783",
+          "001227",
+          "001236",
+          "002142",
+          "002500",
+          "002673",
+          "002736",
+          "002797",
+          "002807",
+          "002839",
+          "002926",
+          "002936",
+          "002939"
+        ],
+        "snapshot_input_freshness": [
+          "001232",
+          "301677",
+          "920038",
+          "920258"
+        ],
+        "lineage_coverage": [
+          "002689",
+          "002690",
+          "002691",
+          "002692",
+          "002693",
+          "002694",
+          "002695",
+          "002696",
+          "002697",
+          "002698",
+          "002700",
+          "002701",
+          "002702",
+          "002703",
+          "002705",
+          "002706",
+          "002707",
+          "002708",
+          "002709",
+          "002712"
+        ],
+        "pending_financial_period": [
+          "603435"
+        ]
+      },
+      "missing_counts": {
+        "price_freshness": 2,
+        "financial_period": 4,
+        "snapshot_price_coherence": 3196,
+        "share_capital": 2,
+        "corporate_action_dividend_lineage": 100,
+        "regulatory_fields": 90,
+        "snapshot_input_freshness": 4,
+        "lineage_coverage": 433,
+        "pending_financial_period": 1
+      },
+      "disclosure_missing_counts": {
+        "corporate_action_dividend_lineage": 100,
+        "pending_financial_period": 1,
+        "regulatory_fields": 90
+      },
+      "schema_compatibility": {
+        "compatible": true,
+        "missing": []
+      }
+    },
+    "dates": {
+      "price": "2026-08-07",
+      "balance_sheet": {
+        "latest_record": "2026-06-30",
+        "latest_complete": "2026-06-30"
+      },
+      "income_statement": {
+        "latest_record": "2026-06-30",
+        "latest_complete": "2026-06-30"
+      },
+      "cash_flow": {
+        "latest_record": "2026-06-30",
+        "latest_complete": "2026-06-30"
+      },
+      "indicator_snapshot": {
+        "latest_complete": "2026-06-30",
+        "calculated_at": "2026-08-08T12:22:43.374197",
+        "latest_price_date": "2026-08-07"
+      }
+    },
+    "dividends": {
+      "total_rows": 56869,
+      "active_missing_announcement_rows": 0,
+      "unverified_period_end_rows": 0
+    },
+    "lineage": {
+      "invalid_hash_rows": 0,
+      "orphan_batch_rows": 0,
+      "audit_archive_gap_rows": 0,
+      "empty_archive_payload_rows": 0,
+      "batch_archive_gap_rows": 0,
+      "archive_gap_rows": 0,
+      "hash_mismatch_rows": 0,
+      "archive_hash_check": {
+        "cached": false,
+        "ttl_seconds": 60
+      }
+    },
+    "code_identity": {
+      "raw_alias_rows": 0
+    },
+    "operations": {
+      "unpublished_overrides": 0,
+      "running_jobs": 0
+    },
+    "warning_codes": [
+      "MINIMUM_DATA_NOT_READY"
+    ]
+  },
+  "verdict": "BLOCK"
+}

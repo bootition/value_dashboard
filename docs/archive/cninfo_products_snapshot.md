@@ -1,0 +1,34 @@
+---
+title: cninfo_products_snapshot
+status: archived
+category: archive
+last-reviewed: 2026-07-26
+---
+
+- generic [ref=e312]:
+  - generic [ref=e313]: 推荐数据包
+  - list [ref=e315]:
+    - listitem [ref=e316]:
+      - generic [ref=e317] [cursor=pointer]:
+        - generic [ref=e318]: "1"
+        - generic [ref=e319]
+    - listitem [ref=e322]:
+      - generic [ref=e323] [cursor=pointer]:
+        - generic [ref=e324]: "2"
+        - generic [ref=e325]
+    - listitem [ref=e328]:
+      - generic [ref=e329] [cursor=pointer]:
+        - generic [ref=e330]: "3"
+        - generic [ref=e331]
+    - listitem [ref=e334]:
+      - generic [ref=e335] [cursor=pointer]:
+        - generic [ref=e336]: "4"
+        - generic [ref=e337]
+    - listitem [ref=e340]:
+      - generic [ref=e341] [cursor=pointer]:
+        - generic [ref=e342]: "5"
+        - generic [ref=e343]
+    - listitem [ref=e346]:
+      - generic [ref=e347] [cursor=pointer]:
+        - generic [ref=e348]: "6"
+        - generic [ref=e349]

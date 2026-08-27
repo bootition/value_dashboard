@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "checked_at": "2026-08-02",
+  "gate_ready": true,
+  "gate_warning_codes": [],
+  "snapshot_period_mismatches": 0,
+  "screening_ms": 451,
+  "total": 3878,
+  "base_pool_size": 5314,
+  "data_date": "2026-06-30"
+}

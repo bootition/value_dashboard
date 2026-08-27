@@ -1,0 +1,43 @@
+{
+  "schema_version": "1.0",
+  "command": "report42.iterationA.fix.gates",
+  "checked_at": "2026-08-03",
+  "formal_db_read_only": true,
+  "formal_db_sha256_before": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "formal_db_sha256_after": {
+    "duckdb": "741C75BE5A34E83C6138B7F23F9F79DFDD89A6C4077197AC964FCDA53CB69DE7",
+    "sqlite": "3D41498FDC0383BD26EBD771DA4860C35D2AF3ADA8730CA514A4B4595B376317"
+  },
+  "gates": {
+    "s1_pytest_regression": {"result": "passed", "collected": 411, "passed": 411, "duration_seconds": 169.99},
+    "new_watchlist_validation_tests": {"result": "passed", "count": 3},
+    "ruff_check_app_tests": {"result": "passed"},
+    "frontend_lint": {"result": "passed"},
+    "frontend_test": {"result": "passed", "node_tests": 52, "vitest_tests": 10},
+    "frontend_build": {"result": "passed"},
+    "formal_db_hash_unchanged": {"result": "passed"}
+  },
+  "fixes": {
+    "g1_user_first_use_runbook": {
+      "status": "done",
+      "location": "docs/runbooks/user-first-use.md",
+      "linked_from": "README.md",
+      "sections": 9
+    },
+    "l0_1_first_screening_guide": {"status": "done", "location": "frontend/src/views/ScreeningPage.vue"},
+    "l0_2_unified_field_formatting": {"status": "done", "location": "frontend/src/utils/screening-format.ts"},
+    "l0_3_strict_only_rerun": {"status": "done", "location": "frontend/src/views/ScreeningPage.vue + ScreeningResultsPanel.vue"},
+    "l0_4_draft_conflict_recovery": {"status": "done", "location": "frontend/src/views/ScreeningPage.vue"},
+    "l0_5_friendly_error_messages": {"status": "done", "location": "frontend/src/helpers/api-error.ts"},
+    "l0_6_stock_code_validation": {
+      "status": "done",
+      "frontend": "frontend/src/views/WatchlistPage.vue",
+      "backend": "app/web/api/watchlist.py",
+      "tests": "tests/regression/test_watchlist_code_validation.py"
+    },
+    "l0_7_invalid_stock_result_state": {"status": "done", "location": "frontend/src/views/StockDetailPage.vue"}
+  }
+}

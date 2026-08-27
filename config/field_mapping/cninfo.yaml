@@ -1,0 +1,21 @@
+# CNINFO 字段映射配置
+# CNINFO 公告 API 返回 JSON，字段已在适配器中完成规范化
+# 此文件用于文档化映射关系
+
+announcements:
+  secCode: stock_code
+  secName: sec_name
+  announcementTitle: title
+  announcementTime: announcement_time   # 毫秒epoch
+  announcementId: announcement_id
+  orgId: org_id
+  adjunctUrl: adjunct_url
+
+dividends:
+  # 从公告标题正则解析，非结构化字段
+  # 解析逻辑在 cninfo_adapter.py 的 _parse_dividend_from_announcement() 中
+  dividend_per_share: dividend_per_share
+  stock_dividend: stock_dividend
+  transfer_share: transfer_share
+  ex_date: ex_date
+  announcement_date: announcement_date

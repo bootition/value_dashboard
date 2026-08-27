@@ -1,0 +1,291 @@
+/* ─── L2 V1/V2: 研究工作台视觉令牌（仅亮色） ────────────────────
+   清理 Vite 模板残留（hero/#center/#next-steps 等已删除），
+   建立统一背景/层级/分割线/风险色/数字字体语义。 */
+
+:root {
+  --vd-bg: #f7f9f7;
+  --vd-surface: #ffffff;
+  --vd-border: #e3e6eb;
+  --vd-text: #1f2329;
+  --vd-text-2: #667085;
+  --vd-primary: #70a986;
+  --vd-danger: #d03050;
+  --vd-warning: #d48806;
+  --vd-up: #d03050;
+  --vd-down: #18a058;
+  --vd-mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --vd-shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+
+  color-scheme: light;
+  font-family: system-ui, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--vd-text);
+  background: var(--vd-bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+}
+
+#app,
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+  background: #fff !important;
+  padding: 27px 17px 18px;
+}
+
+.app-sidebar .n-layout-sider-scroll-container {
+  overflow: visible;
+}
+
+.app-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 11px 39px;
+  color: #355142;
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: -0.055em;
+  text-decoration: none;
+}
+
+.app-brand span {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 9px;
+  background: #a7ceb2;
+  color: #fff;
+  font-size: 14px;
+}
+
+.app-nav-label {
+  margin: 0 12px 9px;
+  color: #a0aaa3;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.11em;
+}
+
+.app-nav {
+  display: grid;
+  gap: 5px;
+}
+
+.app-nav a {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 11px 12px;
+  border-radius: 9px;
+  color: #77867c;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.app-nav a:hover,
+.app-nav a.active {
+  background: #eff8f1;
+  color: #57966d;
+}
+
+.app-nav a.active {
+  font-weight: 700;
+}
+
+.app-nav-icon {
+  display: inline-block;
+  flex: 0 0 15px;
+  width: 15px;
+  height: 15px;
+  border: 1.4px solid currentColor;
+  border-radius: 4px;
+  box-sizing: border-box;
+}
+
+.icon-filter {
+  border: 0;
+  border-top: 1.5px solid currentColor;
+  transform: skewY(-33deg);
+}
+
+.icon-filter::after {
+  content: '';
+  display: block;
+  width: 9px;
+  margin: 5px 0 0 4px;
+  border-top: 1.5px solid currentColor;
+}
+
+.icon-watchlist { border-radius: 50%; }
+.icon-watchlist::after { content: '★'; position: relative; left: 2px; top: -2px; font-size: 10px; }
+.icon-stock { border-radius: 50% 50% 2px 2px; }
+.icon-status { border-radius: 50%; }
+.icon-status::after { content: ''; display: block; width: 7px; height: 7px; margin: 3px; border-left: 1px solid currentColor; border-bottom: 1px solid currentColor; }
+
+.app-sidebar-foot {
+  margin-top: auto;
+}
+
+.app-data-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 10px;
+  border-radius: 8px;
+  background: #f4faf5;
+  color: #5f9975;
+  font-size: 10px;
+}
+
+.app-data-status i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #82ba94;
+}
+
+.app-sidebar-foot p {
+  margin: 7px 10px 0;
+  color: #98a39b;
+  font-size: 9px;
+}
+
+.app-main-content {
+  min-width: 0;
+  padding: 37px 49px 58px;
+  background: #f7f9f7;
+}
+
+h1,
+h2,
+h3 {
+  color: var(--vd-text);
+  font-weight: 600;
+}
+
+h1 {
+  font-size: 24px;
+  margin: 0 0 16px;
+}
+
+h2 {
+  font-size: 20px;
+  margin: 0 0 8px;
+}
+
+p {
+  margin: 0;
+}
+
+/* L2 V4: 数据数字等宽对齐，便于纵向比较 */
+.n-data-table,
+.n-statistic,
+.n-statistic .n-statistic__value {
+  font-variant-numeric: tabular-nums;
+}
+
+/* L2 V3: 卡片统一层级 */
+.n-card {
+  border-color: var(--vd-border);
+  border-radius: 16px;
+  box-shadow: 0 4px 17px rgba(48, 82, 59, 0.045);
+}
+
+.n-data-table {
+  border-radius: 9px;
+  overflow: hidden;
+}
+
+.n-data-table-th {
+  background: #fafcfa !important;
+}
+
+.n-data-table-th__title {
+  color: #98a39b !important;
+  font-size: 10px;
+}
+
+.n-data-table-td {
+  border-color: #eff2f0 !important;
+}
+
+.n-alert {
+  border-radius: 14px;
+  box-shadow: 0 4px 17px rgba(48, 82, 59, 0.045);
+}
+
+/* L2 V5: 尊重系统减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ─── L1-1: 响应式统计卡（4→2→1 列） ─────────────────────────── */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.stats-grid--3 { grid-template-columns: repeat(3, 1fr); }
+.stats-grid .n-card,
+.stats-grid .n-card__content { height: 100%; }
+
+@media (max-width: 1100px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr) !important; }
+}
+@media (max-width: 640px) {
+  .stats-grid { grid-template-columns: 1fr !important; }
+}
+
+/* ─── L1-6: 键盘可访问性 ──────────────────────────────────────── */
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 1000;
+  background: var(--vd-primary);
+  color: #fff;
+  padding: 8px 16px;
+  border-radius: 0 0 4px 0;
+  text-decoration: none;
+}
+.skip-link:focus {
+  left: 0;
+}
+:focus-visible {
+  outline: 2px solid var(--vd-primary);
+  outline-offset: 2px;
+}
+
+/* ─── L1-7: 表格股票代码链接 ──────────────────────────────────── */
+.stock-link {
+  color: var(--vd-primary);
+  text-decoration: none;
+  font-variant-numeric: tabular-nums;
+}
+.stock-link:hover {
+  text-decoration: underline;
+}
+.copy-btn {
+  margin-left: 6px;
+}

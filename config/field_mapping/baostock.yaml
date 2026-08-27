@@ -1,0 +1,29 @@
+# BaoStock 字段映射配置
+# BaoStock 返回字段名为英文，已在适配器中完成映射
+# 此文件用于文档化映射关系
+
+price_daily:
+  # query_history_k_data_plus 字段顺序: date,open,high,low,close,volume,amount,turn
+  date: trade_date
+  open: open
+  high: high
+  low: low
+  close: close
+  volume: volume
+  amount: turnover        # 成交额
+  turn: turnover_rate     # 换手率
+
+dividends:
+  # query_dividend_data 字段名 (通过 rs.fields 获取)
+  dividOperateDate: ex_date
+  dividPlanAnnounceDate: announcement_date
+  dividCashPsBeforeTax: dividend_per_share
+  dividStocksPs: stock_dividend
+  dividReserveToStockPs: transfer_share
+  # BaoStock 不提供配股数据
+  # rights_issue: null
+  # rights_issue_price: null
+
+trading_dates:
+  date: trade_date
+  is_trading_day: is_trading_day

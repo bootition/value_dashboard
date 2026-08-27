@@ -1,0 +1,36 @@
+{
+  "schema_version": "1.0",
+  "command": "system-red-team.reproduction",
+  "checked_at": "2026-08-02",
+  "environment": "synthetic data in temp dir only; formal database not touched",
+  "findings": [
+    {
+      "id": "P1-C",
+      "title": "Screening result silently truncated at LIMIT 5000",
+      "location": "app/core/screening/engine.py:416 (LIMIT 5000), engine.py:234 (total = len(results))",
+      "setup": "synthetic pool of 6000 listed stocks with indicator snapshots; rule matches all (pe_ttm is_not_null); default pool filters",
+      "result": {
+        "base_pool_size": 6000,
+        "returned_rows": 5000,
+        "total": 5000,
+        "truncated_flag_present": false,
+        "response_keys": ["base_pool_size", "data_date", "execution_time_ms", "locked_indicators", "results", "strict_fields", "strict_only", "total"]
+      },
+      "impact": "legal PRD §12.3 base-pool toggle on formal pool 5534 > 5000 silently loses ranked tail; total wrong; no warning"
+    },
+    {
+      "id": "P1-A",
+      "title": "_to_single_quarter fabricates single-quarter values when in-year report period missing",
+      "location": "app/web/api/stock_detail.py:94-112",
+      "setup": "rows Q1(2026-03-31) revenue=100, Q3(2026-09-30) revenue=340; Q2 row absent",
+      "result": {
+        "derived_Q3_single_quarter_revenue": 340.0,
+        "expected_if_Q2_known": 140.0,
+        "expected_fail_closed": "null with reason code",
+        "reason_code_present": false
+      },
+      "impact": "wrong financial conclusions in quarterly research view for gap-affected stocks; calculate_ttm_trend same-module fail-closes"
+    }
+  ],
+  "note": "P1-B (universe refresh partial-response delisting, app/core/init.py:227-255) and P1-D (CSRC-computed ranks labeled 申万, app/core/screening/engine.py:366-385 + app/web/api/screening.py:428-429) confirmed by source audit; not live-reproduced because they require adapter mocks or formal-pool data."
+}

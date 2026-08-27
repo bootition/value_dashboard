@@ -1,0 +1,26 @@
+{
+  "date": "2026-07-30",
+  "release_root": "C:\\Users\\qhdjxgm\\AppData\\Local\\Temp\\vd-release-uat3\\value-dashboard",
+  "build": {
+    "status": "passed",
+    "command": "scripts/build-release.ps1 -OutputDirectory C:\\Users\\qhdjxgm\\AppData\\Local\\Temp\\vd-release-uat3"
+  },
+  "frozen_resources": {
+    "akshare_calendar": "_internal/akshare/file_fold/calendar.json",
+    "status": "present"
+  },
+  "no_python_path": {
+    "path": "C:\\Windows\\System32;C:\\Windows",
+    "cli_discover_schema": {
+      "exit_code": 0,
+      "schema_version": "1.0"
+    },
+    "web": {
+      "health": 200,
+      "spa_index": 200,
+      "favicon": 200,
+      "startup_behavior": "server bound before background empty-profile initialization"
+    }
+  },
+  "scope": "Release-entrypoint evidence only. It does not attest formal research-data quality."
+}

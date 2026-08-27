@@ -1,0 +1,38 @@
+// DSL Grammar (PRD §11) - 简化版, 兼容 earley parser
+
+start: expr
+
+?expr: or_expr
+?or_expr: and_expr ("OR" and_expr)*
+?and_expr: comparison ("AND" comparison)*
+?comparison: additive (COMP_OP additive)?
+COMP_OP: ">" | "<" | ">=" | "<=" | "==" | "!="
+?additive: multiplicative (("+" | "-") multiplicative)*
+?multiplicative: unary (("*" | "/") unary)*
+?unary: "-"? primary
+?primary: NUMBER
+       | field_ref
+       | indicator_ref
+       | func_call
+       | "(" expr ")"
+
+field_ref: TABLE "." FIELD_NAME period_spec?
+period_spec: "@" PERIOD_KEYWORD
+PERIOD_KEYWORD: "TTM" | "YoY" | "QoQ" | "MRQ" | "LATEST"
+
+indicator_ref: INDICATOR_NAME
+
+func_call: FUNC_NAME "(" arg_list? ")"
+arg_list: expr ("," expr)*
+
+FUNC_NAME: "TTM" | "YoY" | "QoQ" | "CAGR" | "rank"
+        | "rank_industry" | "percentile" | "zscore"
+        | "normalize" | "rolling_avg" | "rolling_max"
+        | "rolling_min" | "lag" | "avg" | "max" | "min"
+
+TABLE: "balance" | "income" | "cashflow" | "indicator"
+INDICATOR_NAME: /[a-z_][a-z0-9_]*/
+FIELD_NAME: /[a-z_][a-z0-9_]*/
+NUMBER: /-?\d+\.?\d*/
+%import common.WS
+%ignore WS

@@ -1,0 +1,25 @@
+{
+  "schema_version": "1.0",
+  "command": "system-red-team-round7.cli-export-reproduction",
+  "checked_at": "2026-08-02",
+  "environment": "isolated temporary DuckDB/SQLite; formal database not touched; actual Typer commands",
+  "setup": {
+    "matching_stocks": 10,
+    "temporary_max_result_rows": 3,
+    "sequence": ["screening run", "screening save_result", "screening export_csv"]
+  },
+  "engine_result": {
+    "truncated": true,
+    "total": 10
+  },
+  "cli_export": {
+    "header": "stock_code,pe_ttm,_data_date,_rule_id,_rule_version,_locked_indicators,_strict_only,_field_provenance,_entry_explanation",
+    "has_truncated_column": false
+  },
+  "finding": {
+    "id": "F4",
+    "severity": "P1",
+    "location": "app/cli/main.py:1392-1403",
+    "impact": "Native CLI CSV export silently omits truncation provenance for capped results."
+  }
+}
