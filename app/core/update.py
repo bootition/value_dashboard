@@ -1125,6 +1125,18 @@ class IncrementalUpdater:
         """
         from app.core.init import DataInitializer
 
+        # B 股（200/900）不在新浪/东财财务主源覆盖范围，连查会触发
+        # AdapterManager 熔断并殃及随后的 A 股。直接判为源不支持，
+        # 公告保持 pending，等待专门源或人工披露，不污染熔断器。
+        if stock_code.startswith(("200", "900")):
+            return [
+                {
+                    "status": "failed", "data_type": data_type,
+                    "error": "B-share financial source unsupported",
+                }
+                for data_type in ("balance_sheet", "income_statement", "cash_flow")
+            ]
+
         data_types = ("balance_sheet", "income_statement", "cash_flow")
         initializer = DataInitializer(
             duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
