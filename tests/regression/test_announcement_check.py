@@ -46,7 +46,7 @@ def test_failed_financial_refresh_keeps_announcement_pending_and_records_retry(d
     }
     updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
-    updater._refresh_financials = lambda codes: {
+    updater._refresh_financials = lambda codes, **kwargs: {
         "status": "partial", "succeeded_codes": [], "failed_codes": codes,
     }
     updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
@@ -75,7 +75,7 @@ def test_successful_financial_refresh_marks_announcement_seen(duckdb_store, sqli
     }
     updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
-    updater._refresh_financials = lambda codes: {
+    updater._refresh_financials = lambda codes, **kwargs: {
         "status": "success", "succeeded_codes": codes, "failed_codes": [],
     }
     updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
@@ -233,9 +233,10 @@ def test_refetch_one_incremental_skips_when_source_has_no_new_period(duckdb_stor
 def test_refresh_financials_marks_pending_when_source_lags(duckdb_store, sqlite_store) -> None:
     """三表均无新报告期（数据源延迟）→ 股票进入 pending_codes，不标记 seen。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    updater.refetch_one = lambda code, data_type, incremental=False: {
-        "status": "success", "skipped": True,
-    }
+    updater.refetch_financial_trio = lambda code: [
+        {"status": "success", "data_type": data_type, "skipped": True}
+        for data_type in ("balance_sheet", "income_statement", "cash_flow")
+    ]
 
     result = updater._refresh_financials(["000001"])
 
@@ -258,7 +259,7 @@ def test_pending_financial_refresh_keeps_announcement_pending_and_retries(duckdb
     }
     updater.run_incremental_check = lambda **kwargs: check
     updater._check_new_announcements = lambda persist=False: pending
-    updater._refresh_financials = lambda codes: {
+    updater._refresh_financials = lambda codes, **kwargs: {
         "status": "success", "succeeded_codes": [], "failed_codes": [],
         "pending_codes": codes,
     }

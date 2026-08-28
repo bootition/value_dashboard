@@ -21,7 +21,8 @@ import contextlib
 import json
 import logging
 import re
-from datetime import UTC, datetime
+import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -58,6 +59,10 @@ _DEFAULT_USER_AGENT = (
 _DEFAULT_REFERER = (
     f"{_CNINFO_BASE}/new/commonUrl/pageOfSearch?url=disclosure/list/search"
 )
+
+# CNINFO 翻页参数 pageNum 在 101 起会重复返回第 1 页（2026-08-28 实测），
+# 因此单次查询最多只能取 100 页。超过时由 _query_announcements 按日期二分拆分。
+_CNINFO_MAX_PAGE_NUM = 100
 
 # ─── 公告类别常量 ────────────────────────────────────────────────────
 
@@ -231,7 +236,7 @@ class CNINFOAdapter(BaseAdapter):
         category: str | None,
         start_date: str | None,
         end_date: str | None,
-        page_size: int = 50,
+        page_size: int = 30,
         max_pages: int = 20,
         column: str | None = None,
     ) -> list[dict[str, Any]]:
@@ -256,6 +261,13 @@ class CNINFOAdapter(BaseAdapter):
             column = column or _column_for_code(stock_code)
             stock_param = f"{stock_code},{org_id}"
 
+        # 2026-08-28 实测：CNINFO 忽略 pageSize>30，固定每页返回 30 条。
+        # 之前请求 50 但每页只得 30，代码用 `len(ann_list) < page_size`
+        # 判断“已到末页”，导致只读到第一页（全市场 3 个板块 90 条重复），
+        # 中报等财务公告因此长期漏检。这里强制使用源的真实页容量。
+        if page_size > 30:
+            page_size = 30
+
         results: list[dict[str, Any]] = []
         client = self._get_client()
 
@@ -271,42 +283,91 @@ class CNINFOAdapter(BaseAdapter):
                 "isHLtitle": "true",
             }
 
-            try:
-                self._wait_rate_limit()
-                resp = client.post(
-                    _SEARCH_URL,
-                    data=form,
-                    headers={"Content-Type": "application/x-www-form-urlencoded"},
-                )
-                # P2修复: 429重试1次
-                if resp.status_code == 429:
-                    import time as _time
-                    _time.sleep(2)
+            payload: dict[str, Any] | None = None
+            last_error: Exception | None = None
+            for attempt, backoff in enumerate((0, 2, 5, 10), start=1):
+                try:
+                    self._wait_rate_limit()
                     resp = client.post(
                         _SEARCH_URL,
                         data=form,
                         headers={"Content-Type": "application/x-www-form-urlencoded"},
                     )
-                resp.raise_for_status()
-                payload = resp.json()
-            except (httpx.HTTPError, ValueError) as e:
-                logger.error(
-                    "CNINFO 公告查询失败 stock=%s page=%d: %s",
-                    stock_code or "market", page_num, e,
-                )
-                break
+                    if resp.status_code == 429:
+                        raise httpx.HTTPStatusError(
+                            "CNINFO 429", request=resp.request, response=resp,
+                        )
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    last_error = None
+                    break
+                except (httpx.HTTPError, ValueError) as e:
+                    last_error = e
+                    logger.warning(
+                        "CNINFO 公告查询失败 stock=%s page=%d attempt=%d: %s",
+                        stock_code or "market", page_num, attempt, e,
+                    )
+                    if backoff:
+                        time.sleep(backoff)
+            if payload is None:
+                # 页面级失败会向上传播为 partial/unavailable，调用方不得
+                # 把截断的公告列表误当成完整发现结果（中报漏检根因之一）。
+                raise RuntimeError(
+                    f"CNINFO page {page_num} failed after retries: {last_error}"
+                ) from last_error
 
             ann_list = payload.get("announcements") or []
+            actual_page_size = len(ann_list)
             if not ann_list:
                 break
 
             for raw in ann_list:
                 results.append(self._normalize_announcement(raw, stock_code))
 
-            # 翻页终止：当前页返回少于 page_size 说明已到末尾
-            total_record = payload.get("totalRecordNum") or payload.get("totalAnnouncement") or 0
-            if len(ann_list) < page_size or page_num * page_size >= total_record:
+            # 翻页终止：以源返回的 totalRecordNum 为准；total 缺失时才用
+            # “不足一页”作为到达末尾的信号。
+            total_record = int(
+                payload.get("totalRecordNum")
+                or payload.get("totalAnnouncement")
+                or 0
+            )
+            if total_record and page_num * actual_page_size >= total_record:
                 break
+            if actual_page_size < page_size and not total_record:
+                break
+            if page_num >= _CNINFO_MAX_PAGE_NUM and total_record > page_num * actual_page_size:
+                # CNINFO pageNum>100 会重复第 1 页；把日期窗口二分后递归补齐。
+                try:
+                    start_dt = datetime.strptime(start_date or "1990-01-01", "%Y-%m-%d").date()
+                    end_dt = datetime.strptime(end_date or "2099-12-31", "%Y-%m-%d").date()
+                except ValueError:
+                    logger.warning("CNINFO 公告超过 100 页且无法拆分日期窗口，按截断返回")
+                    break
+                if start_dt >= end_dt:
+                    logger.warning("CNINFO 单日公告仍超过 100 页，按前 100 页返回")
+                    break
+                mid_dt = start_dt + (end_dt - start_dt) // 2
+                first = self._query_announcements(
+                    stock_code=stock_code,
+                    category=category,
+                    start_date=start_dt.strftime("%Y-%m-%d"),
+                    end_date=mid_dt.strftime("%Y-%m-%d"),
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    column=column,
+                )
+                second = self._query_announcements(
+                    stock_code=stock_code,
+                    category=category,
+                    start_date=(mid_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
+                    end_date=end_dt.strftime("%Y-%m-%d"),
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    column=column,
+                )
+                # 递归子窗口已覆盖整段日期；丢弃本层先取的 100 页，
+                # 避免“本层 3000 条 + 递归全量”重复请求（中报季提速）。
+                return [*first, *second]
 
         return results
 
@@ -359,33 +420,38 @@ class CNINFOAdapter(BaseAdapter):
         # category 可直接传 CNINFO 原始值，也可传 CATEGORY_MAP 别名
         category_raw = request.extra_params.get("category")
         category = CATEGORY_MAP.get(category_raw, category_raw) if category_raw else None
-        page_size = int(request.extra_params.get("page_size", 50))
+        page_size = int(request.extra_params.get("page_size", 30))
         max_pages = int(request.extra_params.get("max_pages", 20))
 
-        # 全市场查询：不带 stock 参数，按交易所板块各查一次。
-        # 这是自动更新"发现新公告/财报"的高效路径（PRD §7.7），
-        # 避免逐股轮询 5000+ 股票。
+        # 全市场查询：不带 stock 参数。2026-08-28 实测 CNINFO 当前接口
+        # 忽略 column 且三个板块返回同一份全市场列表；因此只查一次并按
+        # announcement_id 去重，避免重复请求与重复条目。
         if not codes:
             all_data: list[dict[str, Any]] = []
             errors: list[str] = []
-            for column in ("sse", "szse", "bj"):
-                try:
-                    items = self._query_announcements(
-                        stock_code=None,
-                        category=category,
-                        start_date=request.start_date,
-                        end_date=request.end_date,
-                        page_size=page_size,
-                        max_pages=max_pages,
-                        column=column,
-                    )
-                    all_data.extend(items)
-                except Exception as e:
-                    logger.exception("全市场公告查询异常 column=%s", column)
-                    errors.append(f"{column}: {e}")
+            try:
+                items = self._query_announcements(
+                    stock_code=None,
+                    category=category,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    page_size=page_size,
+                    max_pages=max_pages,
+                    column="szse",
+                )
+                seen_ids: set[str] = set()
+                for item in items:
+                    announcement_id = item.get("announcement_id")
+                    if announcement_id and announcement_id in seen_ids:
+                        continue
+                    if announcement_id:
+                        seen_ids.add(announcement_id)
+                    all_data.append(item)
+            except Exception as e:
+                logger.exception("全市场公告查询异常")
+                errors.append(f"market: {e}")
             if errors:
-                prefix = "all_boards_failed" if len(errors) >= 3 else "partial_boards_failed"
-                errors = [f"{prefix}: {'; '.join(errors)}"]
+                errors = [f"all_boards_failed: {'; '.join(errors)}"]
             return self._finalize_result(
                 data=all_data,
                 label="announcements",
@@ -428,7 +494,7 @@ class CNINFOAdapter(BaseAdapter):
                 confidence="missing",
             )
 
-        page_size = int(request.extra_params.get("page_size", 50))
+        page_size = int(request.extra_params.get("page_size", 30))
         max_pages = int(request.extra_params.get("max_pages", 20))
 
         all_data: list[dict[str, Any]] = []

@@ -46,7 +46,7 @@ class _PagedResponse:
 def test_tencent_bse_qfq_prices_are_normalized_and_archivable(monkeypatch) -> None:
     responder = _PagedResponse()
     monkeypatch.setattr(
-        "app.core.adapters.tencent_adapter.requests.get",
+        "app.core.adapters.tencent_adapter.requests.Session.get",
         lambda *args, **kwargs: responder,
     )
 
@@ -71,7 +71,7 @@ def test_tencent_bse_qfq_prices_are_normalized_and_archivable(monkeypatch) -> No
 def test_tencent_pages_back_when_source_has_older_data(monkeypatch) -> None:
     responder = _PagedResponse()
     monkeypatch.setattr(
-        "app.core.adapters.tencent_adapter.requests.get",
+        "app.core.adapters.tencent_adapter.requests.Session.get",
         lambda *args, **kwargs: responder,
     )
 
@@ -95,7 +95,7 @@ def test_tencent_bse_qfq_falls_back_to_raw_when_no_adjustment_exists(monkeypatch
                 }
             }
 
-    monkeypatch.setattr("app.core.adapters.tencent_adapter.requests.get", lambda *args, **kwargs: RawOnlyResponse())
+    monkeypatch.setattr("app.core.adapters.tencent_adapter.requests.Session.get", lambda *args, **kwargs: RawOnlyResponse())
     result = TencentAdapter(rate_limit=0).fetch(
         FetchRequest(data_type="price_daily", stock_codes=["920000"], adjust="qfq")
     )
@@ -111,7 +111,7 @@ def test_tencent_price_deadline_bounds_http_timeout(monkeypatch) -> None:
         seen["timeout"] = kwargs["timeout"]
         return _Response()
 
-    monkeypatch.setattr("app.core.adapters.tencent_adapter.requests.get", capture)
+    monkeypatch.setattr("app.core.adapters.tencent_adapter.requests.Session.get", capture)
     result = TencentAdapter(rate_limit=0).fetch(
         FetchRequest(
             data_type="price_daily",

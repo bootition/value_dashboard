@@ -13,12 +13,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -50,6 +51,12 @@ _ANNOUNCEMENT_FINANCIAL_KEYWORDS: tuple[str, ...] = (
     "年度报告", "半年度报告", "一季报", "第一季度报告", "三季报", "第三季度报告",
     "业绩预告", "业绩快报",
 )
+# 财务公告按 CNINFO 类别精确查询，避免全市场全文列表翻页被噪声淹没。
+# 顺序即查询顺序：当前处于中报季，半年报优先。
+_ANNOUNCEMENT_FINANCIAL_CATEGORIES: tuple[str, ...] = (
+    "semi_annual", "q1", "q3", "annual",
+)
+_ANNOUNCEMENT_CHECK_CURSOR_KEY = "announcement_check_cursor"
 _ANNOUNCEMENT_DIVIDEND_KEYWORDS: tuple[str, ...] = (
     "权益分派", "分红", "除权除息", "利润分配",
 )
@@ -106,6 +113,19 @@ class IncrementalUpdater:
         self.announcement_lookback_days: int = self._load_update_config(
             "announcement_lookback_days", default=3
         )
+        # 公告检查游标缺失时的首次追补窗口（天）。2026-08-28 之前
+        # CNINFO 分页 bug 导致中报大量漏检，首次修复需回看整个披露季。
+        self.announcement_catchup_days: int = self._load_update_config(
+            "announcement_catchup_days", default=45
+        )
+        # CNINFO 每页实际固定返回 30 条；财务类别在 45 天窗口约 11,000 条，
+        # 需要 370+ 页。非财务公告只做最近 3 天注册，页数设上限即可。
+        self.announcement_financial_max_pages: int = self._load_update_config(
+            "announcement_financial_max_pages", default=450
+        )
+        self.announcement_general_max_pages: int = self._load_update_config(
+            "announcement_general_max_pages", default=40
+        )
         # CSRC 行业低频刷新间隔（天）：行业归属变化极低，避免每次更新
         # 逐股查询 CNINFO（约 1.5s/股）占用数小时（默认 30 天）
         self.csrc_refresh_interval_days: int = self._load_update_config(
@@ -128,6 +148,11 @@ class IncrementalUpdater:
         # 2026-08-28 提速计划：串行重建约需数十分钟，多进程可显著缩短。
         self.research_statistics_parallel_workers: int = self._load_update_config(
             "research_statistics_parallel_workers", default=4
+        )
+        # 财务三表刷新的并发股票数：网络请求并行，DuckDB 写事务仍由
+        # 单写者锁串行，因此并发只缩短网络等待、不会双写。
+        self.financial_refresh_concurrency: int = self._load_update_config(
+            "financial_refresh_concurrency", default=8
         )
         self.price_fetch_timeout_seconds: int = self._load_update_config(
             "price_fetch_timeout_seconds", default=45
@@ -422,10 +447,19 @@ class IncrementalUpdater:
         announcement_codes = announcement_check.get("affected_stock_codes", [])
         financials: dict[str, Any] | None = None
         if announcement_codes:
-            financials = self._refresh_financials(announcement_codes)
+            financials = self._refresh_financials(announcement_codes, detail_cb=detail_cb)
             report_step("financials", financials)
-            actions = self._refresh_market_actions(announcement_codes)
-            report_step("market_actions", actions)
+            # 只有同一批公告里出现“权益分派实施”等分红除权公告时，才刷新
+            # dividends/xdxr。中报季每天上千份财报公告，逐股重拉分红域会
+            # 白白增加数小时请求；非分红财报不需要该步骤。
+            market_action_codes = sorted({
+                code
+                for code, items in announcement_check.get("all_new_announcements", {}).items()
+                if any(classify_announcement(item.get("title")) == "dividend" for item in items)
+            })
+            if market_action_codes:
+                actions = self._refresh_market_actions(market_action_codes)
+                report_step("market_actions", actions)
             # 只有真正写入新报告期的股票才登记公告；
             # 数据源延迟（pending）或刷新失败（failed）保持公告 pending 并记录重试
             refreshed_codes = set(financials["succeeded_codes"])
@@ -454,6 +488,24 @@ class IncrementalUpdater:
                 continue
             self._mark_announcements_seen(code, announcements)
 
+        # 只有本轮发现的财务公告全部成功入册（无 failed/pending）才推进
+        # 公告检查游标；否则下一轮会重新发现未入册公告，断点不丢失。
+        financials_settled = (
+            not announcement_codes
+            or (
+                financials is not None
+                and not financials.get("failed_codes")
+                and not financials.get("pending_codes")
+                and len(financials.get("succeeded_codes", [])) == len(announcement_codes)
+            )
+        )
+        if (
+            announcement_check.get("status") == "available"
+            and not announcement_check.get("errors")
+            and financials_settled
+        ):
+            self._save_announcement_cursor()
+
         financial_step = report["steps"].get("financials", {"status": "success"})
         if share_capital_changed and financial_step["status"] == "success":
             # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
@@ -466,12 +518,13 @@ class IncrementalUpdater:
             report_step("indicators", snapshot_step)
             if snapshot_step["status"] != "success":
                 snapshot_step["reason"] = "price update retained; snapshot publication not ready"
-        elif financial_step["status"] == "success":
+        elif financial_step["status"] in {"success", "partial"}:
             from app.core.indicators.calculator import IndicatorCalculator
 
             # 2026-08-28 提速计划：财报只刷新了少数公告股票，只增量重算
             # "价格刚变化 + 财报刚刷新 + 快照日期落后"的并集，不再因为
-            # 几只股票发了新财报就全量重算 5,500+ 只。
+            # 几只股票发了新财报就全量重算 5,500+ 只。partial 也照常为
+            # 已成功写入的股票重算快照；失败股票保留上一代快照。
             stale_snapshot_codes = self._stale_snapshot_codes()
             refreshed_financial_codes = list(
                 financials.get("succeeded_codes", []) if financials else []
@@ -638,20 +691,49 @@ class IncrementalUpdater:
             return {"status": "failed", "error": str(error)}
 
     def _stale_snapshot_codes(self) -> list[str]:
-        """Listed stocks whose snapshot price date is behind the raw price date."""
+        """Listed stocks whose snapshot is behind raw price OR complete financials.
+
+        财报中报季 catch-up 可能 partial：已成功写入 Q2 三表的股票即使
+        价格日期没变，也必须重算快照，否则市值/TTM 仍停留在 Q1。
+        """
         try:
             rows = self.duck.read_query(
                 """WITH raw AS (
                        SELECT stock_code, MAX(trade_date) AS latest
                        FROM price_daily_raw GROUP BY stock_code
+                   ),
+                   complete_financials AS (
+                       SELECT bs.stock_code, MAX(bs.report_date) AS latest
+                       FROM balance_sheet bs
+                       JOIN income_statement ic
+                         ON ic.stock_code = bs.stock_code
+                        AND ic.report_date = bs.report_date
+                       JOIN cash_flow cf
+                         ON cf.stock_code = bs.stock_code
+                        AND cf.report_date = bs.report_date
+                       WHERE bs.total_assets IS NOT NULL
+                         AND bs.total_liabilities IS NOT NULL
+                         AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
+                         AND ic.revenue IS NOT NULL
+                         AND ic.parent_net_profit IS NOT NULL
+                         AND cf.cf_from_operating IS NOT NULL
+                       GROUP BY bs.stock_code
+                   ),
+                   stale AS (
+                       SELECT snap.stock_code
+                       FROM indicator_snapshot snap
+                       JOIN raw ON raw.stock_code = snap.stock_code
+                       JOIN stock_meta m ON m.stock_code = snap.stock_code
+                       WHERE m.is_listed IS TRUE
+                         AND snap.latest_price_date != raw.latest
+                       UNION
+                       SELECT snap.stock_code
+                       FROM indicator_snapshot snap
+                       JOIN complete_financials fin
+                         ON fin.stock_code = snap.stock_code
+                       WHERE fin.latest > snap.report_date
                    )
-                   SELECT snap.stock_code
-                   FROM indicator_snapshot snap
-                   JOIN raw ON raw.stock_code = snap.stock_code
-                   JOIN stock_meta m ON m.stock_code = snap.stock_code
-                   WHERE m.is_listed IS TRUE
-                     AND snap.latest_price_date != raw.latest
-                   ORDER BY snap.stock_code"""
+                   SELECT DISTINCT stock_code FROM stale ORDER BY stock_code"""
             )
             return [row["stock_code"] for row in rows]
         except Exception as error:
@@ -830,6 +912,36 @@ class IncrementalUpdater:
             logger.warning(f"获取 {table} 最新报告期失败: {e}")
         return None
 
+    def _announcement_cursor(self) -> datetime | None:
+        """Last successfully persisted announcement-check cursor (UTC)."""
+        try:
+            rows = self.sqlite.query(
+                "SELECT value FROM data_refresh_state WHERE key = ?",
+                [_ANNOUNCEMENT_CHECK_CURSOR_KEY],
+            )
+            if not rows:
+                return None
+            value = rows[0].get("value")
+            if not value:
+                return None
+            parsed = datetime.fromisoformat(str(value))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=UTC)
+            return parsed.astimezone(UTC)
+        except (ValueError, TypeError):
+            return None
+
+    def _save_announcement_cursor(self, at: datetime | None = None) -> None:
+        """Advance the durable announcement-check cursor after a clean remote check."""
+        cursor = (at or datetime.now(UTC)).isoformat()
+        self.sqlite.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                              updated_at=excluded.updated_at""",
+            [_ANNOUNCEMENT_CHECK_CURSOR_KEY, cursor, datetime.now(UTC).isoformat()],
+        )
+
     def _check_new_announcements(
         self,
         *,
@@ -838,53 +950,128 @@ class IncrementalUpdater:
     ) -> dict[str, Any]:
         """Compare remote announcement IDs without mutating during a check-only run.
 
-        全市场按日期段批量查询（PRD §7.7），替代逐股轮询：
-        - CNINFO 全市场接口一次查询最近 N 天公告（分 sse/szse/bj 三板块）
-        - 与本地 announcement_registry 比对，找出未见过的公告
-        - 财务类公告进入 affected_stock_codes（触发财务刷新）
-        - 非财务类公告也返回，供登记但不触发财务刷新
+        全市场按日期段批量查询（PRD §7.7），替代逐股轮询。2026-08-28 修复：
+        - CNINFO 每页固定 30 条；财务公告按半年报/一季报/三季报/年报类别
+          分别精确查询，不再依赖噪声极大的全市场全文列表。
+        - 持久化检查游标后，日常只查游标之后的窗口；游标缺失时回看
+          `announcement_catchup_days`（默认 45 天，覆盖整个中报季）。
+        - 非财务公告只查最近 `announcement_lookback_days` 天用于登记。
         """
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        lookback = lookback_days if lookback_days else self.announcement_lookback_days
-        start_date = (datetime.now() - timedelta(days=lookback)).strftime("%Y-%m-%d")
-        try:
-            result = self.adapter_mgr.fetch(FetchRequest(
-                data_type="announcements",
-                start_date=start_date,
-                end_date=end_date,
-            ))
-        except Exception as error:
-            return {"status": "unavailable", "checked_remote": False, "error": str(error)}
+        now = datetime.now(UTC)
+        end_date = now.strftime("%Y-%m-%d")
+        general_lookback = (
+            lookback_days if lookback_days else self.announcement_lookback_days
+        )
+        general_start = (now - timedelta(days=general_lookback)).strftime("%Y-%m-%d")
+        cursor = self._announcement_cursor() if persist else None
+        if cursor is not None:
+            financial_start = (cursor - timedelta(days=2)).strftime("%Y-%m-%d")
+        else:
+            financial_window = (
+                getattr(self, "announcement_catchup_days", 45)
+                if persist
+                else general_lookback
+            )
+            financial_start = (now - timedelta(days=financial_window)).strftime("%Y-%m-%d")
+        financial_max_pages = getattr(self, "announcement_financial_max_pages", 450)
+        general_max_pages = getattr(self, "announcement_general_max_pages", 40)
 
-        if result.metadata.error:
-            if persist:
-                self._record_failure("", "announcements", result.metadata.source, result.metadata.error)
-            return {
-                "status": (
-                    "unavailable" if "all_boards_failed" in (result.metadata.error or "")
-                    else "partial"
-                ),
-                "checked_remote": True,
-                "affected_stock_codes": [],
-                "affected_announcements": {},
-                "all_new_announcements": {},
-                "errors": [result.metadata.error],
-            }
+        def fetch_items(
+            category: str | None, start_date: str, max_pages: int,
+        ) -> tuple[list[dict[str, Any]], str | None]:
+            try:
+                result = self.adapter_mgr.fetch(FetchRequest(
+                    data_type="announcements",
+                    start_date=start_date,
+                    end_date=end_date,
+                    extra_params={
+                        "category": category,
+                        "page_size": 30,
+                        "max_pages": max_pages,
+                    },
+                ))
+            except Exception as error:
+                return [], str(error)
+            return list(result.data or []), result.metadata.error or None
 
-        affected: set[str] = set()
-        affected_announcements: dict[str, list[dict[str, Any]]] = {}
-        for item in result.data:
+        all_items: list[dict[str, Any]] = []
+        errors: list[str] = []
+        last_error_source = "cninfo"
+        for category in _ANNOUNCEMENT_FINANCIAL_CATEGORIES:
+            items, error = fetch_items(
+                category, financial_start, financial_max_pages,
+            )
+            all_items.extend(items)
+            if error:
+                errors.append(f"{category}: {error}")
+        general_items, general_error = fetch_items(
+            None, general_start, general_max_pages,
+        )
+        all_items.extend(general_items)
+        if general_error:
+            errors.append(f"general: {general_error}")
+
+        # 类别查询与全文查询可能返回同一公告；按公告 ID 去重。
+        unique_items: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for item in all_items:
             announcement_id = item.get("announcement_id")
             stock_code = item.get("stock_code")
             if not announcement_id or not stock_code:
                 continue
-            seen = self.sqlite.query(
-                "SELECT 1 FROM announcement_registry WHERE announcement_id = ?",
-                [announcement_id],
-            )
-            if not seen:
-                affected.add(stock_code)
-                affected_announcements.setdefault(stock_code, []).append(item)
+            if announcement_id in seen_ids:
+                continue
+            seen_ids.add(announcement_id)
+            unique_items.append(item)
+
+        if errors and persist:
+            with contextlib.suppress(Exception):
+                self._record_failure(
+                    "", "announcements", last_error_source, "; ".join(errors),
+                )
+
+        if not unique_items and errors:
+            return {
+                "status": "unavailable",
+                "checked_remote": True,
+                "affected_stock_codes": [],
+                "affected_announcements": {},
+                "all_new_announcements": {},
+                "errors": errors,
+            }
+
+        # 批量查询本地登记表，避免每一条公告一次 SQL。
+        existing_ids: set[str] = set()
+        all_ids = [item["announcement_id"] for item in unique_items]
+        for offset in range(0, len(all_ids), 400):
+            chunk = all_ids[offset:offset + 400]
+            placeholders = ", ".join("?" for _ in chunk)
+            try:
+                rows = self.sqlite.query(
+                    f"SELECT announcement_id FROM announcement_registry "
+                    f"WHERE announcement_id IN ({placeholders})",
+                    chunk,
+                )
+                existing_ids.update(str(row["announcement_id"]) for row in rows)
+            except Exception:
+                # 老库缺少该列时退回逐条查询，保证发现功能仍可用。
+                existing_ids.update(
+                    str(item["announcement_id"]) for item in unique_items
+                    if self.sqlite.query(
+                        "SELECT 1 FROM announcement_registry WHERE announcement_id = ?",
+                        [item["announcement_id"]],
+                    )
+                )
+
+        affected: set[str] = set()
+        affected_announcements: dict[str, list[dict[str, Any]]] = {}
+        for item in unique_items:
+            announcement_id = str(item["announcement_id"])
+            stock_code = str(item["stock_code"])
+            if announcement_id in existing_ids:
+                continue
+            affected.add(stock_code)
+            affected_announcements.setdefault(stock_code, []).append(item)
 
         # 按标题分类，只保留财务类公告触发刷新
         financial_codes: set[str] = set()
@@ -898,15 +1085,18 @@ class IncrementalUpdater:
                 financial_codes.add(code)
                 financial_announcements[code] = financial_items
 
+        # 游标不在这里推进：只有当本轮发现的财务公告全部成功刷新/入册后，
+        # 才允许把“已检查到”的边界前移（见 _run_incremental_update_flow 末尾）。
+        # 若中途失败，下一轮会重新发现未入册公告，断点不丢失。
         return {
-            "status": "available",
+            "status": "available" if not errors else "partial",
             "checked_remote": True,
             "affected_stock_codes": sorted(financial_codes),
             "affected_announcements": financial_announcements,
             "all_new_announcements": {
                 code: affected_announcements[code] for code in sorted(affected)
             },
-            "errors": [],
+            "errors": errors,
         }
 
     def _mark_announcements_seen(self, stock_code: str, announcements: list[dict[str, Any]]) -> None:
@@ -925,7 +1115,94 @@ class IncrementalUpdater:
                 ],
             )
 
-    def _refresh_financials(self, stock_codes: list[str]) -> dict[str, Any]:
+    def refetch_financial_trio(self, stock_code: str) -> list[dict[str, Any]]:
+        """Refresh one stock's three statements with one DuckDB transaction.
+
+        Network requests still run per statement, but all successful new rows
+        are upserted + lineage-recorded in a single write transaction instead
+        of three, cutting two write-lock/commit rounds per stock during the
+        half-year-report season.
+        """
+        from app.core.init import DataInitializer
+
+        data_types = ("balance_sheet", "income_statement", "cash_flow")
+        initializer = DataInitializer(
+            duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
+        )
+        fetched: dict[str, tuple[Any, list[dict[str, Any]]]] = {}
+        outcomes: list[dict[str, Any]] = []
+        for data_type in data_types:
+            try:
+                latest_local = self._get_latest_financial_report_date(
+                    stock_code, data_type,
+                )
+                result = self.adapter_mgr.fetch(FetchRequest(
+                    data_type=data_type,
+                    stock_codes=[stock_code],
+                    extra_params={"num": "1"},
+                ))
+                if result.metadata.error or not result.data:
+                    outcomes.append({
+                        "status": "failed", "data_type": data_type,
+                        "error": result.metadata.error or "empty result",
+                    })
+                    continue
+                new_rows = [
+                    row for row in result.data
+                    if not latest_local or str(row.get("report_date") or "") > latest_local
+                ]
+                if not new_rows:
+                    outcomes.append({
+                        "status": "success", "data_type": data_type,
+                        "skipped": True, "latest_local": latest_local,
+                    })
+                    continue
+                fetched[data_type] = (result, new_rows)
+                outcomes.append({
+                    "status": "success", "data_type": data_type, "skipped": False,
+                })
+            except Exception as error:
+                outcomes.append({
+                    "status": "failed", "data_type": data_type, "error": str(error),
+                })
+        if not fetched:
+            return outcomes
+        try:
+            with self.duck.transaction() as conn:
+                for data_type, (_, new_rows) in fetched.items():
+                    for row in new_rows:
+                        initializer._upsert_financial_row(
+                            conn, data_type, stock_code, row,
+                        )
+                for data_type, (result, new_rows) in fetched.items():
+                    batch_id = initializer._record_batch_in_connection(
+                        conn, result, data_type, len(new_rows),
+                    )
+                    initializer._record_field_audit_in_connection(
+                        conn, result, new_rows, stock_code, "report_date", batch_id,
+                    )
+        except Exception as error:
+            for outcome in outcomes:
+                if outcome.get("status") == "success" and not outcome.get("skipped"):
+                    outcome["status"] = "failed"
+                    outcome["error"] = str(error)
+            return outcomes
+        balance = fetched.get("balance_sheet")
+        if balance is not None:
+            try:
+                initializer._record_missing_financial_sector_fields(
+                    stock_code, balance[1],
+                )
+            except Exception:
+                logger.debug("记录 %s 金融业缺失字段失败（非致命）", stock_code)
+        return outcomes
+
+    def _refresh_financials(
+        self,
+        stock_codes: list[str],
+        *,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """Refresh core statements for stocks with newly registered filings.
 
         增量模式（PRD §7.7）：
@@ -937,19 +1214,45 @@ class IncrementalUpdater:
         succeeded_codes: list[str] = []
         pending_codes: list[str] = []
         failed: list[str] = []
-        for code in stock_codes:
-            outcomes = [
-                self.refetch_one(code, data_type, incremental=True)
-                for data_type in ("balance_sheet", "income_statement", "cash_flow")
-            ]
-            if all(outcome["status"] == "success" for outcome in outcomes):
-                if all(outcome.get("skipped") for outcome in outcomes):
-                    pending_codes.append(code)
+        completed = 0
+
+        def refresh_one(code: str) -> tuple[str, list[dict[str, Any]]]:
+            try:
+                outcomes = self.refetch_financial_trio(code)
+            except Exception as error:
+                outcomes = [
+                    {"status": "failed", "error": str(error), "data_type": data_type}
+                    for data_type in ("balance_sheet", "income_statement", "cash_flow")
+                ]
+            return code, outcomes
+
+        concurrency = max(1, getattr(self, "financial_refresh_concurrency", 8))
+        with ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="vd-financial-refresh",
+        ) as executor:
+            future_to_code = {
+                executor.submit(refresh_one, code): code for code in stock_codes
+            }
+            for future in as_completed(future_to_code):
+                code, outcomes = future.result()
+                completed += 1
+                if all(outcome["status"] == "success" for outcome in outcomes):
+                    if all(outcome.get("skipped") for outcome in outcomes):
+                        pending_codes.append(code)
+                    else:
+                        succeeded += 1
+                        succeeded_codes.append(code)
                 else:
-                    succeeded += 1
-                    succeeded_codes.append(code)
-            else:
-                failed.append(code)
+                    failed.append(code)
+                if detail_cb is not None:
+                    detail_cb("financials", {
+                        "step": "financials",
+                        "label": "财务数据",
+                        "done": completed,
+                        "total": len(stock_codes),
+                        "current": code,
+                    })
         return {
             "status": "success" if not failed else "partial",
             "total": len(stock_codes), "success": succeeded, "failed": len(failed),

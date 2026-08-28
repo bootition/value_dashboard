@@ -32,7 +32,7 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
         "status": "available", "affected_stock_codes": [],
         "affected_announcements": {}, "all_new_announcements": {},
     }
-    updater._refresh_financials = lambda codes: {"status": "success", "succeeded_codes": codes}
+    updater._refresh_financials = lambda codes, **kwargs: {"status": "success", "succeeded_codes": codes}
     updater._refresh_market_actions = lambda codes: {"status": "success"}
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}

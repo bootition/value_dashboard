@@ -47,6 +47,9 @@ update:
   startup: true           # 启动时自动执行增量更新
   incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
+  announcement_catchup_days: 45  # 公告游标缺失时的首次追补窗口（覆盖中报季）
+  announcement_financial_max_pages: 450  # CNINFO 每页固定 30 条；财务类别追补上限
+  announcement_general_max_pages: 5  # 非财务公告只登记最近 3 天的前几页（可选登记，不做全量）
   price_fetch_concurrency: 8
   price_fetch_max_concurrency: 16
   price_fetch_concurrency_step: 4
@@ -55,6 +58,7 @@ update:
   price_fetch_timeout_seconds: 45
   price_fetch_batch_size: 20
   research_statistics_parallel_workers: 4
+  financial_refresh_concurrency: 8
   # 业务概览低频域（reports/67）：价格优先后按月有界续传，自选股票优先；
   # 失败保留旧值，绝不阻断价格/财务/readiness。
   business_overview_auto_enabled: true
