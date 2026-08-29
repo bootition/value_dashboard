@@ -463,6 +463,25 @@ class IncrementalUpdater:
                 announcement_check["affected_announcements"][code].append(item)
         announcement_codes = sorted(set(announcement_check.get("affected_stock_codes", [])) | set(pending_codes))
         announcement_check["affected_stock_codes"] = announcement_codes
+        # B 股（200/900）不在任何免费财务主源覆盖范围，重复 retry 只会产生
+        # 永续失败。与不可补字段同策略：直接入册为已处理、清理 retry，
+        # 不进入财务刷新，也不在页面制造噪音。
+        unsupported_codes = {
+            code for code in announcement_codes
+            if code.startswith(("200", "900"))
+        }
+        if unsupported_codes:
+            for code in sorted(unsupported_codes):
+                self._mark_announcements_seen(
+                    code,
+                    announcement_check.get("affected_announcements", {}).get(code, []),
+                )
+                self._resolve_announcement_retries(code)
+            announcement_codes = [
+                code for code in announcement_codes
+                if code not in unsupported_codes
+            ]
+            announcement_check["affected_stock_codes"] = announcement_codes
         financials: dict[str, Any] | None = None
         if announcement_codes:
             financials = self._refresh_financials(announcement_codes, detail_cb=detail_cb)
