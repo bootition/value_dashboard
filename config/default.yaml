@@ -65,6 +65,8 @@ update:
   business_overview_auto_enabled: true
   business_overview_refresh_interval_days: 30
   business_overview_max_stocks_per_run: 100
+  business_overview_catchup_threshold: 4000  # 缺口超过该数量时进入追赶模式
+  business_overview_catchup_max_stocks_per_run: 500  # 追赶模式每轮上限（约 6 分钟）
   # 融资事件低频域（2026-08-25 数据补全）：历史事件有界续传，批 50 + 冷却 30s；
   # 失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务/readiness。
   funding_auto_enabled: true

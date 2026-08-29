@@ -310,6 +310,15 @@ class BusinessOverviewUpdater:
             "business_overview_max_stocks_per_run", default=20,
         ))
         limit = max_stocks or configured_max
+        # 覆盖率低时进入追赶模式：每轮处理更多只，但仍为有界任务。
+        catchup_threshold = int(self._load_config(
+            "business_overview_catchup_threshold", default=4000,
+        ))
+        catchup_max = int(self._load_config(
+            "business_overview_catchup_max_stocks_per_run", default=500,
+        ))
+        if len(due_codes) >= catchup_threshold and not max_stocks:
+            limit = max(limit, catchup_max)
         targets = due_codes[:limit]
         if progress_cb is None:
             report = self.update_many(targets)

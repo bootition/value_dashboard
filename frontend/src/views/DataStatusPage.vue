@@ -672,6 +672,10 @@ function skipReasonLabel(reason: string | null | undefined): string {
 
         <!-- 缺失列表 -->
         <n-card title="缺失列表" size="small" v-if="missingList.length > 0">
+          <n-alert type="info" :show-icon="false" style="margin-bottom: 12px;">
+            金融监管指标（资本充足率/不良率等）与北交所增发配股当前无免费数据源，
+            已从本列表隐藏并保留存档；待接入公告 PDF 解析或新数据源后再启用。
+          </n-alert>
           <n-data-table
             size="small"
             striped

@@ -65,6 +65,8 @@ update:
   business_overview_auto_enabled: true
   business_overview_refresh_interval_days: 30
   business_overview_max_stocks_per_run: 100
+  business_overview_catchup_threshold: 4000  # 缺口超过该数量时进入追赶模式
+  business_overview_catchup_max_stocks_per_run: 500  # 追赶模式每轮上限（约 6 分钟）
 
 backup:
   keep_full_backups: 3

@@ -25,6 +25,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
 _SUMMARY_TTL_SECONDS = 60
+
+# 当前免费源确实无法补齐的字段：不在缺失列表/计数中继续展示为“待处理”，
+# 保留在库中留档；将来接入公告 PDF 解析或付费源时再从这里移除。
+_DISABLED_MISSING_FIELDS = {
+    "balance.core_tier1_capital_adequacy_ratio",
+    "balance.tier1_capital_adequacy_ratio",
+    "balance.capital_adequacy_ratio",
+    "balance.non_performing_loan_ratio",
+    "balance.provision_coverage_ratio",
+    "balance.risk_coverage_ratio",
+}
+
+_ACTIONABLE_MISSING_SQL = """(
+    field_name NOT IN ({disabled_placeholders})
+    AND NOT (
+        field_name = 'placement_funding'
+        AND substr(stock_code, 1, 1) IN ('4', '8', '9')
+    )
+)"""
 _SUMMARY_CACHE: dict[str, dict[str, object]] = {}
 _SUMMARY_CACHE_LOCK = threading.Lock()
 _SUMMARY_REFRESH_LOCK = threading.Lock()
@@ -150,6 +169,14 @@ def _store_summary(request: Request, summary: dict) -> None:
             "at": time.monotonic(),
             "data": stored,
         }
+
+
+def _actionable_missing_condition() -> tuple[str, list[str]]:
+    placeholders = ", ".join("?" for _ in _DISABLED_MISSING_FIELDS)
+    return (
+        _ACTIONABLE_MISSING_SQL.replace("{disabled_placeholders}", placeholders),
+        list(_DISABLED_MISSING_FIELDS),
+    )
 
 
 @router.get("/indicator-recompute")
@@ -576,8 +603,11 @@ def _build_summary_from_state(state) -> dict:
         errors.append("retry_count")
 
     try:
+        condition, disabled = _actionable_missing_condition()
         row = sqlite.query(
-            "SELECT COUNT(*) as cnt FROM missing_list WHERE resolved_at IS NULL"
+            f"SELECT COUNT(*) as cnt FROM missing_list "
+            f"WHERE resolved_at IS NULL AND {condition}",
+            disabled,
         )
         summary["missing_count"] = row[0]["cnt"]
     except Exception:
@@ -754,19 +784,32 @@ def get_missing_list(
     """缺失列表摘要（D-4：支持按字段前缀过滤）"""
     sqlite = request.app.state.sqlite
     try:
+        condition, disabled = _actionable_missing_condition()
         if field_prefix:
             rows = sqlite.query(
-                "SELECT stock_code, field_name, reason_code "
-                "FROM missing_list WHERE resolved_at IS NULL "
-                "AND field_name LIKE ? LIMIT ?",
-                [f"{field_prefix}%", limit],
+                f"SELECT stock_code, field_name, reason_code "
+                f"FROM missing_list WHERE resolved_at IS NULL "
+                f"AND field_name LIKE ? AND {condition} LIMIT ?",
+                [f"{field_prefix}%", *disabled, limit],
+            )
+            total = sqlite.query(
+                f"SELECT COUNT(*) AS c FROM missing_list "
+                f"WHERE resolved_at IS NULL AND field_name LIKE ? AND {condition}",
+                [f"{field_prefix}%", *disabled],
             )
         else:
             rows = sqlite.query(
-                "SELECT stock_code, field_name, reason_code "
-                "FROM missing_list WHERE resolved_at IS NULL LIMIT ?",
-                [limit],
+                f"SELECT stock_code, field_name, reason_code "
+                f"FROM missing_list WHERE resolved_at IS NULL "
+                f"AND {condition} LIMIT ?",
+                [*disabled, limit],
             )
-        return {"count": len(rows), "items": rows}
+            total = sqlite.query(
+                f"SELECT COUNT(*) AS c FROM missing_list "
+                f"WHERE resolved_at IS NULL AND {condition}",
+                disabled,
+            )
+        count = total[0]["c"] if total else len(rows)
+        return {"count": count, "items": rows}
     except Exception as error:
         raise HTTPException(status_code=503, detail="missing list is unavailable") from error
