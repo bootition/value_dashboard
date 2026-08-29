@@ -126,6 +126,13 @@ def _run_startup_maintenance(
     except Exception as error:
         logger.warning("自动更新后数据就绪复核失败(非致命): %s", error)
 
+    try:
+        from app.core.data_quality import warm_screening_readiness_cache
+
+        warm_screening_readiness_cache(duck, sqlite)
+    except Exception as error:
+        logger.warning("筛选就绪缓存预热失败(非致命): %s", error)
+
     # C8/C16修复(报告41): 启动时对有界操作表做 GC（过期 plan / 旧 job_logs /
     # 已解析 missing_list），幂等、保守、不涉及审计记录。
     try:

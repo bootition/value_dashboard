@@ -212,6 +212,11 @@ async function runScreening() {
       include_suspended: !basePool.exclude_suspended,
       min_listing_years: basePool.min_listing_years,
       strict_only: strictOnly.value,
+    }, {
+      // 后端筛选门禁在无缓存冷启动时需执行一次全库数据质量核对；
+      // 该请求单独放宽超时，避免默认 30s 把仍在正常计算的服务端请求
+      // 从浏览器侧中止，造成“一直 loading 却永远收不到结果”。
+      timeout: 120_000,
     })
     results.value = resp.data.results
     executionTime.value = resp.data.execution_time_ms

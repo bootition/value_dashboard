@@ -99,6 +99,108 @@ def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
         "warning_codes": blocking_warnings,
     }
 
+SCREENING_READINESS_CACHE_KEY = "screening_readiness_cache"
+SCREENING_READINESS_CACHE_TTL_SECONDS = 600
+
+
+def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str | None:
+    """Cheap fingerprint for the global inputs behind screening readiness.
+
+    COUNT(*) is metadata-only in DuckDB and the snapshot aggregate is served
+    by zone maps on the production database; this must stay far cheaper than
+    the full readiness build it guards.
+    """
+    try:
+        snap = duck.read_query(
+            "SELECT MAX(calculated_at) AS c, MAX(latest_price_date) AS p, COUNT(*) AS n "
+            "FROM indicator_snapshot"
+        )[0]
+        counts = duck.read_query(
+            """SELECT
+                 (SELECT COUNT(*) FROM source_audit) AS source_audit_c,
+                 (SELECT COUNT(*) FROM fetch_batch) AS fetch_batch_c,
+                 (SELECT COUNT(*) FROM raw_response_archive) AS archive_c,
+                 (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c"""
+        )[0]
+        payload = {"snap": snap, "counts": counts}
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return None
+
+
+def load_screening_readiness_cache(
+    sqlite: SQLiteStore, fingerprint: str,
+) -> dict | None:
+    """Return a fresh cached screening decision, or None on miss/expiry."""
+    try:
+        rows = sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [SCREENING_READINESS_CACHE_KEY],
+        )
+        if not rows:
+            return None
+        payload = json.loads(rows[0]["value"] or "{}")
+        if payload.get("fingerprint") != fingerprint:
+            return None
+        updated = payload.get("updated_at")
+        if updated:
+            updated_dt = datetime.fromisoformat(updated)
+            if (
+                datetime.now(UTC) - updated_dt
+            ).total_seconds() > SCREENING_READINESS_CACHE_TTL_SECONDS:
+                return None
+        return payload.get("decision")
+    except Exception:
+        return None
+
+
+def store_screening_readiness_cache(
+    sqlite: SQLiteStore, fingerprint: str, decision: dict,
+) -> None:
+    """Persist a completed screening decision atomically (best-effort)."""
+    try:
+        sqlite.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                             updated_at=excluded.updated_at""",
+            [
+                SCREENING_READINESS_CACHE_KEY,
+                json.dumps({
+                    "fingerprint": fingerprint,
+                    "decision": decision,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }, default=str),
+                datetime.now(UTC).isoformat(),
+            ],
+        )
+    except Exception:
+        logger.warning("screening readiness cache write failed", exc_info=True)
+
+
+def warm_screening_readiness_cache(
+    duck: DuckDBStore, sqlite: SQLiteStore,
+) -> dict | None:
+    """Compute and persist the screening decision when no fresh cache exists.
+
+    Startup maintenance calls this off the web request path so the first
+    user-triggered screening run normally hits the persistent cache instead
+    of paying the full data-quality scan inline.
+    """
+    fingerprint = screening_readiness_cache_key(duck, sqlite)
+    if not fingerprint:
+        return None
+    cached = load_screening_readiness_cache(sqlite, fingerprint)
+    if cached is not None:
+        return cached
+    decision = screening_readiness(duck, sqlite)
+    store_screening_readiness_cache(sqlite, fingerprint, decision)
+    return decision
+
+
+
 
 # Fraction of a stock's observed window that may lack bars before the
 # calendar check fails. Suspensions legitimately produce zero bars on
@@ -638,64 +740,153 @@ def minimum_data_readiness(
 
 
 def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> list[str]:
-    """Fail closed if materialized inputs or snapshots lost their source graph."""
+    """Fail closed if materialized inputs or snapshots lost their source graph.
+
+    2026-08-30 提速：原实现把约 957 万条 evidence 行全部拉回 Python 再逐股
+    判空，正式库单次约 25 秒。改为在 DuckDB 内先按每只股票所需的
+    raw/qfq 最新交易日、完整财务报告期裁剪 evidence，再聚合出缺失股票。
+    语义与原实现一致（新股/停牌股仍豁免），结果只返回缺失代码。
+    """
     if not readiness_rows:
         return []
-    codes = [row["stock_code"] for row in readiness_rows]
-    slots = ", ".join("?" for _ in codes)
     rows = duck.read_query(
-        f"""SELECT audit.stock_code, audit.report_date, audit.field_name, batch.data_type
-             FROM source_audit audit
-             JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
-             JOIN raw_response_archive raw ON raw.raw_response_hash = audit.raw_response_hash
-             WHERE audit.stock_code IN ({slots}) AND octet_length(raw.payload) > 0
-               AND (audit.field_name IN (
-                   'latest_close', 'total_assets', 'total_liabilities', 'total_equity',
-                   'total_equity_parent', 'revenue', 'parent_net_profit', 'cf_from_operating'
-               ) OR batch.data_type = 'indicator_snapshot')""",
-        codes,
+        """
+        WITH raw AS (
+            SELECT stock_code, MAX(trade_date) AS last_date
+            FROM price_daily_raw WHERE close IS NOT NULL GROUP BY stock_code
+        ), qfq AS (
+            SELECT stock_code, MAX(trade_date) AS last_date
+            FROM price_daily_qfq WHERE close IS NOT NULL GROUP BY stock_code
+        ), complete_financials AS (
+            SELECT bs.stock_code, MAX(bs.report_date) AS report_date
+            FROM balance_sheet bs
+            JOIN income_statement ic
+              ON ic.stock_code = bs.stock_code AND ic.report_date = bs.report_date
+            JOIN cash_flow cf
+              ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
+            WHERE bs.total_assets IS NOT NULL
+              AND bs.total_liabilities IS NOT NULL
+              AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
+              AND ic.revenue IS NOT NULL
+              AND ic.parent_net_profit IS NOT NULL
+              AND cf.cf_from_operating IS NOT NULL
+            GROUP BY bs.stock_code
+        ), base AS (
+            SELECT m.stock_code,
+                   m.listing_date,
+                   raw.last_date AS raw_last_date,
+                   qfq.last_date AS qfq_last_date,
+                   complete_financials.report_date AS financial_report_date
+            FROM stock_meta m
+            LEFT JOIN raw ON raw.stock_code = m.stock_code
+            LEFT JOIN qfq ON qfq.stock_code = m.stock_code
+            LEFT JOIN complete_financials ON complete_financials.stock_code = m.stock_code
+            WHERE m.is_listed IS TRUE
+        ), evidence AS (
+            SELECT base.stock_code,
+                   audit.report_date,
+                   audit.field_name,
+                   batch.data_type
+            FROM base
+            JOIN source_audit audit ON audit.stock_code = base.stock_code
+            JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+            JOIN raw_response_archive raw ON raw.raw_response_hash = audit.raw_response_hash
+            WHERE OCTET_LENGTH(raw.payload) > 0
+              AND (
+                  (audit.field_name = 'latest_close'
+                   AND audit.report_date IN (base.raw_last_date, base.qfq_last_date))
+                  OR (
+                      audit.field_name IN (
+                          'total_assets', 'total_liabilities', 'total_equity',
+                          'total_equity_parent', 'revenue', 'parent_net_profit',
+                          'cf_from_operating'
+                      )
+                      AND audit.report_date = base.financial_report_date
+                      AND batch.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                  )
+                  OR (
+                      batch.data_type = 'indicator_snapshot'
+                      AND audit.report_date = base.financial_report_date
+                  )
+              )
+        ), flags AS (
+            SELECT base.stock_code,
+                   base.listing_date,
+                   base.raw_last_date,
+                   base.qfq_last_date,
+                   base.financial_report_date,
+                   BOOL_OR(
+                       evidence.data_type = 'price_daily_raw'
+                       AND evidence.field_name = 'latest_close'
+                       AND evidence.report_date = base.raw_last_date
+                   ) AS raw_price_ok,
+                   BOOL_OR(
+                       evidence.data_type = 'price_daily_qfq'
+                       AND evidence.field_name = 'latest_close'
+                       AND evidence.report_date = base.qfq_last_date
+                   ) AS qfq_price_ok,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                       AND evidence.field_name = 'total_assets'
+                   ) AS has_total_assets,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                       AND evidence.field_name = 'total_liabilities'
+                   ) AS has_total_liabilities,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                       AND evidence.field_name = 'revenue'
+                   ) AS has_revenue,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                       AND evidence.field_name = 'parent_net_profit'
+                   ) AS has_parent_net_profit,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                       AND evidence.field_name = 'cf_from_operating'
+                   ) AS has_cf_from_operating,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type IN ('balance_sheet', 'income_statement', 'cash_flow')
+                       AND evidence.field_name IN ('total_equity', 'total_equity_parent')
+                   ) AS has_equity,
+                   BOOL_OR(
+                       evidence.report_date = base.financial_report_date
+                       AND evidence.data_type = 'indicator_snapshot'
+                   ) AS snapshot_ok
+            FROM base
+            LEFT JOIN evidence ON evidence.stock_code = base.stock_code
+            GROUP BY base.stock_code, base.listing_date, base.raw_last_date,
+                     base.qfq_last_date, base.financial_report_date
+        )
+        SELECT flags.stock_code
+        FROM flags
+        WHERE NOT (
+            COALESCE(flags.raw_price_ok, FALSE)
+            AND COALESCE(flags.qfq_price_ok, FALSE)
+            AND COALESCE(flags.has_total_assets, FALSE)
+            AND COALESCE(flags.has_total_liabilities, FALSE)
+            AND COALESCE(flags.has_revenue, FALSE)
+            AND COALESCE(flags.has_parent_net_profit, FALSE)
+            AND COALESCE(flags.has_cf_from_operating, FALSE)
+            AND COALESCE(flags.has_equity, FALSE)
+            AND COALESCE(flags.snapshot_ok, FALSE)
+        )
+          -- 新股（上市不足 90 天）与停牌股（最近 bar 超过 7 天前，无法抓取
+          -- 新数据）的原始响应仍在积累/冻结中，属披露项，不阻断筛选。
+          AND (flags.listing_date IS NULL
+               OR flags.listing_date < CURRENT_DATE - INTERVAL '90 days')
+          AND (flags.raw_last_date IS NULL
+               OR flags.raw_last_date >= CURRENT_DATE - INTERVAL '7 days')
+        ORDER BY flags.stock_code
+        """
     )
-    evidence: dict[str, set[tuple[str, str, str]]] = {}
-    for row in rows:
-        evidence.setdefault(row["stock_code"], set()).add((
-            str(row["report_date"])[:10], row["field_name"], row["data_type"],
-        ))
-    missing: list[str] = []
-    financial_fields = {
-        "total_assets", "total_liabilities", "revenue", "parent_net_profit", "cf_from_operating",
-    }
-    for stock in readiness_rows:
-        code = stock["stock_code"]
-        record = evidence.get(code, set())
-        raw_date = str(stock.get("raw_last_date") or "")[:10]
-        qfq_date = str(stock.get("qfq_last_date") or "")[:10]
-        report_date = str(stock.get("financial_report_date") or "")[:10]
-        prices_ok = {
-            (raw_date, "latest_close", "price_daily_raw"),
-            (qfq_date, "latest_close", "price_daily_qfq"),
-        } <= record
-        available_financial_fields = {
-            field for date, field, data_type in record
-            if date == report_date and data_type in {"balance_sheet", "income_statement", "cash_flow"}
-        }
-        financial_ok = financial_fields <= available_financial_fields and bool(
-            {"total_equity", "total_equity_parent"} & available_financial_fields
-        )
-        snapshot_ok = any(
-            date == report_date and data_type == "indicator_snapshot"
-            for date, _field, data_type in record
-        )
-        # 新股（上市不足 90 天）与停牌股（最近 bar 超过 7 天前，无法抓取新
-        # 数据）的原始响应仍在积累/冻结中，属披露项，不阻断筛选。
-        listing = str(stock.get("listing_date") or "")[:10]
-        is_new_listing = bool(listing) and listing >= (date.today() - timedelta(days=90)).isoformat()
-        raw_last = str(stock.get("raw_last_date") or "")[:10]
-        is_stale_suspended = bool(raw_last) and raw_last < (date.today() - timedelta(days=7)).isoformat()
-        if is_new_listing or is_stale_suspended:
-            continue
-        if not prices_ok or not financial_ok or not snapshot_ok:
-            missing.append(code)
-    return missing
+    return [row["stock_code"] for row in rows]
 
 
 _ARCHIVE_HASH_CACHE_TTL_SECONDS = 60.0
@@ -707,10 +898,11 @@ def _archive_hash_mismatch_rows(
 ) -> tuple[int, bool]:
     """Count archived payloads failing SHA-256 verification, cached briefly.
 
-    Returns (mismatch_rows, cache_hit). Hot read paths reuse the process-local
-    result for a short TTL instead of rescanning every archived BLOB per
-    request. Fail closed: an unreadable archive reports one mismatch so
-    callers still surface LINEAGE_INVALID, and failures are never cached.
+    Returns (mismatch_rows, cache_hit). Rows written by the adapters are
+    hashed before insert and carry integrity_verified=TRUE (schema v7), so a
+    cold scan only re-checks the rows that have not been marked verified yet.
+    This keeps the fail-closed check while avoiding a ~40s read of all 6GB+
+    of archived payloads on every process start. Failures are never cached.
     """
     cache_key = str(duck.db_path)
     now = time.monotonic()
@@ -719,11 +911,19 @@ def _archive_hash_mismatch_rows(
         if cached is not None and now - cached[0] < _ARCHIVE_HASH_CACHE_TTL_SECONDS:
             return cached[1], True
     try:
-        mismatches = sum(
-            1
-            for archive in duck.read_query(
+        try:
+            rows = duck.read_query(
+                "SELECT raw_response_hash, payload FROM raw_response_archive "
+                "WHERE payload IS NOT NULL AND COALESCE(integrity_verified, FALSE) = FALSE"
+            )
+        except Exception:
+            # 兼容尚无 integrity_verified 列的旧测试库/历史 schema。
+            rows = duck.read_query(
                 "SELECT raw_response_hash, payload FROM raw_response_archive WHERE payload IS NOT NULL"
             )
+        mismatches = sum(
+            1
+            for archive in rows
             if not isinstance(archive["payload"], bytes)
             or hashlib.sha256(archive["payload"]).hexdigest() != archive["raw_response_hash"]
         )
@@ -927,38 +1127,41 @@ def build_data_quality_status(
     )[0]
     lineage = duck.read_query(
         """
-        WITH audits AS (
-            SELECT
-                COUNT(*) FILTER (WHERE LENGTH(s.raw_response_hash) != 64) AS invalid_hash_rows,
-                COUNT(*) FILTER (WHERE f.batch_id IS NULL) AS orphan_batch_rows,
-                COUNT(*) FILTER (
-                    WHERE LENGTH(s.raw_response_hash) = 64 AND archive.raw_response_hash IS NULL
-                ) AS audit_archive_gap_rows
-                , COUNT(*) FILTER (
-                    WHERE archive.raw_response_hash IS NOT NULL
-                      AND (archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0)
-                ) AS empty_archive_payload_rows
-            FROM source_audit s
-            LEFT JOIN fetch_batch f ON s.fetch_batch_id = f.batch_id
-            LEFT JOIN raw_response_archive archive ON s.raw_response_hash = archive.raw_response_hash
-        ), batches AS (
-            SELECT COUNT(*) AS batch_archive_gap_rows
-            FROM fetch_batch batch
-            LEFT JOIN raw_response_archive archive ON batch.raw_response_hash = archive.raw_response_hash
-            WHERE archive.raw_response_hash IS NULL
-        )
-        SELECT audits.*, batches.batch_archive_gap_rows,
-               audits.audit_archive_gap_rows + batches.batch_archive_gap_rows
-                 + audits.empty_archive_payload_rows AS archive_gap_rows
-        FROM audits CROSS JOIN batches
+        SELECT
+            (SELECT COUNT(*) FROM source_audit
+             WHERE LENGTH(raw_response_hash) != 64) AS invalid_hash_rows,
+            (SELECT COUNT(*) FROM source_audit s
+             WHERE s.fetch_batch_id IS NULL
+                OR NOT EXISTS (
+                    SELECT 1 FROM fetch_batch f WHERE f.batch_id = s.fetch_batch_id
+                )) AS orphan_batch_rows,
+            (SELECT COUNT(*) FROM source_audit s
+             WHERE LENGTH(s.raw_response_hash) = 64
+               AND NOT EXISTS (
+                   SELECT 1 FROM raw_response_archive archive
+                   WHERE archive.raw_response_hash = s.raw_response_hash
+               )) AS audit_archive_gap_rows,
+            (SELECT COUNT(*) FROM source_audit s
+             WHERE EXISTS (
+                 SELECT 1 FROM raw_response_archive archive
+                 WHERE archive.raw_response_hash = s.raw_response_hash
+                   AND (archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0)
+             )) AS empty_archive_payload_rows,
+            (SELECT COUNT(*) FROM fetch_batch batch
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM raw_response_archive archive
+                 WHERE archive.raw_response_hash = batch.raw_response_hash
+             )) AS batch_archive_gap_rows
         """
     )[0]
-    # Do not trust a mutable verification flag for an immutable source record.
-    # A full payload rescan still runs on cache expiry or on an explicit
-    # refresh request; the short process-local TTL only keeps hot read paths
-    # from rescanning every archived BLOB on each request. Verification is
-    # fail closed: an unreadable archive is reported as a mismatch so callers
-    # still surface LINEAGE_INVALID.
+    lineage["archive_gap_rows"] = (
+        lineage["audit_archive_gap_rows"]
+        + lineage["batch_archive_gap_rows"]
+        + lineage["empty_archive_payload_rows"]
+    )
+    # integrity_verified 标记由写路径在插入前校验；冷启动只重算未标记行，
+    # 避免把 6GB+ 归档 BLOB 全部读回。未标记行仍逐条验证，验证失败继续
+    # 报 LINEAGE_INVALID（fail closed）。
     lineage["hash_mismatch_rows"], hash_check_cached = _archive_hash_mismatch_rows(
         duck, force_refresh=force_archive_hash_recheck
     )

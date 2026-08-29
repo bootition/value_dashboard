@@ -142,6 +142,7 @@ describe('ScreeningPage 常驻范围条件（范围并入筛选条件，去掉�
         include_suspended: false,
         min_listing_years: 1,
       }),
+      expect.objectContaining({ timeout: 120_000 }),
     )
   })
 })

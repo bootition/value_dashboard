@@ -181,3 +181,74 @@ def test_run_under_duckdb_write_lock_marks_auto_update(
 
     assert response.status_code == 200
     assert response.json()["auto_update_in_progress"] is True
+
+
+def test_gate_uses_fresh_persisted_readiness_cache_with_gate_shape(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    _seed_screenable(duckdb_store, sqlite_store)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+    from app.core.data_quality import (
+        screening_readiness_cache_key,
+        store_screening_readiness_cache,
+    )
+
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert fingerprint is not None
+    store_screening_readiness_cache(sqlite_store, fingerprint, {
+        "ready": True,
+        "readiness": {"ready": True},
+        "warning_codes": [],
+    })
+
+    gate = _require_current_screenability(_FakeRequest(duckdb_store, sqlite_store))
+
+    # 缓存的是 screening_readiness 决策；请求链需要 gate 形状。
+    assert gate == {"lock_active": False, "data_as_of": None}
+
+
+def test_gate_raises_409_from_fresh_persisted_not_ready_cache(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    _seed_screenable(duckdb_store, sqlite_store)
+    from app.core.data_quality import (
+        screening_readiness_cache_key,
+        store_screening_readiness_cache,
+    )
+
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert fingerprint is not None
+    store_screening_readiness_cache(sqlite_store, fingerprint, {
+        "ready": False,
+        "readiness": {"ready": False},
+        "warning_codes": ["LINEAGE_INVALID"],
+    })
+
+    with pytest.raises(HTTPException) as exc:
+        _require_current_screenability(_FakeRequest(duckdb_store, sqlite_store))
+
+    assert exc.value.status_code == 409
+    assert exc.value.detail["reason_code"] == "minimum_data_not_ready"
+
+
+def test_warm_screening_readiness_cache_round_trip(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    _seed_screenable(duckdb_store, sqlite_store)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+    from app.core.data_quality import (
+        load_screening_readiness_cache,
+        screening_readiness_cache_key,
+        warm_screening_readiness_cache,
+    )
+
+    decision = warm_screening_readiness_cache(duckdb_store, sqlite_store)
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store)
+
+    assert decision is not None
+    assert decision["ready"] is True
+    assert fingerprint is not None
+    cached = load_screening_readiness_cache(sqlite_store, fingerprint)
+    assert cached is not None
+    assert cached["ready"] is True
+    assert cached["warning_codes"] == []

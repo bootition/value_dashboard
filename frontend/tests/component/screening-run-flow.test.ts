@@ -117,6 +117,7 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     expect(post).toHaveBeenCalledWith(
       '/api/screening/run',
       expect.objectContaining({ rule_id: 1, rule_version: 1, min_listing_years: 1 }),
+      expect.objectContaining({ timeout: 120_000 }),
     )
     expect(wrapper.text()).toContain('600519')
     expect(wrapper.text()).toContain('贵州茅台')
@@ -190,6 +191,7 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     expect(post).toHaveBeenCalledWith(
       '/api/screening/run',
       expect.objectContaining({ rule_id: 42, rule_version: 1 }),
+      expect.objectContaining({ timeout: 120_000 }),
     )
     expect(wrapper.text()).toContain('600519')
   })
@@ -261,6 +263,7 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     expect(post).toHaveBeenCalledWith(
       '/api/screening/run',
       expect.objectContaining({ rule_id: 1, rule_version: 1 }),
+      expect.objectContaining({ timeout: 120_000 }),
     )
     // 快照口径标注可见（截至日期来自 data_as_of）
     expect(wrapper.text()).toContain('2026-08-11')
@@ -322,6 +325,7 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
       expect(post).toHaveBeenCalledWith(
         '/api/screening/run',
         expect.objectContaining({ strict_only: true }),
+        expect.objectContaining({ timeout: 120_000 }),
       )
       expect(wrapper.text()).toContain('严格可信模式无匹配')
       expect(wrapper.text()).toContain('strict 血缘记录')
