@@ -19,7 +19,7 @@ def _check_report(blocked: bool = False) -> dict:
 def _stub_network_steps(updater: IncrementalUpdater) -> None:
     """Replace every network-touching step except the one under test."""
     updater.run_incremental_check = lambda **kwargs: _check_report()
-    updater._check_new_announcements = lambda persist=False: {
+    updater._check_new_announcements = lambda persist=False, **kwargs: {
         "status": "available", "affected_stock_codes": [],
         "affected_announcements": {}, "all_new_announcements": {},
     }

@@ -22,6 +22,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -239,6 +240,7 @@ class CNINFOAdapter(BaseAdapter):
         page_size: int = 30,
         max_pages: int = 20,
         column: str | None = None,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """调用 CNINFO 公告搜索 API，自动翻页。
 
@@ -331,6 +333,16 @@ class CNINFOAdapter(BaseAdapter):
                 or payload.get("totalAnnouncement")
                 or 0
             )
+            if progress_cb is not None:
+                progress_cb({
+                    "page": page_num,
+                    "page_size": actual_page_size,
+                    "total_pages": (
+                        max(1, (total_record + actual_page_size - 1) // actual_page_size)
+                        if total_record else 0
+                    ),
+                    "category": category or "general",
+                })
             if total_record and page_num * actual_page_size >= total_record:
                 break
             if actual_page_size < page_size and not total_record:
@@ -438,6 +450,7 @@ class CNINFOAdapter(BaseAdapter):
                     page_size=page_size,
                     max_pages=max_pages,
                     column="szse",
+                    progress_cb=request.extra_params.get("progress_cb"),
                 )
                 seen_ids: set[str] = set()
                 for item in items:
@@ -471,6 +484,7 @@ class CNINFOAdapter(BaseAdapter):
                     end_date=request.end_date,
                     page_size=page_size,
                     max_pages=max_pages,
+                    progress_cb=request.extra_params.get("progress_cb"),
                 )
                 all_data.extend(items)
             except Exception as e:

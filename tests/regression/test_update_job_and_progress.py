@@ -28,7 +28,7 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
         "new_trading_days": [], "retry_tasks": [], "latest_local_price_date": "2026-07-20",
         "announcement_check": {"status": "available"}, "needs_update": True, "blocked": False,
     }
-    updater._check_new_announcements = lambda persist=False: {
+    updater._check_new_announcements = lambda persist=False, **kwargs: {
         "status": "available", "affected_stock_codes": [],
         "affected_announcements": {}, "all_new_announcements": {},
     }

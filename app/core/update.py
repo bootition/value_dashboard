@@ -442,9 +442,23 @@ class IncrementalUpdater:
         share_capital_changed = shares_before != shares_after
         report["share_capital_changed"] = share_capital_changed
 
-        announcement_check = self._check_new_announcements(persist=True)
+        announcement_check = self._check_new_announcements(persist=True, detail_cb=detail_cb)
         report["check"]["announcement_check"] = announcement_check
-        announcement_codes = announcement_check.get("affected_stock_codes", [])
+        # 上一轮财务刷新失败/pending 的公告已持久化在 retry_list。把它们
+        # 并入本轮待刷新集合：游标推进后不再重复翻 45 天公告，pending 也不丢。
+        pending_items = self._pending_announcement_items()
+        pending_codes = sorted({str(item["stock_code"]) for item in pending_items})
+        for item in pending_items:
+            code = str(item["stock_code"])
+            announcement_check.setdefault("affected_announcements", {}).setdefault(code, [])
+            existing_ids = {
+                str(existing.get("announcement_id"))
+                for existing in announcement_check["affected_announcements"][code]
+            }
+            if item.get("announcement_id") not in existing_ids:
+                announcement_check["affected_announcements"][code].append(item)
+        announcement_codes = sorted(set(announcement_check.get("affected_stock_codes", [])) | set(pending_codes))
+        announcement_check["affected_stock_codes"] = announcement_codes
         financials: dict[str, Any] | None = None
         if announcement_codes:
             financials = self._refresh_financials(announcement_codes, detail_cb=detail_cb)
@@ -466,6 +480,7 @@ class IncrementalUpdater:
             for code, announcements in announcement_check["affected_announcements"].items():
                 if code in refreshed_codes:
                     self._mark_announcements_seen(code, announcements)
+                    self._resolve_announcement_retries(code)
                 else:
                     reason = (
                         "financial data source not yet ready; announcement remains pending"
@@ -488,21 +503,11 @@ class IncrementalUpdater:
                 continue
             self._mark_announcements_seen(code, announcements)
 
-        # 只有本轮发现的财务公告全部成功入册（无 failed/pending）才推进
-        # 公告检查游标；否则下一轮会重新发现未入册公告，断点不丢失。
-        financials_settled = (
-            not announcement_codes
-            or (
-                financials is not None
-                and not financials.get("failed_codes")
-                and not financials.get("pending_codes")
-                and len(financials.get("succeeded_codes", [])) == len(announcement_codes)
-            )
-        )
+        # 财务公告处理完即推进公告检查游标。失败/pending 已写入
+        # retry_list，下一轮直接从 retry_list 续传，不必再翻 45 天公告。
         if (
             announcement_check.get("status") == "available"
             and not announcement_check.get("errors")
-            and financials_settled
         ):
             self._save_announcement_cursor()
 
@@ -947,6 +952,7 @@ class IncrementalUpdater:
         *,
         persist: bool = True,
         lookback_days: int = 3,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Compare remote announcement IDs without mutating during a check-only run.
 
@@ -976,9 +982,28 @@ class IncrementalUpdater:
         financial_max_pages = getattr(self, "announcement_financial_max_pages", 450)
         general_max_pages = getattr(self, "announcement_general_max_pages", 40)
 
+        category_labels = {
+            "semi_annual": "半年报", "q1": "一季报", "q3": "三季报",
+            "annual": "年报",
+        }
+
         def fetch_items(
             category: str | None, start_date: str, max_pages: int,
         ) -> tuple[list[dict[str, Any]], str | None]:
+            label = category_labels.get(category or "", "近期公告")
+
+            def page_progress(info: dict[str, Any]) -> None:
+                if detail_cb is None:
+                    return
+                total_pages = int(info.get("total_pages") or 0)
+                detail_cb("announcements", {
+                    "step": "announcements",
+                    "label": f"公告检查·{label}",
+                    "done": int(info.get("page") or 0),
+                    "total": total_pages,
+                    "current": f"第{int(info.get('page') or 0)}页/{total_pages or '?'}",
+                })
+
             try:
                 result = self.adapter_mgr.fetch(FetchRequest(
                     data_type="announcements",
@@ -988,6 +1013,7 @@ class IncrementalUpdater:
                         "category": category,
                         "page_size": 30,
                         "max_pages": max_pages,
+                        "progress_cb": page_progress,
                     },
                 ))
             except Exception as error:
@@ -1114,6 +1140,46 @@ class IncrementalUpdater:
                     for item in announcements
                 ],
             )
+
+    def _pending_announcement_items(self) -> list[dict[str, Any]]:
+        """Return durable pending financial-announcement markers from retry_list."""
+        try:
+            rows = self.sqlite.query(
+                "SELECT stock_code, extra_json FROM retry_list "
+                "WHERE data_type = 'announcements'"
+            )
+        except Exception:
+            return []
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            code = str(row.get("stock_code") or "").strip()
+            if not code:
+                continue
+            ids: list[str] = []
+            try:
+                ids = json.loads(row.get("extra_json") or "{}").get("announcement_ids", [])
+            except (json.JSONDecodeError, TypeError):
+                ids = []
+            if not ids:
+                ids = [f"pending-{code}"]
+            for announcement_id in ids:
+                items.append({
+                    "stock_code": code,
+                    "announcement_id": str(announcement_id),
+                    "title": "pending financial announcement",
+                    "announcement_time": "",
+                })
+        return items
+
+    def _resolve_announcement_retries(self, stock_code: str) -> None:
+        """Remove announcement pending markers once the stock's refresh succeeded."""
+        try:
+            self.sqlite.execute(
+                "DELETE FROM retry_list WHERE stock_code = ? AND data_type = 'announcements'",
+                [stock_code],
+            )
+        except Exception as error:
+            logger.warning("清理公告 retry %s 失败: %s", stock_code, error)
 
     def refetch_financial_trio(self, stock_code: str) -> list[dict[str, Any]]:
         """Refresh one stock's three statements with one DuckDB transaction.
