@@ -115,6 +115,30 @@ def test_non_financial_announcement_is_registered_without_financial_refresh(duck
     ) == [{"announcement_id": "notice-2", "stock_code": "000001"}]
 
 
+def test_announcement_retry_cleanup_requires_registered_ids(
+    duckdb_store, sqlite_store,
+) -> None:
+    """Q1 完整但中报公告未入册时，retry 不得被误清。"""
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    sqlite_store.execute(
+        """INSERT INTO retry_list
+           (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
+           VALUES ('000001', 'announcements', 'cninfo',
+                   'financial refresh failed; announcement remains pending', 0,
+                   CURRENT_TIMESTAMP, ?)""",
+        ['{"announcement_ids": ["a1", "a2"]}'],
+    )
+    assert updater._cleanup_completed_announcement_retries() == 0
+    updater._mark_announcements_seen("000001", [
+        {"announcement_id": "a1", "title": "x", "announcement_time": ""},
+        {"announcement_id": "a2", "title": "x", "announcement_time": ""},
+    ])
+    assert updater._cleanup_completed_announcement_retries() == 1
+    assert sqlite_store.query(
+        "SELECT COUNT(*) AS c FROM retry_list WHERE data_type='announcements'"
+    ) == [{"c": 0}]
+
+
 def test_classify_announcement_financial_keywords() -> None:
     assert classify_announcement("2026年半年度报告") == "financial"
     assert classify_announcement("2025年年度报告") == "financial"

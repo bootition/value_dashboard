@@ -2199,49 +2199,44 @@ class IncrementalUpdater:
         return len(ids)
 
     def _cleanup_completed_announcement_retries(self) -> int:
-        """Drop announcement-pending entries whose financial data is now complete.
+        """Drop announcement-pending entries only after their filings are registered.
 
-        An announcements retry entry is a pending marker written when a
-        financial-triggering announcement could not be refreshed (PRD §7.4).
-        Once the stock's three statements share a complete period within
-        18 months, the marker's purpose is fulfilled and it must not linger
-        in the visible retry list forever.
+        2026-08-29 修复：旧逻辑只要“三表在 18 个月内有一个共同完整期”就清理，
+        导致 Q1 已完整但 Q2 中报仍 pending 的股票被误清，retry 永久丢失。
+        现在以 announcement_registry 为准：retry.extra_json 里的公告 ID
+        全部已入册，才说明对应财务刷新真正成功过。
         """
         rows = self.sqlite.query(
-            "SELECT id, stock_code FROM retry_list WHERE data_type = 'announcements'"
+            "SELECT id, stock_code, extra_json FROM retry_list "
+            "WHERE data_type = 'announcements'"
         )
         if not rows:
             return 0
-        codes = [row["stock_code"] for row in rows]
-        slots = ", ".join("?" for _ in codes)
-        try:
-            complete = self.duck.read_query(
-                f"""SELECT bs.stock_code FROM balance_sheet bs
-                    JOIN income_statement ic
-                      ON ic.stock_code = bs.stock_code AND ic.report_date = bs.report_date
-                    JOIN cash_flow cf
-                      ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
-                    WHERE bs.stock_code IN ({slots})
-                      AND bs.report_date >= CURRENT_DATE - INTERVAL '18 months'
-                    GROUP BY bs.stock_code""",
-                codes,
+        completed_ids: list[int] = []
+        for row in rows:
+            try:
+                payload = json.loads(row.get("extra_json") or "{}")
+                announcement_ids = payload.get("announcement_ids") or []
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not announcement_ids:
+                continue
+            slots = ", ".join("?" for _ in announcement_ids)
+            registered = self.sqlite.query(
+                f"SELECT COUNT(*) AS c FROM announcement_registry "
+                f"WHERE announcement_id IN ({slots})",
+                announcement_ids,
             )
-        except Exception as error:
-            logger.warning("查询公告待处理财务状态失败: %s", error)
-            return 0
-        if not complete:
-            return 0
-        complete_codes = {row["stock_code"] for row in complete}
-        ids = [row["id"] for row in rows if row["stock_code"] in complete_codes]
-        if ids:
+            if registered and int(registered[0]["c"]) >= len(set(announcement_ids)):
+                completed_ids.append(int(row["id"]))
+        if completed_ids:
+            slots = ", ".join("?" for _ in completed_ids)
             self.sqlite.execute(
-                "DELETE FROM retry_list WHERE id IN ({})".format(
-                    ", ".join("?" for _ in ids)
-                ),
-                ids,
+                f"DELETE FROM retry_list WHERE id IN ({slots})",
+                completed_ids,
             )
-            logger.info("[增量] 清理 %d 条财务已就绪的公告待处理", len(ids))
-        return len(ids)
+            logger.info("[增量] 清理 %d 条已入册的公告待处理", len(completed_ids))
+        return len(completed_ids)
 
     def _retry_failed_tasks(self, tasks: list[dict]) -> dict:
         """重试失败任务"""
