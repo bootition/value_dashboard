@@ -139,6 +139,23 @@ def test_announcement_retry_cleanup_requires_registered_ids(
     ) == [{"c": 0}]
 
 
+def test_legal_empty_placement_funding_missing_is_resolved(
+    duckdb_store, sqlite_store,
+) -> None:
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    sqlite_store.execute(
+        """INSERT INTO missing_list (stock_code, field_name, reason_code)
+           VALUES ('000001', 'placement_funding', 'source_empty'),
+                  ('920000', 'placement_funding', 'source_empty')"""
+    )
+    assert updater._resolve_legal_empty_funding_missing() == 1
+    rows = sqlite_store.query(
+        "SELECT stock_code, resolved_at FROM missing_list ORDER BY stock_code"
+    )
+    assert rows[0]["resolved_at"] is not None
+    assert rows[1]["resolved_at"] is None
+
+
 def test_classify_announcement_financial_keywords() -> None:
     assert classify_announcement("2026年半年度报告") == "financial"
     assert classify_announcement("2025年年度报告") == "financial"

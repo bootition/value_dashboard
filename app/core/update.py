@@ -574,6 +574,7 @@ class IncrementalUpdater:
         # 5.1 融资事件 + 指数估值低频域（数据补全 2026-08-25）：
         #     有界续传 / 每日 1 次；失败保留旧值并进入独立 retry/missing，绝不阻断主链。
         report_step("funding", self._refresh_funding())
+        self._resolve_legal_empty_funding_missing()
         report_step("index_valuation", self._refresh_index_valuation())
 
         # 6. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
@@ -2197,6 +2198,40 @@ class IncrementalUpdater:
         )
         logger.info("[增量] 清理 %d 条无重试路径的失败任务", len(ids))
         return len(ids)
+
+    def _resolve_legal_empty_funding_missing(self) -> int:
+        """Resolve A-share placement_funding source_empty markers.
+
+        Eastmoney BonusFinancing 页面为空代表该公司没有增发/配股事件，
+        属于合法空结果，不应长期挂在 missing_list。北交所（4/8/9 开头）
+        没有东财交叉源，继续保留为如实披露缺口。
+        """
+        try:
+            rows = self.sqlite.query(
+                """SELECT COUNT(*) AS c FROM missing_list
+                   WHERE field_name = 'placement_funding'
+                     AND reason_code = 'source_empty'
+                     AND resolved_at IS NULL
+                     AND stock_code NOT LIKE '4%'
+                     AND stock_code NOT LIKE '8%'
+                     AND stock_code NOT LIKE '9%'"""
+            )
+            count = int(rows[0]["c"]) if rows else 0
+            if count:
+                self.sqlite.execute(
+                    """UPDATE missing_list SET resolved_at = CURRENT_TIMESTAMP
+                       WHERE field_name = 'placement_funding'
+                         AND reason_code = 'source_empty'
+                         AND resolved_at IS NULL
+                         AND stock_code NOT LIKE '4%'
+                         AND stock_code NOT LIKE '8%'
+                         AND stock_code NOT LIKE '9%'"""
+                )
+                logger.info("已解决 %d 条 A 股无增发/配股事件的合法缺失", count)
+            return count
+        except Exception as error:
+            logger.warning("解决合法空融资缺失失败: %s", error)
+            return 0
 
     def _cleanup_completed_announcement_retries(self) -> int:
         """Drop announcement-pending entries only after their filings are registered.
