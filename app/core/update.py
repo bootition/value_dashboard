@@ -468,7 +468,7 @@ class IncrementalUpdater:
         # 不进入财务刷新，也不在页面制造噪音。
         unsupported_codes = {
             code for code in announcement_codes
-            if code.startswith(("200", "900"))
+            if self._is_b_share_stock(code)
         }
         if unsupported_codes:
             for code in sorted(unsupported_codes):
@@ -984,6 +984,24 @@ class IncrementalUpdater:
             logger.warning(f"获取最新价格日期失败: {e}")
         return None
 
+    def _is_b_share_stock(self, stock_code: str) -> bool:
+        """B 股没有免费财务主源，按代码段或名称后缀识别。
+
+        2026-08-30：日志发现 201872 这类深市 B 股不在 200/900 前缀规则内，
+        改为代码段 + stock_meta 名称后缀双重识别。
+        """
+        if stock_code.startswith(("200", "201", "900")):
+            return True
+        try:
+            rows = self.duck.read_query(
+                "SELECT name FROM stock_meta WHERE stock_code = ? "
+                "AND (name LIKE '%B' OR name LIKE '%B股')",
+                [stock_code],
+            )
+            return bool(rows)
+        except Exception:
+            return False
+
     @staticmethod
     def _current_expected_financial_period(now: datetime | None = None) -> str:
         """Return the report period that should already be published today.
@@ -1288,7 +1306,7 @@ class IncrementalUpdater:
         data_types = ("balance_sheet", "income_statement", "cash_flow")
         fetched: dict[str, tuple[Any, list[dict[str, Any]]]] = {}
         outcomes: list[dict[str, Any]] = []
-        if stock_code.startswith(("200", "900")):
+        if self._is_b_share_stock(stock_code):
             return [
                 {
                     "status": "failed", "data_type": data_type,

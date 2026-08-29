@@ -177,6 +177,20 @@ def test_legal_empty_placement_funding_missing_is_resolved(
     assert rows[1]["resolved_at"] is None
 
 
+def test_b_share_detection_uses_prefix_and_name_suffix() -> None:
+    updater = IncrementalUpdater.__new__(IncrementalUpdater)
+    updater.duck = type("FakeDuck", (), {
+        "read_query": lambda self, sql, params: (
+            [{"name": "深中集B"}] if params and params[0] == "000001" else []
+        ),
+    })()
+    assert updater._is_b_share_stock("200011") is True
+    assert updater._is_b_share_stock("201872") is True
+    assert updater._is_b_share_stock("900901") is True
+    assert updater._is_b_share_stock("000001") is True  # name suffix B
+    assert updater._is_b_share_stock("600519") is False
+
+
 def test_classify_announcement_financial_keywords() -> None:
     assert classify_announcement("2026年半年度报告") == "financial"
     assert classify_announcement("2025年年度报告") == "financial"
