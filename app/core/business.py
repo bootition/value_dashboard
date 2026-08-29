@@ -282,7 +282,12 @@ class BusinessOverviewUpdater:
             self._mark_refreshed()
         return report
 
-    def refresh_if_due(self, max_stocks: int = 0) -> dict[str, Any]:
+    def refresh_if_due(
+        self,
+        max_stocks: int = 0,
+        *,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """低频自动集成入口：仅当启用且刷新间隔到期时执行（最小安全）。
 
         - 默认启用，但每轮只处理有界数量，避免低频源拖慢启动更新。
@@ -305,7 +310,22 @@ class BusinessOverviewUpdater:
             "business_overview_max_stocks_per_run", default=20,
         ))
         limit = max_stocks or configured_max
-        report = self.update_many(due_codes[:limit])
+        targets = due_codes[:limit]
+        if progress_cb is None:
+            report = self.update_many(targets)
+        else:
+            completed = 0
+
+            def cb(code: str, outcome: dict[str, Any]) -> None:
+                nonlocal completed
+                completed += 1
+                progress_cb(code, {
+                    **outcome,
+                    "done": completed,
+                    "total": len(targets),
+                })
+
+            report = self.update_many(targets, progress_cb=cb)
         if report["status"] in {"success", "partial"}:
             self._mark_refreshed()
         return report

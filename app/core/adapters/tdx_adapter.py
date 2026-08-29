@@ -629,14 +629,31 @@ class TDXAdapter(BaseAdapter):
 
     @contextmanager
     def _tdx_session(self) -> Iterator[TdxClient | None]:
-        """通用 TDX 会话: from_best_host, 适用于 xdxr / 财报下载"""
+        """通用 TDX 会话: from_best_host 优先，失败后轮询已知主机。
+
+        2026-08-29 日志显示 from_best_host 选出的主机偶发 7709 超时，
+        但同一时刻其他主机可用。这里增加第二候选，避免单台抖动导致
+        xdxr 整个请求失败。
+        """
         client: TdxClient | None = None
         try:
-            client = TdxClient.from_best_host(timeout=10.0, auto_reconnect=True)
+            client = TdxClient.from_best_host(timeout=8.0, auto_reconnect=True)
         except (TdxConnectionError, TdxError, Exception) as e:
-            logger.warning("TDX 连接失败: %s", e)
-            yield None
-            return
+            logger.warning("TDX 最快主机连接失败，尝试已知主机: %s", e)
+            for host in _KNOWN_BARS_HOSTS:
+                try:
+                    candidate = TdxClient(
+                        host=host, timeout=8.0, auto_reconnect=True,
+                    )
+                    candidate.connect()
+                    client = candidate
+                    logger.info("TDX 回退主机连接成功: %s", host)
+                    break
+                except (TdxConnectionError, TdxError, Exception) as retry_error:
+                    logger.debug("TDX 主机 %s 不可用: %s", host, retry_error)
+            if client is None:
+                yield None
+                return
         try:
             yield client
         finally:

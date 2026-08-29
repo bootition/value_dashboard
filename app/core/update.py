@@ -476,7 +476,9 @@ class IncrementalUpdater:
                 if any(classify_announcement(item.get("title")) == "dividend" for item in items)
             })
             if market_action_codes:
-                actions = self._refresh_market_actions(market_action_codes)
+                actions = self._refresh_market_actions(
+                    market_action_codes, detail_cb=detail_cb,
+                )
                 report_step("market_actions", actions)
             # 只有真正写入新报告期的股票才登记公告；
             # 数据源延迟（pending）或刷新失败（failed）保持公告 pending 并记录重试
@@ -553,14 +555,14 @@ class IncrementalUpdater:
 
         # 3. 业务概览低频域（reports/67 独立域）：仅当自动集成启用且间隔到期
         #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
-        report_step("business_overview", self._refresh_business_overview())
+        report_step("business_overview", self._refresh_business_overview(detail_cb=detail_cb))
 
         # 4. 国债曲线低频域（reports/68 P3 独立基准域）：价格/财务优先后执行；
         #    失败保留旧值并进入独立 retry/missing，绝不阻断股票更新/筛选/readiness。
         report_step("treasury_curve", self._refresh_treasury_curve())
 
         # 5. 历史股本链 + 统计域（reports/68 P4）：有界续传；失败不阻断其他步骤
-        report_step("capital_history", self._refresh_capital_history())
+        report_step("capital_history", self._refresh_capital_history(detail_cb=detail_cb))
         report_step(
             "research_statistics",
             self._refresh_research_statistics(
@@ -593,7 +595,11 @@ class IncrementalUpdater:
         logger.info(f"增量更新完成: {report['status']}")
         return report
 
-    def _refresh_business_overview(self) -> dict[str, Any]:
+    def _refresh_business_overview(
+        self,
+        *,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """低频业务概览自动集成入口（最小安全）。
 
         仅当 update.business_overview_auto_enabled=true 且刷新间隔到期时
@@ -602,9 +608,21 @@ class IncrementalUpdater:
         """
         try:
             from app.core.business import BusinessOverviewUpdater
+
+            def progress(code: str, outcome: dict[str, Any]) -> None:
+                if detail_cb is None:
+                    return
+                detail_cb("business_overview", {
+                    "step": "business_overview",
+                    "label": "业务概览",
+                    "done": int(outcome.get("done") or 0),
+                    "total": int(outcome.get("total") or 0),
+                    "current": code,
+                })
+
             return BusinessOverviewUpdater(
                 duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
-            ).refresh_if_due()
+            ).refresh_if_due(progress_cb=progress)
         except Exception as error:
             logger.warning("业务概览刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
@@ -624,16 +642,32 @@ class IncrementalUpdater:
             logger.warning("国债曲线刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
-    def _refresh_capital_history(self) -> dict[str, Any]:
+    def _refresh_capital_history(
+        self,
+        *,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """历史股本链有界续传（P4）：每轮最多 20 只上市股票，按代码序。
 
         自选优先；失败保留旧值 + retry/missing；绝不阻断价格/财务/readiness。
         """
         try:
             from app.core.capital import CapitalHistoryUpdater
+
+            def progress(code: str, outcome: dict[str, Any]) -> None:
+                if detail_cb is None:
+                    return
+                detail_cb("capital_history", {
+                    "step": "capital_history",
+                    "label": "历史股本",
+                    "done": int(outcome.get("done") or 0),
+                    "total": int(outcome.get("total") or 0),
+                    "current": code,
+                })
+
             return CapitalHistoryUpdater(
                 duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
-            ).update_all(max_stocks=20)
+            ).update_all(max_stocks=20, progress_cb=progress)
         except Exception as error:
             logger.warning("历史股本链刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
@@ -1432,16 +1466,29 @@ class IncrementalUpdater:
             "pending_codes": pending_codes[:20],
         }
 
-    def _refresh_market_actions(self, stock_codes: list[str]) -> dict[str, Any]:
+    def _refresh_market_actions(
+        self,
+        stock_codes: list[str],
+        *,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """Refresh dividend and corporate-action evidence alongside filing data."""
         succeeded = 0
         failed_codes: list[str] = []
-        for code in stock_codes:
+        for index, code in enumerate(stock_codes):
             outcomes = [self.refetch_one(code, data_type) for data_type in ("dividends", "xdxr")]
             if all(outcome["status"] == "success" for outcome in outcomes):
                 succeeded += 1
             else:
                 failed_codes.append(code)
+            if detail_cb is not None:
+                detail_cb("market_actions", {
+                    "step": "market_actions",
+                    "label": "分红除权",
+                    "done": index + 1,
+                    "total": len(stock_codes),
+                    "current": code,
+                })
         return {
             "status": "success" if not failed_codes else "partial",
             "total": len(stock_codes), "success": succeeded, "failed": len(failed_codes),

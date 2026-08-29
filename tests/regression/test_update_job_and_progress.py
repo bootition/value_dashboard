@@ -33,14 +33,14 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
         "affected_announcements": {}, "all_new_announcements": {},
     }
     updater._refresh_financials = lambda codes, **kwargs: {"status": "success", "succeeded_codes": codes}
-    updater._refresh_market_actions = lambda codes: {"status": "success"}
+    updater._refresh_market_actions = lambda codes, **kwargs: {"status": "success"}
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
     # P2/P3 独立低频域：测试环境不得发起真实网络请求
-    updater._refresh_business_overview = lambda: {"status": "skipped", "reason": "test_stub"}
+    updater._refresh_business_overview = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
     updater._refresh_treasury_curve = lambda: {"status": "skipped", "reason": "test_stub"}
     # P4 历史股本链与统计域：测试环境不得触发网络或全量重建
-    updater._refresh_capital_history = lambda: {"status": "skipped", "reason": "test_stub"}
+    updater._refresh_capital_history = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
     updater._refresh_research_statistics = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
 
 

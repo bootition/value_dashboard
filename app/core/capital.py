@@ -646,6 +646,7 @@ class CapitalHistoryUpdater:
         cross_only: bool = False,
         batch_size: int = 0,
         batch_cooldown_seconds: float = 0.0,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """有界续传（P4-2 修复，reports/73）：只处理"缺失/陈旧"的上市股票。
 
@@ -671,6 +672,7 @@ class CapitalHistoryUpdater:
         return self.update_many(
             codes, cross_check=cross_check, cross_only=cross_only,
             batch_size=batch_size, batch_cooldown_seconds=batch_cooldown_seconds,
+            progress_cb=progress_cb,
         )
 
     def _due_stock_codes(self, *, cross_only: bool = False) -> list[str]:

@@ -49,7 +49,7 @@ def test_failed_financial_refresh_keeps_announcement_pending_and_records_retry(d
     updater._refresh_financials = lambda codes, **kwargs: {
         "status": "partial", "succeeded_codes": [], "failed_codes": codes,
     }
-    updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
+    updater._refresh_market_actions = lambda codes, **kwargs: {"status": "success", "success": len(codes)}
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
@@ -78,7 +78,7 @@ def test_successful_financial_refresh_marks_announcement_seen(duckdb_store, sqli
     updater._refresh_financials = lambda codes, **kwargs: {
         "status": "success", "succeeded_codes": codes, "failed_codes": [],
     }
-    updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
+    updater._refresh_market_actions = lambda codes, **kwargs: {"status": "success", "success": len(codes)}
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
@@ -266,7 +266,7 @@ def test_pending_financial_refresh_keeps_announcement_pending_and_retries(duckdb
         "status": "success", "succeeded_codes": [], "failed_codes": [],
         "pending_codes": codes,
     }
-    updater._refresh_market_actions = lambda codes: {"status": "success", "success": len(codes)}
+    updater._refresh_market_actions = lambda codes, **kwargs: {"status": "success", "success": len(codes)}
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     # P0-2: run_incremental_update 新增 universe 步骤；测试聚焦公告链路，跳过它
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
