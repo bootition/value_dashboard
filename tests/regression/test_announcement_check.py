@@ -33,6 +33,27 @@ def test_announcement_check_does_not_mark_a_filing_seen_before_refresh(duckdb_st
     assert sqlite_store.query("SELECT * FROM announcement_registry") == []
 
 
+def test_financial_refresh_marks_skipped_but_current_period_as_succeeded(
+    duckdb_store, sqlite_store,
+) -> None:
+    """本地已有 2026-06-30 三表时，重新抓取全部 skipped 应视为成功，不是 pending。"""
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    updater._fetch_financial_trio = lambda code: (
+        [
+            {"status": "success", "data_type": data_type, "skipped": True,
+             "latest_local": "2026-06-30"}
+            for data_type in ("balance_sheet", "income_statement", "cash_flow")
+        ],
+        {},
+    )
+
+    result = updater._refresh_financials(["000001"])
+
+    assert result["status"] == "success"
+    assert result["succeeded_codes"] == ["000001"]
+    assert result["pending_codes"] == []
+
+
 def test_failed_financial_refresh_keeps_announcement_pending_and_records_retry(duckdb_store, sqlite_store) -> None:
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     check = {

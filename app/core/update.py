@@ -965,6 +965,23 @@ class IncrementalUpdater:
             logger.warning(f"获取最新价格日期失败: {e}")
         return None
 
+    @staticmethod
+    def _current_expected_financial_period(now: datetime | None = None) -> str:
+        """Return the report period that should already be published today.
+
+        半年报季（8-10月）期望 06-30；三季报季（11月后）期望 09-30；
+        一季报季（5-7月）期望 03-31；其余时间期望上一年年报 12-31。
+        """
+        current = now or datetime.now(UTC)
+        year = current.year
+        if current.month >= 11:
+            return f"{year}-09-30"
+        if current.month >= 8:
+            return f"{year}-06-30"
+        if current.month >= 5:
+            return f"{year}-03-31"
+        return f"{year - 1}-12-31"
+
     def _get_latest_financial_report_date(self, stock_code: str, data_type: str) -> str | None:
         """获取本地最新财务报告期（balance_sheet/income_statement/cash_flow）"""
         table = data_type if data_type in {"balance_sheet", "income_statement", "cash_flow"} else None
@@ -1418,12 +1435,24 @@ class IncrementalUpdater:
                 fetched = {}
             return code, outcomes, fetched
 
+        expected_period = self._current_expected_financial_period()
+
         def finish_one(code: str, outcomes: list[dict[str, Any]]) -> None:
             nonlocal succeeded, completed
             completed += 1
             if all(outcome["status"] == "success" for outcome in outcomes):
                 if all(outcome.get("skipped") for outcome in outcomes):
-                    pending_codes.append(code)
+                    local_dates = [
+                        str(outcome.get("latest_local") or "")[:10]
+                        for outcome in outcomes
+                    ]
+                    # 本地三表都已达到当前应发布报告期 → 公告目的已达成，
+                    # 应标记成功入册；只有确实落后于期望期才是源延迟 pending。
+                    if local_dates and all(d >= expected_period for d in local_dates):
+                        succeeded += 1
+                        succeeded_codes.append(code)
+                    else:
+                        pending_codes.append(code)
                 else:
                     succeeded += 1
                     succeeded_codes.append(code)
