@@ -356,6 +356,7 @@ class StatisticsBuilder:
         if parallel > 1 and len(stock_codes) >= 200:
             import concurrent.futures
 
+            completed = 0
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=parallel,
                 initializer=_statistics_worker_init,
@@ -376,10 +377,15 @@ class StatisticsBuilder:
                     except Exception as error:
                         logger.warning("构建 %s 历史统计失败: %s", code, error)
                         failed.append(code)
+                    completed += 1
                     if progress_cb is not None:
-                        progress_cb(code, {"status": "done"})
+                        progress_cb(code, {
+                            "status": "done",
+                            "done": completed,
+                            "total": len(stock_codes),
+                        })
         else:
-            for code in stock_codes:
+            for completed, code in enumerate(stock_codes, start=1):
                 try:
                     series = self.build_series(code)
                     _finish(code, self._stats_for_stock(code, series))
@@ -387,7 +393,11 @@ class StatisticsBuilder:
                     logger.warning("构建 %s 历史统计失败: %s", code, error)
                     failed.append(code)
                 if progress_cb is not None:
-                    progress_cb(code, {"status": "done"})
+                    progress_cb(code, {
+                        "status": "done",
+                        "done": completed,
+                        "total": len(stock_codes),
+                    })
 
         if not records:
             return {"status": "failed", "reason": "no_records", "failed": failed}

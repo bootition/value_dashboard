@@ -20,6 +20,9 @@ interface MissingItem {
 
 interface DataSummary {
   checking?: boolean
+  stale?: boolean
+  updating?: boolean
+  summary_as_of?: string | null
   stock_count: number
   price_raw_count: number
   price_qfq_count: number
@@ -384,6 +387,15 @@ function skipReasonLabel(reason: string | null | undefined): string {
     <n-spin :show="loading && !summary">
       <n-alert v-if="error" type="error" title="提示" style="margin-bottom: 16px;">
         {{ error }}
+      </n-alert>
+      <n-alert
+        v-if="summary && (summary.updating || summary.stale)"
+        type="warning"
+        title="自动更新正在运行"
+        style="margin-bottom: 16px;"
+      >
+        下面的覆盖统计是更新开始前的缓存快照（缓存时间：{{ formatLocalTime(summary.summary_as_of) }}）。
+        实时阶段和进度请看上方“更新运行中”的进度条，更新完成后本提示会自动消失。
       </n-alert>
       <template v-if="summary">
         <!-- L2 V3: 第一问"数据可研究吗" -->

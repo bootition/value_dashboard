@@ -143,10 +143,12 @@ def _cached_summary(request: Request, *, allow_stale: bool = False) -> tuple[dic
 
 
 def _store_summary(request: Request, summary: dict) -> None:
+    stored = dict(summary)
+    stored.setdefault("summary_as_of", datetime.now(UTC).isoformat())
     with _SUMMARY_CACHE_LOCK:
         _SUMMARY_CACHE[_summary_cache_key(request)] = {
             "at": time.monotonic(),
-            "data": dict(summary),
+            "data": stored,
         }
 
 
@@ -227,6 +229,7 @@ def get_summary(request: Request) -> dict:
         if write_lock_active:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
+            cached["updating"] = True
     needs_refresh = (
         (age is None or age > _SUMMARY_TTL_SECONDS or bool(cached.get("checking")))
         and not write_lock_active
@@ -263,6 +266,7 @@ def _refresh_summary_worker(state, key: str) -> None:
         if _update_write_lock_active(state.duck):
             return
         summary = _build_summary_from_state(state)
+        summary.setdefault("summary_as_of", datetime.now(UTC).isoformat())
         with _SUMMARY_CACHE_LOCK:
             _SUMMARY_CACHE[key] = {"at": time.monotonic(), "data": dict(summary)}
     except Exception as error:

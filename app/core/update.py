@@ -565,6 +565,7 @@ class IncrementalUpdater:
             "research_statistics",
             self._refresh_research_statistics(
                 parallel_workers=max(1, int(self.research_statistics_parallel_workers)),
+                detail_cb=detail_cb,
             ),
         )
 
@@ -637,7 +638,12 @@ class IncrementalUpdater:
             logger.warning("历史股本链刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
-    def _refresh_research_statistics(self, *, parallel_workers: int = 1) -> dict[str, Any]:
+    def _refresh_research_statistics(
+        self,
+        *,
+        parallel_workers: int = 1,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
         """历史统计域重建（P4）：仅当股本链或价格/财务/曲线输入变化时执行。
 
         以输入指纹为判据避免每轮全量重建；任何异常均不阻断其他步骤。
@@ -651,7 +657,22 @@ class IncrementalUpdater:
             )
             if rows and rows[0].get("value") == fingerprint:
                 return {"status": "skipped", "reason": "fingerprint_unchanged"}
-            report = builder.rebuild_incremental(parallel=parallel_workers)
+
+            def stats_progress(code: str, outcome: dict[str, Any]) -> None:
+                if detail_cb is None:
+                    return
+                detail_cb("research_statistics", {
+                    "step": "research_statistics",
+                    "label": "历史统计",
+                    "done": int(outcome.get("done") or 0),
+                    "total": int(outcome.get("total") or 0),
+                    "current": code,
+                })
+
+            report = builder.rebuild_incremental(
+                parallel=parallel_workers,
+                progress_cb=stats_progress,
+            )
             # P4-10 修复（reports/73）：仅全部成功才持久化指纹；
             # partial（部分股票失败）不落指纹，下一轮自动重试失败股。
             if report["status"] == "success":
@@ -825,14 +846,18 @@ class IncrementalUpdater:
             }
 
         statuses = [step.get("status") for step in steps.values()]
+        # skipped 是节流命中，不是失败。只要没有 failed/partial 子步骤，
+        # 本轮 universe 就是正常完成，避免页面长期显示误导性的 partial。
+        if all(status == "skipped" for status in statuses):
+            status = "skipped"
+        elif all(status in {"success", "skipped"} for status in statuses):
+            status = "success"
+        elif any(status == "failed" for status in statuses):
+            status = "partial"
+        else:
+            status = "partial"
         return {
-            "status": (
-                "success"
-                if all(status == "success" for status in statuses)
-                else "skipped"
-                if all(status == "skipped" for status in statuses)
-                else "partial"
-            ),
+            "status": status,
             "steps": steps,
         }
 
