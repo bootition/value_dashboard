@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import json
@@ -81,6 +82,65 @@ def _csv_export_row(
     return line
 
 
+def _screenability_cache_key(request: Request) -> str | None:
+    """Cheap fingerprint for the global inputs behind screening readiness."""
+    try:
+        snap = request.app.state.duck.read_query(
+            "SELECT MAX(calculated_at) AS c, MAX(latest_price_date) AS p, COUNT(*) AS n "
+            "FROM indicator_snapshot"
+        )[0]
+        counts = request.app.state.duck.read_query(
+            """SELECT
+                 (SELECT COUNT(*) FROM source_audit) AS source_audit_c,
+                 (SELECT COUNT(*) FROM fetch_batch) AS fetch_batch_c,
+                 (SELECT COUNT(*) FROM raw_response_archive) AS archive_c,
+                 (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c"""
+        )[0]
+        import hashlib as _hashlib
+
+        payload = {"snap": snap, "counts": counts}
+        return _hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    except Exception:
+        return None
+
+
+def _load_screening_readiness_cache(request: Request, key: str) -> dict | None:
+    try:
+        rows = request.app.state.sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = 'screening_readiness_cache'"
+        )
+        if not rows:
+            return None
+        payload = json.loads(rows[0]["value"] or "{}")
+        if payload.get("fingerprint") != key:
+            return None
+        updated = payload.get("updated_at")
+        if updated:
+            updated_dt = datetime.fromisoformat(updated)
+            if (datetime.now(UTC) - updated_dt).total_seconds() > 600:
+                return None
+        return payload.get("decision")
+    except Exception:
+        return None
+
+
+def _store_screening_readiness_cache(request: Request, key: str, decision: dict) -> None:
+    with contextlib.suppress(Exception):
+        request.app.state.sqlite.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES ('screening_readiness_cache', ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                             updated_at=excluded.updated_at""",
+            [json.dumps({
+                "fingerprint": key,
+                "decision": decision,
+                "updated_at": datetime.now(UTC).isoformat(),
+            }, default=str), datetime.now(UTC).isoformat()],
+        )
+
+
 def _require_current_screenability(request: Request) -> dict:
     """Enforce the current database gate for screen-derived durable output.
 
@@ -117,7 +177,25 @@ def _require_current_screenability(request: Request) -> dict:
 
     from app.core.data_quality import screening_readiness
 
+    cache_key = _screenability_cache_key(request)
+    if cache_key:
+        cached = _load_screening_readiness_cache(request, cache_key)
+        if cached is not None:
+            request.app.state.startup_readiness = cached.get("readiness") or {}
+            if not cached.get("ready"):
+                raise HTTPException(status_code=409, detail={
+                    "reason_code": (
+                        "minimum_data_not_ready"
+                        if not (cached.get("readiness") or {}).get("ready")
+                        else "screening_data_quality_not_ready"
+                    ),
+                    "readiness": cached.get("readiness") or {},
+                    "warning_codes": cached.get("warning_codes") or [],
+                })
+            return cached
     decision = screening_readiness(request.app.state.duck, request.app.state.sqlite)
+    if cache_key:
+        _store_screening_readiness_cache(request, cache_key, decision)
     request.app.state.startup_readiness = decision["readiness"]
     if not decision["ready"]:
         reason_code = (

@@ -132,6 +132,39 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
         })
         if not calendar_dates:
             return False
+        # 2026-08-30 提速：该检查在正式库上约需 60 秒，且筛选每次运行都会
+        # 调用。交易日历与价格覆盖不变时结果不会变，因此用输入指纹做持久
+        # 缓存；价格更新后仅首次筛选会重算一次。
+        try:
+            cal_fp = sqlite.query(
+                "SELECT COUNT(*) AS c, MIN(trade_date) AS lo, MAX(trade_date) AS hi "
+                "FROM trading_dates"
+            )[0]
+            price_fp = duck.read_query(
+                """SELECT
+                     (SELECT COUNT(*) FROM price_daily_raw WHERE close IS NOT NULL) AS raw_c,
+                     (SELECT MIN(trade_date) FROM price_daily_raw WHERE close IS NOT NULL) AS raw_lo,
+                     (SELECT MAX(trade_date) FROM price_daily_raw WHERE close IS NOT NULL) AS raw_hi,
+                     (SELECT COUNT(*) FROM price_daily_qfq WHERE close IS NOT NULL) AS qfq_c,
+                     (SELECT MIN(trade_date) FROM price_daily_qfq WHERE close IS NOT NULL) AS qfq_lo,
+                     (SELECT MAX(trade_date) FROM price_daily_qfq WHERE close IS NOT NULL) AS qfq_hi"""
+            )[0]
+            import hashlib as _hashlib
+            fingerprint = _hashlib.sha256(
+                json.dumps({
+                    "calendar": cal_fp,
+                    "price": price_fp,
+                }, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+            cached = sqlite.query(
+                "SELECT value FROM data_refresh_state WHERE key = 'trading_calendar_gate_cache'"
+            )
+            if cached:
+                payload = json.loads(cached[0]["value"] or "{}")
+                if payload.get("fingerprint") == fingerprint and "result" in payload:
+                    return bool(payload["result"])
+        except Exception:
+            fingerprint = None
         values = ", ".join("(CAST(? AS DATE))" for _ in calendar_dates)
         missing = duck.read_query(
             f"""
@@ -206,6 +239,17 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
             """,
             calendar_dates,
         )
+        try:
+            if fingerprint is not None:
+                sqlite.execute(
+                    """INSERT INTO data_refresh_state (key, value, updated_at)
+                       VALUES ('trading_calendar_gate_cache', ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                                     updated_at=excluded.updated_at""",
+                    [json.dumps({"fingerprint": fingerprint, "result": True}), datetime.now(UTC).isoformat()],
+                )
+        except Exception:
+            pass
         return not missing
     except Exception:
         return False
