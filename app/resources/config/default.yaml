@@ -64,7 +64,7 @@ update:
   # 失败保留旧值，绝不阻断价格/财务/readiness。
   business_overview_auto_enabled: true
   business_overview_refresh_interval_days: 30
-  business_overview_max_stocks_per_run: 20
+  business_overview_max_stocks_per_run: 100
 
 backup:
   keep_full_backups: 3
