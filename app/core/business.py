@@ -77,7 +77,7 @@ class BusinessOverviewUpdater:
         try:
             from app.core.config import Config
             cfg = Config.current()
-            update_cfg = cfg.get("update", {})
+            update_cfg = cfg.get_value("update", {})
             if isinstance(update_cfg, dict) and key in update_cfg:
                 return update_cfg[key]
         except Exception:

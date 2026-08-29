@@ -181,7 +181,7 @@ class IncrementalUpdater:
         try:
             from app.core.config import Config
             cfg = Config.current()
-            update_cfg = cfg.get("update", {})
+            update_cfg = cfg.get_value("update", {})
             value = update_cfg.get(key) if isinstance(update_cfg, dict) else None
             return int(value) if value else default
         except Exception:

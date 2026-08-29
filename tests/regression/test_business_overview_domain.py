@@ -452,6 +452,19 @@ def test_updater_retry_and_missing_dedup_and_resolve(
     )[0]["c"] == 0
 
 
+def test_update_config_uses_get_value_api(monkeypatch) -> None:
+    from app.core.config import Config
+
+    class FakeConfig:
+        def get_value(self, key: str, default=None):
+            return {"update": {"business_overview_max_stocks_per_run": 100}}.get(key, default)
+
+    monkeypatch.setattr(Config, "current", classmethod(lambda cls: FakeConfig()))
+    assert BusinessOverviewUpdater._load_config(
+        "business_overview_max_stocks_per_run", default=20,
+    ) == 100
+
+
 def test_updater_requires_database_profile(monkeypatch) -> None:
     from app.core.storage.path_policy import PathIsolationError
     for name in ("VD_ENV", "VD_FORMAL_ACK", "VD_DUCKDB_PATH", "VD_SQLITE_PATH",
