@@ -233,10 +233,13 @@ def test_refetch_one_incremental_skips_when_source_has_no_new_period(duckdb_stor
 def test_refresh_financials_marks_pending_when_source_lags(duckdb_store, sqlite_store) -> None:
     """三表均无新报告期（数据源延迟）→ 股票进入 pending_codes，不标记 seen。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    updater.refetch_financial_trio = lambda code: [
-        {"status": "success", "data_type": data_type, "skipped": True}
-        for data_type in ("balance_sheet", "income_statement", "cash_flow")
-    ]
+    updater._fetch_financial_trio = lambda code: (
+        [
+            {"status": "success", "data_type": data_type, "skipped": True}
+            for data_type in ("balance_sheet", "income_statement", "cash_flow")
+        ],
+        {},
+    )
 
     result = updater._refresh_financials(["000001"])
 

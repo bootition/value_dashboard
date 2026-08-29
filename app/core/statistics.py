@@ -324,6 +324,7 @@ class StatisticsBuilder:
         max_stocks: int = 0,
         progress_cb: Any = None,
         parallel: int = 0,
+        merge: bool = False,
     ) -> dict[str, Any]:
         """为全部（或给定）上市股票构建统计并原子发布。
 
@@ -396,18 +397,26 @@ class StatisticsBuilder:
         self.duck.write_query(
             f'CREATE TABLE "{staging_table}" AS SELECT * FROM research_statistics WHERE FALSE'
         )
+        success_codes = [code for code in stock_codes if code not in set(failed)]
         try:
             self._write_records(staging_table, records)
-            with self.duck.transaction() as conn:
-                count = conn.execute(f'SELECT COUNT(*) FROM "{staging_table}"').fetchone()[0]
-                if count != len(records):
-                    raise RuntimeError(
-                        f"statistics staging mismatch: {count} != {len(records)}"
-                    )
-                conn.execute("DELETE FROM research_statistics")
-                conn.execute(
-                    f'INSERT INTO research_statistics BY NAME SELECT * FROM "{staging_table}"'
+            if merge:
+                self._publish_statistics_merge(
+                    staging_table, records, success_codes,
                 )
+            else:
+                with self.duck.transaction() as conn:
+                    count = conn.execute(
+                        f'SELECT COUNT(*) FROM "{staging_table}"'
+                    ).fetchone()[0]
+                    if count != len(records):
+                        raise RuntimeError(
+                            f"statistics staging mismatch: {count} != {len(records)}"
+                        )
+                    conn.execute("DELETE FROM research_statistics")
+                    conn.execute(
+                        f'INSERT INTO research_statistics BY NAME SELECT * FROM "{staging_table}"'
+                    )
         finally:
             self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
 
@@ -417,8 +426,187 @@ class StatisticsBuilder:
             "records": len(records),
             "version": version,
             "failed": failed[:20],
+            "failed_count": len(failed),
+            "success_codes": success_codes,
             "fingerprint": fingerprint,
         }
+
+    def _publish_statistics_merge(
+        self, staging_table: str, records: list[dict[str, Any]],
+        stock_codes: list[str],
+    ) -> None:
+        """Replace research_statistics rows only for successfully rebuilt stocks."""
+        if not stock_codes or not records:
+            return
+        placeholders = ", ".join("?" for _ in stock_codes)
+        with self.duck.transaction() as conn:
+            previous_total = conn.execute(
+                "SELECT COUNT(*) FROM research_statistics"
+            ).fetchone()[0]
+            affected_count = conn.execute(
+                f"SELECT COUNT(*) FROM research_statistics "
+                f"WHERE stock_code IN ({placeholders})",
+                stock_codes,
+            ).fetchone()[0]
+            conn.execute(
+                f"DELETE FROM research_statistics WHERE stock_code IN ({placeholders})",
+                stock_codes,
+            )
+            conn.execute(
+                f'INSERT INTO research_statistics BY NAME SELECT * FROM "{staging_table}"'
+            )
+            row_count = conn.execute(
+                "SELECT COUNT(*) FROM research_statistics"
+            ).fetchone()[0]
+            expected = previous_total - affected_count + len(records)
+            if row_count != expected:
+                raise RuntimeError(
+                    f"statistics merge mismatch: rows={row_count}, expected={expected}"
+                )
+    _STOCK_STATE_TABLE = "research_statistics_stock_state"
+
+    def _ensure_stock_state_table(self) -> None:
+        """Per-stock input fingerprint store for incremental rebuild."""
+        with self.sqlite.transaction() as conn:
+            conn.execute(
+                f"""CREATE TABLE IF NOT EXISTS {self._STOCK_STATE_TABLE} (
+                    stock_code TEXT PRIMARY KEY,
+                    fingerprint TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
+            )
+
+    def _stock_fingerprints(self, stock_codes: list[str]) -> dict[str, str]:
+        """Compute one fingerprint per stock from the statistics input tables.
+
+        Treasury curve and verified-share counts are global inputs, so a
+        treasury-curve change marks every stock changed (correct: spread_10y
+        depends on the curve).
+        """
+        rows = self.duck.read_query(
+            """SELECT m.stock_code,
+                      (SELECT COALESCE(CAST(MAX(p.trade_date) AS VARCHAR), '')
+                         FROM price_daily_raw p WHERE p.stock_code = m.stock_code) AS price_date,
+                      (SELECT COUNT(*) FROM price_daily_raw p
+                         WHERE p.stock_code = m.stock_code) AS price_cnt,
+                      (SELECT COALESCE(CAST(MAX(bs.report_date) AS VARCHAR), '')
+                         FROM balance_sheet bs WHERE bs.stock_code = m.stock_code) AS bs_date,
+                      (SELECT COUNT(*) FROM balance_sheet bs
+                         WHERE bs.stock_code = m.stock_code) AS bs_cnt,
+                      (SELECT COALESCE(CAST(MAX(ic.report_date) AS VARCHAR), '')
+                         FROM income_statement ic WHERE ic.stock_code = m.stock_code) AS ic_date,
+                      (SELECT COUNT(*) FROM income_statement ic
+                         WHERE ic.stock_code = m.stock_code) AS ic_cnt,
+                      (SELECT COALESCE(CAST(MAX(cap.effective_date) AS VARCHAR), '')
+                         FROM share_capital_history cap WHERE cap.stock_code = m.stock_code) AS cap_date,
+                      (SELECT COUNT(*) FROM share_capital_history cap
+                         WHERE cap.stock_code = m.stock_code) AS cap_cnt,
+                      (SELECT COALESCE(CAST(MAX(d.ex_date) AS VARCHAR), '')
+                         FROM dividends d WHERE d.stock_code = m.stock_code) AS div_date,
+                      (SELECT COUNT(*) FROM dividends d
+                         WHERE d.stock_code = m.stock_code) AS div_cnt
+               FROM stock_meta m
+               WHERE m.stock_code IN ({placeholders})
+               ORDER BY m.stock_code""".replace(
+                "{placeholders}", ", ".join("?" for _ in stock_codes)
+            ),
+            stock_codes,
+        )
+        curve = self.duck.read_query(
+            "SELECT COALESCE(CAST(MAX(curve_date) AS VARCHAR), '') AS latest, "
+            "COUNT(*) AS c FROM treasury_yield_curve"
+        )[0]
+        verified = self.duck.read_query(
+            "SELECT COUNT(*) AS c FROM share_capital_history WHERE verified"
+        )[0]
+        result: dict[str, str] = {}
+        for row in rows:
+            parts = [
+                "price", str(row["price_date"] or ""), str(row["price_cnt"] or 0),
+                "balance", str(row["bs_date"] or ""), str(row["bs_cnt"] or 0),
+                "income", str(row["ic_date"] or ""), str(row["ic_cnt"] or 0),
+                "capital", str(row["cap_date"] or ""), str(row["cap_cnt"] or 0),
+                "dividends", str(row["div_date"] or ""), str(row["div_cnt"] or 0),
+                "treasury", str(curve.get("latest") or ""), str(curve.get("c") or 0),
+                "verified", str(verified.get("c") or 0),
+            ]
+            result[str(row["stock_code"])] = hashlib.sha256(
+                "|".join(parts).encode("utf-8")
+            ).hexdigest()[:16]
+        return result
+
+    def _load_stock_state(self) -> dict[str, str]:
+        try:
+            rows = self.sqlite.query(
+                f"SELECT stock_code, fingerprint FROM {self._STOCK_STATE_TABLE}"
+            )
+        except Exception:
+            return {}
+        return {str(row["stock_code"]): str(row["fingerprint"]) for row in rows}
+
+    def _save_stock_state(self, fingerprints: dict[str, str]) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.sqlite.transaction() as conn:
+            conn.executemany(
+                f"""INSERT INTO {self._STOCK_STATE_TABLE}
+                    (stock_code, fingerprint, updated_at) VALUES (?, ?, ?)
+                    ON CONFLICT(stock_code) DO UPDATE SET
+                      fingerprint=excluded.fingerprint,
+                      updated_at=excluded.updated_at""",
+                [
+                    (stock_code, fingerprint, now)
+                    for stock_code, fingerprint in fingerprints.items()
+                ],
+            )
+
+    def rebuild_incremental(
+        self,
+        *,
+        parallel: int = 0,
+        progress_cb: Any = None,
+    ) -> dict[str, Any]:
+        """Rebuild only stocks whose per-stock statistics inputs changed.
+
+        First call has no stored state and falls back to a full rebuild, after
+        which per-stock fingerprints make subsequent runs incremental.
+        """
+        self._ensure_stock_state_table()
+        rows = self.duck.read_query(
+            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+        )
+        stock_codes = [str(row["stock_code"]) for row in rows]
+        if not stock_codes:
+            return {"status": "skipped", "reason": "no_listed_stocks", "targeted": 0}
+        current = self._stock_fingerprints(stock_codes)
+        stored = self._load_stock_state()
+        changed = [
+            code for code in stock_codes
+            if stored.get(code) != current.get(code)
+        ]
+        if not changed:
+            return {
+                "status": "skipped",
+                "reason": "fingerprint_unchanged",
+                "targeted": 0,
+                "fingerprint": self._input_fingerprint(),
+            }
+        report = self.rebuild_all(
+            stock_codes=changed,
+            parallel=parallel,
+            progress_cb=progress_cb,
+            merge=True,
+        )
+        succeeded = [
+            code for code in report.get("success_codes", [])
+            if code in current
+        ]
+        if succeeded:
+            self._save_stock_state({
+                code: current[code] for code in succeeded
+            })
+        report["changed_codes"] = len(changed)
+        report["incremental"] = True
+        return report
 
     def _cleanup_staging_tables(self) -> None:
         """Drop orphaned research_statistics_staging_* tables (reports/76 P3-2).

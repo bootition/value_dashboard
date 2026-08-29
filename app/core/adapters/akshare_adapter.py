@@ -267,11 +267,13 @@ class AKShareAdapter(BaseAdapter):
         """
         records: list[dict[str, Any]] = []
         source_errors: list[str] = []
+        raw_payloads: list[str] = []
 
         # SSE + SZSE
         try:
             self._wait_rate_limit()
             df = ak.stock_info_a_code_name()
+            raw_payloads.append(df.to_json(orient="records", date_format="iso", force_ascii=False))
             for _, row in df.iterrows():
                 code = str(row["code"]).strip()
                 records.append(
@@ -289,6 +291,7 @@ class AKShareAdapter(BaseAdapter):
         try:
             self._wait_rate_limit()
             df_bj = ak.stock_info_bj_name_code()
+            raw_payloads.append(df_bj.to_json(orient="records", date_format="iso", force_ascii=False))
             for _, row in df_bj.iterrows():
                 code = str(row["证券代码"]).strip()
                 records.append(
@@ -305,9 +308,11 @@ class AKShareAdapter(BaseAdapter):
         if not records:
             return self._make_empty_result("无法获取股票列表")
 
+        raw_response = "\n".join(raw_payloads)
         if source_errors:
             return self._make_result(
                 data=records,
+                raw_response=raw_response,
                 confidence="approximate",
                 error="partial stock list: " + "; ".join(source_errors),
                 api_version=_AKSHARE_VERSION,
@@ -315,6 +320,7 @@ class AKShareAdapter(BaseAdapter):
 
         return self._make_result(
             data=records,
+            raw_response=raw_response,
             confidence="strict",
             api_version=_AKSHARE_VERSION,
         )
@@ -326,6 +332,7 @@ class AKShareAdapter(BaseAdapter):
         absent name into a claim that a stock is not ST or not suspended.
         """
         exchange_rows: dict[str, dict[str, Any]] = {}
+        raw_payloads: list[str] = []
 
         def load_exchange_list(
             fetch: Callable[[], pd.DataFrame],
@@ -337,7 +344,9 @@ class AKShareAdapter(BaseAdapter):
         ) -> None:
             try:
                 self._wait_rate_limit()
-                for _, row in fetch().iterrows():
+                df = fetch()
+                raw_payloads.append(df.to_json(orient="records", date_format="iso", force_ascii=False))
+                for _, row in df.iterrows():
                     code = _strip_code(str(row.get(code_column, "")).strip()).zfill(6)
                     if not code or code == "000000":
                         continue
@@ -371,6 +380,7 @@ class AKShareAdapter(BaseAdapter):
         try:
             self._wait_rate_limit()
             frame = ak.stock_tfp_em(date=datetime.date.today().strftime("%Y%m%d"))
+            raw_payloads.append(frame.to_json(orient="records", date_format="iso", force_ascii=False))
             suspension_codes = {
                 _strip_code(str(value).strip()).zfill(6)
                 for value in frame.get("代码", pd.Series(dtype="object"))
@@ -409,6 +419,7 @@ class AKShareAdapter(BaseAdapter):
 
         return self._make_result(
             data=records,
+            raw_response="\n".join(raw_payloads),
             confidence="approximate",
             api_version=_AKSHARE_VERSION,
         )

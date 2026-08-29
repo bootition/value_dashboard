@@ -58,7 +58,8 @@ update:
   price_fetch_timeout_seconds: 45  # 单股 raw/qfq 并行抓取的有界截止时间
   price_fetch_batch_size: 20  # 价格持久化批量：每批合并为单 DuckDB 事务，减少 WAL 提交
   research_statistics_parallel_workers: 4  # 历史统计域全量重建的进程池并行数（只读分析）
-  financial_refresh_concurrency: 8  # 财务三表刷新并发股票数（网络并行，写库仍串行）
+  financial_refresh_concurrency: 8  # 财务三表刷新并发股票数（网络并行）
+  financial_refresh_batch_size: 20  # 混合批量写：每满 N 只一个 DuckDB 事务
   # 业务概览低频域（reports/67）：价格优先后按月有界续传，自选股票优先；
   # 失败保留旧值，绝不阻断价格/财务/readiness。
   business_overview_auto_enabled: true

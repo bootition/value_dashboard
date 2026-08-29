@@ -154,6 +154,10 @@ class IncrementalUpdater:
         self.financial_refresh_concurrency: int = self._load_update_config(
             "financial_refresh_concurrency", default=8
         )
+        # 混合批量写：并发抓取后每满 N 只合并为一个 DuckDB 事务。
+        self.financial_refresh_batch_size: int = self._load_update_config(
+            "financial_refresh_batch_size", default=20
+        )
         self.price_fetch_timeout_seconds: int = self._load_update_config(
             "price_fetch_timeout_seconds", default=45
         )
@@ -647,7 +651,7 @@ class IncrementalUpdater:
             )
             if rows and rows[0].get("value") == fingerprint:
                 return {"status": "skipped", "reason": "fingerprint_unchanged"}
-            report = builder.rebuild_all(parallel=parallel_workers)
+            report = builder.rebuild_incremental(parallel=parallel_workers)
             # P4-10 修复（reports/73）：仅全部成功才持久化指纹；
             # partial（部分股票失败）不落指纹，下一轮自动重试失败股。
             if report["status"] == "success":
@@ -1181,34 +1185,21 @@ class IncrementalUpdater:
         except Exception as error:
             logger.warning("清理公告 retry %s 失败: %s", stock_code, error)
 
-    def refetch_financial_trio(self, stock_code: str) -> list[dict[str, Any]]:
-        """Refresh one stock's three statements with one DuckDB transaction.
-
-        Network requests still run per statement, but all successful new rows
-        are upserted + lineage-recorded in a single write transaction instead
-        of three, cutting two write-lock/commit rounds per stock during the
-        half-year-report season.
-        """
-        from app.core.init import DataInitializer
-
-        # B 股（200/900）不在新浪/东财财务主源覆盖范围，连查会触发
-        # AdapterManager 熔断并殃及随后的 A 股。直接判为源不支持，
-        # 公告保持 pending，等待专门源或人工披露，不污染熔断器。
+    def _fetch_financial_trio(
+        self, stock_code: str,
+    ) -> tuple[list[dict[str, Any]], dict[str, tuple[Any, list[dict[str, Any]]]]]:
+        """Fetch latest rows for one stock's three statements without writing."""
+        data_types = ("balance_sheet", "income_statement", "cash_flow")
+        fetched: dict[str, tuple[Any, list[dict[str, Any]]]] = {}
+        outcomes: list[dict[str, Any]] = []
         if stock_code.startswith(("200", "900")):
             return [
                 {
                     "status": "failed", "data_type": data_type,
                     "error": "B-share financial source unsupported",
                 }
-                for data_type in ("balance_sheet", "income_statement", "cash_flow")
-            ]
-
-        data_types = ("balance_sheet", "income_statement", "cash_flow")
-        initializer = DataInitializer(
-            duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
-        )
-        fetched: dict[str, tuple[Any, list[dict[str, Any]]]] = {}
-        outcomes: list[dict[str, Any]] = []
+                for data_type in data_types
+            ], fetched
         for data_type in data_types:
             try:
                 latest_local = self._get_latest_financial_report_date(
@@ -1243,22 +1234,44 @@ class IncrementalUpdater:
                 outcomes.append({
                     "status": "failed", "data_type": data_type, "error": str(error),
                 })
+        return outcomes, fetched
+
+    @staticmethod
+    def _persist_fetched_trio_in_connection(
+        initializer: Any,
+        conn: Any,
+        stock_code: str,
+        fetched: dict[str, tuple[Any, list[dict[str, Any]]]],
+    ) -> None:
+        """Write fetched financial rows + lineage for one stock into conn."""
+        for data_type, (_, new_rows) in fetched.items():
+            for row in new_rows:
+                initializer._upsert_financial_row(conn, data_type, stock_code, row)
+        for data_type, (result, new_rows) in fetched.items():
+            batch_id = initializer._record_batch_in_connection(
+                conn, result, data_type, len(new_rows),
+            )
+            initializer._record_field_audit_in_connection(
+                conn, result, new_rows, stock_code, "report_date", batch_id,
+            )
+
+    def _persist_financial_trio(
+        self, stock_code: str, outcomes: list[dict[str, Any]],
+        fetched: dict[str, tuple[Any, list[dict[str, Any]]]],
+    ) -> list[dict[str, Any]]:
+        """Persist one stock's fetched trio in its own transaction."""
         if not fetched:
             return outcomes
+        from app.core.init import DataInitializer
+
+        initializer = DataInitializer(
+            duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
+        )
         try:
             with self.duck.transaction() as conn:
-                for data_type, (_, new_rows) in fetched.items():
-                    for row in new_rows:
-                        initializer._upsert_financial_row(
-                            conn, data_type, stock_code, row,
-                        )
-                for data_type, (result, new_rows) in fetched.items():
-                    batch_id = initializer._record_batch_in_connection(
-                        conn, result, data_type, len(new_rows),
-                    )
-                    initializer._record_field_audit_in_connection(
-                        conn, result, new_rows, stock_code, "report_date", batch_id,
-                    )
+                self._persist_fetched_trio_in_connection(
+                    initializer, conn, stock_code, fetched,
+                )
         except Exception as error:
             for outcome in outcomes:
                 if outcome.get("status") == "success" and not outcome.get("skipped"):
@@ -1275,6 +1288,46 @@ class IncrementalUpdater:
                 logger.debug("记录 %s 金融业缺失字段失败（非致命）", stock_code)
         return outcomes
 
+    def _persist_financial_batch(
+        self, items: list[tuple[str, list[dict[str, Any]], dict[str, tuple[Any, list[dict[str, Any]]]]]],
+    ) -> None:
+        """Persist up to batch_size stocks in one transaction; fallback per stock."""
+        from app.core.init import DataInitializer
+
+        if not items:
+            return
+        initializer = DataInitializer(
+            duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
+        )
+        try:
+            with self.duck.transaction() as conn:
+                for code, _, fetched in items:
+                    self._persist_fetched_trio_in_connection(
+                        initializer, conn, code, fetched,
+                    )
+        except Exception as error:
+            logger.warning(
+                "财务批量写入失败，退化为逐股单事务: %s", error,
+            )
+            for code, outcomes, fetched in items:
+                self._persist_financial_trio(code, outcomes, fetched)
+            return
+        for code, _, fetched in items:
+            balance = fetched.get("balance_sheet")
+            if balance is None:
+                continue
+            try:
+                initializer._record_missing_financial_sector_fields(
+                    code, balance[1],
+                )
+            except Exception:
+                logger.debug("记录 %s 金融业缺失字段失败（非致命）", code)
+
+    def refetch_financial_trio(self, stock_code: str) -> list[dict[str, Any]]:
+        """Refresh one stock's three statements (fetch + single transaction)."""
+        outcomes, fetched = self._fetch_financial_trio(stock_code)
+        return self._persist_financial_trio(stock_code, outcomes, fetched)
+
     def _refresh_financials(
         self,
         stock_codes: list[str],
@@ -1283,54 +1336,70 @@ class IncrementalUpdater:
     ) -> dict[str, Any]:
         """Refresh core statements for stocks with newly registered filings.
 
-        增量模式（PRD §7.7）：
-        - 只拉最新报告期，本地已有则跳过（skipped）
-        - 数据源无新报告期（财报延迟）时返回 pending_codes，
-          由调用方保持公告 pending 并在下次启动重试
+        混合批量：并发抓取，每满 financial_refresh_batch_size 只合并一个
+        DuckDB 事务；整批失败退化为逐股单事务。
         """
         succeeded = 0
         succeeded_codes: list[str] = []
         pending_codes: list[str] = []
         failed: list[str] = []
         completed = 0
+        batch_size = max(1, getattr(self, "financial_refresh_batch_size", 20))
+        batch_items: list[tuple[str, list[dict[str, Any]], dict[str, tuple[Any, list[dict[str, Any]]]]]] = []
 
-        def refresh_one(code: str) -> tuple[str, list[dict[str, Any]]]:
+        def refresh_one(code: str) -> tuple[str, list[dict[str, Any]], dict[str, tuple[Any, list[dict[str, Any]]]]]:
             try:
-                outcomes = self.refetch_financial_trio(code)
+                outcomes, fetched = self._fetch_financial_trio(code)
             except Exception as error:
                 outcomes = [
                     {"status": "failed", "error": str(error), "data_type": data_type}
                     for data_type in ("balance_sheet", "income_statement", "cash_flow")
                 ]
-            return code, outcomes
+                fetched = {}
+            return code, outcomes, fetched
+
+        def finish_one(code: str, outcomes: list[dict[str, Any]]) -> None:
+            nonlocal succeeded, completed
+            completed += 1
+            if all(outcome["status"] == "success" for outcome in outcomes):
+                if all(outcome.get("skipped") for outcome in outcomes):
+                    pending_codes.append(code)
+                else:
+                    succeeded += 1
+                    succeeded_codes.append(code)
+            else:
+                failed.append(code)
+            if detail_cb is not None:
+                detail_cb("financials", {
+                    "step": "financials",
+                    "label": "财务数据",
+                    "done": completed,
+                    "total": len(stock_codes),
+                    "current": code,
+                })
 
         concurrency = max(1, getattr(self, "financial_refresh_concurrency", 8))
         with ThreadPoolExecutor(
             max_workers=concurrency,
             thread_name_prefix="vd-financial-refresh",
         ) as executor:
-            future_to_code = {
-                executor.submit(refresh_one, code): code for code in stock_codes
-            }
-            for future in as_completed(future_to_code):
-                code, outcomes = future.result()
-                completed += 1
-                if all(outcome["status"] == "success" for outcome in outcomes):
-                    if all(outcome.get("skipped") for outcome in outcomes):
-                        pending_codes.append(code)
-                    else:
-                        succeeded += 1
-                        succeeded_codes.append(code)
+            futures = {executor.submit(refresh_one, code): code for code in stock_codes}
+            for future in as_completed(futures):
+                code, outcomes, fetched = future.result()
+                if fetched:
+                    batch_items.append((code, outcomes, fetched))
+                    if len(batch_items) >= batch_size:
+                        self._persist_financial_batch(batch_items)
+                        for item_code, item_outcomes, _ in batch_items:
+                            finish_one(item_code, item_outcomes)
+                        batch_items.clear()
                 else:
-                    failed.append(code)
-                if detail_cb is not None:
-                    detail_cb("financials", {
-                        "step": "financials",
-                        "label": "财务数据",
-                        "done": completed,
-                        "total": len(stock_codes),
-                        "current": code,
-                    })
+                    finish_one(code, outcomes)
+        if batch_items:
+            self._persist_financial_batch(batch_items)
+            for item_code, item_outcomes, _ in batch_items:
+                finish_one(item_code, item_outcomes)
+            batch_items.clear()
         return {
             "status": "success" if not failed else "partial",
             "total": len(stock_codes), "success": succeeded, "failed": len(failed),

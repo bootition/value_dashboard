@@ -277,6 +277,7 @@ class CapitalHistoryUpdater:
         - cross_only=True（核验补强模式）：主链不重新抓取，直接读库中已有
           股本链与东财交叉数据重算 verified 标志；库中无链则跳过（不报错）。
         """
+        fallback_used = False
         if cross_only:
             main_rows = self.duck.read_query(
                 "SELECT effective_date, total_shares, change_reason, is_anchor "
@@ -303,7 +304,6 @@ class CapitalHistoryUpdater:
                 data_type="share_capital_history",
                 stock_codes=[stock_code],
             ))
-            fallback_used = False
             if result.metadata.error:
                 # 2026-08-27：主源（CNINFO）因锚点陈旧/截断回归失败时，
                 # 主动尝试东财 F10 历史股本作为降级主链，而不是停在 retry。
