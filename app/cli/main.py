@@ -8,7 +8,7 @@ M7: 完整命令树
 from __future__ import annotations
 
 import json
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -203,6 +203,35 @@ def data_refresh_universe() -> None:
         )
     )
 
+
+@data_app.command("refresh_csrc")
+def data_refresh_csrc(
+    full: bool = typer.Option(False, "--full", help="全市场重抓并纠正历史非证监会口径"),
+) -> None:
+    """补抓/纠正 CSRC 证监会行业分类（跨进程单写者串行）。"""
+    from app.cli.protocol import make_response
+    from app.core.init import DataInitializer
+    from app.core.storage.update_lock import UpdateLockError, exclusive_update
+
+    _, duck, sqlite = _database_context()
+    initializer = DataInitializer(duck=duck, sqlite=sqlite)
+    try:
+        with exclusive_update(duck.db_path):
+            report = initializer._fetch_csrc_industry(full_refresh=full)
+    except UpdateLockError as error:
+        report = {"status": "skipped", "reason": "another_update_running", "error": str(error)}
+    if report.get("status") in {"success", "partial"}:
+        sqlite.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES ('csrc_industry_last_refresh', ?, ?)
+               ON CONFLICT(key) DO UPDATE SET
+                 value=excluded.value, updated_at=excluded.updated_at""",
+            [datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()],
+        )
+    typer.echo(json.dumps(
+        make_response("data.refresh_csrc", report),
+        ensure_ascii=False, indent=2, default=str,
+    ))
 
 @data_app.command("update")
 def data_update(

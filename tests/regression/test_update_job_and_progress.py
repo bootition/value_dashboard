@@ -393,9 +393,18 @@ def test_csrc_fetch_handles_empty_success_without_executemany(duckdb_store, sqli
 
     report = initializer._fetch_csrc_industry()
 
-    assert report["status"] == "partial"
+    assert report["status"] == "success"
     assert report["count"] == 0
-    assert report["errors"] == ["CSRC source returned no classifications"]
+    assert report["missing"] == 1
+    assert report["errors"] == []
+    missing = sqlite_store.query(
+        "SELECT stock_code, field_name, reason_code FROM missing_list WHERE field_name = 'csrc_industry'"
+    )
+    assert missing == [{
+        "stock_code": "600519",
+        "field_name": "csrc_industry",
+        "reason_code": "source_no_classification",
+    }]
 
 
 class _ChunkAdapter:
@@ -488,3 +497,49 @@ def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store
         "SELECT stock_code FROM price_daily_raw WHERE trade_date = '2026-08-06'"
     )
     assert {row["stock_code"] for row in after} == {"000001", "600519"}
+
+
+def test_csrc_full_refresh_replaces_legacy_non_csrc_values(
+    duckdb_store, sqlite_store,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1, csrc_l2)
+           VALUES ('000001', 'a', 'SZSE', true, '金融', '银行'),
+                  ('000002', 'b', 'SZSE', true, '主要消费', '饮料')"""
+    )
+
+    class FullAdapter:
+        def fetch(self, request):
+            rows = [
+                {"stock_code": code, "csrc_l1": "制造业", "csrc_l2": "专用设备制造业"}
+                for code in request.stock_codes
+                if code == "000001"
+            ]
+            import hashlib
+
+            from app.core.adapters.base import FetchResult, SourceMetadata
+            raw = json.dumps(rows).encode("utf-8")
+            return FetchResult(
+                data=rows,
+                metadata=SourceMetadata(
+                    source="cninfo_csrc", fetch_time=datetime.now(UTC),
+                    raw_response_hash=hashlib.sha256(raw).hexdigest(), confidence="strict",
+                ),
+                raw_response=raw,
+            )
+
+    initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=FullAdapter())
+    report = initializer._fetch_csrc_industry(full_refresh=True)
+
+    assert report["status"] == "success"
+    rows = duckdb_store.read_query(
+        "SELECT stock_code, csrc_l1, csrc_l2 FROM stock_meta ORDER BY stock_code"
+    )
+    assert rows == [
+        {"stock_code": "000001", "csrc_l1": "制造业", "csrc_l2": "专用设备制造业"},
+        {"stock_code": "000002", "csrc_l1": None, "csrc_l2": None},
+    ]
+    missing = sqlite_store.query(
+        "SELECT stock_code FROM missing_list WHERE field_name = 'csrc_industry' AND resolved_at IS NULL"
+    )
+    assert missing == [{"stock_code": "000002"}]

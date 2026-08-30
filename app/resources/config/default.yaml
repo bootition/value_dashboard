@@ -14,6 +14,7 @@ database:
 adapters:
   rate_limit_interval:
     cninfo: 1.5
+    cninfo_csrc: 0.35
     akshare_eastmoney: 0.5
     tdx: 0.2
     baostock: 0.8

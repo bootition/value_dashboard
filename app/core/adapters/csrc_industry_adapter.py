@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Any
 
 from app.core.adapters.base import (
@@ -65,6 +66,7 @@ class CSRCIndustryAdapter(BaseAdapter):
         all_data: list[dict[str, Any]] = []
         errors: list[str] = []
         for code in codes:
+            self._wait_rate_limit()
             try:
                 rows = self._fetch_stock_industry(code)
                 all_data.extend(rows)
@@ -85,16 +87,25 @@ class CSRCIndustryAdapter(BaseAdapter):
         """查询单只股票的当前 CSRC 行业归属。
 
         返回规范化记录；无当前归属时返回空列表（不伪造）。
+
+        2026-08-30 修复：
+        - akshare 默认 end_date=20220713，导致 2022-07 以后上市/变更的股票
+          永远查不到记录；这里显式查询到今天的变更历史。
+        - 接口一次返回多种行业分类标准（巨潮/申万/中证/证监会等），旧实现
+          取第一条导致 csrc_l1/csrc_l2 混入非证监会口径。现在只保留
+          “证监会”分类标准记录，并按变更日期取最新一条。
         """
         try:
             import akshare as ak
         except ImportError as error:
             raise RuntimeError("akshare 不可用，无法查询 CSRC 行业") from error
 
-        # 变更历史按日期倒序（接口默认返回全部历史），取最新一条当前记录。
-        # F008C「最新记录标识」=1 表示当前归属。
         try:
-            df = ak.stock_industry_change_cninfo(symbol=stock_code)
+            df = ak.stock_industry_change_cninfo(
+                symbol=stock_code,
+                start_date="19900101",
+                end_date=date.today().strftime("%Y%m%d"),
+            )
         except (KeyError, TypeError) as e:
             # 新发行/无行业变更历史的股票：CNINFO 无返回列（akshare 内部 KeyError），
             # 属"该股无数据"而非源故障——如实返回空，避免逐股失败误触熔断。
@@ -103,24 +114,35 @@ class CSRCIndustryAdapter(BaseAdapter):
         if df is None or df.empty:
             return []
 
-        rows: list[dict[str, Any]] = []
-        latest_row: dict[str, Any] | None = None
+        # 不同 akshare 版本对该列的中文名不同：1.18.81 为“分类标准”，
+        # 1.18.64 为“行业标准”。
+        standard_col = next(
+            (column for column in ("分类标准", "行业标准") if column in df.columns),
+            None,
+        )
+        if standard_col is None:
+            # 无法识别分类标准列时宁可留空重试，也不能混入其他行业口径。
+            logger.warning("%s CSRC 响应缺少分类标准列，按缺失处理", stock_code)
+            return []
+        csrc_rows: list[dict[str, Any]] = []
         for _, record in df.iterrows():
-            is_latest = record.get("最新记录标识")
+            if "证监会" not in str(record.get(standard_col) or ""):
+                continue
+            csrc_l1 = record.get("行业门类")
+            csrc_l2 = record.get("行业大类")
+            if not isinstance(csrc_l1, str) or not isinstance(csrc_l2, str):
+                continue
             normalized = {
                 "stock_code": stock_code,
-                "csrc_l1": record.get("行业门类"),
-                "csrc_l2": record.get("行业大类"),
+                "csrc_l1": csrc_l1,
+                "csrc_l2": csrc_l2,
                 "as_of_date": str(record.get("变更日期") or ""),
             }
-            if latest_row is None:
-                latest_row = normalized  # 兜底：无 =1 记录时取第一条
-            if is_latest is not None and str(is_latest) == "1":
-                rows.append(normalized)
-                break
-        if not rows and latest_row is not None:
-            rows.append(latest_row)
-        return rows
+            csrc_rows.append(normalized)
+        if not csrc_rows:
+            return []
+        csrc_rows.sort(key=lambda row: row["as_of_date"], reverse=True)
+        return [csrc_rows[0]]
 
     # ─── 结果构建辅助 ─────────────────────────────────────────────
 

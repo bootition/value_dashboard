@@ -72,10 +72,11 @@ def test_csrc_industry_routes_to_cninfo_csrc(monkeypatch) -> None:
     adapter = manager.get_adapter("cninfo_csrc")
     assert adapter is not None
 
-    def fake_change(symbol: str) -> pd.DataFrame:
+    def fake_change(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         assert symbol == "000001"
         return pd.DataFrame([
-            {"最新记录标识": 1, "行业门类": "制造业", "行业大类": "专用设备制造业",
+            {"分类标准": "证监会行业分类标准（2012）",
+             "行业门类": "制造业", "行业大类": "专用设备制造业",
              "变更日期": "2025-06-01"},
         ])
 

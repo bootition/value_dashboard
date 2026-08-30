@@ -63,7 +63,7 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
     "cninfo": 1.5,
-    "cninfo_csrc": 1.5,
+    "cninfo_csrc": 0.35,
     "baostock": 0.8,
     "tdx": 0.2,
     "tencent": 0.2,

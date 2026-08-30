@@ -124,11 +124,11 @@ def test_universe_step_skips_csrc_when_recently_refreshed(
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_stock_universe",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_listing_info",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
 
     def forbidden(self) -> dict:
@@ -150,15 +150,15 @@ def test_universe_step_marks_csrc_refreshed_after_success(
 
     monkeypatch.setattr(
         DataInitializer, "_fetch_stock_universe",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_listing_info",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_csrc_industry",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -194,7 +194,7 @@ def test_universe_steps_are_throttled_by_daily_marker(
     monkeypatch.setattr(DataInitializer, "_fetch_listing_info", forbidden)
     monkeypatch.setattr(
         DataInitializer, "_fetch_csrc_industry",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -228,7 +228,7 @@ def test_universe_steps_run_when_marker_stale_or_absent(
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_csrc_industry",
-        lambda self: {"status": "success", "count": 1},
+        lambda self, **kwargs: {"status": "success", "count": 1},
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -284,3 +284,36 @@ class _FakeSQLite:
 
     def query(self, sql: str, params: list | None = None) -> list[dict]:
         return self._rows
+
+
+def test_universe_step_runs_csrc_inside_interval_when_null_gap_exists(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    from app.core.init import DataInitializer
+
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1)
+           VALUES ('000001', 'a', 'SZSE', true, NULL)"""
+    )
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES ('csrc_industry_last_refresh', ?, ?)""",
+        [datetime.now(UTC).date().isoformat(), datetime.now(UTC).isoformat()],
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_stock_universe",
+        lambda self, **kwargs: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_listing_info",
+        lambda self, **kwargs: {"status": "success", "count": 1},
+    )
+    monkeypatch.setattr(
+        DataInitializer, "_fetch_csrc_industry",
+        lambda self, **kwargs: {"status": "success", "count": 1},
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    step = updater._refresh_universe_metadata()
+
+    assert step["steps"]["csrc_industry"]["status"] == "success"

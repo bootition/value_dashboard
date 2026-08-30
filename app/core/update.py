@@ -884,9 +884,13 @@ class IncrementalUpdater:
                 "interval_days": self.universe_refresh_interval_days,
             }
 
-        if self._csrc_refresh_due():
+        csrc_full_due = self._csrc_refresh_due()
+        csrc_null_gap = self._csrc_null_gap_exists()
+        if csrc_full_due or csrc_null_gap:
             try:
-                steps["csrc_industry"] = initializer._fetch_csrc_industry()
+                steps["csrc_industry"] = initializer._fetch_csrc_industry(
+                    full_refresh=csrc_full_due,
+                )
                 if steps["csrc_industry"].get("status") in {"success", "partial"}:
                     self._mark_refreshed("csrc_industry_last_refresh")
             except Exception as error:
@@ -895,7 +899,7 @@ class IncrementalUpdater:
         else:
             steps["csrc_industry"] = {
                 "status": "skipped",
-                "reason": "refreshed_within_interval",
+                "reason": "refreshed_within_interval_and_no_unrecorded_null_gap",
                 "interval_days": self.csrc_refresh_interval_days,
             }
 
@@ -916,8 +920,30 @@ class IncrementalUpdater:
         }
 
     def _csrc_refresh_due(self) -> bool:
-        """Return whether the CSRC industry refresh interval has elapsed."""
+        """Return whether the full CSRC refresh interval has elapsed."""
         return self._refresh_due("csrc_industry_last_refresh", self.csrc_refresh_interval_days)
+
+    def _csrc_null_gap_exists(self) -> bool:
+        """Return true when listed stocks still lack CSRC and are not recorded missing.
+
+        新股上市后 csrc_l1/csrc_l2 为空时，不能等 30 天全量刷新才补；
+        已由 CNINFO 确认“源无分类”的股票记入 missing_list，不再每轮重试。
+        """
+        try:
+            null_rows = self.duck.read_query(
+                """SELECT COUNT(*) AS c FROM stock_meta
+                   WHERE is_listed IS TRUE AND csrc_l1 IS NULL"""
+            )
+            missing_rows = self.sqlite.query(
+                """SELECT COUNT(*) AS c FROM missing_list
+                   WHERE field_name = 'csrc_industry' AND resolved_at IS NULL"""
+            )
+        except Exception as error:
+            logger.warning("检查 CSRC 未记录缺口失败: %s", error)
+            return False
+        null_count = int(null_rows[0]["c"]) if null_rows else 0
+        missing_count = int(missing_rows[0]["c"]) if missing_rows else 0
+        return null_count > missing_count
 
     def _refresh_due(self, key: str, interval_days: int) -> bool:
         """Return whether a data-domain refresh marker is older than the interval."""

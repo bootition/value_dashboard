@@ -125,7 +125,7 @@ class DataInitializer:
                     "note": "CSRC 行业分类由后续自动更新低频补齐（PRD §24）",
                 }
             else:
-                step3 = self._fetch_csrc_industry()
+                step3 = self._fetch_csrc_industry(full_refresh=True)
                 report["steps"]["sw_industry"] = step3
 
             step4: dict[str, Any] | None = None
@@ -405,33 +405,54 @@ class DataInitializer:
         logger.info(f"[Step 2] 获取 {len(result.data)} 个交易日")
         return {"status": "success", "count": len(result.data)}
 
-    def _fetch_csrc_industry(self) -> dict[str, Any]:
+    def _fetch_csrc_industry(self, *, full_refresh: bool = False) -> dict[str, Any]:
         """Step 3: CSRC（证监会）行业分类（CNINFO 自动获取，PRD §24）
 
-        P1修复（首启性能/可用性）：
-        - 只补抓 csrc_l1 IS NULL 的股票（断点续传语义，已有旧分类保留）
-        - 分块抓取（CSRC_BATCH_SIZE），每块独立事务提交并记录进度，
-          中断后下次运行从断点继续，不会每轮全市场逐股重扫
+        - 默认增量补抓：只处理尚无 CSRC 分类且未登记“源无数据”的股票。
+        - ``full_refresh=True``：全市场重抓，用于纠正旧适配器把巨潮/申万/
+          中证口径误写入 csrc_l1/csrc_l2 的历史数据。
+        - 合法无分类记录写入 missing_list，成功写入后解析 missing 记录。
+        - 分块抓取（CSRC_BATCH_SIZE），每块独立事务提交并记录进度，中断后可续传。
         """
-        logger.info("[Step 3] 获取 CSRC 行业分类...")
+        logger.info("[Step 3] 获取 CSRC 行业分类... (full_refresh=%s)", full_refresh)
 
         try:
-            stocks = self.duck.read_query(
-                """SELECT stock_code FROM stock_meta
-                   WHERE is_listed IS TRUE AND csrc_l1 IS NULL
-                   ORDER BY stock_code"""
-            )
+            if full_refresh:
+                stocks = self.duck.read_query(
+                    """SELECT stock_code FROM stock_meta
+                       WHERE is_listed IS TRUE
+                       ORDER BY stock_code"""
+                )
+            else:
+                stocks = self.duck.read_query(
+                    """SELECT stock_code FROM stock_meta
+                       WHERE is_listed IS TRUE AND csrc_l1 IS NULL
+                       ORDER BY stock_code"""
+                )
+                missing_codes = {
+                    row["stock_code"]
+                    for row in self.sqlite.query(
+                        """SELECT stock_code FROM missing_list
+                           WHERE field_name = 'csrc_industry' AND resolved_at IS NULL"""
+                    )
+                }
+                stocks = [
+                    stock for stock in stocks
+                    if stock["stock_code"] not in missing_codes
+                ]
         except Exception as error:
             return {"status": "failed", "source": "cninfo", "count": 0, "error": str(error)}
 
         if not stocks:
             return {
                 "status": "success", "source": "cninfo", "count": 0,
-                "note": "全部上市股已有 CSRC 分类（无需重抓）",
+                "note": "全部上市股已有 CSRC 分类或缺口已登记（无需重抓）",
             }
 
         codes = [str(row["stock_code"]) for row in stocks]
         processed = 0
+        filled = 0
+        legal_missing = 0
         errors: list[str] = []
         for i in range(0, len(codes), CSRC_BATCH_SIZE):
             chunk = codes[i : i + CSRC_BATCH_SIZE]
@@ -439,33 +460,93 @@ class DataInitializer:
                 data_type="csrc_industry",
                 stock_codes=chunk,
             ))
-            if result.metadata.error and not result.data:
-                errors.append(result.metadata.error)
-            elif not result.data:
-                errors.append("CSRC source returned no classifications")
-            else:
-                # 幂等写入；缺数据的股票保持 NULL 留给下轮断点
+            returned_codes = {str(row.get("stock_code")) for row in result.data}
+            has_error = bool(result.metadata.error)
+            if result.data:
+                rows = [
+                    row for row in result.data
+                    if row.get("stock_code") and row.get("csrc_l1") and row.get("csrc_l2")
+                ]
                 with self.duck.transaction() as conn:
                     conn.executemany(
                         """UPDATE stock_meta SET csrc_l1=?, csrc_l2=? WHERE stock_code=?""",
                         [(row.get("csrc_l1"), row.get("csrc_l2"), row.get("stock_code"))
-                         for row in result.data],
+                         for row in rows],
                     )
-                processed += len(result.data)
-            self._mark_csrc_progress(i + len(chunk), len(codes))
+                filled += len(rows)
+                self._resolve_csrc_missing([row["stock_code"] for row in rows])
+            missing_codes = [code for code in chunk if code not in returned_codes]
+            if has_error:
+                # 块内有股票网络失败时，不能把未返回股票当成“源无分类”；
+                # 本块未返回代码留到下次续传重试，成功返回的代码照常写入。
+                errors.append(result.metadata.error or "CSRC source failed for some stocks")
+                missing_codes = []
+            elif missing_codes:
+                if full_refresh:
+                    # 全量刷新时源确认无证监会分类：清空历史误写入的非 CSRC
+                    # 口径值，避免行业排名继续使用巨潮/申万/中证分类。
+                    slots = ", ".join("?" for _ in missing_codes)
+                    with self.duck.transaction() as conn:
+                        conn.execute(
+                            f"""UPDATE stock_meta SET csrc_l1=NULL, csrc_l2=NULL
+                                 WHERE stock_code IN ({slots})""",
+                            missing_codes,
+                        )
+                self._record_csrc_missing(missing_codes, "source_no_classification")
+                legal_missing += len(missing_codes)
+            processed += len(chunk)
+            self._mark_csrc_progress(processed, len(codes))
             logger.info(
-                "  [Step 3] CSRC 进度: %d/%d (本块 %d 条)",
-                min(i + len(chunk), len(codes)), len(codes), len(result.data),
+                "  [Step 3] CSRC 进度: %d/%d (本块 %d 条，缺失 %d 条)",
+                min(processed, len(codes)), len(codes), len(result.data),
+                len(missing_codes),
             )
 
-        logger.info(f"[Step 3] CSRC 行业分类更新完成: {processed} 条")
+        logger.info(
+            "[Step 3] CSRC 行业分类更新完成: 更新 %d 条，合法缺失 %d 条",
+            filled, legal_missing,
+        )
         return {
             "status": "success" if not errors else "partial",
             "source": "cninfo",
-            "count": processed,
+            "count": filled,
+            "missing": legal_missing,
             "total": len(codes),
             "errors": errors[:20],
         }
+
+    def _record_csrc_missing(self, codes: list[str], reason_code: str) -> None:
+        """CSRC 源合法无分类时登记 missing_list（每股票+字段一条未解决）。"""
+        if not codes:
+            return
+        try:
+            with self.sqlite.transaction() as conn:
+                conn.executemany(
+                    """INSERT INTO missing_list (stock_code, field_name, reason_code)
+                       VALUES (?, 'csrc_industry', ?)
+                       ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                       DO NOTHING""",
+                    [(code, reason_code) for code in codes],
+                )
+        except Exception as error:
+            logger.warning("记录 CSRC missing 失败: %s", error)
+
+    def _resolve_csrc_missing(self, codes: list[str]) -> None:
+        """CSRC 写入成功后解析对应 missing_list 记录。"""
+        if not codes:
+            return
+        try:
+            slots = ", ".join("?" for _ in codes)
+            with self.sqlite.transaction() as conn:
+                conn.execute(
+                    f"""UPDATE missing_list SET resolved_at = ?
+                       WHERE field_name = 'csrc_industry'
+                         AND resolved_at IS NULL
+                         AND stock_code IN ({slots})""",
+                    [datetime.now(UTC).isoformat(), *codes],
+                )
+        except Exception as error:
+            logger.warning("解析 CSRC missing 失败: %s", error)
 
     def _mark_csrc_progress(self, processed: int, total: int) -> None:
         """持久化 CSRC 抓取进度（断点续传依据）。"""
