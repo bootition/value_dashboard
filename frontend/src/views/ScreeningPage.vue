@@ -13,7 +13,7 @@ import type {
   DataStatusSummaryResponse,
   WarningCode,
 } from '../types/screening.ts'
-import { generateRuleId } from '../types/screening.ts'
+import { cloneScreeningRule, generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import { applyIndicatorUnits, fieldDisplayName, fieldOptionLabel } from '../utils/screening-format.ts'
@@ -459,16 +459,23 @@ function deleteSelectedRule(): void {
 }
 
 function applyLoadedRule(rule: SavedRule) {
-  // 先重置编辑区再覆盖，确保目标规则不含 conditions/sort 时不残留旧内容
+  // 先重置编辑区再覆盖，确保目标规则不含 conditions/sort 时不残留旧内容。
+  // 必须深拷贝：Object.assign(ruleTree, saved.conditions) 会把 conditions.rules
+  // 数组引用共享给编辑区；用户一改条件值，savedRules 里的“已保存版本”会同步
+  // 被改掉，isDraftDirty() 随即判定“无修改”，于是永远按旧版本号运行。
+  const conditions = rule.rule_json.conditions
+  const clone = cloneScreeningRule(
+    conditions && conditions.rules
+      ? conditions
+      : { logic: 'AND', rules: [] },
+  )
   ruleTree.logic = 'AND'
   ruleTree.rules.splice(0, ruleTree.rules.length)
-  if (rule.rule_json.conditions) {
-    Object.assign(ruleTree, rule.rule_json.conditions)
-  }
+  Object.assign(ruleTree, clone)
 
-  // Load sort rules
+  // Load sort rules（同样深拷贝，避免 UI 修改污染 savedRules）
   sortRules.value = (rule.rule_json.sort && rule.rule_json.sort.length > 0)
-    ? [...rule.rule_json.sort]
+    ? cloneScreeningRule(rule.rule_json.sort)
     : []
 
   message.success(`已加载规则: ${rule.name} v${rule.version}`)

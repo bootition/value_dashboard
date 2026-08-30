@@ -108,3 +108,15 @@ export function isRuleNode(
 ): item is ScreeningRuleNode {
   return 'logic' in item && (item.logic === 'AND' || item.logic === 'OR')
 }
+
+/**
+ * Deep-clone a rule tree/array before loading it into the editor.
+ *
+ * The editor mutates rule values in place. Loading a saved rule with a shallow
+ * copy shares the nested condition objects with the saved-rules cache; the
+ * cache then changes with the editor, so dirty detection can never see a
+ * difference between the draft and the saved version.
+ */
+export function cloneScreeningRule<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T
+}
