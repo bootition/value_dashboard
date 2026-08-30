@@ -1137,6 +1137,39 @@ class DataInitializer:
             "parent_net_profit": "parent_net_profit",
             "cf_from_operating": "cf_from_operating",
         }
+        # Sina/TDX 适配器已输出标准化小写字段名；旧版白名单只放行核心字段，
+        # 导致明细行项目（货币资金/存货/商誉/三费/EPS 等）全部被丢弃。
+        standard_financial_fields = {
+            "monetary_funds", "trading_financial_assets", "notes_receivable",
+            "accounts_receivable", "prepayments", "other_receivables",
+            "inventory", "contract_assets", "total_current_assets",
+            "long_term_equity_investment", "fixed_assets",
+            "construction_in_progress", "right_of_use_assets",
+            "intangible_assets", "goodwill", "deferred_tax_assets",
+            "total_non_current_assets", "short_term_loans", "notes_payable",
+            "accounts_payable", "prepayments_received", "contract_liabilities",
+            "employee_benefits_payable", "taxes_payable",
+            "total_current_liabilities", "long_term_loans", "bonds_payable",
+            "lease_liabilities", "total_non_current_liabilities",
+            "paid_in_capital", "capital_reserve", "surplus_reserve",
+            "undistributed_profit", "minority_interest",
+            "total_operating_revenue", "total_operating_cost", "cost_of_revenue",
+            "taxes_and_surcharges", "selling_expenses", "administrative_expenses",
+            "rd_expenses", "financial_expenses", "interest_expense",
+            "interest_income", "asset_impairment_loss", "credit_impairment_loss",
+            "exchange_gain", "investment_income", "operating_profit",
+            "non_operating_income", "non_operating_expenses", "total_profit",
+            "income_tax", "net_profit", "minority_shareholder_profit",
+            "deducted_net_profit", "basic_eps", "diluted_eps",
+            "cash_received_sales", "taxes_refunded", "other_operating_cf_in",
+            "total_operating_cf_in", "cash_paid_goods", "cash_paid_employees",
+            "cash_paid_taxes", "other_operating_cf_out",
+            "total_operating_cf_out", "cf_from_investing",
+            "cf_from_financing", "exchange_rate_effect", "cf_net",
+            "cash_beginning", "cash_ending",
+        }
+        for field in standard_financial_fields:
+            field_mapping.setdefault(field, field)
 
         # 构建标准化记录
         mapped: dict[str, Any] = {}

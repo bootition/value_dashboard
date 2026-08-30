@@ -185,7 +185,7 @@ def test_real_fixture_maps_all_seven_fields_from_fzb_lrb_llb(monkeypatch) -> Non
     assert [row["report_date"] for row in balance.data] == [
         "2026-03-31", "2025-12-31", "2024-12-31",
     ]
-    assert balance.data[0] == {
+    expected_core = {
         "stock_code": "600519",
         "report_date": "2026-03-31",
         "total_assets": 319918844905.58,
@@ -193,21 +193,24 @@ def test_real_fixture_maps_all_seven_fields_from_fzb_lrb_llb(monkeypatch) -> Non
         "total_equity_parent": 270894035676.27002,
         "total_equity": 281135886435.69,
     }
+    for key, value in expected_core.items():
+        assert balance.data[0][key] == value
+    # 明细字段现在也会被解析并入库
+    assert balance.data[0]["monetary_funds"] is not None
+    assert balance.data[0]["inventory"] is not None
 
     income = _fixture_result("income_statement", monkeypatch)
-    assert income.data[0] == {
-        "stock_code": "600519",
-        "report_date": "2026-03-31",
-        "revenue": 53909252220.51,
-        "parent_net_profit": 27242512886.45,
-    }
+    assert income.data[0]["stock_code"] == "600519"
+    assert income.data[0]["report_date"] == "2026-03-31"
+    assert income.data[0]["revenue"] == 53909252220.51
+    assert income.data[0]["parent_net_profit"] == 27242512886.45
+    assert income.data[0]["basic_eps"] is not None
 
     cashflow = _fixture_result("cash_flow", monkeypatch)
-    assert cashflow.data[0] == {
-        "stock_code": "600519",
-        "report_date": "2026-03-31",
-        "cf_from_operating": 26909891269.13,
-    }
+    assert cashflow.data[0]["stock_code"] == "600519"
+    assert cashflow.data[0]["report_date"] == "2026-03-31"
+    assert cashflow.data[0]["cf_from_operating"] == 26909891269.13
+    assert cashflow.data[0]["cash_ending"] is not None
 
     for statement in (balance, income, cashflow):
         assert len(statement.data) == 3
@@ -237,7 +240,8 @@ def test_revenue_never_takes_total_operating_revenue(monkeypatch) -> None:
     )
 
     assert result.data[0]["revenue"] == 53909252220.51
-    assert result.data[0].get("total_operating_revenue") is None
+    # 营业总收入与营业收入是不同口径，各自映射到自己的字段
+    assert result.data[0].get("total_operating_revenue") == 54702912385.23
 
 
 def test_missing_fields_are_not_fabricated(monkeypatch) -> None:

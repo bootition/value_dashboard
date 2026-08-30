@@ -284,16 +284,22 @@ def data_business_overview(
     """
     from app.cli.protocol import make_response
     from app.core.business import BusinessOverviewUpdater
+    from app.core.storage.update_lock import UpdateLockError, exclusive_update
 
     _, duck, sqlite = _database_context()
     updater = BusinessOverviewUpdater(duck=duck, sqlite=sqlite)
     if check_only:
         report = updater.status_report()
-    elif stocks.strip():
-        codes = [code.strip() for code in stocks.split(",") if code.strip()]
-        report = updater.update_many(codes)
     else:
-        report = updater.update_all(max_stocks=max_stocks)
+        try:
+            with exclusive_update(duck.db_path):
+                if stocks.strip():
+                    codes = [code.strip() for code in stocks.split(",") if code.strip()]
+                    report = updater.update_many(codes)
+                else:
+                    report = updater.update_all(max_stocks=max_stocks)
+        except UpdateLockError as error:
+            report = {"status": "skipped", "reason": "another_update_running", "error": str(error)}
     typer.echo(json.dumps(make_response("data.business-overview", report), ensure_ascii=False, indent=2, default=str))
 
 
