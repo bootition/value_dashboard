@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import { NTag, NTooltip } from 'naive-ui'
 
 /**
@@ -20,7 +21,7 @@ export interface IndicatorGroup {
   readonly items: readonly MetricStatItem[]
 }
 
-withDefaults(
+const props = withDefaults(
   defineProps<{
     /** 粘性目录锚点 id */
     readonly id: string
@@ -31,6 +32,18 @@ withDefaults(
   }>(),
   { cols: 4 },
 )
+
+// 缺失字段不再渲染成一张张 “—” 卡片：界面只显示确实采集到的指标。
+const visibleGroups = computed(() =>
+  props.groups
+    .map((group) => ({
+      ...group,
+      items: group.items.filter(
+        (item) => item.value !== '—' && item.value !== '' && item.value != null,
+      ),
+    }))
+    .filter((group) => group.items.length > 0),
+)
 </script>
 
 <template>
@@ -40,7 +53,7 @@ withDefaults(
       <h2>{{ title }}</h2>
     </header>
     <div
-      v-for="(group, groupIndex) in groups"
+      v-for="(group, groupIndex) in visibleGroups"
       :key="group.name ?? groupIndex"
       class="indicator-group"
     >

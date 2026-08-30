@@ -223,8 +223,8 @@ describe('StockDetailPage 不可信指标统一警示（reports/27 P1-8）', () 
     const text = wrapper.text()
     // 全局 fail-closed 告警
     expect(text).toContain('当前数据库状态不可信')
-    // 指标卡片的"数据不可信"标记（非普通数值）
-    expect(text).toContain('数据不可信')
+    // 缺失指标不再渲染成空卡片，因此页面不会出现普通数值或空值标记
+    expect(text).not.toContain('数据不可信')
   })
 })
 
@@ -234,7 +234,7 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
     localStorage.clear()
   })
 
-  it('渲染粘性目录的六个章节', async () => {
+  it('渲染粘性目录的五个章节', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
@@ -246,11 +246,10 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
       '经营与成长',
       '财务安全',
       '股东回报',
-      '来源材料',
     ])
   })
 
-  it('渲染概览与四个摘要章节及来源材料', async () => {
+  it('渲染概览与四个摘要章节', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
@@ -260,7 +259,6 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
     expect(wrapper.find('#operations').text()).toContain('经营与成长')
     expect(wrapper.find('#safety').text()).toContain('财务安全')
     expect(wrapper.find('#return').text()).toContain('股东回报')
-    expect(wrapper.find('#sources').text()).toContain('来源材料')
     // 首屏身份 / 行情 / 数据状态
     expect(wrapper.find('#overview').text()).toContain('贵州茅台')
     expect(wrapper.find('#overview').text()).toContain('最新收盘价')

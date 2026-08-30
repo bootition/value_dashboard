@@ -18,7 +18,6 @@ import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import TreasuryComparisonCard from '../components/TreasuryComparisonCard.vue'
 import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
-import DataTraceability from '../components/DataTraceability.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
 import { fmt, fmtPct } from '../utils/formatters.ts'
 import { loadKlineSettings, pageStorage, saveKlineSettings } from '../utils/kline-settings.ts'
@@ -28,7 +27,6 @@ import type {
   IndicatorsResponse,
   KlineResponse,
   TrendResponse,
-  AuditResponse,
   KlinePeriod,
   IndicatorMetric,
   FinancialTrendRow,
@@ -52,7 +50,6 @@ const stockInfo = ref<StockInfo | null>(null)
 const indicators = ref<IndicatorsResponse | null>(null)
 const klineData = ref<KlineResponse>({ candles: [] })
 const trendData = ref<TrendResponse>({ trend: [], period: 'annual', count: 0 })
-const auditData = ref<AuditResponse>({ field_audit: [], batch_audit: [] })
 const businessOverview = ref<BusinessOverviewResponse | null>(null)
 const warningCodes = ref<readonly WarningCode[]>([])
 
@@ -92,7 +89,6 @@ async function fetchAll() {
       fetchIndicators(gen),
       fetchKline(gen),
       fetchTrend(gen),
-      fetchAudit(gen),
       fetchBusinessOverview(gen),
     ])
   } finally {
@@ -173,18 +169,6 @@ async function fetchTrend(gen: number) {
     if (gen !== generation.value) return
     trendData.value = { trend: [], period: 'annual', count: 0 }
     message.warning(friendlyErrorMessage(e, '加载财务趋势失败'))
-  }
-}
-
-async function fetchAudit(gen: number) {
-  try {
-    const resp = await axios.get<AuditResponse>(`/api/stock/${stockCode.value}/source-audit`)
-    if (gen !== generation.value) return
-    auditData.value = resp.data
-  } catch (e) {
-    if (gen !== generation.value) return
-    auditData.value = { field_audit: [], batch_audit: [] }
-    message.warning(friendlyErrorMessage(e, '加载溯源信息失败'))
   }
 }
 
@@ -380,7 +364,6 @@ const tocItems: readonly TocItem[] = [
   { id: 'operations', label: '经营与成长' },
   { id: 'safety', label: '财务安全' },
   { id: 'return', label: '股东回报' },
-  { id: 'sources', label: '来源材料' },
 ]
 const activeSection = ref('overview')
 const sectionEls = ref<Record<string, HTMLElement | null>>({})
@@ -624,14 +607,6 @@ onUnmounted(() => {
             </div>
           </IndicatorGroupSection>
 
-          <!-- 来源材料 -->
-          <section id="sources" :ref="setSectionRef('sources')" class="stock-section sources-section">
-            <header class="section-heading">
-              <p class="section-kicker">SOURCE MATERIALS</p>
-              <h2>来源材料</h2>
-            </header>
-            <DataTraceability :stock-code="stockCode" :audit-data="auditData" />
-          </section>
         </div>
 
         <StockTocNav

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   NSpace, NRadioGroup, NRadioButton, NSelect, NEmpty, NDataTable, NRadio,
 } from 'naive-ui'
@@ -25,7 +25,7 @@ const periodOptions = [
   { label: '全部', value: 99 },
 ]
 
-const metricOptions = [
+const allMetricOptions = [
   { label: '营收', value: 'revenue' },
   { label: '归母净利', value: 'parent_net_profit' },
   { label: '毛利率', value: 'gross_margin' },
@@ -35,7 +35,28 @@ const metricOptions = [
   { label: 'EPS', value: 'basic_eps' },
 ]
 
+
 const trendRows = computed(() => [...props.trendData.trend])
+
+// 只提供历史序列中确实存在数据的指标，避免整列都是 “—”。
+const availableMetricKeys = computed(() => {
+  const keys = new Set<string>()
+  for (const row of trendRows.value) {
+    for (const option of allMetricOptions) {
+      const value = row[option.value as keyof FinancialTrendRow]
+      if (value !== null && value !== undefined) keys.add(option.value)
+    }
+  }
+  return keys
+})
+const metricOptions = computed(() =>
+  allMetricOptions.filter((option) => availableMetricKeys.value.has(option.value)),
+)
+watch(metricOptions, (options) => {
+  if (options.length > 0 && !options.some((option) => option.value === chartMetric.value)) {
+    chartMetric.value = options[0]!.value as keyof FinancialTrendRow
+  }
+}, { immediate: true })
 
 const isEmpty = computed(() => props.trendData.trend.length === 0)
 
@@ -149,18 +170,30 @@ const zeroLineY = computed(() => {
   return null
 })
 
-const trendColumns: DataTableColumns<FinancialTrendRow> = [
-  { title: '报告期', key: 'report_date', width: 110 },
-  { title: '营收', key: 'revenue', render: (r) => fmt(r.revenue, 0) },
-  { title: '归母净利', key: 'net_profit', render: (r) => fmt(r.net_profit, 0) },
-  { title: '扣非净利', key: 'deducted_net_profit', render: (r) => fmt(r.deducted_net_profit, 0) },
-  { title: '毛利率', key: 'gross_margin', render: (r) => fmtPct(r.gross_margin) },
-  { title: '净利率', key: 'net_margin', render: (r) => fmtPct(r.net_margin) },
-  { title: 'ROE', key: 'roe', render: (r) => fmtPct(r.roe) },
-  { title: '负债率', key: 'debt_ratio', render: (r) => fmtPct(r.debt_ratio) },
-  { title: 'EPS', key: 'basic_eps', render: (r) => fmt(r.basic_eps) },
-  { title: '经营CF', key: 'cf_from_operating', render: (r) => fmt(r.cf_from_operating, 0) },
-]
+const trendColumns = computed<DataTableColumns<FinancialTrendRow>>(() => {
+  const columns: DataTableColumns<FinancialTrendRow> = [
+    { title: '报告期', key: 'report_date', width: 110 },
+  ]
+  const candidates: Array<{ field: keyof FinancialTrendRow; title: string; render: (r: FinancialTrendRow) => string }> = [
+    { field: 'revenue', title: '营收', render: (r) => fmt(r.revenue, 0) },
+    { field: 'net_profit', title: '归母净利', render: (r) => fmt(r.net_profit, 0) },
+    { field: 'deducted_net_profit', title: '扣非净利', render: (r) => fmt(r.deducted_net_profit, 0) },
+    { field: 'gross_margin', title: '毛利率', render: (r) => fmtPct(r.gross_margin) },
+    { field: 'net_margin', title: '净利率', render: (r) => fmtPct(r.net_margin) },
+    { field: 'roe', title: 'ROE', render: (r) => fmtPct(r.roe) },
+    { field: 'debt_ratio', title: '负债率', render: (r) => fmtPct(r.debt_ratio) },
+    { field: 'basic_eps', title: 'EPS', render: (r) => fmt(r.basic_eps) },
+    { field: 'cf_from_operating', title: '经营CF', render: (r) => fmt(r.cf_from_operating, 0) },
+  ]
+  for (const candidate of candidates) {
+    const key = candidate.field
+    const hasData = trendRows.value.some((row) => row[key] !== null && row[key] !== undefined)
+    if (hasData) {
+      columns.push({ title: candidate.title, key, render: candidate.render } as never)
+    }
+  }
+  return columns
+})
 </script>
 
 <template>
