@@ -327,7 +327,7 @@ async function addToWatchlist() {
 
     <section class="screening-results-card">
       <div class="results-heading"><div><p>SCREENING RESULTS</p><h2>筛选结果</h2><span>{{ totalMatched || displayedResults.length }} 家公司符合当前规则</span></div><div><n-button id="save-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button><n-button id="export-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="exportCSV">导出 CSV</n-button><n-button id="watchlist-btn" size="small" type="primary" :disabled="watchlistDisabled" :aria-describedby="watchlistDisabled ? 'quality-alert' : undefined" @click="addToWatchlist">保存到自选列表</n-button></div></div>
-      <div class="result-meta"><span><b>{{ displayedResults.length }}</b> 家已展示</span><span>基础股票池 <b>{{ basePoolSize }}</b></span><span>耗时 <b>{{ executionTime }} ms</b></span><span>数据日期 <b>{{ dataDate || '—' }}</b></span></div>
+      <div class="result-meta"><span><b>{{ displayedResults.length }}</b> 家已展示</span><span>执行规则 <b>{{ ruleName }} v{{ ruleVersion }}</b></span><span>基础股票池 <b>{{ basePoolSize }}</b></span><span>耗时 <b>{{ executionTime }} ms</b></span><span>数据日期 <b>{{ dataDate || '—' }}</b></span></div>
       <div class="column-config">
         <n-select
           v-model:value="selectedColumns"
