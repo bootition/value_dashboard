@@ -252,3 +252,34 @@ def test_warm_screening_readiness_cache_round_trip(
     assert cached is not None
     assert cached["ready"] is True
     assert cached["warning_codes"] == []
+
+
+def test_screening_readiness_cache_stale_while_revalidate_read(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    import json as _json
+
+    from app.core.data_quality import (
+        SCREENING_READINESS_CACHE_KEY,
+        load_screening_readiness_cache,
+        screening_readiness_cache_key,
+    )
+
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store) or "test-fp"
+    decision = {"ready": True, "readiness": {"ready": True}, "warning_codes": []}
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                         updated_at=excluded.updated_at""",
+        [SCREENING_READINESS_CACHE_KEY, _json.dumps({
+            "fingerprint": fingerprint,
+            "decision": decision,
+            "updated_at": "2000-01-01T00:00:00+00:00",
+        }), "2000-01-01T00:00:00+00:00"],
+    )
+
+    assert load_screening_readiness_cache(sqlite_store, fingerprint) is None
+    assert load_screening_readiness_cache(
+        sqlite_store, fingerprint, allow_stale=True,
+    ) == decision

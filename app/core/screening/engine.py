@@ -117,7 +117,10 @@ RANK_SUFFIXES = (
     "_industry_rank", "_industry_percentile",
     "_sw1_rank", "_sw1_percentile", "_sw2_rank", "_sw2_percentile",
 )
-METADATA_COLUMNS = {"stock_code", "name", "exchange", "sw_level1", "sw_level2", "csrc_l1", "csrc_l2"}
+METADATA_COLUMNS = {
+    "stock_code", "name", "exchange", "listing_date", "is_st", "is_suspended",
+    "total_shares", "circ_shares", "sw_level1", "sw_level2", "csrc_l1", "csrc_l2",
+}
 MAX_RULE_LEAVES = 100
 MAX_IN_VALUES = 1_000
 # P1-C修复: 结果行数上限（内存/导出保护）；超限时显式 truncated 标记
@@ -377,7 +380,9 @@ base_pool AS (
     SELECT
         m.stock_code, m.name, m.pinyin, m.exchange, m.sw_level1, m.sw_level2,
         m.csrc_l1, m.csrc_l2,
-        m.is_st, m.is_suspended, m.listing_date, s.*, {', '.join(normalized_selects)}
+        m.is_st, m.is_suspended, m.listing_date,
+        m.total_shares, m.circ_shares,
+        s.*, {', '.join(normalized_selects)}
     FROM stock_meta m
     LEFT JOIN LATERAL (
         SELECT * FROM indicator_snapshot s

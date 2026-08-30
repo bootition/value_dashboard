@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.core.data_quality import (
+    ensure_screening_readiness_refresh,
     load_screening_readiness_cache,
     screening_readiness_cache_key,
     store_screening_readiness_cache,
@@ -127,6 +128,16 @@ def _require_current_screenability(request: Request) -> dict:
     cache_key = screening_readiness_cache_key(request.app.state.duck, request.app.state.sqlite)
     if cache_key:
         cached = load_screening_readiness_cache(request.app.state.sqlite, cache_key)
+        if cached is None:
+            # 同指纹的过期决策采用 stale-while-revalidate：请求立即返回，
+            # 后台单飞刷新，避免每 10 分钟让用户卡一次 20s+ 全库核对。
+            cached = load_screening_readiness_cache(
+                request.app.state.sqlite, cache_key, allow_stale=True,
+            )
+            if cached is not None:
+                ensure_screening_readiness_refresh(
+                    request.app.state.duck, request.app.state.sqlite, cache_key,
+                )
         if cached is not None:
             request.app.state.startup_readiness = cached.get("readiness") or {}
             if not cached.get("ready"):
@@ -168,6 +179,7 @@ class ScreeningRequest(BaseModel):
     include_suspended: bool = False
     min_listing_years: int = 1
     strict_only: bool = False
+    columns: list[str] | None = None
 
 
 class SaveResultRequest(BaseModel):
@@ -209,6 +221,11 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
     if not rule_rows:
         raise HTTPException(status_code=400, detail="saved rule version not found")
     rule = json.loads(rule_rows[0]["rule_json"])
+    # 2026-08-31：结果列可在运行前自由选择；本次运行覆盖保存版本的 columns，
+    # 并随 screening_runs.columns_json 持久化，保证屏幕/保存/导出同口径。
+    if req.columns is not None:
+        rule = dict(rule)
+        rule["columns"] = list(dict.fromkeys(req.columns))
     # P1-5修复: 惰性过期清理由单条原子 DELETE 完成, 只回收早于 TTL 的 run,
     # 不再删除其他页面尚在有效期内未保存的 run; 正常消费仍由 /save 负责删除
     request.app.state.sqlite.execute(

@@ -159,3 +159,48 @@ def test_screening_uses_published_statement_overrides(
 
     assert response.status_code == 200
     assert response.json()["results"][0]["balance.total_assets"] == 200.0
+
+
+def test_screening_run_accepts_freely_selected_result_columns(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
+           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    )
+    insert_minimum_screenable_data(duckdb_store)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(router)
+    client = TestClient(app)
+    rule = client.post(
+        "/api/screening/rules/save",
+        json={"name": "free-columns", "rule_json": {
+            "conditions": {"logic": "AND", "rules": []},
+            "columns": ["stock_code", "pe_ttm"],
+        }},
+    ).json()
+    columns = ["stock_code", "name", "listing_date", "total_shares", "circ_shares", "pe_ttm"]
+
+    response = client.post(
+        "/api/screening/run",
+        json={
+            "rule_id": rule["rule_id"], "rule_version": rule["version"],
+            "min_listing_years": 0, "columns": columns,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0]["stock_code"] == "000001"
+    assert body["results"][0]["listing_date"] == "2020-01-01"
+    assert body["results"][0]["total_shares"] == 100
+    assert body["results"][0]["circ_shares"] == 80
+    persisted = sqlite_store.query(
+        "SELECT columns_json FROM screening_runs WHERE run_id = ?",
+        [body["run_id"]],
+    )[0]
+    assert persisted["columns_json"] == '["stock_code", "name", "listing_date", "total_shares", "circ_shares", "pe_ttm"]'

@@ -99,6 +99,37 @@ const opOptions = [
   { label: '无数据', value: 'is_null' },
 ]
 
+// 结果展示列：运行前可自由增删；本次运行通过 /run 的 columns 参数生效，
+// 并持久化到 draft.result_columns。这里只放 stock_meta 基础信息，
+// 指标列复用 /api/screening/indicators 的 indicatorOptions。
+const RESULT_METADATA_COLUMNS: Array<{ label: string; value: string }> = [
+  { label: '股票代码', value: 'stock_code' },
+  { label: '股票名称', value: 'name' },
+  { label: '交易所', value: 'exchange' },
+  { label: '上市日期', value: 'listing_date' },
+  { label: 'ST 状态', value: 'is_st' },
+  { label: '停牌状态', value: 'is_suspended' },
+  { label: '总股本', value: 'total_shares' },
+  { label: '流通股本', value: 'circ_shares' },
+  { label: '证监会一级行业', value: 'csrc_l1' },
+  { label: '证监会二级行业', value: 'csrc_l2' },
+]
+const DEFAULT_RESULT_COLUMNS = [
+  'stock_code', 'name', 'exchange', 'listing_date',
+  'csrc_l1', 'csrc_l2', 'latest_close', 'total_market_cap',
+]
+const selectedResultColumns = ref<string[]>([])
+const resultColumnOptions = computed(() => {
+  const seen = new Set(RESULT_METADATA_COLUMNS.map(item => item.value))
+  const options = [...RESULT_METADATA_COLUMNS]
+  for (const indicator of indicatorOptions.value) {
+    if (seen.has(indicator.value)) continue
+    seen.add(indicator.value)
+    options.push(indicator)
+  }
+  return options
+})
+
 const readinessCopy = computed(() => {
   if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
   if (dataReady.value === null) return { state: 'loading', label: '正在核对数据' }
@@ -212,6 +243,9 @@ async function runScreening() {
       include_suspended: !basePool.exclude_suspended,
       min_listing_years: basePool.min_listing_years,
       strict_only: strictOnly.value,
+      columns: selectedResultColumns.value.length > 0
+        ? selectedResultColumns.value
+        : undefined,
     }, {
       // 后端筛选门禁在无缓存冷启动时需执行一次全库数据质量核对；
       // 该请求单独放宽超时，避免默认 30s 把仍在正常计算的服务端请求
@@ -295,6 +329,7 @@ function draftPayload() {
     sort: sortRules.value,
     base_pool: { ...basePool },
     strict_only: strictOnly.value,
+    result_columns: selectedResultColumns.value,
   }
 }
 
@@ -368,7 +403,11 @@ function saveDraftSoon() {
   draftTimer = setTimeout(() => void persistDraft(), 400)
 }
 
-watch([ruleTree, sortRules, basePool, strictOnly], saveDraftSoon, { deep: true })
+watch(
+  [ruleTree, sortRules, basePool, strictOnly, selectedResultColumns],
+  saveDraftSoon,
+  { deep: true },
+)
 
 async function restoreDraft() {
   try {
@@ -377,6 +416,7 @@ async function restoreDraft() {
       sort?: SortRule[]
       base_pool?: Partial<typeof basePool>
       strict_only?: boolean
+      result_columns?: string[]
     } | null; revision?: number }>('/api/screening/draft')
     const draft = response.data.draft
     draftRevision.value = response.data.revision ?? 0
@@ -388,6 +428,11 @@ async function restoreDraft() {
     if (draft.sort) sortRules.value = draft.sort
     if (draft.base_pool) Object.assign(basePool, draft.base_pool)
     if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
+    if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
+      selectedResultColumns.value = draft.result_columns
+    } else if (selectedResultColumns.value.length === 0) {
+      selectedResultColumns.value = [...DEFAULT_RESULT_COLUMNS]
+    }
     syncEditorSnapshot()
   } catch {
     message.warning('无法恢复最近筛选草稿')
@@ -407,11 +452,9 @@ async function persistRule(name: string): Promise<{ rule_id: number; version: nu
       rule_json: {
         conditions: ruleTree,
         sort: sortRules.value,
-        columns: Array.from(new Set([
-          'stock_code', 'name', 'exchange', 'csrc_l1', 'csrc_l2', 'latest_close',
-          ...sortRules.value.map(item => item.field),
-          ...Array.from(ruleFields.value),
-        ])),
+        columns: selectedResultColumns.value.length > 0
+          ? [...selectedResultColumns.value]
+          : [...DEFAULT_RESULT_COLUMNS],
       },
       locked_indicators: {},
       status: 'saved',
@@ -477,6 +520,10 @@ function applyLoadedRule(rule: SavedRule) {
   sortRules.value = (rule.rule_json.sort && rule.rule_json.sort.length > 0)
     ? cloneScreeningRule(rule.rule_json.sort)
     : []
+
+  selectedResultColumns.value = (rule.rule_json.columns && rule.rule_json.columns.length > 0)
+    ? [...rule.rule_json.columns]
+    : [...DEFAULT_RESULT_COLUMNS]
 
   message.success(`已加载规则: ${rule.name} v${rule.version}`)
 }
@@ -657,6 +704,19 @@ onUnmounted(() => {
             </n-space>
             <n-button size="tiny" @click="addSortRule">+ 添加排序规则</n-button>
           </n-space>
+        </div>
+
+        <div class="screening-section">
+          <div class="screening-section-title"><div><b>03</b><h3>结果展示列</h3></div><p>运行前可自由增加或删减展示信息；修改展示列不会产生新的规则版本。</p></div>
+          <n-select
+            v-model:value="selectedResultColumns"
+            :options="resultColumnOptions"
+            multiple
+            filterable
+            clearable
+            size="small"
+            placeholder="选择要在结果表展示的信息"
+          />
         </div>
 
         <DslIndicatorManager class="dsl-manager" />

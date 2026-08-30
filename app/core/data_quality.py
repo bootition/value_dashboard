@@ -131,9 +131,15 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
 
 
 def load_screening_readiness_cache(
-    sqlite: SQLiteStore, fingerprint: str,
+    sqlite: SQLiteStore, fingerprint: str, *, allow_stale: bool = False,
 ) -> dict | None:
-    """Return a fresh cached screening decision, or None on miss/expiry."""
+    """Return a cached screening decision, or None on miss/fingerprint change.
+
+    Fresh calls reject entries older than ``SCREENING_READINESS_CACHE_TTL_SECONDS``.
+    ``allow_stale=True`` still requires the same input fingerprint but permits an
+    expired decision so the request path can use stale-while-revalidate instead
+    of blocking on another 20s+ full-data-quality scan.
+    """
     try:
         rows = sqlite.query(
             "SELECT value FROM data_refresh_state WHERE key = ?",
@@ -144,16 +150,55 @@ def load_screening_readiness_cache(
         payload = json.loads(rows[0]["value"] or "{}")
         if payload.get("fingerprint") != fingerprint:
             return None
-        updated = payload.get("updated_at")
-        if updated:
-            updated_dt = datetime.fromisoformat(updated)
-            if (
-                datetime.now(UTC) - updated_dt
-            ).total_seconds() > SCREENING_READINESS_CACHE_TTL_SECONDS:
-                return None
+        if not allow_stale:
+            updated = payload.get("updated_at")
+            if updated:
+                updated_dt = datetime.fromisoformat(updated)
+                if (
+                    datetime.now(UTC) - updated_dt
+                ).total_seconds() > SCREENING_READINESS_CACHE_TTL_SECONDS:
+                    return None
         return payload.get("decision")
     except Exception:
         return None
+
+
+_screening_readiness_refresh_lock = threading.Lock()
+_screening_readiness_refreshing: set[str] = set()
+
+
+def ensure_screening_readiness_refresh(
+    duck: DuckDBStore, sqlite: SQLiteStore, fingerprint: str,
+) -> None:
+    """Refresh an expired screening decision in a single-flight background thread."""
+    key = f"{duck.db_path}|{sqlite.db_path}|{fingerprint}"
+    with _screening_readiness_refresh_lock:
+        if key in _screening_readiness_refreshing:
+            return
+        _screening_readiness_refreshing.add(key)
+    threading.Thread(
+        target=_screening_readiness_refresh_worker,
+        args=(duck, sqlite, fingerprint, key),
+        name="vd-screening-readiness-refresh",
+        daemon=True,
+    ).start()
+
+
+def _screening_readiness_refresh_worker(
+    duck: DuckDBStore, sqlite: SQLiteStore, fingerprint: str, key: str,
+) -> None:
+    try:
+        from app.core.storage.update_lock import any_write_lock_active
+
+        if any_write_lock_active(duck.db_path):
+            return
+        decision = screening_readiness(duck, sqlite)
+        store_screening_readiness_cache(sqlite, fingerprint, decision)
+    except Exception as error:
+        logger.warning("后台 screening readiness 刷新失败: %s", error)
+    finally:
+        with _screening_readiness_refresh_lock:
+            _screening_readiness_refreshing.discard(key)
 
 
 def store_screening_readiness_cache(
