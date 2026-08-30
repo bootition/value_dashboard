@@ -543,3 +543,36 @@ def test_csrc_full_refresh_replaces_legacy_non_csrc_values(
         "SELECT stock_code FROM missing_list WHERE field_name = 'csrc_industry' AND resolved_at IS NULL"
     )
     assert missing == [{"stock_code": "000002"}]
+
+
+def test_financial_detail_gap_detects_sparse_core_rows(duckdb_store, sqlite_store) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
+           VALUES ('000001', 'sparse', 'SZSE', true)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities, total_equity)
+           VALUES ('000001', '2026-06-30', 100, 20, 80)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
+           VALUES ('000001', '2026-06-30', 10, 2)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
+           VALUES ('000001', '2026-06-30', 3)"""
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    assert updater._financial_detail_gap_codes() == ["000001"]
+
+    duckdb_store.write_query(
+        """UPDATE balance_sheet SET monetary_funds = 1 WHERE stock_code = '000001'"""
+    )
+    duckdb_store.write_query(
+        """UPDATE income_statement SET cost_of_revenue = 1 WHERE stock_code = '000001'"""
+    )
+    duckdb_store.write_query(
+        """UPDATE cash_flow SET cash_received_sales = 1 WHERE stock_code = '000001'"""
+    )
+    assert updater._financial_detail_gap_codes() == []

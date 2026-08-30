@@ -131,6 +131,9 @@ class IncrementalUpdater:
         self.csrc_refresh_interval_days: int = self._load_update_config(
             "csrc_refresh_interval_days", default=30
         )
+        self.financial_detail_backfill_max_stocks_per_run: int = self._load_update_config(
+            "financial_detail_backfill_max_stocks_per_run", default=100
+        )
         # 价格批量抓取的并发网络请求数（HTTP 源；socket 源内部强制串行）
         self.price_fetch_concurrency: int = self._load_update_config(
             "price_fetch_concurrency", default=8
@@ -537,6 +540,13 @@ class IncrementalUpdater:
             self._save_announcement_cursor()
 
         financial_step = report["steps"].get("financials", {"status": "success"})
+        # 财报明细缺口有界续传：只重抓“核心字段齐全但明细字段缺失”的股票。
+        # 该步骤不参与 readiness 阻断，只负责逐步补齐详情页字段。
+        detail_backfill = report_step(
+            "financial_detail_backfill",
+            self._refresh_financial_detail_backfill(detail_cb=detail_cb),
+        )
+        detail_backfilled_codes = list(detail_backfill.get("succeeded_codes", []))
         if share_capital_changed and financial_step["status"] == "success":
             # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
             # 该路径低频，且与自动更新同锁，不会再现"重算与抓取并发"的竞争。
@@ -562,6 +572,7 @@ class IncrementalUpdater:
             codes_to_compute = list(dict.fromkeys([
                 *updated_price_codes,
                 *refreshed_financial_codes,
+                *detail_backfilled_codes,
                 *stale_snapshot_codes,
             ]))
             if codes_to_compute:
@@ -1467,6 +1478,99 @@ class IncrementalUpdater:
         """Refresh one stock's three statements (fetch + single transaction)."""
         outcomes, fetched = self._fetch_financial_trio(stock_code)
         return self._persist_financial_trio(stock_code, outcomes, fetched)
+
+    def _financial_detail_gap_codes(self) -> list[str]:
+        """Return stocks whose latest financial rows still miss detail line items.
+
+        核心字段（total_assets/revenue/cf_from_operating）齐备但明细字段为空，
+        说明该报告期来自旧的“最小核心集”抓取或旧版解析器。这些股票不阻断
+        readiness，但详情页会显示缺口；本方法为有界续传提供队列。
+        """
+        try:
+            rows = self.duck.read_query(
+                """
+                WITH latest_bs AS (
+                    SELECT stock_code, report_date, total_assets, monetary_funds
+                    FROM balance_sheet
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY stock_code ORDER BY report_date DESC
+                    ) = 1
+                ), latest_ic AS (
+                    SELECT stock_code, report_date, revenue, cost_of_revenue
+                    FROM income_statement
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY stock_code ORDER BY report_date DESC
+                    ) = 1
+                ), latest_cf AS (
+                    SELECT stock_code, report_date, cf_from_operating, cash_received_sales
+                    FROM cash_flow
+                    QUALIFY ROW_NUMBER() OVER (
+                        PARTITION BY stock_code ORDER BY report_date DESC
+                    ) = 1
+                )
+                SELECT m.stock_code
+                FROM stock_meta m
+                LEFT JOIN latest_bs bs ON bs.stock_code = m.stock_code
+                LEFT JOIN latest_ic ic ON ic.stock_code = m.stock_code
+                LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
+                WHERE m.is_listed IS TRUE
+                  AND (
+                      (bs.total_assets IS NOT NULL AND bs.monetary_funds IS NULL)
+                      OR (ic.revenue IS NOT NULL AND ic.cost_of_revenue IS NULL)
+                      OR (cf.cf_from_operating IS NOT NULL AND cf.cash_received_sales IS NULL)
+                  )
+                ORDER BY m.stock_code
+                """
+            )
+        except Exception as error:
+            logger.warning("查询财务明细缺口失败: %s", error)
+            return []
+        return [
+            row["stock_code"] for row in rows
+            if not self._is_b_share_stock(row["stock_code"])
+        ]
+
+    def _refresh_financial_detail_backfill(
+        self,
+        *,
+        detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """Boundedly refetch financial details for stocks with sparse statements."""
+        limit = max(0, int(self.financial_detail_backfill_max_stocks_per_run))
+        if limit <= 0:
+            return {"status": "skipped", "reason": "backfill_disabled"}
+        codes = self._financial_detail_gap_codes()
+        if not codes:
+            return {"status": "success", "targeted": 0, "succeeded": 0, "failed": 0}
+        targets = codes[:limit]
+        succeeded_codes: list[str] = []
+        failed_codes: list[str] = []
+        for index, code in enumerate(targets, start=1):
+            statement_failures = []
+            for data_type in ("balance_sheet", "income_statement", "cash_flow"):
+                outcome = self.refetch_one(code, data_type)
+                if outcome.get("status") != "success":
+                    statement_failures.append(data_type)
+            if statement_failures:
+                failed_codes.append(code)
+            else:
+                succeeded_codes.append(code)
+            if detail_cb is not None:
+                detail_cb("financial_detail_backfill", {
+                    "step": "financial_detail_backfill",
+                    "label": "财务明细回填",
+                    "done": index,
+                    "total": len(targets),
+                    "current": code,
+                })
+        return {
+            "status": "success" if not failed_codes else "partial",
+            "targeted": len(targets),
+            "succeeded": len(succeeded_codes),
+            "failed": len(failed_codes),
+            "succeeded_codes": succeeded_codes,
+            "failed_codes": failed_codes[:20],
+        }
 
     def _refresh_financials(
         self,

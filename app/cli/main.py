@@ -270,6 +270,26 @@ def data_update(
     typer.echo(json.dumps(make_response("data.update", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("financial-detail-backfill")
+def data_financial_detail_backfill(
+    max_stocks: int = typer.Option(100, "--max-stocks", help="最多回填N只股票(0=全部)"),
+) -> None:
+    """有界回填三大报表明细字段（单写者串行）。"""
+    from app.cli.protocol import make_response
+    from app.core.storage.update_lock import UpdateLockError, exclusive_update
+
+    _, duck, sqlite = _database_context()
+    from app.core.update import IncrementalUpdater
+
+    updater = IncrementalUpdater(duck=duck, sqlite=sqlite)
+    updater.financial_detail_backfill_max_stocks_per_run = max_stocks
+    try:
+        with exclusive_update(duck.db_path):
+            report = updater._refresh_financial_detail_backfill()
+    except UpdateLockError as error:
+        report = {"status": "skipped", "reason": "another_update_running", "error": str(error)}
+    typer.echo(json.dumps(make_response("data.financial-detail-backfill", report), ensure_ascii=False, indent=2, default=str))
+
 @data_app.command("business-overview")
 def data_business_overview(
     stocks: str = typer.Option("", "--stocks", help="只更新指定股票，逗号分隔"),
@@ -735,6 +755,39 @@ def indicator_discover(
     typer.echo(json.dumps(make_response("indicator.discover", result), ensure_ascii=False, indent=2))
 
 
+def _data_quality_for_cli(duck, sqlite) -> tuple[dict, bool]:
+    """Read-only data-quality payload that is safe while auto-update writes.
+
+    A full build during the update window can observe a half-written universe and
+    report false “not ready”. Prefer the persistent screening readiness decision
+    when a write lock is active; otherwise run the authoritative full build.
+    """
+    from app.core.data_quality import (
+        build_data_quality_status,
+        load_screening_readiness_cache,
+        read_cached_data_readiness,
+        screening_readiness_cache_key,
+    )
+    from app.core.storage.update_lock import any_write_lock_active
+
+    lock_active = any_write_lock_active(duck.db_path)
+    fingerprint = screening_readiness_cache_key(duck, sqlite)
+    decision = (
+        load_screening_readiness_cache(sqlite, fingerprint, allow_stale=True)
+        if fingerprint
+        else None
+    )
+    if lock_active:
+        readiness = (decision or {}).get("readiness") or read_cached_data_readiness(sqlite)
+        if readiness is not None:
+            return {
+                "minimum_data_readiness": readiness,
+                "warning_codes": (decision or {}).get("warning_codes") or [],
+                "cached": True,
+            }, True
+    return build_data_quality_status(duck, sqlite), False
+
+
 @data_app.command("status")
 def data_status() -> None:
     """查看数据覆盖状态"""
@@ -742,7 +795,6 @@ def data_status() -> None:
 
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.data_quality import build_data_quality_status
     duck, sqlite = _database_stores(initialize=False)
 
     stock_count = duck.read_query("SELECT COUNT(*) as cnt FROM stock_meta WHERE is_listed IS TRUE")
@@ -773,6 +825,37 @@ def data_status() -> None:
     )
     retry_count = sqlite.query("SELECT COUNT(*) as cnt FROM retry_list")
     missing_count = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
+    financial_detail_gap = duck.read_query(
+        """
+        WITH latest_bs AS (
+            SELECT stock_code, total_assets, monetary_funds FROM balance_sheet
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
+        ), latest_ic AS (
+            SELECT stock_code, revenue, cost_of_revenue FROM income_statement
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
+        ), latest_cf AS (
+            SELECT stock_code, cf_from_operating, cash_received_sales FROM cash_flow
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
+        )
+        SELECT COUNT(*) AS cnt FROM stock_meta m
+        LEFT JOIN latest_bs bs ON bs.stock_code = m.stock_code
+        LEFT JOIN latest_ic ic ON ic.stock_code = m.stock_code
+        LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
+        WHERE m.is_listed IS TRUE
+          AND (
+              (bs.total_assets IS NOT NULL AND bs.monetary_funds IS NULL)
+              OR (ic.revenue IS NOT NULL AND ic.cost_of_revenue IS NULL)
+              OR (cf.cf_from_operating IS NOT NULL AND cf.cash_received_sales IS NULL)
+          )
+        """
+    )
+    business_overview_gap = duck.read_query(
+        """SELECT COUNT(*) AS cnt FROM stock_meta m
+           WHERE m.is_listed IS TRUE
+             AND NOT EXISTS (SELECT 1 FROM company_profile p WHERE p.stock_code = m.stock_code)"""
+    )
+
+    data_quality_payload, _ = _data_quality_for_cli(duck, sqlite)
 
     data = {
         "stock_count": stock_count[0]["cnt"],
@@ -783,7 +866,9 @@ def data_status() -> None:
         "cash_flow_count": cf_count[0]["cnt"],
         "retry_count": retry_count[0]["cnt"],
         "missing_count": missing_count[0]["cnt"],
-        "data_quality": build_data_quality_status(duck, sqlite),
+        "financial_detail_gap_count": financial_detail_gap[0]["cnt"],
+        "business_overview_gap_count": business_overview_gap[0]["cnt"],
+        "data_quality": data_quality_payload,
     }
     typer.echo(json.dumps(make_response("data.status", data), ensure_ascii=False, indent=2, default=str))
 
@@ -1292,7 +1377,6 @@ def data_diagnose() -> None:
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
-    from app.core.data_quality import build_data_quality_status
     duck, sqlite = _database_stores(initialize=False)
 
     report: dict = {}
@@ -1346,8 +1430,48 @@ def data_diagnose() -> None:
     except Exception:
         report["missing_count"] = "error"
 
-    data_quality = build_data_quality_status(duck, sqlite)
+    try:
+        row = duck.read_query(
+            """
+            WITH latest_bs AS (
+                SELECT stock_code, total_assets, monetary_funds FROM balance_sheet
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
+            ), latest_ic AS (
+                SELECT stock_code, revenue, cost_of_revenue FROM income_statement
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
+            ), latest_cf AS (
+                SELECT stock_code, cf_from_operating, cash_received_sales FROM cash_flow
+                QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
+            )
+            SELECT COUNT(*) AS cnt FROM stock_meta m
+            LEFT JOIN latest_bs bs ON bs.stock_code = m.stock_code
+            LEFT JOIN latest_ic ic ON ic.stock_code = m.stock_code
+            LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
+            WHERE m.is_listed IS TRUE
+              AND (
+                  (bs.total_assets IS NOT NULL AND bs.monetary_funds IS NULL)
+                  OR (ic.revenue IS NOT NULL AND ic.cost_of_revenue IS NULL)
+                  OR (cf.cf_from_operating IS NOT NULL AND cf.cash_received_sales IS NULL)
+              )
+            """
+        )
+        report["financial_detail_gap_count"] = row[0]["cnt"]
+    except Exception:
+        report["financial_detail_gap_count"] = "error"
+
+    try:
+        row = duck.read_query(
+            """SELECT COUNT(*) AS cnt FROM stock_meta m
+               WHERE m.is_listed IS TRUE
+                 AND NOT EXISTS (SELECT 1 FROM company_profile p WHERE p.stock_code = m.stock_code)"""
+        )
+        report["business_overview_gap_count"] = row[0]["cnt"]
+    except Exception:
+        report["business_overview_gap_count"] = "error"
+
+    data_quality, cached = _data_quality_for_cli(duck, sqlite)
     report["data_quality"] = data_quality
+    report["auto_update_in_progress"] = cached
 
     # 健康评估
     issues: list[str] = []
@@ -1361,6 +1485,16 @@ def data_diagnose() -> None:
         issues.append("指标快照为空, 请运行: vd data compute_indicators")
     if report.get("retry_count", 0) > 0:
         issues.append(f"有 {report['retry_count']} 个待重试任务, 请运行: vd data update")
+    if isinstance(report.get("financial_detail_gap_count"), int) and report["financial_detail_gap_count"] > 0:
+        issues.append(
+            f"有 {report['financial_detail_gap_count']} 只股票财务明细字段待回填, "
+            "请运行: vd data financial-detail-backfill --max-stocks N"
+        )
+    if isinstance(report.get("business_overview_gap_count"), int) and report["business_overview_gap_count"] > 0:
+        issues.append(
+            f"有 {report['business_overview_gap_count']} 只股票业务概览未采集, "
+            "请运行: vd data business-overview --max-stocks N"
+        )
     blocking_warnings = {
         "FINANCIAL_SHELL_ROWS",
         "SNAPSHOT_STALE",
