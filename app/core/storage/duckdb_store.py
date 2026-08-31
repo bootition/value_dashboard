@@ -227,9 +227,15 @@ class DuckDBStore:
                 conn.close()
 
     def _connect_writer(self) -> duckdb.DuckDBPyConnection:
-        """Open a read-write connection with bounded retry (caller holds the write lock)."""
+        """Open a read-write connection with bounded retry (caller holds the write lock).
+
+        同进程 Web 读线程在写锁建立前可能已持有 read_only 连接；Windows
+        DuckDB 此时报 "different configuration"，写连接需要等读连接关闭。
+        旧窗口约 10s，全市场价格更新时曾让 000534 写入失败；延长到约
+        90s，覆盖长查询/慢请求，失败后再交给上层 retry。
+        """
         last_error: Exception | None = None
-        delays = (0.5, 1.0, 2.0, 3.0, 4.0)
+        delays = (0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0)
         for attempt in range(len(delays) + 1):
             try:
                 return duckdb.connect(str(self._db_path))
