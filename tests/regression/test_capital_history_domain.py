@@ -670,6 +670,22 @@ def test_input_fingerprint_includes_dividends(
     assert after != before
 
 
+def test_input_fingerprint_detects_treasury_value_update(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """同一 curve_date 的收益率被 upsert 修正时，统计域输入指纹必须变化。"""
+    _seed_statistics_inputs(duckdb_store, sqlite_store)
+    builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
+    before = builder._input_fingerprint()
+
+    duckdb_store.write_query(
+        """UPDATE treasury_yield_curve SET yield_pct = 1.75
+           WHERE curve_date = '2026-08-05' AND tenor_years = 10.0"""
+    )
+    after = builder._input_fingerprint()
+    assert after != before
+
+
 # ─── 交叉核验补全（STATUS 缺口 #7，2026-08-13）────────────────────────────
 
 

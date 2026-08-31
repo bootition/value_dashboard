@@ -832,19 +832,47 @@ class StatisticsBuilder:
         （verified 标志变化）也触发重建，防止披露口径与发布域脱节。
         """
         parts: list[str] = []
-        date_columns = {
-            "price_daily_raw": "trade_date",
-            "income_statement": "report_date",
-            "balance_sheet": "report_date",
-            "share_capital_history": "effective_date",
-            "treasury_yield_curve": "curve_date",
-            "dividends": "ex_date",
-        }
-        for table, date_column in date_columns.items():
+        # 价格表 1700 万级，保持 count+max 轻指纹；其余小表使用内容级
+        # md5：同一报告日/除权日/生效日的值被修正（如财报差错更正、
+        # 分红更正、股本链核验更新）时，统计域必须重建而不是等下一轮。
+        price_row = self.duck.read_query(
+            "SELECT COUNT(*) AS c, MAX(trade_date) AS latest FROM price_daily_raw"
+        )[0]
+        parts.append(f"price_daily_raw:{price_row['c']}:{str(price_row['latest'])[:10]}")
+
+        def content_part(table: str, fields: list[str], sort_fields: list[str]) -> str:
+            expression = " || ':' || ".join(
+                f"COALESCE(CAST({field} AS VARCHAR), '')" for field in fields
+            )
+            order_by = ", ".join(sort_fields)
             row = self.duck.read_query(
-                f"SELECT COUNT(*) AS c, MAX({date_column}) AS latest FROM {table}"
+                f"""SELECT COUNT(*) AS c, COALESCE(md5(string_agg(
+                       {expression}, '|' ORDER BY {order_by}
+                   )), '') AS fp FROM {table}"""
             )[0]
-            parts.append(f"{table}:{row['c']}:{str(row['latest'])[:10]}")
+            return f"{table}:{row['c']}:{row['fp']}"
+
+        parts.append(content_part(
+            "income_statement", ["report_date", "parent_net_profit"], ["report_date"],
+        ))
+        parts.append(content_part(
+            "balance_sheet", ["report_date", "total_equity_parent"], ["report_date"],
+        ))
+        parts.append(content_part(
+            "share_capital_history",
+            ["effective_date", "total_shares", "verified"],
+            ["effective_date"],
+        ))
+        parts.append(content_part(
+            "dividends",
+            ["ex_date", "announcement_date", "dividend_per_share"],
+            ["ex_date", "announcement_date"],
+        ))
+        parts.append(content_part(
+            "treasury_yield_curve",
+            ["curve_date", "tenor_years", "yield_pct"],
+            ["curve_date", "tenor_years"],
+        ))
         verified = self.duck.read_query(
             "SELECT COUNT(*) AS c FROM share_capital_history WHERE verified"
         )[0]

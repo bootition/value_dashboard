@@ -63,6 +63,23 @@ def _database_context(*, initialize: bool = True):
     return paths, duck, sqlite
 
 
+def _with_update_lock(duck, operation):
+    """Run a DuckDB-mutating CLI operation under the cross-process update lock.
+
+    All data-mutating CLI commands share the same single-writer contract as
+    auto-update. Without this, a manual treasury/funding/capital/statistics
+    rebuild could interleave with an auto-update cycle and publish a snapshot
+    computed from a half-refreshed input set.
+    """
+    from app.core.storage.update_lock import UpdateLockError, exclusive_update
+
+    try:
+        with exclusive_update(duck.db_path):
+            return operation()
+    except UpdateLockError as error:
+        return {"status": "skipped", "reason": "another_update_running", "error": str(error)}
+
+
 def _database_stores(*, initialize: bool = True):
     _, duck, sqlite = _database_context(initialize=initialize)
     return duck, sqlite
@@ -166,11 +183,11 @@ def data_init(
 
     _, duck, sqlite = _database_context()
     initializer = DataInitializer(duck=duck, sqlite=sqlite)
-    report = initializer.run_full_init(
+    report = _with_update_lock(duck, lambda: initializer.run_full_init(
         skip_prices=skip_prices,
         skip_financials=skip_financials,
         skip_csrc=skip_csrc,
-    )
+    ))
 
     typer.echo(json.dumps(make_response("data.init", report), ensure_ascii=False, indent=2, default=str))
 
@@ -183,17 +200,21 @@ def data_refresh_universe() -> None:
 
     _, duck, sqlite = _database_context()
     initializer = DataInitializer(duck=duck, sqlite=sqlite)
-    universe = initializer._fetch_stock_universe()
-    metadata = (
-        initializer._fetch_listing_info()
-        if universe.get("status") == "success"
-        else {"status": "skipped", "reason": "universe_not_refreshed"}
-    )
-    result = {
-        "status": "success" if metadata.get("status") == "success" else "partial",
-        "universe": universe,
-        "pool_metadata": metadata,
-    }
+
+    def _refresh() -> dict:
+        universe = initializer._fetch_stock_universe()
+        metadata = (
+            initializer._fetch_listing_info()
+            if universe.get("status") == "success"
+            else {"status": "skipped", "reason": "universe_not_refreshed"}
+        )
+        return {
+            "status": "success" if metadata.get("status") == "success" else "partial",
+            "universe": universe,
+            "pool_metadata": metadata,
+        }
+
+    result = _with_update_lock(duck, _refresh)
     typer.echo(
         json.dumps(
             make_response("data.refresh_universe", result),
@@ -254,16 +275,21 @@ def data_update(
     elif stocks.strip():
         # 指定股票更新（PRD §16.1）：只刷新这些股票的核心数据
         codes = [c.strip() for c in stocks.split(",") if c.strip()]
-        report = {
-            "status": "success",
-            "targeted": len(codes),
-            "results": {},
-        }
-        for code in codes:
-            report["results"][code] = {
-                data_type: updater.refetch_one(code, data_type)
-                for data_type in ("price_daily", "balance_sheet", "income_statement", "cash_flow", "dividends", "xdxr")
+
+        def _refetch_codes() -> dict:
+            report = {
+                "status": "success",
+                "targeted": len(codes),
+                "results": {},
             }
+            for code in codes:
+                report["results"][code] = {
+                    data_type: updater.refetch_one(code, data_type)
+                    for data_type in ("price_daily", "balance_sheet", "income_statement", "cash_flow", "dividends", "xdxr")
+                }
+            return report
+
+        report = _with_update_lock(duck, _refetch_codes)
     else:
         report = updater.run_incremental_update(max_stocks=max_stocks)
 
@@ -350,11 +376,17 @@ def data_treasury_curve(
             [float(t.strip()) for t in tenors.split(",") if t.strip()]
             if tenors.strip() else None
         )
-        report = updater.backfill(tenor_list, max_tenors=max_tenors)
+        report = _with_update_lock(
+            duck, lambda: updater.backfill(tenor_list, max_tenors=max_tenors),
+        )
     elif daily:
-        report = updater.update_daily([work_date] if work_date.strip() else None)
+        report = _with_update_lock(
+            duck, lambda: updater.update_daily(
+                [work_date] if work_date.strip() else None,
+            ),
+        )
     else:
-        report = updater.refresh_if_due()
+        report = _with_update_lock(duck, updater.refresh_if_due)
     typer.echo(json.dumps(make_response("data.treasury-curve", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -382,9 +414,16 @@ def data_funding(
         report = updater.status_report()
     elif stocks.strip():
         codes = [code.strip() for code in stocks.split(",") if code.strip()]
-        report = updater.update_many(codes, batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown))
+        report = _with_update_lock(
+            duck, lambda: updater.update_many(
+                codes, batch_size=batch_size,
+                batch_cooldown_seconds=float(batch_cooldown),
+            ),
+        )
     else:
-        report = updater.update_all(max_stocks=max_stocks)
+        report = _with_update_lock(
+            duck, lambda: updater.update_all(max_stocks=max_stocks),
+        )
     typer.echo(json.dumps(make_response("data.funding", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -398,10 +437,50 @@ def data_buyback(
     """
     from app.cli.protocol import make_response
     from app.core.buyback import BuybackUpdater
+    from app.core.storage.update_lock import UpdateLockError, exclusive_update
 
     _, duck, sqlite = _database_context()
     updater = BuybackUpdater(duck=duck, sqlite=sqlite)
-    report = updater.status_report() if check_only else updater.refresh_all()
+    if check_only:
+        report = updater.status_report()
+    else:
+        try:
+            with exclusive_update(duck.db_path):
+                before = duck.read_query(
+                    """SELECT stock_code, COALESCE(SUM(buyback_amount), 0) AS amount
+                       FROM buyback_events GROUP BY stock_code"""
+                )
+                before_by_code = {row["stock_code"]: row["amount"] for row in before}
+                report = updater.refresh_all()
+                if report.get("status") == "success":
+                    after = duck.read_query(
+                        """SELECT stock_code, COALESCE(SUM(buyback_amount), 0) AS amount
+                           FROM buyback_events GROUP BY stock_code"""
+                    )
+                    after_by_code = {row["stock_code"]: row["amount"] for row in after}
+                    changed_codes = sorted({
+                        code for code in set(before_by_code) | set(after_by_code)
+                        if before_by_code.get(code) != after_by_code.get(code)
+                    })
+                    if changed_codes:
+                        from app.core.indicators.calculator import IndicatorCalculator
+
+                        calc_report = IndicatorCalculator(
+                            duck=duck, sqlite=sqlite,
+                        ).compute_snapshot_for_codes(changed_codes)
+                        report["snapshot_recompute"] = calc_report
+                    report["changed_codes"] = changed_codes
+                    # 与自动更新 _refresh_buyback 同口径：成功后写节流标记，
+                    # 下一轮自动更新不会在同一间隔内重复全市场请求。
+                    sqlite.execute(
+                        """INSERT INTO data_refresh_state (key, value, updated_at)
+                           VALUES ('buyback_last_refresh', ?, ?)
+                           ON CONFLICT(key) DO UPDATE SET
+                             value=excluded.value, updated_at=excluded.updated_at""",
+                        [datetime.now(UTC).isoformat(), datetime.now(UTC).isoformat()],
+                    )
+        except UpdateLockError as error:
+            report = {"status": "skipped", "reason": "another_update_running", "error": str(error)}
     typer.echo(json.dumps(make_response("data.buyback", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -425,7 +504,9 @@ def data_index_valuation(
         report = updater.status_report()
     else:
         code_list = [c.strip() for c in indexes.split(",") if c.strip()] if indexes.strip() else None
-        report = updater.update_daily(code_list)
+        report = _with_update_lock(
+            duck, lambda: updater.update_daily(code_list),
+        )
     typer.echo(json.dumps(make_response("data.index-valuation", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -471,15 +552,19 @@ def data_capital_history(
                     file=__import__("sys").stderr, flush=True,
                 )
 
-        report = updater.update_many(
-            codes, cross_check=not no_cross, cross_only=cross_only,
-            batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
-            progress_cb=cb if verbose else None,
+        report = _with_update_lock(
+            duck, lambda: updater.update_many(
+                codes, cross_check=not no_cross, cross_only=cross_only,
+                batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
+                progress_cb=cb if verbose else None,
+            ),
         )
     else:
-        report = updater.update_all(
-            max_stocks=max_stocks, cross_check=not no_cross, cross_only=cross_only,
-            batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
+        report = _with_update_lock(
+            duck, lambda: updater.update_all(
+                max_stocks=max_stocks, cross_check=not no_cross, cross_only=cross_only,
+                batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
+            ),
         )
     typer.echo(json.dumps(make_response("data.capital-history", report), ensure_ascii=False, indent=2, default=str))
 
@@ -499,8 +584,10 @@ def data_research_statistics(
     from app.core.statistics import StatisticsBuilder
 
     _, duck, sqlite = _database_context()
-    report = StatisticsBuilder(duck=duck, sqlite=sqlite).rebuild_all(
-        max_stocks=max_stocks, parallel=parallel,
+    report = _with_update_lock(
+        duck, lambda: StatisticsBuilder(duck=duck, sqlite=sqlite).rebuild_all(
+            max_stocks=max_stocks, parallel=parallel,
+        ),
     )
     typer.echo(json.dumps(make_response("data.research-statistics", report), ensure_ascii=False, indent=2, default=str))
 
@@ -514,7 +601,12 @@ def data_replenish_missing_core_data(
     from app.core.update import IncrementalUpdater
 
     _, duck, sqlite = _database_context()
-    result = IncrementalUpdater(duck=duck, sqlite=sqlite).replenish_missing_core_data(max_stocks)
+    result = _with_update_lock(
+        duck,
+        lambda: IncrementalUpdater(
+            duck=duck, sqlite=sqlite,
+        ).replenish_missing_core_data(max_stocks),
+    )
     typer.echo(
         json.dumps(
             make_response("data.replenish_missing_core_data", result),
@@ -542,10 +634,12 @@ def data_backfill_prices(
 
     _, duck, sqlite = _database_context()
     backfiller = PriceBackfiller(duck=duck, sqlite=sqlite)
-    report = backfiller.run_full_backfill(
-        skip_if_complete=skip_complete,
-        max_stocks=max_stocks,
-        fetch_dividends=not no_dividends,
+    report = _with_update_lock(
+        duck, lambda: backfiller.run_full_backfill(
+            skip_if_complete=skip_complete,
+            max_stocks=max_stocks,
+            fetch_dividends=not no_dividends,
+        ),
     )
     typer.echo(json.dumps(make_response("data.backfill_prices", report), ensure_ascii=False, indent=2, default=str))
 
@@ -628,7 +722,7 @@ def data_compute_indicators() -> None:
 
     _, duck, sqlite = _database_context()
     calc = IndicatorCalculator(duck=duck, sqlite=sqlite)
-    report = calc.compute_snapshot_for_all()
+    report = _with_update_lock(duck, calc.compute_snapshot_for_all)
 
     typer.echo(json.dumps(make_response("data.compute_indicators", report), ensure_ascii=False, indent=2, default=str))
 
@@ -1627,7 +1721,7 @@ def data_quarantine_legacy_records_execute(
             error_message="legacy record set changed after plan creation",
         ), ensure_ascii=False, indent=2))
         return
-    result = quarantine_legacy_records(duck)
+    result = _with_update_lock(duck, lambda: quarantine_legacy_records(duck))
     result["plan_id"] = plan_id
     typer.echo(json.dumps(make_response(
         "data.quarantine_legacy_records_execute", result
@@ -1718,7 +1812,12 @@ def data_refetch_execute(
     if summary.get("stock_code") != stock_code or summary.get("data_type") != data_type:
         typer.echo(json.dumps(make_response("data.refetch_execute", error_code="E001", error_message="arguments do not match the confirmed plan"), ensure_ascii=False))
         return
-    result = IncrementalUpdater(duck=duck, sqlite=sqlite).refetch_one(stock_code, data_type)
+    result = _with_update_lock(
+        duck,
+        lambda: IncrementalUpdater(duck=duck, sqlite=sqlite).refetch_one(
+            stock_code, data_type,
+        ),
+    )
     typer.echo(json.dumps(make_response("data.refetch_execute", result), ensure_ascii=False, indent=2, default=str))
 
 

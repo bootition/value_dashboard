@@ -134,6 +134,9 @@ class IncrementalUpdater:
         self.financial_detail_backfill_max_stocks_per_run: int = self._load_update_config(
             "financial_detail_backfill_max_stocks_per_run", default=100
         )
+        self.buyback_refresh_interval_days: int = self._load_update_config(
+            "buyback_refresh_interval_days", default=7
+        )
         # 价格批量抓取的并发网络请求数（HTTP 源；socket 源内部强制串行）
         self.price_fetch_concurrency: int = self._load_update_config(
             "price_fetch_concurrency", default=8
@@ -547,7 +550,52 @@ class IncrementalUpdater:
             self._refresh_financial_detail_backfill(detail_cb=detail_cb),
         )
         detail_backfilled_codes = list(detail_backfill.get("succeeded_codes", []))
-        if share_capital_changed and financial_step["status"] == "success":
+        # 回购注销事件是“分红融资比（含回购注销）”的输入。此前只在 CLI
+        # 手动刷新，自动更新从未调度，指标会随回购进度持续过期。
+        buyback_step = report_step("buyback", self._refresh_buyback())
+        buyback_changed_codes = list(buyback_step.get("changed_codes", []))
+        # 融资事件同样影响 cumulative_financing_amount / 分红融资比，必须在
+        # 指标快照重算之前刷新；旧位置（统计域之后）会让新融资数据迟到一轮。
+        funding_step = report_step("funding", self._refresh_funding())
+        self._resolve_legal_empty_funding_missing()
+        funding_changed_codes = list(funding_step.get("changed_codes", []))
+        # 国债曲线变化会改变所有股票快照中的 div_yield_spread_*。旧流程在
+        # 指标重算之后才刷曲线，利差字段会整轮陈旧；现在提前并触发全量重算。
+        treasury_step = report_step("treasury_curve", self._refresh_treasury_curve())
+        treasury_changed_codes = []
+        if treasury_step.get("curve_changed"):
+            try:
+                treasury_changed_codes = [
+                    row["stock_code"]
+                    for row in self.duck.read_query(
+                        "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+                    )
+                ]
+            except Exception as error:
+                logger.warning("查询国债利差重算范围失败: %s", error)
+        # 6. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）。
+        #    旧位置在统计域之后：重试成功的价格/财务/分红/融资/曲线数据会
+        #    再等一整轮才进入快照。现在移到指标重算之前，并把影响快照的
+        #    重试成功代码并入本轮重算集合。
+        retry_recompute_codes: list[str] = []
+        self._cleanup_unretryable_tasks()
+        self._cleanup_completed_announcement_retries()
+        self._resolve_complete_missing_records()
+        if check_report["retry_tasks"]:
+            expected_date = self._latest_expected_trading_date(
+                datetime.now().strftime("%Y-%m-%d")
+            )
+            self._cleanup_redundant_retries(expected_date)
+            refreshed_tasks = self._check_retry_tasks()
+            if refreshed_tasks:
+                retries_step = report_step(
+                    "retries", self._retry_failed_tasks(refreshed_tasks),
+                )
+                retry_recompute_codes = list(
+                    retries_step.get("recompute_codes", [])
+                )
+
+        if share_capital_changed:
             # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
             # 该路径低频，且与自动更新同锁，不会再现"重算与抓取并发"的竞争。
             from app.core.indicators.calculator import IndicatorCalculator
@@ -558,7 +606,7 @@ class IncrementalUpdater:
             report_step("indicators", snapshot_step)
             if snapshot_step["status"] != "success":
                 snapshot_step["reason"] = "price update retained; snapshot publication not ready"
-        elif financial_step["status"] in {"success", "partial"}:
+        elif financial_step["status"] in {"success", "partial"} or retry_recompute_codes:
             from app.core.indicators.calculator import IndicatorCalculator
 
             # 2026-08-28 提速计划：财报只刷新了少数公告股票，只增量重算
@@ -573,6 +621,10 @@ class IncrementalUpdater:
                 *updated_price_codes,
                 *refreshed_financial_codes,
                 *detail_backfilled_codes,
+                *buyback_changed_codes,
+                *funding_changed_codes,
+                *treasury_changed_codes,
+                *retry_recompute_codes,
                 *stale_snapshot_codes,
             ]))
             if codes_to_compute:
@@ -587,9 +639,7 @@ class IncrementalUpdater:
         #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
         report_step("business_overview", self._refresh_business_overview(detail_cb=detail_cb))
 
-        # 4. 国债曲线低频域（reports/68 P3 独立基准域）：价格/财务优先后执行；
-        #    失败保留旧值并进入独立 retry/missing，绝不阻断股票更新/筛选/readiness。
-        report_step("treasury_curve", self._refresh_treasury_curve())
+        # 4. 国债曲线已提前到指标快照重算之前执行。
 
         # 5. 历史股本链 + 统计域（reports/68 P4）：有界续传；失败不阻断其他步骤
         report_step("capital_history", self._refresh_capital_history(detail_cb=detail_cb))
@@ -601,24 +651,9 @@ class IncrementalUpdater:
             ),
         )
 
-        # 5.1 融资事件 + 指数估值低频域（数据补全 2026-08-25）：
-        #     有界续传 / 每日 1 次；失败保留旧值并进入独立 retry/missing，绝不阻断主链。
-        report_step("funding", self._refresh_funding())
-        self._resolve_legal_empty_funding_missing()
+        # 5.1 融资事件/失败重试已提前到指标快照重算之前执行；这里只保留
+        #     指数估值每日 1 次低频域。失败保留旧值并进入独立 retry/missing。
         report_step("index_valuation", self._refresh_index_valuation())
-
-        # 6. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）
-        self._cleanup_unretryable_tasks()
-        self._cleanup_completed_announcement_retries()
-        self._resolve_complete_missing_records()
-        if check_report["retry_tasks"]:
-            expected_date = self._latest_expected_trading_date(
-                datetime.now().strftime("%Y-%m-%d")
-            )
-            self._cleanup_redundant_retries(expected_date)
-            refreshed_tasks = self._check_retry_tasks()
-            if refreshed_tasks:
-                report_step("retries", self._retry_failed_tasks(refreshed_tasks))
 
         report["status"] = aggregate_job_status(report["steps"])
         report["finished_at"] = datetime.now(UTC).isoformat()
@@ -663,15 +698,44 @@ class IncrementalUpdater:
 
         每日检查当日曲线并补齐近 30 天缺失的关键期限；任何异常都被捕获，
         绝不让国债源失败阻断价格/财务/readiness 增量更新。
+
+        返回 curve_changed，调用方据此重算所有含 div_yield_spread_* 的快照。
         """
         try:
+            before = self._treasury_curve_fingerprint()
             from app.core.treasury import TreasuryCurveUpdater
-            return TreasuryCurveUpdater(
+
+            report = TreasuryCurveUpdater(
                 duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
             ).refresh_if_due()
+            after = self._treasury_curve_fingerprint()
+            curve_changed = before != after
+            return {**report, "curve_changed": curve_changed}
         except Exception as error:
             logger.warning("国债曲线刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
+
+    def _treasury_curve_fingerprint(self) -> str:
+        """Cheap content fingerprint of the whole treasury curve table.
+
+        收益率利差快照可能引用任意历史日期的曲线点（停牌/价格滞后股票尤其
+        明显），所以不能只比较行数与最大日期；任意已有日期的收益率被
+        upsert 修正也必须触发 div_yield_spread_* 重算。
+        """
+        try:
+            rows = self.duck.read_query(
+                """SELECT COALESCE(md5(string_agg(
+                       CAST(curve_date AS VARCHAR) || ':' ||
+                       CAST(tenor_years AS VARCHAR) || ':' ||
+                       CAST(yield_pct AS VARCHAR),
+                       '|' ORDER BY curve_date, tenor_years
+                   )), '') AS fp
+                   FROM treasury_yield_curve"""
+            )
+            return str(rows[0]["fp"]) if rows else ""
+        except Exception as error:
+            logger.warning("计算国债曲线指纹失败: %s", error)
+            return ""
 
     def _refresh_capital_history(
         self,
@@ -760,12 +824,31 @@ class IncrementalUpdater:
         每轮最多 update.funding_max_stocks_per_run（默认 100）只未覆盖上市股票，
         批 50 + 冷却 30s（东财 F10 安全组合）；失败保留旧值 + retry/missing，
         绝不阻断价格/财务/readiness。历史事件一次补齐后日常仅新股增量。
+
+        返回 changed_codes 供调用方重算 cumulative_financing_amount /
+        dividend_financing_ratio_pct 快照。
         """
         try:
+            before = self.duck.read_query(
+                """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
+                   FROM funding_events GROUP BY stock_code"""
+            )
+            before_by_code = {row["stock_code"]: row["amount"] for row in before}
             from app.core.funding import FundingUpdater
-            return FundingUpdater(
+
+            report = FundingUpdater(
                 duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
             ).refresh_if_due()
+            after = self.duck.read_query(
+                """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
+                   FROM funding_events GROUP BY stock_code"""
+            )
+            after_by_code = {row["stock_code"]: row["amount"] for row in after}
+            changed_codes = sorted({
+                code for code in set(before_by_code) | set(after_by_code)
+                if before_by_code.get(code) != after_by_code.get(code)
+            })
+            return {**report, "changed_codes": changed_codes}
         except Exception as error:
             logger.warning("融资事件刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
@@ -1529,6 +1612,44 @@ class IncrementalUpdater:
             row["stock_code"] for row in rows
             if not self._is_b_share_stock(row["stock_code"])
         ]
+
+    def _refresh_buyback(self) -> dict[str, Any]:
+        """低频全市场回购明细刷新，并返回本次发生变化的股票代码。
+
+        东财回购接口一次返回全市场，刷新成本低；写入后需要重算受影响股票
+        的 dividend_financing_ratio_pct 快照。
+        """
+        if not self._refresh_due("buyback_last_refresh", self.buyback_refresh_interval_days):
+            return {
+                "status": "skipped",
+                "reason": "refreshed_within_interval",
+                "interval_days": self.buyback_refresh_interval_days,
+            }
+        try:
+            before = self.duck.read_query(
+                """SELECT stock_code, COALESCE(SUM(buyback_amount), 0) AS amount
+                   FROM buyback_events GROUP BY stock_code"""
+            )
+            before_by_code = {row["stock_code"]: row["amount"] for row in before}
+            from app.core.buyback import BuybackUpdater
+
+            report = BuybackUpdater(duck=self.duck, sqlite=self.sqlite).refresh_all()
+            if report.get("status") != "success":
+                return report
+            after = self.duck.read_query(
+                """SELECT stock_code, COALESCE(SUM(buyback_amount), 0) AS amount
+                   FROM buyback_events GROUP BY stock_code"""
+            )
+            after_by_code = {row["stock_code"]: row["amount"] for row in after}
+            changed_codes = sorted({
+                code for code in set(before_by_code) | set(after_by_code)
+                if before_by_code.get(code) != after_by_code.get(code)
+            })
+            self._mark_refreshed("buyback_last_refresh")
+            return {**report, "changed_codes": changed_codes}
+        except Exception as error:
+            logger.warning("回购明细刷新失败(非致命): %s", error)
+            return {"status": "failed", "error": str(error)}
 
     def _refresh_financial_detail_backfill(
         self,
@@ -2475,6 +2596,21 @@ class IncrementalUpdater:
 
         success_count = 0
         still_failing = 0
+        recompute_codes: list[str] = []
+
+        def note_snapshot_input(code: str) -> None:
+            if code and code not in recompute_codes:
+                recompute_codes.append(code)
+
+        def note_treasury_curve_input() -> None:
+            try:
+                for row in self.duck.read_query(
+                    "SELECT stock_code FROM stock_meta "
+                    "WHERE is_listed IS TRUE ORDER BY stock_code"
+                ):
+                    note_snapshot_input(row["stock_code"])
+            except Exception as error:
+                logger.warning("查询国债重试影响范围失败: %s", error)
 
         for task in tasks:
             retry_id = task["id"]
@@ -2555,6 +2691,7 @@ class IncrementalUpdater:
                     if outcome["status"] == "success":
                         self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
                         success_count += 1
+                        note_treasury_curve_input()
                     else:
                         still_failing += 1
                         self._mark_retry_failed(
@@ -2575,6 +2712,7 @@ class IncrementalUpdater:
                             [stock_code],
                         )
                         success_count += 1
+                        note_snapshot_input(stock_code)
                     else:
                         still_failing += 1
                         self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
@@ -2601,6 +2739,11 @@ class IncrementalUpdater:
                 if outcome["status"] == "success":
                     self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
                     success_count += 1
+                    if data_type in {
+                        "balance_sheet", "income_statement", "cash_flow",
+                        "dividends", "xdxr",
+                    }:
+                        note_snapshot_input(stock_code)
                 else:
                     still_failing += 1
                     self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
@@ -2653,6 +2796,7 @@ class IncrementalUpdater:
                     continue
                 self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
                 success_count += 1
+                note_snapshot_input(stock_code)
                 logger.info(f"  重试成功并落库: {stock_code} {data_type} adjust={adjust}")
 
         logger.info(f"[增量] 重试完成: 成功 {success_count}, 仍失败 {still_failing}")
@@ -2667,6 +2811,7 @@ class IncrementalUpdater:
             "total": len(tasks),
             "succeeded": success_count,
             "still_failing": still_failing,
+            "recompute_codes": recompute_codes,
         }
 
     def refetch_one(self, stock_code: str, data_type: str, *, incremental: bool = False) -> dict[str, Any]:

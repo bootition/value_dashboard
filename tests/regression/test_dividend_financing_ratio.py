@@ -313,3 +313,48 @@ def test_cumulative_financing_derives_from_price_times_shares_when_amounts_missi
     )
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     assert calc._get_cumulative_financing_amount("000001") == pytest.approx(1000.0)
+
+
+def test_buyback_updater_retains_existing_events_on_empty_source(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """全量替换语义不得在源空响应时清空既有回购事件。"""
+    from datetime import UTC, datetime
+
+    from app.core.adapters.base import FetchResult, SourceMetadata
+    from app.core.buyback import BuybackUpdater
+
+    duckdb_store.write_query(
+        """INSERT INTO buyback_events
+           (stock_code, start_date, announce_date, buyback_shares,
+            buyback_amount, progress, source, fetch_time, raw_hash, confidence, batch_id)
+           VALUES ('000001', '2024-01-01', '2024-12-01', 100.0, 1234.5,
+                   '实施中', 'eastmoney_repurchase', CURRENT_TIMESTAMP, ?, 'approximate', 'bb1')""",
+        ["0" * 64],
+    )
+
+    class EmptyBuybackAdapter:
+        def fetch(self, request):
+            return FetchResult(
+                data=[],
+                metadata=SourceMetadata(
+                    source="eastmoney_repurchase",
+                    fetch_time=datetime.now(UTC),
+                    raw_response_hash="0" * 64,
+                    confidence="missing",
+                ),
+                raw_response=b"[]",
+            )
+
+    updater = BuybackUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter=EmptyBuybackAdapter(),
+    )
+    report = updater.refresh_all()
+
+    assert report["status"] == "failed"
+    assert report["reason"] == "source_empty"
+    assert report["retained"] is True
+    rows = duckdb_store.read_query(
+        "SELECT stock_code, buyback_amount FROM buyback_events"
+    )
+    assert rows == [{"stock_code": "000001", "buyback_amount": 1234.5}]

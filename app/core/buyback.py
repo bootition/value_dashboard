@@ -59,6 +59,18 @@ class BuybackUpdater:
                 "error": result.metadata.error,
                 "retained": True,
             }
+        # 全量替换语义的防数据丢失门槛：源返回空列表时（akshare 部分时段
+        # 会返回 0 行且不带 error），必须保留既有回购事件，不能 DELETE 后
+        # 空写。否则一次瞬时空响应就会清空 dividend_financing_ratio_pct
+        # 的“回购注销”输入。
+        if not result.data:
+            logger.warning("东财回购明细返回空列表，保留既有回购事件不执行全量替换")
+            return {
+                "status": "failed",
+                "reason": "source_empty",
+                "error": "eastmoney repurchase source returned no rows",
+                "retained": True,
+            }
 
         batch_id = uuid.uuid4().hex
         fetch_time = datetime.now(UTC)

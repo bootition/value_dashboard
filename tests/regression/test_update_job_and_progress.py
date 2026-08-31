@@ -37,6 +37,17 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "skipped", "success": 0}
     updater._refresh_universe_metadata = lambda: {"status": "skipped", "steps": {}}
     # P2/P3 独立低频域：测试环境不得发起真实网络请求
+    # 指标输入域（回购/融资/财务明细回填）：测试环境不得发起真实网络请求。
+    # 全部 skipped 且无 changed_codes，可确保"无输入变化则不再重算快照"。
+    updater._refresh_financial_detail_backfill = lambda **kwargs: {
+        "status": "skipped", "reason": "test_stub", "succeeded_codes": [],
+    }
+    updater._refresh_buyback = lambda: {
+        "status": "skipped", "reason": "test_stub", "changed_codes": [],
+    }
+    updater._refresh_funding = lambda: {
+        "status": "skipped", "reason": "test_stub", "changed_codes": [],
+    }
     updater._refresh_business_overview = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
     updater._refresh_treasury_curve = lambda: {"status": "skipped", "reason": "test_stub"}
     # P4 历史股本链与统计域：测试环境不得触发网络或全量重建
@@ -285,11 +296,201 @@ def test_share_capital_unchanged_skips_recompute(duckdb_store, sqlite_store, mon
             recomputed.append({"status": "success"})
             return {"status": "success"}
 
+        def compute_snapshot_for_codes(self, codes, *, progress_cb=None) -> dict:
+            recomputed.append({"status": "success"})
+            return {"status": "success"}
+
     monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
 
     updater.run_incremental_update()
 
     assert recomputed == []
+
+
+def test_share_capital_change_recomputes_even_when_financials_partial(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """财报步骤 partial 时股本变化仍必须触发全量快照重算。
+
+    2026-08-31 全局数据路径审计：旧条件要求 financials 必须 success，
+    partial 时会继续使用旧股本口径的 market_cap/per_share 指标。
+    """
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_update_network_steps(updater)
+    updater._check_new_announcements = lambda persist=False, **kwargs: {
+        "status": "available", "affected_stock_codes": ["000001"],
+        "affected_announcements": {"000001": [{"announcement_id": "a1", "title": "年度报告"}]},
+        "all_new_announcements": {"000001": [{"announcement_id": "a1", "title": "年度报告"}]},
+    }
+    updater._refresh_financials = lambda codes, **kwargs: {
+        "status": "partial", "succeeded_codes": [],
+    }
+    recomputed: list[str] = []
+
+    class FakeCalculator:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def compute_snapshot_for_all(self, *, progress_cb=None) -> dict:
+            recomputed.append("full")
+            return {"status": "success"}
+
+        def compute_snapshot_for_codes(self, codes, *, progress_cb=None) -> dict:
+            recomputed.append("codes")
+            return {"status": "success"}
+
+    monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
+    fingerprint_calls = {"n": 0}
+
+    def fingerprint() -> str:
+        fingerprint_calls["n"] += 1
+        return "before" if fingerprint_calls["n"] == 1 else "after"
+
+    monkeypatch.setattr(updater, "_share_capital_fingerprint", fingerprint)
+
+    report = updater.run_incremental_update()
+
+    assert report["share_capital_changed"] is True
+    assert recomputed == ["full"]
+
+
+def test_buyback_funding_treasury_refresh_before_indicators(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """指标输入域必须在 snapshot 重算之前刷新。
+
+    回购/融资/国债曲线任一域变化都会改变快照字段；旧流程中融资与国债
+    位于指标重算之后，会整轮陈旧。
+    """
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
+        "VALUES ('000001', 'a', 'SZSE', true)"
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_update_network_steps(updater)
+    order: list[str] = []
+
+    def buyback() -> dict:
+        order.append("buyback")
+        return {"status": "success", "changed_codes": ["000001"]}
+
+    def funding() -> dict:
+        order.append("funding")
+        return {"status": "success", "changed_codes": ["000001"]}
+
+    def treasury() -> dict:
+        order.append("treasury_curve")
+        return {"status": "success", "curve_changed": True}
+
+    updater._refresh_buyback = buyback
+    updater._refresh_funding = funding
+    updater._refresh_treasury_curve = treasury
+    computed: list[list[str]] = []
+
+    class FakeCalculator:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def compute_snapshot_for_all(self, *, progress_cb=None) -> dict:
+            order.append("indicators_full")
+            return {"status": "success"}
+
+        def compute_snapshot_for_codes(self, codes, *, progress_cb=None) -> dict:
+            order.append("indicators")
+            computed.append(list(codes))
+            return {"status": "success"}
+
+    monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
+    updater._share_capital_fingerprint = lambda: "same"
+
+    updater.run_incremental_update()
+
+    assert order.index("buyback") < order.index("indicators")
+    assert order.index("funding") < order.index("indicators")
+    assert order.index("treasury_curve") < order.index("indicators")
+    assert computed and "000001" in computed[-1]
+
+
+def test_retry_success_runs_before_indicators_and_triggers_recompute(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """重试成功的快照输入必须在同一轮进入指标重算。
+
+    旧流程把 retries 放在统计域之后，价格/财务/分红/融资/曲线的重试成果
+    要再等一整轮才反映到 indicator_snapshot。
+    """
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
+        "VALUES ('000001', 'a', 'SZSE', true)"
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_update_network_steps(updater)
+    updater.run_incremental_check = lambda **kwargs: {
+        "new_trading_days": [], "retry_tasks": [{"id": 1}],
+        "latest_local_price_date": "2026-07-20",
+        "announcement_check": {"status": "available"},
+        "needs_update": True, "blocked": False,
+    }
+    updater._check_retry_tasks = lambda: [{
+        "id": 1, "stock_code": "000001", "data_type": "price_daily",
+        "adapter": "fixture", "error": "fixture", "retry_count": 0,
+        "extra_json": "{}",
+    }]
+    order: list[str] = []
+
+    def retry(tasks: list[dict]) -> dict:
+        order.append("retries")
+        return {"status": "success", "total": len(tasks),
+                "succeeded": 1, "still_failing": 0,
+                "recompute_codes": ["000001"]}
+
+    updater._retry_failed_tasks = retry
+    computed: list[list[str]] = []
+
+    class FakeCalculator:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def compute_snapshot_for_all(self, *, progress_cb=None) -> dict:
+            order.append("indicators_full")
+            return {"status": "success"}
+
+        def compute_snapshot_for_codes(self, codes, *, progress_cb=None) -> dict:
+            order.append("indicators")
+            computed.append(list(codes))
+            return {"status": "success"}
+
+    monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
+    updater._share_capital_fingerprint = lambda: "same"
+
+    report = updater.run_incremental_update()
+
+    assert report["steps"]["retries"]["recompute_codes"] == ["000001"]
+    assert "retries" in order and "indicators" in order
+    assert order.index("retries") < order.index("indicators")
+    assert computed and "000001" in computed[-1]
+
+
+def test_treasury_curve_fingerprint_detects_value_updates(
+    duckdb_store, sqlite_store,
+) -> None:
+    """行数与最大日期不变、收益率被 upsert 修正时也必须触发利差重算。"""
+    duckdb_store.write_query(
+        """INSERT INTO treasury_yield_curve
+           (curve_date, tenor_years, yield_pct, source, fetch_time,
+            raw_hash, confidence, batch_id)
+           VALUES ('2026-08-28', 10.0, 2.10, 'czb_mof', CURRENT_TIMESTAMP,
+                   '0', 'strict', 'b1')"""
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    before = updater._treasury_curve_fingerprint()
+    duckdb_store.write_query(
+        """UPDATE treasury_yield_curve SET yield_pct = 2.25
+           WHERE curve_date = '2026-08-28' AND tenor_years = 10.0"""
+    )
+    after = updater._treasury_curve_fingerprint()
+    assert before != ""
+    assert after != before
 
 
 def test_csrc_fetch_only_targets_missing_classifications(duckdb_store, sqlite_store, monkeypatch) -> None:
