@@ -132,13 +132,13 @@ class IncrementalUpdater:
             "csrc_refresh_interval_days", default=30
         )
         self.financial_detail_backfill_max_stocks_per_run: int = self._load_update_config(
-            "financial_detail_backfill_max_stocks_per_run", default=100
+            "financial_detail_backfill_max_stocks_per_run", default=10000
         )
         self.financial_detail_backfill_concurrency: int = self._load_update_config(
-            "financial_detail_backfill_concurrency", default=6
+            "financial_detail_backfill_concurrency", default=16
         )
         self.financial_detail_backfill_persist_batch_size: int = self._load_update_config(
-            "financial_detail_backfill_persist_batch_size", default=10
+            "financial_detail_backfill_persist_batch_size", default=50
         )
         self.financial_detail_backfill_tdx_max_stocks_per_run: int = self._load_update_config(
             "financial_detail_backfill_tdx_max_stocks_per_run", default=10
