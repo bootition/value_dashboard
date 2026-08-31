@@ -138,7 +138,7 @@ class IncrementalUpdater:
             "financial_detail_backfill_concurrency", default=16
         )
         self.financial_detail_backfill_persist_batch_size: int = self._load_update_config(
-            "financial_detail_backfill_persist_batch_size", default=50
+            "financial_detail_backfill_persist_batch_size", default=100
         )
         self.financial_detail_backfill_tdx_max_stocks_per_run: int = self._load_update_config(
             "financial_detail_backfill_tdx_max_stocks_per_run", default=10
@@ -1932,15 +1932,74 @@ class IncrementalUpdater:
     def _write_financial_detail_trio(
         initializer: Any, conn: Any, stock_code: str, fetched: dict[str, Any],
     ) -> None:
-        """在调用方事务内写入一只股票的三表 + lineage。"""
+        """在调用方事务内写入一只股票的三表 + lineage。
+
+        Sina 已是标准化小写字段，采用“删除源返回报告期 + executemany
+        插入”的批量替换：正式库实测每股三表约 1.4s（含提交），而逐行
+        ON CONFLICT 约 4-8s。非 Sina 兜底仍走逐行 upsert 的通用映射。
+        """
+        import json
+
         for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
             result = fetched.get(data_type)
-            if result is None:
+            if result is None or not result.data:
                 continue
-            for row in result.data:
-                initializer._upsert_financial_row(
-                    conn, data_type, stock_code, row,
-                )
+            if result.metadata.source == "sina":
+                available = initializer._financial_cols_cache.get(data_type)
+                if available is None:
+                    available = {
+                        row[0]
+                        for row in conn.execute(
+                            f"SELECT column_name FROM information_schema.columns "
+                            f"WHERE table_name = '{data_type}'"
+                        ).fetchall()
+                    }
+                    initializer._financial_cols_cache[data_type] = available
+                rows: list[dict[str, Any]] = []
+                for row in result.data:
+                    mapped = {
+                        key: value
+                        for key, value in row.items()
+                        if key in available
+                    }
+                    if "stock_code" not in mapped:
+                        mapped["stock_code"] = stock_code
+                    if "raw_data" in available:
+                        mapped["raw_data"] = json.dumps(
+                            row, ensure_ascii=False, default=str,
+                        )
+                    rows.append(mapped)
+                fields = sorted({
+                    key for mapped in rows for key in mapped if key in available
+                })
+                if "stock_code" not in fields:
+                    fields.insert(0, "stock_code")
+                if "report_date" not in fields:
+                    fields.insert(1, "report_date")
+                report_dates = sorted({
+                    str(mapped.get("report_date") or "")[:10]
+                    for mapped in rows
+                    if mapped.get("report_date") is not None
+                })
+                if report_dates:
+                    placeholders = ", ".join("?" for _ in report_dates)
+                    conn.execute(
+                        f"DELETE FROM {data_type} WHERE stock_code = ? "
+                        f"AND report_date IN ({placeholders})",
+                        [stock_code, *report_dates],
+                    )
+                if rows:
+                    field_placeholders = ", ".join("?" for _ in fields)
+                    conn.executemany(
+                        f"INSERT INTO {data_type} ({', '.join(fields)}) "
+                        f"VALUES ({field_placeholders})",
+                        [[mapped.get(field) for field in fields] for mapped in rows],
+                    )
+            else:
+                for row in result.data:
+                    initializer._upsert_financial_row(
+                        conn, data_type, stock_code, row,
+                    )
         for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
             result = fetched.get(data_type)
             if result is None or not result.data:
