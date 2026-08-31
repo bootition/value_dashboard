@@ -39,6 +39,9 @@ last-reviewed: 2026-08-31
    - 修复：`max_stocks>0` 改为从 `_due_stock_codes` 的缺失/陈旧子集续传；`max_stocks=0` 保留“显式全量”语义。
 2. **`PriceBackfiller._record_missing` 裸 INSERT**
    - 已与其他域统一为 `ON CONFLICT ... DO UPDATE`，不再因重复 missing 条目产生 UNIQUE 告警。
+3. **手工财务明细回填后不重算快照**
+   - `vd data financial-detail-backfill --max-stocks N` 只写三表明细，没有像自动更新那样把成功代码送进 `compute_snapshot_for_codes`，加速回填后指标快照会整轮陈旧。
+   - 修复：CLI 在写锁内对 `succeeded_codes` 立即执行快照重算并返回 `snapshot_recompute`。
 
 ## 已在本轮正式库验证的前序修复
 

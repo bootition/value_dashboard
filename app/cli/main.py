@@ -312,6 +312,13 @@ def data_financial_detail_backfill(
     try:
         with exclusive_update(duck.db_path):
             report = updater._refresh_financial_detail_backfill()
+            succeeded_codes = list(report.get("succeeded_codes", []))
+            if succeeded_codes:
+                from app.core.indicators.calculator import IndicatorCalculator
+
+                report["snapshot_recompute"] = IndicatorCalculator(
+                    duck=duck, sqlite=sqlite,
+                ).compute_snapshot_for_codes(succeeded_codes)
     except UpdateLockError as error:
         report = {"status": "skipped", "reason": "another_update_running", "error": str(error)}
     typer.echo(json.dumps(make_response("data.financial-detail-backfill", report), ensure_ascii=False, indent=2, default=str))
