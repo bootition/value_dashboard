@@ -510,6 +510,34 @@ def test_bounded_auto_refresh_continues_with_missing_stocks(
     assert [row["stock_code"] for row in covered] == ["600001", "600002"]
 
 
+def test_update_all_bounded_cursor_skips_covered_prefix(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """max_stocks>0 的 update_all 必须从未覆盖子集续传，不能重复刷前缀。"""
+    for code in ("600001", "600002", "600003"):
+        _seed_stock(duckdb_store, code)
+    adapter = _FakeF10Adapter(
+        profile=[{"stock_code": "ignored", "code": "ignored", "name": "公司"}],
+        breakdown=[{
+            "stock_code": "ignored", "report_date": "2025-12-31", "type": 1,
+            "item_name": "产品", "amount": 100.0, "ratio": 100.0, "rank": 1,
+        }],
+    )
+    updater = BusinessOverviewUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter=adapter,
+    )
+
+    first = updater.update_all(max_stocks=1)
+    second = updater.update_all(max_stocks=1)
+
+    assert first["targeted"] == 1
+    assert second["targeted"] == 1
+    rows = duckdb_store.read_query(
+        "SELECT stock_code FROM company_profile ORDER BY stock_code"
+    )
+    assert [row["stock_code"] for row in rows] == ["600001", "600002"]
+
+
 def test_due_stock_codes_include_stale_rows(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:

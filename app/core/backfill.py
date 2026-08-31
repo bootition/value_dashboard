@@ -501,6 +501,9 @@ class PriceBackfiller:
                 """
                 INSERT INTO missing_list (stock_code, field_name, reason_code)
                 VALUES (?, ?, ?)
+                ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                DO UPDATE SET reason_code = excluded.reason_code,
+                              detected_at = CURRENT_TIMESTAMP
                 """,
                 [stock_code, field_name, reason_code],
             )

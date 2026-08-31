@@ -261,10 +261,21 @@ class BusinessOverviewUpdater:
         """更新全部上市股票（研究优先名单优先，失败不阻断整体）。
 
         业务概览是低频域：通常随财报期后触发或按月检查（reports/67 §4.5）。
+        max_stocks>0 时只处理“缺失/陈旧”子集，不能对全市场列表前 N 只
+        反复刷新，否则 CLI 加速命令会把已覆盖的前缀刷了一遍又一遍。
         """
-        codes = self._listed_stock_codes()
-        if not codes:
-            return {"status": "skipped", "reason": "no_listed_stocks"}
+        if max_stocks > 0:
+            interval_days = int(self._load_config(
+                "business_overview_refresh_interval_days", default=30,
+            ))
+            codes = self._due_stock_codes(interval_days)
+            if not codes:
+                return {"status": "skipped", "reason": "no_due_stocks"}
+        else:
+            # max_stocks=0 是显式全量刷新语义，不能因为“当前无 due”而跳过。
+            codes = self._listed_stock_codes()
+            if not codes:
+                return {"status": "skipped", "reason": "no_listed_stocks"}
         try:
             priority_codes = {
                 row["stock_code"]
