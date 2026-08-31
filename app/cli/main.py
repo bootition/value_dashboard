@@ -491,9 +491,13 @@ def data_funding(
                 if before.get(code) != after.get(code)
             })
             result["changed_codes"] = changed
-            if changed and result.get("status") in {"success", "partial"}:
+            succeeded = [
+                code for code, outcome in (result.get("results") or {}).items()
+                if isinstance(outcome, dict) and outcome.get("status") == "success"
+            ]
+            if result.get("status") in {"success", "partial"} and succeeded:
                 result["snapshot_recompute"] = _recompute_snapshots(
-                    duck, sqlite, changed,
+                    duck, sqlite, succeeded,
                 )
             return result
 
@@ -768,6 +772,11 @@ def data_backfill_prices(
         )
         if result.get("status") in {"success", "partial"}:
             result["snapshot_recompute"] = _recompute_snapshots(duck, sqlite)
+            from app.core.statistics import StatisticsBuilder
+
+            result["research_statistics_rebuild"] = StatisticsBuilder(
+                duck=duck, sqlite=sqlite,
+            ).rebuild_incremental()
         return result
 
     report = _with_update_lock(duck, _run)
