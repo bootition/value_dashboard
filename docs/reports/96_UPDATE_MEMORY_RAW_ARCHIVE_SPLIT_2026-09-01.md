@@ -48,7 +48,9 @@ last-reviewed: 2026-09-01
 
 - 受控 memtest（正式库，N=5/batch=5）：峰值 WS 0.84GB，20.7 只/分；
 - 受控 memtest（正式库，N=50/batch=50）：峰值 WS 1.48GB，29.6 只/分；
-- 服务重启后真实自动更新财务明细回填：WS 0.6~3.3GB，稳定约 29 只/分；
+- 服务重启后真实自动更新财务明细回填：WS 0.6~3.3GB，稳定约 29~38 只/分；
+  本轮缺口 673/673 全部完成，active 归档 3,534 行、history 164,651 行，
+  archive_gap / batch_gap / empty_payload 复检均为 0；
 - 定向回归 137 passed；Ruff 全绿；
 - 完整 S1：674 passed，2 failed。2 项失败在 `HEAD` 干净基线工作树上
   同样复现（`test_complete_period_policy` 与
