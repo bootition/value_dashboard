@@ -16,10 +16,11 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from app.core.adapters.base import FetchRequest
+from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.adapters.eastmoney_f10_adapter import EastMoneyF10Adapter
 from app.core.adapters.manager import AdapterManager
 from app.core.storage.duckdb_store import DuckDBStore
@@ -92,13 +93,36 @@ class BusinessOverviewUpdater:
         Returns:
             报告 dict：{"status": "success"|"failed", "stock_code", ...}
         """
-        profile_result = self.adapter.fetch(FetchRequest(
-            data_type="company_profile", stock_codes=[stock_code],
-        ))
-        breakdown_result = self.adapter.fetch(FetchRequest(
-            data_type="business_breakdown", stock_codes=[stock_code],
-        ))
+        profile_result = self._fetch_one(stock_code, "company_profile")
+        breakdown_result = self._fetch_one(stock_code, "business_breakdown")
+        return self._persist_fetched(stock_code, profile_result, breakdown_result)
 
+    def _fetch_one(self, stock_code: str, data_type: str) -> Any:
+        """抓取单个 F10 数据面；适配器抛异常时转成失败结果，不中断批处理。"""
+        try:
+            return self.adapter.fetch(FetchRequest(
+                data_type=data_type, stock_codes=[stock_code],
+            ))
+        except Exception as error:
+            logger.warning("抓取 %s %s 失败: %s", stock_code, data_type, error)
+            return FetchResult(
+                data=[],
+                metadata=SourceMetadata(
+                    source="eastmoney_f10",
+                    fetch_time=datetime.now(UTC),
+                    raw_response_hash="",
+                    confidence="missing",
+                    error=str(error),
+                ),
+            )
+
+    def _persist_fetched(
+        self,
+        stock_code: str,
+        profile_result: Any,
+        breakdown_result: Any,
+    ) -> dict[str, Any]:
+        """按现有原子语义持久化一对已抓取结果。"""
         errors: list[str] = []
         for data_type, result in (
             ("company_profile", profile_result),
@@ -227,6 +251,95 @@ class BusinessOverviewUpdater:
     # ─── 批量 / 全量 ──────────────────────────────────────────────
 
     def update_many(
+        self,
+        stock_codes: list[str],
+        *,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """更新给定股票，返回汇总报告。
+
+        抓取按 business_overview_concurrency 并发入队；EastMoneyF10Adapter
+        的全局限速锁仍保证源侧不超过 2 req/s。DuckDB 写入始终在主线程
+        逐股串行提交，避免同进程多写者竞争。
+        """
+        if not stock_codes:
+            return {
+                "status": "success", "targeted": 0, "succeeded": 0,
+                "failed": 0, "failed_codes": [], "results": {},
+            }
+        concurrency = max(
+            1, int(self._load_config("business_overview_concurrency", default=4)),
+        )
+        if concurrency <= 1 or len(stock_codes) <= 1:
+            return self._update_many_serial(stock_codes, progress_cb=progress_cb)
+
+        results: dict[str, dict[str, Any]] = {}
+        failed: list[str] = []
+        data_types = ("company_profile", "business_breakdown")
+        pending: dict[Future[Any], tuple[str, str]] = {}
+        partial: dict[str, dict[str, Any]] = {}
+        max_inflight = max(concurrency * 4, 8)
+        iterator = (
+            (stock_code, data_type)
+            for stock_code in stock_codes
+            for data_type in data_types
+        )
+
+        def submit_next(executor: ThreadPoolExecutor) -> None:
+            for _ in range(max_inflight - len(pending)):
+                try:
+                    stock_code, data_type = next(iterator)
+                except StopIteration:
+                    return
+                future = executor.submit(self._fetch_one, stock_code, data_type)
+                pending[future] = (stock_code, data_type)
+
+        with ThreadPoolExecutor(
+            max_workers=min(concurrency, max_inflight),
+            thread_name_prefix="vd-business-overview",
+        ) as executor:
+            submit_next(executor)
+            while pending:
+                for future in as_completed(tuple(pending)):
+                    stock_code, data_type = pending.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as error:
+                        result = FetchResult(
+                            data=[],
+                            metadata=SourceMetadata(
+                                source="eastmoney_f10",
+                                fetch_time=datetime.now(UTC),
+                                raw_response_hash="",
+                                confidence="missing",
+                                error=str(error),
+                            ),
+                        )
+                    partial.setdefault(stock_code, {})[data_type] = result
+                    submit_next(executor)
+                    if len(partial.get(stock_code, {})) == len(data_types):
+                        outcome = self._persist_fetched(
+                            stock_code,
+                            partial[stock_code]["company_profile"],
+                            partial[stock_code]["business_breakdown"],
+                        )
+                        partial.pop(stock_code, None)
+                        results[stock_code] = outcome
+                        if outcome["status"] != "success":
+                            failed.append(stock_code)
+                        if progress_cb is not None:
+                            progress_cb(stock_code, outcome)
+
+        return {
+            "status": "success" if not failed else "partial",
+            "targeted": len(stock_codes),
+            "succeeded": len(stock_codes) - len(failed),
+            "failed": len(failed),
+            "failed_codes": failed[:20],
+            "results": results,
+        }
+
+    def _update_many_serial(
         self,
         stock_codes: list[str],
         *,
@@ -374,6 +487,27 @@ class BusinessOverviewUpdater:
             [cutoff, cutoff],
         )
         codes = [row["stock_code"] for row in rows]
+        # 已确认源缺失（profile/breakdown 均无数据）的股票在重试窗口内出队，
+        # 避免北交所等无 F10 覆盖的股票每轮占住限速额度与队头位置。
+        try:
+            missing_cutoff = datetime.now(UTC) - timedelta(days=max(0, int(
+                self._load_config(
+                    "business_overview_missing_retry_days", default=7,
+                )
+            )))
+            blocked_rows = self.sqlite.query(
+                """SELECT stock_code FROM missing_list
+                   WHERE field_name IN ('company_profile', 'business_breakdown')
+                     AND resolved_at IS NULL
+                     AND detected_at >= ?
+                   GROUP BY stock_code
+                   HAVING COUNT(DISTINCT field_name) = 2""",
+                [missing_cutoff.isoformat()],
+            )
+            blocked = {row["stock_code"] for row in blocked_rows}
+            codes = [code for code in codes if code not in blocked]
+        except Exception as error:
+            logger.warning("查询业务概览 missing 缓存失败: %s", error)
         source_order = {code: index for index, code in enumerate(codes)}
         try:
             priority_codes = {

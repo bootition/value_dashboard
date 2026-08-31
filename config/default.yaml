@@ -10,6 +10,9 @@ database:
   duckdb_path: "data/valuedashboard.duckdb"
   sqlite_path: "data/valuedashboard.sqlite"
   sqlite_wal_mode: true
+  # DuckDB 单个连接的内存上限；防止 50GB 高水位库的冷核对/大事务
+  # 把进程 WS 推到默认的 25GB。可被 user.yaml 覆盖。
+  duckdb_memory_limit: "12GB"
 
 adapters:
   rate_limit_interval:
@@ -74,6 +77,8 @@ update:
   business_overview_max_stocks_per_run: 10000  # 自动更新单周期清空全部业务概览缺口
   business_overview_catchup_threshold: 0
   business_overview_catchup_max_stocks_per_run: 10000
+  business_overview_concurrency: 4      # 抓取并发；源侧仍限速 2 req/s
+  business_overview_missing_retry_days: 7  # 已确认源缺失股票的出队窗口
   # 融资事件低频域（2026-08-25 数据补全）：历史事件有界续传，批 50 + 冷却 30s；
   # 失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务/readiness。
   funding_auto_enabled: true

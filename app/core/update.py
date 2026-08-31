@@ -1929,23 +1929,100 @@ class IncrementalUpdater:
         return result
 
     @staticmethod
+    def _write_sina_financial_table(
+        initializer: Any, conn: Any, data_type: str, stock_code: str,
+        result: Any,
+    ) -> None:
+        """以 TEMP TABLE + UPDATE/INSERT 合并一批 Sina 标准化明细行。
+
+        与逐行 legacy merge 等价：源返回的非 NULL 字段覆盖旧值，源未返回
+        的字段保留旧值，新报告期直接插入。每表只执行一次 UPDATE 和一次
+        INSERT，避免逐行 DELETE+INSERT 在宽表上反复重写 row group。
+        """
+        available = initializer._financial_cols_cache.get(data_type)
+        if available is None:
+            available = {
+                row[0]
+                for row in conn.execute(
+                    f"SELECT column_name FROM information_schema.columns "
+                    f"WHERE table_name = '{data_type}'"
+                ).fetchall()
+            }
+            initializer._financial_cols_cache[data_type] = available
+        rows: list[dict[str, Any]] = []
+        for row in result.data:
+            mapped = {
+                key: value
+                for key, value in row.items()
+                if key in available and value is not None
+            }
+            mapped.setdefault("stock_code", stock_code)
+            if "raw_data" in available:
+                mapped["raw_data"] = json.dumps(
+                    row, ensure_ascii=False, default=str,
+                )
+            rows.append(mapped)
+        if not rows:
+            return
+        fields = sorted({key for mapped in rows for key in mapped if key in available})
+        if "stock_code" not in fields:
+            fields.insert(0, "stock_code")
+        if "report_date" not in fields:
+            fields.insert(1, "report_date")
+        temp = f"tmp_{data_type}_{uuid.uuid4().hex[:10]}"
+        conn.execute(
+            f"CREATE TEMP TABLE {temp} AS "
+            f"SELECT * FROM {data_type} WHERE 1 = 0"
+        )
+        placeholders = ", ".join("?" for _ in fields)
+        conn.executemany(
+            f"INSERT INTO {temp} ({', '.join(fields)}) "
+            f"VALUES ({placeholders})",
+            [[mapped.get(field) for field in fields] for mapped in rows],
+        )
+        updates = ", ".join(
+            f"{field} = s.{field}"
+            for field in fields
+            if field not in {"stock_code", "report_date"}
+        )
+        conn.execute(
+            f"UPDATE {data_type} t SET {updates} FROM {temp} s "
+            f"WHERE t.stock_code = s.stock_code "
+            f"AND t.report_date = s.report_date"
+        )
+        source_fields = ", ".join(f"s.{field}" for field in fields)
+        conn.execute(
+            f"INSERT INTO {data_type} ({', '.join(fields)}) "
+            f"SELECT {source_fields} FROM {temp} s "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {data_type} t "
+            f"WHERE t.stock_code = s.stock_code "
+            f"AND t.report_date = s.report_date)"
+        )
+        conn.execute(f"DROP TABLE {temp}")
+
+    @staticmethod
     def _write_financial_detail_trio(
         initializer: Any, conn: Any, stock_code: str, fetched: dict[str, Any],
     ) -> None:
-        """在调用方事务内写入一只股票的三表 + lineage（内存安全优先）。
+        """在调用方事务内写入一只股票的三表 + lineage。
 
-        批量 DELETE / ON CONFLICT / TEMP UPDATE 在正式库宽表与溯源大表上
-        均会触发 DuckDB 峰值内存 20GB+。此处保持逐行 _upsert_financial_row
-        的稳定路径，并按批次合并提交。
+        2026-09-01 原始响应归档已冷热分层，内存峰值不再由 raw_response_archive
+        决定；Sina 批量行改用 TEMP TABLE 合并，减少逐行 DELETE+INSERT 的
+        row-group 重写。非 Sina 兜底仍走逐行 upsert 的通用映射。
         """
         for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
             result = fetched.get(data_type)
-            if result is None:
+            if result is None or not result.data:
                 continue
-            for row in result.data:
-                initializer._upsert_financial_row(
-                    conn, data_type, stock_code, row,
+            if result.metadata.source == "sina":
+                IncrementalUpdater._write_sina_financial_table(
+                    initializer, conn, data_type, stock_code, result,
                 )
+            else:
+                for row in result.data:
+                    initializer._upsert_financial_row(
+                        conn, data_type, stock_code, row,
+                    )
         for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
             result = fetched.get(data_type)
             if result is None or not result.data:

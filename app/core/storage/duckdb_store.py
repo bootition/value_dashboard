@@ -100,9 +100,27 @@ class DuckDBStore:
         self._path_set = validated
         self._db_path = validated.duckdb_path
         self._lock_path = self._db_path.parent / ".duckdb.write.lock"
+        self._memory_limit = self._load_memory_limit()
 
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._revalidate()
+
+    @staticmethod
+    def _load_memory_limit() -> str:
+        """Read database.duckdb_memory_limit with a conservative fallback."""
+        try:
+            import importlib
+            config_module = importlib.import_module("app.core.config")
+            database_cfg = config_module.Config.current().get_value("database", {})
+            value = database_cfg.get("duckdb_memory_limit") if isinstance(database_cfg, dict) else None
+            if value:
+                return str(value)
+        except Exception:
+            pass
+        return "12GB"
+
+    def _connection_config(self) -> dict[str, str]:
+        return {"memory_limit": self._memory_limit}
 
     def _revalidate(self) -> None:
         validated = self._path_set.validate()
@@ -148,6 +166,7 @@ class DuckDBStore:
                 conn = duckdb.connect(
                     str(self._db_path),
                     read_only=not allow_same_process_rw,
+                    config=self._connection_config(),
                 )
             except duckdb.ConnectionException as error:
                 last_error = error
@@ -275,7 +294,9 @@ class DuckDBStore:
         delays = (0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0)
         for attempt in range(len(delays) + 1):
             try:
-                return duckdb.connect(str(self._db_path))
+                return duckdb.connect(
+                    str(self._db_path), config=self._connection_config(),
+                )
             except Exception as error:
                 last_error = error
                 if attempt < len(delays):

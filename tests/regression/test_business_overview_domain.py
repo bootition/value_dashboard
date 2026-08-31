@@ -739,3 +739,57 @@ def test_updater_defaults_to_manager_for_independent_circuit_breaker(
 
     updater = BusinessOverviewUpdater(duck=duckdb_store, sqlite=sqlite_store)
     assert isinstance(updater.adapter, AdapterManager)
+
+
+def test_update_many_concurrent_fetch_serial_persist(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    for code in ("600001", "600002", "600003", "600004"):
+        _seed_stock(duckdb_store, code)
+    adapter = _FakeF10Adapter(
+        profile=[{"stock_code": "ignored", "code": "ignored", "name": "公司"}],
+        breakdown=[{
+            "stock_code": "ignored", "report_date": "2025-12-31", "type": 1,
+            "item_name": "产品", "amount": 100.0, "ratio": 100.0, "rank": 1,
+        }],
+    )
+    updater = BusinessOverviewUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter=adapter,
+    )
+    monkeypatch.setattr(
+        updater, "_load_config",
+        lambda key, default: {"business_overview_concurrency": 4}.get(key, default),
+    )
+
+    report = updater.update_many(["600001", "600002", "600003", "600004"])
+
+    assert report["status"] == "success"
+    assert report["succeeded"] == 4
+    rows = duckdb_store.read_query(
+        "SELECT stock_code FROM company_profile ORDER BY stock_code"
+    )
+    assert [row["stock_code"] for row in rows] == ["600001", "600002", "600003", "600004"]
+    # 两类请求均已发出，且结果被逐股原子持久化
+    assert sorted(adapter.calls) == ["business_breakdown"] * 4 + ["company_profile"] * 4
+
+
+def test_due_stock_codes_skip_recently_confirmed_source_missing(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    _seed_stock(duckdb_store)
+    updater = BusinessOverviewUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter=_FakeF10Adapter(),
+    )
+    monkeypatch.setattr(
+        updater, "_load_config",
+        lambda key, default: {"business_overview_missing_retry_days": 7}.get(key, default),
+    )
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO missing_list (stock_code, field_name, reason_code)
+               VALUES (?, 'company_profile', 'source_empty'),
+                      (?, 'business_breakdown', 'source_empty')""",
+            ["600519", "600519"],
+        )
+
+    assert updater._due_stock_codes(30) == []
