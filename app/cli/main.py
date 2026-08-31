@@ -80,6 +80,16 @@ def _with_update_lock(duck, operation):
         return {"status": "skipped", "reason": "another_update_running", "error": str(error)}
 
 
+def _recompute_snapshots(duck, sqlite, codes=None):
+    """Run snapshot recompute inside an already-held update lock."""
+    from app.core.indicators.calculator import IndicatorCalculator
+
+    calc = IndicatorCalculator(duck=duck, sqlite=sqlite)
+    if codes:
+        return calc.compute_snapshot_for_codes(list(codes))
+    return calc.compute_snapshot_for_all()
+
+
 def _database_stores(*, initialize: bool = True):
     _, duck, sqlite = _database_context(initialize=initialize)
     return duck, sqlite
@@ -282,11 +292,22 @@ def data_update(
                 "targeted": len(codes),
                 "results": {},
             }
+            succeeded: list[str] = []
             for code in codes:
                 report["results"][code] = {
                     data_type: updater.refetch_one(code, data_type)
                     for data_type in ("price_daily", "balance_sheet", "income_statement", "cash_flow", "dividends", "xdxr")
                 }
+                if any(
+                    outcome.get("status") == "success"
+                    for outcome in report["results"][code].values()
+                    if isinstance(outcome, dict)
+                ):
+                    succeeded.append(code)
+            if succeeded:
+                report["snapshot_recompute"] = _recompute_snapshots(
+                    duck, sqlite, succeeded,
+                )
             return report
 
         report = _with_update_lock(duck, _refetch_codes)
@@ -376,6 +397,22 @@ def data_treasury_curve(
 
     _, duck, sqlite = _database_context()
     updater = TreasuryCurveUpdater(duck=duck, sqlite=sqlite)
+
+    def _run_with_recompute(operation) -> dict:
+        from app.core.update import IncrementalUpdater
+
+        before = IncrementalUpdater(
+            duck=duck, sqlite=sqlite,
+        )._treasury_curve_fingerprint()
+        result = operation()
+        after = IncrementalUpdater(
+            duck=duck, sqlite=sqlite,
+        )._treasury_curve_fingerprint()
+        result["curve_changed"] = before != after
+        if result["curve_changed"]:
+            result["snapshot_recompute"] = _recompute_snapshots(duck, sqlite)
+        return result
+
     if check_only:
         report = updater.status_report()
     elif backfill:
@@ -384,16 +421,24 @@ def data_treasury_curve(
             if tenors.strip() else None
         )
         report = _with_update_lock(
-            duck, lambda: updater.backfill(tenor_list, max_tenors=max_tenors),
+            duck,
+            lambda: _run_with_recompute(
+                lambda: updater.backfill(tenor_list, max_tenors=max_tenors),
+            ),
         )
     elif daily:
         report = _with_update_lock(
-            duck, lambda: updater.update_daily(
-                [work_date] if work_date.strip() else None,
+            duck,
+            lambda: _run_with_recompute(
+                lambda: updater.update_daily(
+                    [work_date] if work_date.strip() else None,
+                ),
             ),
         )
     else:
-        report = _with_update_lock(duck, updater.refresh_if_due)
+        report = _with_update_lock(
+            duck, lambda: _run_with_recompute(updater.refresh_if_due),
+        )
     typer.echo(json.dumps(make_response("data.treasury-curve", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -421,16 +466,67 @@ def data_funding(
         report = updater.status_report()
     elif stocks.strip():
         codes = [code.strip() for code in stocks.split(",") if code.strip()]
-        report = _with_update_lock(
-            duck, lambda: updater.update_many(
+
+        def _run_stocks() -> dict:
+            before = {
+                row["stock_code"]: row["amount"]
+                for row in duck.read_query(
+                    """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
+                       FROM funding_events GROUP BY stock_code"""
+                )
+            }
+            result = updater.update_many(
                 codes, batch_size=batch_size,
                 batch_cooldown_seconds=float(batch_cooldown),
-            ),
-        )
+            )
+            after = {
+                row["stock_code"]: row["amount"]
+                for row in duck.read_query(
+                    """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
+                       FROM funding_events GROUP BY stock_code"""
+                )
+            }
+            changed = sorted({
+                code for code in set(before) | set(after)
+                if before.get(code) != after.get(code)
+            })
+            result["changed_codes"] = changed
+            if changed and result.get("status") in {"success", "partial"}:
+                result["snapshot_recompute"] = _recompute_snapshots(
+                    duck, sqlite, changed,
+                )
+            return result
+
+        report = _with_update_lock(duck, _run_stocks)
     else:
-        report = _with_update_lock(
-            duck, lambda: updater.update_all(max_stocks=max_stocks),
-        )
+        def _run_all() -> dict:
+            before = {
+                row["stock_code"]: row["amount"]
+                for row in duck.read_query(
+                    """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
+                       FROM funding_events GROUP BY stock_code"""
+                )
+            }
+            result = updater.update_all(max_stocks=max_stocks)
+            after = {
+                row["stock_code"]: row["amount"]
+                for row in duck.read_query(
+                    """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
+                       FROM funding_events GROUP BY stock_code"""
+                )
+            }
+            changed = sorted({
+                code for code in set(before) | set(after)
+                if before.get(code) != after.get(code)
+            })
+            result["changed_codes"] = changed
+            if changed and result.get("status") in {"success", "partial"}:
+                result["snapshot_recompute"] = _recompute_snapshots(
+                    duck, sqlite, changed,
+                )
+            return result
+
+        report = _with_update_lock(duck, _run_all)
     typer.echo(json.dumps(make_response("data.funding", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -559,20 +655,36 @@ def data_capital_history(
                     file=__import__("sys").stderr, flush=True,
                 )
 
-        report = _with_update_lock(
-            duck, lambda: updater.update_many(
+        def _run_many() -> dict:
+            result = updater.update_many(
                 codes, cross_check=not no_cross, cross_only=cross_only,
                 batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
                 progress_cb=cb if verbose else None,
-            ),
-        )
+            )
+            if result.get("status") in {"success", "partial"}:
+                from app.core.statistics import StatisticsBuilder
+
+                result["research_statistics_rebuild"] = StatisticsBuilder(
+                    duck=duck, sqlite=sqlite,
+                ).rebuild_incremental()
+            return result
+
+        report = _with_update_lock(duck, _run_many)
     else:
-        report = _with_update_lock(
-            duck, lambda: updater.update_all(
+        def _run_all() -> dict:
+            result = updater.update_all(
                 max_stocks=max_stocks, cross_check=not no_cross, cross_only=cross_only,
                 batch_size=batch_size, batch_cooldown_seconds=float(batch_cooldown),
-            ),
-        )
+            )
+            if result.get("status") in {"success", "partial"}:
+                from app.core.statistics import StatisticsBuilder
+
+                result["research_statistics_rebuild"] = StatisticsBuilder(
+                    duck=duck, sqlite=sqlite,
+                ).rebuild_incremental()
+            return result
+
+        report = _with_update_lock(duck, _run_all)
     typer.echo(json.dumps(make_response("data.capital-history", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -608,12 +720,18 @@ def data_replenish_missing_core_data(
     from app.core.update import IncrementalUpdater
 
     _, duck, sqlite = _database_context()
-    result = _with_update_lock(
-        duck,
-        lambda: IncrementalUpdater(
-            duck=duck, sqlite=sqlite,
-        ).replenish_missing_core_data(max_stocks),
-    )
+
+    def _run() -> dict:
+        updater = IncrementalUpdater(duck=duck, sqlite=sqlite)
+        result = updater.replenish_missing_core_data(max_stocks)
+        completed = result.get("completed_codes", [])
+        if completed:
+            result["snapshot_recompute"] = _recompute_snapshots(
+                duck, sqlite, completed,
+            )
+        return result
+
+    result = _with_update_lock(duck, _run)
     typer.echo(
         json.dumps(
             make_response("data.replenish_missing_core_data", result),
@@ -641,13 +759,18 @@ def data_backfill_prices(
 
     _, duck, sqlite = _database_context()
     backfiller = PriceBackfiller(duck=duck, sqlite=sqlite)
-    report = _with_update_lock(
-        duck, lambda: backfiller.run_full_backfill(
+
+    def _run() -> dict:
+        result = backfiller.run_full_backfill(
             skip_if_complete=skip_complete,
             max_stocks=max_stocks,
             fetch_dividends=not no_dividends,
-        ),
-    )
+        )
+        if result.get("status") in {"success", "partial"}:
+            result["snapshot_recompute"] = _recompute_snapshots(duck, sqlite)
+        return result
+
+    report = _with_update_lock(duck, _run)
     typer.echo(json.dumps(make_response("data.backfill_prices", report), ensure_ascii=False, indent=2, default=str))
 
 
@@ -1819,12 +1942,20 @@ def data_refetch_execute(
     if summary.get("stock_code") != stock_code or summary.get("data_type") != data_type:
         typer.echo(json.dumps(make_response("data.refetch_execute", error_code="E001", error_message="arguments do not match the confirmed plan"), ensure_ascii=False))
         return
-    result = _with_update_lock(
-        duck,
-        lambda: IncrementalUpdater(duck=duck, sqlite=sqlite).refetch_one(
+    def _run() -> dict:
+        result = IncrementalUpdater(duck=duck, sqlite=sqlite).refetch_one(
             stock_code, data_type,
-        ),
-    )
+        )
+        if result.get("status") == "success" and data_type in {
+            "price_daily", "balance_sheet", "income_statement",
+            "cash_flow", "dividends", "xdxr",
+        }:
+            result["snapshot_recompute"] = _recompute_snapshots(
+                duck, sqlite, [stock_code],
+            )
+        return result
+
+    result = _with_update_lock(duck, _run)
     typer.echo(json.dumps(make_response("data.refetch_execute", result), ensure_ascii=False, indent=2, default=str))
 
 

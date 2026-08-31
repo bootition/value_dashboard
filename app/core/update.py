@@ -3005,6 +3005,7 @@ class IncrementalUpdater:
             targets = targets[:max_stocks]
 
         completed = 0
+        completed_codes: list[str] = []
         failed_codes: list[str] = []
         for target in targets:
             code = target["stock_code"]
@@ -3016,6 +3017,7 @@ class IncrementalUpdater:
             results = [self.refetch_one(code, data_type) for data_type in data_types]
             if all(result["status"] == "success" for result in results):
                 completed += 1
+                completed_codes.append(code)
             else:
                 failed_codes.append(code)
 
@@ -3023,6 +3025,7 @@ class IncrementalUpdater:
             "status": "success" if not failed_codes else "partial",
             "targeted": len(targets),
             "completed": completed,
+            "completed_codes": completed_codes,
             "failed": len(failed_codes),
             "failed_codes": failed_codes[:20],
         }

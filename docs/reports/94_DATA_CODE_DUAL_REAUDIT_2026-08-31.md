@@ -42,6 +42,9 @@ last-reviewed: 2026-08-31
 3. **手工财务明细回填后不重算快照**
    - `vd data financial-detail-backfill --max-stocks N` 只写三表明细，没有像自动更新那样把成功代码送进 `compute_snapshot_for_codes`，加速回填后指标快照会整轮陈旧。
    - 修复：CLI 在写锁内对 `succeeded_codes` 立即执行快照重算并返回 `snapshot_recompute`。
+4. **同类“手工写命令不闭环快照”问题**
+   - 手工 funding 更新不重算 `cumulative_financing_amount`；手工 treasury 更新不重算 `div_yield_spread_*`；`data update --stocks`、`refetch_execute`、`replenish_missing_core_data`、`backfill-prices` 也不重算受影响快照；手工 capital-history 不重建历史统计。
+   - 修复：上述写命令统一在写锁内按变化代码（曲线变化则全量）执行 `compute_snapshot_for_codes/all`；capital-history 成功后自动执行 `StatisticsBuilder.rebuild_incremental`。
 
 ## 已在本轮正式库验证的前序修复
 
