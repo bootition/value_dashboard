@@ -232,9 +232,13 @@ def test_indicator_trust_policy_matches_frontend_is_indicator_untrusted() -> Non
 
     for code in (
         "FINANCIAL_SHELL_ROWS", "SNAPSHOT_STALE", "LINEAGE_INVALID",
-        "MINIMUM_DATA_NOT_READY", "CODE_IDENTITY_ALIAS", "LIVE_SCHEMA_INCOMPATIBLE",
+        "CODE_IDENTITY_ALIAS", "LIVE_SCHEMA_INCOMPATIBLE",
     ):
         assert indicator_trust([code])["untrusted_all"] is True
+
+    # 前端 data-quality.ts 2026-08-27 起将 MINIMUM_DATA_NOT_READY 视为
+    # 少数股票缺口提示，不遮蔽全量快照指标。
+    assert indicator_trust(["MINIMUM_DATA_NOT_READY"])["untrusted_all"] is False
 
 
 def test_mask_untrusted_values_fail_closed() -> None:
