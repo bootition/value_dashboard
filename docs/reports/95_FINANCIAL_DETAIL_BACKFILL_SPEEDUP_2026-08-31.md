@@ -38,5 +38,6 @@ last-reviewed: 2026-08-31
 ## 自动完成安排
 
 - 活跃配置 `config/default.yaml` 与资源默认值均为 `financial_detail_backfill_max_stocks_per_run: 10000`：服务重启后自动更新会在一个周期内清空全部明细缺口队列，并在同一周期重算成功股票快照。
+- 业务概览同步改为单周期清空全部缺口（`business_overview_max_stocks_per_run: 10000`）。
 - 快速源确认无数据的股票登记 missing，7 天后自动重试；TDX 每轮最多兜底 10 只。
 - 完成后无需人工监控，后续仅有新股/新报告期的少量增量缺口。
