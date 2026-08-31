@@ -576,6 +576,34 @@ def test_update_all_uses_due_cursor(
     assert rows and rows[0]["stock_code"] == "600000"
 
 
+def test_update_all_advances_past_successfully_fetched_stale_main_chain(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """主链锚点天然早于价格日，成功抓取后不得在下一轮重复占住队头。"""
+    _seed_stock(duckdb_store, "600000")
+    _seed_stock(duckdb_store, "600001")
+    _seed_price(duckdb_store, "600000", date(2026, 8, 7), 10.0)
+    _seed_price(duckdb_store, "600001", date(2026, 8, 7), 10.0)
+    fake = _FakeCapitalAdapter(main=[{
+        "effective_date": "2025-12-31", "total_shares": 1000000000.0,
+        "change_reason": None, "is_anchor": True,
+    }], cross=[])
+    updater = _updater(duckdb_store, sqlite_store, fake)
+
+    first = updater.update_all(max_stocks=1)
+    assert first["status"] == "success"
+    assert first["targeted"] == 1
+    assert "600000" in first["results"]
+
+    due = updater._due_stock_codes()
+    assert "600000" not in due, "成功抓取且 TTL 内的主链不得立即复刷"
+    assert "600001" in due, "游标必须推进到下一只未覆盖股票"
+
+    second = updater.update_all(max_stocks=1)
+    assert second["targeted"] == 1
+    assert "600001" in second["results"]
+
+
 def test_coverage_per_window_uses_main_chain(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:

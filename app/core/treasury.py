@@ -317,6 +317,7 @@ class TreasuryCurveUpdater:
         """
         today = _cn_today()
         candidates: list[str] = []
+        valid_days: set[str] = set()
         try:
             rows = self.sqlite.query(
                 "SELECT trade_date FROM trading_dates "
@@ -324,6 +325,11 @@ class TreasuryCurveUpdater:
                 [str(today), max(1, lookback_trading_days)],
             )
             candidates.extend(str(r["trade_date"])[:10] for r in rows)
+            all_rows = self.sqlite.query(
+                "SELECT trade_date FROM trading_dates WHERE trade_date <= ?",
+                [str(today)],
+            )
+            valid_days = {str(r["trade_date"])[:10] for r in all_rows}
         except Exception as error:
             logger.warning("查询交易日历失败: %s", error)
         try:
@@ -335,7 +341,21 @@ class TreasuryCurveUpdater:
             )
             for row in miss_rows:
                 day = str(row["field_name"]).rsplit("_", 1)[-1]
-                if day and day not in candidates:
+                if not day or day > str(today):
+                    continue
+                try:
+                    is_non_trading = (
+                        (valid_days and day not in valid_days)
+                        or (not valid_days and date.fromisoformat(day).weekday() >= 5)
+                    )
+                except ValueError:
+                    continue
+                if is_non_trading:
+                    # 周末/法定节假日会被 source_empty 永久挂起，之后每天
+                    # 都重试并重新登记 missing；这里一次性结清为合法非交易日。
+                    self._resolve_missing(None, work_date=day)
+                    continue
+                if day not in candidates:
                     candidates.append(day)
         except Exception as error:
             logger.warning("查询国债缺失条目失败: %s", error)

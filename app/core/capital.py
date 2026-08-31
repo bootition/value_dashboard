@@ -78,6 +78,8 @@ class CapitalHistoryUpdater:
     # 失败/空结果也记录，批次审查可见；due 游标按状态区分（error 行带
     # 重试冷却，绝不把失败行当作已核验）。
     _CROSS_CACHE_TTL_DAYS = 7  # 东财事件日终低频变化，7 天内复用
+    _MAIN_CACHE_TTL_DAYS = 7    # 主链成功后 7 天内不再重抓（解决队头重复）
+    _MAIN_ERROR_RETRY_DELAY_SECONDS = 1800
     # 缓存行状态：verified=取到事件并参与核验；empty=取到空事件集（无交叉
     # 证据，不再重试）；error=源异常（含风控），冷却后可重试。
     _CROSS_CACHE_OK_STATUSES = {"verified", "empty"}
@@ -108,6 +110,14 @@ class CapitalHistoryUpdater:
                 if "error" not in columns:
                     conn.execute(
                         "ALTER TABLE capital_cross_cache ADD COLUMN error TEXT"
+                    )
+                if "main_fetched_at" not in columns:
+                    conn.execute(
+                        "ALTER TABLE capital_cross_cache ADD COLUMN main_fetched_at TEXT"
+                    )
+                if "main_status" not in columns:
+                    conn.execute(
+                        "ALTER TABLE capital_cross_cache ADD COLUMN main_status TEXT"
                     )
         except Exception as e:
             logger.warning("创建东财交叉缓存表失败: %s", e)
@@ -188,6 +198,47 @@ class CapitalHistoryUpdater:
                 )
         except Exception as e:
             logger.warning("保存东财交叉缓存失败: %s", e)
+
+    def _save_main_cache(
+        self,
+        stock_code: str,
+        *,
+        status: str,
+        error: str | None = None,
+    ) -> None:
+        """主链抓取结果缓存，与交叉核验缓存同表不同列。
+
+        主链锚点天然早于最新价格（半年报/年报），因此不能用
+        latest_cap < latest_price 单独决定 due；否则成功抓取后下一轮仍会
+        排在队头，20 只/轮永远无法推进到后续股票。
+        """
+        try:
+            with self.sqlite.transaction() as conn:
+                existing = conn.execute(
+                    "SELECT 1 FROM capital_cross_cache WHERE stock_code = ?",
+                    [stock_code],
+                ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        """INSERT INTO capital_cross_cache
+                           (stock_code, events_json, verified_points, total_points,
+                            fetched_at, cross_status, error, main_fetched_at, main_status)
+                           VALUES (?, '[]', 0, 0, ?, NULL, ?, ?, ?)""",
+                        [stock_code, datetime.now(UTC).isoformat(),
+                         (error or "")[:500], datetime.now(UTC).isoformat(), status],
+                    )
+                else:
+                    conn.execute(
+                        """UPDATE capital_cross_cache
+                           SET main_fetched_at = ?, main_status = ?,
+                               error = CASE WHEN ? IS NOT NULL AND ? != ''
+                                            THEN ? ELSE error END
+                         WHERE stock_code = ?""",
+                        [datetime.now(UTC).isoformat(), status,
+                         error, error, (error or "")[:500], stock_code],
+                    )
+        except Exception as error_:  # noqa: BLE001
+            logger.warning("保存主链抓取缓存失败: %s", error_)
 
     def _stale_verified_events(self, stock_code: str) -> list[dict[str, Any]]:
         """回退用：读取任何 verified 状态缓存行的事件（忽略 TTL）。
@@ -314,6 +365,9 @@ class CapitalHistoryUpdater:
                 ))
                 if fallback_result.metadata.error or not fallback_result.data:
                     self._record_retry(stock_code, result.metadata.error)
+                    self._save_main_cache(
+                        stock_code, status="error", error=result.metadata.error,
+                    )
                     return {
                         "status": "failed", "stock_code": stock_code,
                         "error": result.metadata.error, "retained": True,
@@ -331,6 +385,9 @@ class CapitalHistoryUpdater:
                 ))
                 if fallback_result.metadata.error or not fallback_result.data:
                     self._record_missing(stock_code, "source_empty")
+                    self._save_main_cache(
+                        stock_code, status="error", error="source_empty",
+                    )
                     return {
                         "status": "failed", "stock_code": stock_code,
                         "reason": "source_empty", "retained": True,
@@ -387,6 +444,9 @@ class CapitalHistoryUpdater:
         rows = self._verify_and_build(stock_code, main_data, cross_events)
         if not rows:
             self._record_missing(stock_code, "no_valid_records")
+            self._save_main_cache(
+                stock_code, status="error", error="no_valid_records",
+            )
             return {
                 "status": "failed", "stock_code": stock_code,
                 "reason": "no_valid_records", "retained": True,
@@ -465,6 +525,8 @@ class CapitalHistoryUpdater:
 
         self._resolve_missing(stock_code)
         self._resolve_retry(stock_code)
+        if not cross_only:
+            self._save_main_cache(stock_code, status="ok")
         return {
             "status": "success", "stock_code": stock_code,
             "batch_id": batch_id, "rows": len(rows),
@@ -685,7 +747,17 @@ class CapitalHistoryUpdater:
         error 行在冷却窗口内暂不入选（防对风控源轰炸），冷却后重新 due。
         cross_only=True 时主链陈旧项不入选（只补交叉核验）。
         """
-        main_due: list[str] = []
+        main_due: list[tuple[int, str]] = []
+        try:
+            cached_rows = self.sqlite.query(
+                """SELECT stock_code, cross_status, fetched_at,
+                          main_fetched_at, main_status
+                   FROM capital_cross_cache"""
+            )
+        except Exception:
+            cached_rows = []
+        main_cache = {row["stock_code"]: row for row in cached_rows}
+
         if not cross_only:
             rows = self.duck.read_query(
                 """SELECT m.stock_code
@@ -701,26 +773,61 @@ class CapitalHistoryUpdater:
                    WHERE m.is_listed IS TRUE
                      AND (h.stock_code IS NULL
                           OR h.latest_cap < COALESCE(
-                              p.latest_price, CURRENT_DATE - INTERVAL '7 days'))
-                   ORDER BY (h.stock_code IS NULL) DESC, m.stock_code"""
+                              p.latest_price, CURRENT_DATE - INTERVAL '7 days'))"""
             )
-            main_due = [row["stock_code"] for row in rows]
+            now = datetime.now(UTC)
+            for row in rows:
+                code = row["stock_code"]
+                cached = main_cache.get(code)
+                status = (cached or {}).get("main_status")
+                fetched_raw = (cached or {}).get("main_fetched_at")
+                if status == "ok" and fetched_raw:
+                    try:
+                        fetched = datetime.fromisoformat(fetched_raw)
+                    except ValueError:
+                        fetched = None
+                    if fetched is not None and (now - fetched).days < self._MAIN_CACHE_TTL_DAYS:
+                        # 主链已成功抓取且在 TTL 内：不得因为
+                        # 锚点天然早于最新价格而重复排在队头。
+                        continue
+                    main_due.append((1, code))  # 过期主链，周期复刷
+                    continue
+                if status == "error" and fetched_raw:
+                    try:
+                        fetched = datetime.fromisoformat(fetched_raw)
+                    except ValueError:
+                        fetched = None
+                    if fetched is not None and (now - fetched).total_seconds() < self._MAIN_ERROR_RETRY_DELAY_SECONDS:
+                        continue
+                    main_due.append((2, code))
+                    continue
+                main_due.append((0, code))
+            main_due.sort(key=lambda item: (item[0], item[1]))
 
         # 无交叉缓存 → 也入选（确保交叉核验执行）
         listed_rows = self.duck.read_query(
             "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE"
         )
         listed = [row["stock_code"] for row in listed_rows]
-        try:
-            cached_rows = self.sqlite.query(
-                "SELECT stock_code, cross_status, fetched_at FROM capital_cross_cache"
-            )
-        except Exception:
-            cached_rows = []
         covered_codes: set[str] = set()
         cooling_codes: set[str] = set()
         for row in cached_rows:
-            status = row.get("cross_status") or "verified"
+            status = row.get("cross_status")
+            if status is None:
+                # 旧版缓存行没有 cross_status，且没有主链新列 → 继续视为
+                # verified；带主链新列但 cross_status 为空的行不能算已交叉。
+                if not row.get("main_fetched_at"):
+                    covered_codes.add(row["stock_code"])
+                    continue
+                if row.get("main_status") == "error":
+                    fetched_raw = row.get("main_fetched_at") or ""
+                    try:
+                        fetched = datetime.fromisoformat(fetched_raw)
+                    except ValueError:
+                        continue
+                    if (datetime.now(UTC) - fetched).total_seconds() < self._MAIN_ERROR_RETRY_DELAY_SECONDS:
+                        cooling_codes.add(row["stock_code"])
+                continue
             if status in self._CROSS_CACHE_OK_STATUSES:
                 covered_codes.add(row["stock_code"])
                 continue
@@ -730,15 +837,16 @@ class CapitalHistoryUpdater:
                 fetched = datetime.fromisoformat(fetched_at)
             except ValueError:
                 continue
-            if (datetime.now(UTC) - fetched).total_seconds() \
-                    < self._CROSS_ERROR_RETRY_DELAY_SECONDS:
+            if (datetime.now(UTC) - fetched).total_seconds() < self._CROSS_ERROR_RETRY_DELAY_SECONDS:
                 cooling_codes.add(row["stock_code"])
         no_cache = [
             code for code in listed
             if code not in covered_codes and code not in cooling_codes
         ]
 
-        due = list(dict.fromkeys([*main_due, *no_cache]))
+        due = list(dict.fromkeys([
+            code for _, code in main_due
+        ] + no_cache))
         return due
 
     # ─── 交叉核验审计（STATUS 缺口 #7 待办③，只读）─────────────────

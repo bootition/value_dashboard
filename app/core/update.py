@@ -541,6 +541,7 @@ class IncrementalUpdater:
             and not announcement_check.get("errors")
         ):
             self._save_announcement_cursor()
+            self._resolve_announcement_source_retries()
 
         financial_step = report["steps"].get("financials", {"status": "success"})
         # 财报明细缺口有界续传：只重抓“核心字段齐全但明细字段缺失”的股票。
@@ -1418,6 +1419,21 @@ class IncrementalUpdater:
             )
         except Exception as error:
             logger.warning("清理公告 retry %s 失败: %s", stock_code, error)
+
+    def _resolve_announcement_source_retries(self) -> None:
+        """Remove the global CNINFO outage marker once a later check succeeds.
+
+        Source-level failures are recorded with stock_code='' so per-stock
+        pending markers are never conflated; without this cleanup the global
+        marker would keep diagnose 永久显示 retry_count=1 even after CNINFO
+        recovers.
+        """
+        try:
+            self.sqlite.execute(
+                "DELETE FROM retry_list WHERE stock_code = '' AND data_type = 'announcements'"
+            )
+        except Exception as error:
+            logger.warning("清理公告源故障 retry 失败: %s", error)
 
     def _fetch_financial_trio(
         self, stock_code: str,

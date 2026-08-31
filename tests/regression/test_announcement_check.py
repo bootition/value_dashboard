@@ -160,6 +160,28 @@ def test_announcement_retry_cleanup_requires_registered_ids(
     ) == [{"c": 0}]
 
 
+def test_global_announcement_source_retry_cleared_after_recovery(
+    duckdb_store, sqlite_store,
+) -> None:
+    """CNINFO 全局故障恢复后，stock_code='' 的源级 retry 不得永久残留。"""
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    sqlite_store.execute(
+        """INSERT INTO retry_list
+           (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
+           VALUES ('', 'announcements', 'cninfo', 'all_boards_failed', 0,
+                   CURRENT_TIMESTAMP, '{}'),
+                  ('000001', 'announcements', 'cninfo', 'pending', 0,
+                   CURRENT_TIMESTAMP, '{}')"""
+    )
+
+    updater._resolve_announcement_source_retries()
+
+    rows = sqlite_store.query(
+        "SELECT stock_code FROM retry_list WHERE data_type = 'announcements'"
+    )
+    assert rows == [{"stock_code": "000001"}]
+
+
 def test_legal_empty_placement_funding_missing_is_resolved(
     duckdb_store, sqlite_store,
 ) -> None:

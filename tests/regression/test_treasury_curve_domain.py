@@ -489,15 +489,35 @@ def test_gap_fill_includes_unresolved_missing_list_entries(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
 ) -> None:
     monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
-    _seed_missing_entry(sqlite_store, "2026-08-09")
+    _seed_missing_entry(sqlite_store, "2026-08-07")  # 周五，合法候选
     recorded: list = []
     monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
     updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
 
     report = updater.backfill_missing_days(max_days=5, lookback_trading_days=10)
 
-    assert report["targeted"] == ["2026-08-09"]
-    assert recorded == [date(2026, 8, 9)]
+    assert report["targeted"] == ["2026-08-07"]
+    assert recorded == [date(2026, 8, 7)]
+
+
+def test_gap_fill_resolves_weekend_missing_entries_without_retry(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.treasury._cn_today", lambda: _FIXED_TODAY)
+    _seed_missing_entry(sqlite_store, "2026-08-09")  # 周日，非交易日
+    recorded: list = []
+    monkeypatch.setattr(TreasuryCurveUpdater, "_update_daily_one", _gap_fill_stub(recorded))
+    updater = _treasury_updater(duckdb_store, sqlite_store, _FakeCzbAdapter())
+
+    report = updater.backfill_missing_days(max_days=5, lookback_trading_days=10)
+
+    assert report == {"status": "skipped", "reason": "no_missing_days"}
+    assert recorded == []
+    rows = sqlite_store.query(
+        "SELECT resolved_at FROM missing_list "
+        "WHERE field_name = 'treasury_curve_daily_2026-08-09'"
+    )
+    assert rows and rows[0]["resolved_at"] is not None
 
 
 def test_gap_fill_excludes_future_days(
@@ -569,9 +589,12 @@ def test_snapshot_ttm_dividend_yield_and_spread(
                    date(2025, 6, 30), date(2025, 5, 1), 0.5)   # 12 个月外
     _seed_dividend(duckdb_store, "600519",
                    date(2026, 9, 30), date(2026, 9, 1), 2.0)   # 未来除权不计入
-    _seed_curve(duckdb_store, date(2026, 8, 10), 10.0, 1.5)
-    _seed_curve(duckdb_store, date(2026, 8, 10), 5.0, 1.4)
-    _seed_curve(duckdb_store, date(2026, 7, 20), 2.0, 1.3)     # 超过 5 日陈旧
+    # _seed_stock 会通过 conftest 写入到 CURRENT_DATE 的价格史，
+    # 因此曲线日期必须动态对齐该最新价格日，不能用固定的 2026-08-07。
+    latest = date.today()
+    _seed_curve(duckdb_store, latest, 10.0, 1.5)
+    _seed_curve(duckdb_store, latest, 5.0, 1.4)
+    _seed_curve(duckdb_store, latest - timedelta(days=18), 2.0, 1.3)  # 超过 5 日陈旧
 
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     result = calculator.compute_all_for_stock("600519")
