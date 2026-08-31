@@ -265,7 +265,7 @@ def test_archive_hash_check_fails_closed_when_archive_is_unreadable(
     real_read_query = duckdb_store.read_query
 
     def fail_on_archive_scan(sql: str, params: list | None = None) -> list:
-        if "FROM raw_response_archive WHERE payload IS NOT NULL" in sql:
+        if "FROM raw_response_archive_all WHERE payload IS NOT NULL" in sql:
             raise RuntimeError("archive unreadable")
         return real_read_query(sql, params)
 

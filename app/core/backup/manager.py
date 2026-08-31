@@ -278,13 +278,14 @@ class BackupManager:
         "balance_sheet", "income_statement", "cash_flow",
         "dividends", "xdxr", "indicator_snapshot",
         "fetch_batch", "source_audit", "raw_response_archive",
+        "raw_response_archive_history",
         "source_audit_quarantine", "dividends_quarantine",
     ]
     LEGACY_PUBLIC_DUCKDB_TABLES = [
         "stock_meta", "price_daily_raw", "price_daily_qfq",
         "balance_sheet", "income_statement", "cash_flow",
         "dividends", "xdxr", "indicator_snapshot",
-        "fetch_batch", "source_audit",
+        "fetch_batch", "source_audit", "raw_response_archive_history",
     ]
 
     def __init__(

@@ -28,7 +28,7 @@ import duckdb
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
 from app.core.job_status import aggregate_job_status
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -533,18 +533,13 @@ class PriceBackfiller:
                         result.metadata.confidence,
                     ],
                 )
-                conn.execute(
-                    """INSERT INTO raw_response_archive
-                       (raw_response_hash, source, fetch_time, payload, api_version, integrity_verified)
-                       VALUES (?, ?, ?, ?, ?, TRUE)
-                       ON CONFLICT(raw_response_hash) DO NOTHING""",
-                    [
-                        result.metadata.raw_response_hash,
-                        result.metadata.source,
-                        result.metadata.fetch_time,
-                        result.raw_response,
-                        result.metadata.api_version,
-                    ],
+                archive_raw_response_if_absent(
+                    conn,
+                    raw_response_hash=result.metadata.raw_response_hash,
+                    source=result.metadata.source,
+                    fetch_time=result.metadata.fetch_time,
+                    payload=result.raw_response,
+                    api_version=result.metadata.api_version,
                 )
         except Exception as e:
             logger.warning(f"记录批次溯源失败: {e}")

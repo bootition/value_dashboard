@@ -27,6 +27,7 @@ ARCHIVE_TABLES = (
     "fetch_batch",
     "source_audit",
     "raw_response_archive",
+    "raw_response_archive_history",
 )
 _MANIFEST_NAME = "manifest.json"
 _VERIFIED_NAME = "verified.json"

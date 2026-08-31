@@ -38,3 +38,20 @@ def test_xdxr_backfill_batch_archives_its_raw_response(duckdb_store, sqlite_stor
     assert duckdb_store.read_query(
         "SELECT payload FROM raw_response_archive WHERE raw_response_hash = ?", [hashlib.sha256(raw_response).hexdigest()]
     ) == [{"payload": b'{"xdxr":true}'}]
+
+
+def test_duplicate_raw_response_is_archived_once(duckdb_store, sqlite_store) -> None:
+    raw_response = b'{"source":"duplicate"}'
+    result = FetchResult(
+        data=[], raw_response=raw_response,
+        metadata=SourceMetadata(source="akshare_eastmoney", fetch_time=datetime.now(UTC),
+                                raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate"),
+    )
+    initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store)
+    initializer._record_batch(result, "income_statement", 0)
+    initializer._record_batch(result, "income_statement", 0)
+
+    digest = hashlib.sha256(raw_response).hexdigest()
+    assert duckdb_store.read_query(
+        "SELECT COUNT(*) AS count FROM raw_response_archive_all WHERE raw_response_hash = ?", [digest]
+    ) == [{"count": 1}]

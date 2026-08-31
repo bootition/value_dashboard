@@ -28,6 +28,43 @@ from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 _STALE_MALFORMED_LOCK_SECONDS = 5.0
 
 
+def archive_raw_response_if_absent(
+    conn: Any,
+    *,
+    raw_response_hash: str,
+    source: str,
+    fetch_time: Any,
+    payload: bytes | None,
+    api_version: str | None,
+) -> bool:
+    """Append a raw response payload unless its content hash already exists.
+
+    Schema v16 splits the archive into a small hot ``raw_response_archive``
+    for new writes and ``raw_response_archive_history`` for legacy BLOBs.
+    Writers are serialized by the application write lock and DuckDB's
+    single-writer rule, so a primary-key probe followed by a plain INSERT is
+    race-free and keeps the same first-writer-wins semantics as the old
+    ``ON CONFLICT DO NOTHING`` statement.
+    """
+    existing = conn.execute(
+        "SELECT 1 FROM raw_response_archive_all WHERE raw_response_hash = ?",
+        [raw_response_hash],
+    ).fetchone()
+    if existing is not None:
+        return False
+    conn.execute(
+        """INSERT INTO raw_response_archive
+           (raw_response_hash, source, fetch_time, payload, api_version,
+            integrity_verified)
+           VALUES (?, ?, ?, ?, ?, TRUE)""",
+        [raw_response_hash, source, fetch_time, payload, api_version],
+    )
+    return True
+
+
+
+
+
 def _is_process_alive(pid: int) -> bool:
     """检查指定 PID 的进程是否仍在运行（Windows 兼容）"""
     try:

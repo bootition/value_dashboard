@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 15
+DUCKDB_SCHEMA_VERSION = 16
 SQLITE_SCHEMA_VERSION = 15
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -960,6 +960,68 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (15, 'Dividend financing ratio percent column')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v16: 原始响应归档冷热分层（2026-09-01）。
+        # 生产库 raw_response_archive 已积累 26GB+ BLOB；该表任何新行提交
+        # 都会让 DuckDB 在提交阶段扫描整表做主键校验（实测单行提交峰值
+        # 24GB / 约 134s）。把既有归档改名为 history 后，新建一个小而空的
+        # active 表承接新写入，并通过 raw_response_archive_all 视图合并读取。
+        # 迁移只改 catalog 元数据，不复制 BLOB。
+        history_exists = connection.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE table_name = 'raw_response_archive_history'"
+        ).fetchone()
+        active_exists = connection.execute(
+            "SELECT 1 FROM duckdb_tables() WHERE table_name = 'raw_response_archive'"
+        ).fetchone()
+        if history_exists is None and active_exists is not None:
+            connection.execute(
+                "ALTER TABLE raw_response_archive RENAME TO raw_response_archive_history"
+            )
+        if history_exists is None:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS raw_response_archive_history (
+                    raw_response_hash VARCHAR PRIMARY KEY,
+                    source            VARCHAR NOT NULL,
+                    fetch_time        TIMESTAMP NOT NULL,
+                    payload           BLOB,
+                    api_version       VARCHAR,
+                    integrity_verified BOOLEAN DEFAULT FALSE,
+                    created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_response_archive (
+                raw_response_hash VARCHAR PRIMARY KEY,
+                source            VARCHAR NOT NULL,
+                fetch_time        TIMESTAMP NOT NULL,
+                payload           BLOB,
+                api_version       VARCHAR,
+                integrity_verified BOOLEAN DEFAULT FALSE,
+                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE OR REPLACE VIEW raw_response_archive_all AS
+            SELECT raw_response_hash, source, fetch_time, payload, api_version,
+                   integrity_verified, created_at
+            FROM raw_response_archive_history
+            UNION ALL
+            SELECT raw_response_hash, source, fetch_time, payload, api_version,
+                   integrity_verified, created_at
+            FROM raw_response_archive
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (16, 'Split raw response archive into hot active and cold history tables')
             ON CONFLICT (version) DO NOTHING
             """
         )

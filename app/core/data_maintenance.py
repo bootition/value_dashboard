@@ -34,7 +34,7 @@ def legacy_quarantine_summary(duck: DuckDBStore) -> dict[str, Any]:
     empty_payloads = duck.read_query(
         """
         SELECT COUNT(*) AS count
-        FROM raw_response_archive
+        FROM raw_response_archive_all
         WHERE payload IS NULL OR OCTET_LENGTH(payload) = 0
         """
     )[0]["count"]
@@ -107,7 +107,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
         empty_archive_count = connection.execute(
             """
             SELECT COUNT(*)
-            FROM raw_response_archive archive
+            FROM raw_response_archive_all archive
             WHERE archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0
             """
         ).fetchone()[0]
@@ -115,7 +115,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             """
             SELECT COUNT(*)
             FROM source_audit audit
-            JOIN raw_response_archive archive ON audit.raw_response_hash = archive.raw_response_hash
+            JOIN raw_response_archive_all archive ON audit.raw_response_hash = archive.raw_response_hash
             WHERE archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0
             """
         ).fetchone()[0]
@@ -123,7 +123,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             """
             SELECT COUNT(*)
             FROM fetch_batch batch
-            LEFT JOIN raw_response_archive archive ON batch.raw_response_hash = archive.raw_response_hash
+            LEFT JOIN raw_response_archive_all archive ON batch.raw_response_hash = archive.raw_response_hash
             WHERE archive.raw_response_hash IS NULL
             """
         ).fetchone()[0]
@@ -187,7 +187,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             connection.execute(
                 """
                 CREATE TEMP TABLE _vd_empty_hashes AS
-                SELECT DISTINCT raw_response_hash FROM raw_response_archive
+                SELECT DISTINCT raw_response_hash FROM raw_response_archive_all
                 WHERE payload IS NULL OR OCTET_LENGTH(payload) = 0
                 """
             )
@@ -201,7 +201,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
                 """
                 INSERT INTO raw_response_archive_quarantine
                 SELECT archive.*, 'unsupported_legacy_empty_payload', ?
-                FROM raw_response_archive archive
+                FROM raw_response_archive_all archive
                 WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
                 """,
                 [timestamp],
@@ -232,6 +232,12 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             )
             connection.execute(
                 """
+                DELETE FROM raw_response_archive_history
+                WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
+                """
+            )
+            connection.execute(
+                """
                 DELETE FROM source_audit
                 WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
                 """
@@ -248,7 +254,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
                 """
                 SELECT COUNT(*)
                 FROM fetch_batch batch
-                LEFT JOIN raw_response_archive archive ON batch.raw_response_hash = archive.raw_response_hash
+                LEFT JOIN raw_response_archive_all archive ON batch.raw_response_hash = archive.raw_response_hash
                 WHERE archive.raw_response_hash IS NULL
                 """
             ).fetchone()[0]
@@ -257,7 +263,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
                 INSERT INTO fetch_batch_quarantine
                 SELECT batch.*, 'unsupported_legacy_orphan_batch', ?
                 FROM fetch_batch batch
-                LEFT JOIN raw_response_archive archive ON batch.raw_response_hash = archive.raw_response_hash
+                LEFT JOIN raw_response_archive_all archive ON batch.raw_response_hash = archive.raw_response_hash
                 WHERE archive.raw_response_hash IS NULL
                 """,
                 [timestamp],
@@ -268,7 +274,7 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
                 WHERE batch_id IN (
                     SELECT batch.batch_id
                     FROM fetch_batch batch
-                    LEFT JOIN raw_response_archive archive ON batch.raw_response_hash = archive.raw_response_hash
+                    LEFT JOIN raw_response_archive_all archive ON batch.raw_response_hash = archive.raw_response_hash
                     WHERE archive.raw_response_hash IS NULL
                 )
                 """

@@ -119,7 +119,7 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
             """SELECT
                  (SELECT COUNT(*) FROM source_audit) AS source_audit_c,
                  (SELECT COUNT(*) FROM fetch_batch) AS fetch_batch_c,
-                 (SELECT COUNT(*) FROM raw_response_archive) AS archive_c,
+                 (SELECT COUNT(*) FROM raw_response_archive_all) AS archive_c,
                  (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c"""
         )[0]
         payload = {"snap": snap, "counts": counts}
@@ -835,7 +835,7 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
             FROM base
             JOIN source_audit audit ON audit.stock_code = base.stock_code
             JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
-            JOIN raw_response_archive raw ON raw.raw_response_hash = audit.raw_response_hash
+            JOIN raw_response_archive_all raw ON raw.raw_response_hash = audit.raw_response_hash
             WHERE OCTET_LENGTH(raw.payload) > 0
               AND (
                   (audit.field_name = 'latest_close'
@@ -958,13 +958,13 @@ def _archive_hash_mismatch_rows(
     try:
         try:
             rows = duck.read_query(
-                "SELECT raw_response_hash, payload FROM raw_response_archive "
+                "SELECT raw_response_hash, payload FROM raw_response_archive_all "
                 "WHERE payload IS NOT NULL AND COALESCE(integrity_verified, FALSE) = FALSE"
             )
         except Exception:
             # 兼容尚无 integrity_verified 列的旧测试库/历史 schema。
             rows = duck.read_query(
-                "SELECT raw_response_hash, payload FROM raw_response_archive WHERE payload IS NOT NULL"
+                "SELECT raw_response_hash, payload FROM raw_response_archive_all WHERE payload IS NOT NULL"
             )
         mismatches = sum(
             1
@@ -1183,18 +1183,18 @@ def build_data_quality_status(
             (SELECT COUNT(*) FROM source_audit s
              WHERE LENGTH(s.raw_response_hash) = 64
                AND NOT EXISTS (
-                   SELECT 1 FROM raw_response_archive archive
+                   SELECT 1 FROM raw_response_archive_all archive
                    WHERE archive.raw_response_hash = s.raw_response_hash
                )) AS audit_archive_gap_rows,
             (SELECT COUNT(*) FROM source_audit s
              WHERE EXISTS (
-                 SELECT 1 FROM raw_response_archive archive
+                 SELECT 1 FROM raw_response_archive_all archive
                  WHERE archive.raw_response_hash = s.raw_response_hash
                    AND (archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0)
              )) AS empty_archive_payload_rows,
             (SELECT COUNT(*) FROM fetch_batch batch
              WHERE NOT EXISTS (
-                 SELECT 1 FROM raw_response_archive archive
+                 SELECT 1 FROM raw_response_archive_all archive
                  WHERE archive.raw_response_hash = batch.raw_response_hash
              )) AS batch_archive_gap_rows
         """

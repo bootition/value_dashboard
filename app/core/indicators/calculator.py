@@ -22,7 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.treasury import MAX_STALENESS_DAYS
@@ -1587,13 +1587,13 @@ class IndicatorCalculator:
             [batch_id, "indicator_snapshot", "derived_calculator", "indicator_calculator/v1",
              datetime.now(UTC), raw_hash, len(audit_rows), "approximate"],
         )
-        connection.execute(
-            """INSERT INTO raw_response_archive
-               (raw_response_hash, source, fetch_time, payload, api_version, integrity_verified)
-               VALUES (?, ?, ?, ?, ?, TRUE)
-               ON CONFLICT(raw_response_hash) DO NOTHING""",
-            [raw_hash, "derived_calculator", datetime.now(UTC), formula.encode("utf-8"),
-             "indicator_calculator/v1"],
+        archive_raw_response_if_absent(
+            connection,
+            raw_response_hash=raw_hash,
+            source="derived_calculator",
+            fetch_time=datetime.now(UTC),
+            payload=formula.encode("utf-8"),
+            api_version="indicator_calculator/v1",
         )
         connection.executemany(
             """INSERT INTO source_audit
