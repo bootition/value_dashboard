@@ -72,6 +72,10 @@ class DataInitializer:
         self.duck = duck
         self.sqlite = sqlite
         self._batch_id = str(uuid.uuid4())
+        # 财务行写入热路径缓存：information_schema / duckdb_constraints
+        # 元数据查询此前每行执行一次，100+ 行报告期会放大为数十秒。
+        self._financial_cols_cache: dict[str, set[str]] = {}
+        self._financial_pk_cache: dict[str, bool] = {}
 
     def run_full_init(
         self,
@@ -1013,11 +1017,16 @@ class DataInitializer:
         """
         import json
 
-        # 获取表的列名
-        cols_info = conn.execute(
-            f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"
-        ).fetchall()
-        available_cols = {c[0] for c in cols_info}
+        # 获取表的列名（同一 DataInitializer 实例内缓存；旧实现每行查询一次）
+        if not hasattr(self, "_financial_cols_cache"):
+            self._financial_cols_cache = {}
+        available_cols = self._financial_cols_cache.get(table)
+        if available_cols is None:
+            cols_info = conn.execute(
+                f"SELECT column_name FROM information_schema.columns WHERE table_name = '{table}'"
+            ).fetchall()
+            available_cols = {c[0] for c in cols_info}
+            self._financial_cols_cache[table] = available_cols
 
         # AKShare/Eastmoney 字段名 → 标准化列名映射
         # Eastmoney 返回大写英文字段名（如 TOTAL_ASSETS），映射到小写标准列名
@@ -1205,15 +1214,21 @@ class DataInitializer:
         if not mapped:
             return
 
-        constraint_rows = conn.execute(
-            """SELECT 1 FROM duckdb_constraints()
-               WHERE table_name = ?
-                 AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-                 AND constraint_column_names = ['stock_code', 'report_date']
-               LIMIT 1""",
-            [table],
-        ).fetchall()
-        if not constraint_rows:
+        if not hasattr(self, "_financial_pk_cache"):
+            self._financial_pk_cache = {}
+        has_pk = self._financial_pk_cache.get(table)
+        if has_pk is None:
+            constraint_rows = conn.execute(
+                """SELECT 1 FROM duckdb_constraints()
+                   WHERE table_name = ?
+                     AND constraint_type IN ('PRIMARY KEY', 'UNIQUE')
+                     AND constraint_column_names = ['stock_code', 'report_date']
+                   LIMIT 1""",
+                [table],
+            ).fetchall()
+            has_pk = bool(constraint_rows)
+            self._financial_pk_cache[table] = has_pk
+        if not has_pk:
             # Older production databases have an income_statement table without
             # the declared composite key. Merge first so replacing one row does
             # not erase columns omitted by a sparse provider response.
@@ -1317,6 +1332,7 @@ class DataInitializer:
     def _record_field_audit_in_connection(
         self, conn: Any, result: FetchResult, rows: list[dict[str, Any]],
         stock_code: str, report_date_field: str, fetch_batch_id: str,
+        field_whitelist: set[str] | None = None,
     ) -> None:
         audit_rows: list[tuple[Any, ...]] = []
         for row in rows:
@@ -1324,6 +1340,8 @@ class DataInitializer:
             for source_field, value in row.items():
                 field_name = self._standard_audit_field(source_field)
                 if field_name is None or not isinstance(value, (int, float)):
+                    continue
+                if field_whitelist is not None and field_name not in field_whitelist:
                     continue
                 audit_rows.append((
                     stock_code, field_name, report_date, value, result.metadata.source,

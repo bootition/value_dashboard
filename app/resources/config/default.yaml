@@ -61,7 +61,11 @@ update:
   research_statistics_parallel_workers: 4
   financial_refresh_concurrency: 8
   financial_refresh_batch_size: 20
-  financial_detail_backfill_max_stocks_per_run: 100
+  financial_detail_backfill_max_stocks_per_run: 500
+  financial_detail_backfill_concurrency: 16
+  financial_detail_backfill_persist_batch_size: 50
+  financial_detail_backfill_tdx_max_stocks_per_run: 10
+  financial_detail_backfill_missing_retry_days: 7
   buyback_refresh_interval_days: 7
   # 业务概览低频域（reports/67）：价格优先后按月有界续传，自选股票优先；
   # 失败保留旧值，绝不阻断价格/财务/readiness。

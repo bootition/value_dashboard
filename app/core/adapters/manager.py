@@ -351,14 +351,24 @@ class AdapterManager:
         logger.info(f"适配器管理器初始化完成: {list(self._adapters.keys())}")
 
     def fetch(self, request: FetchRequest) -> FetchResult:
-        """按优先级尝试适配器，主适配器失败时切换备用
+        """按默认优先级尝试适配器，主适配器失败时切换备用。"""
+        self._ensure_initialized()
+        priority_list = ADAPTER_PRIORITY.get(request.data_type, [])
+        return self.fetch_with_sources(request, priority_list)
 
-        Returns:
-            FetchResult: 第一个成功适配器的结果，或最后一个失败的结果
+    def fetch_with_sources(
+        self,
+        request: FetchRequest,
+        source_names: list[str],
+    ) -> FetchResult:
+        """按调用方给定的来源顺序尝试，不触发默认链中的慢速回退。
+
+        财务明细回填等批量任务用 "sina -> akshare_eastmoney" 快速失败，
+        避免每个源缺口股票都落到 40s+ 的 TDX 回退上；需要 TDX 时调用方
+        可显式传入 source_names=["tdx"]。
         """
         self._ensure_initialized()
-
-        priority_list = ADAPTER_PRIORITY.get(request.data_type, [])
+        priority_list = source_names or ADAPTER_PRIORITY.get(request.data_type, [])
         if not priority_list:
             return FetchResult(
                 data=[],

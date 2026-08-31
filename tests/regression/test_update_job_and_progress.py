@@ -493,6 +493,72 @@ def test_treasury_curve_fingerprint_detects_value_updates(
     assert after != before
 
 
+def test_financial_detail_gap_excludes_b_shares_in_sql(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """B 股过滤必须在 SQL 内完成；旧实现逐代码查库，5000 缺口会放大到分钟级。"""
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
+           VALUES ('000001', 'sparse', 'SZSE', true),
+                  ('200001', 'sparseB', 'SZSE', true),
+                  ('900001', 'sparseB股', 'SSE', true)"""
+    )
+    for code in ("000001", "200001", "900001"):
+        duckdb_store.write_query(
+            f"""INSERT INTO balance_sheet (stock_code, report_date, total_assets)
+               VALUES ('{code}', '2026-06-30', 100)"""
+        )
+        duckdb_store.write_query(
+            f"""INSERT INTO income_statement (stock_code, report_date, revenue)
+               VALUES ('{code}', '2026-06-30', 10)"""
+        )
+        duckdb_store.write_query(
+            f"""INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
+               VALUES ('{code}', '2026-06-30', 3)"""
+        )
+
+    def fail_if_called(stock_code: str) -> bool:
+        raise AssertionError("B 股判断不得在缺口查询中对每只股票逐次查库")
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    monkeypatch.setattr(updater, "_is_b_share_stock", fail_if_called)
+    assert updater._financial_detail_gap_codes() == ["000001"]
+
+
+def test_financial_detail_source_missing_blocks_recent_retry(
+    duckdb_store, sqlite_store,
+) -> None:
+    """快速源确认无数据的股票 7 天内出队，之后允许重新尝试。"""
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
+           VALUES ('000001', 'sparse', 'SZSE', true)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
+           VALUES ('000001', '2026-06-30', 100)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO income_statement (stock_code, report_date, revenue)
+           VALUES ('000001', '2026-06-30', 10)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
+           VALUES ('000001', '2026-06-30', 3)"""
+    )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    updater._record_financial_detail_missing("000001", "sina: source_empty")
+    assert updater._financial_detail_gap_codes() == []
+
+    from datetime import UTC, datetime, timedelta
+
+    sqlite_store.execute(
+        """UPDATE missing_list SET detected_at = ?
+           WHERE stock_code = '000001' AND field_name = 'financial_detail_backfill'""",
+        [(datetime.now(UTC) - timedelta(days=8)).isoformat()],
+    )
+    assert updater._financial_detail_gap_codes() == ["000001"]
+
+
 def test_csrc_fetch_only_targets_missing_classifications(duckdb_store, sqlite_store, monkeypatch) -> None:
     """P1: CSRC 只补抓缺失分类的股票（断点续传）。"""
     duckdb_store.write_query(

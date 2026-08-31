@@ -90,6 +90,12 @@ def _recompute_snapshots(duck, sqlite, codes=None):
     return calc.compute_snapshot_for_all()
 
 
+def _financial_detail_gap_count(duck, sqlite) -> int:
+    from app.core.update import IncrementalUpdater
+
+    return len(IncrementalUpdater(duck=duck, sqlite=sqlite)._financial_detail_gap_codes())
+
+
 def _database_stores(*, initialize: bool = True):
     _, duck, sqlite = _database_context(initialize=initialize)
     return duck, sqlite
@@ -319,7 +325,7 @@ def data_update(
 
 @data_app.command("financial-detail-backfill")
 def data_financial_detail_backfill(
-    max_stocks: int = typer.Option(100, "--max-stocks", help="最多回填N只股票(0=全部)"),
+    max_stocks: int = typer.Option(500, "--max-stocks", help="最多回填N只股票(0=全部)"),
 ) -> None:
     """有界回填三大报表明细字段（单写者串行）。"""
     from app.cli.protocol import make_response
@@ -1058,30 +1064,10 @@ def data_status() -> None:
     )
     retry_count = sqlite.query("SELECT COUNT(*) as cnt FROM retry_list")
     missing_count = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
-    financial_detail_gap = duck.read_query(
-        """
-        WITH latest_bs AS (
-            SELECT stock_code, total_assets, monetary_funds FROM balance_sheet
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
-        ), latest_ic AS (
-            SELECT stock_code, revenue, cost_of_revenue FROM income_statement
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
-        ), latest_cf AS (
-            SELECT stock_code, cf_from_operating, cash_received_sales FROM cash_flow
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
-        )
-        SELECT COUNT(*) AS cnt FROM stock_meta m
-        LEFT JOIN latest_bs bs ON bs.stock_code = m.stock_code
-        LEFT JOIN latest_ic ic ON ic.stock_code = m.stock_code
-        LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
-        WHERE m.is_listed IS TRUE
-          AND (
-              (bs.total_assets IS NOT NULL AND bs.monetary_funds IS NULL)
-              OR (ic.revenue IS NOT NULL AND ic.cost_of_revenue IS NULL)
-              OR (cf.cf_from_operating IS NOT NULL AND cf.cash_received_sales IS NULL)
-          )
-        """
-    )
+    try:
+        financial_detail_gap = [{"cnt": _financial_detail_gap_count(duck, sqlite)}]
+    except Exception:
+        financial_detail_gap = [{"cnt": -1}]
     business_overview_gap = duck.read_query(
         """SELECT COUNT(*) AS cnt FROM stock_meta m
            WHERE m.is_listed IS TRUE
@@ -1099,7 +1085,10 @@ def data_status() -> None:
         "cash_flow_count": cf_count[0]["cnt"],
         "retry_count": retry_count[0]["cnt"],
         "missing_count": missing_count[0]["cnt"],
-        "financial_detail_gap_count": financial_detail_gap[0]["cnt"],
+        "financial_detail_gap_count": (
+            financial_detail_gap[0]["cnt"]
+            if financial_detail_gap[0]["cnt"] >= 0 else "error"
+        ),
         "business_overview_gap_count": business_overview_gap[0]["cnt"],
         "data_quality": data_quality_payload,
     }
@@ -1664,31 +1653,7 @@ def data_diagnose() -> None:
         report["missing_count"] = "error"
 
     try:
-        row = duck.read_query(
-            """
-            WITH latest_bs AS (
-                SELECT stock_code, total_assets, monetary_funds FROM balance_sheet
-                QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
-            ), latest_ic AS (
-                SELECT stock_code, revenue, cost_of_revenue FROM income_statement
-                QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
-            ), latest_cf AS (
-                SELECT stock_code, cf_from_operating, cash_received_sales FROM cash_flow
-                QUALIFY ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) = 1
-            )
-            SELECT COUNT(*) AS cnt FROM stock_meta m
-            LEFT JOIN latest_bs bs ON bs.stock_code = m.stock_code
-            LEFT JOIN latest_ic ic ON ic.stock_code = m.stock_code
-            LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
-            WHERE m.is_listed IS TRUE
-              AND (
-                  (bs.total_assets IS NOT NULL AND bs.monetary_funds IS NULL)
-                  OR (ic.revenue IS NOT NULL AND ic.cost_of_revenue IS NULL)
-                  OR (cf.cf_from_operating IS NOT NULL AND cf.cash_received_sales IS NULL)
-              )
-            """
-        )
-        report["financial_detail_gap_count"] = row[0]["cnt"]
+        report["financial_detail_gap_count"] = _financial_detail_gap_count(duck, sqlite)
     except Exception:
         report["financial_detail_gap_count"] = "error"
 

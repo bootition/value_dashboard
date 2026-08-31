@@ -134,6 +134,18 @@ class IncrementalUpdater:
         self.financial_detail_backfill_max_stocks_per_run: int = self._load_update_config(
             "financial_detail_backfill_max_stocks_per_run", default=100
         )
+        self.financial_detail_backfill_concurrency: int = self._load_update_config(
+            "financial_detail_backfill_concurrency", default=6
+        )
+        self.financial_detail_backfill_persist_batch_size: int = self._load_update_config(
+            "financial_detail_backfill_persist_batch_size", default=10
+        )
+        self.financial_detail_backfill_tdx_max_stocks_per_run: int = self._load_update_config(
+            "financial_detail_backfill_tdx_max_stocks_per_run", default=10
+        )
+        self.financial_detail_backfill_missing_retry_days: int = self._load_update_config(
+            "financial_detail_backfill_missing_retry_days", default=7
+        )
         self.buyback_refresh_interval_days: int = self._load_update_config(
             "buyback_refresh_interval_days", default=7
         )
@@ -1620,6 +1632,13 @@ class IncrementalUpdater:
                 LEFT JOIN latest_ic ic ON ic.stock_code = m.stock_code
                 LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
                 WHERE m.is_listed IS TRUE
+                  AND NOT (
+                      m.stock_code LIKE '200%'
+                      OR m.stock_code LIKE '201%'
+                      OR m.stock_code LIKE '900%'
+                      OR m.name LIKE '%B'
+                      OR m.name LIKE '%B股'
+                  )
                   AND (
                       -- 不能用单一字段（如 cost_of_revenue）探测“旧最小核心集”：
                       -- 银行/券商/保险的利润表本来就没有营业成本，单一探测会
@@ -1660,10 +1679,26 @@ class IncrementalUpdater:
         except Exception as error:
             logger.warning("查询财务明细缺口失败: %s", error)
             return []
-        return [
-            row["stock_code"] for row in rows
-            if not self._is_b_share_stock(row["stock_code"])
-        ]
+        codes = [row["stock_code"] for row in rows]
+        # 快速源（sina/akshare）已确认无数据的股票登记
+        # financial_detail_backfill missing；在重试窗口内不得再次占住队头，
+        # 否则每轮都会落到 40s+ 的 TDX 慢回退上，队列永远推不动。
+        try:
+            cutoff = datetime.now(UTC) - timedelta(
+                days=max(0, self.financial_detail_backfill_missing_retry_days),
+            )
+            miss_rows = self.sqlite.query(
+                """SELECT stock_code FROM missing_list
+                   WHERE field_name = 'financial_detail_backfill'
+                     AND resolved_at IS NULL
+                     AND detected_at >= ?""",
+                [cutoff.isoformat()],
+            )
+            blocked = {row["stock_code"] for row in miss_rows}
+            return [code for code in codes if code not in blocked]
+        except Exception as error:
+            logger.warning("查询财务明细 missing 缓存失败: %s", error)
+            return codes
 
     def _refresh_buyback(self) -> dict[str, Any]:
         """低频全市场回购明细刷新，并返回本次发生变化的股票代码。
@@ -1703,48 +1738,253 @@ class IncrementalUpdater:
             logger.warning("回购明细刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
+    _FINANCIAL_DETAIL_DATA_TYPES = ("balance_sheet", "income_statement", "cash_flow")
+    _FINANCIAL_DETAIL_FAST_SOURCES = ("sina", "akshare_eastmoney")
+    # 明细回填的字段级溯源只保留 screening/readiness 使用的核心口径；
+    # 全字段逐行审计会在 source_audit（约 4000 万行）上产生数百万次
+    # 索引插入，把回填速度压到 2 只/分钟。
+    _FINANCIAL_DETAIL_AUDIT_FIELDS = {
+        "total_assets", "total_liabilities", "total_equity",
+        "total_equity_parent", "revenue", "parent_net_profit",
+        "cf_from_operating", "net_profit", "deducted_net_profit",
+        "total_operating_revenue", "cost_of_revenue",
+    }
+
     def _refresh_financial_detail_backfill(
         self,
         *,
         detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        """Boundedly refetch financial details for stocks with sparse statements."""
+        """有界并发回填三大表明细（2026-08-31 提速版）。
+
+        旧实现逐股串行 refetch_one：每股三次独立 DuckDB 事务提交，
+        并且源缺口股会逐次落到 40s+ 的 TDX 慢回退；正式库实测约
+        2 只/分钟。新实现：
+        - 网络抓取并发（sina -> akshare 快速失败，不再默认走 TDX）；
+        - 每 N 只合并为一个 DuckDB 事务，摊销每次约 7s 的提交开销；
+        - 快速源确认无数据的股票登记 missing 并在 7 天内出队；
+        - TDX 仅对每轮少量快速源缺口做补齐，不再阻塞大队列。
+        """
+        started = time.monotonic()
         limit = max(0, int(self.financial_detail_backfill_max_stocks_per_run))
         if limit <= 0:
             return {"status": "skipped", "reason": "backfill_disabled"}
         codes = self._financial_detail_gap_codes()
         if not codes:
-            return {"status": "success", "targeted": 0, "succeeded": 0, "failed": 0}
+            return {
+                "status": "success", "targeted": 0, "succeeded": 0,
+                "failed": 0, "source_missing": 0,
+            }
         targets = codes[:limit]
+
+        from app.core.init import DataInitializer
+
+        initializer = DataInitializer(
+            duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
+        )
         succeeded_codes: list[str] = []
         failed_codes: list[str] = []
-        for index, code in enumerate(targets, start=1):
-            statement_failures = []
-            for data_type in ("balance_sheet", "income_statement", "cash_flow"):
-                outcome = self.refetch_one(code, data_type)
-                if outcome.get("status") != "success":
-                    statement_failures.append(data_type)
-            if statement_failures:
-                failed_codes.append(code)
-            else:
+        missing_codes: list[str] = []
+        buffer: list[tuple[str, dict[str, Any]]] = []
+        tdx_budget = max(0, int(self.financial_detail_backfill_tdx_max_stocks_per_run))
+        tdx_attempted = 0
+        concurrency = max(1, min(int(self.financial_detail_backfill_concurrency), 16))
+        batch_size = max(1, int(self.financial_detail_backfill_persist_batch_size))
+
+        def persist_buffer(items: list[tuple[str, dict[str, Any]]]) -> None:
+            nonlocal succeeded_codes, failed_codes
+            if not items:
+                return
+            try:
+                with self.duck.transaction() as conn:
+                    for code, fetched in items:
+                        self._write_financial_detail_trio(
+                            initializer, conn, code, fetched,
+                        )
+            except Exception as error:
+                logger.warning(
+                    "财务明细批量事务失败，退化为逐股提交: %s", error,
+                )
+                for code, fetched in items:
+                    try:
+                        with self.duck.transaction() as conn:
+                            self._write_financial_detail_trio(
+                                initializer, conn, code, fetched,
+                            )
+                    except Exception as single_error:
+                        failed_codes.append(code)
+                        logger.warning(
+                            "财务明细回填 %s 写入失败: %s", code, single_error,
+                        )
+                        continue
+                    succeeded_codes.append(code)
+                    self._record_financial_detail_sector_missing(
+                        initializer, code, fetched,
+                    )
+                    self._resolve_financial_detail_missing(code)
+                return
+            for code, fetched in items:
                 succeeded_codes.append(code)
-            if detail_cb is not None:
-                detail_cb("financial_detail_backfill", {
-                    "step": "financial_detail_backfill",
-                    "label": "财务明细回填",
-                    "done": index,
-                    "total": len(targets),
-                    "current": code,
-                })
+                self._record_financial_detail_sector_missing(
+                    initializer, code, fetched,
+                )
+                self._resolve_financial_detail_missing(code)
+
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            futures = {
+                executor.submit(self._fetch_financial_detail_trio_fast, code): code
+                for code in targets
+            }
+            for completed, future in enumerate(as_completed(futures), start=1):
+                code = futures[future]
+                try:
+                    fetched, errors = future.result()
+                except Exception as error:
+                    fetched, errors = {}, {
+                        data_type: str(error)
+                        for data_type in self._FINANCIAL_DETAIL_DATA_TYPES
+                    }
+                if errors and tdx_attempted < tdx_budget:
+                    tdx_attempted += 1
+                    for data_type in list(errors):
+                        tdx_result = self._fetch_financial_detail_tdx(
+                            code, data_type,
+                        )
+                        if tdx_result is not None:
+                            fetched[data_type] = tdx_result
+                            errors.pop(data_type, None)
+                if errors:
+                    missing_codes.append(code)
+                    self._record_financial_detail_missing(
+                        code, "; ".join(
+                            f"{data_type}: {reason}"
+                            for data_type, reason in errors.items()
+                        )[:400],
+                    )
+                else:
+                    buffer.append((code, fetched))
+                    if len(buffer) >= batch_size:
+                        persist_buffer(buffer)
+                        buffer.clear()
+                if detail_cb is not None:
+                    detail_cb("financial_detail_backfill", {
+                        "step": "financial_detail_backfill",
+                        "label": "财务明细回填",
+                        "done": completed,
+                        "total": len(targets),
+                        "current": code,
+                        "succeeded": len(succeeded_codes),
+                        "failed": len(failed_codes),
+                        "source_missing": len(missing_codes),
+                    })
+            if buffer:
+                persist_buffer(buffer)
+
         return {
-            "status": "success" if not failed_codes else "partial",
+            "status": "partial" if failed_codes else "success",
             "targeted": len(targets),
             "succeeded": len(succeeded_codes),
             "failed": len(failed_codes),
+            "source_missing": len(missing_codes),
             "succeeded_codes": succeeded_codes,
             "failed_codes": failed_codes[:20],
+            "missing_codes": missing_codes[:20],
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "rate_per_minute": round(
+                len(targets) * 60 / max(time.monotonic() - started, 0.001), 2
+            ),
         }
 
+    def _fetch_financial_detail_trio_fast(
+        self, stock_code: str,
+    ) -> tuple[dict[str, Any], dict[str, str]]:
+        """并发抓取三表，只走快速源；失败原因返回给调用方决定 TDX 兜底。"""
+        fetched: dict[str, Any] = {}
+        errors: dict[str, str] = {}
+        for data_type in self._FINANCIAL_DETAIL_DATA_TYPES:
+            result = self.adapter_mgr.fetch_with_sources(
+                FetchRequest(data_type=data_type, stock_codes=[stock_code]),
+                list(self._FINANCIAL_DETAIL_FAST_SOURCES),
+            )
+            if result.metadata.error or not result.data:
+                errors[data_type] = result.metadata.error or "source_empty"
+            else:
+                fetched[data_type] = result
+        return fetched, errors
+
+    def _fetch_financial_detail_tdx(
+        self, stock_code: str, data_type: str,
+    ) -> Any | None:
+        """TDX 兜底只由调用方有预算地触发，避免每个源缺口股都等 40s+。"""
+        try:
+            result = self.adapter_mgr.fetch_with_sources(
+                FetchRequest(data_type=data_type, stock_codes=[stock_code]),
+                ["tdx"],
+            )
+        except Exception as error:
+            logger.warning("TDX 财务明细兜底失败 %s %s: %s", stock_code, data_type, error)
+            return None
+        if result.metadata.error or not result.data:
+            return None
+        return result
+
+    @staticmethod
+    def _write_financial_detail_trio(
+        initializer: Any, conn: Any, stock_code: str, fetched: dict[str, Any],
+    ) -> None:
+        """在调用方事务内写入一只股票的三表 + lineage。"""
+        for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
+            result = fetched.get(data_type)
+            if result is None:
+                continue
+            for row in result.data:
+                initializer._upsert_financial_row(
+                    conn, data_type, stock_code, row,
+                )
+        for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
+            result = fetched.get(data_type)
+            if result is None:
+                continue
+            batch_id = initializer._record_batch_in_connection(
+                conn, result, data_type, len(result.data),
+            )
+            initializer._record_field_audit_in_connection(
+                conn, result, result.data, stock_code, "report_date", batch_id,
+                field_whitelist=IncrementalUpdater._FINANCIAL_DETAIL_AUDIT_FIELDS,
+            )
+
+    def _record_financial_detail_sector_missing(
+        self, initializer: Any, stock_code: str, fetched: dict[str, Any],
+    ) -> None:
+        balance = fetched.get("balance_sheet")
+        if balance is not None and balance.data:
+            initializer._record_missing_financial_sector_fields(
+                stock_code, balance.data,
+            )
+
+    def _record_financial_detail_missing(self, stock_code: str, reason: str) -> None:
+        try:
+            self.sqlite.execute(
+                """INSERT INTO missing_list (stock_code, field_name, reason_code)
+                   VALUES (?, 'financial_detail_backfill', ?)
+                   ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                   DO UPDATE SET reason_code = excluded.reason_code,
+                                 detected_at = CURRENT_TIMESTAMP""",
+                [stock_code, (reason or "source_unavailable")[:400]],
+            )
+        except Exception as error:
+            logger.warning("记录财务明细源缺口失败 %s: %s", stock_code, error)
+
+    def _resolve_financial_detail_missing(self, stock_code: str) -> None:
+        try:
+            self.sqlite.execute(
+                """UPDATE missing_list SET resolved_at = ?
+                   WHERE stock_code = ? AND field_name = 'financial_detail_backfill'
+                     AND resolved_at IS NULL""",
+                [datetime.now(UTC).isoformat(), stock_code],
+            )
+        except Exception as error:
+            logger.warning("解决财务明细源缺口失败 %s: %s", stock_code, error)
     def _refresh_financials(
         self,
         stock_codes: list[str],
