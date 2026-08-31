@@ -37,6 +37,6 @@ last-reviewed: 2026-08-31
 
 ## 自动完成安排
 
-- 服务重启后，自动更新每轮可处理 500 只（约 25 分钟）。
-- 一个独立完成器会循环执行 `data financial-detail-backfill --max-stocks 1000`，直到 `financial_detail_gap_count` 归零或达到时间上限；每个批次结束自动重算快照。
-- 完成后无需人工监控。
+- 活跃配置 `config/default.yaml` 与资源默认值均为 `financial_detail_backfill_max_stocks_per_run: 10000`：服务重启后自动更新会在一个周期内清空全部明细缺口队列，并在同一周期重算成功股票快照。
+- 快速源确认无数据的股票登记 missing，7 天后自动重试；TDX 每轮最多兜底 10 只。
+- 完成后无需人工监控，后续仅有新股/新报告期的少量增量缺口。
