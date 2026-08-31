@@ -390,6 +390,7 @@ def test_replenish_only_refetches_missing_current_stock_inputs(
         "status": "success",
         "targeted": 1,
         "completed": 1,
+        "completed_codes": ["000002"],
         "failed": 0,
         "failed_codes": [],
     }
