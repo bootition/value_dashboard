@@ -10,7 +10,7 @@ last-reviewed: 2026-08-31
 
 ## 裁决
 
-**第二轮全局数据路径复审计完成，发现并修复 7 类此前遗漏的环节。**
+**第二轮全局数据路径复审计完成，发现并修复 8 类此前遗漏的环节。**
 上一轮（`reports/91`）补齐了字段映射与缺口诊断，但自动更新的“抓取→指标快照”输入链仍存在多条过期/漏跑路径。本次从全局视角逐域核对每条输入链，修复后所有涉及 `indicator_snapshot` 的输入域都保证在同一轮内“先更新输入、再重算快照”。
 
 ## 审计发现与修复
@@ -40,14 +40,18 @@ last-reviewed: 2026-08-31
 - **发现**：日终 upsert 或历史回填修正同一日期的 `yield_pct` 时，行数与最大日期都不变，`div_yield_spread_*` 与历史统计 `spread_10y` 会静默陈旧。
 - **修复**：`IncrementalUpdater` 新增 `_treasury_curve_fingerprint`（全表内容级 md5）；`StatisticsBuilder._input_fingerprint` 同步升级为内容级指纹，并覆盖财务、股本、分红小表（价格 1700 万级表保持 count+max 轻指纹）。
 
-### 7. 手工 CLI 写命令未全部遵守单写者契约
+### 7. 财务明细缺口探测字段会让银行/券商永久占据回填队头
+- **发现**：`_financial_detail_gap_codes` 用 `cost_of_revenue` / `cash_received_sales` 等单一字段判断旧行；银行利润表本来就没有营业成本，回填成功后仍被判为缺口。缺口队列按代码排序，头部银行会挤占每轮 100 个名额，使后面的普通股票永远排不到。
+- **修复**：改为“行业通用候选字段组全部为空才算旧行”——资产负债表的 `paid_in_capital/undistributed_profit`、利润表的利息/费用/投资类字段、现金流量表的职工/税费现金字段。旧最小核心集仍能检出，特殊行业回填成功后正常出队。
+
+### 8. 手工 CLI 写命令未全部遵守单写者契约
 - **发现**：`data treasury-curve/funding/index-valuation/capital-history/research-statistics/refresh_universe/compute_indicators/replenish_missing_core_data/backfill-prices/refetch_execute` 等写命令未持有跨进程更新锁，可能与自动更新交错。
 - **修复**：CLI 新增 `_with_update_lock`，上述写命令统一进入 `exclusive_update`；写锁被自动更新占用时返回 `skipped/another_update_running`。只读 `--check-only`/status 路径不受影响。
 
 ## 验证
 
 - 定向回归：`test_update_job_and_progress.py`、`test_incremental_update_scope.py`、`test_sina_adapter.py`、`test_storage_and_ingestion.py`、`test_dividend_financing_ratio.py`、`test_capital_history_domain.py` 共 **105 passed**。
-- 新增回归：回购空响应保旧值、回购/融资/国债先于指标、retry 先于指标、股本变化在财务 partial 时仍全量重算、国债同日期收益率修正触发快照与统计域指纹变化。
+- 新增回归：回购空响应保旧值、回购/融资/国债先于指标、retry 先于指标、股本变化在财务 partial 时仍全量重算、国债同日期收益率修正触发快照与统计域指纹变化、银行等行业用通用字段完成明细缺口出队。
 - Ruff：全部改动文件通过。
 
 ## 后续动作

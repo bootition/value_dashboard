@@ -777,3 +777,39 @@ def test_financial_detail_gap_detects_sparse_core_rows(duckdb_store, sqlite_stor
         """UPDATE cash_flow SET cash_received_sales = 1 WHERE stock_code = '000001'"""
     )
     assert updater._financial_detail_gap_codes() == []
+
+
+def test_financial_detail_gap_uses_sector_universal_probes(
+    duckdb_store, sqlite_store,
+) -> None:
+    """银行等特殊行业不能用营业成本/销售收现探测明细缺口。
+
+    回填成功后 cost_of_revenue / cash_received_sales 仍合法为 NULL；
+    缺口检测必须改用 paid_in_capital/interest_income/cash_paid_employees
+    等跨行业通用字段，否则这些股票会永久占据回填队列头部。
+    """
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
+           VALUES ('000001', 'bank', 'SZSE', true)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO balance_sheet
+               (stock_code, report_date, total_assets, total_liabilities, total_equity,
+                monetary_funds, paid_in_capital, undistributed_profit)
+           VALUES ('000001', '2026-06-30', 100, 20, 80, 5, 10, 1)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO income_statement
+               (stock_code, report_date, revenue, parent_net_profit,
+                interest_income, interest_expense, administrative_expenses)
+           VALUES ('000001', '2026-06-30', 10, 2, 8, 4, 1)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO cash_flow
+               (stock_code, report_date, cf_from_operating,
+                cash_paid_employees, cash_paid_taxes)
+           VALUES ('000001', '2026-06-30', 3, 1, 0.5)"""
+    )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    assert updater._financial_detail_gap_codes() == []

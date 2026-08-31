@@ -1573,19 +1573,26 @@ class IncrementalUpdater:
             rows = self.duck.read_query(
                 """
                 WITH latest_bs AS (
-                    SELECT stock_code, report_date, total_assets, monetary_funds
+                    SELECT stock_code, report_date, total_assets,
+                           monetary_funds, paid_in_capital, undistributed_profit
                     FROM balance_sheet
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY stock_code ORDER BY report_date DESC
                     ) = 1
                 ), latest_ic AS (
-                    SELECT stock_code, report_date, revenue, cost_of_revenue
+                    SELECT stock_code, report_date, revenue,
+                           cost_of_revenue, interest_income, interest_expense,
+                           selling_expenses, administrative_expenses,
+                           taxes_and_surcharges, investment_income
                     FROM income_statement
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY stock_code ORDER BY report_date DESC
                     ) = 1
                 ), latest_cf AS (
-                    SELECT stock_code, report_date, cf_from_operating, cash_received_sales
+                    SELECT stock_code, report_date, cf_from_operating,
+                           cash_received_sales, taxes_refunded, cash_paid_goods,
+                           cash_paid_employees, cash_paid_taxes,
+                           total_operating_cf_in, total_operating_cf_out
                     FROM cash_flow
                     QUALIFY ROW_NUMBER() OVER (
                         PARTITION BY stock_code ORDER BY report_date DESC
@@ -1598,9 +1605,38 @@ class IncrementalUpdater:
                 LEFT JOIN latest_cf cf ON cf.stock_code = m.stock_code
                 WHERE m.is_listed IS TRUE
                   AND (
-                      (bs.total_assets IS NOT NULL AND bs.monetary_funds IS NULL)
-                      OR (ic.revenue IS NOT NULL AND ic.cost_of_revenue IS NULL)
-                      OR (cf.cf_from_operating IS NOT NULL AND cf.cash_received_sales IS NULL)
+                      -- 不能用单一字段（如 cost_of_revenue）探测“旧最小核心集”：
+                      -- 银行/券商/保险的利润表本来就没有营业成本，单一探测会
+                      -- 让这些股票回填成功后仍然留在缺口队列头部，挤占每轮
+                      -- 100 个名额，后面的股票永远排不到。改为“行业通用候选
+                      -- 字段组全部为空才算旧行”：正常回填成功的股票至少会写入
+                      -- paid_in_capital/undistributed_profit、利息或费用类利润
+                      -- 字段、职工/税费现金字段之一。
+                      (
+                          bs.total_assets IS NOT NULL
+                          AND COALESCE(
+                              bs.monetary_funds, bs.paid_in_capital,
+                              bs.undistributed_profit,
+                          ) IS NULL
+                      )
+                      OR (
+                          ic.revenue IS NOT NULL
+                          AND COALESCE(
+                              ic.cost_of_revenue, ic.interest_income,
+                              ic.interest_expense, ic.selling_expenses,
+                              ic.administrative_expenses,
+                              ic.taxes_and_surcharges, ic.investment_income,
+                          ) IS NULL
+                      )
+                      OR (
+                          cf.cf_from_operating IS NOT NULL
+                          AND COALESCE(
+                              cf.cash_received_sales, cf.taxes_refunded,
+                              cf.cash_paid_goods, cf.cash_paid_employees,
+                              cf.cash_paid_taxes, cf.total_operating_cf_in,
+                              cf.total_operating_cf_out,
+                          ) IS NULL
+                      )
                   )
                 ORDER BY m.stock_code
                 """
