@@ -1943,13 +1943,22 @@ class IncrementalUpdater:
                 )
         for data_type in IncrementalUpdater._FINANCIAL_DETAIL_DATA_TYPES:
             result = fetched.get(data_type)
-            if result is None:
+            if result is None or not result.data:
                 continue
             batch_id = initializer._record_batch_in_connection(
                 conn, result, data_type, len(result.data),
             )
+            # 明细回填只需刷新“最新报告期”的字段级溯源；历史报告期的
+            # 核心字段溯源已由当年抓取写入。全历史逐行审计会在 source_audit
+            # 上产生数十亿次索引插入，是回填速度的主要瓶颈。
+            latest_rows = [
+                max(
+                    result.data,
+                    key=lambda row: str(row.get("report_date") or ""),
+                )
+            ]
             initializer._record_field_audit_in_connection(
-                conn, result, result.data, stock_code, "report_date", batch_id,
+                conn, result, latest_rows, stock_code, "report_date", batch_id,
                 field_whitelist=IncrementalUpdater._FINANCIAL_DETAIL_AUDIT_FIELDS,
             )
 
