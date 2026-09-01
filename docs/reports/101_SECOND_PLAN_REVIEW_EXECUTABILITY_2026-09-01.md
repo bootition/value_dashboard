@@ -1,9 +1,10 @@
 ---
 title: 数据库治理计划第二次复审——可执行性与大厂变更标准
-status: approved
+status: superseded
 category: reports
 created: 2026-09-01
 last-reviewed: 2026-09-01
+superseded-by: reports/102_PLAN_EXECUTION_STATUS_2026-09-01.md
 supersedes: reports/100_PLAN_RISK_REVIEW_AND_REVISION_2026-09-01.md
 ---
 
