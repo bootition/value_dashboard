@@ -1,9 +1,10 @@
 ---
 title: 数据库与主机现状调研及下一步优化方案
-status: approved
+status: superseded
 category: reports
 created: 2026-09-01
 last-reviewed: 2026-09-01
+superseded-by: reports/100_PLAN_RISK_REVIEW_AND_REVISION_2026-09-01.md
 ---
 
 # 数据库与主机现状调研及下一步优化方案
