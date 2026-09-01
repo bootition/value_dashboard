@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from app.core.data_quality import minimum_data_readiness
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.screening.engine import ScreeningEngine
@@ -87,12 +85,18 @@ def test_pending_incomplete_period_does_not_block_screening_or_readiness(
 def test_snapshot_behind_complete_period_blocks_screening_and_readiness(
     duckdb_store, sqlite_store,
 ) -> None:
-    """完整期已推进但快照未重算 → 门禁与引擎同时 fail-closed。"""
+    """完整期已推进但快照未重算 → 门禁阻断、引擎剔除该股并空跑。
+
+    2026-08-27 口径：引擎不再因个别混期股票中止全市场筛选，
+    而是把混期代码从本次基础池排除（其他股票照常可用）。
+    """
     _seed_pool(duckdb_store, sqlite_store)
     _insert_complete_newer_period(duckdb_store)
 
-    with pytest.raises(ValueError, match="mixed snapshot/statement report dates"):
-        _run_screening(duckdb_store)
+    result = _run_screening(duckdb_store)
+    assert result["total"] == 0
+    assert result["base_pool_size"] == 0
+    assert result["results"] == []
 
     quality = minimum_data_readiness(duckdb_store, sqlite_store)
     assert quality["ready"] is False

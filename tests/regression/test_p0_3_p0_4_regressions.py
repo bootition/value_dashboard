@@ -251,7 +251,10 @@ def test_p0_4_red_independent_latest_rows_green_rejects_mixed_dates(
         "INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES ('000001', '2026-03-31', 100)"
     )
 
-    with pytest.raises(ValueError, match='mixed snapshot/statement report dates'):
-        ScreeningEngine(duck=duckdb_store).run(
-            {'conditions': {'logic': 'AND', 'rules': []}}, min_listing_years=0,
-        )
+    result = ScreeningEngine(duck=duckdb_store).run(
+        {'conditions': {'logic': 'AND', 'rules': []}}, min_listing_years=0,
+    )
+    # 2026-08-27 口径：混期股票从本次基础池剔除，而不是中止整轮筛选。
+    assert result["total"] == 0
+    assert result["base_pool_size"] == 0
+    assert result["results"] == []
