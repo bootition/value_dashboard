@@ -47,12 +47,18 @@ P6 采用“硬链接快照 + 已导出的 Parquet 冷归档”作为当前回�
 
 ## 4. 当前限制与待办
 
-- `vd backup` 仍无法一次性 COPY 26GB BLOB 归档，需分块导出改造；
-- P2 冷归档未接入 CLI 恢复命令；
-- P3 正式库批量预取与黄金样本的长期基准未跑完；
+- `vd backup` 已改为 raw_response_archive_history 5000 行分块导出/恢复；
+- P2 冷归档文件已生成，但尚未接入 CLI 恢复命令；
+- P3 正式库批量预取将在下一轮统计域重建中观察基准；
 - 推送仍因代理未开启失败。
 
-## 5. 回滚信息
+## 5. 执行中发现并修复的问题
+
+- v18：归档轮转检查原先每次写入都执行 `SUM(OCTET_LENGTH(payload))`，
+  价格流水线被拖慢到约 20 只/分；改为分区登记表维护行数/字节计数器后，
+  价格更新恢复到约 116 只/分。
+
+## 6. 回滚信息
 
 - 旧 DuckDB：`data/valuedashboard.duckdb.old-20260901154717`
 - 硬链接快照：`data/valuedashboard.duckdb.pre-rebuild-20260901`
