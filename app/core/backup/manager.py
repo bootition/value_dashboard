@@ -377,19 +377,23 @@ class BackupManager:
         try:
             with self._duck.write_connection() as connection:
                 public_tables = self._detect_public_tables(connection)
-                for table in public_tables:
+            for table in public_tables:
+                # 每张表使用独立连接导出：大表 COPY 会让 DuckDB 缓冲池
+                # 累积到 memory_limit 附近；持久连接连续导出多张大表时，
+                # 后续表会在旧页尚未释放时 OOM（正式库 26GB BLOB 归档已复现）。
+                with self._duck.write_connection() as connection:
                     parquet_path = public_dir / f"{table}.parquet"
                     target = str(parquet_path).replace("'", "''")
                     connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
-                    size = parquet_path.stat().st_size
-                    manifest["files"].append({
-                        "category": "public", "table": table,
-                        "filename": parquet_path.relative_to(backup_path).as_posix(),
-                        "size_bytes": size,
-                        "sha256": _file_checksum(parquet_path),
-                        "encrypted": False,
-                    })
-                    logger.info(f"  导出公共数据: {table} ({size} bytes)")
+                size = parquet_path.stat().st_size
+                manifest["files"].append({
+                    "category": "public", "table": table,
+                    "filename": parquet_path.relative_to(backup_path).as_posix(),
+                    "size_bytes": size,
+                    "sha256": _file_checksum(parquet_path),
+                    "encrypted": False,
+                })
+                logger.info(f"  导出公共数据: {table} ({size} bytes)")
         except Exception as error:
             shutil.rmtree(backup_path, ignore_errors=True)
             return {"status": "error", "error": f"public backup failed: {error}"}

@@ -835,8 +835,8 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
             FROM base
             JOIN source_audit audit ON audit.stock_code = base.stock_code
             JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
-            JOIN raw_response_archive_all raw ON raw.raw_response_hash = audit.raw_response_hash
-            WHERE OCTET_LENGTH(raw.payload) > 0
+            JOIN raw_response_archive_valid_hash raw
+              ON raw.raw_response_hash = audit.raw_response_hash
               AND (
                   (audit.field_name = 'latest_close'
                    AND audit.report_date IN (base.raw_last_date, base.qfq_last_date))
@@ -1183,7 +1183,7 @@ def build_data_quality_status(
             (SELECT COUNT(*) FROM source_audit s
              WHERE LENGTH(s.raw_response_hash) = 64
                AND NOT EXISTS (
-                   SELECT 1 FROM raw_response_archive_all archive
+                   SELECT 1 FROM raw_response_archive_valid_hash archive
                    WHERE archive.raw_response_hash = s.raw_response_hash
                )) AS audit_archive_gap_rows,
             (SELECT COUNT(*) FROM source_audit s
@@ -1194,7 +1194,7 @@ def build_data_quality_status(
              )) AS empty_archive_payload_rows,
             (SELECT COUNT(*) FROM fetch_batch batch
              WHERE NOT EXISTS (
-                 SELECT 1 FROM raw_response_archive_all archive
+                 SELECT 1 FROM raw_response_archive_valid_hash archive
                  WHERE archive.raw_response_hash = batch.raw_response_hash
              )) AS batch_archive_gap_rows
         """

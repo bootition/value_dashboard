@@ -238,6 +238,12 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             )
             connection.execute(
                 """
+                DELETE FROM raw_response_archive_valid_hash
+                WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
+                """
+            )
+            connection.execute(
+                """
                 DELETE FROM source_audit
                 WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
                 """

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 16
+DUCKDB_SCHEMA_VERSION = 17
 SQLITE_SCHEMA_VERSION = 15
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -1022,6 +1022,61 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (16, 'Split raw response archive into hot active and cold history tables')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v17: lineage 物化 hash 集合 + 归档分区登记表。
+        # - valid_hash 让 4200 万行 source_audit 只连接小表，不在冷核对
+        #   中触碰 26GB BLOB 视图；
+        # - partitions 登记所有 raw_response_archive_* 表，轮转时用它重建
+        #   合并视图；当前 active 行 closed_at 为 NULL。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_response_archive_valid_hash (
+                raw_response_hash VARCHAR PRIMARY KEY
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO raw_response_archive_valid_hash
+            SELECT raw_response_hash FROM raw_response_archive_all
+            WHERE payload IS NOT NULL AND OCTET_LENGTH(payload) > 0
+            ON CONFLICT DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS raw_response_archive_partitions (
+                partition_table VARCHAR PRIMARY KEY,
+                created_at TIMESTAMP NOT NULL,
+                closed_at TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO raw_response_archive_partitions
+                (partition_table, created_at, closed_at)
+            SELECT 'raw_response_archive_history',
+                   COALESCE(MIN(created_at), CURRENT_TIMESTAMP),
+                   COALESCE(MAX(created_at), CURRENT_TIMESTAMP)
+            FROM raw_response_archive_history
+            ON CONFLICT DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO raw_response_archive_partitions
+                (partition_table, created_at, closed_at)
+            SELECT 'raw_response_archive', CURRENT_TIMESTAMP, NULL
+            ON CONFLICT DO NOTHING
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (17, 'Materialized valid archive hash set for lineage checks')
             ON CONFLICT (version) DO NOTHING
             """
         )

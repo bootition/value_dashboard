@@ -81,8 +81,78 @@ class StatisticsBuilder:
         # 国债曲线对同一 tenor 完全相同，却在逐股 build_series 中被重复
         # 查询/解析数千次；进程内缓存后，统计域重建只读一次曲线。
         self._curve_cache: dict[float, tuple[list[date], list[float]]] = {}
+        self._batch_cache: dict[str, dict[str, list[dict[str, Any]]]] = {}
+        self._batch_price_days: dict[str, list[str]] = {}
+        self._batch_capital_rows: dict[str, list[dict[str, Any]]] = {}
+        self._batch_sentinel = object()
 
     # ─── 序列构建 ─────────────────────────────────────────────────
+
+    def prime_batch(self, stock_codes: list[str]) -> None:
+        """预取一批股票的统计输入，避免逐股重复打开 DuckDB 查询。
+
+        只做批量取数，不改任何指标口径；build_series / _stats_for_stock
+        命中缓存时直接复用，未命中股票仍走原逐股查询。
+        """
+        if not stock_codes:
+            return
+        placeholders = ", ".join("?" for _ in stock_codes)
+        params: list[Any] = list(stock_codes)
+        self._batch_cache = {"price": {}, "financial": {}, "capital": {}, "dividend": {}}
+        self._batch_price_days = {}
+        self._batch_capital_rows = {}
+        for row in self.duck.read_query(
+            f"""SELECT stock_code, trade_date, close FROM price_daily_raw
+                WHERE stock_code IN ({placeholders}) AND close IS NOT NULL
+                ORDER BY stock_code, trade_date ASC""",
+            params,
+        ):
+            self._batch_cache["price"].setdefault(str(row["stock_code"]), []).append(row)
+        for row in self.duck.read_query(
+            f"""SELECT ic.stock_code, ic.report_date, ic.parent_net_profit,
+                       ic.revenue, bs.total_equity_parent
+                FROM income_statement ic
+                LEFT JOIN balance_sheet bs
+                  ON bs.stock_code = ic.stock_code
+                 AND bs.report_date = ic.report_date
+                WHERE ic.stock_code IN ({placeholders})
+                ORDER BY ic.stock_code, ic.report_date ASC""",
+            params,
+        ):
+            self._batch_cache["financial"].setdefault(str(row["stock_code"]), []).append(row)
+        for row in self.duck.read_query(
+            f"""SELECT stock_code, effective_date, total_shares
+                FROM share_capital_history
+                WHERE stock_code IN ({placeholders})
+                ORDER BY stock_code, effective_date ASC""",
+            params,
+        ):
+            self._batch_cache["capital"].setdefault(str(row["stock_code"]), []).append(row)
+        for row in self.duck.read_query(
+            f"""SELECT stock_code, ex_date, announcement_date, dividend_per_share
+                FROM dividends
+                WHERE stock_code IN ({placeholders}) AND dividend_per_share > 0
+                  AND announcement_date IS NOT NULL
+                ORDER BY stock_code, ex_date ASC""",
+            params,
+        ):
+            self._batch_cache["dividend"].setdefault(str(row["stock_code"]), []).append(row)
+        for row in self.duck.read_query(
+            f"""SELECT stock_code, trade_date FROM price_daily_raw
+                WHERE stock_code IN ({placeholders}) AND close IS NOT NULL
+                ORDER BY stock_code, trade_date ASC""",
+            params,
+        ):
+            self._batch_price_days.setdefault(str(row["stock_code"]), []).append(
+                str(row["trade_date"])[:10]
+            )
+        for row in self.duck.read_query(
+            f"""SELECT stock_code, effective_date FROM share_capital_history
+                WHERE stock_code IN ({placeholders})
+                ORDER BY stock_code, effective_date ASC""",
+            params,
+        ):
+            self._batch_capital_rows.setdefault(str(row["stock_code"]), []).append(row)
 
     def build_series(
         self,
@@ -94,26 +164,30 @@ class StatisticsBuilder:
         reports/73 修复阶段性能优化：日期一次性预解析为 date 对象，
         分红预解析并按 ex_date 排序（单指针滑窗，不再逐日全表扫描）。
         """
-        price_rows = self.duck.read_query(
-            """SELECT trade_date, close FROM price_daily_raw
-               WHERE stock_code = ? AND close IS NOT NULL
-               ORDER BY trade_date ASC""",
-            [stock_code],
-        )
+        price_rows = self._batch_cache.get("price", {}).get(stock_code, self._batch_sentinel)
+        if price_rows is self._batch_sentinel:
+            price_rows = self.duck.read_query(
+                """SELECT trade_date, close FROM price_daily_raw
+                   WHERE stock_code = ? AND close IS NOT NULL
+                   ORDER BY trade_date ASC""",
+                [stock_code],
+            )
         if not price_rows:
             return []
 
         # 报告期财务（累计利润 + 归母权益）
-        financial_rows = self.duck.read_query(
-            """SELECT ic.report_date, ic.parent_net_profit, ic.revenue,
-                      bs.total_equity_parent
-               FROM income_statement ic
-               LEFT JOIN balance_sheet bs
-                 ON bs.stock_code = ic.stock_code AND bs.report_date = ic.report_date
-               WHERE ic.stock_code = ?
-               ORDER BY ic.report_date ASC""",
-            [stock_code],
-        )
+        financial_rows = self._batch_cache.get("financial", {}).get(stock_code, self._batch_sentinel)
+        if financial_rows is self._batch_sentinel:
+            financial_rows = self.duck.read_query(
+                """SELECT ic.report_date, ic.parent_net_profit, ic.revenue,
+                          bs.total_equity_parent
+                   FROM income_statement ic
+                   LEFT JOIN balance_sheet bs
+                     ON bs.stock_code = ic.stock_code AND bs.report_date = ic.report_date
+                   WHERE ic.stock_code = ?
+                   ORDER BY ic.report_date ASC""",
+                [stock_code],
+            )
         ttm_by_report: dict[date, float | None] = {}
         equity_by_report: dict[date, float | None] = {}
         report_dates: list[date] = []
@@ -124,23 +198,27 @@ class StatisticsBuilder:
             equity_by_report[rdate] = row.get("total_equity_parent")
 
         # 股本 step 函数
-        capital_rows = self.duck.read_query(
-            """SELECT effective_date, total_shares FROM share_capital_history
-               WHERE stock_code = ? ORDER BY effective_date""",
-            [stock_code],
-        )
+        capital_rows = self._batch_cache.get("capital", {}).get(stock_code, self._batch_sentinel)
+        if capital_rows is self._batch_sentinel:
+            capital_rows = self.duck.read_query(
+                """SELECT effective_date, total_shares FROM share_capital_history
+                   WHERE stock_code = ? ORDER BY effective_date""",
+                [stock_code],
+            )
         capital_dates = [date.fromisoformat(str(r["effective_date"])[:10]) for r in capital_rows]
         capital_values = [float(r["total_shares"]) for r in capital_rows]
 
         # 分红（预解析 + 排序，遍历时按 ex_date 滑窗）
-        dividend_rows = self.duck.read_query(
-            """SELECT ex_date, announcement_date, dividend_per_share
-               FROM dividends
-               WHERE stock_code = ? AND dividend_per_share > 0
-                 AND announcement_date IS NOT NULL
-               ORDER BY ex_date ASC""",
-            [stock_code],
-        )
+        dividend_rows = self._batch_cache.get("dividend", {}).get(stock_code, self._batch_sentinel)
+        if dividend_rows is self._batch_sentinel:
+            dividend_rows = self.duck.read_query(
+                """SELECT ex_date, announcement_date, dividend_per_share
+                   FROM dividends
+                   WHERE stock_code = ? AND dividend_per_share > 0
+                     AND announcement_date IS NOT NULL
+                   ORDER BY ex_date ASC""",
+                [stock_code],
+            )
         dividend_ex: list[date] = []
         dividend_ann: list[date] = []
         dividend_dps: list[float] = []
@@ -371,33 +449,34 @@ class StatisticsBuilder:
             import concurrent.futures
 
             completed = 0
+            chunk_size = max(50, min(250, 20000 // max(parallel, 1)))
+            chunks = [
+                stock_codes[index:index + chunk_size]
+                for index in range(0, len(stock_codes), chunk_size)
+            ]
             with concurrent.futures.ProcessPoolExecutor(
                 max_workers=parallel,
                 initializer=_statistics_worker_init,
                 initargs=(str(self.duck.db_path), str(self.sqlite.db_path)),
             ) as executor:
-                future_to_code = {
-                    executor.submit(_statistics_worker_build, code): code
-                    for code in stock_codes
+                future_to_chunk = {
+                    executor.submit(_statistics_worker_build_chunk, chunk): chunk
+                    for chunk in chunks
                 }
-                for future in concurrent.futures.as_completed(future_to_code):
-                    code = future_to_code[future]
-                    try:
-                        result = future.result()
-                        if result[1] is None:
+                for future in concurrent.futures.as_completed(future_to_chunk):
+                    for code, stats, error in future.result():
+                        if error is not None:
+                            logger.warning("构建 %s 历史统计失败: %s", code, error)
                             failed.append(code)
                         else:
-                            _finish(code, result[1])
-                    except Exception as error:
-                        logger.warning("构建 %s 历史统计失败: %s", code, error)
-                        failed.append(code)
-                    completed += 1
-                    if progress_cb is not None:
-                        progress_cb(code, {
-                            "status": "done",
-                            "done": completed,
-                            "total": len(stock_codes),
-                        })
+                            _finish(code, stats)
+                        completed += 1
+                        if progress_cb is not None:
+                            progress_cb(code, {
+                                "status": "done",
+                                "done": completed,
+                                "total": len(stock_codes),
+                            })
         else:
             for completed, code in enumerate(stock_codes, start=1):
                 try:
@@ -671,17 +750,22 @@ class StatisticsBuilder:
         }
 
         # 覆盖计算输入（每股一次查询，供 PE/PB 窗口门槛）
-        price_day_rows = self.duck.read_query(
-            "SELECT trade_date FROM price_daily_raw "
-            "WHERE stock_code = ? AND close IS NOT NULL ORDER BY trade_date",
-            [stock_code],
-        )
-        capital_rows = self.duck.read_query(
-            "SELECT effective_date, verified FROM share_capital_history "
-            "WHERE stock_code = ? ORDER BY effective_date",
-            [stock_code],
-        )
-        price_days = [str(row["trade_date"])[:10] for row in price_day_rows]
+        if self._batch_price_days:
+            price_days = self._batch_price_days.get(stock_code, [])
+        else:
+            price_day_rows = self.duck.read_query(
+                "SELECT trade_date FROM price_daily_raw "
+                "WHERE stock_code = ? AND close IS NOT NULL ORDER BY trade_date",
+                [stock_code],
+            )
+            price_days = [str(row["trade_date"])[:10] for row in price_day_rows]
+        capital_rows = self._batch_capital_rows.get(stock_code, self._batch_sentinel)
+        if capital_rows is self._batch_sentinel:
+            capital_rows = self.duck.read_query(
+                "SELECT effective_date, verified FROM share_capital_history "
+                "WHERE stock_code = ? ORDER BY effective_date",
+                [stock_code],
+            )
         capital_days = [str(row["effective_date"])[:10] for row in capital_rows]
 
         def coverage_for(window_years: int) -> float | None:
@@ -960,6 +1044,29 @@ def _statistics_worker_build(code: str) -> tuple[str, list[dict[str, Any]]] | tu
         return code, builder._stats_for_stock(code, series)
     except Exception as error:
         return code, None, str(error)
+
+
+def _statistics_worker_build_chunk(
+    codes: list[str],
+) -> list[tuple[str, list[dict[str, Any]] | None, str | None]]:
+    """批量工作函数：先批量取数，再逐股复用同一份缓存计算。"""
+    global _WORKER_BUILDER
+    results: list[tuple[str, list[dict[str, Any]] | None, str | None]] = []
+    try:
+        builder = _WORKER_BUILDER
+        if builder is None:
+            builder = StatisticsBuilder(duck=_WORKER_STORE, sqlite=_WORKER_SQLITE)
+            _WORKER_BUILDER = builder
+        builder.prime_batch(codes)
+        for code in codes:
+            try:
+                series = builder.build_series(code)
+                results.append((code, builder._stats_for_stock(code, series), None))
+            except Exception as error:
+                results.append((code, None, str(error)))
+    except Exception as error:
+        return [(code, None, str(error)) for code in codes]
+    return results
 
 
 def series_values(

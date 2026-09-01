@@ -975,3 +975,17 @@ def test_bse_stock_skips_eastmoney_cross(
     assert "no_cross_source" in (rows[0]["error"] or "")
     audit = updater.cross_audit()
     assert audit["empty_no_cross_source"] == 1
+
+
+def test_statistics_prime_batch_matches_per_stock_queries(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    _seed_statistics_inputs(duckdb_store, sqlite_store)
+    plain = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
+    batched = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
+    batched.prime_batch(["600519"])
+
+    assert plain.build_series("600519") == batched.build_series("600519")
+    assert plain._stats_for_stock("600519", plain.build_series("600519")) == batched._stats_for_stock(
+        "600519", batched.build_series("600519")
+    )

@@ -16,6 +16,7 @@ import os
 import secrets
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,91 @@ from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 
 # 空/半写锁文件宽限期（秒）：与 update_lock.py 同口径，超过即视为死锁
 _STALE_MALFORMED_LOCK_SECONDS = 5.0
+
+# raw_response_archive 热表轮转阈值：任一条件满足即把当前 active 关闭
+# 为新分区并另开空表。5GB 来自 2026-09-01 正式库 26GB 大表提交峰值
+# 24.5GB 的教训；在该阈值下提交仍保持亚秒级/低内存。
+_RAW_ARCHIVE_ROTATE_BYTES = 5 * 1024 * 1024 * 1024
+_RAW_ARCHIVE_ROTATE_ROWS = 100_000
+_RAW_ARCHIVE_ROTATE_DAYS = 31
+
+_RAW_ARCHIVE_COLUMNS = (
+    "raw_response_hash", "source", "fetch_time", "payload",
+    "api_version", "integrity_verified", "created_at",
+)
+
+
+def _recreate_raw_archive_view(conn: Any) -> None:
+    rows = conn.execute(
+        "SELECT partition_table FROM raw_response_archive_partitions "
+        "ORDER BY created_at, partition_table"
+    ).fetchall()
+    if not rows:
+        return
+    selects = " UNION ALL ".join(
+        f"SELECT {', '.join(_RAW_ARCHIVE_COLUMNS)} "
+        f'FROM "{row[0]}"'
+        for row in rows
+    )
+    conn.execute(
+        f"CREATE OR REPLACE VIEW raw_response_archive_all AS {selects}"
+    )
+
+
+def _rotate_raw_archive_if_needed(conn: Any) -> None:
+    row = conn.execute(
+        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(payload)), 0), "
+        "MIN(created_at) FROM raw_response_archive"
+    ).fetchone()
+    if row is None:
+        return
+    count, total_bytes, oldest = row
+    now = datetime.now(UTC)
+    if oldest is not None and getattr(oldest, "tzinfo", None) is None:
+        oldest = oldest.replace(tzinfo=UTC)
+    age_days = (now - oldest).days if oldest is not None else 0
+    if (
+        int(total_bytes or 0) < _RAW_ARCHIVE_ROTATE_BYTES
+        and int(count or 0) < _RAW_ARCHIVE_ROTATE_ROWS
+        and age_days < _RAW_ARCHIVE_ROTATE_DAYS
+    ):
+        return
+    partition = f"raw_response_archive_{now.strftime('%Y%m%d_%H%M%S')}"
+    conn.execute(
+        f'ALTER TABLE raw_response_archive RENAME TO "{partition}"'
+    )
+    conn.execute(
+        """
+        CREATE TABLE raw_response_archive (
+            raw_response_hash VARCHAR PRIMARY KEY,
+            source            VARCHAR NOT NULL,
+            fetch_time        TIMESTAMP NOT NULL,
+            payload           BLOB,
+            api_version       VARCHAR,
+            integrity_verified BOOLEAN DEFAULT FALSE,
+            created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(
+        """UPDATE raw_response_archive_partitions
+           SET closed_at = ? WHERE partition_table = ?""",
+        [now, partition],
+    )
+    conn.execute(
+        """INSERT INTO raw_response_archive_partitions
+           (partition_table, created_at, closed_at)
+           VALUES (?, ?, ?)""",
+        [partition, now, now],
+    )
+    conn.execute(
+        """INSERT INTO raw_response_archive_partitions
+           (partition_table, created_at, closed_at)
+           VALUES ('raw_response_archive', ?, NULL)
+           ON CONFLICT DO NOTHING""",
+        [now],
+    )
+    _recreate_raw_archive_view(conn)
 
 
 def archive_raw_response_if_absent(
@@ -46,6 +132,7 @@ def archive_raw_response_if_absent(
     race-free and keeps the same first-writer-wins semantics as the old
     ``ON CONFLICT DO NOTHING`` statement.
     """
+    _rotate_raw_archive_if_needed(conn)
     existing = conn.execute(
         "SELECT 1 FROM raw_response_archive_all WHERE raw_response_hash = ?",
         [raw_response_hash],
@@ -59,6 +146,12 @@ def archive_raw_response_if_absent(
            VALUES (?, ?, ?, ?, ?, TRUE)""",
         [raw_response_hash, source, fetch_time, payload, api_version],
     )
+    if payload:
+        conn.execute(
+            """INSERT INTO raw_response_archive_valid_hash (raw_response_hash)
+               VALUES (?) ON CONFLICT DO NOTHING""",
+            [raw_response_hash],
+        )
     return True
 
 
@@ -107,7 +200,16 @@ class DuckDBStore:
 
     @staticmethod
     def _load_memory_limit() -> str:
-        """Read database.duckdb_memory_limit with a conservative fallback."""
+        """Read memory limit: env override > user config > conservative fallback.
+
+        VD_DUCKDB_MEMORY_LIMIT is an operational escape hatch for one-off
+        maintenance jobs (backup/export/rebuild) that legitimately need a
+        larger limit than the daily service default.
+        """
+        import os
+        env_value = os.environ.get("VD_DUCKDB_MEMORY_LIMIT")
+        if env_value:
+            return env_value
         try:
             import importlib
             config_module = importlib.import_module("app.core.config")

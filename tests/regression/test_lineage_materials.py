@@ -55,3 +55,36 @@ def test_duplicate_raw_response_is_archived_once(duckdb_store, sqlite_store) -> 
     assert duckdb_store.read_query(
         "SELECT COUNT(*) AS count FROM raw_response_archive_all WHERE raw_response_hash = ?", [digest]
     ) == [{"count": 1}]
+
+
+def test_raw_archive_rotates_on_threshold_and_view_stays_complete(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    from app.core.storage import duckdb_store as archive_module
+
+    monkeypatch.setattr(archive_module, "_RAW_ARCHIVE_ROTATE_BYTES", 1)
+    monkeypatch.setattr(archive_module, "_RAW_ARCHIVE_ROTATE_ROWS", 1)
+    monkeypatch.setattr(archive_module, "_RAW_ARCHIVE_ROTATE_DAYS", 0)
+    with duckdb_store.transaction() as conn:
+        archive_module.archive_raw_response_if_absent(
+            conn,
+            raw_response_hash="c" * 64,
+            source="sina",
+            fetch_time=datetime.now(UTC),
+            payload=b"first-payload",
+            api_version=None,
+        )
+    partitions = duckdb_store.read_query(
+        "SELECT partition_table, closed_at FROM raw_response_archive_partitions ORDER BY created_at"
+    )
+    names = [row["partition_table"] for row in partitions]
+    assert "raw_response_archive" in names
+    active = next(row for row in partitions if row["partition_table"] == "raw_response_archive")
+    assert active["closed_at"] is None
+    assert any(
+        name.startswith("raw_response_archive_20") and name != "raw_response_archive"
+        for name in names
+    )
+    assert duckdb_store.read_query(
+        "SELECT COUNT(*) AS c FROM raw_response_archive_all WHERE raw_response_hash = ?", ["c" * 64]
+    ) == [{"c": 1}]
