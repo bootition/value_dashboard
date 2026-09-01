@@ -31,6 +31,11 @@ from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
+# Windows spawn 进程池的 worker 全局状态（见 _statistics_worker_init）。
+_WORKER_STORE: DuckDBStore | None = None
+_WORKER_SQLITE: SQLiteStore | None = None
+_WORKER_BUILDER: StatisticsBuilder | None = None
+
 __all__ = [
     "StatisticsBuilder",
     "WINDOW_MIN_SAMPLES",
@@ -73,6 +78,9 @@ class StatisticsBuilder:
         assert duck is not None and sqlite is not None
         self.duck = duck
         self.sqlite = sqlite
+        # 国债曲线对同一 tenor 完全相同，却在逐股 build_series 中被重复
+        # 查询/解析数千次；进程内缓存后，统计域重建只读一次曲线。
+        self._curve_cache: dict[float, tuple[list[date], list[float]]] = {}
 
     # ─── 序列构建 ─────────────────────────────────────────────────
 
@@ -141,14 +149,20 @@ class StatisticsBuilder:
             dividend_ann.append(date.fromisoformat(str(row["announcement_date"])[:10]))
             dividend_dps.append(float(row["dividend_per_share"]))
 
-        # 国债曲线（tenor）
-        curve_rows = self.duck.read_query(
-            """SELECT curve_date, yield_pct FROM treasury_yield_curve
-               WHERE tenor_years = ? ORDER BY curve_date ASC""",
-            [tenor],
-        )
-        curve_dates = [date.fromisoformat(str(r["curve_date"])[:10]) for r in curve_rows]
-        curve_values = [float(r["yield_pct"]) for r in curve_rows]
+        # 国债曲线（tenor）：同 tenor 全市场共享，缓存避免逐股重复读取。
+        cached_curve = self._curve_cache.get(tenor)
+        if cached_curve is None:
+            curve_rows = self.duck.read_query(
+                """SELECT curve_date, yield_pct FROM treasury_yield_curve
+                   WHERE tenor_years = ? ORDER BY curve_date ASC""",
+                [tenor],
+            )
+            cached_curve = (
+                [date.fromisoformat(str(r["curve_date"])[:10]) for r in curve_rows],
+                [float(r["yield_pct"]) for r in curve_rows],
+            )
+            self._curve_cache[tenor] = cached_curve
+        curve_dates, curve_values = cached_curve
 
         ttm_profit_values = [ttm_by_report.get(rd) for rd in report_dates]
         equity_values = [equity_by_report.get(rd) for rd in report_dates]
@@ -907,9 +921,6 @@ class StatisticsBuilder:
 
 # ─── 进程池 worker（reports/73 修复阶段：全量重建并行化）──────────────────
 
-_WORKER_STORE: DuckDBStore | None = None
-_WORKER_SQLITE: SQLiteStore | None = None
-
 
 def _statistics_worker_init(duck_path: str, sqlite_path: str) -> None:
     """进程池 initializer：在工作进程内建立只读 store（Windows spawn 安全）。"""
@@ -917,7 +928,7 @@ def _statistics_worker_init(duck_path: str, sqlite_path: str) -> None:
 
     from app.core.storage.path_policy import DatabasePathSet, VdEnv
 
-    global _WORKER_STORE, _WORKER_SQLITE
+    global _WORKER_STORE, _WORKER_SQLITE, _WORKER_BUILDER
     run_root = Path(duck_path).parent
     paths = DatabasePathSet(
         env=VdEnv.FORMAL,
@@ -927,12 +938,17 @@ def _statistics_worker_init(duck_path: str, sqlite_path: str) -> None:
     ).validate()
     _WORKER_STORE = DuckDBStore(paths=paths)
     _WORKER_SQLITE = SQLiteStore(paths=paths)
+    _WORKER_BUILDER = StatisticsBuilder(duck=_WORKER_STORE, sqlite=_WORKER_SQLITE)
 
 
 def _statistics_worker_build(code: str) -> tuple[str, list[dict[str, Any]]] | tuple[str, None, str]:
     """工作函数：单股 build_series + _stats_for_stock（只读，可 pickle）。"""
+    global _WORKER_BUILDER
     try:
-        builder = StatisticsBuilder(duck=_WORKER_STORE, sqlite=_WORKER_SQLITE)
+        builder = _WORKER_BUILDER
+        if builder is None:
+            builder = StatisticsBuilder(duck=_WORKER_STORE, sqlite=_WORKER_SQLITE)
+            _WORKER_BUILDER = builder
         series = builder.build_series(code)
         return code, builder._stats_for_stock(code, series)
     except Exception as error:

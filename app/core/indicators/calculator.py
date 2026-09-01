@@ -17,6 +17,7 @@ import hashlib
 import logging
 import math
 import uuid
+from bisect import bisect_right
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
@@ -384,6 +385,126 @@ class IndicatorCalculator:
             "reason": None if not failed_codes else "changed_stock_not_ready",
             "total": len(codes), "success": len(records),
             "failed": len(failed_codes), "failed_codes": failed_codes[:20],
+        }
+
+    def refresh_treasury_spreads(
+        self,
+        stock_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """仅刷新快照中的 TTM 股息率与国债利差列。
+
+        国债曲线每日变化会让全市场快照的 div_yield_spread_* 过期；此前
+        通过 compute_snapshot_for_codes 对 5,500+ 只股票完整重算全部指标，
+        耗时约 12 分钟。这里把价格日/分红/曲线对齐放到 Python 内完成，
+        DuckDB 只执行一次批量 UPDATE 与衍生 lineage，正式库可缩短到秒级。
+        """
+        where = ""
+        params: list[Any] = []
+        if stock_codes:
+            placeholders = ", ".join("?" for _ in stock_codes)
+            where = f" AND snap.stock_code IN ({placeholders})"
+            params = list(stock_codes)
+        rows = self.duck.read_query(
+            f"""SELECT snap.stock_code, snap.report_date,
+                       snap.latest_price_date, snap.latest_close,
+                       snap.calculated_at, snap.data_version
+                FROM indicator_snapshot snap
+                WHERE snap.latest_close IS NOT NULL{where}
+                ORDER BY snap.stock_code""",
+            params,
+        )
+        if not rows:
+            return {"status": "skipped", "reason": "no_snapshot_rows", "total": 0, "success": 0}
+
+        codes = [row["stock_code"] for row in rows]
+        price_by_code = {
+            row["stock_code"]: str(row["latest_price_date"])[:10]
+            for row in rows
+        }
+        # 一次 SQL 聚合每只股票截至各自价格日的 TTM 已实施现金分红。
+        placeholders = ", ".join("?" for _ in codes)
+        div_rows = self.duck.read_query(
+            f"""SELECT b.stock_code, SUM(d.dividend_per_share) AS dps
+                FROM (
+                    SELECT stock_code, CAST(latest_price_date AS DATE) AS price_date
+                    FROM indicator_snapshot
+                    WHERE stock_code IN ({placeholders})
+                ) b
+                JOIN dividends d
+                  ON d.stock_code = b.stock_code
+                 AND d.dividend_per_share IS NOT NULL
+                 AND d.dividend_per_share > 0
+                 AND d.announcement_date IS NOT NULL
+                 AND d.ex_date IS NOT NULL
+                 AND d.announcement_date <= b.price_date
+                 AND d.ex_date <= b.price_date
+                 AND d.ex_date >= b.price_date - INTERVAL '1 year'
+                GROUP BY b.stock_code""",
+            codes,
+        )
+        dps_by_code = {row["stock_code"]: float(row["dps"] or 0.0) for row in div_rows}
+
+        curve_rows = self.duck.read_query(
+            """SELECT tenor_years, curve_date, yield_pct
+               FROM treasury_yield_curve
+               ORDER BY tenor_years, curve_date"""
+        )
+        curves: dict[float, tuple[list[date], list[float]]] = {}
+        for row in curve_rows:
+            tenor = float(row["tenor_years"])
+            dates, values = curves.setdefault(tenor, ([], []))
+            dates.append(date.fromisoformat(str(row["curve_date"])[:10]))
+            values.append(float(row["yield_pct"]))
+
+        published_at = datetime.now(UTC)
+        update_rows: list[list[Any]] = []
+        lineage_rows: list[dict[str, Any]] = []
+        for row in rows:
+            code = row["stock_code"]
+            price_date = date.fromisoformat(price_by_code[code])
+            close = float(row["latest_close"])
+            dps = dps_by_code.get(code, 0.0)
+            ttm_yield = (dps / close) * 100.0 if dps > 0 and close > 0 else None
+            item: dict[str, Any] = {
+                "stock_code": code,
+                "report_date": row["report_date"],
+                "latest_price_date": row["latest_price_date"],
+                "calculated_at": published_at,
+                "data_version": row["data_version"],
+                "ttm_dividend_yield": ttm_yield,
+            }
+            values = [ttm_yield]
+            for tenor in KEY_TENORS:
+                dates, yields = curves.get(tenor, ([], []))
+                index = bisect_right(dates, price_date) - 1
+                spread = None
+                if index >= 0 and ttm_yield is not None:
+                    curve_date = dates[index]
+                    if (price_date - curve_date).days <= MAX_STALENESS_DAYS:
+                        spread = ttm_yield - yields[index]
+                item[CZB_CURVE_YIELD_TENOR_LABELS[tenor]] = spread
+                values.append(spread)
+            update_rows.append((values, code))
+            lineage_rows.append(item)
+
+        with self.duck.transaction() as connection:
+            set_fields = ["ttm_dividend_yield = ?"]
+            set_fields.extend(
+                f"{CZB_CURVE_YIELD_TENOR_LABELS[tenor]} = ?"
+                for tenor in KEY_TENORS
+            )
+            connection.executemany(
+                f"UPDATE indicator_snapshot SET {', '.join(set_fields)}, "
+                f"calculated_at = ? WHERE stock_code = ?",
+                [[*values, published_at, code] for values, code in update_rows],
+            )
+            self._record_derived_lineage_in_connection(connection, lineage_rows)
+
+        return {
+            "status": "success",
+            "total": len(rows),
+            "success": len(rows),
+            "failed": 0,
         }
 
     def _read_query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:

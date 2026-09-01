@@ -232,3 +232,43 @@ def test_indicator_schema_persists_all_emitted_cagr_and_technical_fields(
         "ma60", "ma120", "ma250", "avg_volume", "period_return",
         "annualized_volatility", "max_drawdown", "turnover_rate",
     }.issubset(columns)
+
+
+def test_refresh_treasury_spreads_updates_only_treasury_columns(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
+           VALUES ('600519', 'Test', 'SSE', true)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO indicator_snapshot
+           (stock_code, report_date, latest_close, latest_price_date,
+            calculated_at, pe_ttm, ttm_dividend_yield)
+           VALUES ('600519', '2025-12-31', 10.0, '2026-08-31',
+                   CURRENT_TIMESTAMP, 25.0, NULL)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600519', '2026-06-30', '2026-06-01', 2.0)"""
+    )
+    duckdb_store.write_query(
+        """INSERT INTO treasury_yield_curve
+           (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash,
+            confidence, batch_id)
+           VALUES ('2026-08-31', 10.0, 3.0, 'czb_mof', CURRENT_TIMESTAMP, ?,
+                   'strict', 'test-batch')""",
+        ["a" * 64],
+    )
+
+    report = _calculator(duckdb_store, sqlite_store).refresh_treasury_spreads(["600519"])
+
+    assert report["status"] == "success"
+    snapshot = duckdb_store.read_query(
+        """SELECT ttm_dividend_yield, div_yield_spread_10y, pe_ttm
+           FROM indicator_snapshot WHERE stock_code = '600519'"""
+    )[0]
+    assert snapshot["ttm_dividend_yield"] == 20.0
+    assert snapshot["div_yield_spread_10y"] == 17.0
+    assert snapshot["pe_ttm"] == 25.0, "非国债字段必须保持不变"

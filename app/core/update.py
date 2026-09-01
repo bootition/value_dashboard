@@ -165,7 +165,7 @@ class IncrementalUpdater:
         # 历史统计域全量重建的进程池并行数（只读分析；发布仍在主进程）。
         # 2026-08-28 提速计划：串行重建约需数十分钟，多进程可显著缩短。
         self.research_statistics_parallel_workers: int = self._load_update_config(
-            "research_statistics_parallel_workers", default=4
+            "research_statistics_parallel_workers", default=12
         )
         # 财务三表刷新的并发股票数：网络请求并行，DuckDB 写事务仍由
         # 单写者锁串行，因此并发只缩短网络等待、不会双写。
@@ -636,7 +636,6 @@ class IncrementalUpdater:
                 *detail_backfilled_codes,
                 *buyback_changed_codes,
                 *funding_changed_codes,
-                *treasury_changed_codes,
                 *retry_recompute_codes,
                 *stale_snapshot_codes,
             ]))
@@ -647,6 +646,20 @@ class IncrementalUpdater:
                     codes_to_compute, progress_cb=indicator_progress,
                 )
                 report_step("indicators", snapshot_step)
+            if treasury_changed_codes:
+                # 国债曲线变化只影响 ttm_dividend_yield / div_yield_spread_*，
+                # 无需对全市场完整重算 PE/PB/成长/技术指标；专用批量刷新
+                # 在正式库为秒级，取代旧的约 12 分钟全量重算。
+                treasury_step = IndicatorCalculator(
+                    duck=self.duck, sqlite=self.sqlite,
+                ).refresh_treasury_spreads(treasury_changed_codes)
+                if codes_to_compute:
+                    report_step(
+                        "indicators",
+                        {**treasury_step, "full_recompute": snapshot_step},
+                    )
+                else:
+                    report_step("indicators", treasury_step)
 
         # 3. 业务概览低频域（reports/67 独立域）：仅当自动集成启用且间隔到期
         #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。

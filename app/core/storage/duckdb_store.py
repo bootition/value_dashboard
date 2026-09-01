@@ -117,7 +117,7 @@ class DuckDBStore:
                 return str(value)
         except Exception:
             pass
-        return "12GB"
+        return "14GB"
 
     def _connection_config(self) -> dict[str, str]:
         return {"memory_limit": self._memory_limit}

@@ -400,6 +400,11 @@ def test_buyback_funding_treasury_refresh_before_indicators(
             computed.append(list(codes))
             return {"status": "success"}
 
+        def refresh_treasury_spreads(self, codes) -> dict:
+            order.append("indicators_treasury")
+            computed.append(list(codes))
+            return {"status": "success"}
+
     monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
     updater._share_capital_fingerprint = lambda: "same"
 
@@ -408,6 +413,7 @@ def test_buyback_funding_treasury_refresh_before_indicators(
     assert order.index("buyback") < order.index("indicators")
     assert order.index("funding") < order.index("indicators")
     assert order.index("treasury_curve") < order.index("indicators")
+    assert order.index("treasury_curve") < order.index("indicators_treasury")
     assert computed and "000001" in computed[-1]
 
 
