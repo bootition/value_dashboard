@@ -378,22 +378,44 @@ class BackupManager:
             with self._duck.write_connection() as connection:
                 public_tables = self._detect_public_tables(connection)
             for table in public_tables:
-                # 每张表使用独立连接导出：大表 COPY 会让 DuckDB 缓冲池
-                # 累积到 memory_limit 附近；持久连接连续导出多张大表时，
-                # 后续表会在旧页尚未释放时 OOM（正式库 26GB BLOB 归档已复现）。
                 with self._duck.write_connection() as connection:
-                    parquet_path = public_dir / f"{table}.parquet"
-                    target = str(parquet_path).replace("'", "''")
-                    connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
-                size = parquet_path.stat().st_size
-                manifest["files"].append({
-                    "category": "public", "table": table,
-                    "filename": parquet_path.relative_to(backup_path).as_posix(),
-                    "size_bytes": size,
-                    "sha256": _file_checksum(parquet_path),
-                    "encrypted": False,
-                })
-                logger.info(f"  导出公共数据: {table} ({size} bytes)")
+                    if table in self._BLOB_CHUNK_TABLES:
+                        parts = self._export_public_table_chunked(connection, table, public_dir)
+                        if parts:
+                            for part in parts:
+                                manifest["files"].append({
+                                    "category": "public", "table": table,
+                                    "filename": part["filename"],
+                                    "size_bytes": part["size_bytes"],
+                                    "sha256": part["sha256"],
+                                    "encrypted": False,
+                                    "part": part["index"],
+                                })
+                        else:
+                            parquet_path = public_dir / f"{table}.parquet"
+                            target = str(parquet_path).replace("'", "''")
+                            connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
+                            manifest["files"].append({
+                                "category": "public", "table": table,
+                                "filename": parquet_path.relative_to(backup_path).as_posix(),
+                                "size_bytes": parquet_path.stat().st_size,
+                                "sha256": _file_checksum(parquet_path),
+                                "encrypted": False,
+                            })
+                        logger.info(f"  导出公共数据: {table} parts={len(parts)}")
+                    else:
+                        parquet_path = public_dir / f"{table}.parquet"
+                        target = str(parquet_path).replace("'", "''")
+                        connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
+                        size = parquet_path.stat().st_size
+                        manifest["files"].append({
+                            "category": "public", "table": table,
+                            "filename": parquet_path.relative_to(backup_path).as_posix(),
+                            "size_bytes": size,
+                            "sha256": _file_checksum(parquet_path),
+                            "encrypted": False,
+                        })
+                        logger.info(f"  导出公共数据: {table} ({size} bytes)")
         except Exception as error:
             shutil.rmtree(backup_path, ignore_errors=True)
             return {"status": "error", "error": f"public backup failed: {error}"}
@@ -519,6 +541,9 @@ class BackupManager:
             "checksum": checksum[:16],
         }
 
+    _BLOB_CHUNK_TABLES = {"raw_response_archive_history"}
+    _BLOB_CHUNK_SIZE = 5000
+
     def _detect_public_tables(self, connection: Any) -> list[str]:
         present_tables = {
             row[0]
@@ -637,11 +662,14 @@ class BackupManager:
             rollback_root = Path(journal["rollback_root"])
             if not rollback_root.is_dir() or not rollback_root.is_relative_to(self._data_root.resolve()):
                 raise ValueError("restore rollback journal is unsafe")
-            public_files = [
-                (table, rollback_root / f"{table}.parquet")
-                for table in self.PUBLIC_DUCKDB_TABLES
-            ]
-            if not all(path.is_file() for _, path in public_files):
+            public_files = []
+            for parquet_file in rollback_root.glob("*.parquet"):
+                table = parquet_file.name[:-len(".parquet")]
+                if ".part" in table:
+                    table = table.split(".part")[0]
+                if table in self.PUBLIC_DUCKDB_TABLES:
+                    public_files.append((table, parquet_file))
+            if not public_files:
                 raise ValueError("restore rollback data is incomplete")
             personal_path = rollback_root / "personalized.json"
             personal_data = json.loads(personal_path.read_text(encoding="utf-8"))
@@ -744,8 +772,10 @@ class BackupManager:
         public_files: list[tuple[str, Path]] = []
         public_dir = extract_dir / "public"
         if public_dir.exists():
-            for parquet_file in public_dir.glob("*.parquet"):
-                table = parquet_file.stem
+            for parquet_file in public_dir.rglob("*.parquet"):
+                table = parquet_file.name[:-len(".parquet")]
+                if ".part" in table:
+                    table = table.split(".part")[0]
                 if not safe_table_pattern.match(table) or table not in valid_tables:
                     return {"status": "error", "error": f"unsafe public table: {table}"}
                 public_files.append((table, parquet_file))
@@ -889,17 +919,60 @@ class BackupManager:
         logger.info(f"备份恢复完成: {len(result['restored'])} 项")
         return result
 
+    @staticmethod
+    def _export_public_table_chunked(connection: Any, table: str, public_dir: Path) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        last_hash = ""
+        index = 0
+        while True:
+            rows = connection.execute(
+                f"SELECT COUNT(*) FROM (SELECT * FROM {table} "
+                f"WHERE raw_response_hash > ? ORDER BY raw_response_hash LIMIT ?)",
+                [last_hash, BackupManager._BLOB_CHUNK_SIZE],
+            ).fetchone()[0]
+            if rows == 0:
+                break
+            out = public_dir / f"{table}.part{index:04d}.parquet"
+            target = str(out).replace("'", "''")
+            connection.execute(
+                f"COPY (SELECT * FROM {table} WHERE raw_response_hash > ? "
+                f"ORDER BY raw_response_hash LIMIT ?) TO '{target}' (FORMAT PARQUET)",
+                [last_hash, BackupManager._BLOB_CHUNK_SIZE],
+            )
+            chunk_rows = connection.execute(
+                f"SELECT raw_response_hash FROM {table} "
+                f"WHERE raw_response_hash > ? ORDER BY raw_response_hash "
+                f"LIMIT {BackupManager._BLOB_CHUNK_SIZE}",
+                [last_hash],
+            ).fetchall()
+            last_hash = chunk_rows[-1][0]
+            parts.append({
+                "index": index,
+                "filename": out.name,
+                "size_bytes": out.stat().st_size,
+                "sha256": _file_checksum(out),
+            })
+            index += 1
+        return parts
+
     def _export_public_tables(self, target_dir: Path) -> None:
         with self._duck.write_connection() as connection:
             for table in self.PUBLIC_DUCKDB_TABLES:
-                target = str(target_dir / f"{table}.parquet").replace("'", "''")
-                connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
+                if table in self._BLOB_CHUNK_TABLES:
+                    parts = self._export_public_table_chunked(connection, table, target_dir)
+                    if not parts:
+                        target = str(target_dir / f"{table}.parquet").replace("'", "''")
+                        connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
+                else:
+                    target = str(target_dir / f"{table}.parquet").replace("'", "''")
+                    connection.execute(f"COPY {table} TO '{target}' (FORMAT PARQUET)")
 
     def _restore_public_tables(self, files: list[tuple[str, Path]]) -> None:
+        by_table: dict[str, list[Path]] = {}
+        for table, path in files:
+            by_table.setdefault(table, []).append(path)
         with self._duck.transaction() as connection:
-            restored_tables = {table for table, _ in files}
-            # A pre-migration backup has no archive or quarantine tables.
-            # Clear those newer tables so restoring it reproduces that state.
+            restored_tables = set(by_table)
             present_tables = {
                 row[0]
                 for row in connection.execute(
@@ -908,14 +981,14 @@ class BackupManager:
             }
             for table in (set(self.PUBLIC_DUCKDB_TABLES) - restored_tables) & present_tables:
                 connection.execute(f"DELETE FROM {table}")
-            for table, parquet_file in files:
-                source = str(parquet_file).replace("'", "''")
+            for table, paths in by_table.items():
                 connection.execute(f"DELETE FROM {table}")
-                # Migrations may append snapshot columns in a different order
-                # from an older backup. Restore by field name, never position.
-                connection.execute(
-                    f"INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{source}')"
-                )
+                for parquet_file in paths:
+                    source = str(parquet_file).replace("'", "''")
+                    connection.execute(
+                        f"INSERT INTO {table} BY NAME "
+                        f"SELECT * FROM read_parquet('{source}')"
+                    )
 
     def _snapshot_personalized_data(self) -> dict[str, list[dict[str, Any]]]:
         return {table: self._sqlite.query(f"SELECT * FROM {table}") for table in self.PERSONALIZED_TABLES}
