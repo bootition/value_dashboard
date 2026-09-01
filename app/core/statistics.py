@@ -866,21 +866,28 @@ class StatisticsBuilder:
             )[0]
             return f"{table}:{row['c']}:{row['fp']}"
 
+        # 排序必须带 stock_code 作为最终 tie-breaker：多只股票可能共享
+        # 同一报告日/除权日/生效日，仅按日期排序会让 string_agg 在 DuckDB
+        # 并行执行中产生非确定顺序，导致指纹逐次变化、统计域每轮误重建。
         parts.append(content_part(
-            "income_statement", ["report_date", "parent_net_profit"], ["report_date"],
+            "income_statement",
+            ["report_date", "parent_net_profit"],
+            ["report_date", "stock_code"],
         ))
         parts.append(content_part(
-            "balance_sheet", ["report_date", "total_equity_parent"], ["report_date"],
+            "balance_sheet",
+            ["report_date", "total_equity_parent"],
+            ["report_date", "stock_code"],
         ))
         parts.append(content_part(
             "share_capital_history",
             ["effective_date", "total_shares", "verified"],
-            ["effective_date"],
+            ["effective_date", "stock_code"],
         ))
         parts.append(content_part(
             "dividends",
             ["ex_date", "announcement_date", "dividend_per_share"],
-            ["ex_date", "announcement_date"],
+            ["ex_date", "announcement_date", "stock_code"],
         ))
         parts.append(content_part(
             "treasury_yield_curve",
