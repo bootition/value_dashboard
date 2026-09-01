@@ -26,7 +26,7 @@ supersedes: null
 | E3 | **数据路径必须用项目 venv**：`vd.bat`/`start.bat` 优先 `.venv\Scripts\python.exe`；`uv sync --locked` 默认**不含 extras**，必须 `uv sync --locked --all-extras`（akshare 1.18.81 / baostock / easy-tdx），否则数据源模块缺失 | reports/77 N1 |
 | E4 | 系统 Python 的 akshare 1.18.64 有缺陷（SECUCODE 无归一化、pageSize=20 截断历史），**禁止**用于数据路径 | reports/75 |
 | E5 | ruff 规则集**必须显式锁定**传统集（pyproject.toml `[tool.ruff.lint] select`）；ruff 0.16 默认扩展集会爆 500+ 存量违规 | reports/77 N2 |
-| E6 | Git push 需代理 `127.0.0.1:10808`（已配 git 全局 http proxy）；网络变更需重新确认 | AGENTS.md |
+| E6 | Git push 默认走代理 `127.0.0.1:10808`（git 全局 URL 级 http proxy）；代理不可用时可用 `git -c http.https://github.com.proxy= -c https.https://github.com.proxy= push origin <branch>` 临时直连（2026-09-01 验证成功）。网络变更后需重新确认 | AGENTS.md；2026-09-01 实测 |
 | E7 | DuckDB 连接统一 `memory_limit=14GB`（`config/default.yaml`，可经 user.yaml 覆盖）；12GB 曾触发冷核对 OOM | reports/98；config |
 
 ## 2. 数据源约束与限速
@@ -108,4 +108,4 @@ supersedes: null
 
 ---
 
-*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭（创建 config/user.yaml 骨架）。*
+*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭（创建 config/user.yaml 骨架）；E6 补充代理不可用时的直连回退命令。*
