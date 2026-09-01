@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 17
+DUCKDB_SCHEMA_VERSION = 18
 SQLITE_SCHEMA_VERSION = 15
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -1077,6 +1077,35 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (17, 'Materialized valid archive hash set for lineage checks')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v18: 分区登记表增加行数/字节统计，避免每次归档写入都扫描 BLOB
+        # 计算 SUM(OCTET_LENGTH(payload))（2026-09-01 价格更新复现：该扫描
+        # 把价格流水线拖慢到约 20 只/分）。
+        connection.execute(
+            "ALTER TABLE raw_response_archive_partitions "
+            "ADD COLUMN IF NOT EXISTS row_count BIGINT DEFAULT 0"
+        )
+        connection.execute(
+            "ALTER TABLE raw_response_archive_partitions "
+            "ADD COLUMN IF NOT EXISTS estimated_bytes BIGINT DEFAULT 0"
+        )
+        connection.execute(
+            """
+            UPDATE raw_response_archive_partitions p
+            SET row_count = a.c, estimated_bytes = a.b
+            FROM (
+                SELECT COUNT(*) AS c, COALESCE(SUM(OCTET_LENGTH(payload)), 0) AS b
+                FROM raw_response_archive
+            ) a
+            WHERE p.partition_table = 'raw_response_archive'
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (18, 'Track raw archive partition row/byte counters')
             ON CONFLICT (version) DO NOTHING
             """
         )

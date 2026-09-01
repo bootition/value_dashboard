@@ -62,6 +62,15 @@ def test_raw_archive_rotates_on_threshold_and_view_stays_complete(
 ) -> None:
     from app.core.storage import duckdb_store as archive_module
 
+    with duckdb_store.transaction() as conn:
+        archive_module.archive_raw_response_if_absent(
+            conn,
+            raw_response_hash="b" * 64,
+            source="sina",
+            fetch_time=datetime.now(UTC),
+            payload=b"seed-payload",
+            api_version=None,
+        )
     monkeypatch.setattr(archive_module, "_RAW_ARCHIVE_ROTATE_BYTES", 1)
     monkeypatch.setattr(archive_module, "_RAW_ARCHIVE_ROTATE_ROWS", 1)
     monkeypatch.setattr(archive_module, "_RAW_ARCHIVE_ROTATE_DAYS", 0)

@@ -60,8 +60,9 @@ def _recreate_raw_archive_view(conn: Any) -> None:
 
 def _rotate_raw_archive_if_needed(conn: Any) -> None:
     row = conn.execute(
-        "SELECT COUNT(*), COALESCE(SUM(OCTET_LENGTH(payload)), 0), "
-        "MIN(created_at) FROM raw_response_archive"
+        "SELECT COALESCE(row_count, 0), COALESCE(estimated_bytes, 0), created_at "
+        "FROM raw_response_archive_partitions "
+        "WHERE partition_table = 'raw_response_archive'"
     ).fetchone()
     if row is None:
         return
@@ -95,19 +96,22 @@ def _rotate_raw_archive_if_needed(conn: Any) -> None:
     )
     conn.execute(
         """UPDATE raw_response_archive_partitions
-           SET closed_at = ? WHERE partition_table = ?""",
-        [now, partition],
+           SET closed_at = ?,
+               row_count = COALESCE(row_count, ?),
+               estimated_bytes = COALESCE(estimated_bytes, ?)
+           WHERE partition_table = ?""",
+        [now, count, total_bytes, partition],
     )
     conn.execute(
         """INSERT INTO raw_response_archive_partitions
-           (partition_table, created_at, closed_at)
-           VALUES (?, ?, ?)""",
-        [partition, now, now],
+           (partition_table, created_at, closed_at, row_count, estimated_bytes)
+           VALUES (?, ?, ?, ?, ?)""",
+        [partition, now, now, count, total_bytes],
     )
     conn.execute(
         """INSERT INTO raw_response_archive_partitions
-           (partition_table, created_at, closed_at)
-           VALUES ('raw_response_archive', ?, NULL)
+           (partition_table, created_at, closed_at, row_count, estimated_bytes)
+           VALUES ('raw_response_archive', ?, NULL, 0, 0)
            ON CONFLICT DO NOTHING""",
         [now],
     )
@@ -151,6 +155,13 @@ def archive_raw_response_if_absent(
             """INSERT INTO raw_response_archive_valid_hash (raw_response_hash)
                VALUES (?) ON CONFLICT DO NOTHING""",
             [raw_response_hash],
+        )
+        conn.execute(
+            """UPDATE raw_response_archive_partitions
+               SET row_count = COALESCE(row_count, 0) + 1,
+                   estimated_bytes = COALESCE(estimated_bytes, 0) + ?
+               WHERE partition_table = 'raw_response_archive'""",
+            [len(payload)],
         )
     return True
 
