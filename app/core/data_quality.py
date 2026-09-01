@@ -796,7 +796,19 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
         return []
     rows = duck.read_query(
         """
-        WITH raw AS (
+        WITH valid_hashes AS (
+            SELECT raw_response_hash FROM raw_response_archive_valid_hash
+            UNION ALL
+            -- 兼容旧测试/维护脚本直接 INSERT raw_response_archive 的路径；
+            -- 只回退扫描小型 active 热表，绝不回退到 26GB 的 history 大表。
+            SELECT a.raw_response_hash FROM raw_response_archive a
+            WHERE a.payload IS NOT NULL
+              AND OCTET_LENGTH(a.payload) > 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM raw_response_archive_valid_hash v
+                  WHERE v.raw_response_hash = a.raw_response_hash
+              )
+        ), raw AS (
             SELECT stock_code, MAX(trade_date) AS last_date
             FROM price_daily_raw WHERE close IS NOT NULL GROUP BY stock_code
         ), qfq AS (
@@ -835,7 +847,7 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
             FROM base
             JOIN source_audit audit ON audit.stock_code = base.stock_code
             JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
-            JOIN raw_response_archive_valid_hash raw
+            JOIN valid_hashes raw
               ON raw.raw_response_hash = audit.raw_response_hash
               AND (
                   (audit.field_name = 'latest_close'
@@ -1172,6 +1184,19 @@ def build_data_quality_status(
     )[0]
     lineage = duck.read_query(
         """
+        WITH valid_hashes AS (
+            SELECT raw_response_hash FROM raw_response_archive_valid_hash
+            UNION ALL
+            -- 兼容旧测试/维护脚本直接 INSERT raw_response_archive 的路径；
+            -- 只回退扫描小型 active 热表，绝不回退到 26GB 的 history 大表。
+            SELECT a.raw_response_hash FROM raw_response_archive a
+            WHERE a.payload IS NOT NULL
+              AND OCTET_LENGTH(a.payload) > 0
+              AND NOT EXISTS (
+                  SELECT 1 FROM raw_response_archive_valid_hash v
+                  WHERE v.raw_response_hash = a.raw_response_hash
+              )
+        )
         SELECT
             (SELECT COUNT(*) FROM source_audit
              WHERE LENGTH(raw_response_hash) != 64) AS invalid_hash_rows,
@@ -1183,7 +1208,7 @@ def build_data_quality_status(
             (SELECT COUNT(*) FROM source_audit s
              WHERE LENGTH(s.raw_response_hash) = 64
                AND NOT EXISTS (
-                   SELECT 1 FROM raw_response_archive_valid_hash archive
+                   SELECT 1 FROM valid_hashes archive
                    WHERE archive.raw_response_hash = s.raw_response_hash
                )) AS audit_archive_gap_rows,
             (SELECT COUNT(*) FROM source_audit s
@@ -1194,7 +1219,7 @@ def build_data_quality_status(
              )) AS empty_archive_payload_rows,
             (SELECT COUNT(*) FROM fetch_batch batch
              WHERE NOT EXISTS (
-                 SELECT 1 FROM raw_response_archive_valid_hash archive
+                 SELECT 1 FROM valid_hashes archive
                  WHERE archive.raw_response_hash = batch.raw_response_hash
              )) AS batch_archive_gap_rows
         """
