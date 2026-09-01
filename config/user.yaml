@@ -1,0 +1,17 @@
+# 用户本地覆盖配置（默认全注释，机制已激活）
+#
+# 加载规则：app/core/config.py 先读 default.yaml，再深合并本文件。
+# 只写需要覆盖的键，未写的键继续使用 default.yaml。
+#
+# 示例 1：DuckDB 内存上限（32GB 机器默认 14GB；小内存机器可下调）：
+# database:
+#   duckdb_memory_limit: "12GB"
+#
+# 示例 2：修改数据源优先级：
+# adapters:
+#   primary:
+#     price_daily: ["tencent", "tdx", "baostock"]
+#
+# 示例 3：关闭启动时自动打开浏览器：
+# server:
+#   open_browser: false

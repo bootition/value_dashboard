@@ -3,9 +3,9 @@ title: 红队 BLOCK 修复与验收（reports/76 全部发现关闭）
 status: superseded
 category: reports
 created: 2026-08-13
-last-reviewed: 2026-08-14
-supersedes: 76_SYSTEM_RED_TEAM_USER_FLOW_REVIEW_2026-08-13.md
-superseded-by: 80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md
+last-reviewed: 2026-09-01
+supersedes: reports/76_SYSTEM_RED_TEAM_USER_FLOW_REVIEW_2026-08-13.md
+superseded-by: reports/80_SYSTEM_RED_TEAM_FULL_REVIEW_2026-08-14.md
 ---
 
 # 红队 BLOCK 修复与验收（reports/76 全部发现关闭）

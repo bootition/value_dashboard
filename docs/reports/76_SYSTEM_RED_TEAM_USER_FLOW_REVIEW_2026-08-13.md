@@ -3,8 +3,8 @@ title: 系统红队全面审查与用户流程实测（BLOCK 发现基线）
 status: superseded
 category: reports
 created: 2026-08-13
-last-reviewed: 2026-08-13
-superseded-by: 77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md
+last-reviewed: 2026-09-01
+superseded-by: reports/77_RED_TEAM_BLOCK_FIX_AND_ACCEPTANCE_2026-08-13.md
 ---
 
 # 系统红队全面审查与用户流程实测（BLOCK 发现基线）

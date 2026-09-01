@@ -1,3 +1,11 @@
+---
+title: 项目当前状态（Single Source of Truth）
+status: approved
+category: decisions
+created: 2026-07-31
+last-reviewed: 2026-09-01
+---
+
 # 项目当前状态（单一真相源 / Single Source of Truth）
 
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
@@ -113,6 +121,7 @@
 | `docs/reports/46_REMAINING_P2_AND_CSRC_2026-08-04.md` | **剩余 P2 与 CSRC 填充实施报告**：C3-C16 + O1 attestation **PASS** + O3/O5/O6；正式库 ready 恢复 | **B1/B2 全部关闭依据；CSRC 数据落地** |
 | `docs/reports/47_DESKTOP_SCREENING_UI_AND_STOCK_SEARCH_2026-08-04.md` | **桌面筛选界面与个股搜索入口实施报告**：正式筛选页 + 四模块侧栏 + 中文指标 + 模块内股票搜索 | **本次 UI 实施与门禁依据** |
 | `docs/reports/48_APPROVED_FOUR_PAGE_DESKTOP_UI_INTEGRATION_2026-08-04.md` | **已确认四页桌面界面正式接入报告**：样稿确认后完整接入四页 | **当前完整 UI 接入与门禁依据** |
+| `docs/reports/49_DESKTOP_UI_PARITY_AND_DATA_STATUS_FIX_2026-08-04.md` | 桌面界面同构与数据状态修复历史事实 | 当前结论被 `reports/50` 取代 |
 | `docs/reports/50_FINAL_SCREENING_UI_AND_AUTO_UPDATE_RECOVERY_2026-08-05.md` | 最终筛选界面与自动更新恢复历史事实 | 当前结论被 `reports/51`/`reports/52` 取代 |
 | `docs/reports/51_LAUNCH_PATH_AND_LIVE_STATUS_RECOVERY_2026-08-06.md` | 用户启动路径与实时状态恢复历史事实（连接修复、dist 遮蔽） | 当前结论被 `reports/52` 取代 |
 | `docs/reports/52_VISUAL_BASELINE_AND_LAUNCH_BUILD_STRATEGY_2026-08-06.md` | **视觉基线回归与按需构建启动**：范围常驻条件、全站字体/圆角恢复、指纹按需构建、构建入口随 build 提交 | **当前筛选入口、视觉、启动依据；与 reports/53 合并作为当前状态** |
@@ -128,7 +137,7 @@
 | `docs/reports/62_FORMAL_AUTO_RECOVERY_COMPLETE_2026-08-08.md` | **正式库普通用户路径恢复完成**：7 轮修复、最终 PASS、性能实测、剩余披露项清单 | **当前数据与恢复状态依据** |
 | `docs/reports/63_SYSTEM_RED_TEAM_REVIEW_2026-08-09.md` | 独立系统红队复审：P2-1 至 P2-4 发现基线 | **已被 `reports/64` 关闭** |
 | `docs/reports/64_RED_TEAM_P2_REMEDIATION_2026-08-09.md` | **红队 P2 风险修复**：启动、静态资源、状态轮询、价格重抓原子性全部关闭 | **当前红队修复与门禁依据** |
-| `docs/reports/65_TREASURY_BOND_REQUIREMENTS_ASSESSMENT_2026-08-09.md` | 记账式国债来源与架构调研事实 | **需求未确认，已被 `reports/66` 取代** |
+| `docs/reports/65_TREASURY_BOND_REQUIREMENTS_ASSESSMENT_2026-08-09.md` | 记账式国债来源与架构调研事实 | 调研事实保留；需求结论已被 `reports/68` 取代 |
 | `docs/reports/66_TREASURY_BOND_DISCOVERY_RESET_2026-08-09.md` | 国债需求探索重置：撤回未充分讨论的早期结论 | **已被 `reports/68` 取代** |
 | `docs/reports/67_BUSINESS_OVERVIEW_DATA_FEASIBILITY_2026-08-09.md` | **个股业务概览数据可行性**：东财 F10 主源、字段和风险边界 | **当前业务概览范围评估依据** |
 | `docs/reports/68_STOCK_DETAIL_AND_TREASURY_FEASIBILITY_2026-08-10.md` | **个股研究工作台与国债基准可行性**：P1-P4 门槛、来源和隔离架构 | **当前需求与实施前提依据** |
@@ -155,6 +164,10 @@
 | `docs/reports/89_STOCK_DETAIL_CLEANUP_2026-08-31.md` | **个股详情缺失字段清理与来源材料移除报告（2026-08-31）**：缺失卡片动态隐藏、来源材料移除；披露财务明细/业务概览补采边界 | 当前个股详情界面与数据缺口依据 |
 | `docs/reports/90_SINA_FINANCIAL_DETAIL_MAPPING_2026-08-31.md` | **Sina 财务三表明细字段映射补全报告（2026-08-31）**：70+ 明细字段映射、写入白名单、688139 样本回填与业务概览补抓 | 当前财务明细采集能力与剩余回填边界依据 |
 | `docs/reports/91_DATA_INTEGRITY_AUDIT_AND_DETAIL_BACKFILL_2026-08-31.md` | **数据完整性审计与自动续传报告（2026-08-31）**：财务明细缺口检测/有界回填、业务概览缺口计数、写窗口安全诊断 | 当前数据完整性检查与回填机制依据 |
+| `docs/reports/92_GLOBAL_DATA_PATH_REAUDIT_AND_INPUT_CHAIN_FIX_2026-08-31.md` | **全局数据路径复审计与指标输入链修复（2026-08-31）**：回购域接入自动更新、融资/国债/失败重试前移到快照前、内容级指纹、通用财务缺口探测、写类 CLI 单写者锁 | 当前数据路径与指标输入链依据 |
+| `docs/reports/93_POST_UPDATE_FULL_REAUDIT_2026-08-31.md` | **更新完成后全量复审计（2026-08-31）**：修复历史股本链游标队头重复、国债非交易日 missing 重试、CNINFO 源级 retry 清理、missing 冲突告警 | 当前更新后审计依据 |
+| `docs/reports/94_DATA_CODE_DUAL_REAUDIT_2026-08-31.md` | **数据与代码双重复查（2026-08-31）**：核心链路数据完整；修复业务概览 CLI 游标与 backfill missing 裸 INSERT | 当前双重复查与缺口依据 |
+| `docs/reports/95_FINANCIAL_DETAIL_BACKFILL_SPEEDUP_2026-08-31.md` | **财务明细回填提速与自动完成（2026-08-31）**：B 股过滤、并发抓取、批量事务、快速源优先、TDX 兜底；自动更新单周期清空缺口队列 | 当前财务明细回填依据 |
 | `docs/reports/96_UPDATE_MEMORY_RAW_ARCHIVE_SPLIT_2026-09-01.md` | **更新过程内存治理（2026-09-01）**：`raw_response_archive` 冷热分层（history + 小型 active + 全量视图）、写路径去 ON CONFLICT、正式库峰值 28GB→3GB、速率约29只/分 | 当前更新内存与原始响应归档结构依据 |
 | `docs/reports/97_UPDATE_MEMORY_LIMIT_AND_THROUGHPUT_2026-09-01.md` | **更新内存上限与吞吐优化（2026-09-01）**：DuckDB 12GB 上限、F10 并发抓取 60.5只/分、源缺失出队、Sina 财务明细 TEMP TABLE 合并 | 当前更新内存上限与吞吐优化依据 |
 | `docs/reports/98_TREASURY_SPREAD_BULK_AND_STATS_WORKERS_2026-09-01.md` | **更新总耗时压缩（2026-09-01）**：国债利差 30s 批量刷新、统计域并行12+曲线缓存、完整周期38→12分钟、DuckDB 14GB | 当前更新总耗时与国债重算优化依据 |
@@ -189,6 +202,7 @@
 - `reports/56`（启动耗时剖析）→ 根因与历史实测保留；readiness 后台缓存实施结论由 `reports/59` 更新。
 - `reports/58`（腾讯主源与初版并发）→ 官方调研与校准事实保留；当前并发、超时、动态限速和优先续传策略由 `reports/59` 更新。
 - `reports/59`（readiness 缓存与吞吐初版）→ 实现事实保留；红队修复、正式实测速率和正式库 BLOCK 裁决由 `reports/60` 更新。
+- `reports/59`（价格更新流水线实证与批量持久化，编号 59 重复的幽灵报告）→ 结论已并入 `reports/60`；front-matter 已标 superseded。
 - `reports/60`（红队与正式实践 BLOCK 裁决）→ 修复事实保留；数据现状由 `reports/62` 更新为 PASS。
 - `reports/63`（独立系统红队复审）→ 其 P2-1 至 P2-4 已由 `reports/64` 关闭。
 - `reports/66`（国债需求探索重置）→ 个股详情与国债基准需求已完成可行性门禁，当前结论见 `reports/68`。

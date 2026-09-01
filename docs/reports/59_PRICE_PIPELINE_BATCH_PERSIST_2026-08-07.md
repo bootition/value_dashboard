@@ -1,9 +1,10 @@
 ---
 title: 价格更新流水线实证与批量持久化报告（2026-08-07）
-status: approved
+status: superseded
 category: reports
 created: 2026-08-07
-last-reviewed: 2026-08-07
+last-reviewed: 2026-09-01
+superseded-by: reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md
 ---
 
 # 价格更新流水线实证与批量持久化报告（2026-08-07）
