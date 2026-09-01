@@ -1,10 +1,11 @@
 ---
 title: 数据库治理计划风险复审与修订
-status: approved
+status: superseded
 category: reports
 created: 2026-09-01
 last-reviewed: 2026-09-01
 supersedes: reports/99_DB_HOST_SURVEY_AND_NEXT_STEPS_2026-09-01.md
+superseded-by: reports/101_SECOND_PLAN_REVIEW_EXECUTABILITY_2026-09-01.md
 ---
 
 # 数据库治理计划风险复审与修订
