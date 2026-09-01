@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "captured_at_local": "2026-09-01T13:05:00+08:00",
+  "captured_at_utc": "2026-09-01T05:27:05.362753+00:00",
+  "host": {
+    "os": "Windows",
+    "cpu_physical_cores": 12,
+    "cpu_logical_processors": 24,
+    "ram_total_gb": 31.2,
+    "ram_free_observed_gb_range": [
+      2.5,
+      12.2
+    ],
+    "disks": [
+      {
+        "device": "C:",
+        "size_gb": 300.0,
+        "free_gb": 29.7
+      },
+      {
+        "device": "D:",
+        "size_gb": 652.9,
+        "free_gb": 183.6
+      }
+    ],
+    "physical_disk": "YMTC PC41Q-1TB-B SSD"
+  },
+  "duckdb": {
+    "path": "data/valuedashboard.duckdb",
+    "file_bytes": 53391667200,
+    "file_gib": 49.7,
+    "wal_bytes": 0,
+    "pragma_database_size": {
+      "database_size": "49.7 GiB",
+      "block_size": 262144,
+      "total_blocks": 203673,
+      "used_blocks": 137005,
+      "free_blocks": 66668,
+      "used_approx_decimal_gb": 35.9,
+      "used_approx_gib": 33.4,
+      "free_reclaimable_approx_decimal_gb": 17.5,
+      "free_reclaimable_approx_gib": 16.3,
+      "memory_usage": "9.2 MiB",
+      "memory_limit": "13.0 GiB"
+    },
+    "configured_memory_limit": "14GB"
+  },
+  "sqlite": {
+    "path": "data/valuedashboard.sqlite",
+    "approx_mb": 59
+  },
+  "tables_row_counts": {
+    "stock_meta": 6253,
+    "price_daily_raw": 17410272,
+    "price_daily_qfq": 17317123,
+    "balance_sheet": 427762,
+    "income_statement": 437527,
+    "cash_flow": 415648,
+    "dividends": 57175,
+    "xdxr": 183244,
+    "indicator_snapshot": 5542,
+    "company_profile": 5553,
+    "business_breakdown": 1008876,
+    "share_capital_history": 243653,
+    "research_statistics": 222080,
+    "funding_events": 12830,
+    "buyback_events": 5286,
+    "index_valuation": 5224,
+    "treasury_yield_curve": 47580,
+    "source_audit": 42065955,
+    "fetch_batch": 173663,
+    "raw_response_archive": 3541,
+    "raw_response_archive_history": 164651
+  },
+  "raw_archive_bytes": {
+    "active": 2725808426,
+    "history": 26097044124,
+    "total": 28822846550
+  },
+  "source_audit_string_bytes_estimate": 7289299807,
+  "data_quality": {
+    "ready": true,
+    "warning_codes": [],
+    "schema_compatible": true,
+    "lineage_gaps": {
+      "invalid_hash_rows": 0,
+      "orphan_batch_rows": 0,
+      "audit_archive_gap_rows": 0,
+      "empty_archive_payload_rows": 0,
+      "batch_archive_gap_rows": 0,
+      "hash_mismatch_rows": 0
+    },
+    "coverage": {
+      "listed": 5553,
+      "company_profile": 5553,
+      "business_breakdown": 5552,
+      "share_capital_history": 5551,
+      "research_statistics": 5552,
+      "financial_detail_gap_codes": 0
+    },
+    "missing_counts": {
+      "price_freshness": 2,
+      "financial_period": 11,
+      "snapshot_price_coherence": 11,
+      "share_capital": 12,
+      "corporate_action_dividend_lineage": 115,
+      "regulatory_fields": 2,
+      "snapshot_input_freshness": 11
+    },
+    "open_missing_by_field": {
+      "placement_funding": 339,
+      "csrc_industry": 110,
+      "balance.tier1_capital_adequacy_ratio": 48,
+      "balance.provision_coverage_ratio": 48,
+      "balance.non_performing_loan_ratio": 48,
+      "balance.core_tier1_capital_adequacy_ratio": 48,
+      "balance.capital_adequacy_ratio": 48,
+      "balance.risk_coverage_ratio": 34,
+      "treasury_curve_daily_2026-09-01": 1,
+      "business_breakdown": 1
+    },
+    "open_retry_count": 1,
+    "retry_sample": "301697 price_daily"
+  },
+  "recent_update_jobs": {
+    "job117": {
+      "status": "partial",
+      "duration_minutes": 11.5,
+      "reason": "301697 price retry; stats one-time fingerprint rebuild"
+    },
+    "job116": {
+      "status": "partial",
+      "duration_minutes": 11.3,
+      "reason": "301697 price retry"
+    },
+    "job115": {
+      "status": "partial",
+      "duration_minutes": 11.5,
+      "reason": "301697 price retry"
+    },
+    "job114": {
+      "status": "success",
+      "duration_minutes": 32.3
+    }
+  },
+  "tests": {
+    "full_s1_passed": 677,
+    "full_s1_failed": 2,
+    "full_s1_failures": "baseline mixed snapshot/statement report dates x2"
+  },
+  "observations": [
+    "DuckDB file high-water 49.7 GiB; used blocks approx 33.4 GiB; about 16.3 GiB is reclaimable free space.",
+    "Raw archive history is the largest single BLOB domain: 26.1 GB across 164,651 rows.",
+    "Active raw archive is 2.7 GB across 3,541 rows and remains fast to append.",
+    "After update finishes, the service process working set was observed oscillating between about 5 and 14.7 GB while idle; DuckDB pragma memory_usage was only 9.2 MiB at sample time, indicating retained process/file-mapping pages rather than active query memory. OS trims it under memory pressure.",
+    "D: drive now has 183.6 GB free, enough for an offline rebuild (estimated new file approx 36 GB plus safety backup).",
+    "Statistics fingerprint is deterministic and currently equal to stored value; no-change startups will skip the 5553-stock rebuild."
+  ]
+}
