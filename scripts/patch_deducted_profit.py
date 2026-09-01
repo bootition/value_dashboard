@@ -17,7 +17,6 @@ import time
 from pathlib import Path
 
 import akshare as ak
-import duckdb
 import pandas as pd
 
 from app.core.storage.duckdb_store import DuckDBStore

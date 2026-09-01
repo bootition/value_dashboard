@@ -121,7 +121,7 @@ def repair(store: DuckDBStore) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--no-verify", action="store_true", help="跳过 DELETE+ROLLBACK 验证")
-    args = parser.parse_args()
+    parser.parse_args()
 
     try:
         paths = require_formal_maintenance_paths()

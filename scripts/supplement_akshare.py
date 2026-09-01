@@ -283,26 +283,6 @@ def supplement_financials(
         "path to persist source payloads, fetch batches, and field audits atomically."
     )
 
-    cols = list(insert_df.columns)
-
-    existing = conn.execute(f"SELECT COUNT(*) FROM {table_name} WHERE report_date > '{CSMAR_CUTOFF}'").fetchone()[0]
-    if existing > 0:
-        csv_stocks = insert_df["stock_code"].nunique()
-        existing_stocks = conn.execute(
-            f"SELECT COUNT(DISTINCT stock_code) AS cnt FROM {table_name} WHERE report_date > '{CSMAR_CUTOFF}'"
-        ).fetchone()[0]
-        if existing_stocks > 0 and csv_stocks < existing_stocks * 0.5:
-            raise ValueError(
-                f"{table_name}: CSV covers {csv_stocks} stocks but DB has {existing_stocks} "
-                f"post-cutoff stocks. Refusing delete-and-replace."
-            )
-        conn.execute(f"DELETE FROM {table_name} WHERE report_date > '{CSMAR_CUTOFF}'")
-        logger.info("  已删除 %d 行旧补充数据", existing)
-
-    conn.execute(f"INSERT INTO {table_name} ({', '.join(cols)}) SELECT * FROM insert_df")
-    logger.info("  %s 写入完成: %d 行", table_name, len(insert_df))
-    return len(insert_df)
-
 
 def supplement_dividends(
     conn: duckdb.DuckDBPyConnection,

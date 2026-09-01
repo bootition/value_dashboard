@@ -1,5 +1,5 @@
 """全面审查：数据库、代码、配置、前端"""
-import duckdb, os, sys
+import duckdb, sys
 from pathlib import Path
 
 PROJECT = Path('D:/Mr.Q/掌控经济/value-dashboard')
