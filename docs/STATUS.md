@@ -168,6 +168,8 @@
 | `docs/runbooks/ops-auto-update-retry.md` | 自动更新与重试运行手册（O2） | |
 | `docs/runbooks/ops-data-rebuild.md` | 数据重建运行手册（O2） | |
 | `docs/runbooks/ops-build-release-s1.md` | 构建、发布与 S1 门禁运行手册（O2） | |
+| `docs/runbooks/ops-duckdb-rebuild.md` | DuckDB 离线重建运行手册（2026-09-01） | 数据库治理 P0 配套 |
+| `docs/runbooks/ops-knowledge-base.md` | **运行期硬约束知识库**：环境/数据源/DuckDB/口径/门禁/git 约束唯一常驻入口（聚合 reports 散落约束） | 2026-09-01 创建；对话中确认的新约束必须登记于此 |
 | `docs/contracts/path-isolation-contract.md` | 路径隔离合同（签署版） | |
 | `.planning/2026-07-31-automatic-data-updates/` | 当前实施会话计划 | 会话产物，不入 docs/ |
 ## 已被取代的结论（Superseded，禁止引用为当前结论）

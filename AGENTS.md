@@ -38,6 +38,16 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 - ✅ 机器证据（JSON/hash 等）只放 `docs/evidence/`
 - ✅ 修订 PRD（`docs/decisions/01_PRODUCT_REQUIREMENTS_V1.md`）时同步更新其 `last-reviewed` 并记录变更到其修订章节
 
+### 5. 隐性知识回写规则（强制，防止"知识只存在于对话里"）
+
+**背景教训（2026-09-01 体检）：** 大量运行期硬约束只存在于报告/当时会话里（如 12GB 实验库"为什么不敢删"、DuckDB 14GB 上限、东财封禁），新会话必须翻几十份报告才能拼全；`.planning/` 里甚至躺着无人敢删的 12GB 数据库副本。现立规则：
+
+- ✅ **对话中确认的任何固定事实/硬约束/保留期限/口径裁决，必须在本会话内写入文档**——优先登记到 `docs/runbooks/ops-knowledge-base.md`（运行期硬约束唯一常驻入口，含环境/数据源/DuckDB/口径/门禁/git 约束），同时更新其 `last-reviewed`
+- ✅ 新约束涉及状态变化时，按 §4 流程更新 `docs/STATUS.md`
+- ✅ 决策必须附着在决策物上：schema/代码级特殊设计（如 quarantine 隔离表、冷热分层）在代码注释或 knowledge-base 登记设计意图
+- ❌ 禁止把"定了但没写"的结论只留在对话里；会话结束时对话中不应残留未落文档的固定结论
+- ❌ 禁止删除/清理任何有保留期限的产物（如数据库重建回滚快照）而不在本文件/STATUS 登记依据
+
 ## 常用命令
 
 ```bash
@@ -77,6 +87,14 @@ uv lock --locked
 ### 4. 提交消息风格
 
 参考现有历史（`feat:` / `fix:` / `chore:` / `docs:` 前缀 + 中文摘要 + 可选要点列表）。
+
+### 5. 会话收尾检查清单（每次会话结束前强制逐项执行）
+
+1. ✅ 工作区 `git status` 清零（有未提交变更则按主题提交）
+2. ✅ `git push` 到 origin（代理 127.0.0.1:10808；失败必须如实告知，见 §3）
+3. ✅ 按"文档规则 §5"提炼本会话确认的知识到 `docs/runbooks/ops-knowledge-base.md`（或更新其 `last-reviewed`）
+4. ✅ 删除实验产物：数据库副本（`.duckdb` 拷贝）、临时 CSV、调试脚本等（先确认无保留价值，有保留期限的登记后保留）
+5. ✅ 清理 `.planning/<本会话>/` 中不再需要的中间文件（保留 findings/progress/task_plan 与最终交付物）
 
 ## 工作区边界
 
