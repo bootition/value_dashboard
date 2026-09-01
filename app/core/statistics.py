@@ -449,7 +449,7 @@ class StatisticsBuilder:
             import concurrent.futures
 
             completed = 0
-            chunk_size = max(50, min(250, 20000 // max(parallel, 1)))
+            chunk_size = max(25, min(100, 5000 // max(parallel, 1)))
             chunks = [
                 stock_codes[index:index + chunk_size]
                 for index in range(0, len(stock_codes), chunk_size)
