@@ -45,6 +45,11 @@ last-reviewed: 2026-09-01
 2. **统计域进程复用与曲线缓存**：每个 worker 进程复用同一个
    StatisticsBuilder，共享国债曲线解析缓存；默认并行数由 4 → **12**。
    5553 只重建实测约 9 分 11 秒。
+3. **统计域指纹确定性修复**：`_input_fingerprint` 的内容聚合增加
+   `stock_code` 作为最终排序键。此前多股共享同一报告日/除权日时，
+   DuckDB 的 `string_agg` 顺序不稳定，指纹在两次读取间漂移，导致
+   5553 只统计域每次启动都误重建。修复后连续 5 次读取指纹完全一致；
+   后续只有真实输入变化才会重建统计域。
 3. **配置**：
    - `research_statistics_parallel_workers: 12`
    - `database.duckdb_memory_limit: "14GB"`
