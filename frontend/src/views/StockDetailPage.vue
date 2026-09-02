@@ -20,7 +20,6 @@ import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
 import { fmt, fmtPct } from '../utils/formatters.ts'
 import { loadKlineSettings, pageStorage, saveKlineSettings } from '../utils/kline-settings.ts'
-import type { KlineRange } from '../utils/kline-settings.ts'
 import type {
   StockInfo,
   IndicatorsResponse,
@@ -56,7 +55,6 @@ const warningCodes = ref<readonly WarningCode[]>([])
 const initialKlineSettings = loadKlineSettings(pageStorage())
 const klinePeriod = ref<KlinePeriod>(initialKlineSettings.period)
 const adjustMode = ref<'raw' | 'qfq'>(initialKlineSettings.adjust)
-const klineRange = ref<number>(initialKlineSettings.range)
 const klineAbortController = ref<AbortController | null>(null)
 
 // 财务趋势配置
@@ -143,7 +141,6 @@ async function fetchKline(gen: number) {
     const resp = await axios.get<KlineResponse>(`/api/stock/${stockCode.value}/kline`, {
       params: {
         adjust: adjustMode.value,
-        days: klineRange.value,
         period: klinePeriod.value,
       },
       signal: klineAbortController.value.signal,
@@ -419,12 +416,11 @@ function updateActiveSection() {
 }
 
 // ─── 监听变化 ───────────────────────────────────────────────────────────
-watch([klinePeriod, adjustMode, klineRange], () => {
+watch([klinePeriod, adjustMode], () => {
   saveKlineSettings(
     {
       period: klinePeriod.value,
       adjust: adjustMode.value,
-      range: klineRange.value as KlineRange,
     },
     pageStorage(),
   )
@@ -542,7 +538,6 @@ onUnmounted(() => {
             <KlineChartCard
               v-model:period="klinePeriod"
               v-model:adjust="adjustMode"
-              v-model:range="klineRange"
               :candles="klineData.candles"
             />
           </section>

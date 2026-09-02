@@ -206,6 +206,27 @@ def test_monthly_kline_aggregates_ohlcv_with_last_trading_day(
     assert feb["turnover_rate"] is None
 
 
+def test_kline_days_none_returns_all_history_in_ascending_order(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _insert_kline_rows(
+        duckdb_store,
+        "600519",
+        [
+            (date(2026, 1, 5), 10, 12, 9, 11, 100, 1000),
+            (date(2026, 1, 6), 11, 13, 10, 12, 100, 1000),
+            (date(2026, 1, 7), 12, 14, 11, 13, 100, 1000),
+        ],
+    )
+
+    result = get_kline("600519", request=_kline_request(duckdb_store))
+
+    assert result["count"] == 3
+    assert [bar["trade_date"] for bar in result["candles"]] == [
+        date(2026, 1, 5), date(2026, 1, 6), date(2026, 1, 7),
+    ]
+
+
 def test_weekly_kline_uses_iso_week_buckets_across_year_boundary(
     duckdb_store: DuckDBStore,
 ) -> None:

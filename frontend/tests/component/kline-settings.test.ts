@@ -18,12 +18,12 @@ describe('kline-settings localStorage 持久化', () => {
   })
 
   it('合法存档被完整还原', () => {
-    saveKlineSettings({ period: 'week', adjust: 'qfq', range: 500 }, localStorage)
-    expect(loadKlineSettings(localStorage)).toEqual({ period: 'week', adjust: 'qfq', range: 500 })
+    saveKlineSettings({ period: 'week', adjust: 'qfq' }, localStorage)
+    expect(loadKlineSettings(localStorage)).toEqual({ period: 'week', adjust: 'qfq' })
   })
 
   it('非法值整体回退默认', () => {
-    localStorage.setItem(KEY, JSON.stringify({ period: 'invalid', adjust: 'bad', range: 12345 }))
+    localStorage.setItem(KEY, JSON.stringify({ period: 'invalid', adjust: 'bad' }))
     expect(loadKlineSettings(localStorage)).toEqual(DEFAULT_KLINE_SETTINGS)
   })
 
@@ -34,7 +34,7 @@ describe('kline-settings localStorage 持久化', () => {
 
   it('部分存档只回退非法字段，保留合法字段', () => {
     localStorage.setItem(KEY, JSON.stringify({ period: 'month' }))
-    expect(loadKlineSettings(localStorage)).toEqual({ period: 'month', adjust: 'raw', range: 250 })
+    expect(loadKlineSettings(localStorage)).toEqual({ period: 'month', adjust: 'raw' })
   })
 
   it('storage 不可用时读写均安全降级', () => {

@@ -277,17 +277,19 @@ def get_kline(
     stock_code: str,
     request: Request,
     adjust: Literal["raw", "qfq"] = "raw",
-    days: int = Query(250, ge=1, le=2000),
+    days: int | None = Query(default=None, ge=1, le=20000),
     period: Literal["day", "week", "month"] = "day",
 ) -> dict:
     """K线数据 (PRD §14 SD2: 日/周/月K, 成交量, 均线, raw与qfq切换)
 
-    period=day 保持原行为；period=week/month 服务端读时聚合日线：
+    days 缺省时返回该股全部可得 K 线（由前端 K 线图缩放/平移查看范围）；
+    显式传 days 仍按最近 N 根返回，兼容既有调用与回归测试。
+
+    period=day 直读日线；period=week/month 服务端读时聚合日线：
     - trade_date 取桶内最后一个真实交易日
     - open/close 取桶内首个/末个真实交易日价格，high/low 取桶内极值，
       volume/turnover 求和
     - turnover_rate 周/月 fail-closed 置 null
-    - days 表示返回的 K 线根数（取最新 days 根后升序）
     聚合后复用 _calc_ma 计算均线。
     """
     duck = request.app.state.duck
@@ -306,24 +308,36 @@ def get_kline(
     )
 
     if period == "day":
-        rows = duck.read_query(
-            f"""SELECT trade_date, open, high, low, close, volume, turnover,
-                       {turnover_rate_column}
-                FROM {table}
-                WHERE stock_code = ? AND close IS NOT NULL
-                ORDER BY trade_date DESC
-                LIMIT ?""",
-            [stock_code, days],
-        )
+        if days is None:
+            rows = duck.read_query(
+                f"""SELECT trade_date, open, high, low, close, volume, turnover,
+                           {turnover_rate_column}
+                    FROM {table}
+                    WHERE stock_code = ? AND close IS NOT NULL
+                    ORDER BY trade_date ASC""",
+                [stock_code],
+            )
+        else:
+            rows = duck.read_query(
+                f"""SELECT trade_date, open, high, low, close, volume, turnover,
+                           {turnover_rate_column}
+                    FROM {table}
+                    WHERE stock_code = ? AND close IS NOT NULL
+                    ORDER BY trade_date DESC
+                    LIMIT ?""",
+                [stock_code, days],
+            )
+            # 按时间正序排列（旧→新）
+            rows.reverse()
         if not rows:
             return {"candles": [], "adjust": adjust, "period": period}
-        # 按时间正序排列（旧→新）
-        rows.reverse()
     else:
         daily_rows = _fetch_daily_for_aggregation(duck, table, stock_code, days, period)
         if not daily_rows:
             return {"candles": [], "adjust": adjust, "period": period}
-        rows = _aggregate_candles(daily_rows, period)[-days:]
+        rows = _aggregate_candles(daily_rows, period)
+        if days is not None:
+            rows = rows[-days:]
 
     # 计算 MA 线
     closes = [r["close"] for r in rows]
@@ -341,9 +355,21 @@ def get_kline(
 
 
 def _fetch_daily_for_aggregation(
-    duck: object, table: str, stock_code: str, days: int, period: str
+    duck: object, table: str, stock_code: str, days: int | None, period: str
 ) -> list[dict]:
-    """取构建最近 days 根周/月 K 线所需的升序日线窗口（带时间边界下界）"""
+    """取构建周/月 K 线所需的升序日线。
+
+    days 缺省取全部可得日线；显式传 days 时只取覆盖最近 days 根周/月
+    K 线所需的时间窗口（带时间边界下界），兼容旧调用。
+    """
+    if days is None:
+        return duck.read_query(
+            f"""SELECT trade_date, open, high, low, close, volume, turnover
+                FROM {table}
+                WHERE stock_code = ? AND close IS NOT NULL
+                ORDER BY trade_date ASC""",
+            [stock_code],
+        )
     max_row = duck.read_query(
         f"SELECT max(trade_date) AS latest FROM {table} "
         "WHERE stock_code = ? AND close IS NOT NULL",

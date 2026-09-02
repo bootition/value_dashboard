@@ -38,6 +38,7 @@ const WINDOW_OPTIONS = [
 
 const metric = ref<string>(props.defaultMetric)
 const window = ref<number>(10)
+const windowAutoSwitched = ref(false)
 const viewMode = ref<'band' | 'sigma'>('band')
 const loading = ref(false)
 const data = ref<ResearchStatisticsResponse | null>(null)
@@ -171,6 +172,30 @@ const sigmaLines = computed(() => {
 
 const overlayLines = computed(() => (viewMode.value === 'band' ? bandLines.value : sigmaLines.value))
 
+/**
+ * 部分股票（如 2022 年上市的中国移动）没有 1200 个交易日样本，
+ * 默认 10 年窗口的统计为 insufficient_samples，图上自然没有任何辅助线。
+ * 数据到达后自动切到最长的可用窗口，避免“图表看起来没有辅助线”。
+ */
+function autoSelectAvailableWindow() {
+  const preferred = [window.value, 10, 5, 3, 1, 99]
+  for (const candidate of preferred) {
+    const stat = data.value?.statistics?.[`${candidate}y`]
+    const usable = (
+      stat
+      && stat.reason == null
+      && (stat.mean != null || stat.p10 != null)
+    )
+    if (usable) {
+      if (window.value !== candidate) {
+        window.value = candidate
+        windowAutoSwitched.value = true
+      }
+      return
+    }
+  }
+}
+
 function statRow(label: string, value: unknown, unit = ''): string {
   if (value === null || value === undefined) return `${label} —`
   if (typeof value === 'number') return `${label} ${value.toFixed(2)}${unit}`
@@ -216,6 +241,8 @@ async function fetchData() {
       { params: { metric: metric.value } },
     )
     data.value = resp.data
+    windowAutoSwitched.value = false
+    autoSelectAvailableWindow()
   } catch (e) {
     if (isAxiosError(e) && e.response?.status === 404) return
     errorText.value = friendlyErrorMessage(e, '加载历史研究统计失败')
@@ -268,6 +295,9 @@ onMounted(fetchData)
       口径：最新重述回看（历史日使用该日对应报告期当前最新重述财务值与历史有效总股本），
       不代表当时市场可见信息，不用于回测。PE≤0 不参与统计；历史股本未覆盖日 PE/PB 为缺失。
       本卡为实时计算，与筛选使用的已发布统计域可能存在时差；股息率与国债比较已合并进“股息率-国债10年利差”序列。
+    </p>
+    <p v-if="windowAutoSwitched" class="stat-auto-note">
+      该股票历史样本不足，已自动切换到 {{ window }} 年窗口。
     </p>
 
     <n-spin :show="loading">
@@ -364,6 +394,11 @@ onMounted(fetchData)
   color: #85928a;
   font-size: 11px;
   line-height: 1.6;
+}
+.stat-auto-note {
+  margin: -6px 0 12px;
+  color: #b98a2e;
+  font-size: 11px;
 }
 .stat-chart-frame {
   padding: 12px;

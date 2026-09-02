@@ -277,28 +277,28 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
     expect(wrapper.find('.toc-link.active').text()).toBe('财务安全')
   })
 
-  it('localStorage 全局记忆 period/adjust/range 并作用于请求', async () => {
+  it('localStorage 全局记忆 period/adjust 并作用于请求', async () => {
     localStorage.setItem(
       KLINE_SETTINGS_KEY,
-      JSON.stringify({ period: 'week', adjust: 'qfq', range: 500 }),
+      JSON.stringify({ period: 'week', adjust: 'qfq' }),
     )
     const klineRequests = setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
-    expect(klineRequests[0]).toMatchObject({ period: 'week', adjust: 'qfq', days: 500 })
+    expect(klineRequests[0]).toMatchObject({ period: 'week', adjust: 'qfq' })
   })
 
-  it('非法 period/adjust/range 安全回退默认', async () => {
+  it('非法 period/adjust 安全回退默认', async () => {
     localStorage.setItem(
       KLINE_SETTINGS_KEY,
-      JSON.stringify({ period: 'invalid', adjust: 'bad', range: 123 }),
+      JSON.stringify({ period: 'invalid', adjust: 'bad' }),
     )
     const klineRequests = setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
-    expect(klineRequests[0]).toMatchObject({ period: 'day', adjust: 'raw', days: 250 })
+    expect(klineRequests[0]).toMatchObject({ period: 'day', adjust: 'raw' })
   })
 
   it('切换周期后写入 localStorage 并重新拉取 K 线', async () => {

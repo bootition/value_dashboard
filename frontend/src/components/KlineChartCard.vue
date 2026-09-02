@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { NEmpty, NRadioButton, NRadioGroup, NSelect } from 'naive-ui'
+import { NEmpty, NRadioButton, NRadioGroup } from 'naive-ui'
 import { dispose, init } from 'klinecharts'
 import type { Chart, KLineData } from 'klinecharts'
 import type { KlineCandle, KlinePeriod } from '../types/stock-detail.ts'
-import { KLINE_ADJUSTS, KLINE_PERIODS, KLINE_RANGES } from '../utils/kline-settings.ts'
+import { KLINE_ADJUSTS, KLINE_PERIODS } from '../utils/kline-settings.ts'
 
 const props = defineProps<{
   readonly candles: readonly KlineCandle[]
@@ -12,7 +12,6 @@ const props = defineProps<{
 
 const period = defineModel<KlinePeriod>('period', { required: true })
 const adjust = defineModel<'raw' | 'qfq'>('adjust', { required: true })
-const range = defineModel<number>('range', { required: true })
 
 const container = ref<HTMLElement>()
 const chartInstance = ref<Chart | null>(null)
@@ -22,11 +21,6 @@ const periodOptions = [
   { label: '周K', value: 'week' },
   { label: '月K', value: 'month' },
 ] as const
-
-const rangeOptions = computed(() => {
-  const unit = period.value === 'day' ? '日' : period.value === 'week' ? '周' : '月'
-  return KLINE_RANGES.map((n) => ({ label: `${n}${unit}`, value: n }))
-})
 
 const isEmpty = computed(() => props.candles.length === 0)
 
@@ -41,12 +35,6 @@ function onAdjustChange(value: string | number) {
   const v = String(value)
   if ((KLINE_ADJUSTS as readonly string[]).includes(v)) {
     adjust.value = v as 'raw' | 'qfq'
-  }
-}
-
-function onRangeChange(value: string | number | null) {
-  if (typeof value === 'number' && (KLINE_RANGES as readonly number[]).includes(value)) {
-    range.value = value
   }
 }
 
@@ -139,6 +127,9 @@ function renderChart() {
   chart.setSymbol({ ticker: 'A股', pricePrecision: 2, volumePrecision: 0 })
   // setPeriod 触发 getBars('init') 载入数据，并让十字光标/时间轴按周期格式化。
   chart.setPeriod({ type: period.value, span: 1 })
+  // 全历史载入后由用户滚轮缩放、拖动平移查看任意区间，不再用固定 days 下拉。
+  chart.setZoomEnabled(true)
+  chart.setScrollEnabled(true)
   // 首次挂载时容器可能刚从 loading 遮罩中完成布局，主动 resize 一次。
   if ('resize' in chart) chart.resize()
   chart.createIndicator({ name: 'MA', calcParams: [5, 10, 20, 60, 120, 250] }, false)
@@ -146,6 +137,11 @@ function renderChart() {
 }
 
 watch(() => props.candles, renderChart)
+watch(period, (value) => {
+  if (chartInstance.value) {
+    chartInstance.value.setPeriod({ type: value, span: 1 })
+  }
+})
 onMounted(renderChart)
 
 onUnmounted(() => {
@@ -173,16 +169,10 @@ onUnmounted(() => {
           <n-radio-button value="raw">不复权</n-radio-button>
           <n-radio-button value="qfq">前复权</n-radio-button>
         </n-radio-group>
-        <n-select
-          :value="range"
-          :options="rangeOptions"
-          size="small"
-          style="width: 104px"
-          @update:value="onRangeChange"
-        />
       </div>
     </div>
     <div ref="container" class="kline-canvas"></div>
+    <p class="kline-hint">已载入全部历史 K 线 · 滚轮缩放，拖动平移</p>
     <n-empty v-if="isEmpty" description="无K线数据" class="kline-empty" />
   </section>
 </template>
@@ -221,6 +211,11 @@ onUnmounted(() => {
   height: 400px;
   margin-top: 18px;
   width: 100%;
+}
+.kline-hint {
+  margin: 8px 2px 0;
+  color: #91a097;
+  font-size: 10px;
 }
 .kline-empty {
   padding: 30px;

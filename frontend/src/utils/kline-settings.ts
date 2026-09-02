@@ -1,5 +1,5 @@
 /**
- * K 线查看偏好（period / adjust / range）的全局持久化。
+ * K 线查看偏好（period / adjust）的全局持久化。
  *
  * 通过 localStorage 记忆用户在个股研究中的 K 线偏好，跨股票、跨会话生效。
  * 读取时对非法值做安全回退，避免脏数据破坏页面。storage 不可用时静默忽略。
@@ -10,19 +10,14 @@ import type { KlinePeriod } from '../types/stock-detail.ts'
 export const KLINE_PERIODS = ['day', 'week', 'month'] as const
 export type KlineAdjust = 'raw' | 'qfq'
 export const KLINE_ADJUSTS = ['raw', 'qfq'] as const
-export const KLINE_RANGES = [250, 500, 1000] as const
-export type KlineRange = (typeof KLINE_RANGES)[number]
-
 export interface KlineSettings {
   readonly period: KlinePeriod
   readonly adjust: KlineAdjust
-  readonly range: KlineRange
 }
 
 export const DEFAULT_KLINE_SETTINGS: KlineSettings = {
   period: 'day',
   adjust: 'raw',
-  range: 250,
 }
 
 const STORAGE_KEY = 'vd.stock-detail.kline-settings'
@@ -33,10 +28,6 @@ function isKlinePeriod(value: unknown): value is KlinePeriod {
 
 function isKlineAdjust(value: unknown): value is KlineAdjust {
   return (KLINE_ADJUSTS as readonly unknown[]).includes(value)
-}
-
-function isKlineRange(value: unknown): value is KlineRange {
-  return (KLINE_RANGES as readonly unknown[]).includes(value)
 }
 
 /**
@@ -55,7 +46,6 @@ export function loadKlineSettings(
     return {
       period: isKlinePeriod(candidate.period) ? candidate.period : DEFAULT_KLINE_SETTINGS.period,
       adjust: isKlineAdjust(candidate.adjust) ? candidate.adjust : DEFAULT_KLINE_SETTINGS.adjust,
-      range: isKlineRange(candidate.range) ? candidate.range : DEFAULT_KLINE_SETTINGS.range,
     }
   } catch {
     return { ...DEFAULT_KLINE_SETTINGS }
