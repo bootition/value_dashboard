@@ -305,13 +305,22 @@ class DataInitializer:
         logger.info(f"[Step 1] 获取 {len(records)} 只股票")
         return {"status": "success", "count": len(records)}
 
-    def _fetch_listing_info(self) -> dict[str, Any]:
-        """Fetch and persist listing/ST/suspension/share metadata for the stock universe."""
-        logger.info("[Step 1b] 获取上市与状态元数据...")
-        stocks = self.duck.read_query(
-            "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
-        )
-        stock_codes = [row["stock_code"] for row in stocks]
+    def _fetch_listing_info(self, stock_codes: list[str] | None = None) -> dict[str, Any]:
+        """Fetch and persist listing/ST/suspension/share metadata for the stock universe.
+
+        ``stock_codes`` 非空时只补抓指定缺口股票；否则全量刷新。增量更新
+        在新股刚进入 stock_list 但 listing_info 处于日内节流窗口时，
+        用该方法把新股元数据补上，避免 publish gate 被新代码块阻塞。
+        """
+        if stock_codes:
+            logger.info("[Step 1b] 补抓上市与状态元数据: %d 只", len(stock_codes))
+        else:
+            logger.info("[Step 1b] 获取上市与状态元数据...")
+            stocks = self.duck.read_query(
+                "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
+            )
+            stock_codes = [row["stock_code"] for row in stocks]
+        stock_codes = list(dict.fromkeys(str(code).strip() for code in stock_codes if str(code).strip()))
         if not stock_codes:
             return {"status": "skipped", "reason": "no_stock_universe", "count": 0}
 

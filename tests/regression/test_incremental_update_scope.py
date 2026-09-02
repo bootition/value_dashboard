@@ -197,12 +197,60 @@ def test_universe_steps_are_throttled_by_daily_marker(
         lambda self, **kwargs: {"status": "success", "count": 1},
     )
 
+    # 没有元数据缺口的正常库仍应命中节流；缺口新股会触发定向补抓（见下一条测试）。
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta
+           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended)
+           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', TRUE, FALSE, FALSE)"""
+    )
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     step = updater._refresh_universe_metadata()
 
     assert step["steps"]["stock_list"]["status"] == "skipped"
     assert step["steps"]["listing_info"]["status"] == "skipped"
     assert step["steps"]["csrc_industry"]["status"] == "success"
+
+
+def test_listing_info_gap_forces_targeted_refresh_inside_daily_window(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """新股已进入 stock_list 但 listing_info 还在日内节流窗口时，必须补抓。"""
+    from app.core.init import DataInitializer
+
+    now = datetime.now(UTC)
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES ('stock_list_last_refresh', ?, ?)""",
+        [now.isoformat(), now.isoformat()],
+    )
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES ('listing_info_last_refresh', ?, ?)""",
+        [now.isoformat(), now.isoformat()],
+    )
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta
+           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended)
+           VALUES ('301688', 'N Test', 'SZSE', NULL, TRUE, NULL, NULL)"""
+    )
+    seen: list[list[str] | None] = []
+
+    def fake_listing(self, stock_codes=None):
+        seen.append(stock_codes)
+        return {"status": "success", "count": len(stock_codes or []), "missing": 0}
+
+    monkeypatch.setattr(DataInitializer, "_fetch_stock_universe",
+                        lambda self: {"status": "success", "count": 1})
+    monkeypatch.setattr(DataInitializer, "_fetch_listing_info", fake_listing)
+    monkeypatch.setattr(DataInitializer, "_fetch_csrc_industry",
+                        lambda self, **kwargs: {"status": "success", "count": 1})
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    step = updater._refresh_universe_metadata()
+
+    assert seen == [["301688"]]
+    assert step["steps"]["stock_list"]["status"] == "skipped"
+    assert step["steps"]["listing_info"]["status"] == "success"
 
 
 def test_universe_steps_run_when_marker_stale_or_absent(
@@ -224,7 +272,7 @@ def test_universe_steps_run_when_marker_stale_or_absent(
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_listing_info",
-        lambda self: calls.append("listing_info") or {"status": "success", "count": 1},
+        lambda self, **kwargs: calls.append("listing_info") or {"status": "success", "count": 1},
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_csrc_industry",

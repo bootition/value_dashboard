@@ -107,6 +107,10 @@ def _run_startup_maintenance(
 
         controller = AutoUpdateController(duck=duck, sqlite=sqlite)
         if controller.status().get("enabled") and not controller.status().get("paused"):
+            # 进程被直接关闭时 job_logs 会残留 running 行；启动先结算它们，
+            # 避免“重开一次就多一个 running 任务”的观感与错误统计。
+            from app.core.update import IncrementalUpdater
+            IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
             logger.info("启动后台自动更新（PRD §7.3）...")
             controller.run_once()
             logger.info("自动更新完成")

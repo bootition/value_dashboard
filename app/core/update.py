@@ -960,6 +960,16 @@ class IncrementalUpdater:
         )
         return rows[0]["fp"] if rows else ""
 
+    def _listing_info_gap_codes(self) -> list[str]:
+        """Return listed stocks missing metadata needed by the publish gate."""
+        rows = self.duck.read_query(
+            """SELECT stock_code FROM stock_meta
+               WHERE is_listed IS TRUE
+                 AND (listing_date IS NULL OR is_st IS NULL OR is_suspended IS NULL)
+               ORDER BY stock_code"""
+        )
+        return [row["stock_code"] for row in rows]
+
     def _refresh_universe_metadata(self) -> dict[str, Any]:
         """PRD §7.7 第 4 项: 刷新股票池、上市/ST/停牌/股本与 CSRC 行业。
 
@@ -989,10 +999,18 @@ class IncrementalUpdater:
                 "interval_days": self.universe_refresh_interval_days,
             }
 
-        if self._refresh_due("listing_info_last_refresh", self.universe_refresh_interval_days):
+        listing_due = self._refresh_due(
+            "listing_info_last_refresh", self.universe_refresh_interval_days
+        )
+        # 新股今天刚进入 stock_list 时，listing_info 可能还在日内节流窗口；
+        # 不能跳过，否则 listing_date/ST/停牌/股本缺失会卡住快照发布。
+        gap_codes = self._listing_info_gap_codes()
+        if listing_due or gap_codes:
             try:
-                steps["listing_info"] = initializer._fetch_listing_info()
-                if steps["listing_info"].get("status") == "success":
+                steps["listing_info"] = initializer._fetch_listing_info(
+                    stock_codes=gap_codes if not listing_due and gap_codes else None
+                )
+                if listing_due and steps["listing_info"].get("status") == "success":
                     self._mark_refreshed("listing_info_last_refresh")
             except Exception as error:
                 logger.warning("上市状态刷新失败: %s", error)
