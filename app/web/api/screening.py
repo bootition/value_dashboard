@@ -670,11 +670,13 @@ def list_available_indicators(request: Request) -> dict:
     for expression in published:
         indicators.append({
             "name": expression["name"], "rankable": True,
-            "label": _DSL_INDICATOR_LABELS.get(
-                expression["name"], f"{expression['name']} (DSL v{expression['version']})"
-            ),
+            # 2026-09-02：筛选条件保留英文表达式名（规则 JSON 稳定口径）；
+            # display_name 供复合指标管理/详情等非筛选界面显示中文名。
+            "label": f"{expression['name']} (DSL v{expression['version']})",
+            "display_name": _DSL_INDICATOR_LABELS.get(expression["name"], expression["name"]),
             "unit": _DSL_INDICATOR_UNITS.get(expression["name"], "plain"),
             "version": expression["version"], "content_hash": expression["content_hash"],
+            "dsl": True,
         })
     return {"indicators": indicators, "count": len(indicators)}
 

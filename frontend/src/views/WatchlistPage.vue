@@ -17,6 +17,7 @@ interface WatchlistItem {
   name: string
   exchange: string
   csrc_l1: string | null
+  listing_date: string | null
   group_name: string
   source_rule_id: number | null
   source_result_id: number | null
@@ -31,6 +32,8 @@ interface WatchlistItem {
   revenue_yoy: number | null
   net_profit_yoy: number | null
   dividend_yield: number | null
+  total_market_cap: number | null
+  circ_market_cap: number | null
   untrusted_fields?: string[]
 }
 
@@ -72,7 +75,7 @@ const selectedGroupLabel = computed(() => selectedGroup.value || '默认组')
 const displayGroupName = (name: string) => name === 'default' ? '默认组' : name
 
 // L1-7（报告42）: 列配置记忆（localStorage），无历史配置时用默认列
-const DEFAULT_COLUMNS = ['stock_code', 'name', 'exchange', 'group_name', 'latest_close', 'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'debt_ratio', 'source']
+const DEFAULT_COLUMNS = ['stock_code', 'name', 'exchange', 'group_name', 'listing_date', 'total_market_cap', 'latest_close', 'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'debt_ratio', 'source']
 const COLUMNS_STORAGE_KEY = 'vd.watchlist.columns'
 
 function loadSavedColumns(): string[] {
@@ -96,6 +99,9 @@ const allColumnOptions = [
   { label: '股票名称', value: 'name' },
   { label: '交易所', value: 'exchange' },
   { label: '分组', value: 'group_name' },
+  { label: '上市日期', value: 'listing_date' },
+  { label: fieldDisplayName('total_market_cap'), value: 'total_market_cap' },
+  { label: fieldDisplayName('circ_market_cap'), value: 'circ_market_cap' },
   { label: fieldDisplayName('latest_close'), value: 'latest_close' },
   { label: fieldDisplayName('pe_ttm'), value: 'pe_ttm' },
   { label: fieldDisplayName('pb_mrq'), value: 'pb_mrq' },
@@ -132,6 +138,7 @@ async function copyStockCode(code: string) {
 type NumericField =
   | 'latest_close' | 'pe_ttm' | 'pb_mrq' | 'roe' | 'gross_margin'
   | 'net_margin' | 'debt_ratio' | 'revenue_yoy' | 'net_profit_yoy' | 'dividend_yield'
+  | 'total_market_cap' | 'circ_market_cap'
 
 function trustedRender(field: NumericField) {
   // L0-2（报告42）: 与筛选/详情共用同一字段口径格式化
@@ -161,6 +168,9 @@ const tableColumns = computed(() => {
     name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || '—' },
     exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
     group_name: { title: '分组', key: 'group_name', width: 90 },
+    listing_date: { title: '上市日期', key: 'listing_date', width: 96, sorter: 'default', render: (r) => r.listing_date || '—' },
+    total_market_cap: { title: fieldTitleWithUnit('total_market_cap', '总市值'), key: 'total_market_cap', width: 110, sorter: 'default', render: trustedRender('total_market_cap') },
+    circ_market_cap: { title: fieldTitleWithUnit('circ_market_cap', '流通市值'), key: 'circ_market_cap', width: 110, sorter: 'default', render: trustedRender('circ_market_cap') },
     latest_close: { title: fieldTitleWithUnit('latest_close', '收盘价'), key: 'latest_close', width: 80, sorter: 'default', render: trustedRender('latest_close') },
     pe_ttm: { title: fieldTitleWithUnit('pe_ttm', 'PE'), key: 'pe_ttm', width: 70, sorter: 'default', render: trustedRender('pe_ttm') },
     pb_mrq: { title: fieldTitleWithUnit('pb_mrq', 'PB'), key: 'pb_mrq', width: 70, sorter: 'default', render: trustedRender('pb_mrq') },

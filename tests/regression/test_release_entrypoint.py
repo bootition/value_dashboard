@@ -159,8 +159,13 @@ def test_start_bat_executes_under_cmd_and_reaches_packaged_branch(tmp_path: Path
     command_shims = tmp_path / "command-shims"
     command_shims.mkdir()
     (command_shims / "netstat.cmd").write_bytes(b"@exit /b 1\r\n")
+    # 本机 8765 常驻服务会让 start.bat 的 health-check 提前走 already-running 分支；
+    # shim powershell 固定返回 1，确保测试始终进入 packaged 分支。
+    (command_shims / "powershell.cmd").write_bytes(b"@exit /b 1\r\n")
+
     env = os.environ.copy()
     env["PATH"] = f"{command_shims}{os.pathsep}{env['PATH']}"
+    env["VD_SKIP_HEALTH_CHECK"] = "1"
 
     subprocess.run(
         ["cmd", "/d", "/c", "start.bat < nul"],

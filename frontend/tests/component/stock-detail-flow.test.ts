@@ -370,36 +370,16 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
     expect(wrapper.find('#operations').text()).toContain('暂无主营构成数据')
   })
 
-  it('股东回报章节展示国债比较（利差默认）', async () => {
+  it('国债比较已合并进历史研究统计，不再单独请求国债卡片', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
-    const returnText = wrapper.find('#return').text()
-    expect(returnText).toContain('国债比较')
-    expect(returnText).toContain('利差')
-    expect(returnText).toContain('TTM已实施股息率')
-    expect(returnText).toContain('czb_mof')
-    // 默认请求 10 年期限
+    expect(wrapper.find('#return').text()).not.toContain('国债比较')
+    expect(wrapper.find('#valuation').text()).toContain('国债比较已合并进“股息率-国债10年利差”序列')
     const requests = (axios.get as Mock).mock.calls
       .filter(([url]: [string]) => String(url).includes('/treasury-comparison'))
-      .map(([, config]: [string, { params?: Record<string, unknown> } | undefined]) => config?.params)
-    expect(requests[0]).toMatchObject({ tenor: 10, limit: 250 })
-  })
-
-  it('国债曲线缺失时显示局部空态', async () => {
-    const missing = {
-      ...TREASURY_COMPARISON,
-      series: [],
-      missing: true,
-      provenance: null,
-    }
-    setupAxiosMock(null, null, missing)
-    const { wrapper } = await mountDetailWithCode('600519')
-    await flushPromises()
-
-    const returnText = wrapper.find('#return').text()
-    expect(returnText).toContain('暂无国债比较数据')
+    expect(requests).toEqual([])
   })
 
   it('估值章节展示历史研究统计（分位带与z-score）', async () => {
@@ -415,22 +395,14 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
     expect(valuationText).toContain('最新重述回看')
   })
 
-  it('股东回报章节基本渲染且统计组件默认股息率序列', async () => {
-    const statisticCalls: Array<Record<string, unknown>> = []
+  it('历史研究统计只渲染一张且默认可切换股息利差序列', async () => {
     setupAxiosMock()
-    const get = axios.get as Mock
-    const original = get.getMockImplementation()
-    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
-      if (String(url).includes('/research-statistics')) {
-        statisticCalls.push(config?.params ?? {})
-      }
-      return original?.(url, config)
-    })
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
-    expect(wrapper.find('#return').text()).toContain('历史研究统计')
-    const defaultMetric = statisticCalls.find((p) => p.metric === 'ttm_dividend_yield')
-    expect(defaultMetric).toBeTruthy()
+    const cards = wrapper.findAll('[aria-label="历史研究统计"]')
+    expect(cards).toHaveLength(1)
+    expect(wrapper.find('#return').text()).not.toContain('历史研究统计')
+    expect(wrapper.find('#valuation').text()).toContain('股息率-国债10年利差')
   })
 })

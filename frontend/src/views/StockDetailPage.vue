@@ -15,7 +15,6 @@ import type { IndicatorGroup, MetricStatItem } from '../components/IndicatorGrou
 import StockTocNav from '../components/StockTocNav.vue'
 import type { TocItem } from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
-import TreasuryComparisonCard from '../components/TreasuryComparisonCard.vue'
 import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
 import FinancialTrendCard from '../components/FinancialTrendCard.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
@@ -367,6 +366,13 @@ const tocItems: readonly TocItem[] = [
 ]
 const activeSection = ref('overview')
 const sectionEls = ref<Record<string, HTMLElement | null>>({})
+// Naive UI 的实际滚动容器是 .n-layout-scroll-container，不是 window；
+// 粘性目录的高亮与滚动监听必须挂到该容器，否则 window.scrollY 恒为 0。
+const scrollContainer = ref<HTMLElement | null>(null)
+// 嵌套 n-layout-scroll-container 会让 CSS sticky 失效，因此用 scroll 监听
+// 手动 translateY，把目录固定在视口顶部附近（仅桌面宽度生效）。
+const tocNaturalTop = ref(0)
+const tocShift = ref(0)
 
 function setSectionRef(id: string) {
   return (el: unknown) => {
@@ -388,7 +394,15 @@ function scrollToSection(id: string) {
 }
 
 function updateActiveSection() {
-  const scrollTop = window.scrollY || document.documentElement.scrollTop || 0
+  const container = scrollContainer.value
+  const scrollTop = container
+    ? container.scrollTop
+    : (window.scrollY || document.documentElement.scrollTop || 0)
+  if (window.matchMedia('(min-width: 1025px)').matches && tocNaturalTop.value > 0) {
+    tocShift.value = Math.max(0, scrollTop - (tocNaturalTop.value - 24))
+  } else {
+    tocShift.value = 0
+  }
   if (scrollTop <= 0) {
     activeSection.value = tocItems[0].id
     return
@@ -421,12 +435,17 @@ watch(trendYears, () => fetchTrend(generation.value))
 watch(stockCode, fetchAll)
 
 onMounted(() => {
+  scrollContainer.value = document.querySelector<HTMLElement>('.n-layout-scroll-container')
+  const tocEl = document.querySelector<HTMLElement>('.stock-toc-wrap')
+  if (tocEl) tocNaturalTop.value = tocEl.getBoundingClientRect().top + (scrollContainer.value?.scrollTop ?? 0)
+  scrollContainer.value?.addEventListener('scroll', updateActiveSection, { passive: true })
   window.addEventListener('scroll', updateActiveSection, { passive: true })
   updateActiveSection()
   fetchAll()
 })
 
 onUnmounted(() => {
+  scrollContainer.value?.removeEventListener('scroll', updateActiveSection)
   window.removeEventListener('scroll', updateActiveSection)
   // 2026-08-14 红队 P3：卸载时中止在途请求，避免离开页面后
   // 响应落地写入已卸载组件状态 / 触发无意义告警。
@@ -599,18 +618,15 @@ onUnmounted(() => {
             title="股东回报"
             :groups="returnGroup"
           >
-            <div class="section-inner-block">
-              <ResearchStatisticsCard :stock-code="stockCode" default-metric="ttm_dividend_yield" />
-            </div>
-            <div class="section-inner-block">
-              <TreasuryComparisonCard :stock-code="stockCode" />
-            </div>
+            <!-- 2026-09-02：历史研究统计只保留一张；股息率与国债比较已合并进该卡
+                 “股息率-国债10年利差”序列，不再重复展示两张统计卡和单独国债比较卡。 -->
           </IndicatorGroupSection>
 
         </div>
 
         <StockTocNav
           class="stock-toc-wrap"
+          :style="{ transform: tocShift > 0 ? `translateY(${tocShift}px)` : undefined }"
           :items="tocItems"
           :active-id="activeSection"
           @navigate="scrollToSection"
@@ -645,8 +661,11 @@ onUnmounted(() => {
   min-width: 0;
 }
 .stock-toc-wrap {
-  position: sticky;
-  top: 24px;
+  position: relative;
+  top: 0;
+  /* 目录靠右贴边，且与正文保持足够距离，避免遮住卡片内容 */
+  justify-self: end;
+  margin-right: 6px;
 }
 .section-heading p {
   margin: 0;

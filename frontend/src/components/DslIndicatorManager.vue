@@ -7,6 +7,7 @@ import {
 import axios from 'axios'
 
 import type { DataTableColumns } from 'naive-ui'
+import { fieldDisplayName } from '../utils/screening-format.ts'
 
 interface DslExpression {
   id: number
@@ -68,7 +69,16 @@ function statusTagType(s: string) {
 }
 
 const columns: DataTableColumns<DslExpression> = [
-  { title: '名称', key: 'name', width: 150 },
+  {
+    title: '名称',
+    key: 'name',
+    width: 170,
+    render: (row: DslExpression) =>
+      h('div', { class: 'dsl-name-cell' }, [
+        h('b', null, fieldDisplayName(row.name, row.name)),
+        h('small', null, row.name),
+      ]),
+  },
   { title: '表达式', key: 'expression', ellipsis: { tooltip: true } },
   { title: '描述', key: 'description', ellipsis: { tooltip: true } },
   {
@@ -296,5 +306,5 @@ loadExpressions()
 </template>
 
 <style scoped>
-.dsl-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.dsl-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }.dsl-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.dsl-heading h2 { margin: 7px 0 5px; font-size: 18px; }.dsl-heading span, .dsl-summary, .dsl-tools span { color: #829087; font-size: 11px; }.dsl-summary { margin: 18px 0 0; }.dsl-tools { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; padding: 12px; border-radius: 8px; background: #fafcf9; }.dsl-tools :deep(.n-input) { width: 150px; }.dsl-empty { padding: 30px; }.dsl-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
+.dsl-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.dsl-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }.dsl-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.dsl-heading h2 { margin: 7px 0 5px; font-size: 18px; }.dsl-heading span, .dsl-summary, .dsl-tools span { color: #829087; font-size: 11px; }.dsl-summary { margin: 18px 0 0; }.dsl-tools { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; padding: 12px; border-radius: 8px; background: #fafcf9; }.dsl-tools :deep(.n-input) { width: 150px; }.dsl-empty { padding: 30px; }.dsl-name-cell b,.dsl-name-cell small{display:block;}.dsl-name-cell small{color:#97a29a;font-size:10px;}.dsl-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
 </style>

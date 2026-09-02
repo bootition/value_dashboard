@@ -141,7 +141,12 @@ const readinessCopy = computed(() => {
 
 const indicatorOptions = computed(() =>
   indicators.value.map((i) => {
-    const baseLabel = fieldDisplayName(i.name, (i as ScreeningIndicator & { label?: string }).label)
+    const meta = i as ScreeningIndicator & { label?: string; display_name?: string; dsl?: boolean }
+    // 复合指标在筛选条件里保留英文表达式名（规则 JSON 稳定口径）；
+    // 内置字段仍显示中文+英文缩写。管理界面用 display_name 显示中文。
+    const baseLabel = meta.dsl
+      ? (meta.label ?? meta.name)
+      : fieldDisplayName(i.name, meta.label)
     return {
       label: fieldOptionLabel(i.name, baseLabel),
       value: i.name,

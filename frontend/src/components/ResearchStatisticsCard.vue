@@ -42,6 +42,7 @@ const viewMode = ref<'band' | 'sigma'>('band')
 const loading = ref(false)
 const data = ref<ResearchStatisticsResponse | null>(null)
 const errorText = ref('')
+const hoverIndex = ref<number | null>(null)
 
 const W = 640
 const H = 230
@@ -52,22 +53,31 @@ const stats = computed(() => data.value?.statistics ?? {})
 const activeStats = computed(() => stats.value[`${window.value}y`] ?? {})
 
 const hasSeries = computed(() => series.value.some((item) => item[metric.value as keyof typeof item] != null))
+// 窗口内全部行（含 null）：x 轴保持交易日连续，null 在画线时断笔。
+const windowRows = computed(() => {
+  let rows = series.value.map((item) => ({
+    date: item.price_date,
+    value: item[metric.value as keyof typeof item] as number | null,
+  }))
+  if (window.value !== 99) {
+    const start = new Date()
+    start.setFullYear(start.getFullYear() - window.value)
+    const startMs = start.getTime()
+    rows = rows.filter((item) => Date.parse(item.date) >= startMs)
+  }
+  return rows
+})
 // P4-12 修复（reports/73）：序列按所选窗口过滤（与统计窗口一致），
 // 不再全历史序列 + 窗口统计线并存造成误导。
-const usableSeries = computed(() => {
-  const rows = series.value
-    .filter((item) => item[metric.value as keyof typeof item] != null)
-    .map((item) => ({ date: item.price_date, value: item[metric.value as keyof typeof item] as number }))
-  if (window.value === 99) return rows
-  const start = new Date()
-  start.setFullYear(start.getFullYear() - window.value)
-  const startMs = start.getTime()
-  return rows.filter((item) => Date.parse(item.date) >= startMs)
-})
+const usableSeries = computed(() =>
+  windowRows.value
+    .filter((item) => item.value != null)
+    .map((item) => ({ date: item.date, value: item.value as number })),
+)
 
 // P4-12：x 轴按日期线性映射（节假日/停牌日自然压缩）
 const dateRange = computed(() => {
-  const points = usableSeries.value
+  const points = windowRows.value
   if (!points.length) return { min: 0, max: 1 }
   const first = Date.parse(points[0].date)
   const last = Date.parse(points[points.length - 1].date)
@@ -97,7 +107,7 @@ const valueRange = computed(() => {
 })
 
 const x = (i: number) => {
-  const points = usableSeries.value
+  const points = windowRows.value
   if (points.length <= 1) return PAD.left + (W - PAD.left - PAD.right) / 2
   const t = (Date.parse(points[i].date) - dateRange.value.min) / (dateRange.value.max - dateRange.value.min)
   return PAD.left + t * (W - PAD.left - PAD.right)
@@ -105,9 +115,20 @@ const x = (i: number) => {
 const y = (v: number) => PAD.top + (1 - (v - valueRange.value.min) / (valueRange.value.max - valueRange.value.min)) * (H - PAD.top - PAD.bottom)
 
 const linePath = computed(() => {
-  const points = usableSeries.value
-  if (!points.length) return ''
-  return points.map((p, i) => `${i === 0 ? 'M' : 'L'}${x(i).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ')
+  const rows = windowRows.value
+  if (!rows.length) return ''
+  const segments: string[] = []
+  let started = false
+  for (let i = 0; i < rows.length; i += 1) {
+    const value = rows[i].value
+    if (value == null) {
+      started = false
+      continue
+    }
+    segments.push(`${started ? 'L' : 'M'}${x(i).toFixed(1)},${y(value).toFixed(1)}`)
+    started = true
+  }
+  return segments.join(' ')
 })
 
 const yTicks = computed(() => {
@@ -120,15 +141,18 @@ const yTicks = computed(() => {
   return ticks
 })
 
+const BAND_COLORS = ['#e05d5d', '#e8963e', '#b98a2e', '#4a87c4', '#7b6ba6']
+const SIGMA_COLORS = ['#e05d5d', '#e8963e', '#b98a2e', '#4a87c4', '#7b6ba6']
+
 const bandLines = computed(() => {
   const s = activeStats.value
   if (viewMode.value !== 'band' || s.p10 == null) return []
-  const lines: Array<{ value: number; label: string; dash: string }> = []
-  if (s.p10 != null) lines.push({ value: s.p10, label: 'P10', dash: '5,4' })
-  if (s.p20 != null) lines.push({ value: s.p20, label: 'P20', dash: '2,3' })
-  if (s.p50 != null) lines.push({ value: s.p50, label: 'P50', dash: '0' })
-  if (s.p80 != null) lines.push({ value: s.p80, label: 'P80', dash: '2,3' })
-  if (s.max != null) lines.push({ value: s.max, label: '最大', dash: '5,4' })
+  const lines: Array<{ value: number; label: string; dash: string; color: string }> = []
+  if (s.p10 != null) lines.push({ value: s.p10, label: 'P10', dash: '5,4', color: BAND_COLORS[0] })
+  if (s.p20 != null) lines.push({ value: s.p20, label: 'P20', dash: '2,3', color: BAND_COLORS[1] })
+  if (s.p50 != null) lines.push({ value: s.p50, label: 'P50', dash: '0', color: BAND_COLORS[2] })
+  if (s.p80 != null) lines.push({ value: s.p80, label: 'P80', dash: '2,3', color: BAND_COLORS[3] })
+  if (s.max != null) lines.push({ value: s.max, label: '最大', dash: '5,4', color: BAND_COLORS[4] })
   return lines
 })
 
@@ -137,11 +161,11 @@ const sigmaLines = computed(() => {
   if (viewMode.value !== 'sigma' || s.mean == null || s.sigma == null) return []
   const { mean, sigma } = s
   return [
-    { value: mean - 2 * sigma, label: 'μ-2σ', dash: '5,4' },
-    { value: mean - sigma, label: 'μ-1σ', dash: '2,3' },
-    { value: mean, label: 'μ', dash: '0' },
-    { value: mean + sigma, label: 'μ+1σ', dash: '2,3' },
-    { value: mean + 2 * sigma, label: 'μ+2σ', dash: '5,4' },
+    { value: mean - 2 * sigma, label: 'μ-2σ', dash: '5,4', color: SIGMA_COLORS[0] },
+    { value: mean - sigma, label: 'μ-1σ', dash: '2,3', color: SIGMA_COLORS[1] },
+    { value: mean, label: 'μ', dash: '0', color: SIGMA_COLORS[2] },
+    { value: mean + sigma, label: 'μ+1σ', dash: '2,3', color: SIGMA_COLORS[3] },
+    { value: mean + 2 * sigma, label: 'μ+2σ', dash: '5,4', color: SIGMA_COLORS[4] },
   ]
 })
 
@@ -151,6 +175,36 @@ function statRow(label: string, value: unknown, unit = ''): string {
   if (value === null || value === undefined) return `${label} —`
   if (typeof value === 'number') return `${label} ${value.toFixed(2)}${unit}`
   return `${label} ${String(value)}`
+}
+
+const hoverPoint = computed(() => {
+  if (hoverIndex.value == null) return null
+  const row = windowRows.value[hoverIndex.value]
+  if (!row || row.value == null) return null
+  return {
+    index: hoverIndex.value,
+    date: row.date,
+    value: row.value,
+    x: x(hoverIndex.value),
+    y: y(row.value),
+  }
+})
+
+function onChartMove(event: MouseEvent) {
+  const svg = event.currentTarget as SVGSVGElement
+  const rect = svg.getBoundingClientRect()
+  const rows = windowRows.value
+  if (!rows.length || rect.width === 0) return
+  const px = ((event.clientX - rect.left) / rect.width) * W
+  const plotWidth = W - PAD.left - PAD.right
+  const raw = (px - PAD.left) / plotWidth
+  const index = Math.round(raw * (rows.length - 1))
+  if (index < 0 || index >= rows.length) {
+    hoverIndex.value = null
+    return
+  }
+  const row = rows[index]
+  hoverIndex.value = row.value == null ? null : index
 }
 
 async function fetchData() {
@@ -213,7 +267,7 @@ onMounted(fetchData)
     <p class="stat-note">
       口径：最新重述回看（历史日使用该日对应报告期当前最新重述财务值与历史有效总股本），
       不代表当时市场可见信息，不用于回测。PE≤0 不参与统计；历史股本未覆盖日 PE/PB 为缺失。
-      本卡为实时计算，与筛选使用的已发布统计域可能存在时差。
+      本卡为实时计算，与筛选使用的已发布统计域可能存在时差；股息率与国债比较已合并进“股息率-国债10年利差”序列。
     </p>
 
     <n-spin :show="loading">
@@ -234,14 +288,32 @@ onMounted(fetchData)
             :key="line.label"
             :x1="PAD.left" :x2="W - PAD.right"
             :y1="y(line.value)" :y2="y(line.value)"
-            stroke="#b98a2e" stroke-width="1"
+            :stroke="line.color" stroke-width="1.4"
             :stroke-dasharray="line.dash"
           />
           <path :d="linePath" fill="none" stroke="#57966d" stroke-width="2" />
+          <rect
+            :x="PAD.left" :y="PAD.top"
+            :width="W - PAD.left - PAD.right"
+            :height="H - PAD.top - PAD.bottom"
+            fill="transparent"
+            @mousemove="onChartMove"
+            @mouseleave="hoverIndex = null"
+          />
+          <g v-if="hoverPoint" class="stat-crosshair">
+            <line :x1="hoverPoint.x" :x2="hoverPoint.x" :y1="PAD.top" :y2="H - PAD.bottom" stroke="#365944" stroke-width="0.7" stroke-dasharray="2,3" />
+            <circle :cx="hoverPoint.x" :cy="hoverPoint.y" r="4" fill="#57966d" stroke="#fff" stroke-width="1.4" />
+          </g>
         </svg>
+        <div v-if="hoverPoint" class="stat-hover-tip" :style="{ left: `${hoverPoint.x / W * 100}%`, top: `${hoverPoint.y / H * 100}%` }">
+          <b>{{ hoverPoint.date }}</b>
+          <span>{{ hoverPoint.value.toFixed(2) }}</span>
+        </div>
         <div class="stat-legend">
           <span><i class="dot series" />序列</span>
-          <span v-for="line in overlayLines" :key="line.label"><i class="dot band" />{{ line.label }}</span>
+          <span v-for="line in overlayLines" :key="line.label">
+            <i class="dot band" :style="{ background: line.color }" />{{ line.label }}
+          </span>
         </div>
         <p class="stat-foot">
           样本 {{ activeStats.samples ?? '—' }} ·
@@ -298,10 +370,36 @@ onMounted(fetchData)
   border-radius: 10px;
   background: #fafcf9;
 }
+.stat-chart-frame {
+  position: relative;
+}
 .stat-chart-frame svg {
   display: block;
   width: 100%;
   height: auto;
+}
+.stat-hover-tip {
+  position: absolute;
+  z-index: 3;
+  padding: 5px 8px;
+  border-radius: 7px;
+  background: rgba(38, 57, 45, 0.94);
+  color: #fff;
+  font-size: 10px;
+  pointer-events: none;
+  transform: translate(-50%, calc(-100% - 9px));
+  white-space: nowrap;
+}
+.stat-hover-tip b,
+.stat-hover-tip span {
+  display: block;
+}
+.stat-hover-tip span {
+  margin-top: 2px;
+  font-weight: 700;
+}
+.stat-crosshair {
+  pointer-events: none;
 }
 .stat-error {
   padding: 20px;

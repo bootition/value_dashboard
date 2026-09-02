@@ -12,6 +12,8 @@ cd /d "%~dp0"
 echo Value Dashboard V1.0
 
 REM Only this application's healthy endpoint counts as an existing instance.
+REM CI/regression may set VD_SKIP_HEALTH_CHECK=1 to bypass a live local service.
+if not "%VD_SKIP_HEALTH_CHECK%"=="" goto :skip_health_check
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:8765/api/health'; if ($r.StatusCode -eq 200 -and $r.Content -match '\"status\"\s*:\s*\"ok\"') { exit 0 } } catch {}; exit 1" >nul 2>&1
 if not errorlevel 1 (
     echo [INFO] Value Dashboard is already running; opening the browser.
@@ -19,6 +21,7 @@ if not errorlevel 1 (
     goto :end
 )
 
+:skip_health_check
 set "RELEASE_ROOT=%CD%"
 set "EXE_PATH=value-dashboard.exe"
 

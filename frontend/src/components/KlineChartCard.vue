@@ -94,7 +94,8 @@ function renderChart() {
 
   let chart: Chart | null
   try {
-    chart = init(container.value, {      styles: {
+    chart = init(container.value, {
+      styles: {
         grid: {
           show: true,
           horizontal: { color: 'rgba(0,0,0,0.05)' },
@@ -104,13 +105,12 @@ function renderChart() {
           priceMark: {
             last: { show: true },
           },
+          // klinecharts 10 CandleBarColor 只接受这三个颜色键；
+          // 旧的 border/wick 扩展键会使 init 抛错而被 catch 吞掉 → 空白。
           bar: {
             upColor: '#ef5350',
             downColor: '#26a69a',
-            upBorderColor: '#ef5350',
-            downBorderColor: '#26a69a',
-            upWickColor: '#ef5350',
-            downWickColor: '#26a69a',
+            noChangeColor: '#7f8c8d',
           },
         },
         indicator: {
@@ -134,8 +134,13 @@ function renderChart() {
   chartInstance.value = chart
 
   chart.setDataLoader(dataLoader)
+  // klinecharts 10 的 Store 在 symbol 未设置时不会触发 init 数据加载，
+  // 这就是画布只渲染坐标轴而 K 线空白的原因。
+  chart.setSymbol({ ticker: 'A股', pricePrecision: 2, volumePrecision: 0 })
   // setPeriod 触发 getBars('init') 载入数据，并让十字光标/时间轴按周期格式化。
   chart.setPeriod({ type: period.value, span: 1 })
+  // 首次挂载时容器可能刚从 loading 遮罩中完成布局，主动 resize 一次。
+  if ('resize' in chart) chart.resize()
   chart.createIndicator({ name: 'MA', calcParams: [5, 10, 20, 60, 120, 250] }, false)
   chart.createIndicator('VOL', false)
 }

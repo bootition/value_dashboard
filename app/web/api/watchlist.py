@@ -27,6 +27,8 @@ _SNAPSHOT_VALUE_FIELDS = (
     "revenue_yoy",
     "net_profit_yoy",
     "dividend_yield",
+    "total_market_cap",
+    "circ_market_cap",
 )
 
 
@@ -87,10 +89,11 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
 
     try:
         stock_info = duck.read_query(
-            f"""SELECT m.stock_code, m.name, m.exchange, m.csrc_l1,
+            f"""SELECT m.stock_code, m.name, m.exchange, m.csrc_l1, m.listing_date,
                        s.latest_close, s.pe_ttm, s.pb_mrq, s.roe,
                        s.gross_margin, s.net_margin, s.debt_ratio,
-                       s.revenue_yoy, s.net_profit_yoy, s.dividend_yield
+                       s.revenue_yoy, s.net_profit_yoy, s.dividend_yield,
+                       s.total_market_cap, s.circ_market_cap
                  FROM stock_meta m
                  LEFT JOIN LATERAL (
                      SELECT * FROM indicator_snapshot s2
@@ -115,6 +118,7 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             "name": info.get("name", ""),
             "exchange": info.get("exchange", ""),
             "csrc_l1": info.get("csrc_l1"),
+            "listing_date": info.get("listing_date"),
             "group_name": row["group_name"],
             "source_rule_id": row.get("source_rule_id"),
             "source_result_id": row.get("source_result_id"),
@@ -129,6 +133,8 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             "revenue_yoy": info.get("revenue_yoy"),
             "net_profit_yoy": info.get("net_profit_yoy"),
             "dividend_yield": info.get("dividend_yield"),
+            "total_market_cap": info.get("total_market_cap"),
+            "circ_market_cap": info.get("circ_market_cap"),
         })
 
     # P1-4: 服务端权威信任决策；阻断警告存在时遮蔽快照数值字段

@@ -18,6 +18,7 @@ from tests.conftest import insert_minimum_screenable_data
 SNAPSHOT_VALUE_FIELDS = (
     "latest_close", "pe_ttm", "pb_mrq", "roe", "gross_margin", "net_margin",
     "debt_ratio", "revenue_yoy", "net_profit_yoy", "dividend_yield",
+    "total_market_cap", "circ_market_cap",
 )
 
 
