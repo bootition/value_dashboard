@@ -33,7 +33,7 @@ supersedes: null
 
 | # | 约束 | 依据 |
 |---|---|---|
-| S1 | **东财 push2/push2his 被封**（IP 级临时封锁）：F10/股本/分红源仍可用；价格已回退腾讯/BaoStock/TDX；冷却期内勿触碰 push2 系 | reports/61 |
+| S1 | 东财 push2/push2his 曾于 2026-08 被封；2026-09-02 单请求探测已恢复（HTTP 200）。价格主链当前仍为腾讯/BaoStock/TDX；若要切回东财，先限速 ≤2 req/s、并发 ≤5 观察 | reports/61；reports/103 |
 | S2 | **北交所（920xxx）不请求东财**：无交叉源且异常会触发 cninfo_capital 熔断殃及沪深；如实记 empty（`no_cross_source:bse`），不入 retry | reports/75 |
 | S3 | 东财交叉核验安全组合：**批 50 + 批间冷却 30-60s**；`update_many` 连续 8 次交叉错误 / 16 次空响应中止保护 | reports/75 |
 | S4 | CNINFO 风控冷却：股本链约 4,700 只由自动更新有界续传，勿手动批量触发 | reports/74 |
@@ -54,7 +54,7 @@ supersedes: null
 | D5 | 当前 schema 版本：`DUCKDB_SCHEMA_VERSION = 18`（app/core/storage/schema.py） | 代码 |
 | D6 | `vd backup` 对 26GB BLOB 表须**分块导出**（raw_response_archive_history 5000 行分块），单次 COPY 会受内存限制 | reports/102 |
 | D7 | **正式库 data/ 只读**：所有写操作必须经 CLI/维护脚本 + 单写者锁；S1 回归强制 `VD_ENV=test` + 正式库 SHA-256 指纹前后对比 | AGENTS.md；conftest.py |
-| D8 | 数据库重建回滚快照（2026-09-01）：`data/valuedashboard.duckdb.old-20260901154717` + `.pre-rebuild-20260901`（同一 inode 硬链接，实占约 50GB）+ `valuedashboard.sqlite.pre-rebuild-20260901`；**回滚窗口 ≥ 1 个完整更新周期，观察通过后才可删除** | reports/101、102 |
+| D8 | ✅ 回滚快照已按窗口删除（2026-09-02）：9-01 22:52 完整成功周期（job 124）通过观察；两硬链接 + sqlite pre-rebuild 已删除，释放约 50GB | reports/101、102；job_logs 124 |
 | D9 | 重建/导出相关外部路径：新库构建 `D:\vd-rebuild-new-20260901`、Parquet 导出 `D:\vd-rebuild-export-20260901`、冷归档 `D:\vd-cold-archive` | reports/102 |
 
 ## 4. 数据口径与隔离表设计意图
@@ -89,15 +89,15 @@ supersedes: null
 
 | # | 事项 | 出处 |
 |---|---|---|
-| T1 | DuckDB 1.5.5 同事务索引 bug：升级评估（当前分事务绕过无复发路径） | reports/81 |
-| T2 | P2 冷归档文件已生成，**未接入 CLI 恢复命令** | reports/102 |
+| T1 | ✅ 已评估（2026-09-02）：本地/镜像最新可用版本仍为 1.5.5，无升级空间；维持分事务重建 workaround，待上游发布 >1.5.5 后复评 | reports/81；2026-09-02 核验 |
+| T2 | ✅ 已关闭（2026-09-02）：`vd archive restore` + `restore_execute` 已实现（先验证 manifest/verified 记录再恢复全部热表），回归 5 passed | reports/102；代码核验 |
 | T3 | ✅ 已关闭（2026-09-01）：`config/user.yaml` 骨架已创建，覆盖通道激活；只写需覆盖的键 | 体检修复 2026-09-01 |
-| T4 | CNINFO 分红 ex_date 剩余 8,467 行核验路径评估（PDF 解析 / 降级 / 明确依赖回退链） | STATUS 缺口 #4 |
-| T5 | 东财行情源冷却到期后：单次探测，恢复后限速 ≤2 req/s、并发 ≤5 | STATUS |
-| T6 | 08-13 单位 bug 期间保存的旧规则建议用户复核另存 | reports/81 |
-| T7 | `test_dead_update_lock_does_not_mark_summary_stale` 完整 S1 中偶发 WinError 32（Windows unlink 竞态，单跑通过） | reports/77 |
-| T8 | S1 既有失败 2 项待排查：国债 `test_snapshot_ttm_dividend_yield_and_spread` 种子日期矛盾；pdf 归档测试在 shim 环境 PermissionError | STATUS 进行中 |
-| T9 | 前 6 名报告编号 05-24/26 全部 superseded，仅追溯用（正常） | STATUS |
+| T4 | ✅ 核验路径已接入（2026-09-02）：`vd data quarantine-dividends-audit` 只读分类剩余隔离行（可恢复/重复/无候选/歧义/冲突）；实际修复仍走 `scripts/repair_dividend_ex_dates.py --yes` | STATUS 缺口 #4；代码核验 |
+| T5 | ✅ 已探测（2026-09-02）：`vd data probe-eastmoney-push2` 实测 HTTP 200（600519 f43=129750），**push2 已解封**；如重新启用仍须 ≤2 req/s、并发 ≤5 | reports/103；实测 |
+| T6 | ✅ 审计命令已接入（2026-09-02）：`vd screening audit-legacy-unit-rules` 列出受影响规则与字段；复核另存仍需用户操作 | reports/81；代码核验 |
+| T7 | ✅ 已核验（2026-09-02）：`_unlink_with_retry` 重试 + 后台线程等待已就位；定向与完整收集通过 | reports/77；2026-09-02 测试 |
+| T8 | ✅ 已核验（2026-09-02）：国债测试已改为动态对齐最新价格日；PDF 归档路径隔离测试定向通过 | STATUS；2026-09-02 测试 |
+| T9 | ✅ 正常（2026-09-02 复核）：`vd backup` 对 `raw_response_archive_history` 默认 5000 行分块导出/恢复（`_BLOB_CHUNK_TABLES`） | STATUS；代码核验 |
 
 ## 8. 隐性知识回写规则（本文件的自我约束）
 
@@ -108,4 +108,4 @@ supersedes: null
 
 ---
 
-*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭（创建 config/user.yaml 骨架）；E6 补充代理不可用时的直连回退命令。*
+*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。*
