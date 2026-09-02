@@ -1066,18 +1066,16 @@ _warning_codes_refreshing: set[str] = set()
 
 
 def _build_warning_codes_low_memory(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
-    """Full quality build under a bounded DuckDB budget.
+    """Full quality build under the process-uniform DuckDB budget.
 
     The full lineage/archive scan is the only operation in this service that
-    approaches the multi-GiB DuckDB limit. 4GB + two threads +
-    preserve_insertion_order=false is the validated floor on the current 40GB
-    database; 2GB still OOMs. Hot read paths never run this synchronously in
-    formal mode.
+    approaches the multi-GiB DuckDB limit. Connection settings are fixed by
+    database.* (8GB / 2 threads / preserve_insertion_order=false on the
+    formal profile). This function must NOT call memory_limit(): a different
+    configuration in the same web process would make ordinary K-line/detail
+    queries fail with different-configuration errors. Hot read paths never run
+    this synchronously in formal mode.
     """
-    memory_manager = getattr(duck, "memory_limit", None)
-    if memory_manager is not None:
-        with memory_manager("4GB", threads=2, preserve_insertion_order=False):
-            return list(build_data_quality_status(duck, sqlite)["warning_codes"])
     return list(build_data_quality_status(duck, sqlite)["warning_codes"])
 
 

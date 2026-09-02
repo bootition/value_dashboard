@@ -56,10 +56,11 @@ def _run_startup_maintenance(
     from app.core.data_quality import minimum_data_readiness, store_cached_data_readiness
 
     def readiness_with_low_memory():
-        # 启动核对与后台 summary 同类：全库质量扫描。使用 4GB/2线程，
-        # 避免把服务默认 DuckDB 配额全部占满。
-        with duck.memory_limit("4GB", threads=2, preserve_insertion_order=False):
-            return minimum_data_readiness(duck, sqlite)
+        # 启动核对与后台 summary 同类：全库质量扫描。
+        # 连接配置已在 database.* 统一为 8GB/2线程/preserve=false；
+        # 此处不能再使用 memory_limit() 创建差异配置，否则会与并发进来的
+        # 普通查询触发 DuckDB different-configuration 连接错误。
+        return minimum_data_readiness(duck, sqlite)
 
     current = startup_readiness
     initialization_error: str | None = None

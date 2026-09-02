@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 
-_SUMMARY_TTL_SECONDS = 60
+# 空闲态摘要无需每分钟全量重建：正式库一次 build_data_quality_status
+# 要扫描 4300 万行 source_audit，约 20-80s。改为 5 分钟 TTL；自动更新
+# 结束时前端会主动拉取一次新摘要，因此不会出现“更新已完成但页面仍
+# stale”。
+_SUMMARY_TTL_SECONDS = 300
 
 # 当前免费源确实无法补齐的字段：不在缺失列表/计数中继续展示为“待处理”，
 # 保留在库中留档；将来接入公告 PDF 解析或付费源时再从这里移除。
@@ -292,13 +296,11 @@ def _refresh_summary_worker(state, key: str) -> None:
     try:
         if _update_write_lock_active(state.duck):
             return
-        # 后台全量核对是 DuckDB 内存消耗大户。给它单独设置 10GB 预算，
-        # 避免把服务默认 14GB 配额全部占用后，并发进入的 K 线/详情等
-        # 轻查询触发 OutOfMemoryException（2026-09-02 start.log 实锤）。
-        with state.duck.memory_limit(
-            "4GB", threads=2, preserve_insertion_order=False,
-        ):
-            summary = _build_summary_from_state(state)
+        # 后台全量核对是 DuckDB 内存消耗大户。连接配置已在 database.*
+        # 统一为 8GB/2线程/preserve=false；不能再调用 memory_limit()
+        # 制造差异配置——同一进程内不同配置并发连接会被 DuckDB 拒绝，
+        # 普通 K 线/详情/自选查询会重试约 28s 后 500（2026-09-02 实测）。
+        summary = _build_summary_from_state(state)
         summary.setdefault("summary_as_of", datetime.now(UTC).isoformat())
         with _SUMMARY_CACHE_LOCK:
             _SUMMARY_CACHE[key] = {"at": time.monotonic(), "data": dict(summary)}

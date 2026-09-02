@@ -58,7 +58,11 @@ def _database_context(*, initialize: bool = True):
         from app.core.backup.manager import recover_pending_restore
         from app.core.storage.schema import init_all_schema
 
-        init_all_schema(duckdb_store=duck, sqlite_store=sqlite)
+        # schema 已是最新版本时跳过全量幂等 DDL。Web 启动路径已有同样优化
+        # （reports/79 方案 C）；CLI 此前每次写命令都会全量重跑，schema v17
+        # 的 hash 集合重建会扫描 raw_response_archive_all 大 BLOB 视图，
+        # 慢且可能 OOM。
+        init_all_schema(duckdb_store=duck, sqlite_store=sqlite, skip_if_current=True)
         recover_pending_restore(paths)
     return paths, duck, sqlite
 
@@ -806,9 +810,14 @@ def _auto_update_controller():
 def auto_update_status() -> None:
     """查询自动更新状态（网页只读展示同源数据）"""
     from app.cli.protocol import make_response
+    from app.core.auto_update import read_persisted_auto_update_status
 
-    controller = _auto_update_controller()
-    typer.echo(json.dumps(make_response("data.auto-update.status", controller.persisted_status()), ensure_ascii=False, indent=2, default=str))
+    # 只读查询：禁止走 _auto_update_controller() 的 schema 初始化路径。
+    # schema v17 的幂等初始化会扫描 raw_response_archive_all 视图，
+    # 在默认 DuckDB 内存预算下 OOM（2026-09-02 体检发现）。
+    sqlite = _sqlite_store(initialize=False)
+    payload = read_persisted_auto_update_status(sqlite)
+    typer.echo(json.dumps(make_response("data.auto-update.status", payload), ensure_ascii=False, indent=2, default=str))
 
 
 @auto_update_app.command("enable")

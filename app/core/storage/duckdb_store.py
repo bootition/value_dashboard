@@ -211,6 +211,16 @@ class DuckDBStore:
         self._db_path = validated.duckdb_path
         self._lock_path = self._db_path.parent / ".duckdb.write.lock"
         self._memory_limit = self._load_memory_limit()
+        # DuckDB 不允许同一进程内对同一文件同时存在不同配置的连接。
+        # Web 进程既处理普通查询、也会执行后台 summary 全量扫描，因此这里
+        # 必须为所有连接提供一套固定的默认配置（memory/threads/insertion
+        # order 三项都固定），并禁止 Web 路径再使用 memory_limit() 制造差异
+        # 配置。不同配置并发会触发 ConnectionException，普通请求重试约 28s
+        # 后 500（2026-09-02 start.log 实锤）。
+        self._threads = self._load_database_setting("duckdb_threads", "2")
+        self._preserve_insertion_order = self._load_database_setting(
+            "duckdb_preserve_insertion_order", "false"
+        )
 
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._revalidate()
@@ -227,25 +237,31 @@ class DuckDBStore:
         env_value = os.environ.get("VD_DUCKDB_MEMORY_LIMIT")
         if env_value:
             return env_value
+        return DuckDBStore._load_database_setting("duckdb_memory_limit", "14GB")
+
+    @staticmethod
+    def _load_database_setting(name: str, default: str) -> str:
+        """Load one database.* DuckDB connection setting with a safe fallback."""
         try:
             import importlib
             config_module = importlib.import_module("app.core.config")
             database_cfg = config_module.Config.current().get_value("database", {})
-            value = database_cfg.get("duckdb_memory_limit") if isinstance(database_cfg, dict) else None
-            if value:
+            value = database_cfg.get(name) if isinstance(database_cfg, dict) else None
+            if value is not None:
                 return str(value)
         except Exception:
             pass
-        return "14GB"
+        return default
 
     def _connection_config(self) -> dict[str, str]:
         override = _MEMORY_LIMIT_OVERRIDE.get() or {}
-        config = {"memory_limit": override.get("memory_limit") or self._memory_limit}
-        if override.get("threads"):
-            config["threads"] = override["threads"]
-        if override.get("preserve_insertion_order"):
-            config["preserve_insertion_order"] = override["preserve_insertion_order"]
-        return config
+        return {
+            "memory_limit": override.get("memory_limit") or self._memory_limit,
+            "threads": override.get("threads") or self._threads,
+            "preserve_insertion_order": (
+                override.get("preserve_insertion_order") or self._preserve_insertion_order
+            ),
+        }
 
     @contextlib.contextmanager
     def memory_limit(
@@ -257,9 +273,11 @@ class DuckDBStore:
     ) -> Iterator[None]:
         """Temporarily override new connection settings on this thread/context.
 
-        用于后台重查询（如数据状态 summary）主动让出 DuckDB 内存预算，
-        避免把进程的全部 memory_limit 用光后，普通网页查询（K线/详情）
-        以 OutOfMemoryException 失败。
+        仅供专用子进程/CLI 维护任务使用（如自动更新、备份、重建）。
+        **禁止在 Web 服务进程内使用**：DuckDB 不允许同一进程对同一文件
+        同时存在不同配置的连接，后台扫描与普通请求并发时会触发
+        different-configuration 错误。Web 后台任务必须使用 database.*
+        统一配置。
 
         大扫描在低内存预算下需要同步调低并行度并关闭 insertion order，
         否则会以 OOM 失败：线程越多，每个线程持有的哈希/排序缓存越大。

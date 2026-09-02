@@ -299,8 +299,9 @@ class IncrementalUpdater:
             ):
                 try:
                     # 自动更新是全库重计算，但只在本线程/子进程生命周期内
-                    # 使用 update.duckdb_memory_limit（默认 4GB，2 线程）。
-                    # 更新进程退出后内存完整归还 OS；普通 Web 查询保持 2GB。
+                    # 使用 update.duckdb_memory_limit 与 update.duckdb_threads。
+                    # 更新进程退出后内存完整归还 OS。该覆盖只允许在专用子进程
+                    # 使用，Web 进程内的连接必须保持 database.* 统一配置。
                     budget, threads = self._update_duckdb_budget()
                     with self.duck.memory_limit(
                         budget, threads=threads, preserve_insertion_order=False,

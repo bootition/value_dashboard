@@ -2,8 +2,25 @@
 
 from __future__ import annotations
 
-from app.core.auto_update import AutoUpdateController
+from app.core.auto_update import (
+    AutoUpdateController,
+    read_persisted_auto_update_status,
+)
 
+
+def test_read_persisted_auto_update_status_is_read_only_helper(
+    duckdb_store, sqlite_store
+) -> None:
+    """vd data auto-update status 只查 SQLite，不构造会写 schema 的控制器。"""
+    controller = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    controller.pause()
+
+    status = read_persisted_auto_update_status(sqlite_store)
+
+    assert status["state"] == "paused"
+    assert status["paused"] is True
+    assert status["enabled"] is True
+    assert status["current_stage"] == controller.status()["current_stage"]
 
 def test_auto_update_controller_defaults_to_enabled(duckdb_store, sqlite_store) -> None:
     controller = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)

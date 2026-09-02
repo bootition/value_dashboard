@@ -183,6 +183,9 @@ async function fetchAutoOverview(): Promise<void> {
       void fetchRecomputeStatus().then(() => {
         void maybeStartPendingRecompute()
       })
+      // 后端重量摘要 TTL 已放宽到 5 分钟：更新刚结束这一刻主动刷新一次，
+      // 让 stale 提示立即消失，而不必等下一轮低频轮询。
+      void fetchHeavy(true)
     }
   } catch {
     // 保留上次状态，不打断轮询链
@@ -281,10 +284,12 @@ function scheduleHeavyPolling() {
     heavyTimer = undefined
   }
   const running = effectiveRunning.value
+  // 空闲态重量摘要每 5 分钟才刷一次（后端 TTL 同为 300s）；
+  // 更新运行中仍 15s 一次，保证进度结束后页面能及时收敛。
   heavyTimer = setTimeout(() => {
     void fetchHeavy(true)
     scheduleHeavyPolling()
-  }, running ? 15000 : 60000)
+  }, running ? 15000 : 300000)
 }
 
 // 重量级只读摘要：summary/retry/missing 设 15s 超时，失败仅出错误提示，不阻塞自动更新卡。

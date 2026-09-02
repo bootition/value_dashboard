@@ -29,6 +29,54 @@ STATE_TABLE = "auto_update_state"
 # 必须纳入合法状态集，否则 _load_persisted_state 会拒绝加载已持久化的状态。
 VALID_STATES = {"idle", "running", "paused", "disabled", "enabled", "finished", "failed"}
 
+
+def read_persisted_auto_update_status(sqlite: SQLiteStore) -> dict[str, Any]:
+    """Read auto-update status from SQLite without opening DuckDB or writing schema.
+
+    ``vd data auto-update status`` is a status query and must never run the full
+    idempotent schema init: schema v17+ rebuilds the archive-hash set by scanning
+    the multi-GB BLOB view and OOMs under the ordinary DuckDB memory budget.
+    This helper mirrors ``AutoUpdateController.persisted_status`` but is
+    strictly read-only.
+    """
+    rows = sqlite.query(
+        f"SELECT state, paused, current_stage, progress_json, last_error, "
+        f"last_success_at, updated_at FROM {STATE_TABLE} WHERE id = 1"
+    )
+    if not rows:
+        return {
+            "state": "enabled",
+            "enabled": True,
+            "paused": False,
+            "current_stage": "idle",
+            "progress": {},
+            "last_error": None,
+            "last_success_at": None,
+            "last_result": None,
+            "last_skip_reason": None,
+            "updated_at": None,
+        }
+    row = rows[0]
+    state = row.get("state")
+    paused = bool(row.get("paused"))
+    try:
+        progress = json.loads(row.get("progress_json") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        progress = {}
+    return {
+        "state": "paused" if paused and state == "enabled" else state,
+        "enabled": state != "disabled",
+        "paused": paused,
+        "current_stage": row.get("current_stage"),
+        "progress": progress,
+        "last_error": row.get("last_error"),
+        "last_success_at": row.get("last_success_at"),
+        "last_result": progress.get("status"),
+        "last_skip_reason": progress.get("reason"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
 # 步骤名 → 中文展示（进度日志用）
 STEP_LABELS: dict[str, str] = {
     "check": "更新检查",
