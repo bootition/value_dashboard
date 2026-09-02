@@ -295,7 +295,9 @@ def _refresh_summary_worker(state, key: str) -> None:
         # 后台全量核对是 DuckDB 内存消耗大户。给它单独设置 10GB 预算，
         # 避免把服务默认 14GB 配额全部占用后，并发进入的 K 线/详情等
         # 轻查询触发 OutOfMemoryException（2026-09-02 start.log 实锤）。
-        with state.duck.memory_limit("10GB"):
+        with state.duck.memory_limit(
+            "4GB", threads=2, preserve_insertion_order=False,
+        ):
             summary = _build_summary_from_state(state)
         summary.setdefault("summary_as_of", datetime.now(UTC).isoformat())
         with _SUMMARY_CACHE_LOCK:
@@ -737,6 +739,17 @@ def get_auto_update_status(request: Request) -> dict:
             progress = {}
         state = row.get("state") or "enabled"
         paused = bool(row.get("paused"))
+        latest_job = None
+        try:
+            job_rows = sqlite.query(
+                """SELECT id, status, started_at, finished_at
+                   FROM job_logs WHERE job_type = 'incremental_update'
+                   ORDER BY id DESC LIMIT 1"""
+            )
+            if job_rows:
+                latest_job = job_rows[0]
+        except Exception:
+            latest_job = None
         return {
             "state": "paused" if paused and state == "enabled" else state,
             "enabled": state != "disabled",
@@ -748,6 +761,9 @@ def get_auto_update_status(request: Request) -> dict:
             "last_result": progress.get("status"),
             "last_skip_reason": progress.get("reason"),
             "updated_at": row.get("updated_at"),
+            # 控制器状态可能因进程重启而先显示 finished/idle，
+            # 但 job_logs 里仍有 running 作业；前端据此显示“后台仍在推进”。
+            "latest_job": latest_job,
         }
     except Exception as error:
         raise HTTPException(status_code=503, detail=f"auto update status is unavailable: {error}") from error

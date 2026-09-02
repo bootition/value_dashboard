@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import subprocess
 import sys
 import threading
 import webbrowser
@@ -54,6 +55,12 @@ def _run_startup_maintenance(
     """Run network-backed first-start work after the local web server binds."""
     from app.core.data_quality import minimum_data_readiness, store_cached_data_readiness
 
+    def readiness_with_low_memory():
+        # 启动核对与后台 summary 同类：全库质量扫描。使用 4GB/2线程，
+        # 避免把服务默认 DuckDB 配额全部占满。
+        with duck.memory_limit("4GB", threads=2, preserve_insertion_order=False):
+            return minimum_data_readiness(duck, sqlite)
+
     current = startup_readiness
     initialization_error: str | None = None
     initialization_report: dict | None = None
@@ -70,7 +77,7 @@ def _run_startup_maintenance(
 
             logger.info("检测到空数据库，后台开始最小可用初始化...")
             initialization_report = DataInitializer(duck=duck, sqlite=sqlite).run_full_init()
-            current = minimum_data_readiness(duck, sqlite)
+            current = readiness_with_low_memory()
             current["initialization"] = initialization_report
     except Exception as error:
         initialization_error = str(error)
@@ -84,7 +91,7 @@ def _run_startup_maintenance(
 
     try:
         current = store_cached_data_readiness(
-            sqlite, minimum_data_readiness(duck, sqlite),
+            sqlite, readiness_with_low_memory(),
         )
         if initialization_report is not None:
             current["initialization"] = initialization_report
@@ -111,9 +118,28 @@ def _run_startup_maintenance(
             # 避免“重开一次就多一个 running 任务”的观感与错误统计。
             from app.core.update import IncrementalUpdater
             IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
-            logger.info("启动后台自动更新（PRD §7.3）...")
-            controller.run_once()
-            logger.info("自动更新完成")
+            logger.info("启动后台自动更新子进程（PRD §7.3）...")
+            env = os.environ.copy()
+            project_root = Path(__file__).resolve().parent.parent.parent
+            if is_frozen_runtime():
+                cmd = [sys.executable, "data", "auto-update", "run"]
+                project_root = Path(sys.executable).resolve().parent
+            else:
+                cmd = [sys.executable, "-m", "app.cli.main", "data", "auto-update", "run"]
+            log_path = Path(os.environ.get("VD_LOG_DIR", "data/logs")) / "auto-update-child.log"
+            try:
+                with log_path.open("a", encoding="utf-8") as child_log:
+                    completed = subprocess.run(
+                        cmd,
+                        cwd=project_root,
+                        env=env,
+                        stdout=child_log,
+                        stderr=subprocess.STDOUT,
+                        check=False,
+                    )
+                logger.info("自动更新子进程完成 exit=%s", completed.returncode)
+            except Exception as error:
+                logger.warning("自动更新子进程启动失败(非致命): %s", error)
         else:
             logger.info("自动更新已关闭或暂停，跳过")
     except Exception as error:
@@ -121,7 +147,7 @@ def _run_startup_maintenance(
 
     try:
         current = store_cached_data_readiness(
-            sqlite, minimum_data_readiness(duck, sqlite),
+            sqlite, readiness_with_low_memory(),
         )
         if initialization_report is not None:
             current["initialization"] = initialization_report

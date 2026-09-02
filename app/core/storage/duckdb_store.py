@@ -193,7 +193,7 @@ class DuckDBWriteLockError(Exception):
     """DuckDB 写锁获取失败"""
 
 
-_MEMORY_LIMIT_OVERRIDE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+_MEMORY_LIMIT_OVERRIDE: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "value_dashboard_duckdb_memory_limit_override", default=None
 )
 
@@ -239,18 +239,39 @@ class DuckDBStore:
         return "14GB"
 
     def _connection_config(self) -> dict[str, str]:
-        override = _MEMORY_LIMIT_OVERRIDE.get()
-        return {"memory_limit": override or self._memory_limit}
+        override = _MEMORY_LIMIT_OVERRIDE.get() or {}
+        config = {"memory_limit": override.get("memory_limit") or self._memory_limit}
+        if override.get("threads"):
+            config["threads"] = override["threads"]
+        if override.get("preserve_insertion_order"):
+            config["preserve_insertion_order"] = override["preserve_insertion_order"]
+        return config
 
     @contextlib.contextmanager
-    def memory_limit(self, value: str) -> Iterator[None]:
-        """Temporarily cap new connections created on this thread/context.
+    def memory_limit(
+        self,
+        value: str,
+        *,
+        threads: int | None = None,
+        preserve_insertion_order: bool | None = None,
+    ) -> Iterator[None]:
+        """Temporarily override new connection settings on this thread/context.
 
         用于后台重查询（如数据状态 summary）主动让出 DuckDB 内存预算，
         避免把进程的全部 memory_limit 用光后，普通网页查询（K线/详情）
         以 OutOfMemoryException 失败。
+
+        大扫描在低内存预算下需要同步调低并行度并关闭 insertion order，
+        否则会以 OOM 失败：线程越多，每个线程持有的哈希/排序缓存越大。
         """
-        token = _MEMORY_LIMIT_OVERRIDE.set(value)
+        override = {"memory_limit": value}
+        if threads is not None:
+            override["threads"] = str(int(threads))
+        if preserve_insertion_order is not None:
+            override["preserve_insertion_order"] = (
+                "true" if preserve_insertion_order else "false"
+            )
+        token = _MEMORY_LIMIT_OVERRIDE.set(override)
         try:
             yield
         finally:

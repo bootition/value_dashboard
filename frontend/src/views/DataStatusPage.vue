@@ -87,7 +87,20 @@ interface AutoUpdateStatus {
   last_result?: string | null
   last_skip_reason?: string | null
   updated_at?: string | null
+  latest_job?: {
+    id: number
+    status: string
+    started_at: string | null
+    finished_at: string | null
+  } | null
 }
+
+// 控制器状态可能已显示 finished/idle，但 job_logs 里仍有 running 作业；
+// 前端必须把两者合并判断，否则会看到“界面没进度，后台还在跑”。
+const effectiveRunning = computed(() =>
+  autoUpdate.value?.current_stage === 'running'
+  || autoUpdate.value?.latest_job?.status === 'running'
+)
 
 const updateLive = computed(() => autoUpdate.value?.progress?.live || null)
 const updateLog = computed(() => autoUpdate.value?.progress?.log || [])
@@ -132,7 +145,7 @@ const refreshing = ref(false)
 // running 时 4s 高频轮询；空闲/完成后 60s 低频轮询，
 // 让自动更新启动/结束、stale 提示变化无需手动刷新即可看到。
 // 2026-08-14 红队 P3：不再恒真——由自动更新实际阶段派生。
-const isPolling = computed(() => autoUpdate.value?.current_stage === 'running')
+const isPolling = computed(() => effectiveRunning.value)
 
 const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
@@ -158,12 +171,12 @@ function formatLocalTime(iso: string | null | undefined): string {
 async function fetchAutoOverview(): Promise<void> {
   if (autoInFlight) return
   autoInFlight = true
-  const wasRunning = autoUpdate.value?.current_stage === 'running'
+  const wasRunning = effectiveRunning.value
   try {
     const autoResp = await axios.get('/api/data-status/auto-update', { timeout: 8000 })
     autoUpdate.value = autoResp.data
     lastRefreshedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
-    const stillRunning = autoUpdate.value?.current_stage === 'running'
+    const stillRunning = effectiveRunning.value
     // 自动更新刚结束时，若有数据修复登记的快照 pending 股票，自动触发重算。
     // 无需用户点按钮，也不需要任何终端命令（2026-08-28 提速计划）。
     if (wasRunning && !stillRunning) {
@@ -256,7 +269,7 @@ function schedulePolling() {
     clearTimeout(pollTimer)
     pollTimer = undefined
   }
-  const running = autoUpdate.value?.current_stage === 'running'
+  const running = effectiveRunning.value
   pollTimer = setTimeout(() => void fetchAutoOverview(), running ? 4000 : 60000)
 }
 
@@ -267,7 +280,7 @@ function scheduleHeavyPolling() {
     clearTimeout(heavyTimer)
     heavyTimer = undefined
   }
-  const running = autoUpdate.value?.current_stage === 'running'
+  const running = effectiveRunning.value
   heavyTimer = setTimeout(() => {
     void fetchHeavy(true)
     scheduleHeavyPolling()
@@ -459,6 +472,16 @@ function skipReasonLabel(reason: string | null | undefined): string {
               <span v-else>—</span>
             </n-descriptions-item>
           </n-descriptions>
+          <n-alert
+            v-if="effectiveRunning && autoUpdate.current_stage !== 'running'"
+            type="info"
+            :show-icon="true"
+            style="margin-top: 12px"
+            title="后台更新作业仍在运行"
+          >
+            界面控制器尚未刷新到 running 状态，但 job_logs 中的更新作业
+            #{{ autoUpdate.latest_job?.id }} 仍在推进；本页会持续轮询。
+          </n-alert>
           <!-- 实时逐股进度（运行中由 detail_cb 提供） -->
           <div v-if="updateLive" class="update-live">
             <div class="update-live-title">

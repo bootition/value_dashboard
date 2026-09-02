@@ -286,11 +286,17 @@ class IncrementalUpdater:
                 on_stale_lock=self._reconcile_crashed_incremental_jobs,
             ):
                 try:
-                    return self._run_incremental_update_locked(max_stocks, progress_cb, detail_cb)
+                    # 自动更新是全库重计算，需要较大 DuckDB 预算；普通 Web
+                    # 请求/后台 summary 使用 4GB 低预算。该上下文只对当前
+                    # 线程创建的连接生效，更新结束后立即恢复默认预算。
+                    with self.duck.memory_limit("14GB"):
+                        return self._run_incremental_update_locked(max_stocks, progress_cb, detail_cb)
                 finally:
                     close = getattr(self.adapter_mgr, "close", None)
                     if callable(close):
                         close()
+                    import gc
+                    gc.collect()
         except UpdateLockError:
             logger.warning("增量更新被跨进程锁拒绝：另一更新正在运行")
             return {

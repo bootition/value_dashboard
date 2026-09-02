@@ -10,10 +10,10 @@ database:
   duckdb_path: "data/valuedashboard.duckdb"
   sqlite_path: "data/valuedashboard.sqlite"
   sqlite_wal_mode: true
-  # DuckDB 单个连接的内存上限；防止 50GB 高水位库的冷核对/大事务
-  # 把进程 WS 推到默认的 25GB。12GB 曾触发冷核对 OOM，14GB 为
-  # 32GB 主机上的保守默认；可被 user.yaml 覆盖。
-  duckdb_memory_limit: "14GB"
+  # DuckDB 单个连接的内存上限（普通 Web 查询/后台核对的默认值）。
+  # 全库自动更新会临时使用 14GB 预算；后台 summary 使用 4GB/2线程。
+  # 普通交互查询 4GB 足够，避免一个小工具长期占住数 GB 内存。
+  duckdb_memory_limit: "4GB"
 
 adapters:
   rate_limit_interval:
