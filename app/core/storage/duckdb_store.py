@@ -12,6 +12,7 @@ DuckDB 进程模型：单进程读写，或多进程只读，二者互斥。
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import os
 import secrets
 import time
@@ -192,6 +193,11 @@ class DuckDBWriteLockError(Exception):
     """DuckDB 写锁获取失败"""
 
 
+_MEMORY_LIMIT_OVERRIDE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "value_dashboard_duckdb_memory_limit_override", default=None
+)
+
+
 class DuckDBStore:
     """DuckDB 连接管理器
 
@@ -233,7 +239,22 @@ class DuckDBStore:
         return "14GB"
 
     def _connection_config(self) -> dict[str, str]:
-        return {"memory_limit": self._memory_limit}
+        override = _MEMORY_LIMIT_OVERRIDE.get()
+        return {"memory_limit": override or self._memory_limit}
+
+    @contextlib.contextmanager
+    def memory_limit(self, value: str) -> Iterator[None]:
+        """Temporarily cap new connections created on this thread/context.
+
+        用于后台重查询（如数据状态 summary）主动让出 DuckDB 内存预算，
+        避免把进程的全部 memory_limit 用光后，普通网页查询（K线/详情）
+        以 OutOfMemoryException 失败。
+        """
+        token = _MEMORY_LIMIT_OVERRIDE.set(value)
+        try:
+            yield
+        finally:
+            _MEMORY_LIMIT_OVERRIDE.reset(token)
 
     def _revalidate(self) -> None:
         validated = self._path_set.validate()

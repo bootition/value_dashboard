@@ -292,7 +292,11 @@ def _refresh_summary_worker(state, key: str) -> None:
     try:
         if _update_write_lock_active(state.duck):
             return
-        summary = _build_summary_from_state(state)
+        # 后台全量核对是 DuckDB 内存消耗大户。给它单独设置 10GB 预算，
+        # 避免把服务默认 14GB 配额全部占用后，并发进入的 K 线/详情等
+        # 轻查询触发 OutOfMemoryException（2026-09-02 start.log 实锤）。
+        with state.duck.memory_limit("10GB"):
+            summary = _build_summary_from_state(state)
         summary.setdefault("summary_as_of", datetime.now(UTC).isoformat())
         with _SUMMARY_CACHE_LOCK:
             _SUMMARY_CACHE[key] = {"at": time.monotonic(), "data": dict(summary)}
