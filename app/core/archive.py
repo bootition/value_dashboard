@@ -196,6 +196,60 @@ class DataArchiveManager:
                 connection.execute(f"DELETE FROM {table}")
         return True, None
 
+    def restore_from_archive(self, target_dir: str | None = None) -> dict[str, Any]:
+        """从已验证的冷归档恢复热表（reports/102 §6 P2 配套命令）。"""
+        root = self.resolve_target(target_dir)
+        valid, error, manifest_checksum = self._validate_manifest(root)
+        if not valid:
+            return {"status": "error", "error": error or "archive manifest invalid"}
+        try:
+            verified = _read_json(root / _VERIFIED_NAME)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"status": "error", "error": "archive has no valid verification record"}
+        if verified.get("manifest_sha256") != manifest_checksum:
+            return {"status": "error", "error": "archive verification record does not match its manifest"}
+        manifest = _read_json(root / _MANIFEST_NAME)
+        restored: list[str] = []
+        row_counts: dict[str, int] = {}
+        try:
+            with self._duck.transaction() as connection:
+                for table in ARCHIVE_TABLES:
+                    entry = manifest["tables"][table]
+                    path = root / entry["filename"]
+                    connection.execute(f"DELETE FROM {table}")
+                    quoted = str(path).replace("'", "''")
+                    connection.execute(
+                        f"INSERT INTO {table} BY NAME SELECT * FROM read_parquet('{quoted}')"
+                    )
+                    row = connection.execute(f"SELECT COUNT(*) AS c FROM {table}").fetchone()
+                    restored.append(table)
+                    row_counts[table] = int(row[0]) if row else 0
+            pdf_manifest_path = root / "pdf_archive_manifest.json"
+            if pdf_manifest_path.is_file():
+                pdf_state = _read_json(pdf_manifest_path).get("entries", [])
+                with self._sqlite.transaction() as conn:
+                    conn.execute("DELETE FROM pdf_archive_manifest")
+                    conn.executemany(
+                        "INSERT INTO pdf_archive_manifest "
+                        "(stock_code, filename, archive_path, checksum, archived_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        [
+                            (
+                                row["stock_code"], row["filename"], row["archive_path"],
+                                row["checksum"], row.get("archived_at"),
+                            )
+                            for row in pdf_state
+                        ],
+                    )
+        except Exception as error:
+            return {"status": "error", "error": f"restore failed: {error}"}
+        return {
+            "status": "ok",
+            "archive": str(root),
+            "restored": restored,
+            "row_counts": row_counts,
+        }
+
     def _validate_manifest(self, root: Path) -> tuple[bool, str | None, str | None]:
         try:
             manifest_path = root / _MANIFEST_NAME

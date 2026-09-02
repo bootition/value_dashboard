@@ -1290,6 +1290,68 @@ def screening_list(limit: int = typer.Option(20, "--limit")) -> None:
     typer.echo(json.dumps(make_response("screening.list", {"results": rows, "count": len(rows)}), ensure_ascii=False, default=str))
 
 
+# 08-13 单位 bug 影响的字段（reports/80 F3 簇 A/B/C）；规则里的条件值在
+# 修复前按错误口径保存，需要人工复核另存。
+_LEGACY_UNIT_FIELDS = frozenset({
+    "ttm_dividend_yield", "div_yield_spread_0p25y", "div_yield_spread_0p5y",
+    "div_yield_spread_1y", "div_yield_spread_2y", "div_yield_spread_3y",
+    "div_yield_spread_5y", "div_yield_spread_7y", "div_yield_spread_10y",
+    "div_yield_spread_30y", "turnover_rate", "net_profit_cagr3",
+    "deducted_profit_cagr3", "deducted_profit_cagr5", "period_return",
+    "annualized_volatility", "max_drawdown",
+})
+
+
+@screening_app.command("audit-legacy-unit-rules")
+def screening_audit_legacy_unit_rules() -> None:
+    """审计 08-13 单位 bug 期间保存的旧规则（技术债 T6）。"""
+    from app.cli.protocol import make_response
+
+    def walk_fields(node) -> set[str]:
+        fields: set[str] = set()
+        if not isinstance(node, dict):
+            return fields
+        if "field" in node and isinstance(node["field"], str):
+            fields.add(node["field"])
+        if "right_field" in node and isinstance(node["right_field"], str):
+            fields.add(node["right_field"])
+        for value in node.values():
+            if isinstance(value, dict):
+                fields |= walk_fields(value)
+            elif isinstance(value, list):
+                for child in value:
+                    fields |= walk_fields(child)
+        return fields
+
+    sqlite = _sqlite_store(initialize=False)
+    rows = sqlite.query(
+        "SELECT id, name, version, status, created_at, rule_json FROM screening_rules "
+        "WHERE created_at < ? ORDER BY created_at",
+        ["2026-08-14T12:00:00"],
+    )
+    affected: list[dict] = []
+    for row in rows:
+        try:
+            rule = json.loads(row["rule_json"])
+        except Exception:
+            continue
+        fields = walk_fields(rule.get("conditions")) | {
+            item.get("field", "") for item in (rule.get("sort") or [])
+        } | set(rule.get("columns") or [])
+        hits = sorted(fields & _LEGACY_UNIT_FIELDS)
+        if hits:
+            affected.append({
+                "id": row["id"], "name": row["name"], "version": row["version"],
+                "status": row["status"], "created_at": row["created_at"],
+                "legacy_unit_fields": hits,
+            })
+    typer.echo(json.dumps(make_response("screening.audit-legacy-unit-rules", {
+        "affected_rule_count": len(affected),
+        "rules": affected,
+        "note": "请对命中的规则复核条件值并另存为新版本；字段含义见 reports/80 F3。",
+    }), ensure_ascii=False, indent=2, default=str))
+
+
 # ─── override 命令 (PRD §9.5, §16.1) ─────────────────────────────
 
 override_app = typer.Typer(help="人工覆写管理")
@@ -1591,6 +1653,67 @@ def archive_clean_execute(
     typer.echo(json.dumps(make_response("archive.clean_execute", {"status": "success", "cleared_tables": list(ARCHIVE_TABLES), "archive": str(archive_root)}), ensure_ascii=False))
 
 
+@archive_app.command("restore")
+def archive_restore(
+    target_dir: str = typer.Argument("data/parquet"),
+) -> None:
+    """从已验证的冷归档恢复热表（reports/102 §6 P2 配套命令）"""
+    from app.cli.protocol import create_plan
+    from app.core.archive import DataArchiveManager
+    from app.core.config import Config
+
+    operation = "archive.restore"
+    paths, duck, sqlite = _database_context()
+    Config.load_with_paths(paths)
+    try:
+        archive_root = DataArchiveManager(duck, paths, sqlite).resolve_target(target_dir)
+    except Exception as error:
+        typer.echo(json.dumps({"status": "error", "error": str(error)}, ensure_ascii=False))
+        return
+    plan_summary = {
+        "operation": operation,
+        "target_dir": str(archive_root),
+        "warning": "恢复将清空当前所有热数据并以冷归档覆盖；执行前请确保归档已验证成功（archive verify）",
+    }
+    result = create_plan(operation, plan_summary, sqlite=sqlite)
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
+@archive_app.command("restore_execute")
+def archive_restore_execute(
+    target_dir: str = typer.Argument("data/parquet"),
+    plan_id: str = typer.Option(..., "--plan-id", help="已确认的恢复计划 ID"),
+) -> None:
+    """执行已确认的冷归档恢复（reports/102 §6 P2）"""
+    from app.cli.protocol import consume_confirmed_plan, make_response
+    from app.core.archive import DataArchiveManager
+    from app.core.config import Config
+
+    paths, duck, sqlite = _database_context()
+    Config.load_with_paths(paths)
+    try:
+        archive_manager = DataArchiveManager(duck, paths, sqlite)
+        archive_root = archive_manager.resolve_target(target_dir)
+    except Exception as error:
+        typer.echo(json.dumps(make_response("archive.restore_execute", error_code="E001", error_message=str(error)), ensure_ascii=False))
+        return
+    plan_error, summary = consume_confirmed_plan("archive.restore", plan_id=plan_id, sqlite=sqlite)
+    if plan_error:
+        typer.echo(json.dumps(plan_error, ensure_ascii=False, indent=2))
+        return
+    if summary.get("target_dir") != str(archive_root):
+        typer.echo(json.dumps(make_response("archive.restore_execute", error_code="E001", error_message="target_dir does not match the confirmed plan"), ensure_ascii=False))
+        return
+    result = _with_update_lock(duck, lambda: archive_manager.restore_from_archive(target_dir))
+    if isinstance(result, dict) and result.get("status") == "skipped":
+        typer.echo(json.dumps(make_response(
+            "archive.restore_execute", error_code="E003",
+            error_message=result.get("reason", "another_update_running"),
+        ), ensure_ascii=False, indent=2))
+        return
+    typer.echo(json.dumps(make_response("archive.restore_execute", result), ensure_ascii=False, indent=2, default=str))
+
+
 # ─── 补充缺失的 data 命令 (M7-问题2/4) ───────────────────────────
 
 @data_app.command("diagnose")
@@ -1790,6 +1913,60 @@ def data_reconcile_jobs_execute(
     typer.echo(json.dumps(make_response(
         "data.reconcile_jobs_execute", {"status": "success", "reconciled": reconciled, "plan_id": plan_id}
     ), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("probe-eastmoney-push2")
+def data_probe_eastmoney_push2(
+    secid: str = typer.Option("1.600519", "--secid", help="东财 secid（1.600519=沪，0.000001=深）"),
+) -> None:
+    """东财行情源冷却期后单次探测（技术债 T5）。
+
+    严格只发 1 个行情报价请求，不批量、不重试，用于确认 push2 是否解封；
+    恢复后仍须遵守 ≤2 req/s、并发 ≤5 的项目约束。
+    """
+    import httpx
+
+    from app.cli.protocol import make_response
+
+    try:
+        with httpx.Client(timeout=8.0, follow_redirects=True) as client:
+            response = client.get(
+                "https://push2.eastmoney.com/api/qt/stock/get",
+                params={"secid": secid, "fields": "f43,f57,f58,f60"},
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+            )
+        result = {
+            "status": "ok",
+            "http_status": response.status_code,
+            "content_type": response.headers.get("content-type"),
+            "body": response.text[:300],
+        }
+    except Exception as error:
+        result = {"status": "error", "error": f"{type(error).__name__}: {error}"}
+    typer.echo(json.dumps(make_response("data.probe-eastmoney-push2", result), ensure_ascii=False, indent=2, default=str))
+
+
+@data_app.command("quarantine-dividends-audit")
+def data_quarantine_dividends_audit(
+    include_samples: bool = typer.Option(False, "--samples", help="输出前 20 条可恢复样本"),
+) -> None:
+    """只读评估 dividends_quarantine 剩余占位除权日的核验路径（技术债 T4）。"""
+    from app.cli.protocol import make_response
+    from scripts.repair_dividend_ex_dates import collect_matches
+
+    paths, duck, sqlite = _database_context(initialize=False)
+    report = collect_matches(duck)
+    response: dict = {
+        key: report[key]
+        for key in (
+            "quarantine_rows_scanned", "restorable", "duplicates",
+            "skipped_no_candidate", "skipped_ambiguous",
+            "skipped_conflicting_existing", "skipped_cross_conflict",
+        )
+    }
+    if include_samples:
+        response["sample_matches"] = report["matches"][:20]
+    typer.echo(json.dumps(make_response("data.quarantine-dividends-audit", response), ensure_ascii=False, indent=2, default=str))
 
 
 @data_app.command("quarantine_legacy_records")

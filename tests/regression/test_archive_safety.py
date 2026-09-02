@@ -81,3 +81,58 @@ def test_archive_rejects_cold_pdf_or_sqlite_manifest_changes(
     verified, error = manager.is_verified_for_cleanup("data/parquet")
     assert verified is False
     assert error == "PDF archive manifest no longer matches SQLite"
+
+
+def test_archive_restore_replaces_hot_data_from_verified_archive(
+    database_paths: DatabasePathSet,
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        Config,
+        "_instance",
+        Config({"archive": {"root": "parquet"}}, paths=database_paths),
+    )
+    with duckdb_store.write_connection() as connection:
+        connection.execute(
+            """INSERT INTO price_daily_raw
+               (stock_code, trade_date, open, high, low, close, volume)
+               VALUES ('000001', '2026-09-01', 10, 12, 9, 11, 1000)"""
+        )
+    manager = DataArchiveManager(duckdb_store, database_paths, sqlite_store)
+    assert manager.create("data/parquet")["status"] == "ok"
+    assert manager.verify("data/parquet")["status"] == "ok"
+    before = duckdb_store.read_query(
+        "SELECT COUNT(*) AS c, COALESCE(MAX(close), 0) AS hi FROM price_daily_raw"
+    )[0]
+    assert before["c"] > 0
+
+    duckdb_store.write_query("DELETE FROM price_daily_raw")
+    assert duckdb_store.read_query("SELECT COUNT(*) AS c FROM price_daily_raw")[0]["c"] == 0
+
+    result = manager.restore_from_archive("data/parquet")
+    assert result["status"] == "ok", result
+    after = duckdb_store.read_query(
+        "SELECT COUNT(*) AS c, COALESCE(MAX(close), 0) AS hi FROM price_daily_raw"
+    )[0]
+    assert after["c"] == before["c"]
+    assert after["hi"] == before["hi"]
+
+
+def test_archive_restore_rejects_unverified_archive(
+    database_paths: DatabasePathSet,
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        Config,
+        "_instance",
+        Config({"archive": {"root": "parquet"}}, paths=database_paths),
+    )
+    manager = DataArchiveManager(duckdb_store, database_paths, sqlite_store)
+    assert manager.create("data/parquet")["status"] == "ok"
+    result = manager.restore_from_archive("data/parquet")
+    assert result["status"] == "error"
+    assert "verification" in result["error"] or "record" in result["error"]
