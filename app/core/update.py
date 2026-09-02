@@ -195,6 +195,18 @@ class IncrementalUpdater:
         )
 
     @staticmethod
+    def _update_duckdb_budget() -> tuple[str, int]:
+        """更新专用的 DuckDB 低内存预算（4GB/2线程，可配置）。"""
+        try:
+            from app.core.config import Config
+            cfg = Config.current().get_value("update", {})
+            budget = str(cfg.get("duckdb_memory_limit") or "4GB") if isinstance(cfg, dict) else "4GB"
+            threads = int(cfg.get("duckdb_threads") or 2) if isinstance(cfg, dict) else 2
+            return budget, max(1, threads)
+        except Exception:
+            return "4GB", 2
+
+    @staticmethod
     def _load_update_config(key: str, *, default: int) -> int:
         try:
             from app.core.config import Config
@@ -286,10 +298,13 @@ class IncrementalUpdater:
                 on_stale_lock=self._reconcile_crashed_incremental_jobs,
             ):
                 try:
-                    # 自动更新是全库重计算，需要较大 DuckDB 预算；普通 Web
-                    # 请求/后台 summary 使用 4GB 低预算。该上下文只对当前
-                    # 线程创建的连接生效，更新结束后立即恢复默认预算。
-                    with self.duck.memory_limit("14GB"):
+                    # 自动更新是全库重计算，但只在本线程/子进程生命周期内
+                    # 使用 update.duckdb_memory_limit（默认 4GB，2 线程）。
+                    # 更新进程退出后内存完整归还 OS；普通 Web 查询保持 2GB。
+                    budget, threads = self._update_duckdb_budget()
+                    with self.duck.memory_limit(
+                        budget, threads=threads, preserve_insertion_order=False,
+                    ):
                         return self._run_incremental_update_locked(max_stocks, progress_cb, detail_cb)
                 finally:
                     close = getattr(self.adapter_mgr, "close", None)

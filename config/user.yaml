@@ -3,9 +3,12 @@
 # 加载规则：app/core/config.py 先读 default.yaml，再深合并本文件。
 # 只写需要覆盖的键，未写的键继续使用 default.yaml。
 #
-# 示例 1：DuckDB 内存上限（普通查询默认 4GB；自动更新临时使用 14GB）：
+# 示例 1：普通查询默认 2GB；后台全库核对 4GB；自动更新默认 4GB/2线程。
 # database:
-#   duckdb_memory_limit: "3GB"
+#   duckdb_memory_limit: "2GB"
+# update:
+#   duckdb_memory_limit: "4GB"
+#   duckdb_threads: 2
 #
 # 示例 2：修改数据源优先级：
 # adapters:

@@ -10,10 +10,9 @@ database:
   duckdb_path: "data/valuedashboard.duckdb"
   sqlite_path: "data/valuedashboard.sqlite"
   sqlite_wal_mode: true
-  # DuckDB 单个连接的内存上限（普通 Web 查询/后台核对的默认值）。
-  # 全库自动更新会临时使用 14GB 预算；后台 summary 使用 4GB/2线程。
-  # 普通交互查询 4GB 足够，避免一个小工具长期占住数 GB 内存。
-  duckdb_memory_limit: "4GB"
+  # 普通 Web 查询/详情页默认 2GB；后台全库核对临时使用 4GB/2线程。
+  # 自动更新子进程使用 update.duckdb_memory_limit（默认 4GB）。
+  duckdb_memory_limit: "2GB"
 
 adapters:
   rate_limit_interval:
@@ -48,6 +47,8 @@ screening:
 
 update:
   enabled: true           # 自动更新默认开启（PRD §7.3）
+  duckdb_memory_limit: "4GB"  # 全库更新子进程的 DuckDB 预算（更新后进程退出并释放）
+  duckdb_threads: 2           # 全库更新低内存模式：低并行 + 关闭插入序保留
   startup: true           # 启动时自动执行增量更新
   incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口

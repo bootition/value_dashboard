@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import threading
 import time
 from datetime import UTC, date, datetime, timedelta
@@ -1057,10 +1058,57 @@ def mask_untrusted_values(values: dict, trust: dict) -> dict:
 
 
 _WARNING_CODES_CACHE_TTL_SECONDS = 30.0
+_WARNING_CODES_STATE_KEY = "warning_codes_cache"
 _warning_codes_cache: dict[str, tuple[float, list[str]]] = {}
 # reports/76 P1-2 增强：TTL 过期后不阻塞请求——返回 stale 结果并后台单飞重建
 _warning_codes_refresh_lock = threading.Lock()
 _warning_codes_refreshing: set[str] = set()
+
+
+def _build_warning_codes_low_memory(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
+    """Full quality build under a bounded DuckDB budget.
+
+    The full lineage/archive scan is the only operation in this service that
+    approaches the multi-GiB DuckDB limit. 4GB + two threads +
+    preserve_insertion_order=false is the validated floor on the current 40GB
+    database; 2GB still OOMs. Hot read paths never run this synchronously in
+    formal mode.
+    """
+    memory_manager = getattr(duck, "memory_limit", None)
+    if memory_manager is not None:
+        with memory_manager("4GB", threads=2, preserve_insertion_order=False):
+            return list(build_data_quality_status(duck, sqlite)["warning_codes"])
+    return list(build_data_quality_status(duck, sqlite)["warning_codes"])
+
+
+def _persisted_warning_codes(sqlite: SQLiteStore) -> list[str]:
+    try:
+        rows = sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [_WARNING_CODES_STATE_KEY],
+        )
+        if rows and rows[0].get("value"):
+            value = json.loads(rows[0]["value"])
+            if isinstance(value, list):
+                return [str(item) for item in value]
+    except Exception:
+        pass
+    return []
+
+
+def _persist_warning_codes(sqlite: SQLiteStore, codes: list[str]) -> None:
+    try:
+        with sqlite.transaction() as conn:
+            conn.execute(
+                """INSERT INTO data_refresh_state (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value, updated_at=excluded.updated_at""",
+                [_WARNING_CODES_STATE_KEY, json.dumps(codes, ensure_ascii=False),
+                 datetime.now(UTC).isoformat()],
+            )
+    except Exception:
+        logger.warning("持久化 warning_codes 缓存失败", exc_info=True)
 
 
 def read_warning_codes(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
@@ -1094,20 +1142,24 @@ def read_warning_codes(duck: DuckDBStore, sqlite: SQLiteStore) -> list[str]:
         from app.core.storage.update_lock import update_lock_active
 
         if update_lock_active(duck.db_path):
-            if cached is not None:
-                return list(cached[1])
-            return []
+            return list(cached[1]) if cached is not None else _persisted_warning_codes(sqlite)
     except Exception:
         pass
     if cached is not None:
         _ensure_warning_codes_refresh(duck, sqlite, cache_key)
         return list(cached[1])
-    try:
-        warning_codes = list(build_data_quality_status(duck, sqlite)["warning_codes"])
-    except Exception:
-        return ["LINEAGE_INVALID"]
-    _warning_codes_cache[cache_key] = (now, warning_codes)
-    return list(warning_codes)
+    # S1 测试进程需要确定性同步结果；正式服务第一次请求绝不执行 40-80s
+    # 的全库扫描——用持久化缓存兜底并触发后台单飞刷新。
+    if os.environ.get("VD_ENV") == "test":
+        try:
+            warning_codes = _build_warning_codes_low_memory(duck, sqlite)
+        except Exception:
+            return ["LINEAGE_INVALID"]
+        _warning_codes_cache[cache_key] = (now, warning_codes)
+        return list(warning_codes)
+    persisted = _persisted_warning_codes(sqlite)
+    _ensure_warning_codes_refresh(duck, sqlite, cache_key)
+    return persisted
 
 
 def _ensure_warning_codes_refresh(duck: DuckDBStore, sqlite: SQLiteStore, key: str) -> None:
@@ -1130,8 +1182,9 @@ def _warning_codes_refresh_worker(duck: DuckDBStore, sqlite: SQLiteStore, key: s
 
         if update_lock_active(duck.db_path):
             return
-        warning_codes = list(build_data_quality_status(duck, sqlite)["warning_codes"])
+        warning_codes = _build_warning_codes_low_memory(duck, sqlite)
         _warning_codes_cache[key] = (time.monotonic(), warning_codes)
+        _persist_warning_codes(sqlite, warning_codes)
     except Exception as error:
         logger.warning("后台 warning codes 刷新失败: %s", error)
     finally:

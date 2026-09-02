@@ -305,7 +305,8 @@ async function fetchHeavy(silent = false): Promise<void> {
     summary.value = sumResp.data
     retryList.value = retryResp.data.items || []
     missingList.value = missResp.data.items || []
-    error.value = (sumResp.data as { stale?: boolean }).stale ? '数据为自动更新期间的快照缓存（stale）' : ''
+    // stale 不是错误：上面有专门的“更新运行中”提示，避免红/黄/绿同时出现。
+    error.value = ''
   } catch (e: unknown) {
     if (!silent) error.value = axios.isAxiosError(e) ? e.message : (e instanceof Error ? e.message : '加载失败')
     else if (!summary.value) error.value = '数据摘要暂时不可用'
@@ -413,18 +414,35 @@ function skipReasonLabel(reason: string | null | undefined): string {
       <template v-if="summary">
         <!-- L2 V3: 第一问"数据可研究吗" -->
         <n-alert
-          :type="summary.data_quality.minimum_data_readiness.checking ? 'info' : summary.data_quality.minimum_data_readiness.ready ? 'success' : 'error'"
+          :type="
+            summary.data_quality.minimum_data_readiness.checking ? 'info'
+            : (summary.updating || summary.stale) ? 'warning'
+            : summary.data_quality.minimum_data_readiness.ready ? 'success'
+            : 'error'
+          "
           :show-icon="true"
           class="data-readiness"
         >
           <template #header>
-            {{ summary.data_quality.minimum_data_readiness.checking ? '正在核对数据' : summary.data_quality.minimum_data_readiness.ready ? '数据可研究' : '数据尚未就绪' }}
+            {{
+              summary.data_quality.minimum_data_readiness.checking
+                ? '正在核对数据'
+                : (summary.updating || summary.stale)
+                  ? '自动更新中：以下为快照口径'
+                  : summary.data_quality.minimum_data_readiness.ready
+                    ? '数据可研究'
+                    : '数据尚未就绪'
+            }}
           </template>
-          {{ summary.data_quality.minimum_data_readiness.checking
-            ? '正在后台核对数据完整性，完成后会显示最终状态。'
-            : summary.data_quality.minimum_data_readiness.ready
-            ? `数据可研究：价格截至 ${summary.data_quality.dates?.price || '—'}，财报截至 ${summary.data_quality.dates?.balance_sheet?.latest_complete || '—'}。最近一次更新执行: ${formatLocalTime(summary.last_update)}（${updateStatusLabel(summary.last_update_status)}）。`
-            : `数据尚未完全就绪，有 ${summary.data_quality.warning_codes.length} 个警告；当前更新完成后会自动恢复。` }}
+          {{
+            summary.data_quality.minimum_data_readiness.checking
+              ? '正在后台核对数据完整性，完成后会显示最终状态。'
+              : (summary.updating || summary.stale)
+                ? '当前覆盖统计与指标为最近一次快照，实时进度见上方“自动更新”卡片；更新完成后自动恢复绿色状态。'
+                : summary.data_quality.minimum_data_readiness.ready
+                  ? `数据可研究：价格截至 ${summary.data_quality.dates?.price || '—'}，财报截至 ${summary.data_quality.dates?.balance_sheet?.latest_complete || '—'}。最近一次更新执行: ${formatLocalTime(summary.last_update)}（${updateStatusLabel(summary.last_update_status)}）。`
+                  : `数据尚未完全就绪，有 ${summary.data_quality.warning_codes.length} 个警告；当前更新完成后会自动恢复。`
+          }}
         </n-alert>
 
         <p style="color: #999; margin-bottom: 16px;">
