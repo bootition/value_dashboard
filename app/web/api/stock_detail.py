@@ -91,6 +91,200 @@ def calculate_ttm_trend(rows: list[dict]) -> list[dict]:
     return trend
 
 
+_METRIC_HISTORY_RATIO_FIELDS = {
+    "roe": "net_profit / total_equity",
+    "roa": "net_profit / total_assets",
+    "gross_margin": "gross_profit / revenue",
+    "net_margin": "net_profit / revenue",
+    "debt_ratio": "total_liabilities / total_assets",
+    "current_ratio": "total_current_assets / total_current_liabilities",
+    "quick_ratio": "(total_current_assets - inventory) / total_current_liabilities",
+    "cf_to_net_profit": "cf_from_operating / net_profit",
+}
+
+
+def _metric_history_value(row: dict, metric: str) -> float | None:
+    if metric in _METRIC_HISTORY_RATIO_FIELDS:
+        revenue = row.get("revenue")
+        net_profit = row.get("net_profit")
+        total_assets = row.get("total_assets")
+        total_equity = row.get("total_equity")
+        if metric == "roe":
+            return net_profit / total_equity if net_profit is not None and total_equity not in (None, 0) else None
+        if metric == "roa":
+            return net_profit / total_assets if net_profit is not None and total_assets not in (None, 0) else None
+        if metric == "gross_margin":
+            gp = row.get("gross_profit")
+            return gp / revenue if gp is not None and revenue not in (None, 0) else None
+        if metric == "net_margin":
+            return net_profit / revenue if net_profit is not None and revenue not in (None, 0) else None
+        if metric == "debt_ratio":
+            tl = row.get("total_liabilities")
+            return tl / total_assets if tl is not None and total_assets not in (None, 0) else None
+        if metric == "current_ratio":
+            ca = row.get("total_current_assets")
+            cl = row.get("total_current_liabilities")
+            return ca / cl if ca is not None and cl not in (None, 0) else None
+        if metric == "quick_ratio":
+            ca = row.get("total_current_assets")
+            inv = row.get("inventory")
+            cl = row.get("total_current_liabilities")
+            return (ca - inv) / cl if ca is not None and inv is not None and cl not in (None, 0) else None
+        if metric == "cf_to_net_profit":
+            cf = row.get("cf_from_operating")
+            return cf / net_profit if cf is not None and net_profit not in (None, 0) else None
+    return None
+
+
+def _metric_history_yoy(rows: list[dict], metric: str) -> list[dict]:
+    """TTM YoY metrics from a chronological TTM row list."""
+    by_year = {}
+    for row in rows:
+        date_text = str(row.get("report_date", ""))
+        if len(date_text) >= 4:
+            by_year[date_text[:4]] = row
+    out = []
+    for row in rows:
+        year = str(row.get("report_date", ""))[:4]
+        prior = by_year.get(str(int(year) - 1)) if year.isdigit() else None
+        item = {"report_date": str(row.get("report_date", ""))}
+        if prior is None:
+            item["value"] = None
+            out.append(item)
+            continue
+        if metric == "revenue_yoy":
+            cur = row.get("revenue")
+            base = prior.get("revenue")
+        elif metric == "net_profit_yoy":
+            cur = row.get("net_profit")
+            base = prior.get("net_profit")
+        elif metric == "deducted_profit_yoy":
+            cur = row.get("deducted_net_profit")
+            base = prior.get("deducted_net_profit")
+        else:
+            item["value"] = None
+            out.append(item)
+            continue
+        item["value"] = (cur / base - 1) if cur is not None and base not in (None, 0) else None
+        out.append(item)
+    return out
+
+
+def _metric_history_rows(duck: object, stock_code: str, metric: str, period: str) -> list[dict]:
+    """Build the latest-restated historical series for one metric."""
+    yoy_metrics = {"revenue_yoy", "net_profit_yoy", "deducted_profit_yoy"}
+    base_period = "ttm" if metric in yoy_metrics else period
+    rows = duck.read_query(
+        """SELECT bs.report_date,
+                  ic.revenue, ic.cost_of_revenue,
+                  (ic.revenue - ic.cost_of_revenue) AS gross_profit,
+                  ic.net_profit, ic.parent_net_profit, ic.deducted_net_profit,
+                  cf.cf_from_operating,
+                  bs.total_assets, bs.total_liabilities,
+                  bs.total_current_assets, bs.total_current_liabilities,
+                  bs.inventory,
+                  bs.total_equity, bs.total_equity_parent
+           FROM balance_sheet bs
+           LEFT JOIN income_statement ic
+             ON bs.stock_code = ic.stock_code AND bs.report_date = ic.report_date
+           LEFT JOIN cash_flow cf
+             ON bs.stock_code = cf.stock_code AND bs.report_date = cf.report_date
+           WHERE bs.stock_code = ?
+           ORDER BY bs.report_date ASC""",
+        [stock_code],
+    )
+    if not rows:
+        return []
+    if base_period == "ttm":
+        rows = calculate_ttm_trend(rows)
+    elif base_period == "quarterly":
+        rows = _to_single_quarter(rows)
+    elif base_period == "annual":
+        rows = [r for r in rows if str(r.get("report_date", ""))[5:7] == "12"]
+    # net_profit fallback for ttm rows
+    for row in rows:
+        if row.get("net_profit") is None and row.get("parent_net_profit") is not None:
+            row["net_profit"] = row["parent_net_profit"]
+    if metric in yoy_metrics:
+        return _metric_history_yoy(rows, metric)
+    return [
+        {"report_date": str(row.get("report_date", "")), "value": _metric_history_value(row, metric)}
+        for row in rows
+    ]
+
+
+def _history_stats(values: list[float]) -> dict:
+    if not values:
+        return {"samples": 0, "mean": None, "sigma": None, "p10": None,
+                "p20": None, "p50": None, "p80": None, "max": None,
+                "current": None, "current_date": None, "reason": "no_samples"}
+    n = len(values)
+    mean = sum(values) / n
+    sigma = (sum((v - mean) ** 2 for v in values) / n) ** 0.5 if n > 1 else 0.0
+    ordered = sorted(values)
+
+    def pct(p: float) -> float:
+        pos = (n - 1) * p
+        lo = int(pos)
+        hi = min(lo + 1, n - 1)
+        frac = pos - lo
+        return ordered[lo] * (1 - frac) + ordered[hi] * frac
+
+    return {
+        "samples": n, "mean": mean, "sigma": sigma,
+        "p10": pct(0.10), "p20": pct(0.20), "p50": pct(0.50),
+        "p80": pct(0.80), "max": ordered[-1],
+        "current": values[-1], "current_date": None, "reason": None,
+    }
+
+
+@router.get("/{stock_code}/metric-history")
+def get_metric_history(
+    stock_code: str,
+    request: Request,
+    metric: str = Query("roe"),
+    period: Literal["annual", "quarterly", "ttm"] = "ttm",
+) -> dict:
+    """通用财务指标历史序列（latest_restated 口径，上市以来默认）。
+
+    详情页“固定数字卡 → 一张图 + 下拉”的数据源。当前支持：
+    roe/roa/gross_margin/net_margin/debt_ratio/current_ratio/quick_ratio/
+    cf_to_net_profit/revenue_yoy/net_profit_yoy/deducted_profit_yoy。
+    """
+    yoy_metrics = {"revenue_yoy", "net_profit_yoy", "deducted_profit_yoy"}
+    supported = set(_METRIC_HISTORY_RATIO_FIELDS) | yoy_metrics
+    if metric not in supported:
+        raise HTTPException(status_code=400, detail=f"unsupported metric: {metric}")
+    duck = request.app.state.duck
+    exists = duck.read_query(
+        "SELECT listing_date FROM stock_meta WHERE stock_code = ?", [stock_code]
+    )
+    if not exists:
+        raise HTTPException(status_code=404, detail="stock not found")
+    listing_date = exists[0].get("listing_date")
+    rows = _metric_history_rows(duck, stock_code, metric, period)
+    if listing_date is not None:
+        listing_text = str(listing_date)[:10]
+        rows = [row for row in rows if str(row.get("report_date", ""))[:10] >= listing_text]
+    values = [float(row["value"]) for row in rows if row.get("value") is not None]
+    stats = _history_stats(values)
+    current_date = None
+    for row in reversed(rows):
+        if row.get("value") is not None:
+            current_date = row.get("report_date")
+            break
+    stats["current_date"] = current_date
+    return {
+        "stock_code": stock_code,
+        "metric": metric,
+        "period": period,
+        "series": rows,
+        "statistics": stats,
+        "window_years": 99,
+        "disclaimer": "latest_restated 最新重述回看口径：历史日使用该日对应报告期当前最新重述财务值，不代表当时市场可见信息，不用于回测",
+    }
+
+
 def _to_single_quarter(rows: list[dict]) -> list[dict]:
     """Convert cumulative flow statements to standalone quarters, preserving balances.
 
@@ -1055,7 +1249,7 @@ def get_source_audit(
                    formula,
                   NULL AS as_reported_value,
                   NULL AS latest_restated_diff
-           FROM source_audit
+           FROM source_audit_all
            WHERE stock_code = ?
            ORDER BY fetch_time DESC
            LIMIT ?""",
@@ -1087,7 +1281,7 @@ def get_source_audit(
                   row_count, confidence
            FROM fetch_batch
            WHERE batch_id IN (
-               SELECT DISTINCT fetch_batch_id FROM source_audit
+               SELECT DISTINCT fetch_batch_id FROM source_audit_all
                WHERE stock_code = ?
            )
            ORDER BY fetch_time DESC

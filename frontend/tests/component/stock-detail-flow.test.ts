@@ -345,19 +345,16 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
     expect(overviewText).toContain('2026-08-09 10:00:00')
   })
 
-  it('经营章节显示最近报告期主营构成明细表', async () => {
+  it('经营章节在固定数字原位显示单张可切换指标历史图', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
     const operationsText = wrapper.find('#operations').text()
-    expect(operationsText).toContain('主营构成')
-    expect(operationsText).toContain('报告期 2025-12-31')
-    // 表格列与行
-    expect(operationsText).toContain('排名')
-    expect(operationsText).toContain('占比')
-    expect(operationsText).toContain('系列酒')
-    expect(operationsText).toContain('境内')
+    expect(operationsText).toContain('经营与成长')
+    expect(operationsText).toContain('ROE')
+    expect(operationsText).toContain('TTM · 上市以来 · latest_restated')
+    expect(operationsText).toContain('暂无该指标历史序列')
   })
 
   it('missing 是局部空态，不触发页面级 stockUnavailable', async () => {
@@ -367,15 +364,15 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
 
     expect(wrapper.text()).not.toContain('股票不存在或暂无数据')
     expect(wrapper.find('#overview').text()).toContain('暂无业务概览数据')
-    expect(wrapper.find('#operations').text()).toContain('暂无主营构成数据')
+    expect(wrapper.find('#operations').text()).toContain('暂无该指标历史序列')
   })
 
-  it('国债比较已合并进历史研究统计，不再单独请求国债卡片', async () => {
+  it('股东回报区域不再请求独立国债卡片，只保留一张历史统计图', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
-    expect(wrapper.find('#return').text()).not.toContain('国债比较')
+    expect(wrapper.find('#return').text()).toContain('历史研究统计')
     expect(wrapper.find('#valuation').text()).toContain('国债比较已合并进“股息率-国债10年利差”序列')
     const requests = (axios.get as Mock).mock.calls
       .filter(([url]: [string]) => String(url).includes('/treasury-comparison'))
@@ -395,14 +392,14 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
     expect(valuationText).toContain('最新重述回看')
   })
 
-  it('历史研究统计只渲染一张且默认可切换股息利差序列', async () => {
+  it('估值与股东回报各保留一张历史统计图', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
     const cards = wrapper.findAll('[aria-label="历史研究统计"]')
-    expect(cards).toHaveLength(1)
-    expect(wrapper.find('#return').text()).not.toContain('历史研究统计')
+    expect(cards).toHaveLength(2)
+    expect(wrapper.find('#return').text()).toContain('历史研究统计')
     expect(wrapper.find('#valuation').text()).toContain('股息率-国债10年利差')
   })
 })

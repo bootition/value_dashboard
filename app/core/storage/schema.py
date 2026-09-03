@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 18
+DUCKDB_SCHEMA_VERSION = 19
 SQLITE_SCHEMA_VERSION = 15
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -270,9 +270,9 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     dps              DOUBLE,            -- 每股股息
     consecutive_div_years INTEGER,
     -- 分红融资比数据前置（2026-08-25，reports/82 后续指标）
-    cumulative_dividend_amount DOUBLE,   -- 历史累计现金分红金额（元，按除权日股本链折算）
-    cumulative_financing_amount DOUBLE,  -- 历史累计股权融资金额（元，IPO+增发+配股，优先募资额/净额）
-    dividend_financing_ratio_pct DOUBLE, -- 分红融资比（%）：广义分红/股权融资 × 100
+    cumulative_dividend_amount DOUBLE,   -- A股累计现金分红金额（元，按A股流通股本折算，H股不计入）
+    cumulative_financing_amount DOUBLE,  -- A股累计股权融资金额（元，IPO+增发+配股，优先募资额/净额）
+    dividend_financing_ratio_pct DOUBLE, -- 分红融资比（%，A股口径）：广义分红/股权融资 × 100
     -- 行情
     ma5             DOUBLE,
     ma10            DOUBLE,
@@ -1106,6 +1106,70 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (18, 'Track raw archive partition row/byte counters')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v19: source_audit 冷热分离（2026-09-03）。
+        # source_audit 保留近期热审计行；老审计行由维护命令按 report_date
+        # 批量迁入 source_audit_archive。日常 readiness/lineage 只扫描热表，
+        # 排查历史问题时通过 source_audit_all 视图查询热+冷。
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS source_audit_archive (
+                id                BIGINT PRIMARY KEY,
+                stock_code        VARCHAR NOT NULL,
+                field_name        VARCHAR NOT NULL,
+                report_date       DATE,
+                value             DOUBLE,
+                source            VARCHAR NOT NULL,
+                fetch_batch_id    VARCHAR NOT NULL,
+                fetch_time        TIMESTAMP NOT NULL,
+                raw_response_hash VARCHAR NOT NULL,
+                confidence        VARCHAR NOT NULL,
+                reason_code       VARCHAR,
+                api_version       VARCHAR,
+                is_override       BOOLEAN DEFAULT FALSE,
+                override_id       BIGINT,
+                created_at        TIMESTAMP,
+                effective_date    DATE,
+                data_version      VARCHAR,
+                formula           VARCHAR,
+                archived_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_audit_archive_stock_date_field
+                ON source_audit_archive (stock_code, report_date, field_name)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_source_audit_archive_hash
+                ON source_audit_archive (raw_response_hash)
+            """
+        )
+        connection.execute(
+            """
+            CREATE OR REPLACE VIEW source_audit_all AS
+            SELECT id, stock_code, field_name, report_date, value, source,
+                   fetch_batch_id, fetch_time, raw_response_hash, confidence,
+                   reason_code, api_version, is_override, override_id, created_at,
+                   effective_date, data_version, formula
+            FROM source_audit
+            UNION ALL
+            SELECT id, stock_code, field_name, report_date, value, source,
+                   fetch_batch_id, fetch_time, raw_response_hash, confidence,
+                   reason_code, api_version, is_override, override_id, created_at,
+                   effective_date, data_version, formula
+            FROM source_audit_archive
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (19, 'Split source audit into hot and archive tables')
             ON CONFLICT (version) DO NOTHING
             """
         )

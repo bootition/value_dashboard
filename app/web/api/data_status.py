@@ -363,7 +363,7 @@ def _build_summary_from_state(state) -> dict:
     duck = state.duck
     sqlite = state.sqlite
 
-    from app.core.data_quality import build_data_quality_status
+    from app.core.data_quality import build_data_quality_status_cached
 
     startup_readiness = getattr(state, "startup_readiness", None)
     if isinstance(startup_readiness, dict) and startup_readiness.get("checking"):
@@ -382,7 +382,7 @@ def _build_summary_from_state(state) -> dict:
         }
 
     try:
-        summary: dict = {"data_quality": build_data_quality_status(duck, sqlite)}
+        summary: dict = {"data_quality": build_data_quality_status_cached(duck, sqlite)}
     except Exception as error:
         raise HTTPException(status_code=503, detail="data quality status is unavailable") from error
     errors: list[str] = []

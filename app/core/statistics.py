@@ -45,6 +45,7 @@ __all__ = [
 
 WINDOW_MIN_SAMPLES: dict[int, int] = {1: 120, 3: 360, 5: 600, 10: 1200, 99: 1200}
 WINDOW_YEARS = (1, 3, 5, 10, 99)
+_WRITE_BATCH_RECORDS = 2_000
 COVERAGE_THRESHOLD_PCT = 90.0  # reports/68 §3.5：历史股本连续可验证覆盖 ≥90%
 MAX_STALENESS_DAYS = 5
 DEFAULT_TENOR = 10.0
@@ -508,18 +509,7 @@ class StatisticsBuilder:
                     staging_table, records, success_codes,
                 )
             else:
-                with self.duck.transaction() as conn:
-                    count = conn.execute(
-                        f'SELECT COUNT(*) FROM "{staging_table}"'
-                    ).fetchone()[0]
-                    if count != len(records):
-                        raise RuntimeError(
-                            f"statistics staging mismatch: {count} != {len(records)}"
-                        )
-                    conn.execute("DELETE FROM research_statistics")
-                    conn.execute(
-                        f'INSERT INTO research_statistics BY NAME SELECT * FROM "{staging_table}"'
-                    )
+                self._publish_statistics_full(staging_table, records)
         finally:
             self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
 
@@ -538,34 +528,87 @@ class StatisticsBuilder:
         self, staging_table: str, records: list[dict[str, Any]],
         stock_codes: list[str],
     ) -> None:
-        """Replace research_statistics rows only for successfully rebuilt stocks."""
+        """Replace research_statistics rows only for successfully rebuilt stocks.
+
+        2026-09-03 优化：按股票分批提交。此前单事务 DELETE+INSERT 5,500+
+        只股票的 22 万行会持续持有 DuckDB 写连接数分钟，期间所有 Web 查询
+        排队/超时。分批后每批写锁窗口降至亚秒级，批次之间页面可正常读取。
+        每只股票仍与它的新统计行在同一事务内替换，不会出现半只股票混旧新。
+        """
         if not stock_codes or not records:
             return
-        placeholders = ", ".join("?" for _ in stock_codes)
-        with self.duck.transaction() as conn:
-            previous_total = conn.execute(
-                "SELECT COUNT(*) FROM research_statistics"
-            ).fetchone()[0]
-            affected_count = conn.execute(
-                f"SELECT COUNT(*) FROM research_statistics "
-                f"WHERE stock_code IN ({placeholders})",
-                stock_codes,
-            ).fetchone()[0]
-            conn.execute(
-                f"DELETE FROM research_statistics WHERE stock_code IN ({placeholders})",
-                stock_codes,
+        for batch_start in range(0, len(stock_codes), self._PUBLISH_BATCH_STOCKS):
+            batch = stock_codes[batch_start:batch_start + self._PUBLISH_BATCH_STOCKS]
+            placeholders = ", ".join("?" for _ in batch)
+            with self.duck.transaction() as conn:
+                affected_count = conn.execute(
+                    f"SELECT COUNT(*) FROM research_statistics "
+                    f"WHERE stock_code IN ({placeholders})",
+                    batch,
+                ).fetchone()[0]
+                staging_count = conn.execute(
+                    f'SELECT COUNT(*) FROM "{staging_table}" '
+                    f"WHERE stock_code IN ({placeholders})",
+                    batch,
+                ).fetchone()[0]
+                conn.execute(
+                    f"DELETE FROM research_statistics WHERE stock_code IN ({placeholders})",
+                    batch,
+                )
+                conn.execute(
+                    f'INSERT INTO research_statistics BY NAME '
+                    f'SELECT * FROM "{staging_table}" '
+                    f"WHERE stock_code IN ({placeholders})",
+                    batch,
+                )
+                after_count = conn.execute(
+                    f"SELECT COUNT(*) FROM research_statistics "
+                    f"WHERE stock_code IN ({placeholders})",
+                    batch,
+                ).fetchone()[0]
+                if after_count != staging_count:
+                    raise RuntimeError(
+                        f"statistics merge batch mismatch: rows={after_count}, "
+                        f"expected={staging_count}"
+                    )
+            if affected_count == 0 and staging_count == 0:
+                continue
+            logger.debug(
+                "published statistics batch %d-%d (%d rows)",
+                batch_start, batch_start + len(batch), staging_count,
             )
+
+    def _publish_statistics_full(
+        self, staging_table: str, records: list[dict[str, Any]],
+    ) -> None:
+        """Full-rebuild publish, also batched to bound the writer-lock window."""
+        if not records:
+            return
+        staging_count = self.duck.read_query(
+            f'SELECT COUNT(*) AS c FROM "{staging_table}"'
+        )[0]["c"]
+        if staging_count != len(records):
+            raise RuntimeError(
+                f"statistics staging mismatch: {staging_count} != {len(records)}"
+            )
+        # 分批清空旧表：每批一个独立事务；旧版本与新版本短暂混存，
+        # 但页面读取不再被长锁冻结。
+        rows = self.duck.read_query(
+            "SELECT DISTINCT stock_code FROM research_statistics ORDER BY stock_code"
+        )
+        all_codes = [str(row["stock_code"]) for row in rows]
+        for batch_start in range(0, len(all_codes), self._PUBLISH_BATCH_STOCKS):
+            batch = all_codes[batch_start:batch_start + self._PUBLISH_BATCH_STOCKS]
+            placeholders = ", ".join("?" for _ in batch)
+            with self.duck.transaction() as conn:
+                conn.execute(
+                    f"DELETE FROM research_statistics WHERE stock_code IN ({placeholders})",
+                    batch,
+                )
+        with self.duck.write_connection() as conn:
             conn.execute(
                 f'INSERT INTO research_statistics BY NAME SELECT * FROM "{staging_table}"'
             )
-            row_count = conn.execute(
-                "SELECT COUNT(*) FROM research_statistics"
-            ).fetchone()[0]
-            expected = previous_total - affected_count + len(records)
-            if row_count != expected:
-                raise RuntimeError(
-                    f"statistics merge mismatch: rows={row_count}, expected={expected}"
-                )
     _STOCK_STATE_TABLE = "research_statistics_stock_state"
 
     def _ensure_stock_state_table(self) -> None:
@@ -997,17 +1040,22 @@ class StatisticsBuilder:
         "coverage_pct", "min_date", "max_date", "reason",
         "version", "input_fingerprint", "published_at",
     )
+    # 每批替换的股票数：把全量发布的 DuckDB 写锁窗口从数分钟压到亚秒级。
+    _PUBLISH_BATCH_STOCKS = 200
 
     def _write_records(self, staging_table: str, records: list[dict[str, Any]]) -> None:
         if not records:
             return
         placeholders = ", ".join(["?"] * len(self._PUBLISH_COLUMNS))
         columns = ", ".join(self._PUBLISH_COLUMNS)
-        with self.duck.write_connection() as conn:
-            conn.executemany(
-                f'INSERT INTO "{staging_table}" ({columns}) VALUES ({placeholders})',
-                [[row.get(col) for col in self._PUBLISH_COLUMNS] for row in records],
-            )
+        rows = [[row.get(col) for col in self._PUBLISH_COLUMNS] for row in records]
+        for batch_start in range(0, len(rows), _WRITE_BATCH_RECORDS):
+            batch = rows[batch_start:batch_start + _WRITE_BATCH_RECORDS]
+            with self.duck.write_connection() as conn:
+                conn.executemany(
+                    f'INSERT INTO "{staging_table}" ({columns}) VALUES ({placeholders})',
+                    batch,
+                )
 
 
 # ─── 进程池 worker（reports/73 修复阶段：全量重建并行化）──────────────────

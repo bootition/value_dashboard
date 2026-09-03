@@ -2,32 +2,27 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
-  NAlert, NButton, NDataTable, NResult, NSelect, NSpace, NSpin, NTag,
+  NAlert, NButton, NResult, NSpace, NSpin, NTag,
   useMessage,
 } from 'naive-ui'
-import type { DataTableColumns } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { isIndicatorUntrusted } from '../types/data-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import KlineChartCard from '../components/KlineChartCard.vue'
 import IndicatorGroupSection from '../components/IndicatorGroupSection.vue'
-import type { IndicatorGroup, MetricStatItem } from '../components/IndicatorGroupSection.vue'
 import StockTocNav from '../components/StockTocNav.vue'
 import type { TocItem } from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
-import FinancialTrendCard from '../components/FinancialTrendCard.vue'
+import MetricHistoryChart from '../components/MetricHistoryChart.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
-import { fmt, fmtPct } from '../utils/formatters.ts'
+import { fmt } from '../utils/formatters.ts'
 import { loadKlineSettings, pageStorage, saveKlineSettings } from '../utils/kline-settings.ts'
 import type {
   StockInfo,
   IndicatorsResponse,
   KlineResponse,
-  TrendResponse,
   KlinePeriod,
-  IndicatorMetric,
-  FinancialTrendRow,
   BusinessOverviewResponse,
 } from '../types/stock-detail.ts'
 import type { WarningCode } from '../types/data-quality.ts'
@@ -47,7 +42,6 @@ const generation = ref(0)
 const stockInfo = ref<StockInfo | null>(null)
 const indicators = ref<IndicatorsResponse | null>(null)
 const klineData = ref<KlineResponse>({ candles: [] })
-const trendData = ref<TrendResponse>({ trend: [], period: 'annual', count: 0 })
 const businessOverview = ref<BusinessOverviewResponse | null>(null)
 const warningCodes = ref<readonly WarningCode[]>([])
 
@@ -58,8 +52,6 @@ const adjustMode = ref<'raw' | 'qfq'>(initialKlineSettings.adjust)
 const klineAbortController = ref<AbortController | null>(null)
 
 // 财务趋势配置
-const trendPeriod = ref<'annual' | 'quarterly' | 'ttm'>('annual')
-const trendYears = ref(5)
 
 const hasUntrustedIndicators = computed(
   () => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value),
@@ -69,10 +61,6 @@ const hasUntrustedIndicators = computed(
 const autoUpdateInProgress = computed(
   () => indicators.value?.auto_update_in_progress === true,
 )
-
-function isFieldUntrusted(field: string): boolean {
-  return isIndicatorUntrusted(field, warningCodes.value)
-}
 
 // ─── 数据获取 ───────────────────────────────────────────────────────────
 async function fetchAll() {
@@ -85,7 +73,6 @@ async function fetchAll() {
       fetchStockInfo(gen),
       fetchIndicators(gen),
       fetchKline(gen),
-      fetchTrend(gen),
       fetchBusinessOverview(gen),
     ])
   } finally {
@@ -154,20 +141,6 @@ async function fetchKline(gen: number) {
   }
 }
 
-async function fetchTrend(gen: number) {
-  try {
-    const resp = await axios.get<TrendResponse>(`/api/stock/${stockCode.value}/financial-trend`, {
-      params: { period: trendPeriod.value, years: trendYears.value },
-    })
-    if (gen !== generation.value) return
-    trendData.value = resp.data
-  } catch (e) {
-    if (gen !== generation.value) return
-    trendData.value = { trend: [], period: 'annual', count: 0 }
-    message.warning(friendlyErrorMessage(e, '加载财务趋势失败'))
-  }
-}
-
 async function fetchBusinessOverview(gen: number) {
   try {
     const resp = await axios.get<BusinessOverviewResponse>(
@@ -200,158 +173,23 @@ async function fetchWarningCodes(gen: number) {
   }
 }
 
-// ─── 指标统计卡数据（四组摘要）──────────────────────────────────────────
-function statItem(
-  label: string,
-  field: string,
-  metric: IndicatorMetric | null | undefined,
-  format: (value: unknown) => string,
-): MetricStatItem {
-  return {
-    label,
-    value: format(metric?.value ?? null),
-    currentOnly: metric?.historical_capable === false,
-    untrusted: isFieldUntrusted(field),
-  }
-}
-
-const valuationItems = computed(() => {
-  const v = indicators.value?.indicators?.valuation
-  return [
-    statItem('市盈率（PE-TTM）', 'pe_ttm', v?.pe_ttm, fmt),
-    statItem('市净率（PB-MRQ）', 'pb_mrq', v?.pb_mrq, fmt),
-    statItem('市销率（PS-TTM）', 'ps_ttm', v?.ps_ttm, fmt),
-    statItem('市现率（PCF-TTM）', 'pcf_ttm', v?.pcf_ttm, fmt),
-    statItem('股息率', 'dividend_yield', v?.dividend_yield, fmtPct),
-    statItem('总市值', 'total_market_cap', v?.total_market_cap, (x) => fmt(x, 0)),
-    statItem('流通市值', 'circ_market_cap', v?.circ_market_cap, (x) => fmt(x, 0)),
-  ]
-})
-
-const profitabilityItems = computed(() => {
-  const p = indicators.value?.indicators?.profitability
-  return [
-    statItem('净资产收益率（ROE）', 'roe', p?.roe, fmtPct),
-    statItem('总资产收益率（ROA）', 'roa', p?.roa, fmtPct),
-    statItem('毛利率', 'gross_margin', p?.gross_margin, fmtPct),
-    statItem('净利率', 'net_margin', p?.net_margin, fmtPct),
-    statItem('ROIC', 'roic', p?.roic, fmtPct),
-    statItem('CF/净利润', 'cf_to_net_profit', p?.cf_to_net_profit, fmt),
-  ]
-})
-
-const growthItems = computed(() => {
-  const g = indicators.value?.indicators?.growth
-  return [
-    statItem('营收YoY', 'revenue_yoy', g?.revenue_yoy, fmtPct),
-    statItem('净利YoY', 'net_profit_yoy', g?.net_profit_yoy, fmtPct),
-    statItem('扣非YoY', 'deducted_profit_yoy', g?.deducted_profit_yoy, fmtPct),
-    statItem('营收CAGR3', 'revenue_cagr3', g?.revenue_cagr3, fmtPct),
-    statItem('营收CAGR5', 'revenue_cagr5', g?.revenue_cagr5, fmtPct),
-    statItem('净利CAGR5', 'net_profit_cagr5', g?.net_profit_cagr5, fmtPct),
-  ]
-})
-
-const safetyItems = computed(() => {
-  const s = indicators.value?.indicators?.safety
-  return [
-    statItem('资产负债率', 'debt_ratio', s?.debt_ratio, fmtPct),
-    statItem('流动比率', 'current_ratio', s?.current_ratio, fmt),
-    statItem('速动比率', 'quick_ratio', s?.quick_ratio, fmt),
-    statItem('有息负债', 'interest_bearing_debt', s?.interest_bearing_debt, (x) => fmt(x, 0)),
-    statItem('利息保障倍数', 'interest_coverage', s?.interest_coverage, fmt),
-    statItem('商誉占比', 'goodwill_ratio', s?.goodwill_ratio, fmtPct),
-  ]
-})
-
-const returnItems = computed(() => {
-  const r = indicators.value?.indicators?.shareholder_return
-  return [
-    statItem('分红率', 'payout_ratio', r?.payout_ratio, fmtPct),
-    statItem('每股股息', 'dps', r?.dps, fmt),
-    statItem('连续分红年数', 'consecutive_div_years', r?.consecutive_div_years, (x) => fmt(x, 0)),
-    statItem('历史累计现金分红', 'cumulative_dividend_amount', r?.cumulative_dividend_amount, (x) => fmt(x, 0)),
-    statItem('历史累计股权融资', 'cumulative_financing_amount', r?.cumulative_financing_amount, (x) => fmt(x, 0)),
-    statItem('分红融资比', 'dividend_financing_ratio_pct', r?.dividend_financing_ratio_pct, (x) => (x == null ? '—' : `${fmt(x, 2)}%`)),
-  ]
-})
-
-const valuationGroup = computed<readonly IndicatorGroup[]>(() => [{ items: valuationItems.value }])
-const operationsGroups = computed<readonly IndicatorGroup[]>(() => [
-  { name: '盈利', items: profitabilityItems.value },
-  { name: '成长', items: growthItems.value },
-])
-const safetyGroup = computed<readonly IndicatorGroup[]>(() => [{ items: safetyItems.value }])
-const returnGroup = computed<readonly IndicatorGroup[]>(() => [{ items: returnItems.value }])
-
-const overviewGroups = computed(() => [
-  {
-    title: '核心估值',
-    items: valuationItems.value.filter((item) =>
-      ['市盈率（PE-TTM）', '市净率（PB-MRQ）', '总市值', '股息率'].includes(item.label),
-    ),
-  },
-  {
-    title: '经营质量',
-    items: [...growthItems.value.slice(0, 2), ...profitabilityItems.value.filter((item) =>
-      ['净资产收益率（ROE）', '净利率'].includes(item.label),
-    )],
-  },
-  {
-    title: '财务安全',
-    items: [
-      ...safetyItems.value.filter((item) =>
-        ['资产负债率', '流动比率', '速动比率'].includes(item.label),
-      ),
-      ...profitabilityItems.value.filter((item) => item.label === 'CF/净利润'),
-    ],
-  },
-  {
-    title: '股东回报',
-    items: returnItems.value,
-  },
-])
-
-// ─── 自定义指标趋势表（迁移自 IndicatorTabs）────────────────────────────
-const customTrendFieldOptions = [
-  { label: '营收', value: 'revenue' },
-  { label: '归母净利', value: 'parent_net_profit' },
+// ─── 图表指标下拉（一处一图，只保留有历史意义的指标）──────────────────
+const operationsMetricOptions = [
+  { label: 'ROE', value: 'roe' },
+  { label: 'ROA', value: 'roa' },
   { label: '毛利率', value: 'gross_margin' },
   { label: '净利率', value: 'net_margin' },
-  { label: 'ROE', value: 'roe' },
-  { label: '负债率', value: 'debt_ratio' },
-  { label: 'EPS', value: 'basic_eps' },
-  { label: '经营现金流', value: 'cf_from_operating' },
+  { label: 'CF/净利润', value: 'cf_to_net_profit' },
+  { label: '营收YoY', value: 'revenue_yoy' },
+  { label: '净利YoY', value: 'net_profit_yoy' },
+  { label: '扣非YoY', value: 'deducted_profit_yoy' },
 ]
-
-const selectedTrendFields = ref<string[]>(['revenue', 'parent_net_profit', 'gross_margin', 'roe'])
-
-const trendRows = computed(() => [...trendData.value.trend])
-
-const trendTableColumns = computed(() => {
-  const baseColumns: DataTableColumns<FinancialTrendRow> = [
-    { title: '报告期', key: 'report_date', width: 110 },
-  ]
-
-  const fieldMap: Record<string, { title: string; render: (r: FinancialTrendRow) => string }> = {
-    revenue: { title: '营收', render: (r) => fmt(r.revenue, 0) },
-    parent_net_profit: { title: '归母净利', render: (r) => fmt(r.parent_net_profit ?? null, 0) },
-    gross_margin: { title: '毛利率', render: (r) => fmtPct(r.gross_margin) },
-    net_margin: { title: '净利率', render: (r) => fmtPct(r.net_margin) },
-    roe: { title: 'ROE', render: (r) => fmtPct(r.roe) },
-    debt_ratio: { title: '负债率', render: (r) => fmtPct(r.debt_ratio) },
-    basic_eps: { title: 'EPS', render: (r) => fmt(r.basic_eps) },
-    cf_from_operating: { title: '经营现金流', render: (r) => fmt(r.cf_from_operating, 0) },
-  }
-
-  for (const field of selectedTrendFields.value) {
-    const col = fieldMap[field]
-    if (col) {
-      baseColumns.push({ title: col.title, key: field, render: col.render } as never)
-    }
-  }
-  return baseColumns
-})
+const safetyMetricOptions = [
+  { label: '资产负债率', value: 'debt_ratio' },
+  { label: '流动比率', value: 'current_ratio' },
+  { label: '速动比率', value: 'quick_ratio' },
+  { label: 'CF/净利润', value: 'cf_to_net_profit' },
+]
 
 // ─── 粘性目录与滚动监听 ─────────────────────────────────────────────────
 const tocItems: readonly TocItem[] = [
@@ -426,8 +264,6 @@ watch([klinePeriod, adjustMode], () => {
   )
   fetchKline(generation.value)
 })
-watch(trendPeriod, () => fetchTrend(generation.value))
-watch(trendYears, () => fetchTrend(generation.value))
 watch(stockCode, fetchAll)
 
 onMounted(() => {
@@ -513,18 +349,6 @@ onUnmounted(() => {
 
             <BusinessOverviewSection :data="businessOverview" mode="overview" />
 
-            <div class="overview-summaries" aria-label="核心研究摘要">
-              <article v-for="group in overviewGroups" :key="group.title" class="summary-panel">
-                <h2>{{ group.title }}</h2>
-                <dl>
-                  <div v-for="item in group.items" :key="item.label">
-                    <dt>{{ item.label }}</dt>
-                    <dd>{{ item.value }}</dd>
-                  </div>
-                </dl>
-              </article>
-            </div>
-
             <div class="data-status-block">
               <n-alert v-if="autoUpdateInProgress" type="info" :show-icon="true">
                 数据正在自动更新，以下指标截至 {{ indicators?.latest_price_date ?? '最新价格日' }}，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。
@@ -548,7 +372,7 @@ onUnmounted(() => {
             :ref="setSectionRef('valuation')"
             kicker="VALUATION & MARKET"
             title="估值与市场"
-            :groups="valuationGroup"
+            :groups="[]"
           >
             <div class="section-inner-block">
               <ResearchStatisticsCard :stock-code="stockCode" default-metric="pe_ttm" />
@@ -561,38 +385,14 @@ onUnmounted(() => {
             :ref="setSectionRef('operations')"
             kicker="OPERATIONS & GROWTH"
             title="经营与成长"
-            :groups="operationsGroups"
+            :groups="[]"
           >
             <div class="section-inner-block">
-              <FinancialTrendCard
-                v-model:trend-period="trendPeriod"
-                v-model:trend-years="trendYears"
-                :trend-data="trendData"
+              <MetricHistoryChart
+                :stock-code="stockCode"
+                :metric-options="operationsMetricOptions"
+                default-metric="roe"
               />
-            </div>
-            <div class="section-inner-block custom-trend-block">
-              <div class="custom-trend-toolbar">
-                <span>选择字段查看趋势：</span>
-                <n-select
-                  v-model:value="selectedTrendFields"
-                  :options="customTrendFieldOptions"
-                  multiple
-                  size="small"
-                  style="min-width: 380px"
-                  placeholder="选择要显示的字段"
-                />
-              </div>
-              <n-data-table
-                size="small"
-                striped
-                :columns="trendTableColumns"
-                :data="trendRows"
-                :pagination="{ pageSize: 20 }"
-                :scroll-x="800"
-              />
-            </div>
-            <div class="section-inner-block">
-              <BusinessOverviewSection :data="businessOverview" mode="operations" />
             </div>
           </IndicatorGroupSection>
 
@@ -602,8 +402,16 @@ onUnmounted(() => {
             :ref="setSectionRef('safety')"
             kicker="FINANCIAL SAFETY"
             title="财务安全"
-            :groups="safetyGroup"
-          />
+            :groups="[]"
+          >
+            <div class="section-inner-block">
+              <MetricHistoryChart
+                :stock-code="stockCode"
+                :metric-options="safetyMetricOptions"
+                default-metric="debt_ratio"
+              />
+            </div>
+          </IndicatorGroupSection>
 
           <!-- 股东回报 -->
           <IndicatorGroupSection
@@ -611,10 +419,11 @@ onUnmounted(() => {
             :ref="setSectionRef('return')"
             kicker="SHAREHOLDER RETURN"
             title="股东回报"
-            :groups="returnGroup"
+            :groups="[]"
           >
-            <!-- 2026-09-02：历史研究统计只保留一张；股息率与国债比较已合并进该卡
-                 “股息率-国债10年利差”序列，不再重复展示两张统计卡和单独国债比较卡。 -->
+            <div class="section-inner-block">
+              <ResearchStatisticsCard :stock-code="stockCode" default-metric="ttm_dividend_yield" />
+            </div>
           </IndicatorGroupSection>
 
         </div>

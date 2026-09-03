@@ -1036,6 +1036,52 @@ def _data_quality_for_cli(duck, sqlite) -> tuple[dict, bool]:
     return build_data_quality_status(duck, sqlite), False
 
 
+@data_app.command("source-audit-archive")
+def data_source_audit_archive(
+    before: str = typer.Option(..., "--before", help="归档 report_date 早于该日期的审计行 (YYYY-MM-DD)"),
+    batch_size: int = typer.Option(50_000, "--batch-size", min=1_000, max=500_000),
+    max_batches: int = typer.Option(0, "--max-batches", min=0),
+    check_only: bool = typer.Option(False, "--check-only"),
+) -> None:
+    """source_audit 冷热分离：把历史审计行移入 source_audit_archive。
+
+    日常 readiness/lineage 只扫描热表；历史排查经 source_audit_all 视图。
+    每个批次一个独立 DuckDB 事务，Web 请求在批次之间可继续读取。
+    """
+    from datetime import date as _date
+
+    from app.cli.protocol import make_response
+    from app.core.source_audit_archive import archive_before, read_archive_state
+
+    try:
+        cutoff = _date.fromisoformat(before)
+    except ValueError as error:
+        typer.echo(json.dumps(make_response(
+            "data.source-audit-archive", error_code="E005",
+            error_message="invalid_before_date", data={"detail": str(error)},
+        ), ensure_ascii=False, indent=2, default=str))
+        raise typer.Exit(code=2) from error
+
+    duck, sqlite = _database_stores()
+    if check_only:
+        rows = duck.read_query(
+            "SELECT COUNT(*) AS c FROM source_audit WHERE report_date < ?",
+            [before],
+        )
+        state = read_archive_state(sqlite)
+        typer.echo(json.dumps(make_response(
+            "data.source-audit-archive",
+            {"check": True, "eligible_rows": rows[0]["c"], "before": before, "state": state},
+        ), ensure_ascii=False, indent=2, default=str))
+        return
+
+    def _run() -> dict:
+        return archive_before(duck, sqlite, cutoff, batch_size=batch_size, max_batches=max_batches)
+
+    report = _with_update_lock(duck, _run)
+    typer.echo(json.dumps(make_response("data.source-audit-archive", report), ensure_ascii=False, indent=2, default=str))
+
+
 @data_app.command("status")
 def data_status() -> None:
     """查看数据覆盖状态"""

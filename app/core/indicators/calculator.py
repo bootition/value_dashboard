@@ -740,11 +740,15 @@ class IndicatorCalculator:
         return rows[0] if rows else {}
 
     def _get_cumulative_dividend_amount(self, stock_code: str) -> float | None:
-        """历史广义分红金额（元）：现金分红 + 回购注销金额。
+        """A股广义分红金额（元）：A股现金分红 + 回购注销金额。
 
-        口径（2026-08-26，分红融资比指标）：
-        - 现金分红：每股股息 × ex_date 当日生效总股本逐笔折算；
-          任一笔有效分红缺股本链 → fail-closed 返回 None。
+        口径（2026-09-03 修正）：
+        - 现金分红：每股股息 × ex_date 当日生效的 A股股本逐笔折算。
+          当前 schema 没有逐日 A股总股本，因此优先使用 stock_meta.circ_shares
+          （A股流通股本）作为 A股股本近似，并明确按流通口径披露；
+          任一笔有效分红无任何可用股本 → fail-closed 返回 None。
+        - 港股分红未采集：绝不把 total_shares 中可能包含的 H 股股本计入，
+          避免中国移动等 A+H 公司把分给 H 股股东的钱算成 A股派现。
         - 回购注销：东财回购明细已回购金额（buyback_events.buyback_amount），
           用于补足“广义分红（包括回购注销）”。
         - 无有效记录 → 0.0。
@@ -761,6 +765,9 @@ class IndicatorCalculator:
                                   AND c.effective_date <= d.ex_date
                                 ORDER BY c.effective_date DESC
                                 LIMIT 1),
+                               (SELECT m.circ_shares
+                                FROM stock_meta m
+                                WHERE m.stock_code = d.stock_code),
                                (SELECT m.total_shares
                                 FROM stock_meta m
                                 WHERE m.stock_code = d.stock_code)
@@ -768,12 +775,9 @@ class IndicatorCalculator:
                    ) AS missing_shares,
                    SUM(
                        d.dividend_per_share * COALESCE(
-                           (SELECT c.total_shares
-                            FROM share_capital_history c
-                            WHERE c.stock_code = d.stock_code
-                              AND c.effective_date <= d.ex_date
-                            ORDER BY c.effective_date DESC
-                            LIMIT 1),
+                           (SELECT m.circ_shares
+                            FROM stock_meta m
+                            WHERE m.stock_code = d.stock_code),
                            (SELECT m.total_shares
                             FROM stock_meta m
                             WHERE m.stock_code = d.stock_code)

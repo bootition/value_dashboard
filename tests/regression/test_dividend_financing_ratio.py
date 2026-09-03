@@ -42,18 +42,20 @@ def _seed_dividends(duck: DuckDBStore, code: str = "000001") -> None:
     )
 
 
-def test_cumulative_dividend_amount_uses_share_capital_as_of(
+def test_cumulative_dividend_amount_uses_a_share_circ_shares(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
     _seed_stock(duckdb_store)
-    _seed_share_chain(duckdb_store)
+    duckdb_store.write_query(
+        "UPDATE stock_meta SET total_shares = 1000000, circ_shares = 200 WHERE stock_code = '000001'"
+    )
     _seed_dividends(duckdb_store)
 
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     amount = calc._get_cumulative_dividend_amount("000001")
 
-    # 2021 年按 100 股、2024 年按 200 股折算
-    assert amount == pytest.approx(100.0 * 1.0 + 200.0 * 2.0)
+    # A股口径按 circ_shares（A股流通股本）折算，total_shares 中含 H 股也不能混入。
+    assert amount == pytest.approx(200.0 * 1.0 + 200.0 * 2.0)
 
 
 def test_cumulative_dividend_amount_fails_closed_when_share_chain_missing(

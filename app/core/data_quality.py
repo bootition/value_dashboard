@@ -86,7 +86,7 @@ def store_cached_data_readiness(sqlite: SQLiteStore, readiness: dict) -> dict:
 
 def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
     """Return one fail-closed policy decision for every screening entry point."""
-    quality = build_data_quality_status(duck, sqlite)
+    quality = build_data_quality_status_cached(duck, sqlite)
     blocking_warnings = sorted(
         set(quality["warning_codes"]) & _SCREENING_BLOCKING_WARNINGS
     )
@@ -102,6 +102,66 @@ def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
 
 SCREENING_READINESS_CACHE_KEY = "screening_readiness_cache"
 SCREENING_READINESS_CACHE_TTL_SECONDS = 600
+FULL_DATA_QUALITY_CACHE_KEY = "data_quality_status_cache_v1"
+
+
+def load_full_data_quality_cache(sqlite: SQLiteStore, fingerprint: str) -> dict | None:
+    """Load a cached full data-quality build for an exact input fingerprint."""
+    try:
+        rows = sqlite.query(
+            "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
+            [FULL_DATA_QUALITY_CACHE_KEY],
+        )
+        if not rows or not rows[0].get("value"):
+            return None
+        value = json.loads(rows[0]["value"])
+        if not isinstance(value, dict) or value.get("fingerprint") != fingerprint:
+            return None
+        value["cached_full_build"] = True
+        value["cached_at"] = rows[0]["updated_at"]
+        return value
+    except Exception:
+        return None
+
+
+def store_full_data_quality_cache(
+    sqlite: SQLiteStore, fingerprint: str, quality: dict,
+) -> None:
+    value = dict(quality)
+    value["fingerprint"] = fingerprint
+    with sqlite.transaction() as conn:
+        conn.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at""",
+            [
+                FULL_DATA_QUALITY_CACHE_KEY,
+                json.dumps(value, ensure_ascii=False, default=str),
+                datetime.now(UTC).isoformat(),
+            ],
+        )
+
+
+def build_data_quality_status_cached(
+    duck: DuckDBStore, sqlite: SQLiteStore,
+) -> dict:
+    """Incremental full-quality build: reuse the persisted result while inputs unchanged.
+
+    2026-09-03 优化：此前数据状态页每个刷新周期都执行一次约 20-80s 的
+    4300 万行 source_audit 全量扫描。现在用与筛选就绪缓存同源的轻量指纹
+    判断输入是否变化；更新完成后指纹变化才重算一次，空闲期直接复用缓存。
+    """
+    fingerprint = screening_readiness_cache_key(duck, sqlite)
+    if fingerprint:
+        cached = load_full_data_quality_cache(sqlite, fingerprint)
+        if cached is not None:
+            return cached
+    quality = build_data_quality_status(duck, sqlite)
+    if fingerprint:
+        try:
+            store_full_data_quality_cache(sqlite, fingerprint, quality)
+        except Exception:
+            logger.warning("全量数据质量缓存写入失败(非致命)")
+    return quality
 
 
 def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str | None:
@@ -119,6 +179,7 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
         counts = duck.read_query(
             """SELECT
                  (SELECT COUNT(*) FROM source_audit) AS source_audit_c,
+                 (SELECT COUNT(*) FROM source_audit_archive) AS source_audit_archive_c,
                  (SELECT COUNT(*) FROM fetch_batch) AS fetch_batch_c,
                  (SELECT COUNT(*) FROM raw_response_archive_all) AS archive_c,
                  (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c"""
@@ -1076,7 +1137,7 @@ def _build_warning_codes_low_memory(duck: DuckDBStore, sqlite: SQLiteStore) -> l
     queries fail with different-configuration errors. Hot read paths never run
     this synchronously in formal mode.
     """
-    return list(build_data_quality_status(duck, sqlite)["warning_codes"])
+    return list(build_data_quality_status_cached(duck, sqlite)["warning_codes"])
 
 
 def _persisted_warning_codes(sqlite: SQLiteStore) -> list[str]:
@@ -1233,6 +1294,13 @@ def build_data_quality_status(
         FROM dividends
         """
     )[0]
+    try:
+        from app.core.source_audit_archive import read_archive_state
+        source_audit_archive_state = read_archive_state(sqlite) or {
+            "archived_rows": 0, "note": "not_archived_yet",
+        }
+    except Exception:
+        source_audit_archive_state = {"archived_rows": 0, "note": "unavailable"}
     lineage = duck.read_query(
         """
         WITH valid_hashes AS (
@@ -1280,6 +1348,7 @@ def build_data_quality_status(
         + lineage["batch_archive_gap_rows"]
         + lineage["empty_archive_payload_rows"]
     )
+    lineage["source_audit_archive"] = source_audit_archive_state
     # integrity_verified 标记由写路径在插入前校验；冷启动只重算未标记行，
     # 避免把 6GB+ 归档 BLOB 全部读回。未标记行仍逐条验证，验证失败继续
     # 报 LINEAGE_INVALID（fail closed）。
