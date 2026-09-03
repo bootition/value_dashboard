@@ -24,6 +24,10 @@ import duckdb
 
 SCHEMA_MIGRATIONS = "schema_migrations"
 CHUNK_TABLES = {"raw_response_archive_history"}
+# 冷审计表的数据只保留在外部 Parquet，不进入主库文件；主库仅保留空表供视图使用。
+EXTERNAL_DATA_TABLES = {"source_audit_archive"}
+# 原始响应 BLOB 保留外部 Parquet，主库只保存元数据行（payload=NULL）。
+EXTERNAL_BLOB_TABLES = {"raw_response_archive_history"}
 CHUNK_SIZE = 5000
 
 
@@ -172,6 +176,16 @@ def cmd_import(args: argparse.Namespace) -> int:
             for row in conn.execute("SELECT table_name FROM duckdb_tables()").fetchall()
         }
         for table, entry in manifest["tables"].items():
+            if table in EXTERNAL_DATA_TABLES:
+                if table not in existing:
+                    table_dir = src / table
+                    sample = table_dir / entry["filename"]
+                    conn.execute(
+                        f"CREATE TABLE {table} AS "
+                        f"SELECT * FROM read_parquet('{_quote(sample)}') WHERE 1 = 0"
+                    )
+                print(f"kept external {table} (empty in main db)", flush=True)
+                continue
             if table not in existing:
                 table_dir = src / table
                 if entry.get("mode") == "chunked":
@@ -184,6 +198,18 @@ def cmd_import(args: argparse.Namespace) -> int:
                 )
                 print(f"created missing table {table}", flush=True)
             table_dir = src / table
+            if table in {"raw_response_archive_partitions"}:
+                conn.execute(f"DELETE FROM {table}")
+            if table in EXTERNAL_BLOB_TABLES:
+                for part in entry["parts"]:
+                    path = table_dir / part["filename"]
+                    conn.execute(
+                        f"INSERT INTO {table} BY NAME "
+                        f"SELECT * EXCLUDE(payload), NULL::BLOB AS payload "
+                        f"FROM read_parquet('{_quote(path)}')"
+                    )
+                print(f"imported {table} metadata only parts={len(entry['parts'])}", flush=True)
+                continue
             if entry.get("mode") == "chunked":
                 for part in entry["parts"]:
                     path = table_dir / part["filename"]
@@ -225,7 +251,7 @@ def _fingerprints(conn: duckdb.DuckDBPyConnection, table: str) -> dict[str, Any]
         "source_audit": "COUNT(*), MIN(id), MAX(id), SUM(id), COUNT(DISTINCT raw_response_hash)",
         "fetch_batch": "COUNT(*), MIN(id), MAX(id), SUM(id)",
         "raw_response_archive": "COUNT(*), SUM(COALESCE(octet_length(payload),0)), COUNT(DISTINCT raw_response_hash)",
-        "raw_response_archive_history": "COUNT(*), SUM(COALESCE(octet_length(payload),0)), COUNT(DISTINCT raw_response_hash)",
+        "raw_response_archive_history": "COUNT(*), COUNT(raw_response_hash)",
         "research_statistics": "COUNT(*), MAX(version), SUM(COALESCE(samples,0))",
         "balance_sheet": "COUNT(*), MIN(report_date), MAX(report_date), SUM(COALESCE(total_assets,0))",
         "income_statement": "COUNT(*), MIN(report_date), MAX(report_date), SUM(COALESCE(revenue,0))",
@@ -249,6 +275,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             errors.append(f"tables differ: old={old_tables} new={new_tables}")
         for table in old_tables:
             if table not in new_tables:
+                continue
+            if table in EXTERNAL_DATA_TABLES:
+                print(f"external {table}: skipped row compare", flush=True)
                 continue
             old_fp = _fingerprints(old_conn, table)
             new_fp = _fingerprints(new_conn, table)

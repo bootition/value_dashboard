@@ -1334,6 +1334,7 @@ def build_data_quality_status(
              WHERE EXISTS (
                  SELECT 1 FROM raw_response_archive_all archive
                  WHERE archive.raw_response_hash = s.raw_response_hash
+                   AND archive.storage = 'active'
                    AND (archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0)
              )) AS empty_archive_payload_rows,
             (SELECT COUNT(*) FROM fetch_batch batch

@@ -58,6 +58,8 @@ supersedes: null
 | D12 | **自动更新写连接窗口会阻塞 Web 查询**：DuckDB 单写者模型下，research_statistics 全量重建的发布阶段会持续持有写连接（2026-09-03 实测约 4-6 分钟），期间普通 K 线/详情/自选请求会等待或超时。这不是连接配置冲突；优化方向是分批可见发布或快照读，而不是调大超时硬扛 | reports/104；实测 |
 | D13 | `source_audit` 冷热分离：日常 readiness/lineage 只扫热表 `source_audit`；历史排查查 `source_audit_all`。归档命令 `vd data source-audit-archive --before YYYY-MM-DD`，按 id keyset 分页，每批独立事务；正式库已归档 30,039,082 行（cutoff 2025-01-01） | reports/106；app/core/source_audit_archive.py |
 | D14 | 分红融资比为 **A股流通股本口径**：`cumulative_dividend_amount` 用 `circ_shares` 优先，total_shares 中的 H 股不得混入；港股分红未采集即不计入、缺数据返回 NULL。600941 已修正为 34.7% | reports/106；calculator.py |
+| D15 | 2026-09-04 离线重建后主库 7.8GB：`source_audit_archive`（30,039,082 行）与 `raw_response_archive_history` payload 均只存外部 Parquet（`D:d-cold-archive`），主库仅空表/元数据；旧库 `valuedashboard.duckdb.old-20260904013322` 保留回滚 | reports/107 |
+| D16 | **总股本分红融资比暂不发布**：当前 `dividends`/`funding_events` 只有 A 股数据，用 total_shares（A+H）会出现 600941 825.9% 类错误；待港股分红与港股融资数据源接入后再增加全市场口径字段 | reports/107 |
 | D7 | **正式库 data/ 只读**：所有写操作必须经 CLI/维护脚本 + 单写者锁；S1 回归强制 `VD_ENV=test` + 正式库 SHA-256 指纹前后对比 | AGENTS.md；conftest.py |
 | D8 | ✅ 回滚快照已按窗口删除（2026-09-02）：9-01 22:52 完整成功周期（job 124）通过观察；两硬链接 + sqlite pre-rebuild 已删除，释放约 50GB | reports/101、102；job_logs 124 |
 | D9 | 重建/导出相关外部路径：新库构建 `D:\vd-rebuild-new-20260901`、Parquet 导出 `D:\vd-rebuild-export-20260901`、冷归档 `D:\vd-cold-archive` | reports/102 |

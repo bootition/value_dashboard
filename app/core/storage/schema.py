@@ -1010,11 +1010,11 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             CREATE OR REPLACE VIEW raw_response_archive_all AS
             SELECT raw_response_hash, source, fetch_time, payload, api_version,
-                   integrity_verified, created_at
+                   integrity_verified, created_at, 'history' AS storage
             FROM raw_response_archive_history
             UNION ALL
             SELECT raw_response_hash, source, fetch_time, payload, api_version,
-                   integrity_verified, created_at
+                   integrity_verified, created_at, 'active' AS storage
             FROM raw_response_archive
             """
         )
