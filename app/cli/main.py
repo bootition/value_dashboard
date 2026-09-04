@@ -187,6 +187,30 @@ def init() -> None:
 data_app = typer.Typer(help="数据管理")
 app.add_typer(data_app, name="data")
 
+etf_app = typer.Typer(help="ETF 轮动工作台")
+app.add_typer(etf_app, name="etf")
+
+_ETF_XLSX_PATH_ARG = typer.Argument(..., help="A股ETF交易记录.xlsx 路径")
+
+
+@etf_app.command("import-xlsx")
+def etf_import_xlsx(
+    path: Path = _ETF_XLSX_PATH_ARG,
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览解析与校验，不写库"),
+) -> None:
+    """导入 ETF 交易记录 Excel（交易流水/资金流水/持仓看板/ETF基础信息）
+
+    - 幂等：同 (代码,日期,方向,价格,份额) 的流水自动跳过
+    - 手续费计入成本；旧网格价不导入，由引擎按 5% 默认重算
+    - 总资产从「持仓看板」sheet 的 ETF策略总资产读取，可在界面修改
+    """
+    from app.cli.protocol import make_response
+    from app.core.etf_import import import_etf_xlsx
+
+    _, _duck, sqlite = _database_context()
+    report = import_etf_xlsx(sqlite, path, dry_run=dry_run)
+    typer.echo(json.dumps(make_response("etf.import-xlsx", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
+
 
 @data_app.command("init")
 def data_init(
