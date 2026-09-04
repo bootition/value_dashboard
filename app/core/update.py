@@ -3153,20 +3153,24 @@ class IncrementalUpdater:
                 if data_type == "index_valuation":
                     # 指数估值域（数据补全 2026-08-25）：stock_code 存指数代码，
                     # 重试即重新抓取主源+交叉源全量（低频，无风控风险）。
-                    from app.core.index_valuation import IndexValuationUpdater
-                    outcome = IndexValuationUpdater(
-                        duck=self.duck, sqlite=self.sqlite,
-                    ).update_daily([stock_code])
+                    # SW_ALL 为申万一级行业分组重试（2026-09-05 v21）。
+                    from app.core.index_valuation import SW_INDUSTRY_GROUP, IndexValuationUpdater
+                    updater = IndexValuationUpdater(duck=self.duck, sqlite=self.sqlite)
+                    if stock_code == SW_INDUSTRY_GROUP:
+                        outcome = updater.update_sw_industries()
+                        error_text = outcome.get("error", "retry failed")
+                    else:
+                        outcome = updater.update_daily([stock_code])
+                        error_text = (
+                            outcome.get("indexes", {}).get(stock_code, {}).get("primary_error")
+                            or "retry failed"
+                        )
                     if outcome["status"] == "success":
                         self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
                         success_count += 1
                     else:
                         still_failing += 1
-                        self._mark_retry_failed(
-                            retry_id,
-                            outcome.get("indexes", {}).get(stock_code, {}).get("primary_error")
-                            or "retry failed",
-                        )
+                        self._mark_retry_failed(retry_id, error_text)
                     continue
                 outcome = self.refetch_one(stock_code, data_type)
                 if outcome["status"] == "success":

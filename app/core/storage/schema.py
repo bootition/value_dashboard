@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 20
+DUCKDB_SCHEMA_VERSION = 21
 SQLITE_SCHEMA_VERSION = 15
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -560,19 +560,22 @@ CREATE INDEX IF NOT EXISTS idx_hk_dividends_stock
     ON hk_dividends (stock_code);
 
 -- 指数估值域（2026-08-25，数据补全：沪深300 ERP 指标的数据前置）
--- 主源乐咕（全历史 PE-TTM/PB/股息率），交叉源中证官网（近 20 交易日）；
--- 同日期双源并存，ERP 计算时主源优先、交叉核验披露；每日 1 次低频。
+-- 2026-09-05 v21：扩展为多指数四源——乐咕宽基月度 PE/PB（主）、申万一级行业
+-- 日度 PE/PB（sws 主）、中证官网交叉、同花顺补充；pe_metric 记录口径，
+-- extra 为 JSON 字符串（点位/静态PE/中位数等附加字段）。
 CREATE TABLE IF NOT EXISTS index_valuation (
-    index_code   VARCHAR NOT NULL,      -- 000300
+    index_code   VARCHAR NOT NULL,      -- 000300 / SW801010 等
     trade_date   DATE NOT NULL,
-    pe_ttm       DOUBLE,                -- 市盈率(TTM)
+    pe_ttm       DOUBLE,                -- 市盈率（口径见 pe_metric）
+    pe_metric    VARCHAR,               -- ttm / static / sws_daily / null=未披露
     pb           DOUBLE,                -- 市净率
     div_yield    DOUBLE,                -- 股息率(%)
-    source       VARCHAR NOT NULL,      -- legulegu / csindex
+    source       VARCHAR NOT NULL,      -- legulegu / sws / csindex / ths
     fetch_time   TIMESTAMP NOT NULL,
     raw_hash     VARCHAR NOT NULL,
     confidence   VARCHAR NOT NULL,      -- strict / approximate / missing
     batch_id     VARCHAR NOT NULL,
+    extra        VARCHAR,               -- 附加字段 JSON 字符串
     PRIMARY KEY (index_code, trade_date, source)
 );
 CREATE INDEX IF NOT EXISTS idx_index_valuation_code
@@ -1210,6 +1213,22 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (20, 'Hong Kong dividend events for A+H dual-listed stocks')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v21: 指数估值域扩展（2026-09-05，多指数 ERP 与 ETF 轮动分位的地基）。
+        # 新增 pe_metric（口径披露）与 extra（JSON 附加字段）；旧行保持 NULL，
+        # 语义不变（legulegu 行即 TTM、csindex 行即 市盈率1=TTM）。
+        connection.execute(
+            "ALTER TABLE index_valuation ADD COLUMN IF NOT EXISTS pe_metric VARCHAR"
+        )
+        connection.execute(
+            "ALTER TABLE index_valuation ADD COLUMN IF NOT EXISTS extra VARCHAR"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (21, 'Index valuation multi-index extension: pe_metric and extra columns')
             ON CONFLICT (version) DO NOTHING
             """
         )

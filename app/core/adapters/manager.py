@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
 KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"}
+    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "ths", "sws", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"}
 )
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
@@ -55,12 +55,17 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "ipo_funding": ["cninfo_funding"],
     # 增发/配股募资（东财 F10 BonusFinancing，数据补全 2026-08-25）
     "placement_funding": ["eastmoney_f10"],
-    # 指数估值（乐咕主源；中证官网交叉由 updater 显式调用）
+    # 指数估值（乐咕主源；中证官网交叉与申万行业由 updater 显式调用）
     "index_valuation": ["legulegu"],
     # 股票回购/注销金额（东财回购明细，数据补全 2026-08-26）
     "buyback_funding": ["eastmoney_repurchase"],
     # 港股分红历史（东财 datacenter 单股接口；源侧 ≤2 req/s）
     "hk_dividends": ["eastmoney_hk_dividend"],
+    # ETF 数据（同花顺官方 Financial-API，2026-09-05；免费额度低频使用）
+    "etf_daily": ["ths"],
+    "etf_snapshot": ["ths"],
+    "etf_profile": ["ths"],
+    "etf_track_percentile": ["ths"],
 }
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
@@ -78,6 +83,8 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "csindex": 1.0,
     "eastmoney_repurchase": 0.0,
     "eastmoney_hk_dividend": 0.5,
+    "ths": 0.5,
+    "sws": 0.5,
 }
 
 
@@ -328,18 +335,30 @@ class AdapterManager:
         except Exception as e:
             logger.warning(f"CNINFO IPO 适配器初始化失败: {e}")
 
-        # 指数估值适配器（乐咕主源 + 中证官网交叉，数据补全 2026-08-25）
+        # 指数估值适配器（乐咕主源 + 中证官网交叉 + 申万行业，2026-08-25 建域）
         try:
             from app.core.adapters.index_valuation_adapter import (
                 CSIndexIndexAdapter,
                 LeguleguIndexAdapter,
+                SwsIndexAdapter,
             )
             self.register(LeguleguIndexAdapter(self._rate_limits["legulegu"]))
             self.register(CSIndexIndexAdapter(self._rate_limits["csindex"]))
+            self.register(SwsIndexAdapter(self._rate_limits["sws"]))
         except ImportError as e:
             logger.warning(f"指数估值适配器未安装: {e}")
         except Exception as e:
             logger.warning(f"指数估值适配器初始化失败: {e}")
+
+        # 同花顺官方 Financial-API 适配器（ETF 行情/资料/跟踪分位，2026-09-05；
+        # 免费额度低频使用，独立 0.5s 限速实例，不参与个股价格主链）
+        try:
+            from app.core.adapters.ths_adapter import ThsAdapter
+            self.register(ThsAdapter(self._rate_limits["ths"]))
+        except ImportError as e:
+            logger.warning(f"同花顺适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"同花顺适配器初始化失败: {e}")
 
         # 东财股票回购/注销适配器（全市场一次性低频，数据补全 2026-08-26）
         try:

@@ -1,13 +1,14 @@
-"""融资事件 + 指数估值低频域回归（数据补全 2026-08-25）
+"""融资事件 + 指数估值低频域回归（数据补全 2026-08-25；v21 扩展 2026-09-05）
 
 覆盖：
 - eastmoney_f10 placement_funding：zfmx/pgmx 解析、derived 推算、北交所跳过、空→missing
 - cninfo_funding adapter：IPO 要素解析、单位归一（万股→股、万元→元）、空→missing
-- index_valuation adapter：乐咕/中证解析、字段映射
+- index_valuation adapter：乐咕 PE/PB 合并、中证解析、申万日报映射
 - FundingUpdater：单股事务原子替换 / 失败保留旧值 / retry/missing 去重
-- IndexValuationUpdater：主源+交叉源双写、主源失败保旧值
-- schema v11 新表 + readiness 完全不变
-- manager 注册与独立限速
+- IndexValuationUpdater：主源+交叉源双写、申万行业组更新、主源失败保旧值
+- schema v11/v21 新表新列 + readiness 完全不变
+- manager 注册与独立限速（含 ths/sws）
+- ThsAdapter：ETF 快照/日线/资料/跟踪分位映射与错误分类
 """
 
 from __future__ import annotations
@@ -26,7 +27,9 @@ from app.core.adapters.eastmoney_f10_adapter import EastMoneyF10Adapter
 from app.core.adapters.index_valuation_adapter import (
     CSIndexIndexAdapter,
     LeguleguIndexAdapter,
+    SwsIndexAdapter,
 )
+from app.core.adapters.ths_adapter import THS_API_KEY_ENV, ThsAdapter
 from app.core.funding import FundingUpdater
 from app.core.index_valuation import IndexValuationUpdater
 from app.core.storage.duckdb_store import DuckDBStore
@@ -240,6 +243,26 @@ class _FakeAKIndex:
              "滚动市盈率": 14.59, "滚动市盈率中位数": 16.1},
         ])
 
+    def stock_index_pb_lg(self, symbol: str) -> object:
+        import pandas as pd
+
+        return pd.DataFrame([
+            {"日期": "2026-08-25", "指数": 3800.0, "市净率": 1.55,
+             "加权市净率": 1.60, "市净率中位数": 1.51},
+            {"日期": "2026-08-24", "指数": 3790.0, "市净率": 1.54,
+             "加权市净率": 1.59, "市净率中位数": 1.50},
+        ])
+
+    def index_analysis_daily_sw(self, symbol: str, start_date: str, end_date: str) -> object:
+        import pandas as pd
+
+        return pd.DataFrame([
+            {"指数代码": "801010.SI", "指数名称": "农林牧渔", "交易日期": "2026-08-25",
+             "收盘指数": 2500.0, "成交额": 100.0, "涨跌幅": 1.2, "换手率": 2.1,
+             "市盈率": 33.9, "市净率": 2.04, "均价": 10.0, "成交额占比": 0.5,
+             "流通市值": 10000.0, "平均流通市值": 100.0, "股息率": 2.1},
+        ])
+
     def stock_zh_index_value_csindex(self, symbol: str) -> object:
         import pandas as pd
 
@@ -260,8 +283,65 @@ def test_legulegu_adapter_maps_pe_ttm(monkeypatch) -> None:
     assert len(result.data) == 2
     assert result.data[0]["index_code"] == "000300"
     assert result.data[0]["pe_ttm"] == pytest.approx(14.57)
+    assert result.data[0]["pe_metric"] == "ttm"
     assert result.data[0]["trade_date"] == "2026-08-25"
-    assert result.data[0]["pb"] is None
+    # v21：乐咕 PE 与 PB 按日期合并
+    assert result.data[0]["pb"] == pytest.approx(1.55)
+
+
+def test_legulegu_pb_failure_is_nonfatal(monkeypatch) -> None:
+    import app.core.adapters.index_valuation_adapter as mod
+
+    class FakeNoPB:
+        def stock_index_pe_lg(self, symbol: str) -> object:
+            import pandas as pd
+            return pd.DataFrame([
+                {"日期": "2026-08-25", "指数": 3800.0, "静态市盈率": 16.0,
+                 "静态市盈率中位数": 18.0, "滚动市盈率": 14.57, "滚动市盈率中位数": 16.0},
+            ])
+
+    monkeypatch.setattr(mod, "ak", FakeNoPB())
+    adapter = LeguleguIndexAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(data_type="index_valuation", stock_codes=["000300"]))
+    assert result.metadata.error is None
+    assert len(result.data) == 1
+    assert result.data[0]["pb"] is None, "PB 请求失败不得阻断 PE 主链"
+
+
+def test_sws_adapter_maps_industry_valuation(monkeypatch) -> None:
+    import app.core.adapters.index_valuation_adapter as mod
+
+    monkeypatch.setattr(mod, "ak", _FakeAKIndex())
+    adapter = SwsIndexAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(
+        data_type="index_valuation", start_date="2026-08-25", end_date="2026-08-25",
+    ))
+    assert result.metadata.error is None
+    assert len(result.data) == 1
+    row = result.data[0]
+    assert row["index_code"] == "SW801010"
+    assert row["pe_metric"] == "sws_daily"
+    assert row["pe_ttm"] == pytest.approx(33.9)
+    assert row["pb"] == pytest.approx(2.04)
+    assert row["div_yield"] == pytest.approx(2.1)
+    assert result.metadata.source == "sws"
+
+
+def test_sws_adapter_non_trading_day_is_missing(monkeypatch) -> None:
+    import app.core.adapters.index_valuation_adapter as mod
+
+    class FakeEmpty:
+        def index_analysis_daily_sw(self, symbol: str, start_date: str, end_date: str) -> object:
+            raise KeyError("交易日期")
+
+    monkeypatch.setattr(mod, "ak", FakeEmpty())
+    adapter = SwsIndexAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(
+        data_type="index_valuation", start_date="2026-09-06", end_date="2026-09-06",
+    ))
+    assert result.data == []
+    assert result.metadata.error is None
+    assert result.metadata.confidence == "missing"
 
 
 def test_csindex_adapter_maps_official_fields(monkeypatch) -> None:
@@ -271,8 +351,20 @@ def test_csindex_adapter_maps_official_fields(monkeypatch) -> None:
     adapter = CSIndexIndexAdapter(rate_limit=0)
     result = adapter.fetch(FetchRequest(data_type="index_valuation", stock_codes=["000300"]))
     assert result.data[0]["pe_ttm"] == pytest.approx(14.57)
+    assert result.data[0]["pe_metric"] == "ttm"
     assert result.data[0]["div_yield"] == pytest.approx(2.55)
     assert result.data[0]["pb"] is None
+
+
+def test_csindex_unsupported_sz_index_is_missing(monkeypatch) -> None:
+    import app.core.adapters.index_valuation_adapter as mod
+
+    monkeypatch.setattr(mod, "ak", _FakeAKIndex())
+    adapter = CSIndexIndexAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(data_type="index_valuation", stock_codes=["399673"]))
+    assert result.data == []
+    assert result.metadata.error is None
+    assert result.metadata.confidence == "missing"
 
 
 def test_legulegu_unsupported_index_is_missing(monkeypatch) -> None:
@@ -406,11 +498,6 @@ def test_funding_update_all_skips_when_covered(
 # ─── IndexValuationUpdater：双源并存 / 主源失败 ───────────────────────
 
 class _FakeIndexAdapter:
-    def __init__(self, rows, error: str | None = None) -> None:
-        self.rows = rows
-        self.error = error
-
-class _FakeIndexAdapter:
     def __init__(self, rows, error: str | None = None, source: str = "legulegu") -> None:
         self.rows = rows
         self.error = error
@@ -427,11 +514,11 @@ def test_index_valuation_updater_writes_both_sources(
 ) -> None:
     primary_rows = [{
         "index_code": "000300", "trade_date": "2026-08-25", "pe_ttm": 14.57,
-        "pb": None, "div_yield": None,
+        "pe_metric": "ttm", "pb": 1.55, "div_yield": None, "extra": None,
     }]
     cross_rows = [{
         "index_code": "000300", "trade_date": "2026-08-25", "pe_ttm": 14.57,
-        "pb": None, "div_yield": 2.55,
+        "pe_metric": "ttm", "pb": None, "div_yield": 2.55, "extra": None,
     }]
     updater = IndexValuationUpdater(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(updater, "_primary", _FakeIndexAdapter(primary_rows, source="legulegu"))
@@ -443,12 +530,38 @@ def test_index_valuation_updater_writes_both_sources(
     assert report["indexes"]["000300"]["primary_rows"] == 1
     assert report["indexes"]["000300"]["cross_rows"] == 1
     rows = duckdb_store.read_query(
-        "SELECT source, pe_ttm, div_yield FROM index_valuation WHERE index_code='000300' ORDER BY source"
+        "SELECT source, pe_ttm, pe_metric, pb, div_yield FROM index_valuation "
+        "WHERE index_code='000300' ORDER BY source"
     )
     assert {r["source"] for r in rows} == {"legulegu", "csindex"}
     by_source = {r["source"]: r for r in rows}
     assert by_source["legulegu"]["pe_ttm"] == pytest.approx(14.57)
+    assert by_source["legulegu"]["pe_metric"] == "ttm"
+    assert by_source["legulegu"]["pb"] == pytest.approx(1.55)
     assert by_source["csindex"]["div_yield"] == pytest.approx(2.55)
+
+
+def test_index_valuation_updater_writes_sws_industries(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    sws_rows = [{
+        "index_code": "SW801010", "trade_date": "2026-08-25", "pe_ttm": 33.9,
+        "pe_metric": "sws_daily", "pb": 2.04, "div_yield": 2.1,
+        "extra": '{"index_close":2500.0}',
+    }]
+    updater = IndexValuationUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    monkeypatch.setattr(updater, "_sws", _FakeIndexAdapter(sws_rows, source="sws"))
+
+    report = updater.update_sw_industries(start_date="2026-08-25", end_date="2026-08-25")
+
+    assert report["status"] == "success"
+    assert report["rows"] == 1
+    rows = duckdb_store.read_query(
+        "SELECT source, index_code, pe_metric, pb FROM index_valuation WHERE index_code='SW801010'"
+    )
+    assert rows[0]["source"] == "sws"
+    assert rows[0]["pe_metric"] == "sws_daily"
+    assert rows[0]["pb"] == pytest.approx(2.04)
 
 
 def test_index_valuation_primary_failure_records_retry(
@@ -480,6 +593,7 @@ def test_index_valuation_refresh_if_due_throttles_same_day(
         return {"status": "success", "indexes": {}}
 
     monkeypatch.setattr(updater, "update_daily", fake_update_daily)
+    monkeypatch.setattr(updater, "_sws", _FakeIndexAdapter([], source="sws"))
 
     first = updater.refresh_if_due()
     second = updater.refresh_if_due()
@@ -488,6 +602,7 @@ def test_index_valuation_refresh_if_due_throttles_same_day(
     assert second["status"] == "skipped"
     assert second["reason"] == "refreshed_today"
     assert len(calls) == 1, "当日第二次 refresh 不得再发请求"
+    assert len(calls[0]) == 12, "refresh 必须覆盖乐咕全部 12 个宽基/红利指数"
 
 
 def test_index_valuation_refresh_if_due_records_marker(
@@ -496,6 +611,7 @@ def test_index_valuation_refresh_if_due_records_marker(
     updater = IndexValuationUpdater(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(updater, "_primary", _FakeIndexAdapter([], source="legulegu"))
     monkeypatch.setattr(updater, "_cross", _FakeIndexAdapter([], source="csindex"))
+    monkeypatch.setattr(updater, "_sws", _FakeIndexAdapter([], source="sws"))
 
     report = updater.refresh_if_due()
 
@@ -521,6 +637,15 @@ def test_schema_v11_creates_new_tables(database_paths) -> None:
     )}
     assert "funding_events" in tables
     assert "index_valuation" in tables
+    columns = {row["column_name"] for row in duck.read_query(
+        "SELECT column_name FROM information_schema.columns WHERE table_name='index_valuation'"
+    )}
+    assert "pe_metric" in columns, "schema v21 必须提供 pe_metric 口径列"
+    assert "extra" in columns, "schema v21 必须提供 extra 附加字段列"
+    versions = {row["version"] for row in duck.read_query(
+        "SELECT version FROM schema_migrations"
+    )}
+    assert 21 in versions
 
 
 def test_readiness_unchanged_by_new_domains(
@@ -542,16 +667,103 @@ def test_manager_registers_new_adapters() -> None:
     assert "cninfo_funding" in manager_module.KNOWN_ADAPTERS
     assert "legulegu" in manager_module.KNOWN_ADAPTERS
     assert "csindex" in manager_module.KNOWN_ADAPTERS
+    assert "ths" in manager_module.KNOWN_ADAPTERS
+    assert "sws" in manager_module.KNOWN_ADAPTERS
     assert manager_module.DEFAULT_ADAPTER_PRIORITY["ipo_funding"] == ["cninfo_funding"]
     assert manager_module.DEFAULT_ADAPTER_PRIORITY["placement_funding"] == ["eastmoney_f10"]
     assert manager_module.DEFAULT_ADAPTER_PRIORITY["index_valuation"] == ["legulegu"]
+    assert manager_module.DEFAULT_ADAPTER_PRIORITY["etf_daily"] == ["ths"]
+    assert manager_module.DEFAULT_ADAPTER_PRIORITY["etf_snapshot"] == ["ths"]
     assert manager_module.DEFAULT_ADAPTER_RATE_LIMITS["cninfo_funding"] >= 1.5
     assert manager_module.DEFAULT_ADAPTER_RATE_LIMITS["eastmoney_f10"] >= 0.5
+    assert manager_module.DEFAULT_ADAPTER_RATE_LIMITS["ths"] >= 0.5
+    assert manager_module.DEFAULT_ADAPTER_RATE_LIMITS["sws"] >= 0.5
 
     adapter_manager = AdapterManager()
     adapter_manager._ensure_initialized()
     assert adapter_manager.get_adapter("cninfo_funding") is not None
     assert adapter_manager.get_adapter("legulegu") is not None
     assert adapter_manager.get_adapter("csindex") is not None
+    assert adapter_manager.get_adapter("sws") is not None
+    assert adapter_manager.get_adapter("ths") is not None
+    ths = adapter_manager.get_adapter("ths")
+    assert "etf_daily" in ths.supported_data_types
+    assert "etf_track_percentile" in ths.supported_data_types
     f10 = adapter_manager.get_adapter("eastmoney_f10")
     assert "placement_funding" in f10.supported_data_types
+
+
+# ─── ThsAdapter：同花顺官方 Financial-API（2026-09-05） ───────────────
+
+class _FakeThs:
+    def __init__(self, payload: dict) -> None:
+        self.payload = payload
+
+    def __call__(self, path: str, api_key: str, params: dict) -> dict:
+        return self.payload
+
+
+def _ths_payload(item: dict | None, *, code: int = 0) -> dict:
+    return {"code": code, "message": "success" if code == 0 else "boom",
+            "request_id": "x", "data": {"item": [item] if item else []}}
+
+
+def test_ths_adapter_etf_snapshot_mapping(monkeypatch) -> None:
+    monkeypatch.setenv(THS_API_KEY_ENV, "test-key")
+    adapter = ThsAdapter(rate_limit=0)
+    monkeypatch.setattr(adapter, "_get", _FakeThs(_ths_payload({
+        "thscode": "510300.SH", "ticker": "510300", "last_price": 4.616,
+        "prev_price": 4.621, "volume": 841465540, "turnover": 3905673000,
+    })))
+    result = adapter.fetch(FetchRequest(data_type="etf_snapshot", stock_codes=["510300"]))
+    assert result.metadata.error is None
+    assert result.data[0]["thscode"] == "510300.SH", "无后缀代码应自动补 SH"
+    assert result.data[0]["last_price"] == pytest.approx(4.616)
+
+
+def test_ths_adapter_etf_track_percentile_mapping(monkeypatch) -> None:
+    monkeypatch.setenv(THS_API_KEY_ENV, "test-key")
+    adapter = ThsAdapter(rate_limit=0)
+    monkeypatch.setattr(adapter, "_get", _FakeThs(_ths_payload({
+        "date_ms": 1753977600000, "rsi_pct": 58.36, "donchian_channel": 0.874,
+        "track_index_pe_ttm_five_year_percentile": 69.11,
+    })))
+    result = adapter.fetch(FetchRequest(
+        data_type="etf_track_percentile", stock_codes=["510300.SH"],
+        start_date="2025-08-01", end_date="2025-08-02",
+    ))
+    assert result.metadata.error is None
+    row = result.data[0]
+    assert row["trade_date"] == "2025-08-01"
+    assert row["track_index_pe_ttm_five_year_percentile"] == pytest.approx(69.11)
+
+
+def test_ths_adapter_business_error_is_error_and_3004_is_missing(monkeypatch) -> None:
+    monkeypatch.setenv(THS_API_KEY_ENV, "test-key")
+    adapter = ThsAdapter(rate_limit=0)
+    monkeypatch.setattr(adapter, "_get", _FakeThs(
+        {"code": 2001, "message": "bad key", "request_id": "x", "data": None}
+    ))
+    result = adapter.fetch(FetchRequest(data_type="etf_snapshot", stock_codes=["510300.SH"]))
+    assert result.data == []
+    assert result.metadata.error is not None
+    assert "2001" in result.metadata.error
+
+    monkeypatch.setattr(adapter, "_get", _FakeThs(
+        {"code": 3004, "message": "unsupported leaf", "request_id": "x", "data": None}
+    ))
+    result = adapter.fetch(FetchRequest(data_type="etf_snapshot", stock_codes=["510300.SH"]))
+    assert result.data == []
+    assert result.metadata.error is None, "3004 是不支持类型的合法缺失"
+    assert result.metadata.confidence == "missing"
+
+
+def test_ths_adapter_missing_key_is_error_without_network(monkeypatch) -> None:
+    monkeypatch.delenv(THS_API_KEY_ENV, raising=False)
+    adapter = ThsAdapter(rate_limit=0)
+    called: list[str] = []
+    monkeypatch.setattr(adapter, "_get", _FakeThs({"code": 0}))
+    result = adapter.fetch(FetchRequest(data_type="etf_snapshot", stock_codes=["510300.SH"]))
+    assert called == []
+    assert result.metadata.error is not None
+    assert "未设置" in result.metadata.error

@@ -647,14 +647,18 @@ def data_hk_dividends(
 
 @data_app.command("index-valuation")
 def data_index_valuation(
-    indexes: str = typer.Option("", "--indexes", help="指数代码，逗号分隔（默认 000300）"),
+    indexes: str = typer.Option("", "--indexes", help="指数代码，逗号分隔（默认 000300；--all-broad 覆盖）"),
+    all_broad: bool = typer.Option(False, "--all-broad", help="更新乐咕全部 12 个宽基/红利指数"),
+    sw_start: str = typer.Option("", "--sw-start", help="申万一级行业回填起始日 YYYYMMDD（与 --sw-end 一起用）"),
+    sw_end: str = typer.Option("", "--sw-end", help="申万一级行业回填结束日 YYYYMMDD（与 --sw-start 一起用）"),
     check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖状态，不抓取"),
 ) -> None:
-    """指数估值低频更新（数据补全：沪深300 ERP 指标的数据前置）
+    """指数估值低频更新（多指数 ERP 与 ETF 分位的数据前置）
 
-    更新 index_valuation（乐咕主源全历史 + 中证官网交叉源近 20 日）。
-    - 每日 1~2 次请求，无风控风险
-    - 主源失败保留旧值并登记 retry；交叉源失败不阻断主源落库
+    - 默认只更新沪深300（乐咕 PE/PB + 中证官网交叉）
+    - --all-broad：更新乐咕 12 个宽基/红利指数
+    - --sw-start/--sw-end：回填申万一级行业窗口（日度 PE/PB，2006+）
+    - 每日 1 次节流；主源失败保留旧值并登记 retry；交叉失败不阻断主源落库
     """
     from app.cli.protocol import make_response
     from app.core.index_valuation import IndexValuationUpdater
@@ -663,8 +667,20 @@ def data_index_valuation(
     updater = IndexValuationUpdater(duck=duck, sqlite=sqlite)
     if check_only:
         report = updater.status_report()
+    elif sw_start.strip() or sw_end.strip():
+        if not (sw_start.strip() and sw_end.strip()):
+            typer.echo("--sw-start 与 --sw-end 必须同时提供", err=True)
+            raise typer.Exit(code=2)
+        report = _with_update_lock(
+            duck, lambda: updater.update_sw_industries(sw_start.strip(), sw_end.strip()),
+        )
     else:
-        code_list = [c.strip() for c in indexes.split(",") if c.strip()] if indexes.strip() else None
+        code_list = None
+        if all_broad:
+            from app.core.index_valuation import BROAD_INDEX_CODES
+            code_list = list(BROAD_INDEX_CODES)
+        elif indexes.strip():
+            code_list = [c.strip() for c in indexes.split(",") if c.strip()]
         report = _with_update_lock(
             duck, lambda: updater.update_daily(code_list),
         )

@@ -39,15 +39,19 @@ DataType = Literal[
     "share_capital_history", # 历史总股本链（CNINFO 主链 + 东财交叉校验，P4）
     "ipo_funding",       # IPO 首发募资（CNINFO 汇总，数据补全 2026-08-25）
     "placement_funding", # 增发/配股募资（东财 F10 BonusFinancing，数据补全 2026-08-25）
-    "index_valuation",   # 指数估值历史（乐咕主源 + 中证官网交叉，数据补全 2026-08-25）
+    "index_valuation",   # 指数估值历史（乐咕/申万主源 + 中证官网交叉，2026-08-25 建域）
     "buyback_funding",   # 股票回购/注销金额（东财回购明细，数据补全 2026-08-26）
     "hk_dividends",      # 港股分红事件（东财 datacenter，2026-09-04）
+    "etf_daily",             # ETF 日线行情（同花顺官方 Financial-API，2026-09-05）
+    "etf_snapshot",          # ETF 行情快照（同花顺官方 Financial-API，2026-09-05）
+    "etf_profile",           # ETF 基本资料（同花顺官方 Financial-API，2026-09-05）
+    "etf_track_percentile",  # ETF 跟踪指数 PE-TTM 五年分位历史（同花顺，2026-09-05）
 ]
 
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
 # P0-1: cninfo_csrc 是 CSRC 行业适配器的独立源名（与 cninfo 公告/分红适配器区分）
-SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"]
+SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "sws", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"]
 
 
 # ─── 请求/响应模型 ──────────────────────────────────────────────────
