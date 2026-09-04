@@ -299,6 +299,7 @@ def grid_state(
     current_price: float | None,
     signal: str,
     today: str | None = None,
+    persist_sell_plan: bool = True,
 ) -> dict[str, Any]:
     """汇总一只 ETF 的持仓、预算、网格与信号。
 
@@ -333,12 +334,15 @@ def grid_state(
     sell_tranche_amount = sell_plan["tranche_amount"] if sell_plan else 0.0
     if position["shares"] > 0 and signal == "sell":
         if sell_plan is None and current_price is not None:
-            plan_date = today or datetime.now(UTC).astimezone().date().isoformat()
-            sell_plan = ensure_sell_plan(
-                sqlite, etf_code=etf_code, trigger_date=plan_date,
-                trigger_price=current_price, shares=position["shares"],
-            )
-            sell_tranche_amount = float(sell_plan["tranche_amount"])
+            if persist_sell_plan:
+                plan_date = today or datetime.now(UTC).astimezone().date().isoformat()
+                sell_plan = ensure_sell_plan(
+                    sqlite, etf_code=etf_code, trigger_date=plan_date,
+                    trigger_price=current_price, shares=position["shares"],
+                )
+                sell_tranche_amount = float(sell_plan["tranche_amount"])
+            else:
+                sell_tranche_amount = current_price * position["shares"] / SELL_TRANCHES
         if sell_plan and position["sell_count"] < SELL_TRANCHES:
             anchor = (
                 position["last_sell_price"]
@@ -346,6 +350,13 @@ def grid_state(
                 else float(sell_plan["trigger_price"])
             )
             next_sell_price = anchor * (1 + step)
+        elif (
+            sell_plan is None
+            and current_price is not None
+            and position["sell_count"] < SELL_TRANCHES
+        ):
+            # 只读预览：不落计划时以当前价作为首档锚点估算
+            next_sell_price = current_price * (1 + step)
 
     market_value = position["shares"] * current_price if current_price is not None else None
     unrealized_pnl = (

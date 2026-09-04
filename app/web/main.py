@@ -294,6 +294,7 @@ def create_app(
     # ─── 注册 API 路由 ──────────────────────────────────────────────
     from app.web.api.data_status import router as data_status_router
     from app.web.api.dsl import router as dsl_router
+    from app.web.api.etf_strategy import router as etf_strategy_router
     from app.web.api.index_dashboard import router as index_dashboard_router
     from app.web.api.screening import router as screening_router
     from app.web.api.stock_detail import router as stock_detail_router
@@ -304,6 +305,7 @@ def create_app(
     app.include_router(watchlist_router)
     app.include_router(dsl_router)
     app.include_router(index_dashboard_router)
+    app.include_router(etf_strategy_router)
 
     # ─── 健康检查 ──────────────────────────────────────────────────
     @app.get("/api/health")

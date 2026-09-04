@@ -6,12 +6,14 @@ import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import type { DataTableColumns } from 'naive-ui'
 import type { IndexOverviewItem } from '../types/index-dashboard.ts'
+import EtfStrategyPanel from '../components/EtfStrategyPanel.vue'
 
 const loading = ref(false)
 const errorText = ref('')
 const items = ref<IndexOverviewItem[]>([])
 const tab = ref<'all' | 'broad' | 'industry'>('all')
 const viewMode = ref<'cards' | 'table'>('cards')
+const mode = ref<'indices' | 'etf'>('indices')
 
 const filtered = computed(() => {
   if (tab.value === 'all') return items.value
@@ -62,7 +64,14 @@ onMounted(async () => {
       <p class="page-sub">宽基与申万一级行业的估值分位与 ERP（股权风险溢价）。分位窗口：近 10 年。</p>
     </header>
 
-    <NSpin :show="loading">
+    <NTabs v-model:value="mode" type="segment" size="small" class="mode-tabs">
+      <NTab name="indices">指数概览</NTab>
+      <NTab name="etf">ETF 轮动策略</NTab>
+    </NTabs>
+
+    <EtfStrategyPanel v-if="mode === 'etf'" />
+
+    <NSpin v-else :show="loading">
       <NEmpty v-if="errorText" :description="errorText" />
       <template v-else>
         <div class="toolbar">
@@ -118,6 +127,7 @@ onMounted(async () => {
 .page { padding: 24px; }
 .page-head h1 { margin: 0 0 4px; font-size: 22px; color: var(--text-h); }
 .page-sub { margin: 0 0 16px; color: var(--text); font-size: 13px; }
+.mode-tabs { margin-bottom: 14px; }
 .toolbar { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 12px; }
 .toolbar-actions { display: flex; gap: 8px; }
 .text-button { border: 0; background: none; color: #57966d; cursor: pointer; font-size: 13px; padding: 4px; }
