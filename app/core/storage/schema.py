@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 22
+DUCKDB_SCHEMA_VERSION = 23
 SQLITE_SCHEMA_VERSION = 16
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -583,6 +583,8 @@ CREATE INDEX IF NOT EXISTS idx_index_valuation_code
 
 -- ETF 日线行情域（2026-09-05，同花顺官方 Financial-API 主源）
 -- 供 ETF 轮动工作台的网格价/持仓盈亏计算；源失败保留旧值，不阻断个股主链。
+-- track_pe_ttm_five_year_percentile 为同花顺"跟踪指数 PE-TTM 五年分位"，
+-- 用于无指数估值历史的 ETF（港股/中概等）兜底信号。
 CREATE TABLE IF NOT EXISTS etf_daily (
     etf_code    VARCHAR NOT NULL,      -- 510300（无交易所后缀）
     trade_date  DATE NOT NULL,
@@ -592,6 +594,7 @@ CREATE TABLE IF NOT EXISTS etf_daily (
     low_price   DOUBLE,
     volume      DOUBLE,
     turnover    DOUBLE,
+    track_pe_ttm_five_year_percentile DOUBLE,
     source      VARCHAR NOT NULL,      -- ths
     fetch_time  TIMESTAMP NOT NULL,
     raw_hash    VARCHAR NOT NULL,
@@ -1264,6 +1267,18 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (22, 'ETF daily quotes for rotation strategy')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v23: etf_daily 增加同花顺跟踪指数 PE-TTM 五年分位列（2026-09-05）。
+        connection.execute(
+            "ALTER TABLE etf_daily ADD COLUMN IF NOT EXISTS "
+            "track_pe_ttm_five_year_percentile DOUBLE"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (23, 'ETF tracking-index PE-TTM five-year percentile column')
             ON CONFLICT (version) DO NOTHING
             """
         )

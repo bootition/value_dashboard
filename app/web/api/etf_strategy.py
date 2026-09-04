@@ -83,6 +83,20 @@ def _overview_item(
               "samples": 0, "latest_date": None}
     )
     percentile = _track_metric(valuation, meta["primary_metric"])
+    percentile_label = "PB分位" if meta["primary_metric"] == "pb" else "PE分位"
+    percentile_source = "指数近10年"
+    if percentile is None and meta["primary_metric"] == "pe":
+        # 港股/中概等无指数估值历史：同花顺跟踪指数 PE-TTM 五年分位兜底
+        track_rows = request.app.state.duck.read_query(
+            """SELECT track_pe_ttm_five_year_percentile FROM etf_daily
+               WHERE etf_code = ? AND track_pe_ttm_five_year_percentile IS NOT NULL
+               ORDER BY trade_date DESC LIMIT 1""",
+            [code],
+        )
+        if track_rows:
+            percentile = float(track_rows[0]["track_pe_ttm_five_year_percentile"])
+            percentile_label = "PE分位(同花顺5年)"
+            percentile_source = "跟踪指数5年"
     signal = signal_zone(percentile)
     current_price = latest_close(request.app.state.duck, code)
     state = grid_state(
@@ -96,7 +110,8 @@ def _overview_item(
         **state,
         "valuation": valuation,
         "percentile": percentile,
-        "percentile_label": "PB分位" if meta["primary_metric"] == "pb" else "PE分位",
+        "percentile_label": percentile_label,
+        "percentile_source": percentile_source,
     }
 
 

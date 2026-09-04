@@ -112,15 +112,18 @@ class ThsAdapter(BaseAdapter):
     # ─── 底层请求 ────────────────────────────────────────────────────
 
     def _get(self, path: str, api_key: str, params: dict[str, Any]) -> dict[str, Any]:
-        import requests  # 延迟导入：单元测试可 monkeypatch，不引入顶层依赖
+        # 用 httpx 而非 requests：akshare 会 monkeypatch requests.Session.request，
+        # 导致 trust_env 等关键字不被接受（2026-09-05 实测）。
+        import httpx
 
         with _domestic_direct():
-            response = requests.get(
+            response = httpx.get(
                 THS_BASE_URL + path,
                 params=params,
                 headers={"X-api-key": api_key},
                 timeout=self._timeout,
                 trust_env=False,
+                follow_redirects=True,
             )
         response.raise_for_status()
         return response.json()

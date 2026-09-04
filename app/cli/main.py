@@ -212,6 +212,32 @@ def etf_import_xlsx(
     typer.echo(json.dumps(make_response("etf.import-xlsx", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
 
 
+@etf_app.command("update-prices")
+def etf_update_prices(
+    codes: str = typer.Option("", "--codes", help="只更新指定 ETF 代码，逗号分隔（默认全部启用）"),
+    years: int = typer.Option(5, "--years", help="回补年数（同花顺单窗口 ≤5 年）"),
+    check_only: bool = typer.Option(False, "--check-only", help="只显示覆盖状态，不抓取"),
+) -> None:
+    """更新 ETF 日线行情与跟踪指数 PE-TTM 五年分位（同花顺官方源）
+
+    - 每只 ETF 最多 2 次请求（日线 + 跟踪分位），单实例 0.5s 限速
+    - 源失败保留旧值并登记 retry，不阻断个股主链
+    """
+    from app.cli.protocol import make_response
+    from app.core.etf_prices import EtfPriceUpdater
+
+    _, duck, sqlite = _database_context()
+    updater = EtfPriceUpdater(duck=duck, sqlite=sqlite)
+    if check_only:
+        report = updater.status_report()
+    else:
+        code_list = [c.strip() for c in codes.split(",") if c.strip()] or None
+        report = _with_update_lock(
+            duck, lambda: updater.update_all(code_list, years=years),
+        )
+    typer.echo(json.dumps(make_response("etf.update-prices", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
+
+
 @data_app.command("init")
 def data_init(
     skip_prices: bool = typer.Option(False, "--skip-prices", help="跳过价格数据"),

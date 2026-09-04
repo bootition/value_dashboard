@@ -71,6 +71,28 @@ def test_overview_and_detail_are_read_only(
     assert missing.status_code == 404
 
 
+def test_overview_uses_ths_track_percentile_fallback(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """港股/中概无指数估值历史：同花顺跟踪指数 PE-TTM 五年分位兜底信号。"""
+    upsert_etf_meta(sqlite_store, etf_code="513130", name="恒生科技",
+                    track_index_code=None, primary_metric="pe")
+    duckdb_store.write_query(
+        """INSERT INTO etf_daily
+           (etf_code, trade_date, close_price, track_pe_ttm_five_year_percentile,
+            source, fetch_time, raw_hash, confidence, batch_id)
+           VALUES ('513130', '2026-09-03', 0.6, 25.0, 'ths',
+                   CURRENT_TIMESTAMP, 'h', 'strict', 'b')"""
+    )
+    client = _build_client(duckdb_store, sqlite_store)
+
+    overview = client.get("/api/etf/overview").json()
+    item = overview["items"][0]
+    assert item["percentile"] == 25.0
+    assert "同花顺5年" in item["percentile_label"]
+    assert item["signal"] == "neutral"
+
+
 def test_post_endpoints_validate_and_write(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
