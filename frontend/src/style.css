@@ -133,6 +133,8 @@ body {
 
 .icon-watchlist { border-radius: 50%; }
 .icon-watchlist::after { content: '★'; position: relative; left: 2px; top: -2px; font-size: 10px; }
+.icon-index { border-radius: 2px; }
+.icon-index::after { content: ''; display: block; width: 9px; height: 0; margin: 4px auto 0; border-top: 1.4px solid currentColor; box-shadow: 0 4px 0 -0.4px currentColor, 0 8px 0 -0.4px currentColor; }
 .icon-stock { border-radius: 50% 50% 2px 2px; }
 .icon-status { border-radius: 50%; }
 .icon-status::after { content: ''; display: block; width: 7px; height: 7px; margin: 3px; border-left: 1px solid currentColor; border-bottom: 1px solid currentColor; }

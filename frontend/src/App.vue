@@ -35,12 +35,17 @@ const statusTag = computed(() => {
 
 const menuItems = [
   { label: '筛选', route: '/screening', key: 'screening', icon: 'filter' },
+  { label: '指数', route: '/index', key: 'index-dashboard', icon: 'index' },
   { label: '自选列表', route: '/watchlist', key: 'watchlist', icon: 'watchlist' },
   { label: '个股详情', route: '/stock', key: 'stock-search', icon: 'stock' },
   { label: '数据状态', route: '/data-status', key: 'data-status', icon: 'status' },
 ]
 
-const activeKey = computed(() => route.name === 'stock-detail' ? 'stock-search' : route.name as string)
+const activeKey = computed(() => {
+  if (route.name === 'stock-detail') return 'stock-search'
+  if (route.name === 'index-detail') return 'index-dashboard'
+  return route.name as string
+})
 
 const themeOverrides = {
   common: {

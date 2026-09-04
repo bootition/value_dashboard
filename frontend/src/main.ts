@@ -37,6 +37,18 @@ const router = createRouter({
       meta: { title: '个股详情' },
     },
     {
+      path: '/index',
+      name: 'index-dashboard',
+      component: () => import('./views/IndexPage.vue'),
+      meta: { title: '指数' },
+    },
+    {
+      path: '/index/:code',
+      name: 'index-detail',
+      component: () => import('./views/IndexDetailPage.vue'),
+      meta: { title: '指数详情' },
+    },
+    {
       path: '/data-status',
       name: 'data-status',
       component: () => import('./views/DataStatusPage.vue'),
