@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-09-04
+last-reviewed: 2026-09-05
 supersedes: null
 ---
 
@@ -116,8 +116,19 @@ supersedes: null
 1. **对话中确认的任何新硬约束**（环境事实、数据源行为、保留期限、口径裁决）→ 当日登记到本文件对应章节，并更新 `last-reviewed`
 2. **决策必须附着在决策物上**：代码/schema 级特殊设计（如 quarantine 表）在代码注释或本文件登记设计意图
 3. **会话收尾清单**（每次会话结束前执行）：git commit → git push → 本文件/STATUS.md 知识提炼 → 删除实验产物（数据库副本、临时 CSV）
-4. 引用本文件结论时标注：`docs/runbooks/ops-knowledge-base.md` + `last-reviewed: 2026-09-04`
+4. 引用本文件结论时标注：`docs/runbooks/ops-knowledge-base.md` + `last-reviewed: 2026-09-05`
+
+## 9. 多指数 ERP 与 ETF 工作台新增约束（2026-09-05）
+
+| # | 约束 | 出处 |
+|---|---|---|
+| S11 | 乐咕 `stock_index_pe_lg/pb_lg` 上游已改为**月末序列**（约 144~261 点，2005 至今）；沪深300 日度历史已留存正式库不回退；UI 标注 cadence=monthly | reports/111 探测 |
+| S12 | 乐咕对连发请求敏感：约 4 个指数（8 次请求）后 csrf 页面解析失败（AttributeError 'NoneType'）；适配器限速 2s/请求，批量回填按逐指数 + 30s 冷却；自动更新宽基组需分日轮转，勿一次连打 12 个 | 2026-09-05 正式库回填实测 |
+| S13 | 申万 `index_analysis_report` 直连：`page_size` 可给到 **50000**（3 页/11.8 万行）；单页 26~55s、3 并发墙钟约 56s；证书链不完整必须 `verify=False`；akshare 50/页路径禁用（2372 页×15s≈10h） | 2026-09-05 实测 |
+| S14 | 同花顺 Financial-API Key 只存环境变量 `HITHINK_FINANCE_API_KEY`（用户级已 setx）；适配器必须用 **httpx**（akshare 会 monkeypatch requests.Session.request，`trust_env` 报 TypeError）；QDII（513130/159605）`track_index_pe_ttm_five_year_percentile` 上游恒 null → 如实 unavailable | reports/111 实测 |
+| S15 | DuckDB 1.5.5 executemany 含 date/datetime 参数的病理内存问题同样适用于 `index_valuation` 批量写入（11.8 万行卡死）——>1 万行批量一律 pandas register + 单条 INSERT SELECT（D19 泛化） | reports/111 |
+| S16 | S1 包装器 preflight 会冻结**本机全部 python 进程状态**：无关 python 服务（如 streamlit）运行/变化会导致"Python process state changed"或 tmp 清理 PermissionError 误报；跑 S1 前需停掉无关 python 应用 | reports/82 §5.4、2026-09-05 实测 |
 
 ---
 
-*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。*
+*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。2026-09-05 多指数 ERP + ETF 工作台：新增 S11-S16（乐咕月度与限流、申万 50000/页并发、THS httpx/QDII null、向量化批量泛化、S1 进程冻结），schema 版本 D5 更新为 23。*
