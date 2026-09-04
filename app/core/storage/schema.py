@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 21
-SQLITE_SCHEMA_VERSION = 15
+DUCKDB_SCHEMA_VERSION = 22
+SQLITE_SCHEMA_VERSION = 16
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
 
@@ -580,6 +580,27 @@ CREATE TABLE IF NOT EXISTS index_valuation (
 );
 CREATE INDEX IF NOT EXISTS idx_index_valuation_code
     ON index_valuation (index_code, trade_date);
+
+-- ETF 日线行情域（2026-09-05，同花顺官方 Financial-API 主源）
+-- 供 ETF 轮动工作台的网格价/持仓盈亏计算；源失败保留旧值，不阻断个股主链。
+CREATE TABLE IF NOT EXISTS etf_daily (
+    etf_code    VARCHAR NOT NULL,      -- 510300（无交易所后缀）
+    trade_date  DATE NOT NULL,
+    close_price DOUBLE,
+    open_price  DOUBLE,
+    high_price  DOUBLE,
+    low_price   DOUBLE,
+    volume      DOUBLE,
+    turnover    DOUBLE,
+    source      VARCHAR NOT NULL,      -- ths
+    fetch_time  TIMESTAMP NOT NULL,
+    raw_hash    VARCHAR NOT NULL,
+    confidence  VARCHAR NOT NULL,
+    batch_id    VARCHAR NOT NULL,
+    PRIMARY KEY (etf_code, trade_date, source)
+);
+CREATE INDEX IF NOT EXISTS idx_etf_daily_code
+    ON etf_daily (etf_code, trade_date);
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -1232,6 +1253,20 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
+        # v22: ETF 日线行情域（2026-09-05，同花顺官方 Financial-API）。
+        # 表 DDL 在 DUCKDB_SCHEMA_V1；此处补索引与迁移记录。
+        # 域纪律：独立于 A 股 readiness；失败不阻断主链。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_etf_daily_code "
+            "ON etf_daily (etf_code, trade_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (22, 'ETF daily quotes for rotation strategy')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
     logger.info("DuckDB schema 初始化完成")
 
 
@@ -1530,6 +1565,89 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             "ON CONFLICT(version) DO NOTHING",
             (15, "missing_list 未解决条目按股票+字段去重"),
         )
+
+        # v16: ETF 轮动工作台操作域（2026-09-05）
+        # 持仓/流水/预算均为用户录入数据，归属 SQLite 操作型存储；
+        # ETF 行情在 DuckDB etf_daily（同花顺官方源）。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 16"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS etf_meta (
+                    etf_code          TEXT PRIMARY KEY,
+                    name              TEXT NOT NULL,
+                    track_index_code  TEXT,              -- 跟踪指数代码（000300 / SW801010）
+                    track_index_name  TEXT,
+                    primary_metric    TEXT NOT NULL DEFAULT 'pe'
+                                      CHECK (primary_metric IN ('pe', 'pb')),
+                    industry_group    TEXT,              -- 行业分组（一指数一 ETF 视图）
+                    budget            REAL NOT NULL DEFAULT 0,  -- 该 ETF 独立预算（元）
+                    step_pct          REAL NOT NULL DEFAULT 5,  -- 网格间距（默认 5%）
+                    enabled           INTEGER NOT NULL DEFAULT 1,
+                    note              TEXT,
+                    updated_at        TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS etf_trades (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    etf_code    TEXT NOT NULL,
+                    trade_date  TEXT NOT NULL,
+                    direction   TEXT NOT NULL CHECK (direction IN ('buy', 'sell')),
+                    price       REAL NOT NULL,
+                    shares      REAL NOT NULL,
+                    amount      REAL NOT NULL,
+                    fee         REAL NOT NULL DEFAULT 0,
+                    note        TEXT,
+                    created_at  TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_etf_trades_code ON etf_trades (etf_code, trade_date)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS etf_cash_flows (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    flow_date  TEXT NOT NULL,
+                    direction  TEXT NOT NULL CHECK (direction IN ('in', 'out')),
+                    amount     REAL NOT NULL,
+                    note       TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS etf_sell_plans (
+                    etf_code         TEXT PRIMARY KEY,
+                    trigger_date     TEXT NOT NULL,   -- 触发 80% 分位的日期
+                    trigger_price    REAL NOT NULL,   -- 触发价（首档锚点）
+                    tranche_amount   REAL NOT NULL,   -- 单档金额 = 触发时持仓市值 ÷ 10
+                    tranches_done    INTEGER NOT NULL DEFAULT 0,
+                    updated_at       TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS etf_settings (
+                    key        TEXT PRIMARY KEY,
+                    value      TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (16, "ETF rotation workbench: meta/trades/cash-flows/sell-plans/settings"),
+            )
+            logger.info("SQLite schema v16 已应用")
 
 
 def init_all_schema(
