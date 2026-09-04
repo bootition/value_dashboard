@@ -256,6 +256,12 @@ def _fingerprints(conn: duckdb.DuckDBPyConnection, table: str) -> dict[str, Any]
         "balance_sheet": "COUNT(*), MIN(report_date), MAX(report_date), SUM(COALESCE(total_assets,0))",
         "income_statement": "COUNT(*), MIN(report_date), MAX(report_date), SUM(COALESCE(revenue,0))",
         "cash_flow": "COUNT(*), MIN(report_date), MAX(report_date), SUM(COALESCE(cf_from_operating,0))",
+        # 港股分红为 schema v20 新域；verify 显式比对该表而非只用 COUNT(*)
+        # （export→import→verify 已自动覆盖该表，无需特殊外部化处理）。
+        "hk_dividends": "COUNT(*), MIN(ex_date), MAX(ex_date), "
+                        "SUM(COALESCE(dividend_per_share_hkd,0)), "
+                        "SUM(COALESCE(dividend_per_share_cny,0)), "
+                        "COUNT(DISTINCT stock_code)",
     }
     expr = queries.get(table, "COUNT(*)")
     return conn.execute(f"SELECT {expr} FROM {table}").fetchone()

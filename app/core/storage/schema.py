@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 19
+DUCKDB_SCHEMA_VERSION = 20
 SQLITE_SCHEMA_VERSION = 15
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -533,6 +533,31 @@ CREATE TABLE IF NOT EXISTS buyback_events (
 );
 CREATE INDEX IF NOT EXISTS idx_buyback_events_stock
     ON buyback_events (stock_code);
+
+-- 港股分红域（2026-09-04，总市场分红融资比数据前置之一）
+-- 仅覆盖 stock_zh_ah_spot() 能映射到 A 股 stock_meta 的 A+H 公司；
+-- 独立于 A 股 dividends / stock_meta / indicator_snapshot / readiness。
+-- stock_code 为 5 位港股代码（如 00941），A 股映射由
+-- app/core/ah_hk_mapping.py 维护，不在本表内冗余。
+CREATE TABLE IF NOT EXISTS hk_dividends (
+    stock_code              VARCHAR NOT NULL,
+    ex_date                 DATE,
+    announcement_date       DATE,
+    report_period           VARCHAR,
+    plan_explain            VARCHAR,
+    dividend_per_share_hkd  DOUBLE,
+    dividend_per_share_cny  DOUBLE,
+    transfer_end_date       VARCHAR,
+    dividend_date           DATE,
+    source                  VARCHAR NOT NULL,
+    fetch_time              TIMESTAMP NOT NULL,
+    raw_response_hash       VARCHAR NOT NULL,
+    confidence              VARCHAR NOT NULL,
+    batch_id                VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, ex_date, plan_explain)
+);
+CREATE INDEX IF NOT EXISTS idx_hk_dividends_stock
+    ON hk_dividends (stock_code);
 
 -- 指数估值域（2026-08-25，数据补全：沪深300 ERP 指标的数据前置）
 -- 主源乐咕（全历史 PE-TTM/PB/股息率），交叉源中证官网（近 20 交易日）；
@@ -1170,6 +1195,21 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (19, 'Split source audit into hot and archive tables')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v20: 港股分红域（2026-09-04，总市场分红融资比的数据前置）。
+        # 表 DDL 在 DUCKDB_SCHEMA_V1 中，这里补齐索引与迁移记录。
+        # 域纪律：独立于 A 股 readiness；写路径走
+        # app/core/hk_dividends.py + 单写者锁，不进入指标快照公式。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hk_dividends_stock "
+            "ON hk_dividends (stock_code)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (20, 'Hong Kong dividend events for A+H dual-listed stocks')
             ON CONFLICT (version) DO NOTHING
             """
         )

@@ -1720,11 +1720,42 @@ class IndicatorCalculator:
             payload=formula.encode("utf-8"),
             api_version="indicator_calculator/v1",
         )
-        connection.executemany(
-            """INSERT INTO source_audit
-               (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time,
-                raw_response_hash, confidence, reason_code, api_version, effective_date,
-                data_version, formula)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            audit_rows,
+        # 2026-09-04 OOM 修复：不要再对 source_audit 直接 executemany。
+        # DuckDB 1.5.5 Python 驱动在 executemany 绑定 date/datetime 参数时，
+        # 事务本地内存按 ~450KB/行 堆积（1 万行实测峰值 4.4GB），
+        # 全量发布 24.5 万行 lineage 直接 OOM（7.4GB 预算耗尽，
+        # 2026-09-04 自动更新验证轮实锤，并已在库副本上复现）。
+        # 改为 pandas 向量化注册 + 单条 INSERT SELECT：
+        # 24.5 万行实测 0.3s / 峰值 <100MB，且仍在同一事务内保持原子性
+        # （与 reports/97 Sina 明细 TEMP TABLE 合并写入同思路）。
+        import pandas as pd
+
+        lineage_columns = (
+            "stock_code", "field_name", "report_date", "value", "source",
+            "fetch_batch_id", "fetch_time", "raw_response_hash", "confidence",
+            "reason_code", "api_version", "effective_date", "data_version",
+            "formula",
         )
+        frame = pd.DataFrame(audit_rows, columns=lineage_columns)
+        for column in ("report_date", "effective_date"):
+            frame[column] = pd.to_datetime(frame[column])
+        # fetch_time 为 UTC 时区感知值；统一转成 naive UTC 落 TIMESTAMP 列，
+        # 与原 executemany 路径的落库语义一致。
+        frame["fetch_time"] = (
+            pd.to_datetime(frame["fetch_time"], utc=True).dt.tz_localize(None)
+        )
+        lineage_view = f"_derived_lineage_stage_{uuid.uuid4().hex[:8]}"
+        connection.register(lineage_view, frame)
+        try:
+            connection.execute(
+                f"""INSERT INTO source_audit
+                    ({', '.join(lineage_columns)})
+                    SELECT stock_code, field_name,
+                           CAST(report_date AS DATE), value, source,
+                           fetch_batch_id, fetch_time, raw_response_hash,
+                           confidence, reason_code, api_version,
+                           CAST(effective_date AS DATE), data_version, formula
+                    FROM {lineage_view}"""
+            )
+        finally:
+            connection.unregister(lineage_view)

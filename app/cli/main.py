@@ -601,6 +601,50 @@ def data_buyback(
     typer.echo(json.dumps(make_response("data.buyback", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("hk-dividends")
+def data_hk_dividends(
+    check_only: bool = typer.Option(False, "--check-only", help="只显示港股分红覆盖/队列状态，不抓取"),
+    stocks: str = typer.Option("", "--stocks", help="只更新指定 A 股代码，逗号分隔（如 600941）"),
+    max_stocks: int = typer.Option(0, "--max-stocks", help="最多更新N只未覆盖的映射股票(0=全部)"),
+    batch_size: int = typer.Option(50, "--batch-size", help="进度/日志分批大小(默认50)"),
+) -> None:
+    """港股分红历史更新（A+H 双地上市股票，总市场分红融资比数据前置）
+
+    更新 hk_dividends（东财 datacenter 单股接口，源侧硬限速 ≤2 req/s）。
+    - A 股代码经 app/core/ah_hk_mapping.py 映射到 5 位港股代码
+    - 单股事务原子替换；失败保留旧值并写入 retry/missing
+    - 独立低频域：不写 stock_meta / indicator_snapshot / readiness
+    """
+    from app.cli.protocol import make_response
+    from app.core.hk_dividends import HKDividendUpdater
+
+    _, duck, sqlite = _database_context()
+    updater = HKDividendUpdater(duck=duck, sqlite=sqlite)
+    if check_only:
+        report = updater.status_report()
+    elif stocks.strip():
+        codes = [code.strip() for code in stocks.split(",") if code.strip()]
+
+        def _run_stocks() -> dict:
+            return updater.update_many(
+                codes,
+                batch_size=batch_size,
+                refresh_mapping=True,
+            )
+
+        report = _with_update_lock(duck, _run_stocks)
+    else:
+        def _run_all() -> dict:
+            return updater.update_all(
+                max_stocks=max_stocks,
+                refresh_mapping=True,
+            )
+
+        report = _with_update_lock(duck, _run_all)
+    typer.echo(json.dumps(make_response("data.hk-dividends", report), ensure_ascii=False, indent=2, default=str))
+
+
+
 @data_app.command("index-valuation")
 def data_index_valuation(
     indexes: str = typer.Option("", "--indexes", help="指数代码，逗号分隔（默认 000300）"),

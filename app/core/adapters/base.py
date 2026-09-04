@@ -41,12 +41,13 @@ DataType = Literal[
     "placement_funding", # 增发/配股募资（东财 F10 BonusFinancing，数据补全 2026-08-25）
     "index_valuation",   # 指数估值历史（乐咕主源 + 中证官网交叉，数据补全 2026-08-25）
     "buyback_funding",   # 股票回购/注销金额（东财回购明细，数据补全 2026-08-26）
+    "hk_dividends",      # 港股分红事件（东财 datacenter，2026-09-04）
 ]
 
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
 # P0-1: cninfo_csrc 是 CSRC 行业适配器的独立源名（与 cninfo 公告/分红适配器区分）
-SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase"]
+SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"]
 
 
 # ─── 请求/响应模型 ──────────────────────────────────────────────────

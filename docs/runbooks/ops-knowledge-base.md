@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-09-03
+last-reviewed: 2026-09-04
 supersedes: null
 ---
 
@@ -42,6 +42,7 @@ supersedes: null
 | S7 | 源级限速（秒/请求）：cninfo 1.5、akshare_eastmoney 0.5、tdx 0.2、baostock 0.8、tencent 0.2、sina 0.35、eastmoney_f10 0.5 | config/default.yaml |
 | S8 | CSRC 行业分类：**只取证监会标准**，显式 `start_date=19900101`、`end_date=今天`；源无分类如实 NULL + `missing_list(csrc_industry)`，禁止混用巨潮/申万/中证 | reports/86 |
 | S9 | 价格主链：腾讯（连接复用）→ baostock → tdx；连续流水线 `price_fetch_pipeline_depth=64` | config；update.py |
+| S10 | **港股分红源**：`ak.stock_hk_dividend_payout_em` 底层为 `datacenter.eastmoney.com`（非 push2）；适配器 `eastmoney_hk_dividend` 硬限速 **0.5s/请求（≤2 req/s）**，逐股串行，禁止并发；`stock_zh_ah_spot()` 为映射快照源（单次请求，不属于 datacenter 限速面） | app/core/adapters/hk_dividend_adapter.py；2026-09-04 实测 |
 
 ## 3. DuckDB / 存储约束
 
@@ -51,15 +52,18 @@ supersedes: null
 | D2 | **DuckDB 1.5.5 同事务 `DROP INDEX`+`CREATE INDEX` bug**（`BoundIndex::CreateDeltaIndex` FATAL）：索引重建必须分事务（DROP 提交后再 CREATE）；升级评估为长期待办 | reports/81 F1 |
 | D3 | `raw_response_archive` 冷热分层（schema v16）：`history`（冷）+ `active`（小）+ 视图 `raw_response_archive_all`；冷核对走 hash 集合，不触碰 BLOB | reports/96 |
 | D4 | lineage hash 集合（schema v17）：`raw_response_archive_valid_hash` + `raw_response_archive_partitions`（5GB / 10万行 / 31天自动轮转，计数器维护避免每次 SUM 全扫） | reports/102 |
-| D5 | 当前 schema 版本：`DUCKDB_SCHEMA_VERSION = 18`（app/core/storage/schema.py） | 代码 |
+| D5 | 当前 schema 版本：`DUCKDB_SCHEMA_VERSION = 20`（app/core/storage/schema.py） | 代码 |
 | D6 | `vd backup` 对 26GB BLOB 表须**分块导出**（raw_response_archive_history 5000 行分块），单次 COPY 会受内存限制 | reports/102 |
 | D10 | `vd data auto-update status` 是**只读**命令（只查 SQLite，不打开 DuckDB）；其它 CLI 写命令在 schema 已最新时经 `skip_if_current=True` 跳过全量幂等 DDL，避免扫描 43GB BLOB 视图 OOM | reports/104 |
 | D11 | 数据状态重量摘要：后台 stale-while-revalidate，TTL 300s；空闲期前端每 300s 拉一次，更新 running→finished 时前端主动立即刷新一次。全量构建仍约 19-23s，但不得阻塞或拒绝普通查询 | reports/104；data_status.py |
 | D12 | **自动更新写连接窗口会阻塞 Web 查询**：DuckDB 单写者模型下，research_statistics 全量重建的发布阶段会持续持有写连接（2026-09-03 实测约 4-6 分钟），期间普通 K 线/详情/自选请求会等待或超时。这不是连接配置冲突；优化方向是分批可见发布或快照读，而不是调大超时硬扛 | reports/104；实测 |
 | D13 | `source_audit` 冷热分离：日常 readiness/lineage 只扫热表 `source_audit`；历史排查查 `source_audit_all`。归档命令 `vd data source-audit-archive --before YYYY-MM-DD`，按 id keyset 分页，每批独立事务；正式库已归档 30,039,082 行（cutoff 2025-01-01） | reports/106；app/core/source_audit_archive.py |
 | D14 | 分红融资比为 **A股流通股本口径**：`cumulative_dividend_amount` 用 `circ_shares` 优先，total_shares 中的 H 股不得混入；港股分红未采集即不计入、缺数据返回 NULL。600941 已修正为 34.7% | reports/106；calculator.py |
-| D15 | 2026-09-04 离线重建后主库 7.8GB：`source_audit_archive`（30,039,082 行）与 `raw_response_archive_history` payload 均只存外部 Parquet（`D:d-cold-archive`），主库仅空表/元数据；旧库 `valuedashboard.duckdb.old-20260904013322` 保留回滚 | reports/107 |
+| D15 | 2026-09-04 离线重建后主库 7.8GB：`source_audit_archive`（30,039,082 行）与 `raw_response_archive_history` payload 均只存外部 Parquet（`D:\vd-cold-archive`），主库仅空表/元数据；旧库 `valuedashboard.duckdb.old-20260904013322` 保留回滚 | reports/107 |
 | D16 | **总股本分红融资比暂不发布**：当前 `dividends`/`funding_events` 只有 A 股数据，用 total_shares（A+H）会出现 600941 825.9% 类错误；待港股分红与港股融资数据源接入后再增加全市场口径字段 | reports/107 |
+| D17 | 外部冷 Parquet 分区规范：`D:\vd-cold-archive\partitioned` 下按 `year=YYYY` 目录，raw_response_archive_history 每 part ≤5,000 行，source_audit_archive 每 part ≤500,000 行；manifest 必须逐 part 记录 rows/sha256，迁移窗口下界必须携带上一游标，避免重复包含 | reports/109；scripts/repartition_cold_archive.py |
+| D19 | **DuckDB 1.5.5 executemany 绑定 date/datetime 参数按 ~450KB/行 堆积事务内存**（1 万行实测峰值 4.4GB；全量 lineage 发布 24.5 万行直接 OOM 7.4GB）。修复范式：大批量写入带日期列的持久表一律走 pandas DataFrame `connection.register()` + 单条 `INSERT ... SELECT`（24.5 万行 0.3s/峰值 <100MB，2026-09-04 库副本复现验证）；小批量（≤数百行/批）仍可用 executemany。fetch_time 时区语义：`pd.to_datetime(..., utc=True).dt.tz_localize(None)` 落 naive UTC，与旧路径一致 | reports/108；app/core/indicators/calculator.py 2026-09-04 修复 |
+| D18 | **港股分红域 `hk_dividends`（schema v20，2026-09-04）**：仅覆盖 `stock_zh_ah_spot()` 可映射的 A+H 公司（当前快照 203 只：153 精确名 + 50 人工覆写）；A→HK 映射持久化在 `app/core/ah_hk_mapping.py`，禁止后缀剥离模糊猜映射（招商银行≠招商证券）。写路径只有 `vd data hk-dividends` + `_with_update_lock`，单股 DELETE→INSERT 原子替换；不触碰 stock_meta/indicator_snapshot/readiness，指标公式暂不修改。港股 IPO/配股/供股融资仍缺失，总市场分红融资比继续 BLOCK | reports/108 |
 | D7 | **正式库 data/ 只读**：所有写操作必须经 CLI/维护脚本 + 单写者锁；S1 回归强制 `VD_ENV=test` + 正式库 SHA-256 指纹前后对比 | AGENTS.md；conftest.py |
 | D8 | ✅ 回滚快照已按窗口删除（2026-09-02）：9-01 22:52 完整成功周期（job 124）通过观察；两硬链接 + sqlite pre-rebuild 已删除，释放约 50GB | reports/101、102；job_logs 124 |
 | D9 | 重建/导出相关外部路径：新库构建 `D:\vd-rebuild-new-20260901`、Parquet 导出 `D:\vd-rebuild-export-20260901`、冷归档 `D:\vd-cold-archive` | reports/102 |
@@ -111,8 +115,8 @@ supersedes: null
 1. **对话中确认的任何新硬约束**（环境事实、数据源行为、保留期限、口径裁决）→ 当日登记到本文件对应章节，并更新 `last-reviewed`
 2. **决策必须附着在决策物上**：代码/schema 级特殊设计（如 quarantine 表）在代码注释或本文件登记设计意图
 3. **会话收尾清单**（每次会话结束前执行）：git commit → git push → 本文件/STATUS.md 知识提炼 → 删除实验产物（数据库副本、临时 CSV）
-4. 引用本文件结论时标注：`docs/runbooks/ops-knowledge-base.md` + `last-reviewed: 2026-09-01`
+4. 引用本文件结论时标注：`docs/runbooks/ops-knowledge-base.md` + `last-reviewed: 2026-09-04`
 
 ---
 
-*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。*
+*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式），D5 schema 版本更新为 20。*

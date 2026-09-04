@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
 KNOWN_ADAPTERS: Final[frozenset[str]] = frozenset(
-    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase"}
+    {"akshare_eastmoney", "baostock", "cninfo", "cninfo_csrc", "tdx", "tencent", "sina", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"}
 )
 DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "stock_list": ["akshare_eastmoney"],
@@ -59,6 +59,8 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "index_valuation": ["legulegu"],
     # 股票回购/注销金额（东财回购明细，数据补全 2026-08-26）
     "buyback_funding": ["eastmoney_repurchase"],
+    # 港股分红历史（东财 datacenter 单股接口；源侧 ≤2 req/s）
+    "hk_dividends": ["eastmoney_hk_dividend"],
 }
 DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "akshare_eastmoney": 0.5,
@@ -75,6 +77,7 @@ DEFAULT_ADAPTER_RATE_LIMITS: Final[dict[str, float]] = {
     "legulegu": 1.0,
     "csindex": 1.0,
     "eastmoney_repurchase": 0.0,
+    "eastmoney_hk_dividend": 0.5,
 }
 
 
@@ -346,6 +349,16 @@ class AdapterManager:
             logger.warning(f"东财回购适配器未安装: {e}")
         except Exception as e:
             logger.warning(f"东财回购适配器初始化失败: {e}")
+
+        # 东财港股分红适配器（datacenter 单股接口，2026-09-04；
+        # 独立 0.5s 限速实例，不与 A 股/业务概览适配器共享间隔）
+        try:
+            from app.core.adapters.hk_dividend_adapter import EastMoneyHKDividendAdapter
+            self.register(EastMoneyHKDividendAdapter(self._rate_limits["eastmoney_hk_dividend"]))
+        except ImportError as e:
+            logger.warning(f"东财港股分红适配器未安装: {e}")
+        except Exception as e:
+            logger.warning(f"东财港股分红适配器初始化失败: {e}")
 
         self._initialized = True
         logger.info(f"适配器管理器初始化完成: {list(self._adapters.keys())}")
