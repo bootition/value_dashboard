@@ -152,6 +152,12 @@ class HKDividendUpdater:
         batch_id = uuid.uuid4().hex
         fetch_time = datetime.now(UTC)
         rows = self._dedupe_rows(result.data, hk_code)
+        # 2026-09-04 导入实锤：源会返回"方案已公告但除净日未定"的行
+        # （ex_date NULL）。这些不是已实施分红事实，且表主键
+        # (stock_code, ex_date, plan_explain) 的 ex_date 隐式 NOT NULL。
+        # 如实跳过并计数披露；ex_date 确定后下次导入自然补上。
+        pending_no_exdate = sum(1 for row in rows if row.get("ex_date") is None)
+        rows = [row for row in rows if row.get("ex_date") is not None]
         if rows:
             with self.duck.transaction() as conn:
                 conn.execute(
@@ -194,6 +200,7 @@ class HKDividendUpdater:
             "hk_code": hk_code,
             "batch_id": batch_id,
             "event_rows": len(rows),
+            "pending_no_exdate": pending_no_exdate,
             "retained": not rows,
         }
 

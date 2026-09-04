@@ -61,6 +61,7 @@ last-reviewed: 2026-09-04
 | 离线重建降空间与总口径阻塞 | ✅ **完成（2026-09-04）**：export→import→verify→swap 后主库 41GB→**7.8GB**；source_audit_archive 与 raw_response_archive_history BLOB 外部化至 `D:\vd-cold-archive`，旧库保留可回滚；总股本分红融资比因缺少港股分红/融资数据暂不发布，保持 A股口径并如实披露 | `reports/107`（2026-09-04） |
 | 冷归档分区策略复审 | ✅ **修正（2026-09-04）**：外部 Parquet 改为按年目录 + 行数封顶分区（history 5,000 行/part，source_audit_archive 500,000 行/part），manifest 记录年份/行数/sha256；修复首版分区脚本行数记录与 id 窗口重复两个 bug，重新生成后行数与热表核验一致 | `reports/109`（2026-09-04） |
 | 更新链 OOM 与失控轮转修复 | ✅ **修复完成（2026-09-04，自动更新验证轮发现）**：① 指标全量发布 lineage 写入（24.5 万行 executemany 含 date/datetime 参数）DuckDB 1.5.5 按 ~450KB/行 堆积事务内存导致 7.4GB OOM——改为 pandas register + 单条 INSERT SELECT（实测 0.3s/峰值 <100MB，同事务原子性不变）；② raw_response_archive 轮转记账 bug：阈值触发后每次写入都轮转（416 个单行表、同秒重名崩溃）——已修 registry 记账并合并存量表；S1 定向回归（lineage/快照原子性/HK 域）全绿 | `reports/110`（2026-09-04）；app/core/indicators/calculator.py、app/core/storage/duckdb_store.py |
+| 港股分红数据域（A+H） | ✅ **完成（2026-09-04）**：schema v20 `hk_dividends` 独立低频域 + `vd data hk-dividends`；A+H 映射 202 只（152 精确 + 50 人工覆写，600941→00941）；正式库已导入 **2,587 行 / 179 只 / 1999→2026**，0 失败 0 retry，23 只无记录如实 missing，未实施方案（无除净日）25 行如实跳过；HKD 解析率 96.9%；不触碰 A 股 readiness；总市场口径分红融资比仍 BLOCK（港股融资事件无源） | `reports/108`（2026-09-04） |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
@@ -77,8 +78,6 @@ last-reviewed: 2026-09-04
 13. **DuckDB 文件高水位（2026-08-28 新披露）**：正式库文件约 16.7GB，远大于逻辑表数据；主因是多次全量快照/统计 `staging → DELETE 全表 → INSERT` 留下的高水位，`source_audit` 3,641 万行及其复合索引占主要空间。已执行 `CHECKPOINT`；DuckDB 1.5.5 默认 `VACUUM` 未物理收缩文件。查询与更新功能正常，离线压缩/重建评估列入待办（`reports/84` §剩余与风险）。
 14. **更新内存峰值与启动核对峰值（2026-09-01 更新）**：`raw_response_archive` 新行提交会触发 DuckDB 整表主键校验扫描，已由 `reports/96` 冷热分层修复；DuckDB 连接默认 `memory_limit=14GB`（`reports/98` 最终口径），冷核对峰值约 16GB 并回落。如机器内存更小，可经 `config/user.yaml` 调整。
 ## 进行中的工作
-- **港股分红数据导入（2026-09-04，见 `reports/108`）**：schema v20 新增 `hk_dividends` 独立低频域与 `vd data hk-dividends`；A+H 映射快照 203 只（153 精确名 + 50 人工覆写，含 600941→00941）；总市场口径公式仍 BLOCK（港股 IPO/配股/供股融资缺失）。
-
 - **数据缺口补全（2026-08-25，见 `reports/82`）**：融资事件域（funding_events：IPO/增发/配股募资）与指数估值域（index_valuation：沪深300 PE 历史）代码/测试/CLI/自动更新接入完成，20 只真实数据抽样验证通过（IPO 18/20、增发配股 12/20、北交所如实 missing）。正式库 index_valuation 已全量落库；funding_events 已全量续传完成（5,550 只）。
 - **分红融资比复合指标（2026-08-26，见 `reports/83`）**：`dividend_financing_ratio` v2 已发布，使用百分数口径并含回购注销；正式库 Schema v15 已应用，buyback_events 已落库（5,271 条/2,863 只），融资域已全量覆盖，快照新字段已回填。
 - **第二轮全项目红队修复（2026-08-14）**：已完结——`reports/80` 全部发现关闭（`reports/81`，S1 613 全绿）；遗留长期项见缺口 #12。
