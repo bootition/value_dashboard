@@ -95,6 +95,7 @@ class ThsAdapter(BaseAdapter):
         if not thscode:
             return self._make_empty_result("缺少 thscode", confidence="missing")
 
+        self._wait_rate_limit()
         try:
             if request.data_type == "etf_daily":
                 return self._fetch_daily(thscode, request, api_key)
