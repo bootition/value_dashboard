@@ -78,7 +78,21 @@ def _rotate_raw_archive_if_needed(conn: Any) -> None:
         and age_days < _RAW_ARCHIVE_ROTATE_DAYS
     ):
         return
-    partition = f"raw_response_archive_{now.strftime('%Y%m%d_%H%M%S')}"
+    # 2026-09-04 失控轮转修复：旧实现把 registry 里活跃行的
+    # row_count/estimated_bytes/created_at 原样保留（先 UPDATE 一个尚不存在的
+    # TS 名再 ON CONFLICT DO NOTHING 插新行），阈值一旦触发（如 5GB）后
+    # 每次写入都会再轮转，1 秒内两次轮转同名表直接 Catalog Error
+    # 崩溃（当日实锤：416 个单行 TS 表 + auto-update failed）。
+    # 修正：先把活跃 registry 行改名为 TS 名并落终值，再插入全新的
+    # 计数器归零活跃行；表名冲突时加序号避免同秒重名。
+    base = f"raw_response_archive_{now.strftime('%Y%m%d_%H%M%S')}"
+    used = {
+        r[0] for r in conn.execute(
+            "SELECT table_name FROM duckdb_tables() WHERE table_name LIKE ?",
+            [f"{base}%"],
+        ).fetchall()
+    }
+    partition = base if base not in used else f"{base}_{len(used)}"
     conn.execute(
         f'ALTER TABLE raw_response_archive RENAME TO "{partition}"'
     )
@@ -95,25 +109,32 @@ def _rotate_raw_archive_if_needed(conn: Any) -> None:
         )
         """
     )
+    # 1) 活跃 registry 行 → 改名为 TS 名并关闭（置真实终值）
     conn.execute(
         """UPDATE raw_response_archive_partitions
-           SET closed_at = ?,
-               row_count = COALESCE(row_count, ?),
-               estimated_bytes = COALESCE(estimated_bytes, ?)
-           WHERE partition_table = ?""",
-        [now, count, total_bytes, partition],
+           SET partition_table = ?,
+               closed_at = ?,
+               row_count = ?,
+               estimated_bytes = ?
+           WHERE partition_table = 'raw_response_archive'""",
+        [partition, now, int(count), int(total_bytes)],
     )
+    # 2) 若该活跃行历史上缺失（防御），补一条 TS 行
     conn.execute(
         """INSERT INTO raw_response_archive_partitions
            (partition_table, created_at, closed_at, row_count, estimated_bytes)
-           VALUES (?, ?, ?, ?, ?)""",
-        [partition, now, now, count, total_bytes],
+           SELECT ?, ?, ?, ?, ?
+           WHERE NOT EXISTS (
+               SELECT 1 FROM raw_response_archive_partitions WHERE partition_table = ?
+           )""",
+        [partition, now, now, int(count), int(total_bytes), partition],
     )
+    # 3) 全新活跃行：计数器归零、created_at=now（无 ON CONFLICT——若已存在
+    #    说明状态异常，让事务显式失败好过静默保留脏计数器）
     conn.execute(
         """INSERT INTO raw_response_archive_partitions
            (partition_table, created_at, closed_at, row_count, estimated_bytes)
-           VALUES ('raw_response_archive', ?, NULL, 0, 0)
-           ON CONFLICT DO NOTHING""",
+           VALUES ('raw_response_archive', ?, NULL, 0, 0)""",
         [now],
     )
     _recreate_raw_archive_view(conn)

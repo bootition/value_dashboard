@@ -66,3 +66,6 @@ config/sw_industry_fallback_result.json
 Thumbs.db
 .idea/
 .vscode/
+
+# 2026-09-05：字面量 $RUNID 目录是历史进程误生成的 S1 临时证据
+/docs/evidence/evidence-s1$RUNID/
