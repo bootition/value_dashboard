@@ -127,3 +127,39 @@ def test_update_all_summary_and_status(
     assert status["coverage"][0]["etf_code"] == "513130"
     assert status["coverage"][0]["rows"] == 2
     assert status["coverage"][0]["track_rows"] == 2
+
+
+def test_track_dates_without_daily_rows_get_independent_rows(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """QDII（如 513130）：跟踪分位日期与行情日期不重叠时，
+    补写 close=NULL 的独立分位行，不污染价格、保证最新分位可查。"""
+    upsert_etf_meta(sqlite_store, etf_code="513130", name="恒生科技",
+                    track_index_code=None, primary_metric="pe")
+    updater = EtfPriceUpdater(duck=duckdb_store, sqlite=sqlite_store)
+
+    class QdiiFakeThs:
+        def fetch(self, request: FetchRequest):
+            if request.data_type == "etf_daily":
+                return _make_result([
+                    {"trade_date": "2026-09-04", "close_price": 0.56},
+                ])
+            return _make_result([
+                {"trade_date": "2026-09-03",
+                 "track_index_pe_ttm_five_year_percentile": 9.0},
+                {"trade_date": "2026-09-04",
+                 "track_index_pe_ttm_five_year_percentile": 9.5},
+            ])
+
+    updater._ths = QdiiFakeThs()  # type: ignore[assignment]
+    report = updater.update_etf("513130")
+
+    assert report["track_merged"] == 1
+    assert report["track_extra_rows"] == 1
+    rows = duckdb_store.read_query(
+        "SELECT trade_date, close_price, track_pe_ttm_five_year_percentile "
+        "FROM etf_daily WHERE etf_code='513130' ORDER BY trade_date"
+    )
+    assert len(rows) == 2
+    assert rows[0]["close_price"] is None and rows[0]["track_pe_ttm_five_year_percentile"] == 9.0
+    assert rows[1]["close_price"] == 0.56 and rows[1]["track_pe_ttm_five_year_percentile"] == 9.5

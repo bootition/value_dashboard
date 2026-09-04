@@ -90,6 +90,7 @@ class EtfPriceUpdater:
 
         batch_id = uuid.uuid4().hex
         fetch_time = datetime.now(UTC)
+        daily_dates = {row.get("trade_date") for row in daily.data}
         with self.duck.transaction() as conn:
             conn.executemany(
                 """INSERT INTO etf_daily
@@ -124,10 +125,40 @@ class EtfPriceUpdater:
                     for row in daily.data
                 ],
             )
+            # QDII（如 513130 恒生科技）跟踪分位日期与 A 股行情日期可能不重叠：
+            # 补写 close_price=NULL 的独立分位行，保证"最新分位"可查且不污染价格。
+            track_hash = track.metadata.raw_response_hash or daily.metadata.raw_response_hash
+            for track_date, track_value in track_by_date.items():
+                if track_date in daily_dates or track_value is None:
+                    continue
+                conn.execute(
+                    """INSERT INTO etf_daily
+                       (etf_code, trade_date, close_price, track_pe_ttm_five_year_percentile,
+                        source, fetch_time, raw_hash, confidence, batch_id)
+                       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(etf_code, trade_date, source) DO UPDATE SET
+                         track_pe_ttm_five_year_percentile=excluded.track_pe_ttm_five_year_percentile,
+                         fetch_time=excluded.fetch_time, raw_hash=excluded.raw_hash,
+                         confidence=excluded.confidence, batch_id=excluded.batch_id""",
+                    [
+                        etf_code, track_date, track_value,
+                        track.metadata.source or daily.metadata.source,
+                        fetch_time, track_hash, track.metadata.confidence, batch_id,
+                    ],
+                )
+        track_values = {
+            date_: value for date_, value in track_by_date.items() if value is not None
+        }
+        merged_rows = sum(
+            1 for row in daily.data if track_values.get(row.get("trade_date")) is not None
+        )
         return {
             "status": "success",
             "rows": len(daily.data),
             "track_rows": len(track.data),
+            "track_non_null": len(track_values),
+            "track_merged": merged_rows,
+            "track_extra_rows": max(0, len(track_values) - merged_rows),
             "track_error": track.metadata.error,
         }
 
