@@ -1,5 +1,7 @@
 /** ETF 轮动工作台后端数据契约（2026-09-05） */
 
+import type { ValuationDetail } from './index-dashboard.ts'
+
 export interface EtfMetaLike {
   etf_code: string
   name: string
@@ -104,6 +106,6 @@ export interface EtfCashFlowRow {
 export interface EtfDetail extends EtfOverviewItem {
   trades: EtfTradeRow[]
   cash_flows: EtfCashFlowRow[]
-  track_valuation: unknown | null
+  track_valuation: ValuationDetail | null
   settings: { total_assets: string | null; budget: number; step_pct: number }
 }

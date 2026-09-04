@@ -7,7 +7,8 @@ import {
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import type { DataTableColumns } from 'naive-ui'
-import type { EtfOverviewItem, EtfOverviewResponse } from '../types/etf-strategy.ts'
+import type { EtfDetail, EtfOverviewItem, EtfOverviewResponse } from '../types/etf-strategy.ts'
+import IndexValuationChart from './IndexValuationChart.vue'
 
 const message = useMessage()
 const loading = ref(false)
@@ -50,9 +51,32 @@ const columns: DataTableColumns<EtfOverviewItem> = [
   { title: '卖出进度', key: 'sell_progress', render: (row) => (row.clear_tail ? '清尾仓' : `${row.sell_tranches_done}/10 档`) },
   {
     title: '操作', key: 'actions',
-    render: (row) => h(NButton, { size: 'tiny', onClick: () => openMetaModal(row) }, { default: () => '预算' }),
+    render: (row) => h('div', { class: 'row-actions' }, [
+      h(NButton, { size: 'tiny', onClick: () => openDetail(row.etf_code) }, { default: () => '详情' }),
+      h(NButton, { size: 'tiny', onClick: () => openMetaModal(row) }, { default: () => '预算' }),
+    ]),
   },
 ]
+
+// ─── 详情（分位线图） ──────────────────────────────────────────────────
+const showDetailModal = ref(false)
+const detailLoading = ref(false)
+const detail = ref<EtfDetail | null>(null)
+const detailError = ref('')
+
+async function openDetail(etfCode: string) {
+  showDetailModal.value = true
+  detailLoading.value = true
+  detailError.value = ''
+  try {
+    const resp = await axios.get<EtfDetail>(`/api/etf/${etfCode}/detail`)
+    detail.value = resp.data
+  } catch (error) {
+    detailError.value = isAxiosError(error) ? friendlyErrorMessage(error) : String(error)
+  } finally {
+    detailLoading.value = false
+  }
+}
 
 // ─── 录入表单 ──────────────────────────────────────────────────────────
 const showTradeModal = ref(false)
@@ -186,6 +210,43 @@ onMounted(load)
       </template>
     </NSpin>
 
+    <NModal v-model:show="showDetailModal" preset="card" :title="`${detail?.name ?? ''} · 估值分位线`" style="width: 860px">
+      <NSpin :show="detailLoading">
+        <NAlert v-if="detailError" type="error" :show-icon="false">{{ detailError }}</NAlert>
+        <template v-else-if="detail">
+          <NDescriptions :column="4" label-placement="top" size="small" class="detail-stats">
+            <NDescriptionsItem label="信号">
+              <NTag :type="(signalMeta[detail.signal] ?? signalMeta.unavailable).type" size="small" :bordered="false">
+                {{ (signalMeta[detail.signal] ?? signalMeta.unavailable).label }}
+              </NTag>
+            </NDescriptionsItem>
+            <NDescriptionsItem label="主指标分位">{{ detail.percentile_label }} {{ fmt(detail.percentile, 0, '%') }}</NDescriptionsItem>
+            <NDescriptionsItem label="持仓成本">{{ fmt(detail.position.avg_cost, 3) }}</NDescriptionsItem>
+            <NDescriptionsItem label="已实现盈亏">{{ fmt(detail.position.realized_pnl) }}</NDescriptionsItem>
+          </NDescriptions>
+          <template v-if="detail.track_valuation">
+            <IndexValuationChart
+              :points="detail.track_valuation.pe_series"
+              :bands="detail.track_valuation.pe_bands"
+              label="PE 历史与 20/80 分位带"
+              color="#4f8fc9"
+              :height="200"
+            />
+            <IndexValuationChart
+              :points="detail.track_valuation.pb_series"
+              :bands="detail.track_valuation.pb_bands"
+              label="PB 历史与 20/80 分位带"
+              color="#c98a4f"
+              :height="200"
+            />
+          </template>
+          <NAlert v-else type="default" :show-icon="false">
+            跟踪指数无估值历史（如港股/中概），信号来自同花顺跟踪指数五年分位；该源不可得时如实标注「分位不可得」。
+          </NAlert>
+        </template>
+      </NSpin>
+    </NModal>
+
     <NModal v-model:show="showTradeModal" preset="card" title="录入买卖" style="width: 480px">
       <NForm label-placement="left" label-width="72">
         <NFormItem label="ETF">
@@ -264,4 +325,6 @@ v-model:value="cashForm.direction" :options="[
 .etf-summary { flex: 1; }
 .etf-actions { display: flex; gap: 8px; flex: 0 0 auto; }
 .etf-hint { color: var(--text); font-size: 12px; margin-top: 10px; }
+.row-actions { display: flex; gap: 4px; }
+.detail-stats { margin-bottom: 8px; }
 </style>
