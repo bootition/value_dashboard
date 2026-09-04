@@ -12,7 +12,7 @@ last-reviewed: 2026-09-04
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
 - **最后更新**：2026-09-04
-- **更新人**：opencode 会话（2026-09-04 港股分红域导入与 41GB→7.8GB 重建：`reports/107`/`reports/108`）
+- **更新人**：opencode 会话（2026-09-04 港股分红域、41GB→7.8GB 重建、更新链 OOM/失控轮转修复：`reports/107`/`reports/108`/`reports/109`）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
@@ -60,6 +60,7 @@ last-reviewed: 2026-09-04
 | 数据治理、分红口径与详情图表化 | ✅ **实施（2026-09-03）**：research_statistics 发布按 200 只/批缩短写锁窗口；source_audit 冷热分离（已归档 30,039,082 行，热表 12,988,150 行，新增 `vd data source-audit-archive`）；数据质量全量核对指纹缓存复用；分红融资比改为 A股流通股本口径（600941：825.9%→34.7%，H股不混入、缺数据 null）；详情页固定数字卡原位改为“一块一图 + 下拉”，新增 `/metric-history` 与 `MetricHistoryChart` | `reports/106`（2026-09-03） |
 | 离线重建降空间与总口径阻塞 | ✅ **完成（2026-09-04）**：export→import→verify→swap 后主库 41GB→**7.8GB**；source_audit_archive 与 raw_response_archive_history BLOB 外部化至 `D:\vd-cold-archive`，旧库保留可回滚；总股本分红融资比因缺少港股分红/融资数据暂不发布，保持 A股口径并如实披露 | `reports/107`（2026-09-04） |
 | 冷归档分区策略复审 | ✅ **修正（2026-09-04）**：外部 Parquet 改为按年目录 + 行数封顶分区（history 5,000 行/part，source_audit_archive 500,000 行/part），manifest 记录年份/行数/sha256；修复首版分区脚本行数记录与 id 窗口重复两个 bug，重新生成后行数与热表核验一致 | `reports/109`（2026-09-04） |
+| 更新链 OOM 与失控轮转修复 | ✅ **修复完成（2026-09-04，自动更新验证轮发现）**：① 指标全量发布 lineage 写入（24.5 万行 executemany 含 date/datetime 参数）DuckDB 1.5.5 按 ~450KB/行 堆积事务内存导致 7.4GB OOM——改为 pandas register + 单条 INSERT SELECT（实测 0.3s/峰值 <100MB，同事务原子性不变）；② raw_response_archive 轮转记账 bug：阈值触发后每次写入都轮转（416 个单行表、同秒重名崩溃）——已修 registry 记账并合并存量表；S1 定向回归（lineage/快照原子性/HK 域）全绿 | `reports/110`（2026-09-04）；app/core/indicators/calculator.py、app/core/storage/duckdb_store.py |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
