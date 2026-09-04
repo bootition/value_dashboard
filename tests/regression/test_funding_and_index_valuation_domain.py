@@ -309,10 +309,16 @@ def test_legulegu_pb_failure_is_nonfatal(monkeypatch) -> None:
 
 
 def test_sws_adapter_maps_industry_valuation(monkeypatch) -> None:
-    import app.core.adapters.index_valuation_adapter as mod
-
-    monkeypatch.setattr(mod, "ak", _FakeAKIndex())
     adapter = SwsIndexAdapter(rate_limit=0)
+    monkeypatch.setattr(adapter, "_request_json", lambda params: {
+        "data": {"results": [{
+            "swindexcode": "801010.SI", "swindexname": "农林牧渔",
+            "bargaindate": "2026-08-25", "closeindex": 2500.0,
+            "bargainamount": 100.0, "markup": 1.2, "turnoverrate": 2.1,
+            "pe": 33.9, "pb": 2.04, "meanprice": 10.0, "bargainsumrate": 0.5,
+            "negotiablesharesum1": 10000.0, "negotiablesharesum2": 100.0, "dp": 2.1,
+        }]}
+    })
     result = adapter.fetch(FetchRequest(
         data_type="index_valuation", start_date="2026-08-25", end_date="2026-08-25",
     ))
@@ -328,14 +334,8 @@ def test_sws_adapter_maps_industry_valuation(monkeypatch) -> None:
 
 
 def test_sws_adapter_non_trading_day_is_missing(monkeypatch) -> None:
-    import app.core.adapters.index_valuation_adapter as mod
-
-    class FakeEmpty:
-        def index_analysis_daily_sw(self, symbol: str, start_date: str, end_date: str) -> object:
-            raise KeyError("交易日期")
-
-    monkeypatch.setattr(mod, "ak", FakeEmpty())
     adapter = SwsIndexAdapter(rate_limit=0)
+    monkeypatch.setattr(adapter, "_request_json", lambda params: {"data": {"results": []}})
     result = adapter.fetch(FetchRequest(
         data_type="index_valuation", start_date="2026-09-06", end_date="2026-09-06",
     ))

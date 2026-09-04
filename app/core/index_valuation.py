@@ -84,8 +84,10 @@ class IndexValuationUpdater:
         assert duck is not None and sqlite is not None
         self.duck = duck
         self.sqlite = sqlite
-        # 独立适配器实例（各自限速），不经 AdapterManager 以便多源并存
-        self._primary = LeguleguIndexAdapter(rate_limit=1.0)
+        # 独立适配器实例（各自限速），不经 AdapterManager 以便多源并存。
+        # 乐咕对连发请求敏感（2026-09-05 正式库回填实测约 4 次后 403），
+        # 单请求间隔提高到 2s 并严格排队。
+        self._primary = LeguleguIndexAdapter(rate_limit=2.0)
         self._cross = CSIndexIndexAdapter(rate_limit=1.0)
         self._sws = SwsIndexAdapter(rate_limit=0.5)
 
@@ -228,12 +230,38 @@ class IndexValuationUpdater:
 
         batch_id = uuid.uuid4().hex
         fetch_time = datetime.now(UTC)
+        # 2026-09-05：118,591 行 executemany 在 DuckDB 1.5.5 下因 date/datetime
+        # 绑定按 ~450KB/行堆积事务内存（reports/110 同款缺陷），直接 OOM/卡死。
+        # 改用 pandas 向量化注册 + 单条 INSERT SELECT，同事务原子性不变。
+        import pandas as pd
+
+        frame = pd.DataFrame(result.data)
+        for column in (
+            "index_code", "trade_date", "pe_ttm", "pe_metric",
+            "pb", "div_yield", "extra",
+        ):
+            if column not in frame.columns:
+                frame[column] = None
+        stage_view = f"_sw_index_valuation_stage_{uuid.uuid4().hex[:10]}"
         with self.duck.transaction() as conn:
-            conn.executemany(
-                """INSERT INTO index_valuation
+            conn.register(stage_view, frame)
+            conn.execute(
+                f"""INSERT INTO index_valuation
                    (index_code, trade_date, pe_ttm, pe_metric, pb, div_yield,
                     source, fetch_time, raw_hash, confidence, batch_id, extra)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   SELECT CAST(index_code AS VARCHAR),
+                          CAST(trade_date AS DATE),
+                          CAST(pe_ttm AS DOUBLE),
+                          CAST(pe_metric AS VARCHAR),
+                          CAST(pb AS DOUBLE),
+                          CAST(div_yield AS DOUBLE),
+                          CAST(? AS VARCHAR),
+                          CAST(? AS TIMESTAMP),
+                          ?,
+                          ?,
+                          CAST(? AS VARCHAR),
+                          CAST(extra AS VARCHAR)
+                   FROM {stage_view}
                    ON CONFLICT(index_code, trade_date, source) DO UPDATE SET
                      pe_ttm=excluded.pe_ttm, pe_metric=excluded.pe_metric,
                      pb=excluded.pb, div_yield=excluded.div_yield,
@@ -241,21 +269,11 @@ class IndexValuationUpdater:
                      confidence=excluded.confidence, batch_id=excluded.batch_id,
                      extra=excluded.extra""",
                 [
-                    [
-                        row.get("index_code"),
-                        row.get("trade_date"),
-                        row.get("pe_ttm"),
-                        row.get("pe_metric"),
-                        row.get("pb"),
-                        row.get("div_yield"),
-                        result.metadata.source,
-                        fetch_time,
-                        result.metadata.raw_response_hash,
-                        result.metadata.confidence,
-                        batch_id,
-                        row.get("extra"),
-                    ]
-                    for row in result.data
+                    result.metadata.source,
+                    fetch_time,
+                    result.metadata.raw_response_hash,
+                    result.metadata.confidence,
+                    batch_id,
                 ],
             )
         return {
