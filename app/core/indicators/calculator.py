@@ -775,6 +775,12 @@ class IndicatorCalculator:
                    ) AS missing_shares,
                    SUM(
                        d.dividend_per_share * COALESCE(
+                           (SELECT c.total_shares
+                            FROM share_capital_history c
+                            WHERE c.stock_code = d.stock_code
+                              AND c.effective_date <= d.ex_date
+                            ORDER BY c.effective_date DESC
+                            LIMIT 1),
                            (SELECT m.circ_shares
                             FROM stock_meta m
                             WHERE m.stock_code = d.stock_code),

@@ -288,12 +288,13 @@ class IndexValuationUpdater:
     def refresh_if_due(self) -> dict[str, Any]:
         """低频自动集成入口：每日最多一次（UTC+8）。
 
-        当日已刷新则直接 skip；未刷新时依次更新宽基组（乐咕+中证交叉）
-        与申万一级行业窗口，宽基组成功即记录 marker；申万失败不阻断宽基。
+        乐咕对连发请求敏感（S12：约 4 指数后 403），且宽基为月末序列，
+        因此自动更新按日轮转 4 个宽基代码，4 个交易日覆盖全部 12 个；
+        申万一级行业窗口（1 次请求）每日执行。显式全量仍走 update_broad()。
         """
         if self._refreshed_today():
             return {"status": "skipped", "reason": "refreshed_today"}
-        broad_report = self.update_broad()
+        broad_report = self.update_daily(self._daily_broad_codes())
         try:
             sws_report = self.update_sw_industries()
         except Exception as error:  # noqa: BLE001
@@ -306,6 +307,14 @@ class IndexValuationUpdater:
         if broad_report.get("status") == "success":
             self._mark_refreshed()
         return report
+
+    @staticmethod
+    def _daily_broad_codes(window: int = 4) -> list[str]:
+        """按 UTC+8 日序号轮转的宽基子集，避免自动更新连打全部乐咕指数。"""
+        day = datetime.now(_CN_TZ).toordinal()
+        codes = list(BROAD_INDEX_CODES)
+        start = (day * window) % len(codes)
+        return [codes[(start + i) % len(codes)] for i in range(window)]
 
     def _refreshed_today(self) -> bool:
         value = self._last_refresh_value()

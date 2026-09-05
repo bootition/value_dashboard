@@ -168,6 +168,9 @@ def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
     updater._get_latest_local_price_date = lambda: "2026-08-05"
+    # 真实日历漂移后 08-05 距今超过默认窗口上限会触发 raw 整段重拉；
+    # 本测试只验证 xdxr 窗口，明确放宽窗口上限。
+    updater.incremental_window_days = 90
 
     result = updater._update_prices_incremental(max_stocks=1)
 

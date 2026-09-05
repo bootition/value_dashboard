@@ -589,9 +589,12 @@ def test_snapshot_ttm_dividend_yield_and_spread(
                    date(2025, 6, 30), date(2025, 5, 1), 0.5)   # 12 个月外
     _seed_dividend(duckdb_store, "600519",
                    date(2026, 9, 30), date(2026, 9, 1), 2.0)   # 未来除权不计入
-    # _seed_stock 会通过 conftest 写入到 CURRENT_DATE 的价格史，
-    # 因此曲线日期必须动态对齐该最新价格日，不能用固定的 2026-08-07。
-    latest = date.today()
+    # _seed_stock 会通过 conftest 写入价格史，曲线日期必须动态对齐
+    # 该股最新价格日，不能用固定日期或 Python 的 date.today()。
+    latest_row = duckdb_store.read_query(
+        "SELECT CAST(MAX(trade_date) AS DATE) AS d FROM price_daily_raw WHERE stock_code = '600519'"
+    )[0]["d"]
+    latest = latest_row if isinstance(latest_row, date) else date.fromisoformat(str(latest_row)[:10])
     _seed_curve(duckdb_store, latest, 10.0, 1.5)
     _seed_curve(duckdb_store, latest, 5.0, 1.4)
     _seed_curve(duckdb_store, latest - timedelta(days=18), 2.0, 1.3)  # 超过 5 日陈旧
@@ -651,8 +654,12 @@ def test_treasury_comparison_api_series_and_alignment(
     assert payload["tenor"] == 10.0
     assert payload["tenors_available"] == list(KEY_TENORS)
     assert payload["max_staleness_days"] == 5
-    # fixture 价格覆盖到今日：series 按价格日降序（最新在前）
-    assert payload["series"][0]["price_date"] == str(date.today())
+    # fixture 价格覆盖到该股最新价格日：series 按价格日降序
+    latest_row = duckdb_store.read_query(
+        "SELECT CAST(MAX(trade_date) AS DATE) AS d FROM price_daily_raw WHERE stock_code = '600519'"
+    )[0]["d"]
+    latest = latest_row if isinstance(latest_row, date) else date.fromisoformat(str(latest_row)[:10])
+    assert payload["series"][0]["price_date"] == str(latest)
     day_0807 = next(
         item for item in payload["series"] if item["price_date"] == "2026-08-07"
     )

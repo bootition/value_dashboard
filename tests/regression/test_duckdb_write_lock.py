@@ -44,4 +44,4 @@ def test_connection_config_always_has_uniform_triple(duckdb_store: DuckDBStore) 
 
     assert set(config) == {"memory_limit", "threads", "preserve_insertion_order"}
     assert config["threads"]
-    assert config["preserve_insertion_order"] in {"true", "false"}
+    assert str(config["preserve_insertion_order"]).lower() in {"true", "false"}

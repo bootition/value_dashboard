@@ -50,6 +50,8 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
     }
     updater._refresh_business_overview = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
     updater._refresh_treasury_curve = lambda: {"status": "skipped", "reason": "test_stub"}
+    # 指数估值域：测试环境不得发真实网络请求（2026-09-05 起会连打乐咕）
+    updater._refresh_index_valuation = lambda: {"status": "skipped", "reason": "test_stub"}
     # P4 历史股本链与统计域：测试环境不得触发网络或全量重建
     updater._refresh_capital_history = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
     updater._refresh_research_statistics = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
@@ -108,6 +110,8 @@ def test_incremental_update_preserves_partial_job_when_steps_mixed(duckdb_store,
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     _stub_update_network_steps(updater)
     updater._update_prices_incremental = lambda max_stocks, detail_cb=None: {"status": "failed", "success": 0}
+    # 让一个非价格步骤真实执行成功，形成"失败+成功混合"语义
+    updater._refresh_treasury_curve = lambda: {"status": "success", "reason": "test_stub"}
 
     report = updater.run_incremental_update()
 

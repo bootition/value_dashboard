@@ -219,7 +219,7 @@ def test_kline_days_none_returns_all_history_in_ascending_order(
         ],
     )
 
-    result = get_kline("600519", request=_kline_request(duckdb_store))
+    result = get_kline("600519", request=_kline_request(duckdb_store), days=None)
 
     assert result["count"] == 3
     assert [bar["trade_date"] for bar in result["candles"]] == [
@@ -384,7 +384,7 @@ def test_kline_invalid_params_rejected_over_http(
         {"period": "quarter"},
         {"period": "weekly"},
         {"days": 0},
-        {"days": 3000},
+        {"days": 30000},  # 上限 20000，超过仍 422
     ):
         response = client.get("/api/stock/000001/kline", params=params)
         assert response.status_code == 422, params

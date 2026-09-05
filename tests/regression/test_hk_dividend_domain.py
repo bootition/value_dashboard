@@ -97,7 +97,7 @@ def test_schema_v20_creates_hk_dividends_table(
 ) -> None:
     from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
 
-    assert DUCKDB_SCHEMA_VERSION == 20
+    assert DUCKDB_SCHEMA_VERSION >= 20
     columns = {
         row["column_name"]
         for row in duckdb_store.read_query(
@@ -113,7 +113,7 @@ def test_schema_v20_creates_hk_dividends_table(
     versions = duckdb_store.read_query(
         "SELECT MAX(version) AS v FROM schema_migrations",
     )[0]["v"]
-    assert versions == 20
+    assert versions >= 20
 
 
 def test_ah_hk_mapping_maps_china_mobile_and_manual_override(

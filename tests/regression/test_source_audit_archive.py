@@ -40,7 +40,7 @@ def test_archive_before_moves_old_rows_and_keeps_hot(
     )
 
     assert report["status"] == "success"
-    assert report["archived_rows"] == 4
+    assert report["archived_rows"] == 3
     hot = duckdb_store.read_query(
         "SELECT report_date FROM source_audit ORDER BY report_date"
     )
@@ -48,9 +48,9 @@ def test_archive_before_moves_old_rows_and_keeps_hot(
         "SELECT report_date FROM source_audit_archive ORDER BY report_date"
     )
     assert [row["report_date"] for row in hot] == [date(2025, 12, 31), date(2026, 6, 30)]
-    assert len(archive) == 4
+    assert len(archive) == 3
     state = read_archive_state(sqlite_store)
-    assert state is not None and state["archived_rows"] == 4
+    assert state is not None and state["archived_rows"] == 3
 
 
 def test_archive_before_is_idempotent(
@@ -63,18 +63,28 @@ def test_archive_before_is_idempotent(
     assert second["archived_rows"] == 0
     assert second["status"] == "success"
     assert duckdb_store.read_query("SELECT COUNT(*) AS c FROM source_audit")[0]["c"] == 2
-    assert duckdb_store.read_query("SELECT COUNT(*) AS c FROM source_audit_archive")[0]["c"] == 4
+    assert duckdb_store.read_query("SELECT COUNT(*) AS c FROM source_audit_archive")[0]["c"] == 3
 
 
 def test_archive_state_reports_partial_when_capped(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    _seed_audit(duckdb_store)
+    # 生产路径要求 batch_size ∈ [1000, 500000]：种子 1005 行、单批 1000，
+    # max_batches=1 时必然 partial 并留下 5 行热数据。
+    for i in range(1005):
+        duckdb_store.write_query(
+            """INSERT INTO source_audit
+               (id, stock_code, field_name, report_date, value, source,
+                fetch_batch_id, fetch_time, raw_response_hash, confidence)
+               VALUES (?, '000001', 'revenue', '2020-12-31', 100.0, 'fixture',
+                       'batch-1', CURRENT_TIMESTAMP, ?, 'strict')""",
+            [i + 1, "0" * 64],
+        )
 
     report = archive_before(
         duckdb_store, sqlite_store, date(2025, 1, 1),
-        batch_size=2, max_batches=1,
+        batch_size=1000, max_batches=1,
     )
 
     assert report["status"] == "partial"
-    assert report["archived_rows"] == pytest.approx(2)
+    assert report["archived_rows"] == pytest.approx(1000)

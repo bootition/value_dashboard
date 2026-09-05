@@ -602,7 +602,7 @@ def test_index_valuation_refresh_if_due_throttles_same_day(
     assert second["status"] == "skipped"
     assert second["reason"] == "refreshed_today"
     assert len(calls) == 1, "当日第二次 refresh 不得再发请求"
-    assert len(calls[0]) == 12, "refresh 必须覆盖乐咕全部 12 个宽基/红利指数"
+    assert len(calls[0]) == 4, "自动更新按日轮转 4 个宽基指数，避免乐咕连发限流"
 
 
 def test_index_valuation_refresh_if_due_records_marker(

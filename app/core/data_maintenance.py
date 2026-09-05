@@ -71,9 +71,20 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             CREATE TABLE IF NOT EXISTS raw_response_archive_quarantine AS
             SELECT archive.*, CAST(NULL AS VARCHAR) AS quarantine_reason,
                    CAST(NULL AS TIMESTAMP) AS quarantined_at
-            FROM raw_response_archive archive WHERE FALSE
+            FROM raw_response_archive_all archive WHERE FALSE
             """
         )
+        # 冷热分层后 raw_response_archive_all 比热表多 storage 列；
+        # 已存在的旧 quarantine 表（CTAS 自热表）需补齐该列。
+        quarantine_columns = {
+            row[1] for row in connection.execute(
+                "PRAGMA table_info(raw_response_archive_quarantine)"
+            ).fetchall()
+        }
+        if "storage" not in quarantine_columns:
+            connection.execute(
+                "ALTER TABLE raw_response_archive_quarantine ADD COLUMN storage VARCHAR"
+            )
         connection.execute(
             """
             CREATE TABLE IF NOT EXISTS fetch_batch_quarantine AS

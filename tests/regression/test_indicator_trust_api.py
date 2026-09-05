@@ -273,4 +273,4 @@ def test_read_warning_codes_fail_closed_and_failures_not_cached() -> None:
 
     assert first == ["LINEAGE_INVALID"]
     assert second == ["LINEAGE_INVALID"]
-    assert calls["count"] == 2
+    assert calls["count"] == 4, "fail-closed 每次调用含锁探测与构建两条查询，且不得缓存"
