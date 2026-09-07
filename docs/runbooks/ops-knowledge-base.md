@@ -52,7 +52,7 @@ supersedes: null
 | D2 | **DuckDB 1.5.5 同事务 `DROP INDEX`+`CREATE INDEX` bug**（`BoundIndex::CreateDeltaIndex` FATAL）：索引重建必须分事务（DROP 提交后再 CREATE）；升级评估为长期待办 | reports/81 F1 |
 | D3 | `raw_response_archive` 冷热分层（schema v16）：`history`（冷）+ `active`（小）+ 视图 `raw_response_archive_all`；冷核对走 hash 集合，不触碰 BLOB | reports/96 |
 | D4 | lineage hash 集合（schema v17）：`raw_response_archive_valid_hash` + `raw_response_archive_partitions`（5GB / 10万行 / 31天自动轮转，计数器维护避免每次 SUM 全扫） | reports/102 |
-| D5 | 当前 schema 版本：`DUCKDB_SCHEMA_VERSION = 20`（app/core/storage/schema.py） | 代码 |
+| D5 | 当前 schema 版本：`DUCKDB_SCHEMA_VERSION = 23`、`SQLITE_SCHEMA_VERSION = 17`（app/core/storage/schema.py） | 代码 |
 | D6 | `vd backup` 对 26GB BLOB 表须**分块导出**（raw_response_archive_history 5000 行分块），单次 COPY 会受内存限制 | reports/102 |
 | D10 | `vd data auto-update status` 是**只读**命令（只查 SQLite，不打开 DuckDB）；其它 CLI 写命令在 schema 已最新时经 `skip_if_current=True` 跳过全量幂等 DDL，避免扫描 43GB BLOB 视图 OOM | reports/104 |
 | D11 | 数据状态重量摘要：后台 stale-while-revalidate，TTL 300s；空闲期前端每 300s 拉一次，更新 running→finished 时前端主动立即刷新一次。全量构建仍约 19-23s，但不得阻塞或拒绝普通查询 | reports/104；data_status.py |
@@ -128,6 +128,7 @@ supersedes: null
 | S14 | 同花顺 Financial-API Key 只存环境变量 `HITHINK_FINANCE_API_KEY`（用户级已 setx）；适配器必须用 **httpx**（akshare 会 monkeypatch requests.Session.request，`trust_env` 报 TypeError）；QDII（513130/159605）`track_index_pe_ttm_five_year_percentile` 上游恒 null → 如实 unavailable | reports/111 实测 |
 | S15 | DuckDB 1.5.5 executemany 含 date/datetime 参数的病理内存问题同样适用于 `index_valuation` 批量写入（11.8 万行卡死）——>1 万行批量一律 pandas register + 单条 INSERT SELECT（D19 泛化） | reports/111 |
 | S16 | S1 包装器 preflight 会冻结**本机全部 python 进程状态**：无关 python 服务（如 streamlit）运行/变化会导致"Python process state changed"或 tmp 清理 PermissionError 误报；跑 S1 前需停掉无关 python 应用 | reports/82 §5.4、2026-09-05 实测 |
+| S17 | ETF 池三层（用户 2026-09-05 定稿）：industry=申万一级有工具的 26 个、strategy=红利/红利低波/央企红利/A500、market=沪深300/中证500/中证1000/**恒生科技**；无合适工具的申万行业不加入观察；`vd etf seed-pool --apply` 只插入缺失代码、不覆盖用户预算 | `app/core/etf_pool.py` |
 
 ---
 
