@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 23
-SQLITE_SCHEMA_VERSION = 16
+SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
 
@@ -1593,6 +1593,8 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 CREATE TABLE IF NOT EXISTS etf_meta (
                     etf_code          TEXT PRIMARY KEY,
                     name              TEXT NOT NULL,
+                    category          TEXT NOT NULL DEFAULT 'industry'
+                                      CHECK (category IN ('industry', 'strategy', 'market')),
                     track_index_code  TEXT,              -- 跟踪指数代码（000300 / SW801010）
                     track_index_name  TEXT,
                     primary_metric    TEXT NOT NULL DEFAULT 'pe'
@@ -1663,6 +1665,26 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 (16, "ETF rotation workbench: meta/trades/cash-flows/sell-plans/settings"),
             )
             logger.info("SQLite schema v16 已应用")
+
+        # v17: ETF 分层（2026-09-05 用户定稿）：
+        # category ∈ industry（申万一级行业）/ strategy（策略因子）/
+        # market（市场指数，含沪深300/中证500/中证1000/恒生科技等）。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 17"
+        ).fetchone()
+        if row is None:
+            meta_columns = {
+                column[1] for column in conn.execute("PRAGMA table_info(etf_meta)").fetchall()
+            }
+            if "category" not in meta_columns:
+                conn.execute(
+                    "ALTER TABLE etf_meta ADD COLUMN category TEXT NOT NULL DEFAULT 'industry'"
+                )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (17, "ETF meta category: industry/strategy/market"),
+            )
+            logger.info("SQLite schema v17 已应用")
 
 
 def init_all_schema(

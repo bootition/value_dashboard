@@ -64,7 +64,7 @@ def signal_zone(percentile: float | None) -> str:
 
 def load_etf_meta(sqlite: SQLiteStore) -> list[dict[str, Any]]:
     return sqlite.query(
-        """SELECT etf_code, name, track_index_code, track_index_name,
+        """SELECT etf_code, name, category, track_index_code, track_index_name,
                   primary_metric, industry_group, budget, step_pct, enabled, note
            FROM etf_meta ORDER BY etf_code"""
     )
@@ -75,6 +75,7 @@ def upsert_etf_meta(
     *,
     etf_code: str,
     name: str,
+    category: str = "industry",
     track_index_code: str | None = None,
     track_index_name: str | None = None,
     primary_metric: str = "pe",
@@ -84,6 +85,8 @@ def upsert_etf_meta(
     enabled: bool = True,
     note: str | None = None,
 ) -> dict[str, Any]:
+    if category not in {"industry", "strategy", "market"}:
+        raise ValueError("category 必须是 industry/strategy/market")
     if primary_metric not in {"pe", "pb"}:
         raise ValueError("primary_metric 必须是 pe 或 pb")
     if step_pct <= 0 or step_pct > 20:
@@ -93,18 +96,20 @@ def upsert_etf_meta(
     with sqlite.transaction() as conn:
         conn.execute(
             """INSERT INTO etf_meta
-               (etf_code, name, track_index_code, track_index_name, primary_metric,
-                industry_group, budget, step_pct, enabled, note, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               (etf_code, name, category, track_index_code, track_index_name,
+                primary_metric, industry_group, budget, step_pct, enabled, note, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(etf_code) DO UPDATE SET
-                 name=excluded.name, track_index_code=excluded.track_index_code,
+                 name=excluded.name, category=excluded.category,
+                 track_index_code=excluded.track_index_code,
                  track_index_name=excluded.track_index_name,
                  primary_metric=excluded.primary_metric,
                  industry_group=excluded.industry_group, budget=excluded.budget,
                  step_pct=excluded.step_pct, enabled=excluded.enabled,
                  note=excluded.note, updated_at=excluded.updated_at""",
-            [etf_code, name, track_index_code, track_index_name, primary_metric,
-             industry_group, budget, step_pct, 1 if enabled else 0, note, _now()],
+            [etf_code, name, category, track_index_code, track_index_name,
+             primary_metric, industry_group, budget, step_pct,
+             1 if enabled else 0, note, _now()],
         )
     return {"etf_code": etf_code, "updated": True}
 
@@ -368,6 +373,7 @@ def grid_state(
     return {
         "etf_code": etf_code,
         "name": meta["name"],
+        "category": meta["category"],
         "track_index_code": meta["track_index_code"],
         "track_index_name": meta["track_index_name"],
         "primary_metric": meta["primary_metric"],

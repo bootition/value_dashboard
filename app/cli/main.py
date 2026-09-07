@@ -212,6 +212,54 @@ def etf_import_xlsx(
     typer.echo(json.dumps(make_response("etf.import-xlsx", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
 
 
+_ETF_CSV_PATH_ARG = typer.Argument(..., help="ETF 合并结果 CSV 路径")
+_ETF_TEMPLATE_PATH_ARG = typer.Argument(..., help="模板输出路径（.csv）")
+
+
+@etf_app.command("seed-pool")
+def etf_seed_pool(
+    apply: bool = typer.Option(False, "--apply", help="写入正式库（否则只预览）"),
+) -> None:
+    """写入默认 ETF 池（行业 26 + 策略 4 + 市场 4）
+
+    - 无合格工具的申万行业不加入观察
+    - 市场层含沪深300/中证500/中证1000/恒生科技
+    - 只插入缺失代码，不覆盖已有预算与启用状态
+    """
+    from app.cli.protocol import make_response
+    from app.core.etf_pool import seed_etf_pool
+
+    _, _duck, sqlite = _database_context()
+    report = seed_etf_pool(sqlite, apply=apply)
+    typer.echo(json.dumps(make_response("etf.seed-pool", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
+
+
+@etf_app.command("import-merge")
+def etf_import_merge(
+    path: Path = _ETF_CSV_PATH_ARG,
+    dry_run: bool = typer.Option(False, "--dry-run", help="只预览解析与校验，不写库"),
+) -> None:
+    """导入合并调仓结果 CSV（meta/trade/cash 三类行）"""
+    from app.cli.protocol import make_response
+    from app.core.etf_pool import import_etf_merge_csv
+
+    _, _duck, sqlite = _database_context()
+    report = import_etf_merge_csv(sqlite, path, dry_run=dry_run)
+    typer.echo(json.dumps(make_response("etf.import-merge", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
+
+
+@etf_app.command("merge-template")
+def etf_merge_template(
+    path: Path = _ETF_TEMPLATE_PATH_ARG,
+) -> None:
+    """生成合并结果导入模板 CSV"""
+    from app.cli.protocol import make_response
+    from app.core.etf_pool import write_merge_template
+
+    report = write_merge_template(path)
+    typer.echo(json.dumps(make_response("etf.merge-template", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
+
+
 @etf_app.command("update-prices")
 def etf_update_prices(
     codes: str = typer.Option("", "--codes", help="只更新指定 ETF 代码，逗号分隔（默认全部启用）"),

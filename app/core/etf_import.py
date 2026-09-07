@@ -130,9 +130,15 @@ def preview_etf_xlsx(path: Path) -> dict[str, Any]:
             track_code, track_name, primary_metric = DEFAULT_TRACK_INDEX_MAP.get(
                 code, (None, None, "pe")
             )
+            category = (
+                "market" if code in {"513130", "159605"}
+                else "strategy" if code in {"513910", "159758"}
+                else "industry"
+            )
             metas.append({
                 "etf_code": code,
                 "name": str(row.get("ETF名称", "")).strip(),
+                "category": category,
                 "track_index_code": track_code,
                 "track_index_name": track_name or str(row.get("行业名称", "")).strip(),
                 "primary_metric": primary_metric,

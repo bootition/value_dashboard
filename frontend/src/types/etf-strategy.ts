@@ -2,9 +2,12 @@
 
 import type { ValuationDetail } from './index-dashboard.ts'
 
+export type EtfCategory = 'industry' | 'strategy' | 'market'
+
 export interface EtfMetaLike {
   etf_code: string
   name: string
+  category: EtfCategory
   track_index_code: string | null
   track_index_name: string | null
   primary_metric: 'pe' | 'pb'
@@ -47,6 +50,7 @@ export interface EtfValuationSummary {
 export interface EtfOverviewItem {
   etf_code: string
   name: string
+  category: EtfCategory
   track_index_code: string | null
   track_index_name: string | null
   primary_metric: 'pe' | 'pb'

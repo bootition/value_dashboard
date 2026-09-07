@@ -2,18 +2,29 @@
 import { computed, h, onMounted, ref } from 'vue'
 import {
   NAlert, NButton, NCard, NDataTable, NDescriptions, NDescriptionsItem, NEmpty,
-  NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpin, NTag, useMessage,
+  NForm, NFormItem, NInput, NInputNumber, NModal, NSelect, NSpin, NTab, NTabs, NTag, useMessage,
 } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import type { DataTableColumns } from 'naive-ui'
-import type { EtfDetail, EtfOverviewItem, EtfOverviewResponse } from '../types/etf-strategy.ts'
+import type { EtfCategory, EtfDetail, EtfOverviewItem, EtfOverviewResponse } from '../types/etf-strategy.ts'
 import IndexValuationChart from './IndexValuationChart.vue'
 
 const message = useMessage()
 const loading = ref(false)
 const errorText = ref('')
 const data = ref<EtfOverviewResponse | null>(null)
+const catFilter = ref<'all' | EtfCategory>('all')
+
+const categoryMeta: Record<EtfCategory, string> = {
+  industry: '行业',
+  strategy: '策略',
+  market: '市场',
+}
+const filteredItems = computed(() => {
+  if (catFilter.value === 'all') return data.value?.items ?? []
+  return (data.value?.items ?? []).filter((item) => item.category === catFilter.value)
+})
 
 const signalMeta: Record<string, { type: 'success' | 'error' | 'warning' | 'default'; label: string }> = {
   buy: { type: 'success', label: '买入观察区' },
@@ -29,6 +40,10 @@ function fmt(value: number | null | undefined, digits = 2, suffix = ''): string 
 
 const columns: DataTableColumns<EtfOverviewItem> = [
   { title: 'ETF', key: 'name', render: (row) => `${row.name}（${row.etf_code}）` },
+  {
+    title: '层级', key: 'category',
+    render: (row) => categoryMeta[row.category] ?? row.category,
+  },
   { title: '跟踪指数', key: 'track_index_name', render: (row) => row.track_index_name ?? '待配置' },
   {
     title: '信号', key: 'signal',
@@ -85,7 +100,7 @@ const showMetaModal = ref(false)
 const saving = ref(false)
 const tradeForm = ref({ etf_code: '', trade_date: new Date().toISOString().slice(0, 10), direction: 'buy', price: null as number | null, shares: null as number | null, fee: 0.0 })
 const cashForm = ref({ flow_date: new Date().toISOString().slice(0, 10), direction: 'in', amount: null as number | null })
-const metaForm = ref({ etf_code: '', budget: null as number | null, step_pct: 5.0, total_assets: '' })
+const metaForm = ref({ etf_code: '', category: 'industry' as EtfCategory, budget: null as number | null, step_pct: 5.0, total_assets: '' })
 
 const etfOptions = computed(() => (data.value?.items ?? []).map((item) => ({
   label: `${item.name}（${item.etf_code}）`, value: item.etf_code,
@@ -95,6 +110,7 @@ const selectedMetaItem = computed(() => (data.value?.items ?? []).find((item) =>
 function openMetaModal(item: EtfOverviewItem) {
   metaForm.value = {
     etf_code: item.etf_code,
+    category: item.category,
     budget: item.budget,
     step_pct: item.step_pct,
     total_assets: data.value?.total_assets ?? '',
@@ -162,6 +178,7 @@ async function submitMeta() {
     await axios.post('/api/etf/meta', {
       etf_code: item.etf_code,
       name: item.name,
+      category: metaForm.value.category,
       track_index_code: item.track_index_code,
       track_index_name: item.track_index_name,
       primary_metric: item.primary_metric,
@@ -202,10 +219,17 @@ onMounted(load)
           </div>
         </div>
 
-        <NEmpty v-if="data.items.length === 0" description="还没有 ETF。先用 vd etf import-xlsx 导入，或点击下方录入。" />
+        <NTabs v-model:value="catFilter" type="line" size="small" class="etf-tabs">
+          <NTab name="all">全部</NTab>
+          <NTab name="industry">行业</NTab>
+          <NTab name="strategy">策略</NTab>
+          <NTab name="market">市场</NTab>
+        </NTabs>
+
+        <NEmpty v-if="filteredItems.length === 0" description="该层级暂无 ETF" />
         <NCard v-else size="small" title="持仓与网格">
-          <NDataTable :columns="columns" :data="data.items" :bordered="false" size="small" />
-          <p class="etf-hint">预算/间距可在「预算」操作中调整（每只 ETF 手动预算，单档 = 预算 ÷ 10）。</p>
+          <NDataTable :columns="columns" :data="filteredItems" :bordered="false" size="small" />
+          <p class="etf-hint">预算/间距/层级可在「预算」操作中调整（每只 ETF 手动预算，单档 = 预算 ÷ 10）。</p>
         </NCard>
       </template>
     </NSpin>
@@ -303,6 +327,15 @@ v-model:value="cashForm.direction" :options="[
         <NFormItem label="ETF">
           <NSelect v-model:value="metaForm.etf_code" :options="etfOptions" />
         </NFormItem>
+        <NFormItem label="层级">
+          <NSelect
+v-model:value="metaForm.category" :options="[
+            { label: '行业', value: 'industry' },
+            { label: '策略', value: 'strategy' },
+            { label: '市场', value: 'market' },
+          ]"
+/>
+        </NFormItem>
         <NFormItem label="预算（元）">
           <NInputNumber v-model:value="metaForm.budget" :step="100" style="width: 100%" />
         </NFormItem>
@@ -324,6 +357,7 @@ v-model:value="cashForm.direction" :options="[
 .etf-toolbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 12px; }
 .etf-summary { flex: 1; }
 .etf-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.etf-tabs { margin-bottom: 10px; }
 .etf-hint { color: var(--text); font-size: 12px; margin-top: 10px; }
 .row-actions { display: flex; gap: 4px; }
 .detail-stats { margin-bottom: 8px; }

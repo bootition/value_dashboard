@@ -31,6 +31,7 @@ router = APIRouter(prefix="/api/etf", tags=["etf-strategy"])
 class MetaIn(BaseModel):
     etf_code: str
     name: str
+    category: str = "industry"
     track_index_code: str | None = None
     track_index_name: str | None = None
     primary_metric: str = "pe"
