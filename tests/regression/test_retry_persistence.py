@@ -288,3 +288,28 @@ def test_announcement_retry_is_never_removed_by_exhaustion(sqlite_store: SQLiteS
         "SELECT retry_count FROM retry_list WHERE id = ?", [retry_id]
     )
     assert rows and rows[0]["retry_count"] == 2
+
+
+def test_redundant_index_valuation_retry_is_cleaned_when_local_data_fresh(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """本地指数估值数据足够新时，源风控产生的 retry 不应永久留在队列。"""
+    duckdb_store.write_query(
+        """INSERT INTO index_valuation
+               (index_code, trade_date, pe_ttm, pe_metric, pb, div_yield,
+                source, fetch_time, raw_hash, confidence, batch_id)
+           VALUES ('000852', CURRENT_DATE - INTERVAL '2 days', 25.0, 'ttm', NULL, NULL,
+                   'legulegu', CURRENT_TIMESTAMP, 'h', 'approximate', 'b1')"""
+    )
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO retry_list
+                   (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
+               VALUES ('000852', 'index_valuation', 'legulegu', 'anti-bot', 2,
+                       CURRENT_TIMESTAMP, '{}')"""
+        )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    assert updater._cleanup_redundant_index_valuation_retries() == 1
+    assert sqlite_store.query(
+        "SELECT * FROM retry_list WHERE stock_code='000852'"
+    ) == []

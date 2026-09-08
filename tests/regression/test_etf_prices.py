@@ -163,3 +163,21 @@ def test_track_dates_without_daily_rows_get_independent_rows(
     assert len(rows) == 2
     assert rows[0]["close_price"] is None and rows[0]["track_pe_ttm_five_year_percentile"] == 9.0
     assert rows[1]["close_price"] == 0.56 and rows[1]["track_pe_ttm_five_year_percentile"] == 9.5
+
+
+def test_etf_missing_api_key_records_missing_and_clears_retry(
+    duckdb_store, sqlite_store,
+) -> None:
+    from app.core.etf_prices import EtfPriceUpdater
+
+    updater = EtfPriceUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    updater._record_retry("510300", "环境变量 HITHINK_FINANCE_API_KEY 未设置")
+
+    assert sqlite_store.query(
+        "SELECT * FROM retry_list WHERE stock_code='510300'"
+    ) == []
+    missing = sqlite_store.query(
+        """SELECT reason_code FROM missing_list
+           WHERE stock_code='510300' AND field_name='etf_daily'"""
+    )
+    assert missing and missing[0]["reason_code"] == "source_unconfigured"

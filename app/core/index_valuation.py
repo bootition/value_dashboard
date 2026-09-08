@@ -154,6 +154,10 @@ class IndexValuationUpdater:
                         ],
                     )
                     index_report["primary_rows"] = len(primary_result.data)
+                    # 主源已成功落库：清理该指数历史 retry/missing，
+                    # 否则配好源后状态页仍会永远显示待重试。
+                    self._resolve_retry(index_code)
+                    self._resolve_missing(index_code)
                 else:
                     self._record_missing(index_code, "source_empty")
 
@@ -379,6 +383,27 @@ class IndexValuationUpdater:
                 )
         except Exception as e:
             logger.warning("记录指数估值缺失信息失败: %s", e)
+
+    def _resolve_retry(self, index_code: str) -> None:
+        try:
+            self.sqlite.execute(
+                """DELETE FROM retry_list
+                   WHERE stock_code = ? AND data_type = 'index_valuation'""",
+                [index_code],
+            )
+        except Exception as e:
+            logger.warning("清理指数估值重试条目失败: %s", e)
+
+    def _resolve_missing(self, index_code: str) -> None:
+        try:
+            self.sqlite.execute(
+                """UPDATE missing_list SET resolved_at = ?
+                   WHERE stock_code = ? AND field_name = 'index_valuation'
+                     AND resolved_at IS NULL""",
+                [datetime.now(UTC).isoformat(), index_code],
+            )
+        except Exception as e:
+            logger.warning("解决指数估值缺失信息失败: %s", e)
 
     # ─── 只读状态报告 ─────────────────────────────────────────────
 

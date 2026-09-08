@@ -152,6 +152,10 @@ class EtfPriceUpdater:
         merged_rows = sum(
             1 for row in daily.data if track_values.get(row.get("trade_date")) is not None
         )
+        # 成功写入后必须清掉同一 ETF 的历史 retry/missing，否则即使后来
+        # 配好 API Key 且数据已抓取，状态页仍会永远显示待重试（红队闭环）。
+        self._resolve_retry(etf_code)
+        self._resolve_missing(etf_code)
         return {
             "status": "success",
             "rows": len(daily.data),
@@ -187,6 +191,12 @@ class EtfPriceUpdater:
     # ─── retry / missing 维护 ───────────────────────────────────────────
 
     def _record_retry(self, etf_code: str, error: str) -> None:
+        # 缺少 API Key 是配置项，不是可重试的瞬时故障；直接转 missing 并
+        # 清理历史重试条目，避免状态页把配置问题永久显示为"待重试"。
+        if "HITHINK_FINANCE_API_KEY" in error:
+            self._record_missing(etf_code, "source_unconfigured")
+            self._resolve_retry(etf_code)
+            return
         try:
             with self.sqlite.transaction() as conn:
                 conn.execute(
@@ -213,6 +223,27 @@ class EtfPriceUpdater:
                 )
         except Exception as e:  # noqa: BLE001
             logger.warning("记录 ETF 行情缺失信息失败: %s", e)
+
+    def _resolve_retry(self, etf_code: str) -> None:
+        try:
+            self.sqlite.execute(
+                """DELETE FROM retry_list
+                   WHERE stock_code = ? AND data_type = 'etf_daily'""",
+                [etf_code],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("清理 ETF 行情重试条目失败: %s", e)
+
+    def _resolve_missing(self, etf_code: str) -> None:
+        try:
+            self.sqlite.execute(
+                """UPDATE missing_list SET resolved_at = ?
+                   WHERE stock_code = ? AND field_name = 'etf_daily'
+                     AND resolved_at IS NULL""",
+                [datetime.now(UTC).isoformat(), etf_code],
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("解决 ETF 行情缺失信息失败: %s", e)
 
     # ─── 只读状态 ───────────────────────────────────────────────────────
 

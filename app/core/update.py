@@ -637,6 +637,7 @@ class IncrementalUpdater:
         retry_recompute_codes: list[str] = []
         self._cleanup_unretryable_tasks()
         self._cleanup_completed_announcement_retries()
+        self._cleanup_redundant_index_valuation_retries()
         self._resolve_complete_missing_records()
         if check_report["retry_tasks"]:
             expected_date = self._latest_expected_trading_date(
@@ -928,10 +929,22 @@ class IncrementalUpdater:
                     "current": code,
                 })
 
-            report = builder.rebuild_incremental(
-                parallel=parallel_workers,
-                progress_cb=stats_progress,
-            )
+            try:
+                report = builder.rebuild_incremental(
+                    parallel=parallel_workers,
+                    progress_cb=stats_progress,
+                )
+            except (OSError, PermissionError) as error:
+                # 受限启动环境（工具型进程树/临时目录 ACL）里 multiprocessing
+                # spawn 会以 WinError 5 失败；串行重建不创建子进程，作为
+                # 同语义降级重试一次，避免统计域每轮 failed。
+                logger.warning(
+                    "统计域并行重建失败，降级串行重试: %s", error,
+                )
+                report = builder.rebuild_incremental(
+                    parallel=0,
+                    progress_cb=stats_progress,
+                )
             # P4-10 修复（reports/73）：仅全部成功才持久化指纹；
             # partial（部分股票失败）不落指纹，下一轮自动重试失败股。
             if report["status"] == "success":
@@ -3047,6 +3060,50 @@ class IncrementalUpdater:
             logger.info("[增量] 清理 %d 条已达标的价格重试条目", len(clean_ids))
         return len(clean_ids)
 
+    def _cleanup_redundant_index_valuation_retries(self) -> int:
+        """删除本地数据已覆盖且足够新鲜的指数估值 retry。
+
+        乐咕为月末序列（2026-09 起月度）；某次刷新被风控拦截但本地最新点
+        仍在 35 天内时，重试条目只是噪声，继续留在队列会让状态页永久显示
+        "待重试"。源本身不可用时改为由下次每日刷新自然覆盖。
+        """
+        try:
+            rows = self.sqlite.query(
+                "SELECT id, stock_code FROM retry_list WHERE data_type = 'index_valuation'"
+            )
+            if not rows:
+                return 0
+            codes = [row["stock_code"] for row in rows]
+            slots = ", ".join("?" for _ in codes)
+            coverage = self.duck.read_query(
+                f"""SELECT index_code, MAX(trade_date) AS latest
+                    FROM index_valuation
+                    WHERE source = 'legulegu' AND index_code IN ({slots})
+                    GROUP BY index_code""",
+                codes,
+            )
+            cutoff = datetime.now(_CN_TZ).date() - timedelta(days=35)
+            fresh = {
+                row["index_code"]
+                for row in coverage
+                if row["latest"] is not None and row["latest"] >= cutoff
+            }
+            clean_ids = [row["id"] for row in rows if row["stock_code"] in fresh]
+            if clean_ids:
+                clean_slots = ", ".join("?" for _ in clean_ids)
+                self.sqlite.execute(
+                    f"DELETE FROM retry_list WHERE id IN ({clean_slots})",
+                    clean_ids,
+                )
+                logger.info(
+                    "[增量] 清理 %d 条本地数据已覆盖的指数估值重试条目",
+                    len(clean_ids),
+                )
+            return len(clean_ids)
+        except Exception as error:
+            logger.warning("清理指数估值冗余重试失败: %s", error)
+            return 0
+
     # 无逐股重试路径、由 universe/行业步骤统一维护的数据域：历史失败条目
     # 是死循环垃圾（如 akshare 被封窗口产生的 listing_info 失败）。
     # announcements 除外：其 retry 条目是公告 pending 的持久化标记（PRD §7.4）。
@@ -3202,6 +3259,7 @@ class IncrementalUpdater:
 
         success_count = 0
         still_failing = 0
+        resolved_unconfigured = 0
         recompute_codes: list[str] = []
 
         def note_snapshot_input(code: str) -> None:
@@ -3229,6 +3287,7 @@ class IncrementalUpdater:
                     "company_profile", "business_breakdown",
                     "share_capital_history", "treasury_yield_curve",
                     "ipo_funding", "placement_funding", "index_valuation",
+                    "etf_daily",
                 }:
                     # 无逐股重试路径的数据域（announcements 等）：retry 条目
                     # 是 pending 标记，由对应维护流程消费；在这里重试只会
@@ -3345,6 +3404,39 @@ class IncrementalUpdater:
                         still_failing += 1
                         self._mark_retry_failed(retry_id, error_text)
                     continue
+                if data_type == "etf_daily":
+                    # ETF 行情域（2026-09-05）：stock_code 存 ETF 代码。
+                    # 缺少同花顺 API Key 是配置项而非可重试故障——如实转
+                    # missing 并从活跃重试队列移出，避免状态页永久"待重试"。
+                    from app.core.etf_prices import EtfPriceUpdater
+                    try:
+                        outcome = EtfPriceUpdater(
+                            duck=self.duck, sqlite=self.sqlite,
+                        ).update_etf(stock_code)
+                    except Exception as error:
+                        outcome = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
+                    error_text = outcome.get("error") or ""
+                    if outcome["status"] == "success":
+                        self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+                        success_count += 1
+                    elif "HITHINK_FINANCE_API_KEY" in error_text:
+                        with self.sqlite.transaction() as conn:
+                            conn.execute(
+                                """INSERT INTO missing_list (stock_code, field_name, reason_code)
+                                   VALUES (?, 'etf_daily', 'source_unconfigured')
+                                   ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                                   DO UPDATE SET reason_code = excluded.reason_code,
+                                                 detected_at = CURRENT_TIMESTAMP""",
+                                [stock_code],
+                            )
+                            conn.execute(
+                                "DELETE FROM retry_list WHERE id = ?", [retry_id],
+                            )
+                        resolved_unconfigured += 1
+                    else:
+                        still_failing += 1
+                        self._mark_retry_failed(retry_id, error_text)
+                    continue
                 outcome = self.refetch_one(stock_code, data_type)
                 if outcome["status"] == "success":
                     self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
@@ -3420,6 +3512,7 @@ class IncrementalUpdater:
             ),
             "total": len(tasks),
             "succeeded": success_count,
+            "resolved_unconfigured": resolved_unconfigured,
             "still_failing": still_failing,
             "recompute_codes": recompute_codes,
         }

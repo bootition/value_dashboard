@@ -150,7 +150,16 @@ class LeguleguIndexAdapter(BaseAdapter):
                 pe_df = ak.stock_index_pe_lg(symbol=symbol)
         except Exception as e:  # noqa: BLE001
             logger.warning("legulegu 指数 %s PE 抓取失败: %s", index_code, e)
-            return self._make_empty_result(f"{type(e).__name__}: {e}")
+            message = f"{type(e).__name__}: {e}"
+            # akshare 在乐咕返回风控/验证页时 csrf meta 缺失，原始异常是
+            # "'NoneType' object has no attribute 'attrs'"，对使用方无信息量；
+            # 翻译成明确源侧不可用原因，便于状态页与日志判断。
+            if "NoneType" in str(e) and "attrs" in str(e):
+                message = (
+                    "legulegu_unavailable: csrf meta missing "
+                    "(anti-bot or upstream page changed)"
+                )
+            return self._make_empty_result(message)
 
         if pe_df is None or len(pe_df) == 0:
             return self._make_result([], confidence="missing")  # 合法缺失：error=None 不触发熔断
