@@ -801,6 +801,15 @@ class DataInitializer:
                 stock_codes=[code],
             ))
 
+            # 红队：先按 metadata.error 记 retry；只有 error=None 且空数据
+            # 才是 source_empty missing。带 error 的部分数据仍可落库，
+            # 但绝不能伪装成完整成功。
+            if bs_result.metadata.error:
+                self._record_failure(
+                    code, "balance_sheet",
+                    bs_result.metadata.source or "akshare_eastmoney",
+                    bs_result.metadata.error,
+                )
             if bs_result.data:
                 complete_rows = [
                     row for row in bs_result.data
@@ -825,7 +834,7 @@ class DataInitializer:
                 except Exception as e:
                     logger.error(f"  写入 {code} 资产负债表失败: {e}")
                     self._record_failure(code, "balance_sheet", bs_result.metadata.source or "akshare_eastmoney", str(e))
-            else:
+            elif bs_result.metadata.error is None:
                 self._record_missing(code, "balance_sheet", "source_empty")
 
             # 利润表
@@ -834,6 +843,12 @@ class DataInitializer:
                 stock_codes=[code],
             ))
 
+            if ic_result.metadata.error:
+                self._record_failure(
+                    code, "income_statement",
+                    ic_result.metadata.source or "akshare_eastmoney",
+                    ic_result.metadata.error,
+                )
             if ic_result.data:
                 complete_rows = [
                     row for row in ic_result.data
@@ -857,7 +872,7 @@ class DataInitializer:
                 except Exception as e:
                     logger.error(f"  写入 {code} 利润表失败: {e}")
                     self._record_failure(code, "income_statement", ic_result.metadata.source or "akshare_eastmoney", str(e))
-            else:
+            elif ic_result.metadata.error is None:
                 self._record_missing(code, "income_statement", "source_empty")
 
             # 现金流量表
@@ -866,6 +881,12 @@ class DataInitializer:
                 stock_codes=[code],
             ))
 
+            if cf_result.metadata.error:
+                self._record_failure(
+                    code, "cash_flow",
+                    cf_result.metadata.source or "akshare_eastmoney",
+                    cf_result.metadata.error,
+                )
             if cf_result.data:
                 complete_rows = [
                     row for row in cf_result.data
@@ -889,7 +910,7 @@ class DataInitializer:
                 except Exception as e:
                     logger.error(f"  写入 {code} 现金流量表失败: {e}")
                     self._record_failure(code, "cash_flow", cf_result.metadata.source or "akshare_eastmoney", str(e))
-            else:
+            elif cf_result.metadata.error is None:
                 self._record_missing(code, "cash_flow", "source_empty")
 
         logger.info(
@@ -1447,14 +1468,18 @@ class DataInitializer:
         error: str,
         extra_json: str | None = None,
     ) -> None:
-        """记录失败到 retry_list"""
+        """记录失败到 retry_list（与 update.py 语义一致：冲突只更新
+        error/last_attempt，不重置 retry_count）"""
         try:
             with self.sqlite.transaction() as conn:
                 conn.execute(
-                    """INSERT OR REPLACE INTO retry_list
+                    """INSERT INTO retry_list
                        (stock_code, data_type, adapter, error, retry_count, last_attempt,
                         extra_json)
-                       VALUES (?, ?, ?, ?, 0, ?, ?)""",
+                       VALUES (?, ?, ?, ?, 0, ?, ?)
+                       ON CONFLICT(stock_code, data_type, adapter, extra_json)
+                       DO UPDATE SET error=excluded.error,
+                                     last_attempt=excluded.last_attempt""",
                     [stock_code, data_type, adapter, error[:500],
                      datetime.now(UTC).isoformat(), extra_json or "{}"],
                 )

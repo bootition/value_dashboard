@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -64,12 +65,20 @@ class TencentAdapter(BaseAdapter):
         return session
 
     def close(self) -> None:
-        """Release reusable HTTP sessions after a long-running update."""
+        """Release reusable HTTP sessions after a long-running update.
+
+        Also clear the calling thread's thread-local session so a later fetch
+        on a reused manager creates a fresh session instead of reusing a closed
+        one (AdapterManager.close resets _initialized and re-registers fresh
+        adapters, but explicit close() must stay safe for direct callers too).
+        """
         with self._sessions_lock:
             sessions = list(self._sessions)
             self._sessions.clear()
         for session in sessions:
             session.close()
+        with contextlib.suppress(AttributeError):
+            del self._session_local.session
 
     def _fetch_price_daily(self, request: FetchRequest) -> FetchResult:
         if not request.stock_codes:
@@ -79,6 +88,7 @@ class TencentAdapter(BaseAdapter):
 
         records: list[dict[str, Any]] = []
         responses: list[dict[str, Any]] = []
+        truncated: list[str] = []
         for stock_code in request.stock_codes:
             symbol = _symbol(stock_code)
             if symbol is None:
@@ -149,18 +159,34 @@ class TencentAdapter(BaseAdapter):
                 window_end = (datetime.strptime(oldest, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
                 pages += 1
 
+            if request.start_date and pages >= 12 and window_end >= start:
+                # Reached the pagination cap before covering the explicitly
+                # requested start_date: the returned rows are a truncated
+                # window and must not look like a complete success.
+                truncated.append(
+                    f"{stock_code}: pagination limit reached before covering start_date {start}"
+                )
+
         # Tencent's endpoint ignores start_date: every request returns the most
         # recent 640 bars ending at the window end. Drop bars older than the
         # requested start so incremental callers persist only the missing rows
         # (a handful per day) instead of re-writing ~2.6 years every time.
         if request.start_date:
             records = [row for row in records if row["trade_date"] >= request.start_date]
+        error = (
+            "tencent price truncated: " + "; ".join(truncated)
+            if truncated else None
+        )
         if not records:
-            return self._make_empty_result("tencent returned no parseable price bars")
+            return self._make_empty_result(
+                "tencent returned no parseable price bars"
+                + (f"; {error}" if error else "")
+            )
         return self._make_result(
             records,
             raw_response=json.dumps(responses, ensure_ascii=False, separators=(",", ":")),
             confidence="approximate",
+            error=error,
             api_version=_API_VERSION,
         )
 

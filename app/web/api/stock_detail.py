@@ -347,8 +347,16 @@ def build_freshness_metadata(
     calculated_at: datetime | str | None,
     data_version: str | None,
 ) -> dict:
-    """Describe independent financial, price, and snapshot ages (all UTC)."""
+    """Describe independent financial, price, and snapshot ages.
+
+    2026-09-08 红队修复：财务"滞后"必须按披露季期望期判断，不能用
+    report_date 距今天数（半年报 06-30 到 9 月自然有 60+ 天，但它是当期
+    最新报告期，不是滞后）。价格/快照年龄仍按 7 天上限告警。
+    """
+    from app.core.financial_period import expected_financial_period
+
     today = datetime.now(UTC).date()
+    expected_financial = date.fromisoformat(expected_financial_period())
     calculated_date: date | None = None
     if isinstance(calculated_at, datetime):
         if calculated_at.tzinfo is None:
@@ -363,10 +371,12 @@ def build_freshness_metadata(
     price_age_days = (today - price_date).days if price_date else None
     financial_age_days = (today - financial_date).days if financial_date else None
     snapshot_age_days = (today - calculated_date).days if calculated_date else None
-    ages = (financial_age_days, price_age_days, snapshot_age_days)
-    stale_days = max(value for value in ages if value is not None) if any(value is not None for value in ages) else None
+    operational_ages = [value for value in (price_age_days, snapshot_age_days) if value is not None]
+    stale_days = max(operational_ages) if operational_ages else None
+    financial_lagging = financial_date is None or financial_date < expected_financial
     return {
         "financial_effective_date": financial_date.isoformat() if financial_date else None,
+        "financial_expected_date": expected_financial.isoformat(),
         "price_date": price_date.isoformat() if price_date else None,
         "calculated_at": str(calculated_at) if calculated_at is not None else None,
         "data_version": data_version,
@@ -374,7 +384,12 @@ def build_freshness_metadata(
         "price_age_days": price_age_days,
         "financial_age_days": financial_age_days,
         "snapshot_age_days": snapshot_age_days,
-        "stale_warning": stale_days is None or stale_days > 7,
+        "financial_lagging": financial_lagging,
+        "stale_warning": (
+            financial_lagging
+            or stale_days is None
+            or stale_days > 7
+        ),
     }
 
 # ─── 指标历史能力标志 (PRD §14 SD7: current_only 指标标注) ──────────

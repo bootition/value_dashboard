@@ -87,6 +87,8 @@ def test_non_session_error_does_not_reconnect(monkeypatch: pytest.MonkeyPatch) -
         FetchRequest(data_type="price_daily", stock_codes=["600519"], adjust="raw")
     )
 
-    assert result.metadata.error is None
+    # 红队修复：子请求失败必须计入 metadata.error（manager 据此触发重试），
+    # 但非会话错误仍不得触发 reconnect。
+    assert result.metadata.error is not None
     assert b"ERROR sh.600519" in (result.raw_response or b"")
     assert calls["login"] == 1  # no reconnect for non-session errors

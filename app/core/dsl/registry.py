@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any
 
-from app.core.dsl.ast_nodes import INDICATOR_METADATA
+from app.core.dsl.ast_nodes import FIELD_METADATA, INDICATOR_METADATA
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -28,6 +28,12 @@ STATUS_PREVIEWED = "previewed"
 STATUS_PUBLISHED = "published"
 IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
+# 简写字段裸名（FIELD_METADATA 的 field 部分）。发布/创建同名指标会被
+# expand_shorthand 优先当作字段简写展开，从而劫持表达式语义，因此禁止。
+_SHORTHAND_FIELD_NAMES: frozenset[str] = frozenset(
+    full_key.split(".", 1)[1] for full_key in FIELD_METADATA
+)
+
 
 def validate_expression_identifier(name: str) -> str:
     """Allow only identifiers that are safe as persisted SQL aliases."""
@@ -35,6 +41,8 @@ def validate_expression_identifier(name: str) -> str:
         raise ValueError("expression name must match [a-z][a-z0-9_]{0,63}")
     if name in INDICATOR_METADATA:
         raise ValueError("expression name conflicts with a built-in indicator")
+    if name in _SHORTHAND_FIELD_NAMES:
+        raise ValueError("expression name conflicts with a shorthand field name")
     return name
 
 
@@ -126,6 +134,9 @@ class ExpressionRegistry:
 
         发布后表达式不可修改, 修改必须创建新版本。
         """
+        # 发布前同样拒绝与字段简写/内建指标冲突的名称（防旧数据/直接 INSERT
+        # 绕过 create 校验后进入已发布指标集）。
+        validate_expression_identifier(name)
         # 生成内容哈希用于版本锁定
         row = self.sqlite.query(
             "SELECT expression_text, ast_json FROM dsl_expressions WHERE name=? AND version=?",
@@ -145,7 +156,12 @@ class ExpressionRegistry:
                 "content_hash": content_hash}
 
     def get(self, name: str, version: int | None = None) -> dict[str, Any] | None:
-        """获取表达式"""
+        """获取表达式。
+
+        ``version`` 省略时返回该名称最新的 **published** 版本（与
+        ``list_published`` 同口径），而不是含 draft 的最新行；依赖版本锁定
+        依赖这一语义。指定 version 时返回该精确版本（任意状态）。
+        """
         if version:
             rows = self.sqlite.query(
                 "SELECT * FROM dsl_expressions WHERE name=? AND version=?",
@@ -153,8 +169,13 @@ class ExpressionRegistry:
             )
         else:
             rows = self.sqlite.query(
-                "SELECT * FROM dsl_expressions WHERE name=? ORDER BY version DESC LIMIT 1",
-                [name],
+                """SELECT * FROM dsl_expressions WHERE name = ? AND status = ?
+                   AND version = (
+                       SELECT MAX(version) FROM dsl_expressions e2
+                       WHERE e2.name = dsl_expressions.name AND e2.status = ?
+                   )
+                   LIMIT 1""",
+                [name, STATUS_PUBLISHED, STATUS_PUBLISHED],
             )
         return rows[0] if rows else None
 
@@ -195,11 +216,13 @@ class ExpressionRegistry:
                 raise ValueError("dependencies can only be recorded for validated expressions")
 
             dep_row = conn.execute(
-                "SELECT id FROM dsl_expressions WHERE name=? AND version=?",
+                "SELECT id, status FROM dsl_expressions WHERE name=? AND version=?",
                 [dep_name, dep_version],
             ).fetchone()
             if not dep_row:
-                return
+                raise ValueError("dependency version not found")
+            if dep_row["status"] != STATUS_PUBLISHED:
+                raise ValueError("dependencies must reference published expression versions")
             conn.execute(
                 "INSERT OR REPLACE INTO dsl_dependencies (expression_id, depends_on_id, depends_on_version) VALUES (?, ?, ?)",
                 [expr_row["id"], dep_row["id"], dep_version],

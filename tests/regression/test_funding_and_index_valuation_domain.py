@@ -228,6 +228,36 @@ def test_cninfo_funding_adapter_akshare_index_error_is_legal_missing(monkeypatch
     assert result.metadata.confidence == "missing"
 
 
+def test_cninfo_funding_adapter_handles_multiple_codes_without_silent_drop(monkeypatch) -> None:
+    """多代码请求必须逐代码处理；子请求失败计入 error，成功代码保留。"""
+    import pandas as pd
+
+    class _SelectiveAK:
+        def stock_ipo_summary_cninfo(self, symbol: str) -> object:
+            if symbol == "999999":
+                raise RuntimeError("source down")
+            if symbol == "832566":
+                raise IndexError("no record")
+            return pd.DataFrame([{
+                "股票代码": "600030", "招股公告日期": "2002-12-13",
+                "总发行数量": 40000.0, "募集资金净额": 175967.3375,
+                "上市日期": "2003-01-06", "发行价格": 4.5,
+            }])
+
+    import app.core.adapters.cninfo_funding_adapter as mod
+
+    monkeypatch.setattr(mod, "ak", _SelectiveAK())
+    adapter = CNINFOFundingAdapter(rate_limit=0)
+    result = adapter.fetch(FetchRequest(
+        data_type="ipo_funding", stock_codes=["600030", "999999", "832566"],
+    ))
+
+    assert [row["stock_code"] for row in result.data] == ["600030"]
+    assert result.metadata.error is not None
+    assert "999999" in result.metadata.error
+    assert "832566" not in result.metadata.error, "IndexError 是合法缺失，不得计入错误"
+
+
 # ─── adapter：index_valuation ─────────────────────────────────────────
 
 class _FakeAKIndex:
@@ -482,6 +512,108 @@ def test_funding_updater_missing_records_missing(
     assert {m["field_name"] for m in missing} == {"ipo_funding", "placement_funding"}
 
 
+def test_funding_legal_empty_preserves_existing_events(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """任一源返回合法空（error=None 且空 data）不得 DELETE 该股历史事件。"""
+    _seed_stock(duckdb_store)
+    _seed_funding_rows(duckdb_store)
+    updater = FundingUpdater(
+        duck=duckdb_store, sqlite=sqlite_store,
+        adapter=_FakeFundingAdapter(ipo=None, placement=None),
+    )
+
+    report = updater.update_stock("000725")
+
+    assert report["status"] == "success"
+    rows = duckdb_store.read_query(
+        "SELECT event_type, batch_id FROM funding_events WHERE stock_code='000725'"
+    )
+    assert rows == [{"event_type": "a_placement", "batch_id": "old-batch"}], \
+        "合法空必须保留旧事件，不得原子替换为无"
+
+
+def test_funding_partial_failure_replaces_only_successful_side(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """一侧失败时：失败侧旧事件保留并记 retry，成功侧原子替换。"""
+    _seed_stock(duckdb_store)
+    _seed_funding_rows(duckdb_store)  # 旧 placement
+    duckdb_store.write_query(
+        """INSERT INTO funding_events
+           (stock_code, event_type, list_date, issue_price, issue_shares,
+            raise_funds, derived, source, fetch_time, raw_hash, confidence, batch_id)
+           VALUES ('000725', 'ipo', '2003-02-01', 2.0, 100000000.0, NULL, false,
+                   'cninfo_funding', CURRENT_TIMESTAMP, ?, 'approximate', 'old-batch')""",
+        ["0" * 64],
+    )
+    placement = [{
+        "stock_code": "000725", "event_type": "a_placement", "announce_date": "2021-08-19",
+        "list_date": "2021-08-19", "issue_price": 5.57, "issue_shares": 3650377019.0,
+        "raise_funds": 3650377019.0 * 5.57, "raise_funds_net": None, "derived": True,
+    }]
+
+    class _IpoDownAdapter:
+        def fetch(self, request: FetchRequest) -> FetchResult:
+            if request.data_type == "ipo_funding":
+                return _result([], source="cninfo_funding", error="ipo source down")
+            return _result(placement, source="eastmoney_f10")
+
+    updater = FundingUpdater(
+        duck=duckdb_store, sqlite=sqlite_store,
+        adapter=_IpoDownAdapter(),
+    )
+
+    report = updater.update_stock("000725")
+
+    assert report["status"] == "partial"
+    rows = duckdb_store.read_query(
+        "SELECT event_type, batch_id, source FROM funding_events WHERE stock_code='000725'"
+    )
+    by_type = {row["event_type"]: row for row in rows}
+    assert by_type["ipo"]["batch_id"] == "old-batch", "失败侧旧事件必须保留"
+    assert by_type["a_placement"]["batch_id"] != "old-batch", "成功侧必须原子替换"
+    retries = sqlite_store.query(
+        "SELECT data_type FROM retry_list WHERE stock_code='000725'"
+    )
+    assert retries == [{"data_type": "ipo_funding"}]
+
+
+def test_funding_update_all_skips_recent_source_empty_stocks(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """两侧近期已确认 source_empty 的股票在重试窗口内出队，避免每轮重复抓取。"""
+    _seed_stock(duckdb_store, "832566")
+    _seed_stock(duckdb_store, "430047")
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    for code in ("832566", "430047"):
+        with sqlite_store.transaction() as conn:
+            conn.executemany(
+                """INSERT INTO missing_list (stock_code, field_name, reason_code, detected_at)
+                   VALUES (?, ?, 'source_empty', ?)""",
+                [
+                    (code, "ipo_funding", now),
+                    (code, "placement_funding", now),
+                ],
+            )
+    calls: list[str] = []
+    adapter = _FakeFundingAdapter(ipo=None, placement=None)
+    original_fetch = adapter.fetch
+
+    def tracking_fetch(request):
+        calls.append(request.data_type)
+        return original_fetch(request)
+
+    adapter.fetch = tracking_fetch
+    updater = FundingUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter=adapter)
+
+    report = updater.update_all(max_stocks=5)
+
+    assert report["status"] == "skipped"
+    assert report["reason"] == "pending_source_empty_retry_window"
+    assert calls == [], "重试窗口内的合法空股票不得重复抓取"
+
+
 def test_funding_update_all_skips_when_covered(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
@@ -562,6 +694,37 @@ def test_index_valuation_updater_writes_sws_industries(
     assert rows[0]["source"] == "sws"
     assert rows[0]["pe_metric"] == "sws_daily"
     assert rows[0]["pb"] == pytest.approx(2.04)
+
+
+def test_index_valuation_upsert_preserves_old_nullable_values(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch,
+) -> None:
+    """重复 upsert 的空字段不得用 NULL 覆盖旧值（pb/pe_ttm/div_yield 等）。"""
+    full = [{
+        "index_code": "000300", "trade_date": "2026-08-25", "pe_ttm": 14.57,
+        "pe_metric": "ttm", "pb": 1.55, "div_yield": 2.55, "extra": '{"a":1}',
+    }]
+    sparse = [{
+        "index_code": "000300", "trade_date": "2026-08-25", "pe_ttm": None,
+        "pe_metric": None, "pb": None, "div_yield": None, "extra": None,
+    }]
+    updater = IndexValuationUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    monkeypatch.setattr(updater, "_primary", _FakeIndexAdapter(full, source="legulegu"))
+    monkeypatch.setattr(updater, "_cross", _FakeIndexAdapter([], source="csindex"))
+
+    assert updater.update_daily()["status"] == "success"
+    monkeypatch.setattr(updater, "_primary", _FakeIndexAdapter(sparse, source="legulegu"))
+    assert updater.update_daily()["status"] == "success"
+
+    rows = duckdb_store.read_query(
+        """SELECT pe_ttm, pe_metric, pb, div_yield, extra FROM index_valuation
+           WHERE index_code='000300' AND source='legulegu'"""
+    )
+    assert rows[0]["pe_ttm"] == pytest.approx(14.57)
+    assert rows[0]["pe_metric"] == "ttm"
+    assert rows[0]["pb"] == pytest.approx(1.55)
+    assert rows[0]["div_yield"] == pytest.approx(2.55)
+    assert rows[0]["extra"] == '{"a":1}'
 
 
 def test_index_valuation_primary_failure_records_retry(

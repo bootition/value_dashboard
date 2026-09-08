@@ -333,6 +333,7 @@ class AKShareAdapter(BaseAdapter):
         """
         exchange_rows: dict[str, dict[str, Any]] = {}
         raw_payloads: list[str] = []
+        source_errors: list[str] = []
 
         def load_exchange_list(
             fetch: Callable[[], pd.DataFrame],
@@ -358,6 +359,7 @@ class AKShareAdapter(BaseAdapter):
                     }
             except Exception as error:
                 logger.warning("exchange listing source failed: %s", error)
+                source_errors.append(f"{code_column}/{name_column}: {error}")
 
         load_exchange_list(
             lambda: ak.stock_info_sh_name_code(symbol="主板A股"),
@@ -388,6 +390,7 @@ class AKShareAdapter(BaseAdapter):
             }
         except Exception as error:
             logger.warning("suspension source failed: %s", error)
+            source_errors.append(f"suspension: {error}")
 
         targets = (
             [_strip_code(code).zfill(6) for code in request.stock_codes]
@@ -421,6 +424,10 @@ class AKShareAdapter(BaseAdapter):
             data=records,
             raw_response="\n".join(raw_payloads),
             confidence="approximate",
+            error=(
+                "partial listing_info: " + "; ".join(source_errors)
+                if source_errors else None
+            ),
             api_version=_AKSHARE_VERSION,
         )
 
@@ -439,6 +446,7 @@ class AKShareAdapter(BaseAdapter):
 
         all_records: list[dict[str, Any]] = []
         raw_payloads: list[str] = []
+        source_errors: list[str] = []
         for code in request.stock_codes:
             plain_code = _strip_code(code)
             try:
@@ -457,14 +465,22 @@ class AKShareAdapter(BaseAdapter):
                 all_records.extend(_df_to_records(df, _PRICE_DAILY_FIELD_MAP))
             except Exception as e:
                 logger.warning(f"stock_zh_a_hist({plain_code}) 失败: {e}")
+                source_errors.append(f"{plain_code}: {e}")
 
         if not all_records:
-            return self._make_empty_result("无法获取日线行情")
+            reason = "无法获取日线行情"
+            if source_errors:
+                reason += ": " + "; ".join(source_errors)
+            return self._make_empty_result(reason)
 
         return self._make_result(
             data=all_records,
             raw_response="\n".join(raw_payloads),
             confidence="strict",
+            error=(
+                "partial price_daily: " + "; ".join(source_errors)
+                if source_errors else None
+            ),
             api_version=_AKSHARE_VERSION,
         )
 
@@ -508,6 +524,7 @@ class AKShareAdapter(BaseAdapter):
 
         all_records: list[dict[str, Any]] = []
         raw_payloads: list[str] = []
+        source_errors: list[str] = []
         for code in request.stock_codes:
             em_symbol = _to_em_symbol(code)
             plain_code = _strip_code(code)
@@ -527,14 +544,22 @@ class AKShareAdapter(BaseAdapter):
                 all_records.extend(records)
             except Exception as e:
                 logger.warning(f"{data_type_name}({em_symbol}) 失败: {e}")
+                source_errors.append(f"{plain_code}: {e}")
 
         if not all_records:
-            return self._make_empty_result(f"无法获取{data_type_name}数据")
+            reason = f"无法获取{data_type_name}数据"
+            if source_errors:
+                reason += ": " + "; ".join(source_errors)
+            return self._make_empty_result(reason)
 
         return self._make_result(
             data=all_records,
             raw_response="\n".join(raw_payloads),
             confidence="strict",
+            error=(
+                f"partial {data_type_name}: " + "; ".join(source_errors)
+                if source_errors else None
+            ),
             api_version=_AKSHARE_VERSION,
         )
 
@@ -551,6 +576,7 @@ class AKShareAdapter(BaseAdapter):
 
         all_records: list[dict[str, Any]] = []
         raw_payloads: list[str] = []
+        source_errors: list[str] = []
         for code in request.stock_codes:
             plain_code = _strip_code(code)
             try:
@@ -564,14 +590,22 @@ class AKShareAdapter(BaseAdapter):
                 all_records.extend(records)
             except Exception as e:
                 logger.warning(f"stock_dividend_cninfo({plain_code}) 失败: {e}")
+                source_errors.append(f"{plain_code}: {e}")
 
         if not all_records:
-            return self._make_empty_result("无法获取分红记录")
+            reason = "无法获取分红记录"
+            if source_errors:
+                reason += ": " + "; ".join(source_errors)
+            return self._make_empty_result(reason)
 
         return self._make_result(
             data=all_records,
             raw_response="\n".join(raw_payloads),
             confidence="strict",
+            error=(
+                "partial dividends: " + "; ".join(source_errors)
+                if source_errors else None
+            ),
             api_version=_AKSHARE_VERSION,
         )
 

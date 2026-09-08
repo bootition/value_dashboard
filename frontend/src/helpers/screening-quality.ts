@@ -33,6 +33,8 @@ export function collectRuleFields(node: ScreeningRuleNode): Set<string> {
         walk(item)
       } else if (item.field) {
         out.add(item.field)
+        // 比较右侧引用字段同样影响结果可信度，必须一并纳入告警覆盖。
+        if (item.right_field) out.add(item.right_field)
       }
     }
   }

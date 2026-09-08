@@ -290,10 +290,12 @@ def test_empty_main_chain_records_missing(
 
 def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     _seed_stock(duck)
-    # 1250 个价格日（覆盖 10 年窗口最小 1200 样本；数值变化保证 σ>0）
-    # 批量写入避免逐行 open-per-query 拖慢整个回归
+    # 1250 个价格日（覆盖 10 年窗口最小 1200 样本；数值变化保证 σ>0）。
+    # 序列终点动态取“昨天”，避免固定 2026-08-07 在日期推进后 1 年窗口
+    # 样本不足 120（2026-09-08 红队修复回归：insufficient_samples 既存失败）。
+    latest = date.today() - timedelta(days=1)
     price_rows = [
-        ("600519", date(2022, 8, 1) + timedelta(days=i), 10.0 + (i % 100))
+        ("600519", latest - timedelta(days=1249 - i), 10.0 + (i % 100))
         for i in range(1250)
     ]
     with duck.write_connection() as conn:
@@ -301,21 +303,29 @@ def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
             "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
             price_rows,
         )
-    _seed_price(duck, "600519", date(2026, 8, 7), 25.0)
+    duck.write_query(
+        "UPDATE price_daily_raw SET close = 25.0 WHERE stock_code = '600519' AND trade_date = ?",
+        [latest],
+    )
     _seed_financials(duck, "600519", date(2021, 12, 31), 80e8, 450e8)
     _seed_financials(duck, "600519", date(2022, 12, 31), 90e8, 470e8)
     _seed_financials(duck, "600519", date(2023, 12, 31), 100e8, 500e8)
     _seed_financials(duck, "600519", date(2024, 12, 31), 120e8, 520e8)
     _seed_financials(duck, "600519", date(2025, 12, 31), 140e8, 540e8)
     _seed_capital(duck, "600519", [(date(2016, 6, 30), 1000000000.0)])
+    ex_date = latest - timedelta(days=30)
+    announcement_date = ex_date - timedelta(days=30)
     duck.write_query(
         """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', '2026-06-30', '2026-05-01', 1.0)""",
+           VALUES ('600519', ?, ?, 1.0)""",
+        [ex_date, announcement_date],
     )
+    curve_date = latest - timedelta(days=2)
     duck.write_query(
         """INSERT INTO treasury_yield_curve
            (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('2026-08-05', 10.0, 1.5, 'czb_mof', CURRENT_TIMESTAMP, 'x', 'strict', 'b1')""",
+           VALUES (?, 10.0, 1.5, 'czb_mof', CURRENT_TIMESTAMP, 'x', 'strict', 'b1')""",
+        [curve_date],
     )
 
 
@@ -708,7 +718,9 @@ def test_input_fingerprint_detects_treasury_value_update(
 
     duckdb_store.write_query(
         """UPDATE treasury_yield_curve SET yield_pct = 1.75
-           WHERE curve_date = '2026-08-05' AND tenor_years = 10.0"""
+           WHERE curve_date = (
+               SELECT MAX(curve_date) FROM treasury_yield_curve WHERE tenor_years = 10.0
+           ) AND tenor_years = 10.0"""
     )
     after = builder._input_fingerprint()
     assert after != before

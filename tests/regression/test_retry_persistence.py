@@ -237,3 +237,54 @@ def test_cleanup_redundant_retries_drops_up_to_date_entries(
 
     assert cleaned == 2
     assert sqlite_store.query("SELECT COUNT(*) AS c FROM retry_list")[0]["c"] == 0
+
+
+def test_retry_exhaustion_moves_entry_to_missing_list(sqlite_store: SQLiteStore) -> None:
+    """达到 max_retries 后，除 announcements 外必须转 missing 并移出重试队列。"""
+    updater = IncrementalUpdater.__new__(IncrementalUpdater)
+    updater.sqlite = sqlite_store
+    with sqlite_store.transaction() as conn:
+        cursor = conn.execute(
+            """INSERT INTO retry_list
+                   (stock_code, data_type, adapter, error, retry_count,
+                    last_attempt, next_retry_at, max_retries, extra_json)
+               VALUES ('000001', 'balance_sheet', 'sina', 'boom', 1,
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 2, '{}')"""
+        )
+        retry_id = cursor.lastrowid
+
+    updater._mark_retry_failed(retry_id, "still failing")
+
+    rows = sqlite_store.query(
+        "SELECT id FROM retry_list WHERE id = ?", [retry_id]
+    )
+    assert rows == []
+    missing = sqlite_store.query(
+        """SELECT stock_code, field_name, reason_code FROM missing_list
+           WHERE stock_code = '000001'
+             AND field_name = 'retry_exhausted:balance_sheet'"""
+    )
+    assert len(missing) == 1
+    assert missing[0]["reason_code"] == "retry_exhausted"
+
+
+def test_announcement_retry_is_never_removed_by_exhaustion(sqlite_store: SQLiteStore) -> None:
+    """announcements 是公告 pending 持久化标记，耗尽后必须保留待重试。"""
+    updater = IncrementalUpdater.__new__(IncrementalUpdater)
+    updater.sqlite = sqlite_store
+    with sqlite_store.transaction() as conn:
+        cursor = conn.execute(
+            """INSERT INTO retry_list
+                   (stock_code, data_type, adapter, error, retry_count,
+                    last_attempt, next_retry_at, max_retries, extra_json)
+               VALUES ('603365', 'announcements', 'cninfo', 'pending', 1,
+                       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 2, '{}')"""
+        )
+        retry_id = cursor.lastrowid
+
+    updater._mark_retry_failed(retry_id, "source still not ready")
+
+    rows = sqlite_store.query(
+        "SELECT retry_count FROM retry_list WHERE id = ?", [retry_id]
+    )
+    assert rows and rows[0]["retry_count"] == 2

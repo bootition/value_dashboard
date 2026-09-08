@@ -137,6 +137,8 @@ const recompute = ref<IndicatorRecomputeStatus>({ status: 'idle', pending_codes:
 const lastRefreshedAt = ref<string | null>(null)
 let recomputeTimer: ReturnType<typeof setTimeout> | undefined
 let recomputeStartInFlight = false
+// 运维级重算令牌：不再从 /api/session 下发，由用户输入并保存在会话内。
+const recomputeAdminToken = ref(sessionStorage.getItem('vd-admin-token') || '')
 // 轻量轮询：仅自动更新状态；in-flight guard + 递归定时，防堆积与卡死
 let pollTimer: ReturnType<typeof setTimeout> | undefined
 let autoInFlight = false
@@ -215,17 +217,21 @@ async function maybeStartPendingRecompute(): Promise<void> {
     || recompute.value.pending_codes.length === 0
     || autoUpdate.value?.current_stage === 'running'
     || recomputeStartInFlight
+    || !recomputeAdminToken.value
   ) {
     return
   }
   recomputeStartInFlight = true
   try {
-    const resp = await axios.post('/api/data-status/indicator-recompute', { timeout: 8000 })
+    const resp = await axios.post('/api/data-status/indicator-recompute', null, {
+      headers: { 'x-vd-admin-token': recomputeAdminToken.value },
+      timeout: 8000,
+    })
     recompute.value = resp.data
     if (recompute.value.status === 'running') scheduleRecomputePolling()
   } catch {
-    // 409（自动更新恰好在开始瞬间启动）或接口未就绪时保留原状态；
-    // 下一次状态轮询会再次尝试。
+    // 409（自动更新恰好在开始瞬间启动）、403（令牌失效）或接口未就绪时
+    // 保留原状态；下一次状态轮询会再次尝试。
   } finally {
     recomputeStartInFlight = false
   }
@@ -240,12 +246,26 @@ async function startRecompute(): Promise<void> {
   ) {
     return
   }
+  if (!recomputeAdminToken.value) {
+    const entered = window.prompt('请输入运维令牌（保存在 data 目录 .vd-admin-token）')
+    if (!entered) return
+    recomputeAdminToken.value = entered.trim()
+    sessionStorage.setItem('vd-admin-token', recomputeAdminToken.value)
+  }
   recomputeStartInFlight = true
   try {
-    const resp = await axios.post('/api/data-status/indicator-recompute', { timeout: 8000 })
+    const resp = await axios.post('/api/data-status/indicator-recompute', null, {
+      headers: { 'x-vd-admin-token': recomputeAdminToken.value },
+      timeout: 8000,
+    })
     recompute.value = resp.data
     if (recompute.value.status === 'running') scheduleRecomputePolling()
-  } catch {
+  } catch (error) {
+    // 403：令牌可能随服务重启失效，清掉后让用户重新输入。
+    if (axios.isAxiosError(error) && error.response?.status === 403) {
+      recomputeAdminToken.value = ''
+      sessionStorage.removeItem('vd-admin-token')
+    }
     // 409（自动更新恰好在开始瞬间启动）或接口未就绪时保留原状态。
   } finally {
     recomputeStartInFlight = false
@@ -445,7 +465,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
               : (summary.updating || summary.stale)
                 ? '当前覆盖统计与指标为最近一次快照，实时进度见上方“自动更新”卡片；更新完成后自动恢复绿色状态。'
                 : summary.data_quality.minimum_data_readiness.ready
-                  ? `数据可研究：价格截至 ${summary.data_quality.dates?.price || '—'}，财报截至 ${summary.data_quality.dates?.balance_sheet?.latest_complete || '—'}。最近一次更新执行: ${formatLocalTime(summary.last_update)}（${updateStatusLabel(summary.last_update_status)}）。`
+                  ? `数据可研究：价格截至 ${summary.data_quality.dates?.price || '—'}，财报报告期截至 ${summary.data_quality.dates?.balance_sheet?.latest_complete || '—'}。最近一次更新执行: ${formatLocalTime(summary.last_update)}（${updateStatusLabel(summary.last_update_status)}）。`
                   : `数据尚未完全就绪，有 ${summary.data_quality.warning_codes.length} 个警告；当前更新完成后会自动恢复。`
           }}
         </n-alert>

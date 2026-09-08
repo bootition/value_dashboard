@@ -72,52 +72,73 @@ class CNINFOFundingAdapter(BaseAdapter):
     def fetch(self, request: FetchRequest) -> FetchResult:
         if not request.stock_codes:
             return self._make_empty_result("ipo_funding 需要 stock_codes")
-        code = request.stock_codes[0]
         if not _AKSHARE_AVAILABLE or ak is None:
             return self._make_empty_result("akshare 未安装")
 
-        try:
-            with _domestic_direct():
-                df = ak.stock_ipo_summary_cninfo(symbol=code)
-        except IndexError:
-            # akshare 自身缺陷：源无记录（如部分北交所）时 records[0] 越界。
-            # 这是"源无记录"的确定性信号 → 合法缺失，不触发熔断、不登记 retry。
-            logger.info("CNINFO IPO %s 无发行记录（akshare IndexError，按合法缺失）", code)
+        codes = list(dict.fromkeys(request.stock_codes))
+        all_rows: list[dict[str, Any]] = []
+        raw_payloads: list[str] = []
+        errors: list[str] = []
+
+        for code in codes:
+            try:
+                with _domestic_direct():
+                    df = ak.stock_ipo_summary_cninfo(symbol=code)
+            except IndexError:
+                # akshare 自身缺陷：源无记录（如部分北交所）时 records[0] 越界。
+                # 这是"源无记录"的确定性信号 → 合法缺失，不触发熔断、不登记 retry。
+                logger.info("CNINFO IPO %s 无发行记录（akshare IndexError，按合法缺失）", code)
+                continue
+            except Exception as e:  # noqa: BLE001
+                logger.warning("CNINFO IPO %s 抓取失败: %s", code, e)
+                errors.append(f"{code}: {type(e).__name__}: {e}")
+                continue
+
+            if df is None or len(df) == 0:
+                # 合法缺失（如北交所无 IPO 汇总）：error=None 不触发熔断（manager P1-27）
+                continue
+
+            raw_payloads.append(df.to_json(orient="records", force_ascii=False))
+            for _, row in df.iterrows():
+                shares_raw = _to_float(row.get("总发行数量"))
+                shares = shares_raw * 1e4 if shares_raw is not None else None  # 万股→股
+                net_raw = _to_float(row.get("募集资金净额"))
+                net = net_raw * 1e4 if net_raw is not None else None  # 万元→元
+                all_rows.append({
+                    "stock_code": str(row.get("股票代码") or code).zfill(6),
+                    "event_type": "ipo",
+                    "announce_date": _to_date(row.get("招股公告日期")),
+                    "list_date": _to_date(row.get("上市日期")),
+                    "issue_price": _to_float(row.get("发行价格")),
+                    "issue_shares": shares,
+                    "raise_funds": None,  # CNINFO 仅净额，总额不伪造
+                    "raise_funds_net": net,
+                    "derived": False,
+                    "extra": {
+                        "面值": _to_float(row.get("每股面值")),
+                        "发行费用总额_万元": _to_float(row.get("发行费用总额")),
+                        "摊薄发行市盈率": _to_float(row.get("摊薄发行市盈率")),
+                        "主承销商": str(row.get("主承销商") or ""),
+                    },
+                })
+
+        if not all_rows:
+            if errors:
+                # 多代码请求中至少一个子请求失败：显式 error，不得静默丢弃。
+                return self._make_empty_result(
+                    f"ipo_funding failed: {'; '.join(errors)}"
+                )
             return self._make_result([], confidence="missing")
-        except Exception as e:  # noqa: BLE001
-            logger.warning("CNINFO IPO %s 抓取失败: %s", code, e)
-            return self._make_empty_result(f"{type(e).__name__}: {e}")
 
-        if df is None or len(df) == 0:
-            # 合法缺失（如北交所无 IPO 汇总）：error=None 不触发熔断（manager P1-27）
-            return self._make_result([], confidence="missing")
-
-        rows: list[dict[str, Any]] = []
-        for _, row in df.iterrows():
-            shares_raw = _to_float(row.get("总发行数量"))
-            shares = shares_raw * 1e4 if shares_raw is not None else None  # 万股→股
-            net_raw = _to_float(row.get("募集资金净额"))
-            net = net_raw * 1e4 if net_raw is not None else None  # 万元→元
-            rows.append({
-                "stock_code": str(row.get("股票代码") or code).zfill(6),
-                "event_type": "ipo",
-                "announce_date": _to_date(row.get("招股公告日期")),
-                "list_date": _to_date(row.get("上市日期")),
-                "issue_price": _to_float(row.get("发行价格")),
-                "issue_shares": shares,
-                "raise_funds": None,  # CNINFO 仅净额，总额不伪造
-                "raise_funds_net": net,
-                "derived": False,
-                "extra": {
-                    "面值": _to_float(row.get("每股面值")),
-                    "发行费用总额_万元": _to_float(row.get("发行费用总额")),
-                    "摊薄发行市盈率": _to_float(row.get("摊薄发行市盈率")),
-                    "主承销商": str(row.get("主承销商") or ""),
-                },
-            })
-
-        raw = df.to_json(orient="records", force_ascii=False)
-        return self._make_result(rows, raw_response=raw, confidence="approximate")
+        return self._make_result(
+            all_rows,
+            raw_response="\n".join(raw_payloads),
+            confidence="approximate",
+            error=(
+                "partial ipo_funding: " + "; ".join(errors)
+                if errors else None
+            ),
+        )
 
 
 def _to_float(value: Any) -> float | None:

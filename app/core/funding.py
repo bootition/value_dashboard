@@ -5,8 +5,10 @@
 失败保留旧值并记录独立 retry/missing，绝不进入 stock_meta / 筛选池 / readiness。
 
 写入语义（沿用 business.py 域纪律）：
-- 单股事务原子替换：该股全部融资事件在同一 DuckDB 事务内删除重建。
-- 任一侧网络错误 → 整股失败，保留旧值，写入 retry_list（去重）。
+- ipo/placement 分开抓取，每侧独立按来源原子替换：只有拿到新证据
+  （metadata.error=None 且 data 非空）才 DELETE+INSERT 对应来源事件。
+- 任一侧网络错误 → 该侧失败保留旧值并写 retry_list；成功侧照常提交；
+  两侧都失败才算 failed。
 - 合法空（北交所无东财交叉源 / CNINFO 无 IPO 记录）→ 保留旧值，写入 missing_list。
 - 批量节奏：batch_size 只后冷却 batch_cooldown_seconds（东财批 50 + 30s
   为 reports/75 验证的安全组合），全量跨多轮有界续传，严禁硬闯。
@@ -23,7 +25,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.base import FetchRequest
@@ -92,10 +94,12 @@ class FundingUpdater:
     # ─── 单股原子更新 ─────────────────────────────────────────────
 
     def update_stock(self, stock_code: str) -> dict[str, Any]:
-        """抓取并原子替换单股全部融资事件；失败保留旧值并记录 retry/missing。
+        """抓取并按来源原子替换该股融资事件；失败/合法空均保留旧值。
 
-        Returns:
-            报告 dict：{"status": "success"|"failed", "stock_code", ...}
+        ipo 与 placement 分开处理：只有真正拿到新证据（metadata.error 为
+        None 且 data 非空）才 DELETE+INSERT 对应来源的事件；合法空
+        （error=None 且 data 为空）保留旧值并登记 missing；任一侧网络
+        错误保留该侧旧值并登记 retry。两侧都失败才算 failed。
         """
         ipo_result = self.adapter.fetch(FetchRequest(
             data_type="ipo_funding", stock_codes=[stock_code],
@@ -104,85 +108,99 @@ class FundingUpdater:
             data_type="placement_funding", stock_codes=[stock_code],
         ))
 
-        errors: list[str] = []
+        failed_types: list[str] = []
         for data_type, result in (
             ("ipo_funding", ipo_result),
             ("placement_funding", placement_result),
         ):
             if result.metadata.error:
-                errors.append(f"{data_type}: {result.metadata.error}")
+                failed_types.append(data_type)
                 self._record_retry(
                     stock_code, data_type, result.metadata.source, result.metadata.error,
                 )
-        if errors:
-            return {
-                "status": "failed",
-                "stock_code": stock_code,
-                "error": "; ".join(errors),
-                "retained": True,
-            }
 
         batch_id = uuid.uuid4().hex
         fetch_time = datetime.now(UTC)
-        # 单股事务原子替换：IPO+增发+配股同一事务提交，任一侧异常整体回滚
-        all_rows: list[dict[str, Any]] = list(ipo_result.data) + list(placement_result.data)
-        with self.duck.transaction() as conn:
-            conn.execute("DELETE FROM funding_events WHERE stock_code = ?", [stock_code])
-            if all_rows:
-                conn.executemany(
-                    """INSERT INTO funding_events
-                       (stock_code, event_type, announce_date, list_date, issue_price,
-                        issue_shares, raise_funds, raise_funds_net, derived, source,
-                        fetch_time, raw_hash, confidence, batch_id)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [
+        written_rows: list[dict[str, Any]] = []
+        if len(failed_types) < 2:
+            # 至少一侧成功/合法空才写库；每侧独立 DELETE+INSERT，失败侧旧值不动。
+            with self.duck.transaction() as conn:
+                for data_type, result in (
+                    ("ipo_funding", ipo_result),
+                    ("placement_funding", placement_result),
+                ):
+                    if data_type in failed_types or not result.data:
+                        continue
+                    rows = list(result.data)
+                    conn.execute(
+                        "DELETE FROM funding_events WHERE stock_code = ? AND source = ?",
+                        [stock_code, result.metadata.source],
+                    )
+                    conn.executemany(
+                        """INSERT INTO funding_events
+                           (stock_code, event_type, announce_date, list_date, issue_price,
+                            issue_shares, raise_funds, raise_funds_net, derived, source,
+                            fetch_time, raw_hash, confidence, batch_id)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                         [
-                            stock_code,
-                            row.get("event_type"),
-                            row.get("announce_date"),
-                            row.get("list_date"),
-                            row.get("issue_price"),
-                            row.get("issue_shares"),
-                            row.get("raise_funds"),
-                            row.get("raise_funds_net"),
-                            bool(row.get("derived", False)),
-                            # 来源按数据类区分：IPO 来自 cninfo_funding，
-                            # 增发/配股来自 eastmoney_f10
-                            "cninfo_funding" if row.get("event_type") == "ipo" else "eastmoney_f10",
-                            fetch_time,
-                            (
-                                ipo_result.metadata.raw_response_hash
-                                if row.get("event_type") == "ipo"
-                                else placement_result.metadata.raw_response_hash
-                            ),
-                            (
-                                ipo_result.metadata.confidence
-                                if row.get("event_type") == "ipo"
-                                else placement_result.metadata.confidence
-                            ),
-                            batch_id,
-                        ]
-                        for row in all_rows
-                    ],
-                )
+                            [
+                                stock_code,
+                                row.get("event_type"),
+                                row.get("announce_date"),
+                                row.get("list_date"),
+                                row.get("issue_price"),
+                                row.get("issue_shares"),
+                                row.get("raise_funds"),
+                                row.get("raise_funds_net"),
+                                bool(row.get("derived", False)),
+                                result.metadata.source,
+                                fetch_time,
+                                result.metadata.raw_response_hash,
+                                result.metadata.confidence,
+                                batch_id,
+                            ]
+                            for row in rows
+                        ],
+                    )
+                    written_rows.extend(rows)
 
-        # 提交后维护 missing 状态（解决已补上的，登记仍然缺失的）
+        # 提交后维护 missing/retry 状态：只有成功写入的一侧才解决对应条目；
+        # 失败侧保留 retry，合法空登记 missing，且都不会碰旧事件。
         for data_type, result in (
             ("ipo_funding", ipo_result),
             ("placement_funding", placement_result),
         ):
+            if data_type in failed_types:
+                continue
             if result.data:
                 self._resolve_missing(stock_code, data_type)
             else:
                 self._record_missing(stock_code, data_type, "source_empty")
-        # 成功后清理该股票已解决的重试条目
-        self._resolve_retry(stock_code)
+            # error=None 代表源已成功应答（无论有数据还是合法空），
+            # 之前失败留下的 retry 已得到确定答案，可以安全解决。
+            self._resolve_retry(stock_code, data_type)
+
+        if failed_types:
+            return {
+                "status": "failed" if len(failed_types) == 2 else "partial",
+                "stock_code": stock_code,
+                "error": "; ".join(
+                    f"{data_type}: {result.metadata.error}"
+                    for data_type, result in (
+                        ("ipo_funding", ipo_result),
+                        ("placement_funding", placement_result),
+                    )
+                    if data_type in failed_types
+                ),
+                "failed_types": failed_types,
+                "retained": True,
+            }
 
         return {
             "status": "success",
             "stock_code": stock_code,
             "batch_id": batch_id,
-            "event_rows": len(all_rows),
+            "event_rows": len(written_rows),
             "ipo_rows": len(ipo_result.data),
             "placement_rows": len(placement_result.data),
         }
@@ -262,6 +280,36 @@ class FundingUpdater:
         pending = [code for code in codes if code not in covered]
         if not pending:
             return {"status": "skipped", "reason": "all_funding_covered"}
+
+        # 近期已确认 source_empty 且仍在重试窗口内的合法空股票出队
+        # （参考 business.py 的 missing 出队模式）：北交所等两侧均无源
+        # 的股票不应每轮占住限速额度与队头位置。
+        try:
+            retry_days = max(0, int(self._load_config(
+                "funding_missing_retry_days", default=7,
+            )))
+            missing_cutoff = (datetime.now(UTC) - timedelta(days=retry_days)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            blocked_rows = self.sqlite.query(
+                """SELECT stock_code FROM missing_list
+                   WHERE field_name IN ('ipo_funding', 'placement_funding')
+                     AND resolved_at IS NULL
+                     AND detected_at >= ?
+                   GROUP BY stock_code
+                   HAVING COUNT(DISTINCT field_name) = 2""",
+                [missing_cutoff],
+            )
+            blocked = {row["stock_code"] for row in blocked_rows}
+            pending = [code for code in pending if code not in blocked]
+        except Exception as error:
+            logger.warning("查询融资事件 missing 缓存失败: %s", error)
+
+        if not pending:
+            return {
+                "status": "skipped",
+                "reason": "pending_source_empty_retry_window",
+            }
         if max_stocks > 0:
             pending = pending[:max_stocks]
         report = self.update_many(pending)
@@ -334,13 +382,17 @@ class FundingUpdater:
         except Exception as e:
             logger.warning("解决融资事件缺失信息失败: %s", e)
 
-    def _resolve_retry(self, stock_code: str) -> None:
-        """数据已到达时清理该股票的待重试条目。"""
+    def _resolve_retry(self, stock_code: str, data_type: str) -> None:
+        """数据已到达时清理该股票该数据类型的待重试条目。
+
+        只清理成功写入的一侧；另一侧失败时其 retry 必须保留，
+        否则下一轮会漏掉重试（红队：全股清除会把失败侧一起删掉）。
+        """
         try:
             self.sqlite.execute(
                 """DELETE FROM retry_list
-                   WHERE stock_code = ? AND data_type IN (?, ?)""",
-                [stock_code, RETRY_DATA_TYPES[0], RETRY_DATA_TYPES[1]],
+                   WHERE stock_code = ? AND data_type = ?""",
+                [stock_code, data_type],
             )
         except Exception as e:
             logger.warning("清理融资事件重试条目失败: %s", e)

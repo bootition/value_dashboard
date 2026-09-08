@@ -394,6 +394,39 @@ def test_update_daily_upserts_and_keeps_old_on_empty(
     assert rows[0]["c"] == 0
 
 
+def test_daily_success_resolves_only_matching_daily_retry(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """daily 成功只能删除对应 daily 重试条目，history 未解决条目必须保留。"""
+    history_extra = json.dumps({"mode": "history", "tenor": 10.0}, ensure_ascii=False)
+    daily_extra = json.dumps({"mode": "daily", "work_date": "2026-08-07"}, ensure_ascii=False)
+    with sqlite_store.transaction() as conn:
+        conn.executemany(
+            """INSERT INTO retry_list
+               (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
+               VALUES ('__market__', 'treasury_yield_curve', 'czb_mof', ?, 0, ?, ?)""",
+            [
+                ("history boom", datetime.now(UTC).isoformat(), history_extra),
+                ("daily boom", datetime.now(UTC).isoformat(), daily_extra),
+            ],
+        )
+    daily = [{
+        "curve_date": "2026-08-07", "tenor_years": 10.0, "yield_pct": 1.70,
+    }]
+    updater = _treasury_updater(
+        duckdb_store, sqlite_store, _FakeCzbAdapter(daily=daily),
+    )
+
+    report = updater.update_daily(["2026-08-07"])
+
+    assert report["status"] == "success"
+    remaining = sqlite_store.query(
+        "SELECT extra_json FROM retry_list WHERE data_type = 'treasury_yield_curve'"
+    )
+    assert remaining == [{"extra_json": history_extra}], \
+        "daily 成功不得误删 history 未解决 retry"
+
+
 def test_align_5_day_staleness_boundary(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:

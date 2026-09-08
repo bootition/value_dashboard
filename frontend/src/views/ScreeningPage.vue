@@ -20,6 +20,16 @@ import { applyIndicatorUnits, fieldDisplayName, fieldOptionLabel } from '../util
 
 const message = useMessage()
 const dialog = useDialog()
+
+// 后端 400 detail 通常是可直接展示的校验消息（如“排序项必须是对象”、
+// “min_listing_years 必须在 0-100 之间”），优先展示原文；其余错误走统一映射。
+function apiErrorText(e: unknown, fallback: string): string {
+  if (isAxiosError(e) && e.response?.status === 400) {
+    const detail = e.response.data?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  }
+  return friendlyErrorMessage(e, fallback)
+}
 const indicators = ref<readonly ScreeningIndicator[]>([])
 const loading = ref(false)
 const results = ref<readonly ScreeningResult[]>([])
@@ -279,7 +289,7 @@ async function runScreening() {
     await nextTick()
     scrollToResults()
   } catch (e: unknown) {
-    message.error(friendlyErrorMessage(e, '筛选失败'))
+    message.error(apiErrorText(e, '筛选失败'))
   } finally {
     loading.value = false
   }
@@ -470,7 +480,7 @@ async function persistRule(name: string): Promise<{ rule_id: number; version: nu
     message.success(`规则已保存为 v${resp.data.version}`)
     return resp.data
   } catch (e: unknown) {
-    message.error(friendlyErrorMessage(e, '保存规则失败'))
+    message.error(apiErrorText(e, '保存规则失败'))
     return null
   }
 }
@@ -690,7 +700,7 @@ onUnmounted(() => {
             </div>
             <div class="standing-condition-line">
               <div class="standing-condition-name"><span>上市时间</span><strong>最低上市年限</strong></div>
-              <label><span>不少于</span><n-input-number v-model:value="basePool.min_listing_years" :min="0" size="small" aria-label="最低上市年限" /></label>
+              <label><span>不少于</span><n-input-number v-model:value="basePool.min_listing_years" :min="0" :max="100" size="small" aria-label="最低上市年限" /></label>
               <p>上市满 {{ basePool.min_listing_years }} 年后进入基础股票池</p>
             </div>
           </div>

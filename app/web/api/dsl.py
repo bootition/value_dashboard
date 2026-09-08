@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core.dsl.engine import DSLEngine
+from app.core.dsl.parser import MAX_EXPRESSION_BYTES
 
 router = APIRouter(prefix="/api/dsl", tags=["dsl"])
 
@@ -34,6 +35,17 @@ def _require_success(result: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _get_expression_by_id(request: Request, expr_id: int) -> dict[str, Any]:
+    """Fetch one expression by primary key (no full-table load)."""
+    rows = request.app.state.sqlite.query(
+        "SELECT id, name, version, status FROM dsl_expressions WHERE id = ?",
+        [expr_id],
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="expression not found")
+    return rows[0]
+
+
 @router.get("/expressions")
 def list_expressions(request: Request) -> dict[str, list[dict[str, Any]]]:
     expressions = _engine(request).list_all()
@@ -50,6 +62,13 @@ def create_expression(
     req: CreateExpressionRequest,
     request: Request,
 ) -> dict[str, Any]:
+    # 与 parser._validate_expression_budget 同口径：超限在进入 Earley 解析
+    # 之前就以 400 拒绝，不消耗解析资源。
+    if len(req.expression.encode("utf-8")) > MAX_EXPRESSION_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"expression exceeds {MAX_EXPRESSION_BYTES} bytes",
+        )
     try:
         return _engine(request).create(
             req.name,
@@ -83,23 +102,13 @@ def preview_single(
 
 @router.put("/expressions/{expr_id}/publish")
 def publish_expression(expr_id: int, request: Request) -> dict[str, Any]:
-    expression = next(
-        (item for item in _engine(request).list_all() if item["id"] == expr_id),
-        None,
-    )
-    if expression is None:
-        raise HTTPException(status_code=404, detail="expression not found")
+    expression = _get_expression_by_id(request, expr_id)
     return _require_success(_engine(request).publish(expression["name"], expression["version"]))
 
 
 @router.delete("/expressions/{expr_id}")
 def delete_expression(expr_id: int, request: Request) -> dict[str, str]:
-    expression = next(
-        (item for item in _engine(request).list_all() if item["id"] == expr_id),
-        None,
-    )
-    if expression is None:
-        raise HTTPException(status_code=404, detail="expression not found")
+    expression = _get_expression_by_id(request, expr_id)
     if expression["status"] == "published":
         raise HTTPException(status_code=400, detail="published expressions are immutable")
 

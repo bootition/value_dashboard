@@ -36,6 +36,32 @@ logger = logging.getLogger(__name__)
 _STARTUP_MAINTENANCE_LOCK = threading.Lock()
 
 
+def _admin_token(sqlite_path: Path) -> str:
+    """Load or create the operator token for maintenance-grade write endpoints.
+
+    普通浏览器写操作使用 /api/session 的 write_token；指标快照全市场重算
+    属于运维级写操作，不能由未鉴权 GET 接口下发凭据（2026-09-08 红队）。
+    令牌持久化在数据库同目录，本地个人工具可在启动日志/文件中查看。
+    """
+    env_token = os.environ.get("VD_ADMIN_TOKEN")
+    if env_token:
+        return env_token
+    token_path = sqlite_path.parent / ".vd-admin-token"
+    try:
+        existing = token_path.read_text(encoding="ascii").strip()
+        if len(existing) >= 16:
+            return existing
+    except OSError:
+        pass
+    token = secrets.token_urlsafe(32)
+    try:
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(token + "\n", encoding="ascii")
+    except OSError:
+        logger.warning("无法持久化运维令牌到 %s，本次进程内临时生效", token_path)
+    return token
+
+
 def _server_host(server_config: dict) -> str:
     """The unauthenticated research service is always loopback-only."""
     if is_frozen_runtime():
@@ -270,6 +296,7 @@ def create_app(
     app.state.startup_readiness = startup_readiness
     app.state.startup_maintenance = {"status": "idle", "error": None}
     app.state.write_token = secrets.token_urlsafe(32)
+    app.state.admin_token = _admin_token(validated.sqlite_path)
 
     @app.middleware("http")
     async def require_local_write_token(request: Request, call_next):

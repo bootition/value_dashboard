@@ -42,6 +42,20 @@ for full_key, meta in FIELD_METADATA.items():
             _SHORTHAND_MAP[field] = f"{table}.{field}"
 
 
+def _prev_non_space(tokens: list[str], before_index: int) -> str:
+    for index in range(before_index - 1, -1, -1):
+        if tokens[index].strip():
+            return tokens[index].strip()
+    return ""
+
+
+def _next_non_space(tokens: list[str], after_index: int) -> str:
+    for index in range(after_index + 1, len(tokens)):
+        if tokens[index].strip():
+            return tokens[index].strip()
+    return ""
+
+
 def expand_shorthand(expression: str) -> str:
     """展开简写 (PRD §11.5 DL10-11)
 
@@ -49,7 +63,7 @@ def expand_shorthand(expression: str) -> str:
 
     规则:
     - 已有表前缀的 (如 income.revenue) 不展开
-    - 已有 @ 周期后缀的不展开
+    - 已有 @ 周期后缀的 (如 revenue@TTM、total_assets@LATEST) 不二次追加
     - 内建指标名 (如 pe_ttm) 不展开
     - 流量字段 (cumulative) → table.field@TTM
     - 时点字段 (point_in_time) → table.field@LATEST
@@ -57,6 +71,7 @@ def expand_shorthand(expression: str) -> str:
     Examples:
         "revenue / total_assets" → "income.revenue@TTM / balance.total_assets@LATEST"
         "pe_ttm > 0 AND revenue > 1000" → "pe_ttm > 0 AND income.revenue@TTM > 1000"
+        "revenue@TTM / total_assets@LATEST" → 原样保留，不变成 @TTM@TTM
     """
     # 获取所有已知字段名（不含表前缀）
     known_fields = set(_SHORTHAND_MAP.keys())
@@ -68,33 +83,25 @@ def expand_shorthand(expression: str) -> str:
     # 使用更精确的正则: 只匹配纯字母开头的标识符
     tokens = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*|[\d.]+|[^\w\s]+|\s+', expression)
     result_parts: list[str] = []
-    i = 0
-    while i < len(tokens):
-        token = tokens[i]
-        # 检查是否是 table.field 模式
-        if (token in known_fields
-                and token not in known_indicators
-                and i + 1 < len(tokens) and tokens[i + 1].strip() == "."
-                and i + 2 < len(tokens) and tokens[i + 2][0].isalpha()):
-            # 这是 table.field 模式的前半，不展开
-            result_parts.append(token)
-        elif token in known_fields and token not in known_indicators:
-            # 检查前一个非空token是否是"."
-            prev_non_space = ""
-            for j in range(len(result_parts) - 1, -1, -1):
-                if result_parts[j].strip():
-                    prev_non_space = result_parts[j].strip()
-                    break
+    for index, token in enumerate(tokens):
+        if token in known_fields and token not in known_indicators:
+            prev_non_space = _prev_non_space(tokens, index)
+            next_non_space = _next_non_space(tokens, index)
             if prev_non_space == ".":
-                # 前一个是".", 说明是 table.field 的后半，不展开
+                # table.field 的后半，不展开
+                result_parts.append(token)
+            elif next_non_space == ".":
+                # table.field 的前半，不展开
+                result_parts.append(token)
+            elif next_non_space == "@":
+                # 已带 @周期后缀（如 revenue@TTM / total_assets@LATEST），
+                # 只补裸字段，绝不二次追加后缀。
                 result_parts.append(token)
             else:
                 # 裸字段名，展开
-                expanded = _SHORTHAND_MAP[token]
-                result_parts.append(expanded)
+                result_parts.append(_SHORTHAND_MAP[token])
         else:
             result_parts.append(token)
-        i += 1
 
     expanded = "".join(result_parts)
     if expanded != expression:
@@ -170,22 +177,39 @@ class DSLEngine:
             result = self.validator.validate(ast)
 
             if result["valid"]:
+                # 5. 依赖版本锁定：与 list_published 同口径，只锁定每个依赖
+                # 名称的最新 published 版本；最新版是 draft 但有旧 published
+                # 时锁旧 published；完全没有 published 版本则拒绝校验。
+                published_deps: list[tuple[str, int]] = []
+                for dep in result["dependencies"]:
+                    if "." in dep:
+                        continue  # 标准化字段, 不需要版本锁定
+                    if dep in INDICATOR_METADATA:
+                        continue  # 内建指标, 不需要版本锁定
+                    dep_expr = self.registry.get(dep)
+                    if dep_expr is None or dep_expr["status"] != STATUS_PUBLISHED:
+                        return {
+                            "name": name,
+                            "version": version,
+                            "status": "draft",
+                            "valid": False,
+                            "errors": [f"依赖指标无已发布版本: {dep}"],
+                            "warnings": result["warnings"],
+                            "expanded_expression": expanded,
+                        }
+                    published_deps.append((dep, dep_expr["version"]))
+
                 # 4. 记录 AST
                 ast_json = json.dumps(ast.to_dict(), ensure_ascii=False)
                 self.registry.validate(
                     name, version, ast_json, result["historical_capable"]
                 )
 
-                # 5. 记录依赖
-                for dep in result["dependencies"]:
-                    if "." in dep:
-                        continue  # 标准化字段, 不需要版本锁定
-                    # 查找已发布的依赖指标
-                    dep_expr = self.registry.get(dep)
-                    if dep_expr and dep_expr["status"] == STATUS_PUBLISHED:
-                        self.registry.add_dependency(
-                            name, version, dep, dep_expr["version"]
-                        )
+                # 6. 记录依赖（原子写入，避免出现无版本锁定的半成品）
+                for dep, dep_version in published_deps:
+                    self.registry.add_dependency(
+                        name, version, dep, dep_version
+                    )
 
                 result["name"] = name
                 result["version"] = version

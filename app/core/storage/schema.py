@@ -777,22 +777,43 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
     """初始化 DuckDB 分析库 schema"""
     logger.info("初始化 DuckDB schema...")
     store.execute_script(DUCKDB_SCHEMA_V1)
+    # 迁移版本表必须先于 v12 探测存在，才能判断 v12 是否已执行。
+    with store.transaction() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                description VARCHAR NOT NULL,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
     # v12 迁移（2026-08-25）：funding_events 撤销复合主键
     # 东财 F10 把一次增发按发行对象拆成多条同 list_date 记录，旧主键
     # (stock_code, event_type, list_date) 会丢失同日期多批次数据。
     # 表为本次数据补全新引入、未发布，直接 DROP 重建（无用户数据可保留）。
+    # 红队：DROP 重建只在 schema_migrations.version=12 未执行时进行，
+    # 不能每次启动都检查/尝试 DROP（否则已重建表会在版本记录后再次被清）。
     try:
-        has_pk = store.read_query(
-            """SELECT 1 FROM duckdb_constraints()
-               WHERE table_name = 'funding_events' AND constraint_type = 'PRIMARY KEY'"""
-        )
-        if has_pk:
-            with store.transaction() as conn:
-                conn.execute("DROP TABLE IF EXISTS funding_events")
-            store.execute_script(DUCKDB_SCHEMA_V1)
-            logger.info("funding_events 主键约束已撤销并重建（v12 迁移）")
+        v12_applied = bool(store.read_query(
+            "SELECT 1 FROM schema_migrations WHERE version = 12"
+        ))
     except Exception as error:  # noqa: BLE001
-        logger.warning("funding_events v12 迁移检查失败(非致命): %s", error)
+        logger.warning("funding_events v12 迁移版本检查失败(非致命): %s", error)
+        v12_applied = True  # 无法确认时拒绝 DROP，避免误删已重建数据
+    if not v12_applied:
+        try:
+            has_pk = store.read_query(
+                """SELECT 1 FROM duckdb_constraints()
+                   WHERE table_name = 'funding_events' AND constraint_type = 'PRIMARY KEY'"""
+            )
+            if has_pk:
+                with store.transaction() as conn:
+                    conn.execute("DROP TABLE IF EXISTS funding_events")
+                store.execute_script(DUCKDB_SCHEMA_V1)
+                logger.info("funding_events 主键约束已撤销并重建（v12 迁移）")
+        except Exception as error:  # noqa: BLE001
+            logger.warning("funding_events v12 迁移检查失败(非致命): %s", error)
     with store.transaction() as connection:
         connection.execute(
             """
@@ -1493,6 +1514,14 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
         if "resolved_at" not in missing_columns:
             conn.execute("ALTER TABLE missing_list ADD COLUMN resolved_at TIMESTAMP")
         conn.execute("UPDATE retry_list SET extra_json = '{}' WHERE extra_json IS NULL")
+        # 建唯一索引前先按 (stock_code, data_type, adapter, extra_json) 保留
+        # 最新一条去重（参考 missing_list 去重写法），避免历史重复行让
+        # CREATE UNIQUE INDEX 失败或把旧错误重新顶出来。
+        conn.execute(
+            "DELETE FROM retry_list WHERE id NOT IN ("
+            "SELECT MAX(id) FROM retry_list "
+            "GROUP BY stock_code, data_type, adapter, extra_json)"
+        )
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS uq_retry_list_request "
             "ON retry_list(stock_code, data_type, adapter, extra_json)"

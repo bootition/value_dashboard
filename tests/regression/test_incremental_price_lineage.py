@@ -455,8 +455,12 @@ def test_large_response_uses_full_replace_and_preserves_lineage(
     class Adapter:
         def fetch(self, request):
             rows = [
-                {"trade_date": f"2026-07-{i:02d}", "close": 10.0, "volume": 100.0}
-                for i in range(1, 31)
+                {"trade_date": "2026-06-01", "close": 9.0, "volume": 100.0},
+                {"trade_date": "2026-06-02", "close": 9.0, "volume": 100.0},
+                *[
+                    {"trade_date": f"2026-07-{i:02d}", "close": 10.0, "volume": 100.0}
+                    for i in range(1, 31)
+                ],
             ]
             return make_result(request.adjust, rows)
 
@@ -480,7 +484,11 @@ def test_large_response_uses_full_replace_and_preserves_lineage(
         "SELECT COUNT(*) AS count FROM price_daily_raw WHERE stock_code = '600600' "
         "AND trade_date < '2026-07-01'"
     )
-    assert old_rows[0]["count"] == 0, "full replace must drop replaced rows"
+    assert old_rows[0]["count"] == 2, "full replace must retain history before the fetched window"
+    latest = duckdb_store.read_query(
+        "SELECT MAX(trade_date) AS d FROM price_daily_raw WHERE stock_code = '600600'"
+    )[0]
+    assert str(latest["d"])[:10] == "2026-07-30"
     audits = duckdb_store.read_query(
         "SELECT COUNT(*) AS count FROM source_audit "
         "WHERE stock_code = '600600' AND field_name = 'latest_close'"

@@ -307,22 +307,30 @@ def save_draft(req: ScreeningDraftRequest, request: Request) -> dict[str, int | 
     draft_bytes = len(json.dumps(req.draft, ensure_ascii=False).encode("utf-8"))
     if draft_bytes > MAX_RULE_JSON_BYTES:
         raise HTTPException(status_code=413, detail="draft payload is too large")
+    next_revision = req.revision + 1
+    draft_json = json.dumps(req.draft, ensure_ascii=False)
     with request.app.state.sqlite.transaction() as conn:
-        current = conn.execute(
-            "SELECT revision FROM screening_drafts WHERE id = 1"
-        ).fetchone()
-        if current is None:
-            if req.revision != 0:
-                raise HTTPException(status_code=409, detail="draft revision conflict; reload and retry")
-        elif current["revision"] != req.revision:
-            raise HTTPException(status_code=409, detail="draft revision conflict; reload and retry")
-        next_revision = req.revision + 1
-        conn.execute(
-            """INSERT INTO screening_drafts (id, draft_json, revision, updated_at)
-               VALUES (1, ?, ?, CURRENT_TIMESTAMP)
-               ON CONFLICT(id) DO UPDATE SET draft_json=excluded.draft_json, revision=excluded.revision, updated_at=CURRENT_TIMESTAMP""",
-            [json.dumps(req.draft, ensure_ascii=False), next_revision],
+        if req.revision == 0:
+            # 首次创建：INSERT 成功即获得 revision=1；若与并发请求竞争，
+            # rowcount=0 会落入下方条件 UPDATE 并因 revision 已变化而 409。
+            inserted = conn.execute(
+                """INSERT INTO screening_drafts (id, draft_json, revision, updated_at)
+                   VALUES (1, ?, ?, CURRENT_TIMESTAMP)
+                   ON CONFLICT(id) DO NOTHING""",
+                [draft_json, next_revision],
+            ).rowcount
+            if inserted == 1:
+                return {"status": "ok", "revision": next_revision}
+        # 乐观锁原子条件更新：读取比较与写入合并为同一条 UPDATE，
+        # 并发 PUT 携带同一 revision 时 SQLite 串行化后只有一个 rowcount=1。
+        cursor = conn.execute(
+            """UPDATE screening_drafts
+               SET draft_json = ?, revision = ?, updated_at = CURRENT_TIMESTAMP
+               WHERE id = 1 AND revision = ?""",
+            [draft_json, next_revision, req.revision],
         )
+        if cursor.rowcount != 1:
+            raise HTTPException(status_code=409, detail="draft revision conflict; reload and retry")
     return {"status": "ok", "revision": next_revision}
 
 
@@ -464,21 +472,25 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
         if result is None:
             raise HTTPException(status_code=400, detail="a saved screening result is required")
         saved_codes = {row.get("stock_code") for row in json.loads(result["result_json"])}
-        requested_codes = set(stock_codes)
+        # 先去重：同一请求里重复代码只 upsert 一次，added 按唯一代码数计。
+        unique_codes = list(dict.fromkeys(stock_codes))
+        requested_codes = set(unique_codes)
         if not requested_codes <= saved_codes:
             raise HTTPException(status_code=400, detail="stock codes must come from the saved result")
-        for code in stock_codes:
-            conn.execute(
-                """INSERT INTO watchlist
-                   (stock_code, group_name, source_rule_id, source_result_id)
-                   VALUES (?, ?, ?, ?)
-                   ON CONFLICT(stock_code, group_name) DO UPDATE SET
-                     source_rule_id=excluded.source_rule_id,
-                     source_result_id=excluded.source_result_id,
-                     added_at=CURRENT_TIMESTAMP""",
-                [code, group_name, result["rule_id"], result_id],
-            )
-            added += 1
+        conn.executemany(
+            """INSERT INTO watchlist
+               (stock_code, group_name, source_rule_id, source_result_id)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(stock_code, group_name) DO UPDATE SET
+                 source_rule_id=excluded.source_rule_id,
+                 source_result_id=excluded.source_result_id,
+                 added_at=CURRENT_TIMESTAMP""",
+            [
+                (code, group_name, result["rule_id"], result_id)
+                for code in unique_codes
+            ],
+        )
+        added = len(unique_codes)
 
     return {"status": "ok", "added": added}
 
@@ -600,6 +612,43 @@ def _attach_result_report_dates(duck: Any, results: list[dict[str, Any]]) -> Non
         row["_report_date"] = report_dates.get(row.get("stock_code"))
 
 
+_DSL_INDICATOR_LABELS = {
+    "dividend_financing_ratio": "分红融资比",
+}
+# 历史白名单：发布/校验时代 AST 之前创建的指标只能靠硬编码兜底。
+_DSL_INDICATOR_UNITS = {
+    "dividend_financing_ratio": "percent",
+}
+# DSL AST 根节点单位 → 筛选前端单位口径（field_units.py 的五类值）。
+_DSL_AST_UNIT_MAP = {
+    "percent": "percent",
+    "ratio": "ratio",
+    "pct": "pct",
+    "cny": "plain",
+    "count": "plain",
+    "mixed": "plain",
+    "unknown": "plain",
+}
+
+
+def _dsl_indicator_unit(expression: dict[str, Any]) -> str:
+    """Derive a published DSL indicator's unit from its validated AST.
+
+    只识别 AST 能可靠给出的 percent/ratio；金额、股数、混合单位等一律
+    归为 plain（原始数值，不做百分比换算）。
+    """
+    hardcoded = _DSL_INDICATOR_UNITS.get(expression.get("name", ""))
+    if hardcoded:
+        return hardcoded
+    try:
+        ast_json = json.loads(expression.get("ast_json") or "{}")
+        if not isinstance(ast_json, dict):
+            return "plain"
+        return _DSL_AST_UNIT_MAP.get(str(ast_json.get("unit", "unknown")).lower(), "plain")
+    except (TypeError, ValueError):
+        return "plain"
+
+
 @router.get("/indicators")
 def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标"""
@@ -652,14 +701,8 @@ def list_available_indicators(request: Request) -> dict:
     # 已发布 DSL：只暴露每个名称的最新版本，并支持中文名/单位元数据。
     # 单位用于筛选输入/展示；percent 表示值本身是百分数（如 150.69 → 150.69%，
     # 按用户口径我们发布前乘 100，所以 150.69 应显示为 15069%）。
-    _DSL_INDICATOR_LABELS = {
-        "dividend_financing_ratio": "分红融资比",
-    }
-    _DSL_INDICATOR_UNITS = {
-        "dividend_financing_ratio": "percent",
-    }
     published = request.app.state.sqlite.query(
-        """SELECT name, version, content_hash
+        """SELECT name, version, content_hash, ast_json
            FROM dsl_expressions
            WHERE status = 'published' AND version = (
                SELECT MAX(version) FROM dsl_expressions e2
@@ -674,11 +717,24 @@ def list_available_indicators(request: Request) -> dict:
             # display_name 供复合指标管理/详情等非筛选界面显示中文名。
             "label": f"{expression['name']} (DSL v{expression['version']})",
             "display_name": _DSL_INDICATOR_LABELS.get(expression["name"], expression["name"]),
-            "unit": _DSL_INDICATOR_UNITS.get(expression["name"], "plain"),
+            "unit": _dsl_indicator_unit(expression),
             "version": expression["version"], "content_hash": expression["content_hash"],
             "dsl": True,
         })
-    return {"indicators": indicators, "count": len(indicators)}
+    return {
+        "indicators": indicators,
+        "count": len(indicators),
+        # 单位口径说明（与 app/core/screening/field_units.py 对齐）：
+        # plain 明确表示“原始数值，不进行百分比换算”（金额/股数/倍率等），
+        # 供前端展示与输入换算时判断。
+        "unit_semantics": {
+            "plain": "plain 表示原始数值（金额/股数/倍率等），不进行百分比换算",
+            "pct": "pct 表示小数比例存储，展示时乘以 100 并加 %",
+            "percent": "percent 表示百分数原值存储，直接加 %",
+            "price": "price 表示价格",
+            "ratio": "ratio 表示倍率",
+        },
+    }
 
 
 class SaveRuleRequest(BaseModel):
@@ -771,7 +827,14 @@ def resolve_rule_indicator_locks(
     published = {
         row["name"]: row
         for row in sqlite.query(
-            "SELECT name, version, content_hash FROM dsl_expressions WHERE status = 'published'"
+            """SELECT name, version, content_hash
+               FROM dsl_expressions
+               WHERE status = 'published'
+                 AND version = (
+                     SELECT MAX(version) FROM dsl_expressions e2
+                     WHERE e2.name = dsl_expressions.name AND e2.status = 'published'
+                 )
+               ORDER BY name"""
         )
     }
     locks: dict[str, dict[str, Any]] = {}

@@ -225,6 +225,7 @@ class BaoStockAdapter(BaseAdapter):
         records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
         skipped_bse: list[str] = []
+        query_errors: list[str] = []
 
         with self._session():
             for raw_code in request.stock_codes:
@@ -270,6 +271,7 @@ class BaoStockAdapter(BaseAdapter):
                     msg = f"query_history_k_data_plus({bs_code}) 失败: {rs.error_msg}"
                     logger.warning(msg)
                     raw_lines.append(f"ERROR {bs_code}: {rs.error_msg}")
+                    query_errors.append(msg)
                     continue
 
                 stock_code_norm = _normalize_stock_code(raw_code)
@@ -303,6 +305,8 @@ class BaoStockAdapter(BaseAdapter):
             if skipped_bse
             else None
         )
+        if query_errors:
+            error = "; ".join(part for part in (error, *query_errors) if part)
         return self._make_result(
             data=records,
             raw_response="\n".join(raw_lines).encode("utf-8"),
@@ -328,6 +332,7 @@ class BaoStockAdapter(BaseAdapter):
         records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
         skipped_bse: list[str] = []
+        query_errors: list[str] = []
 
         with self._session():
             for raw_code in request.stock_codes:
@@ -358,12 +363,15 @@ class BaoStockAdapter(BaseAdapter):
                         )
 
                     if rs.error_code != "0":
+                        msg = f"query_dividend_data({bs_code}, {year}) 失败: {rs.error_msg}"
                         logger.warning(
                             "query_dividend_data(%s, %d) 失败: %s",
                             bs_code,
                             year,
                             rs.error_msg,
                         )
+                        raw_lines.append(f"ERROR {bs_code}/{year}: {rs.error_msg}")
+                        query_errors.append(msg)
                         continue
 
                     fields = list(rs.fields) if rs.fields else []
@@ -388,6 +396,8 @@ class BaoStockAdapter(BaseAdapter):
             if skipped_bse
             else None
         )
+        if query_errors:
+            error = "; ".join(part for part in (error, *query_errors) if part)
         return self._make_result(
             data=records,
             raw_response="\n".join(raw_lines).encode("utf-8"),

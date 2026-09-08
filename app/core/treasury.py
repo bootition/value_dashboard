@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from collections.abc import Callable
@@ -579,11 +580,18 @@ class TreasuryCurveUpdater:
 
     # ─── retry / missing 维护 ─────────────────────────────────────
 
+    @staticmethod
+    def _retry_extra_json(
+        tenor: float | None, *, work_date: str | None = None,
+    ) -> str:
+        """retry_list.extra_json 与 _record_retry/_resolve_retry 共用同一格式。"""
+        extra = {"mode": "history", "tenor": tenor} if tenor is not None else \
+            {"mode": "daily", "work_date": work_date}
+        return json.dumps(extra, ensure_ascii=False)
+
     def _record_retry(
         self, tenor: float | None, error: str, *, work_date: str | None = None,
     ) -> None:
-        extra = {"mode": "history", "tenor": tenor} if tenor is not None else \
-            {"mode": "daily", "work_date": work_date}
         try:
             with self.sqlite.transaction() as conn:
                 conn.execute(
@@ -594,7 +602,7 @@ class TreasuryCurveUpdater:
                          error=excluded.error, last_attempt=excluded.last_attempt""",
                     ["__market__", RETRY_DATA_TYPE, "czb_mof", error[:500],
                      datetime.now(UTC).isoformat(),
-                     __import__("json").dumps(extra, ensure_ascii=False)],
+                     self._retry_extra_json(tenor, work_date=work_date)],
                 )
         except Exception as e:
             logger.warning("记录国债曲线失败信息失败: %s", e)
@@ -630,11 +638,20 @@ class TreasuryCurveUpdater:
             logger.warning("解决国债曲线缺失信息失败: %s", e)
 
     def _resolve_retry(self, tenor: float | None, *, work_date: str | None = None) -> None:
+        """按 extra_json 精确删除本次成功请求对应的 retry 条目。
+
+        不能只按 stock_code+data_type+adapter 整域删除：daily 成功时
+        history 各期限未解决的 retry 必须保留。
+        """
         try:
             self.sqlite.execute(
                 """DELETE FROM retry_list
-                   WHERE stock_code = ? AND data_type = ? AND adapter = ?""",
-                ["__market__", RETRY_DATA_TYPE, "czb_mof"],
+                   WHERE stock_code = ? AND data_type = ? AND adapter = ?
+                     AND extra_json = ?""",
+                [
+                    "__market__", RETRY_DATA_TYPE, "czb_mof",
+                    self._retry_extra_json(tenor, work_date=work_date),
+                ],
             )
         except Exception as e:
             logger.warning("清理国债曲线重试条目失败: %s", e)

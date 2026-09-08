@@ -33,6 +33,22 @@ def test_announcement_check_does_not_mark_a_filing_seen_before_refresh(duckdb_st
     assert sqlite_store.query("SELECT * FROM announcement_registry") == []
 
 
+def test_category_query_title_variant_triggers_financial_refresh(duckdb_store, sqlite_store) -> None:
+    """半年度类别接口返回的公告无论标题写法都必须进入财务刷新集合。"""
+    class CategoryAnnouncementAdapter:
+        def fetch(self, request):
+            return FetchResult(
+                data=[{"announcement_id": "notice-half-year", "announcement_time": "2026-08-25T08:00:00Z",
+                       "title": "2026年半年报", "stock_code": "603365"}],
+                metadata=SourceMetadata(source="cninfo", fetch_time=datetime.now(UTC), raw_response_hash="a" * 64, confidence="strict"),
+            )
+
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=CategoryAnnouncementAdapter())
+    result = updater._check_new_announcements(persist=True)
+    assert result["affected_stock_codes"] == ["603365"]
+    assert result["affected_announcements"]["603365"][0]["title"] == "2026年半年报"
+
+
 def test_financial_refresh_marks_skipped_but_current_period_as_succeeded(
     duckdb_store, sqlite_store,
 ) -> None:
@@ -52,6 +68,28 @@ def test_financial_refresh_marks_skipped_but_current_period_as_succeeded(
     assert result["status"] == "success"
     assert result["succeeded_codes"] == ["000001"]
     assert result["pending_codes"] == []
+
+
+def test_partial_trio_refresh_stays_pending(duckdb_store, sqlite_store) -> None:
+    """只有一张表推进到新报告期时不得把公告标记为成功入册。"""
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    updater._fetch_financial_trio = lambda code: (
+        [
+            {"status": "success", "data_type": "balance_sheet", "skipped": False,
+             "latest_fetched": "2026-06-30"},
+            {"status": "success", "data_type": "income_statement", "skipped": True,
+             "latest_local": "2026-03-31"},
+            {"status": "success", "data_type": "cash_flow", "skipped": True,
+             "latest_local": "2026-03-31"},
+        ],
+        {},
+    )
+
+    result = updater._refresh_financials(["603365"])
+
+    assert result["status"] == "success"
+    assert result["succeeded_codes"] == []
+    assert result["pending_codes"] == ["603365"]
 
 
 def test_failed_financial_refresh_keeps_announcement_pending_and_records_retry(duckdb_store, sqlite_store) -> None:
@@ -220,6 +258,9 @@ def test_classify_announcement_financial_keywords() -> None:
     assert classify_announcement("2026年第三季度报告") == "financial"
     assert classify_announcement("2026年半年度业绩预告") == "financial"
     assert classify_announcement("2026年年度业绩快报") == "financial"
+    # CNINFO 真实标题变体（2026-09-08 红队：603365 漏报根因）
+    assert classify_announcement("2026年半年报") == "financial"
+    assert classify_announcement("2026年半年报摘要") == "financial"
 
 
 def test_classify_announcement_dividend_and_other() -> None:

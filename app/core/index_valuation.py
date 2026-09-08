@@ -128,11 +128,13 @@ class IndexValuationUpdater:
                             source, fetch_time, raw_hash, confidence, batch_id, extra)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                            ON CONFLICT(index_code, trade_date, source) DO UPDATE SET
-                             pe_ttm=excluded.pe_ttm, pe_metric=excluded.pe_metric,
-                             pb=excluded.pb, div_yield=excluded.div_yield,
+                             pe_ttm=COALESCE(excluded.pe_ttm, index_valuation.pe_ttm),
+                             pe_metric=COALESCE(excluded.pe_metric, index_valuation.pe_metric),
+                             pb=COALESCE(excluded.pb, index_valuation.pb),
+                             div_yield=COALESCE(excluded.div_yield, index_valuation.div_yield),
                              fetch_time=excluded.fetch_time, raw_hash=excluded.raw_hash,
                              confidence=excluded.confidence, batch_id=excluded.batch_id,
-                             extra=excluded.extra""",
+                             extra=COALESCE(excluded.extra, index_valuation.extra)""",
                         [
                             [
                                 row.get("index_code", index_code),
@@ -173,11 +175,13 @@ class IndexValuationUpdater:
                                     source, fetch_time, raw_hash, confidence, batch_id, extra)
                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                                    ON CONFLICT(index_code, trade_date, source) DO UPDATE SET
-                                     pe_ttm=excluded.pe_ttm, pe_metric=excluded.pe_metric,
-                                     pb=excluded.pb, div_yield=excluded.div_yield,
+                                     pe_ttm=COALESCE(excluded.pe_ttm, index_valuation.pe_ttm),
+                                     pe_metric=COALESCE(excluded.pe_metric, index_valuation.pe_metric),
+                                     pb=COALESCE(excluded.pb, index_valuation.pb),
+                                     div_yield=COALESCE(excluded.div_yield, index_valuation.div_yield),
                                      fetch_time=excluded.fetch_time, raw_hash=excluded.raw_hash,
                                      confidence=excluded.confidence, batch_id=excluded.batch_id,
-                                     extra=excluded.extra""",
+                                     extra=COALESCE(excluded.extra, index_valuation.extra)""",
                                 [
                                     [
                                         row.get("index_code", index_code),
@@ -263,11 +267,13 @@ class IndexValuationUpdater:
                           CAST(extra AS VARCHAR)
                    FROM {stage_view}
                    ON CONFLICT(index_code, trade_date, source) DO UPDATE SET
-                     pe_ttm=excluded.pe_ttm, pe_metric=excluded.pe_metric,
-                     pb=excluded.pb, div_yield=excluded.div_yield,
+                     pe_ttm=COALESCE(excluded.pe_ttm, index_valuation.pe_ttm),
+                     pe_metric=COALESCE(excluded.pe_metric, index_valuation.pe_metric),
+                     pb=COALESCE(excluded.pb, index_valuation.pb),
+                     div_yield=COALESCE(excluded.div_yield, index_valuation.div_yield),
                      fetch_time=excluded.fetch_time, raw_hash=excluded.raw_hash,
                      confidence=excluded.confidence, batch_id=excluded.batch_id,
-                     extra=excluded.extra""",
+                     extra=COALESCE(excluded.extra, index_valuation.extra)""",
                 [
                     result.metadata.source,
                     fetch_time,

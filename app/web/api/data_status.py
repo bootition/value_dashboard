@@ -194,7 +194,14 @@ def get_indicator_recompute(request: Request) -> dict:
 
 @router.post("/indicator-recompute")
 def start_indicator_recompute(request: Request) -> dict:
-    """启动指标快照重算任务（有 pending 股票时只算 pending，否则全量）。"""
+    """启动指标快照重算任务（有 pending 股票时只算 pending，否则全量）。
+
+    运维级写操作：要求 x-vd-admin-token（不通过未鉴权 /api/session 下发），
+    防止任意本机进程反复触发正式库全市场重算（2026-09-08 红队修复）。
+    """
+    admin_token = getattr(request.app.state, "admin_token", None)
+    if not admin_token or request.headers.get("x-vd-admin-token") != admin_token:
+        raise HTTPException(status_code=403, detail="admin token required for indicator recompute")
     try:
         stage_rows = request.app.state.sqlite.query(
             "SELECT current_stage FROM auto_update_state WHERE id = 1"
@@ -261,8 +268,14 @@ def get_summary(request: Request) -> dict:
             cached["stale"] = True
             cached["stale_reason"] = "auto_update_active"
             cached["updating"] = True
+    # 写锁刚结束但缓存是在更新开始前生成的：即使 TTL 未到也必须后台重建。
+    # 短更新（<5 分钟）以前会直接返回旧缓存且无 stale 标记，状态页显示
+    # 旧 last_update/覆盖数直到 TTL 到期（2026-09-08 红队修复）。
+    update_just_finished = bool(cached.get("updating")) and not write_lock_active
+    if update_just_finished:
+        cached["stale_reason"] = "summary_refreshing_after_update"
     needs_refresh = (
-        (age is None or age > _SUMMARY_TTL_SECONDS or bool(cached.get("checking")))
+        (age is None or age > _SUMMARY_TTL_SECONDS or bool(cached.get("checking")) or update_just_finished)
         and not write_lock_active
     )
     if needs_refresh:

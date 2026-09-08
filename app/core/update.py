@@ -25,6 +25,8 @@ from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
+from app.core.financial_period import CN_TZ as _CN_TZ
+from app.core.financial_period import expected_financial_period
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -48,14 +50,15 @@ def _is_duckdb_fatal(error: Exception) -> bool:
 # 其他公告只登记入册，不进入财务刷新队列。
 
 _ANNOUNCEMENT_FINANCIAL_KEYWORDS: tuple[str, ...] = (
-    "年度报告", "半年度报告", "一季报", "第一季度报告", "三季报", "第三季度报告",
-    "业绩预告", "业绩快报",
+    "年度报告", "半年度报告", "半年报", "一季报", "第一季度报告",
+    "三季报", "第三季度报告", "业绩预告", "业绩快报",
 )
 # 财务公告按 CNINFO 类别精确查询，避免全市场全文列表翻页被噪声淹没。
 # 顺序即查询顺序：当前处于中报季，半年报优先。
 _ANNOUNCEMENT_FINANCIAL_CATEGORIES: tuple[str, ...] = (
     "semi_annual", "q1", "q3", "annual",
 )
+_ANNOUNCEMENT_DIVIDEND_CATEGORY = "dividend"
 _ANNOUNCEMENT_CHECK_CURSOR_KEY = "announcement_check_cursor"
 _ANNOUNCEMENT_DIVIDEND_KEYWORDS: tuple[str, ...] = (
     "权益分派", "分红", "除权除息", "利润分配",
@@ -460,17 +463,32 @@ class IncrementalUpdater:
             report_step("trading_dates", self._update_trading_dates())
         price_step = report_step("prices", self._update_prices_incremental(max_stocks, detail_cb))
         updated_price_codes = price_step.pop("_updated_codes", [])
+        price_xdxr_codes = price_step.pop("_xdxr_codes", [])
+        price_raw_full_refetch = price_step.pop("_raw_full_refetch", False)
 
         if max_stocks > 0:
             if price_step["status"] == "success" and price_step.get("success", 0) > 0:
                 from app.core.indicators.calculator import IndicatorCalculator
 
-                report_step(
-                    "indicators",
-                    IndicatorCalculator(duck=self.duck, sqlite=self.sqlite).compute_snapshot_for_codes(
-                        updated_price_codes, progress_cb=indicator_progress,
-                    ),
+                calculator = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite)
+                price_force_codes = set(price_xdxr_codes)
+                if price_raw_full_refetch:
+                    price_force_codes.update(updated_price_codes)
+                price_method = getattr(
+                    calculator, "compute_price_sensitive_for_codes", None,
                 )
+                snapshot_step = (
+                    price_method(
+                        updated_price_codes,
+                        force_codes=price_force_codes,
+                        progress_cb=indicator_progress,
+                    )
+                    if price_method is not None
+                    else calculator.compute_snapshot_for_codes(
+                        updated_price_codes, progress_cb=indicator_progress,
+                    )
+                )
+                report_step("indicators", snapshot_step)
             report["status"] = aggregate_job_status(report["steps"])
             report["finished_at"] = datetime.now(UTC).isoformat()
             logger.info("有界价格更新完成: %s", report["status"])
@@ -532,7 +550,11 @@ class IncrementalUpdater:
             market_action_codes = sorted({
                 code
                 for code, items in announcement_check.get("all_new_announcements", {}).items()
-                if any(classify_announcement(item.get("title")) == "dividend" for item in items)
+                if any(
+                    item.get("_announcement_category") == _ANNOUNCEMENT_DIVIDEND_CATEGORY
+                    or classify_announcement(item.get("title")) == "dividend"
+                    for item in items
+                )
             })
             if market_action_codes:
                 actions = self._refresh_market_actions(
@@ -644,38 +666,98 @@ class IncrementalUpdater:
         elif financial_step["status"] in {"success", "partial"} or retry_recompute_codes:
             from app.core.indicators.calculator import IndicatorCalculator
 
-            # 2026-08-28 提速计划：财报只刷新了少数公告股票，只增量重算
-            # "价格刚变化 + 财报刚刷新 + 快照日期落后"的并集，不再因为
-            # 几只股票发了新财报就全量重算 5,500+ 只。partial 也照常为
-            # 已成功写入的股票重算快照；失败股票保留上一代快照。
-            stale_snapshot_codes = self._stale_snapshot_codes()
+            calculator = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite)
             refreshed_financial_codes = list(
                 financials.get("succeeded_codes", []) if financials else []
             )
-            codes_to_compute = list(dict.fromkeys([
-                *updated_price_codes,
+            financial_stale_codes = self._stale_financial_snapshot_codes()
+            price_stale_codes = self._stale_price_snapshot_codes()
+
+            # 完整重算组：财务变化/明细回填/失败重试成功，输入域不确定，保
+            # 守整股重算全部指标。价格变化组只重算价格域字段；回购/融资
+            # 变化组只重算分红融资比三列（2026-09-08 提速计划）。
+            full_codes = list(dict.fromkeys([
                 *refreshed_financial_codes,
+                *financial_stale_codes,
                 *detail_backfilled_codes,
-                *buyback_changed_codes,
-                *funding_changed_codes,
                 *retry_recompute_codes,
-                *stale_snapshot_codes,
             ]))
-            if codes_to_compute:
-                snapshot_step = IndicatorCalculator(
-                    duck=self.duck, sqlite=self.sqlite,
-                ).compute_snapshot_for_codes(
-                    codes_to_compute, progress_cb=indicator_progress,
+            price_codes = [
+                code for code in list(dict.fromkeys([
+                    *updated_price_codes,
+                    *price_stale_codes,
+                ]))
+                if code not in full_codes
+            ]
+            event_codes = [
+                code for code in list(dict.fromkeys([
+                    *buyback_changed_codes,
+                    *funding_changed_codes,
+                ]))
+                if code not in full_codes
+            ]
+            price_force_codes = set(full_codes) | set(price_xdxr_codes)
+            if price_raw_full_refetch:
+                price_force_codes.update(updated_price_codes)
+
+            snapshot_step: dict[str, Any] = {
+                "status": "skipped",
+                "reason": "no_changed_stocks",
+                "success": 0,
+                "failed": 0,
+            }
+            ran_indicator_step = False
+            if full_codes:
+                snapshot_step = calculator.compute_snapshot_for_codes(
+                    full_codes, progress_cb=indicator_progress,
                 )
+                ran_indicator_step = True
+            if price_codes:
+                price_method = getattr(
+                    calculator, "compute_price_sensitive_for_codes", None,
+                )
+                if price_method is None:
+                    price_step = calculator.compute_snapshot_for_codes(
+                        price_codes, progress_cb=indicator_progress,
+                    )
+                else:
+                    price_step = price_method(
+                        price_codes,
+                        force_codes=price_force_codes,
+                        progress_cb=indicator_progress,
+                    )
+                if ran_indicator_step:
+                    snapshot_step = {
+                        **price_step,
+                        "full_recompute": snapshot_step,
+                    }
+                else:
+                    snapshot_step = price_step
+                ran_indicator_step = True
+            if event_codes:
+                event_method = getattr(
+                    calculator, "refresh_funding_dividend_fields", None,
+                )
+                if event_method is None:
+                    event_step = calculator.compute_snapshot_for_codes(
+                        event_codes, progress_cb=indicator_progress,
+                    )
+                else:
+                    event_step = event_method(event_codes)
+                if ran_indicator_step:
+                    snapshot_step = {**event_step, "full_recompute": snapshot_step}
+                else:
+                    snapshot_step = event_step
+                ran_indicator_step = True
+            if ran_indicator_step:
                 report_step("indicators", snapshot_step)
+
             if treasury_changed_codes:
                 # 国债曲线变化只影响 ttm_dividend_yield / div_yield_spread_*，
                 # 无需对全市场完整重算 PE/PB/成长/技术指标；专用批量刷新
                 # 在正式库为秒级，取代旧的约 12 分钟全量重算。
-                treasury_step = IndicatorCalculator(
-                    duck=self.duck, sqlite=self.sqlite,
-                ).refresh_treasury_spreads(treasury_changed_codes)
-                if codes_to_compute:
+                treasury_step = calculator.refresh_treasury_spreads(treasury_changed_codes)
+                if ran_indicator_step:
                     report_step(
                         "indicators",
                         {**treasury_step, "full_recompute": snapshot_step},
@@ -877,21 +959,33 @@ class IncrementalUpdater:
         dividend_financing_ratio_pct 快照。
         """
         try:
-            before = self.duck.read_query(
-                """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
-                   FROM funding_events GROUP BY stock_code"""
-            )
-            before_by_code = {row["stock_code"]: row["amount"] for row in before}
+            # 与 IndicatorCalculator._get_cumulative_financing_amount 完全同口径：
+            # COALESCE(raise_funds, raise_funds_net, issue_price * issue_shares)。
+            # 旧实现只看 SUM(raise_funds)，会把 IPO（raise_funds 几乎恒为 NULL、
+            # 金额只存在 raise_funds_net）的融资变化全部漏检。
+            def funding_amounts() -> dict[str, float]:
+                rows = self.duck.read_query(
+                    """SELECT stock_code,
+                              COALESCE(SUM(COALESCE(
+                                  raise_funds, raise_funds_net,
+                                  issue_price * issue_shares
+                              )), 0) AS amount
+                       FROM funding_events
+                       WHERE event_type IN ('ipo', 'a_placement', 'rights')
+                       GROUP BY stock_code"""
+                )
+                return {
+                    str(row["stock_code"]): float(row["amount"] or 0.0)
+                    for row in rows
+                }
+
+            before_by_code = funding_amounts()
             from app.core.funding import FundingUpdater
 
             report = FundingUpdater(
                 duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
             ).refresh_if_due()
-            after = self.duck.read_query(
-                """SELECT stock_code, COALESCE(SUM(raise_funds), 0) AS amount
-                   FROM funding_events GROUP BY stock_code"""
-            )
-            after_by_code = {row["stock_code"]: row["amount"] for row in after}
+            after_by_code = funding_amounts()
             changed_codes = sorted({
                 code for code in set(before_by_code) | set(after_by_code)
                 if before_by_code.get(code) != after_by_code.get(code)
@@ -916,27 +1010,43 @@ class IncrementalUpdater:
             logger.warning("指数估值刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
-    def _stale_snapshot_codes(self) -> list[str]:
-        """Listed stocks whose snapshot is behind raw price OR complete financials.
+    def _stale_price_snapshot_codes(self) -> list[str]:
+        """Listed stocks whose snapshot price date is behind raw price."""
+        try:
+            rows = self.duck.read_query(
+                """SELECT snap.stock_code
+                   FROM indicator_snapshot snap
+                   JOIN stock_meta m ON m.stock_code = snap.stock_code
+                   JOIN (
+                       SELECT stock_code, MAX(trade_date) AS latest
+                       FROM price_daily_raw GROUP BY stock_code
+                   ) raw ON raw.stock_code = snap.stock_code
+                   WHERE m.is_listed IS TRUE
+                     AND snap.latest_price_date != raw.latest
+                   ORDER BY snap.stock_code"""
+            )
+            return [row["stock_code"] for row in rows]
+        except Exception as error:
+            logger.warning("查询价格过期指标快照失败: %s", error)
+            return []
 
-        财报中报季 catch-up 可能 partial：已成功写入 Q2 三表的股票即使
-        价格日期没变，也必须重算快照，否则市值/TTM 仍停留在 Q1。
+    def _stale_financial_snapshot_codes(self) -> list[str]:
+        """Listed stocks whose snapshot report_date is behind complete financials.
+
+        财报中报季 catch-up 可能 partial：已成功写入最新三表的股票即使
+        价格日期没变，也必须重算快照，否则市值/TTM 仍停留在旧报告期。
         """
         try:
             rows = self.duck.read_query(
-                """WITH raw AS (
-                       SELECT stock_code, MAX(trade_date) AS latest
-                       FROM price_daily_raw GROUP BY stock_code
-                   ),
-                   complete_financials AS (
+                """WITH complete_financials AS (
                        SELECT bs.stock_code, MAX(bs.report_date) AS latest
                        FROM balance_sheet bs
                        JOIN income_statement ic
                          ON ic.stock_code = bs.stock_code
-                        AND ic.report_date = bs.report_date
+                         AND ic.report_date = bs.report_date
                        JOIN cash_flow cf
                          ON cf.stock_code = bs.stock_code
-                        AND cf.report_date = bs.report_date
+                         AND cf.report_date = bs.report_date
                        WHERE bs.total_assets IS NOT NULL
                          AND bs.total_liabilities IS NOT NULL
                          AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
@@ -944,27 +1054,27 @@ class IncrementalUpdater:
                          AND ic.parent_net_profit IS NOT NULL
                          AND cf.cf_from_operating IS NOT NULL
                        GROUP BY bs.stock_code
-                   ),
-                   stale AS (
-                       SELECT snap.stock_code
-                       FROM indicator_snapshot snap
-                       JOIN raw ON raw.stock_code = snap.stock_code
-                       JOIN stock_meta m ON m.stock_code = snap.stock_code
-                       WHERE m.is_listed IS TRUE
-                         AND snap.latest_price_date != raw.latest
-                       UNION
-                       SELECT snap.stock_code
-                       FROM indicator_snapshot snap
-                       JOIN complete_financials fin
-                         ON fin.stock_code = snap.stock_code
-                       WHERE fin.latest > snap.report_date
                    )
-                   SELECT DISTINCT stock_code FROM stale ORDER BY stock_code"""
+                   SELECT snap.stock_code
+                   FROM indicator_snapshot snap
+                   JOIN complete_financials fin
+                     ON fin.stock_code = snap.stock_code
+                   JOIN stock_meta m ON m.stock_code = snap.stock_code
+                   WHERE m.is_listed IS TRUE
+                     AND fin.latest > snap.report_date
+                   ORDER BY snap.stock_code"""
             )
             return [row["stock_code"] for row in rows]
         except Exception as error:
-            logger.warning("查询过期指标快照失败: %s", error)
+            logger.warning("查询财务过期指标快照失败: %s", error)
             return []
+
+    def _stale_snapshot_codes(self) -> list[str]:
+        """Listed stocks whose snapshot is behind raw price OR complete financials."""
+        return list(dict.fromkeys([
+            *self._stale_price_snapshot_codes(),
+            *self._stale_financial_snapshot_codes(),
+        ]))
 
     def _share_capital_fingerprint(self) -> str:
         """Return a cheap fingerprint of the share-capital pool state.
@@ -1118,7 +1228,7 @@ class IncrementalUpdater:
             last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
         except (ValueError, TypeError):
             return True
-        return (datetime.now(UTC).date() - last_date).days >= interval_days
+        return (datetime.now(_CN_TZ).date() - last_date).days >= interval_days
 
     def _mark_csrc_refreshed(self) -> None:
         """Persist the CSRC refresh date so later runs skip the full scan."""
@@ -1194,16 +1304,9 @@ class IncrementalUpdater:
 
         半年报季（8-10月）期望 06-30；三季报季（11月后）期望 09-30；
         一季报季（5-7月）期望 03-31；其余时间期望上一年年报 12-31。
+        披露季以北京时间为准（2026-09-08 红队 C 修复）。
         """
-        current = now or datetime.now(UTC)
-        year = current.year
-        if current.month >= 11:
-            return f"{year}-09-30"
-        if current.month >= 8:
-            return f"{year}-06-30"
-        if current.month >= 5:
-            return f"{year}-03-31"
-        return f"{year - 1}-12-31"
+        return expected_financial_period(now)
 
     def _get_latest_financial_report_date(self, stock_code: str, data_type: str) -> str | None:
         """获取本地最新财务报告期（balance_sheet/income_statement/cash_flow）"""
@@ -1322,7 +1425,14 @@ class IncrementalUpdater:
                 ))
             except Exception as error:
                 return [], str(error)
-            return list(result.data or []), result.metadata.error or None
+            items = list(result.data or [])
+            # 类别接口已经按"半年报/一季报/三季报/年报/分红"精确过滤；
+            # 携带来源类别，后面不再依赖标题措辞判断是否财务公告
+            # （CNINFO 存在"2026年半年报"这类标题，旧关键词会漏报）。
+            if category in _ANNOUNCEMENT_FINANCIAL_CATEGORIES or category == _ANNOUNCEMENT_DIVIDEND_CATEGORY:
+                for item in items:
+                    item["_announcement_category"] = category
+            return items, result.metadata.error or None
 
         all_items: list[dict[str, Any]] = []
         errors: list[str] = []
@@ -1334,12 +1444,20 @@ class IncrementalUpdater:
             all_items.extend(items)
             if error:
                 errors.append(f"{category}: {error}")
+        dividend_items, dividend_error = fetch_items(
+            _ANNOUNCEMENT_DIVIDEND_CATEGORY, financial_start, financial_max_pages,
+        )
+        all_items.extend(dividend_items)
+        if dividend_error:
+            errors.append(f"dividend: {dividend_error}")
+        # general 全文列表只用于"非财务公告登记"（可选簿记）；分红/除权公告
+        # 已由上面的 dividend 类别精确覆盖，general 截断不再阻断游标推进，
+        # 否则每个公告量大日都会把更新打成 partial 并反复重查同一窗口。
         general_items, general_error = fetch_items(
             None, general_start, general_max_pages,
         )
         all_items.extend(general_items)
-        if general_error:
-            errors.append(f"general: {general_error}")
+        general_warning = f"general: {general_error}" if general_error else None
 
         # 类别查询与全文查询可能返回同一公告；按公告 ID 去重。
         unique_items: list[dict[str, Any]] = []
@@ -1368,6 +1486,7 @@ class IncrementalUpdater:
                 "affected_announcements": {},
                 "all_new_announcements": {},
                 "errors": errors,
+                "warnings": [general_warning] if general_warning else [],
             }
 
         # 批量查询本地登记表，避免每一条公告一次 SQL。
@@ -1403,13 +1522,15 @@ class IncrementalUpdater:
             affected.add(stock_code)
             affected_announcements.setdefault(stock_code, []).append(item)
 
-        # 按标题分类，只保留财务类公告触发刷新
+        # 财务类别接口直接命中的公告无条件视为财务公告；general 列表中的
+        # 公告按标题分类，只保留财务类公告触发刷新。
         financial_codes: set[str] = set()
         financial_announcements: dict[str, list[dict[str, Any]]] = {}
         for code in sorted(affected):
             financial_items = [
                 item for item in affected_announcements[code]
-                if classify_announcement(item.get("title")) == "financial"
+                if item.get("_announcement_category") in _ANNOUNCEMENT_FINANCIAL_CATEGORIES
+                or classify_announcement(item.get("title")) == "financial"
             ]
             if financial_items:
                 financial_codes.add(code)
@@ -1427,6 +1548,7 @@ class IncrementalUpdater:
                 code: affected_announcements[code] for code in sorted(affected)
             },
             "errors": errors,
+            "warnings": [general_warning] if general_warning else [],
         }
 
     def _mark_announcements_seen(self, stock_code: str, announcements: list[dict[str, Any]]) -> None:
@@ -1544,6 +1666,10 @@ class IncrementalUpdater:
                 fetched[data_type] = (result, new_rows)
                 outcomes.append({
                     "status": "success", "data_type": data_type, "skipped": False,
+                    "latest_fetched": str(max(
+                        (str(row.get("report_date") or "") for row in new_rows),
+                        default=latest_local or "",
+                    )),
                 })
             except Exception as error:
                 outcomes.append({
@@ -2158,25 +2284,26 @@ class IncrementalUpdater:
 
         expected_period = self._current_expected_financial_period()
 
+        def _latest_period(outcome: dict[str, Any]) -> str:
+            # 非 skipped：取本轮实际写入的最新报告期；skipped：取本地已有最新期。
+            return str(
+                outcome.get("latest_fetched") or outcome.get("latest_local") or ""
+            )[:10]
+
         def finish_one(code: str, outcomes: list[dict[str, Any]]) -> None:
             nonlocal succeeded, completed
             completed += 1
             if all(outcome["status"] == "success" for outcome in outcomes):
-                if all(outcome.get("skipped") for outcome in outcomes):
-                    local_dates = [
-                        str(outcome.get("latest_local") or "")[:10]
-                        for outcome in outcomes
-                    ]
-                    # 本地三表都已达到当前应发布报告期 → 公告目的已达成，
-                    # 应标记成功入册；只有确实落后于期望期才是源延迟 pending。
-                    if local_dates and all(d >= expected_period for d in local_dates):
-                        succeeded += 1
-                        succeeded_codes.append(code)
-                    else:
-                        pending_codes.append(code)
-                else:
+                local_dates = [_latest_period(outcome) for outcome in outcomes]
+                # 三张报表都达到当前应发布报告期 → 公告目的已达成，标记成功
+                # 入册。任何一张表仍停留在旧报告期（源侧延迟/部分成功）都
+                # 保持 pending，下一轮继续重试；绝不能把"只有资产负债表
+                # 更新了半年报"误判为成功并把公告永久标记 seen。
+                if local_dates and all(d >= expected_period for d in local_dates):
                     succeeded += 1
                     succeeded_codes.append(code)
+                else:
+                    pending_codes.append(code)
             else:
                 failed.append(code)
             if detail_cb is not None:
@@ -2424,19 +2551,24 @@ class IncrementalUpdater:
             thread_name_prefix="vd-price-request",
         )
 
-        def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None, bool]:
+        def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None, bool, bool, bool]:
             """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。
 
             增量原则：raw 与 qfq 各自以本地最新日期为起点，仅缺失的一侧
             才全量拉取。绝不用全局最老日期拖低另一侧的起点——历史已完整的
             股票每次只拉缺口（通常几行），避免无意义的全历史重拉。
+
+            返回最后两个布尔值表示 raw/qfq 本次是否为"全历史请求"；只有
+            全历史请求才允许走 DELETE+INSERT 全量替换（2026-09-08 红队）。
             """
             code = stock["stock_code"]
             need_qfq_full = code in xdxr_codes
+            raw_full_requested = bool(raw_full_refetch)
+            qfq_full_requested = bool(need_qfq_full or raw_full_refetch)
             raw_latest = stock.get("latest_raw_date")
             qfq_latest = stock.get("latest_qfq_date")
-            raw_from = None if raw_full_refetch else (str(raw_latest) if raw_latest else None)
-            qfq_from = None if (need_qfq_full or raw_full_refetch) else (str(qfq_latest) if qfq_latest else None)
+            raw_from = None if raw_full_requested else (str(raw_latest) if raw_latest else None)
+            qfq_from = None if qfq_full_requested else (str(qfq_latest) if qfq_latest else None)
             def fetch_adjust(adjust: str, start: str | None) -> tuple[Any, float]:
                 started = time.monotonic()
                 result = self.adapter_mgr.fetch(FetchRequest(
@@ -2457,7 +2589,7 @@ class IncrementalUpdater:
                 recover = getattr(self.adapter_mgr, "recover_after_timeout", None)
                 if callable(recover):
                     recover()
-                return code, None, None, f"fetch timeout after {fetch_timeout}s", True
+                return code, None, None, f"fetch timeout after {fetch_timeout}s", True, raw_full_requested, qfq_full_requested
             results: dict[str, Any] = {}
             slow = False
             try:
@@ -2466,16 +2598,16 @@ class IncrementalUpdater:
                     results[futures[future]] = result
                     slow = slow or elapsed > 30
             except Exception as exc:
-                return code, None, None, f"fetch exception: {exc}", False
+                return code, None, None, f"fetch exception: {exc}", False, raw_full_requested, qfq_full_requested
             raw_result = results["raw"]
             qfq_result = results["qfq"]
             if raw_result.metadata.error or not raw_result.data:
-                return code, None, None, raw_result.metadata.error or "empty raw", slow
+                return code, None, None, raw_result.metadata.error or "empty raw", slow, raw_full_requested, qfq_full_requested
             if qfq_result.metadata.error or not qfq_result.data:
-                return code, None, None, (qfq_result.metadata.error or "empty qfq"), slow
-            return code, raw_result, qfq_result, None, slow
+                return code, None, None, (qfq_result.metadata.error or "empty qfq"), slow, raw_full_requested, qfq_full_requested
+            return code, raw_result, qfq_result, None, slow, raw_full_requested, qfq_full_requested
 
-        batch: list[tuple[str, Any, Any]] = []
+        batch: list[tuple[str, Any, Any, bool, bool]] = []
         stable_since = time.monotonic()
         observed_concurrency = concurrency
         # 连续流水线：在途任务 = 股票执行器队列深度。慢股票只占用一个槽位，
@@ -2501,13 +2633,15 @@ class IncrementalUpdater:
             raw_result: Any,
             qfq_result: Any,
             err: str | None,
+            raw_full_requested: bool,
+            qfq_full_requested: bool,
         ) -> None:
             nonlocal success_count, updated_codes, fail_count
             if err is not None or raw_result is None:
                 fail_count += 1
                 self._record_failure(code, "price_daily", "manager", err or "empty")
             else:
-                batch.append((code, raw_result, qfq_result))
+                batch.append((code, raw_result, qfq_result, raw_full_requested, qfq_full_requested))
             if len(batch) >= batch_size:
                 success_count, updated_codes, fail_count = self._persist_price_batch(
                     batch, success_count, updated_codes, fail_count
@@ -2535,12 +2669,21 @@ class IncrementalUpdater:
                     stock = outstanding.pop(future)
                     code = stock["stock_code"]
                     try:
-                        code, raw_result, qfq_result, err, slow = future.result()
+                        (
+                            code, raw_result, qfq_result, err, slow,
+                            raw_full_requested, qfq_full_requested,
+                        ) = future.result()
                         window_penalty = window_penalty or slow or err is not None
-                        handle_price_result(code, raw_result, qfq_result, err)
+                        handle_price_result(
+                            code, raw_result, qfq_result, err,
+                            raw_full_requested, qfq_full_requested,
+                        )
                     except Exception as exc:
                         window_penalty = True
-                        handle_price_result(code, None, None, f"price pipeline exception: {exc}")
+                        handle_price_result(
+                            code, None, None, f"price pipeline exception: {exc}",
+                            False, False,
+                        )
                     completed[0] += 1
                     if detail_cb is not None:
                         detail_cb("price", {
@@ -2594,6 +2737,8 @@ class IncrementalUpdater:
                 stock["stock_code"] in priority_codes for stock in target_stocks
             ),
             "_updated_codes": updated_codes,
+            "_xdxr_codes": sorted(xdxr_codes),
+            "_raw_full_refetch": raw_full_refetch,
         }
 
     def _latest_expected_trading_date(self, today: str, *, now: datetime | None = None) -> str:
@@ -2651,6 +2796,27 @@ class IncrementalUpdater:
                     raise ValueError(
                         f"{stock_code} {data_type} full replace truncated "
                         f"({len(result.data)} remote vs {local_count} local); keeping old data"
+                    )
+                # 全历史替换还必须覆盖本地最老日期；源侧截断为"最近 N 年"
+                # 时不得把更早的历史静默删掉（2026-09-08 红队 P0-1 防线）。
+                remote_dates = [
+                    str(row.get("trade_date") or "")[:10]
+                    for row in result.data
+                    if str(row.get("trade_date") or "")[:10]
+                ]
+                if not remote_dates:
+                    raise ValueError(
+                        f"{stock_code} {data_type} full replace has no trade_date rows"
+                    )
+                local_min_row = connection.execute(
+                    f"SELECT MIN(trade_date) AS earliest FROM {table} WHERE stock_code = ?",
+                    [stock_code],
+                ).fetchone()
+                local_min = str(local_min_row[0])[:10] if local_min_row and local_min_row[0] else ""
+                if local_min and min(remote_dates) > local_min:
+                    raise ValueError(
+                        f"{stock_code} {data_type} full replace would drop history "
+                        f"before {min(remote_dates)} (local earliest {local_min}); keeping old data"
                     )
                 connection.execute(
                     f"DELETE FROM {table} WHERE stock_code = ?", [stock_code]
@@ -2733,7 +2899,7 @@ class IncrementalUpdater:
 
     def _persist_price_batch(
         self,
-        batch: list[tuple[str, Any, Any]],
+        batch: list[tuple[str, Any, Any, bool, bool]],
         success_count: int,
         updated_codes: list[str],
         fail_count: int,
@@ -2746,23 +2912,30 @@ class IncrementalUpdater:
         full-replace transactions: DuckDB upserts degrade linearly with table
         size, so a 2000-row conflict upsert stalls ~1 minute on the formal
         table, while delete+insert completes in seconds.
+
+        2026-09-08 红队修复：只有 fetch_one 明确标记为"全历史请求"
+        （raw_full_requested/qfq_full_requested）且行数超阈值，才允许
+        DELETE+INSERT 替换。增量窗口返回的数据再长也只走冲突 upsert，
+        避免把窗口外的历史K线静默删除。
         """
         large, small = [], []
         for item in batch:
-            _, raw_result, qfq_result = item
+            _, raw_result, qfq_result, raw_full_requested, qfq_full_requested = item
             raw_large = (
-                raw_result is not None
+                bool(raw_full_requested)
+                and raw_result is not None
                 and len(raw_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
             )
             qfq_large = (
-                qfq_result is not None
+                bool(qfq_full_requested)
+                and qfq_result is not None
                 and len(qfq_result.data) > self._PRICE_FULL_REPLACE_THRESHOLD
             )
             if raw_large or qfq_large:
                 large.append((item, raw_large, qfq_large))
             else:
                 small.append(item)
-        for (code, raw_result, qfq_result), raw_large, qfq_large in large:
+        for (code, raw_result, qfq_result, _, _), raw_large, qfq_large in large:
             try:
                 with self.duck.transaction() as connection:
                     self._persist_price_pair_in_connection(
@@ -2781,13 +2954,13 @@ class IncrementalUpdater:
             return success_count, updated_codes, fail_count
         try:
             with self.duck.transaction() as connection:
-                for code, raw_result, qfq_result in small:
+                for code, raw_result, qfq_result, _, _ in small:
                     self._persist_price_pair_in_connection(connection, code, raw_result, qfq_result)
             success_count += len(small)
-            updated_codes.extend(code for code, _, _ in small)
+            updated_codes.extend(code for code, _, _, _, _ in small)
             return success_count, updated_codes, fail_count
         except Exception:
-            for code, raw_result, qfq_result in small:
+            for code, raw_result, qfq_result, _, _ in small:
                 try:
                     self._persist_incremental_price_pair(code, raw_result, qfq_result)
                     success_count += 1
@@ -3503,14 +3676,44 @@ class IncrementalUpdater:
         )
 
     def _mark_retry_failed(self, retry_id: int, error: str) -> None:
-        """Retain a failed retry and update its diagnostic state."""
-        self.sqlite.execute(
-            """UPDATE retry_list
-               SET retry_count = retry_count + 1, error = ?, last_attempt = ?,
-                   next_retry_at = datetime('now', '+' || MIN(24, 1 << MIN(retry_count + 1, 5)) || ' hours')
-               WHERE id = ?""",
-            [error[:500], datetime.now(UTC).isoformat(), retry_id],
-        )
+        """Retain a failed retry and update its diagnostic state.
+
+        达到 max_retries 后：除 announcements（是公告 pending 的持久化标记，
+        由财务刷新路径持续消费）外，把条目转记到 missing_list 并移出活跃
+        重试队列，避免永久滞留且页面不可见（2026-09-08 红队修复）。
+        """
+        now = datetime.now(UTC).isoformat()
+        with self.sqlite.transaction() as conn:
+            cursor = conn.execute(
+                """UPDATE retry_list
+                   SET retry_count = retry_count + 1, error = ?, last_attempt = ?,
+                       next_retry_at = datetime('now', '+' || MIN(24, 1 << MIN(retry_count + 1, 5)) || ' hours')
+                   WHERE id = ?""",
+                [error[:500], now, retry_id],
+            )
+            if cursor.rowcount != 1:
+                return
+            rows = conn.execute(
+                """SELECT stock_code, data_type, extra_json, retry_count, max_retries
+                   FROM retry_list WHERE id = ?""",
+                [retry_id],
+            ).fetchall()
+            if not rows:
+                return
+            row = rows[0]
+            stock_code = row["stock_code"]
+            data_type = row["data_type"]
+            if row["retry_count"] < row["max_retries"] or data_type == "announcements":
+                return
+            conn.execute(
+                """INSERT INTO missing_list (stock_code, field_name, reason_code)
+                   VALUES (?, ?, 'retry_exhausted')
+                   ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                   DO UPDATE SET reason_code = excluded.reason_code,
+                                 detected_at = CURRENT_TIMESTAMP""",
+                [stock_code, f"retry_exhausted:{data_type}"],
+            )
+            conn.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
 
     def _record_failure(
         self,

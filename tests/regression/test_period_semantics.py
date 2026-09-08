@@ -9,6 +9,7 @@ from app.core.dsl.codegen import CodeGen
 from app.core.dsl.parser import parse
 from app.core.dsl.registry import ExpressionRegistry
 from app.core.dsl.validator import Validator
+from app.core.financial_period import expected_financial_period
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import build_freshness_metadata, calculate_ttm_trend
@@ -191,6 +192,29 @@ def test_dsl_growth_value_cannot_be_added_to_a_currency_flow(
     )
 
     assert validation["valid"] is False
+
+
+def test_expected_financial_period_uses_beijing_time() -> None:
+    from datetime import UTC, datetime
+
+    # 北京 8月1日 00:00 = UTC 7月31日 16:00，必须按半年报季返回 06-30。
+    assert expected_financial_period(datetime(2026, 7, 31, 16, 0, tzinfo=UTC)) == "2026-06-30"
+    # 北京 11月1日 00:00 = UTC 10月31日 16:00，必须按三季报季返回 09-30。
+    assert expected_financial_period(datetime(2026, 10, 31, 16, 0, tzinfo=UTC)) == "2026-09-30"
+
+
+def test_current_half_year_report_is_not_stale() -> None:
+    from datetime import UTC, datetime
+
+    # 半年报季中，报告期 06-30 距今天自然有 60+ 天，但不应告警。
+    metadata = build_freshness_metadata(
+        financial_date=date(2026, 6, 30),
+        price_date=date(2026, 9, 7),
+        calculated_at=datetime(2026, 9, 7, tzinfo=UTC),
+        data_version="audit-safe-v1",
+    )
+    assert metadata["stale_warning"] is False
+    assert metadata["financial_lagging"] is False
 
 
 def test_indicator_freshness_flags_large_price_gap() -> None:

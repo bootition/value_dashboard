@@ -134,6 +134,216 @@ class IndicatorCalculator:
 
         return result
 
+    def compute_price_fields_for_stock(
+        self, stock_code: str, report_date: Any,
+    ) -> dict[str, Any]:
+        """只重算与价格相关的指标（估值/行情/国债利差），复用既有报告期。
+
+        2026-09-08 提速：日常价格更新只改变价格域字段，盈利/成长/安全/
+        股东回报/分红融资比等基本面字段无需重算。report_date 必须等于
+        当前最新完整报告期，否则调用方应走完整重算。
+        """
+        financials = self._get_latest_financials(stock_code)
+        if str(financials.get("report_date") or "") != str(report_date or ""):
+            raise ValueError(
+                f"{stock_code} financial period changed to "
+                f"{financials.get('report_date')}; full recompute required"
+            )
+        result: dict[str, Any] = {
+            "stock_code": stock_code,
+            "report_date": report_date,
+            "calculated_at": datetime.now(UTC),
+            "data_version": "audit-safe-v1",
+        }
+        price_info = self._get_latest_price(stock_code)
+        result["latest_close"] = price_info.get("close")
+        result["latest_price_date"] = price_info.get("trade_date")
+        shares = self._get_shares(stock_code, financials)
+        ttm = self._get_ttm_data(stock_code, report_date)
+        dividends = self._get_dividend_summary(stock_code, report_date)
+        result.update(self._calc_valuation(
+            stock_code, price_info, shares.get("total_shares"),
+            shares.get("circ_shares"), ttm, financials, dividends,
+        ))
+        result.update(self._calc_technical(stock_code))
+        result.update(self._calc_treasury_spread(stock_code))
+        return result
+
+    def compute_price_sensitive_for_codes(
+        self,
+        stock_codes: list[str],
+        *,
+        force_codes: set[str] | None = None,
+        progress_cb: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """只更新价格域指标；最新价与既有快照相同且非强制的股票直接跳过。
+
+        只有价格真正变化的股票才重算，未变化股票连查询都省掉；既有快照的
+        报告期保持不变，基本面字段完全不触碰。
+        """
+        codes = list(dict.fromkeys(stock_codes))
+        if not codes:
+            return {"status": "skipped", "reason": "no_changed_stocks", "success": 0, "failed": 0, "skipped": 0}
+
+        gate = self._snapshot_publish_gate()
+        if not gate.get("ready"):
+            return {
+                "status": "rejected", "reason": "publish_gate_failed", "gate": gate,
+                "total": len(codes), "success": 0, "failed": len(codes), "skipped": 0,
+            }
+
+        force = set(force_codes or ())
+        placeholders = ", ".join("?" for _ in codes)
+        existing_rows = self.duck.read_query(
+            f"""SELECT stock_code, report_date, latest_close, latest_price_date
+                FROM indicator_snapshot WHERE stock_code IN ({placeholders})""",
+            codes,
+        )
+        existing = {
+            row["stock_code"]: {
+                "report_date": row["report_date"],
+                "latest_close": row["latest_close"],
+                "latest_price_date": row["latest_price_date"],
+            }
+            for row in existing_rows
+        }
+        raw_rows = self.duck.read_query(
+            f"""SELECT stock_code,
+                       MAX(trade_date) AS latest_date,
+                       MAX_BY(close, trade_date) AS latest_close
+                FROM price_daily_raw
+                WHERE stock_code IN ({placeholders}) AND close IS NOT NULL
+                GROUP BY stock_code""",
+            codes,
+        )
+        raw = {row["stock_code"]: row for row in raw_rows}
+
+        changed: list[str] = []
+        full_fallback: list[str] = []
+        skipped = 0
+        for code in codes:
+            old = existing.get(code)
+            if old is None or old.get("report_date") is None:
+                full_fallback.append(code)
+                continue
+            new = raw.get(code)
+            if code in force or new is None:
+                changed.append(code)
+                continue
+            same_date = str(old.get("latest_price_date") or "")[:10] == str(new["latest_date"])[:10]
+            old_close = old.get("latest_close")
+            new_close = new["latest_close"]
+            same_close = (
+                isinstance(old_close, (int, float))
+                and isinstance(new_close, (int, float))
+                and math.isclose(float(old_close), float(new_close), rel_tol=1e-9, abs_tol=1e-9)
+            )
+            if same_date and same_close:
+                skipped += 1
+            else:
+                changed.append(code)
+
+        full_report: dict[str, Any] = {"status": "skipped", "success": 0, "failed": 0}
+        if full_fallback:
+            full_report = self.compute_snapshot_for_codes(full_fallback, progress_cb=progress_cb)
+
+        records: list[dict[str, Any]] = []
+        failed_codes: list[str] = []
+        with self.duck.read_connection() as connection:
+            self._calculation_read_connection = connection
+            try:
+                for done, code in enumerate(changed, start=1):
+                    try:
+                        indicators = self.compute_price_fields_for_stock(
+                            code, existing[code]["report_date"],
+                        )
+                        records.append(indicators)
+                    except Exception as error:
+                        logger.debug("价格域增量计算 %s 失败: %s", code, error)
+                        failed_codes.append(code)
+                    if progress_cb is not None:
+                        progress_cb({
+                            "step": "indicators_price",
+                            "label": "指标快照·价格域",
+                            "done": done,
+                            "total": len(changed),
+                            "current": code,
+                        })
+            finally:
+                del self._calculation_read_connection
+
+        if records:
+            self._update_snapshot_price_fields(records)
+
+        return {
+            "status": "success" if not failed_codes and full_report.get("status") != "partial" else "partial",
+            "reason": None if not failed_codes else "changed_stock_not_ready",
+            "total": len(codes),
+            "success": len(records),
+            "skipped": skipped,
+            "failed": len(failed_codes) + int(full_report.get("failed") or 0),
+            "failed_codes": (failed_codes + list(full_report.get("failed_codes") or []))[:20],
+            "full_recompute": full_report,
+        }
+
+    def refresh_funding_dividend_fields(self, stock_codes: list[str]) -> dict[str, Any]:
+        """只重算分红融资比三列（回购/融资事件变化专用，2026-09-08 提速）。"""
+        codes = list(dict.fromkeys(stock_codes))
+        if not codes:
+            return {"status": "skipped", "reason": "no_changed_stocks", "total": 0, "success": 0, "failed": 0}
+        placeholders = ", ".join("?" for _ in codes)
+        rows = self.duck.read_query(
+            f"""SELECT stock_code, report_date FROM indicator_snapshot
+                WHERE stock_code IN ({placeholders})""",
+            codes,
+        )
+        report_dates = {row["stock_code"]: row["report_date"] for row in rows}
+        records: list[dict[str, Any]] = []
+        failed_codes: list[str] = []
+        with self.duck.read_connection() as connection:
+            self._calculation_read_connection = connection
+            try:
+                for code in codes:
+                    report_date = report_dates.get(code)
+                    if report_date is None:
+                        failed_codes.append(code)
+                        continue
+                    try:
+                        dividend = self._get_cumulative_dividend_amount(code)
+                        financing = self._get_cumulative_financing_amount(code)
+                        ratio = None
+                        if dividend is not None and financing not in (None, 0):
+                            ratio = dividend / financing * 100.0
+                        records.append({
+                            "stock_code": code,
+                            "report_date": report_date,
+                            "cumulative_dividend_amount": dividend,
+                            "cumulative_financing_amount": financing,
+                            "dividend_financing_ratio_pct": ratio,
+                            "calculated_at": datetime.now(UTC),
+                            "data_version": "audit-safe-v1",
+                        })
+                    except Exception as error:
+                        logger.debug("分红融资比增量计算 %s 失败: %s", code, error)
+                        failed_codes.append(code)
+            finally:
+                del self._calculation_read_connection
+
+        if records:
+            self._update_snapshot_funding_dividend_fields(records)
+        return {
+            "status": "success" if not failed_codes else "partial",
+            "reason": None if not failed_codes else "changed_stock_not_ready",
+            "total": len(codes),
+            "success": len(records),
+            "failed": len(failed_codes),
+            "failed_codes": failed_codes[:20],
+        }
+
+    def _snapshot_publish_gate(self) -> dict[str, Any]:
+        from app.core.data_quality import snapshot_publish_gate
+        return snapshot_publish_gate(self.duck, self.sqlite)
+
     def compute_snapshot_for_all(
         self,
         batch_size: int = 100,
@@ -507,6 +717,104 @@ class IndicatorCalculator:
             "failed": 0,
         }
 
+    _PRICE_SENSITIVE_FIELDS: tuple[str, ...] = (
+        "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ttm", "dividend_yield",
+        "total_market_cap", "circ_market_cap",
+        "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+        "latest_close", "latest_price_date", "turnover_rate", "avg_volume",
+        "period_return", "annualized_volatility", "max_drawdown",
+        "ttm_dividend_yield",
+        *(CZB_CURVE_YIELD_TENOR_LABELS[tenor] for tenor in KEY_TENORS),
+    )
+
+    _FUNDING_DIVIDEND_FIELDS: tuple[str, ...] = (
+        "cumulative_dividend_amount",
+        "cumulative_financing_amount",
+        "dividend_financing_ratio_pct",
+    )
+
+    def _update_snapshot_price_fields(self, records: list[dict[str, Any]]) -> None:
+        """价格域 UPDATE：既有行原地更新，不动基本面字段与报告期。"""
+        if not records:
+            return
+        assignments = ", ".join(f"{field} = ?" for field in self._PRICE_SENSITIVE_FIELDS)
+        with self.duck.transaction() as connection:
+            before = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            for row in records:
+                values = [row.get(field) for field in self._PRICE_SENSITIVE_FIELDS]
+                connection.execute(
+                    f"""UPDATE indicator_snapshot
+                        SET {assignments}, calculated_at = ?
+                        WHERE stock_code = ? AND report_date = ?""",
+                    [*values, row["calculated_at"], row["stock_code"], row["report_date"]],
+                )
+                # DuckDB cursor.rowcount 对 UPDATE 返回 -1，必须用 SELECT 校验。
+                matched = connection.execute(
+                    """SELECT COUNT(*) AS c FROM indicator_snapshot
+                       WHERE stock_code = ? AND report_date = ?""",
+                    [row["stock_code"], row["report_date"]],
+                ).fetchone()[0]
+                if matched != 1:
+                    raise RuntimeError(
+                        f"price-field snapshot update matched {matched} rows "
+                        f"for {row['stock_code']}"
+                    )
+            after = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            if after != before:
+                raise RuntimeError(
+                    f"price-field snapshot update changed row count: {before} -> {after}"
+                )
+            self._record_derived_lineage_in_connection(connection, records)
+
+    def _update_snapshot_funding_dividend_fields(self, records: list[dict[str, Any]]) -> None:
+        """只更新分红融资比三列（回购/融资事件变化专用）。"""
+        if not records:
+            return
+        with self.duck.transaction() as connection:
+            before = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            for row in records:
+                connection.execute(
+                    """UPDATE indicator_snapshot
+                       SET cumulative_dividend_amount = ?,
+                           cumulative_financing_amount = ?,
+                           dividend_financing_ratio_pct = ?,
+                           calculated_at = ?
+                       WHERE stock_code = ? AND report_date = ?""",
+                    [
+                        row["cumulative_dividend_amount"],
+                        row["cumulative_financing_amount"],
+                        row["dividend_financing_ratio_pct"],
+                        row["calculated_at"],
+                        row["stock_code"],
+                        row["report_date"],
+                    ],
+                )
+                # DuckDB cursor.rowcount 对 UPDATE 返回 -1，必须用 SELECT 校验。
+                matched = connection.execute(
+                    """SELECT COUNT(*) AS c FROM indicator_snapshot
+                       WHERE stock_code = ? AND report_date = ?""",
+                    [row["stock_code"], row["report_date"]],
+                ).fetchone()[0]
+                if matched != 1:
+                    raise RuntimeError(
+                        f"funding-dividend snapshot update matched {matched} rows "
+                        f"for {row['stock_code']}"
+                    )
+            after = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            if after != before:
+                raise RuntimeError(
+                    f"funding-dividend snapshot update changed row count: {before} -> {after}"
+                )
+            self._record_derived_lineage_in_connection(connection, records)
+
     def _read_query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
         connection = getattr(self, "_calculation_read_connection", None)
         if connection is None:
@@ -753,47 +1061,38 @@ class IndicatorCalculator:
           用于补足“广义分红（包括回购注销）”。
         - 无有效记录 → 0.0。
         """
+        # 2026-09-08 提速：旧实现每股每笔分红用两个相关子查询回查
+        # share_capital_history，600519 单次约 1s。窗口函数一次定位
+        # ex_date 时点生效股本，600519 降至约 0.04s，结果逐行一致。
         rows = self._read_query(
-            """SELECT
-                   COUNT(*) AS n,
-                   SUM(
-                       CASE
-                           WHEN COALESCE(
-                               (SELECT c.total_shares
-                                FROM share_capital_history c
-                                WHERE c.stock_code = d.stock_code
-                                  AND c.effective_date <= d.ex_date
-                                ORDER BY c.effective_date DESC
-                                LIMIT 1),
-                               (SELECT m.circ_shares
-                                FROM stock_meta m
-                                WHERE m.stock_code = d.stock_code),
-                               (SELECT m.total_shares
-                                FROM stock_meta m
-                                WHERE m.stock_code = d.stock_code)
-                           ) IS NULL THEN 1 ELSE 0 END
-                   ) AS missing_shares,
-                   SUM(
-                       d.dividend_per_share * COALESCE(
-                           (SELECT c.total_shares
-                            FROM share_capital_history c
-                            WHERE c.stock_code = d.stock_code
-                              AND c.effective_date <= d.ex_date
-                            ORDER BY c.effective_date DESC
-                            LIMIT 1),
-                           (SELECT m.circ_shares
-                            FROM stock_meta m
-                            WHERE m.stock_code = d.stock_code),
-                           (SELECT m.total_shares
-                            FROM stock_meta m
-                            WHERE m.stock_code = d.stock_code)
-                       )
-                   ) AS total_amount
-               FROM dividends d
-               WHERE d.stock_code = ?
-                 AND d.dividend_per_share IS NOT NULL
-                 AND d.dividend_per_share > 0
-                 AND d.announcement_date IS NOT NULL
+            """WITH valid_dividends AS (
+                   SELECT d.stock_code, d.ex_date, d.dividend_per_share
+                   FROM dividends d
+                   WHERE d.stock_code = ?
+                     AND d.dividend_per_share IS NOT NULL
+                     AND d.dividend_per_share > 0
+                     AND d.announcement_date IS NOT NULL
+               ), capital_windows AS (
+                   SELECT stock_code, effective_date, total_shares,
+                          LEAD(effective_date, 1, DATE '9999-12-31') OVER (
+                              PARTITION BY stock_code
+                              ORDER BY effective_date, total_shares
+                          ) AS next_date
+                   FROM share_capital_history
+               ), joined AS (
+                   SELECT v.ex_date, v.dividend_per_share,
+                          COALESCE(c.total_shares, m.circ_shares, m.total_shares) AS shares
+                   FROM valid_dividends v
+                   LEFT JOIN stock_meta m ON m.stock_code = v.stock_code
+                   LEFT JOIN capital_windows c
+                     ON c.stock_code = v.stock_code
+                    AND c.effective_date <= v.ex_date
+                    AND v.ex_date < c.next_date
+               )
+               SELECT COUNT(*) AS n,
+                      SUM(CASE WHEN shares IS NULL THEN 1 ELSE 0 END) AS missing_shares,
+                      SUM(dividend_per_share * shares) AS total_amount
+               FROM joined
             """,
             [stock_code],
         )

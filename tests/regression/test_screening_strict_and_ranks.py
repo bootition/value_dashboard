@@ -71,7 +71,8 @@ def test_rank_fields_are_generated_for_sort_and_sw_levels(duckdb_store: DuckDBSt
             "conditions": {"logic": "AND", "rules": []},
             "sort": [{"field": "pe_ttm_sw2_rank", "direction": "asc"}],
             "columns": [
-                "stock_code", "pe_ttm_market_rank", "pe_ttm_sw1_rank", "pe_ttm_sw2_rank",
+                "stock_code", "pe_ttm_market_rank", "pe_ttm_industry_rank",
+                "pe_ttm_sw1_rank", "pe_ttm_sw2_rank",
             ],
         },
         min_listing_years=0,
@@ -80,7 +81,9 @@ def test_rank_fields_are_generated_for_sort_and_sw_levels(duckdb_store: DuckDBSt
     assert result["total"] == 3
     by_code = {row["stock_code"]: row for row in result["results"]}
     assert by_code["000001"]["pe_ttm_market_rank"] == 1
-    assert by_code["000001"]["pe_ttm_sw1_rank"] == 1
+    # sw1_* 是 industry_*（均按 csrc_l1 分区）的历史别名：为兼容已保存
+    # 规则仍参与计算，但 /api/screening/indicators 不再暴露这两个后缀。
+    assert by_code["000001"]["pe_ttm_sw1_rank"] == by_code["000001"]["pe_ttm_industry_rank"]
     assert by_code["000001"]["pe_ttm_sw2_rank"] == 1
 
 

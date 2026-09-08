@@ -173,8 +173,9 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
     """
     try:
         snap = duck.read_query(
-            "SELECT MAX(calculated_at) AS c, MAX(latest_price_date) AS p, COUNT(*) AS n "
-            "FROM indicator_snapshot"
+            """SELECT MAX(calculated_at) AS c, MAX(latest_price_date) AS p,
+                      MAX(report_date) AS r, COUNT(*) AS n
+               FROM indicator_snapshot"""
         )[0]
         counts = duck.read_query(
             """SELECT
@@ -184,7 +185,44 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
                  (SELECT COUNT(*) FROM raw_response_archive_all) AS archive_c,
                  (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c"""
         )[0]
-        payload = {"snap": snap, "counts": counts}
+        # 财务报表/分红/除权除息会改变 readiness 与筛选结果，必须进入指纹；
+        # 只用 COUNT + MAX(date) 聚合，仍比全量 readiness 构建便宜得多。
+        financials = duck.read_query(
+            """SELECT
+                 (SELECT COUNT(*) FROM balance_sheet) AS balance_c,
+                 (SELECT MAX(report_date) FROM balance_sheet) AS balance_max,
+                 (SELECT COUNT(*) FROM income_statement) AS income_c,
+                 (SELECT MAX(report_date) FROM income_statement) AS income_max,
+                 (SELECT COUNT(*) FROM cash_flow) AS cashflow_c,
+                 (SELECT MAX(report_date) FROM cash_flow) AS cashflow_max"""
+        )[0]
+        dividends = duck.read_query(
+            """SELECT COUNT(*) AS n, MAX(ex_date) AS ex_max,
+                      MAX(announcement_date) AS ann_max
+               FROM dividends"""
+        )[0]
+        xdxr = duck.read_query(
+            "SELECT COUNT(*) AS n, MAX(event_date) AS event_max FROM xdxr"
+        )[0]
+        overrides = sqlite.query(
+            """SELECT COUNT(*) AS n, MAX(created_at) AS created_max
+               FROM manual_overrides
+               WHERE status = 'published' AND rolled_back_at IS NULL"""
+        )[0]
+        calendar = sqlite.query(
+            """SELECT COUNT(*) AS n, MIN(trade_date) AS lo, MAX(trade_date) AS hi
+               FROM trading_dates"""
+        )
+        calendar_fp = calendar[0] if calendar else {}
+        payload = {
+            "snap": snap,
+            "counts": counts,
+            "financials": financials,
+            "dividends": dividends,
+            "xdxr": xdxr,
+            "published_overrides": overrides,
+            "trading_calendar": calendar_fp,
+        }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()

@@ -33,10 +33,11 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "balance_sheet": ["sina", "tdx", "akshare_eastmoney"],
     "income_statement": ["sina", "tdx", "akshare_eastmoney"],
     "cash_flow": ["sina", "tdx", "akshare_eastmoney"],
-    # cninfo 分红适配器无法提供 ex_date（需解析公告 PDF，未实现），主源恒空，
-    # 仅保留在链尾作为未来 PDF 解析能力就绪位；akshare/baostock 提供完整
-    # 带 ex_date 与每股数值的分红记录。
-    "dividends": ["akshare_eastmoney", "baostock", "cninfo"],
+    # cninfo 分红路径恒空（公告不含 ex_date，需解析 PDF 且未实现），链尾会把
+    # 源能力缺失伪装成合法空；故从默认链移除。CNINFOAdapter._fetch_dividends
+    # 保留为显式 unsupported error，防止显式配置 cninfo 为 primary 时静默空。
+    # akshare/baostock 提供完整带 ex_date 与每股数值的分红记录。
+    "dividends": ["akshare_eastmoney", "baostock"],
     "xdxr": ["tdx"],
     "announcements": ["cninfo"],
     "sw_industry": ["local_cache"],
@@ -414,6 +415,8 @@ class AdapterManager:
             )
 
         last_result: FetchResult | None = None
+        first_partial: FetchResult | None = None
+        followup_errors: list[str] = []
         tried_adapters: list[str] = []
 
         for adapter_name in priority_list:
@@ -443,14 +446,27 @@ class AdapterManager:
                     return result
 
                 # P1-27修复: 区分"有错误"和"合法空结果"
-                # 有错误 → 记录失败 + 触发熔断
-                # 无错误但空数据 → 不触发熔断（可能是无分红的股票等合法空结果）
+                # 有错误且无数据 → 完全失败，记录熔断
+                # 无错误但空数据 → 合法空，不触发熔断（可能是无分红的股票等）
+                # 有错误但有部分数据 → partial：保留首批数据继续尝试后续适配器；
+                #   不计入完全熔断失败（截断/子请求失败不应让源整体熔断）。
                 last_result = result
                 if result.metadata.error is not None:
-                    self._record_circuit_failure(adapter_name)
-                    logger.warning(
-                        f"{adapter_name} 返回错误: {result.metadata.error}"
-                    )
+                    if result.data:
+                        if first_partial is None:
+                            first_partial = result
+                        else:
+                            followup_errors.append(result.metadata.error)
+                        logger.warning(
+                            f"{adapter_name} 返回 partial ({len(result.data)} 行): "
+                            f"{result.metadata.error}"
+                        )
+                    else:
+                        followup_errors.append(result.metadata.error)
+                        self._record_circuit_failure(adapter_name)
+                        logger.warning(
+                            f"{adapter_name} 返回错误: {result.metadata.error}"
+                        )
                 else:
                     # 无错误但空数据，继续尝试下一个适配器但不计入熔断
                     logger.debug(
@@ -460,6 +476,7 @@ class AdapterManager:
             except Exception as e:
                 logger.error(f"{adapter_name} 抓取 {request.data_type} 失败: {e}")
                 self._record_circuit_failure(adapter_name)
+                followup_errors.append(f"{adapter_name}: {e}")
                 last_result = FetchResult(
                     data=[],
                     metadata=SourceMetadata(
@@ -470,6 +487,29 @@ class AdapterManager:
                         error=str(e),
                     ),
                 )
+
+        # 全链失败时不得丢弃第一个带部分数据的适配器结果：保留 partial data，
+        # 并把后续失败说明合并进 metadata.error（调用方据此触发重试）。
+        if first_partial is not None:
+            merged_errors = [
+                error for error in (
+                    first_partial.metadata.error,
+                    *followup_errors,
+                ) if error
+            ]
+            merged_error = "; ".join(dict.fromkeys(merged_errors)) or None
+            logger.error(
+                f"所有适配器均未完全成功 ({tried_adapters})，返回首个 partial "
+                f"{first_partial.metadata.source} ({len(first_partial.data)} 行): "
+                f"{merged_error}"
+            )
+            return FetchResult(
+                data=first_partial.data,
+                metadata=first_partial.metadata.model_copy(
+                    update={"error": merged_error}
+                ),
+                raw_response=first_partial.raw_response,
+            )
 
         # 所有适配器都失败
         if last_result:
@@ -532,11 +572,19 @@ class AdapterManager:
         return self._adapters.get(name)
 
     def close(self) -> None:
-        """Release reusable adapter sessions after a long-running update."""
-        for adapter in self._adapters.values():
-            close = getattr(adapter, "close", None)
-            if callable(close):
-                close()
+        """Release reusable adapter sessions after a long-running update.
+
+        Closing also resets ``_initialized``: the next fetch re-registers fresh
+        adapter instances. Stateful adapters must clear their thread-local
+        session handles in their own ``close()`` (TencentAdapter does).
+        """
+        with self._state_lock:
+            for adapter in self._adapters.values():
+                close = getattr(adapter, "close", None)
+                if callable(close):
+                    close()
+            self._adapters.clear()
+            self._initialized = False
 
     def recover_after_timeout(self) -> None:
         """Ask stateful sources to recreate their session before their next request."""

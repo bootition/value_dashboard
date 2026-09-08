@@ -288,6 +288,7 @@ class TDXAdapter(BaseAdapter):
         all_records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
         skipped: list[str] = []
+        truncated_codes: list[str] = []
 
         with self._bars_session(request) as client:
             if client is None:
@@ -304,9 +305,11 @@ class TDXAdapter(BaseAdapter):
                     logger.debug("跳过无效代码: %s", raw_code)
                     continue
 
-                bars = self._fetch_bars_for_code(
+                bars, truncated = self._fetch_bars_for_code(
                     client, market, plain_code, start_str, end_str, request
                 )
+                if truncated:
+                    truncated_codes.append(plain_code)
 
                 for _, row in bars.iterrows():
                     all_records.append(
@@ -335,6 +338,11 @@ class TDXAdapter(BaseAdapter):
         error = (
             f"跳过无效代码: {','.join(skipped)}" if skipped else None
         )
+        if truncated_codes:
+            error = "; ".join(part for part in (
+                error,
+                f"TDX K线分页达到上限仍未覆盖 start_date: {','.join(truncated_codes)}",
+            ) if part)
         return self._make_result(
             data=all_records,
             raw_response="\n".join(raw_lines).encode("utf-8"),
@@ -351,9 +359,14 @@ class TDXAdapter(BaseAdapter):
         start_str: str,
         end_str: str,
         request: FetchRequest,
-    ) -> pd.DataFrame:
-        """分页获取单只股票的日线数据, 按日期范围过滤"""
+    ) -> tuple[pd.DataFrame, bool]:
+        """分页获取单只股票的日线数据, 按日期范围过滤。
+
+        Returns ``(bars, truncated)``；truncated=True 表示达到页数上限后
+        仍未覆盖 start_date，调用方必须在 metadata.error 中披露。
+        """
         pages: list[pd.DataFrame] = []
+        truncated = False
 
         for page_idx in range(_MAX_BARS_PAGES):
             if request.deadline_exceeded():
@@ -377,9 +390,14 @@ class TDXAdapter(BaseAdapter):
                 oldest_str = oldest.strftime("%Y-%m-%d") if hasattr(oldest, "strftime") else str(oldest)
                 if oldest_str <= start_str:
                     break
+        else:
+            # for 循环未被 break：页数达到上限仍未见源数据尽头。
+            # 仅在调用方显式要求覆盖 start_date 时才算截断；无 start_date
+            # 时 20 页 (~64 年) 已覆盖 A 股全部历史。
+            truncated = bool(start_str)
 
         if not pages:
-            return pd.DataFrame()
+            return pd.DataFrame(), truncated
 
         combined = pd.concat(pages, ignore_index=True)
         # 去重 (分页边界可能重叠)
@@ -388,10 +406,17 @@ class TDXAdapter(BaseAdapter):
         # 日期过滤
         if start_str:
             combined = combined[combined["date"] >= pd.Timestamp(start_str)]
+            if not combined.empty:
+                oldest_str = (
+                    combined["date"].iloc[-1].strftime("%Y-%m-%d")
+                    if hasattr(combined["date"].iloc[-1], "strftime")
+                    else str(combined["date"].iloc[-1])
+                )
+                truncated = truncated or oldest_str > start_str
         if end_str:
             combined = combined[combined["date"] <= pd.Timestamp(end_str)]
 
-        return combined.reset_index(drop=True)
+        return combined.reset_index(drop=True), truncated
 
     # ─── xdxr ─────────────────────────────────────────────────────
 
@@ -512,6 +537,7 @@ class TDXAdapter(BaseAdapter):
 
         all_records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
+        source_errors: list[str] = []
 
         with self._tdx_session() as client:
             if client is None:
@@ -546,7 +572,13 @@ class TDXAdapter(BaseAdapter):
                     reason=f"日期范围内无 TDX 财报文件 ({request.start_date} ~ {request.end_date})",
                 )
 
-            # 3. 限制下载数量
+            # 3. 限制下载数量；源侧文件多于上限时必须如实披露截断
+            total_files = len(df_files)
+            if total_files > _MAX_FINANCIAL_FILES:
+                source_errors.append(
+                    f"TDX 财报文件截断: 源侧 {total_files} 期，仅抓取最近 "
+                    f"{_MAX_FINANCIAL_FILES} 期"
+                )
             df_files = df_files.head(_MAX_FINANCIAL_FILES)
 
             # 4. 逐期下载 + 解析 + 过滤
@@ -561,6 +593,7 @@ class TDXAdapter(BaseAdapter):
                 except Exception as e:
                     logger.warning("get_financial_records(%s) 失败: %s", full_path, e)
                     raw_lines.append(f"{filename}: ERROR {e}")
+                    source_errors.append(f"{filename}: {e}")
                     continue
 
                 if df_recs is None or df_recs.empty:
@@ -607,9 +640,12 @@ class TDXAdapter(BaseAdapter):
                 )
 
         if not all_records:
-            return self._make_empty_result(
-                reason=f"无法获取 {data_type_name} 数据 (目标股票在财报文件中未找到)",
+            reason = (
+                f"无法获取 {data_type_name} 数据 (目标股票在财报文件中未找到)"
             )
+            if source_errors:
+                reason += ": " + "; ".join(source_errors)
+            return self._make_empty_result(reason=reason)
 
         # P0#2.3修复: TDX 财报字段已映射为命名字段 (见 _TDX_FIELD_MAP)
         # raw_fields 仍保留用于溯源
@@ -622,6 +658,7 @@ class TDXAdapter(BaseAdapter):
             data=all_records,
             raw_response=raw_response_text.encode("utf-8"),
             confidence="approximate",
+            error="; ".join(source_errors) if source_errors else None,
             api_version=_API_VERSION,
         )
 
@@ -641,6 +678,7 @@ class TDXAdapter(BaseAdapter):
         except (TdxConnectionError, TdxError, Exception) as e:
             logger.warning("TDX 最快主机连接失败，尝试已知主机: %s", e)
             for host in _KNOWN_BARS_HOSTS:
+                candidate: TdxClient | None = None
                 try:
                     candidate = TdxClient(
                         host=host, timeout=8.0, auto_reconnect=True,
@@ -651,6 +689,10 @@ class TDXAdapter(BaseAdapter):
                     break
                 except (TdxConnectionError, TdxError, Exception) as retry_error:
                     logger.debug("TDX 主机 %s 不可用: %s", host, retry_error)
+                    # 逐主机失败时必须关闭候选连接，避免半开 socket 泄漏。
+                    if candidate is not None:
+                        with contextlib.suppress(Exception):
+                            candidate.close()
             if client is None:
                 yield None
                 return
@@ -707,18 +749,24 @@ class TDXAdapter(BaseAdapter):
             if tried >= len(_KNOWN_BARS_HOSTS) + _BARS_HOST_MAX_ATTEMPTS:
                 break
             tried += 1
+            candidate: TdxClient | None = None
             try:
                 timeout = max(0.1, request.remaining_seconds(5.0))
-                client = TdxClient(host=host, timeout=timeout, auto_reconnect=False)
-                client.connect()
-                if self._test_bars(client):
+                candidate = TdxClient(host=host, timeout=timeout, auto_reconnect=False)
+                candidate.connect()
+                if self._test_bars(candidate):
                     self.__class__._bars_host = host
                     if tried > 1:
                         logger.info("找到 K 线可用主机: %s (尝试 %d 台)", host, tried)
-                    return client
-                client.close()
+                    return candidate
+                candidate.close()
+                candidate = None
             except (TdxConnectionError, TdxError, Exception) as e:
                 logger.debug("主机 %s K线测试失败: %s", host, e)
+                # 逐主机失败时关闭候选连接，避免 socket 泄漏。
+                if candidate is not None:
+                    with contextlib.suppress(Exception):
+                        candidate.close()
 
         # 全部失败: 返回 from_best_host (至少能用于 xdxr 等其他操作)
         logger.warning("未找到能返回 K 线的主机, 已尝试 %d 台", tried)

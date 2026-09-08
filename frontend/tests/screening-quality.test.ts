@@ -62,6 +62,21 @@ test('collectRuleFields: deeply nested (3 levels) collects all fields', () => {
   assert.deepEqual([...fields].sort(), ['pb_mrq', 'pe_ttm'])
 })
 
+test('collectRuleFields: right_field is collected for untrusted warnings', () => {
+  const node: ScreeningRuleNode = {
+    logic: 'AND',
+    rules: [
+      {
+        field: 'pe_ttm',
+        op: '>',
+        right_field: 'dividend_yield',
+      },
+    ],
+  }
+  const fields = collectRuleFields(node)
+  assert.deepEqual([...fields].sort(), ['dividend_yield', 'pe_ttm'])
+})
+
 test('collectRuleFields: empty rules returns empty set', () => {
   const node: ScreeningRuleNode = { logic: 'AND', rules: [] }
   assert.deepEqual([...collectRuleFields(node)], [])

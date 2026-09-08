@@ -25,6 +25,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -64,6 +65,9 @@ _DEFAULT_REFERER = (
 # CNINFO 翻页参数 pageNum 在 101 起会重复返回第 1 页（2026-08-28 实测），
 # 因此单次查询最多只能取 100 页。超过时由 _query_announcements 按日期二分拆分。
 _CNINFO_MAX_PAGE_NUM = 100
+
+# 公告日按北京（Asia/Shanghai）自然日归日；announcement_time 内部保持 UTC。
+_CN_TZ = ZoneInfo("Asia/Shanghai")
 
 # ─── 公告类别常量 ────────────────────────────────────────────────────
 
@@ -272,6 +276,7 @@ class CNINFOAdapter(BaseAdapter):
 
         results: list[dict[str, Any]] = []
         client = self._get_client()
+        total_record = 0
 
         for page_num in range(1, max_pages + 1):
             form: dict[str, str] = {
@@ -352,12 +357,16 @@ class CNINFOAdapter(BaseAdapter):
                 try:
                     start_dt = datetime.strptime(start_date or "1990-01-01", "%Y-%m-%d").date()
                     end_dt = datetime.strptime(end_date or "2099-12-31", "%Y-%m-%d").date()
-                except ValueError:
-                    logger.warning("CNINFO 公告超过 100 页且无法拆分日期窗口，按截断返回")
-                    break
+                except ValueError as exc:
+                    raise RuntimeError(
+                        "CNINFO announcements truncated: exceeded 100 pages and "
+                        "date window cannot be split"
+                    ) from exc
                 if start_dt >= end_dt:
-                    logger.warning("CNINFO 单日公告仍超过 100 页，按前 100 页返回")
-                    break
+                    raise RuntimeError(
+                        "CNINFO announcements truncated: exceeded 100 pages on a "
+                        "single-day window"
+                    )
                 mid_dt = start_dt + (end_dt - start_dt) // 2
                 first = self._query_announcements(
                     stock_code=stock_code,
@@ -380,6 +389,12 @@ class CNINFOAdapter(BaseAdapter):
                 # 递归子窗口已覆盖整段日期；丢弃本层先取的 100 页，
                 # 避免“本层 3000 条 + 递归全量”重复请求（中报季提速）。
                 return [*first, *second]
+
+        if total_record and total_record > len(results):
+            raise RuntimeError(
+                f"CNINFO announcements truncated: total={total_record}, "
+                f"fetched={len(results)}, max_pages={max_pages}"
+            )
 
         return results
 
@@ -405,6 +420,8 @@ class CNINFOAdapter(BaseAdapter):
         ann_time_ms = raw.get("announcementTime") or 0
         ann_dt: datetime | None = None
         if ann_time_ms:
+            # announcement_time 保留 UTC datetime 供内部差分/排序；
+            # announcement_date 必须按北京自然日归日，不能用 UTC 日期。
             ann_dt = datetime.fromtimestamp(ann_time_ms / 1000.0, tz=UTC)
 
         adjunct_url = raw.get("adjunctUrl") or ""
@@ -417,7 +434,7 @@ class CNINFOAdapter(BaseAdapter):
             "announcement_id": raw.get("announcementId"),
             "title": raw.get("announcementTitle"),
             "announcement_time": ann_dt,
-            "announcement_date": ann_dt.date() if ann_dt else None,
+            "announcement_date": ann_dt.astimezone(_CN_TZ).date() if ann_dt else None,
             "org_id": raw.get("orgId"),
             "adjunct_url": adjunct_url or None,
             "pdf_url": pdf_url,
@@ -501,42 +518,17 @@ class CNINFOAdapter(BaseAdapter):
     # ─── dividends 处理器 ─────────────────────────────────────────
 
     def _fetch_dividends(self, request: FetchRequest) -> FetchResult:
-        codes = request.stock_codes
-        if not codes:
-            return self._make_empty_result(
-                reason="CNINFO 分红查询需要至少一个 stock_code",
-                confidence="missing",
-            )
-
-        page_size = int(request.extra_params.get("page_size", 30))
-        max_pages = int(request.extra_params.get("max_pages", 20))
-
-        all_data: list[dict[str, Any]] = []
-        errors: list[str] = []
-
-        for code in codes:
-            try:
-                items = self._query_announcements(
-                    stock_code=code,
-                    category=CATEGORY_DIVIDEND,
-                    start_date=request.start_date,
-                    end_date=request.end_date,
-                    page_size=page_size,
-                    max_pages=max_pages,
-                )
-                for item in items:
-                    parsed = self._parse_dividend_from_announcement(item)
-                    if parsed is not None:
-                        all_data.append(parsed)
-            except Exception as e:
-                logger.exception("查询 %s 分红异常", code)
-                errors.append(f"{code}: {e}")
-
-        return self._finalize_result(
-            data=all_data,
-            label="dividends",
-            stock_count=len(codes),
-            errors=errors,
+        # CNINFO 权益分派公告不含结构化除权除息日：_normalize_announcement 不
+        # 产 ex_date，而 _parse_dividend_from_announcement 要求 ex_date，因此
+        # 该路径恒空。恒空若以 error=None 返回，会把“源能力缺失”伪装成
+        # “合法无分红”；这里显式返回 unsupported error。默认链已把 cninfo
+        # 从 dividends 优先级移除，仅保留未来 PDF 解析能力就绪的挂载位。
+        return self._make_empty_result(
+            reason=(
+                "CNINFO dividends unsupported: ex_date requires PDF parsing "
+                "(not implemented); returning empty rows would fake a legal empty"
+            ),
+            confidence="missing",
         )
 
     @staticmethod
