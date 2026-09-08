@@ -8,8 +8,10 @@ import secrets
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -70,6 +72,117 @@ def _server_host(server_config: dict) -> str:
     if host not in {"127.0.0.1", "::1", "localhost"}:
         raise PathIsolationError("server.host must be a loopback address")
     return host
+
+
+def _auto_update_command() -> tuple[list[str], Path]:
+    project_root = Path(__file__).resolve().parent.parent.parent
+    if is_frozen_runtime():
+        return [sys.executable, "data", "auto-update", "run"], Path(sys.executable).resolve().parent
+    return [sys.executable, "-m", "app.cli.main", "data", "auto-update", "run"], project_root
+
+
+def run_auto_update_child(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
+    """Launch the isolated auto-update child when no other update is running.
+
+    Used by startup maintenance, the post-close scheduler and the trigger API.
+    Returns False when another update already owns the lock.
+    """
+    from app.core.storage.update_lock import any_write_lock_active
+
+    if any_write_lock_active(duck.db_path):
+        logger.info("已有更新任务持锁，自动更新触发让路")
+        return False
+    from app.core.update import IncrementalUpdater
+
+    IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
+    cmd, project_root = _auto_update_command()
+    log_path = Path(os.environ.get("VD_LOG_DIR", "data/logs")) / "auto-update-child.log"
+    logger.info("启动自动更新子进程（PRD §7.3）...")
+    try:
+        with log_path.open("a", encoding="utf-8") as child_log:
+            completed = subprocess.run(
+                cmd,
+                cwd=project_root,
+                env=os.environ.copy(),
+                stdout=child_log,
+                stderr=subprocess.STDOUT,
+                check=False,
+            )
+        logger.info("自动更新子进程完成 exit=%s", completed.returncode)
+        return True
+    except Exception as error:
+        logger.warning("自动更新子进程启动失败(非致命): %s", error)
+        return False
+
+
+def auto_update_is_due(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
+    """Return True when the latest expected trading session has no price rows yet.
+
+    收盘前（<15:30 本地）期望目标是上一交易日；收盘后自动切到今日，服务
+    无需重启即可在首个调度周期抓取当天数据。
+    """
+    try:
+        from app.core.storage.update_lock import any_write_lock_active
+
+        if any_write_lock_active(duck.db_path):
+            return False
+        state_rows = sqlite.query(
+            "SELECT state, paused FROM auto_update_state WHERE id = 1"
+        )
+        if not state_rows or state_rows[0].get("state") != "enabled" or state_rows[0].get("paused"):
+            return False
+        now = datetime.now()
+        cutoff = now.date() - timedelta(days=1) if now.strftime("%H:%M") < "15:30" else now.date()
+        rows = sqlite.query(
+            "SELECT MAX(trade_date) AS target_date FROM trading_dates WHERE trade_date <= ?",
+            [cutoff.isoformat()],
+        )
+        target_date = rows[0].get("target_date") if rows else None
+        if not target_date:
+            return False
+        price_rows = duck.read_query(
+            "SELECT MAX(trade_date) AS latest FROM price_daily_raw"
+        )
+        latest = str(price_rows[0].get("latest") or "")[:10]
+        return latest < str(target_date)[:10]
+    except Exception as error:
+        logger.warning("自动更新到期检查失败: %s", error)
+        return False
+
+
+_AUTO_UPDATE_SCHEDULER_INTERVAL_SECONDS = 300
+_auto_update_spawn_lock = threading.Lock()
+_auto_update_scheduler_started = False
+
+
+def _auto_update_scheduler_loop(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
+    while True:
+        time.sleep(_AUTO_UPDATE_SCHEDULER_INTERVAL_SECONDS)
+        try:
+            if not auto_update_is_due(duck, sqlite):
+                continue
+            with _auto_update_spawn_lock:
+                if auto_update_is_due(duck, sqlite):
+                    run_auto_update_child(duck, sqlite)
+        except Exception as error:
+            logger.warning("自动更新调度器执行失败(非致命): %s", error)
+
+
+def _start_auto_update_scheduler(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
+    """Start a low-frequency post-close scheduler so the long-running web service
+    catches the current trading day without a manual restart.
+    """
+    global _auto_update_scheduler_started
+    if _auto_update_scheduler_started:
+        return
+    _auto_update_scheduler_started = True
+    threading.Thread(
+        target=_auto_update_scheduler_loop,
+        args=(duck, sqlite),
+        name="vd-auto-update-scheduler",
+        daemon=True,
+    ).start()
+    logger.info("自动更新收盘后调度器已启动（每 %s 秒检查一次）", _AUTO_UPDATE_SCHEDULER_INTERVAL_SECONDS)
 
 
 def _run_startup_maintenance(
@@ -145,30 +258,10 @@ def _run_startup_maintenance(
             # 避免“重开一次就多一个 running 任务”的观感与错误统计。
             from app.core.update import IncrementalUpdater
             IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
-            logger.info("启动后台自动更新子进程（PRD §7.3）...")
-            env = os.environ.copy()
-            project_root = Path(__file__).resolve().parent.parent.parent
-            if is_frozen_runtime():
-                cmd = [sys.executable, "data", "auto-update", "run"]
-                project_root = Path(sys.executable).resolve().parent
-            else:
-                cmd = [sys.executable, "-m", "app.cli.main", "data", "auto-update", "run"]
-            log_path = Path(os.environ.get("VD_LOG_DIR", "data/logs")) / "auto-update-child.log"
-            try:
-                with log_path.open("a", encoding="utf-8") as child_log:
-                    completed = subprocess.run(
-                        cmd,
-                        cwd=project_root,
-                        env=env,
-                        stdout=child_log,
-                        stderr=subprocess.STDOUT,
-                        check=False,
-                    )
-                logger.info("自动更新子进程完成 exit=%s", completed.returncode)
-            except Exception as error:
-                logger.warning("自动更新子进程启动失败(非致命): %s", error)
+            run_auto_update_child(duck, sqlite)
         else:
             logger.info("自动更新已关闭或暂停，跳过")
+        _start_auto_update_scheduler(duck, sqlite)
     except Exception as error:
         logger.warning("后台自动更新失败(非致命): %s", error)
 

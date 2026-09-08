@@ -17,6 +17,9 @@ if not "%VD_SKIP_HEALTH_CHECK%"=="" goto :skip_health_check
 powershell -NoProfile -Command "try { $r = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 'http://127.0.0.1:8765/api/health'; if ($r.StatusCode -eq 200 -and $r.Content -match '\"status\"\s*:\s*\"ok\"') { exit 0 } } catch {}; exit 1" >nul 2>&1
 if not errorlevel 1 (
     echo [INFO] Value Dashboard is already running; opening the browser.
+    REM Existing instance does not rerun startup auto-update. Ask it to
+    REM trigger an update (post-close scheduler also handles this within 5min).
+    powershell -NoProfile -Command "try { $t=(Get-Content -LiteralPath 'data\.vd-admin-token' -Raw -ErrorAction Stop).Trim(); Invoke-WebRequest -UseBasicParsing -TimeoutSec 10 -Method Post -Uri 'http://127.0.0.1:8765/api/data-status/auto-update/trigger' -Headers @{'x-vd-admin-token'=$t} | Out-Null } catch {}" >nul 2>&1
     start "" "http://127.0.0.1:8765/"
     goto :end
 )

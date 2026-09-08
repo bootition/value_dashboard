@@ -719,6 +719,46 @@ def _build_summary_from_state(state) -> dict:
     return summary
 
 
+@router.post("/auto-update/trigger")
+def trigger_auto_update(request: Request) -> dict:
+    """手动/start.bat 触发一轮自动更新（使用运维令牌）。
+
+    服务长期运行时，start.bat 再次打开会检测到已有实例；此端点让
+    已有实例无需重启即可启动更新子进程（2026-09-08 修复）。
+    """
+    admin_token = getattr(request.app.state, "admin_token", None)
+    if not admin_token or request.headers.get("x-vd-admin-token") != admin_token:
+        raise HTTPException(status_code=403, detail="admin token required")
+    try:
+        stage_rows = request.app.state.sqlite.query(
+            "SELECT current_stage FROM auto_update_state WHERE id = 1"
+        )
+        if stage_rows and stage_rows[0].get("current_stage") == "running":
+            return {"triggered": False, "reason": "already_running"}
+        from app.core.storage.update_lock import any_write_lock_active
+
+        if any_write_lock_active(request.app.state.duck.db_path):
+            return {"triggered": False, "reason": "another_update_running"}
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    threading.Thread(
+        target=_run_auto_update_child_in_process,
+        args=(request.app.state.duck, request.app.state.sqlite),
+        name="vd-triggered-auto-update",
+        daemon=True,
+    ).start()
+    return {"triggered": True}
+
+
+def _run_auto_update_child_in_process(duck, sqlite) -> None:
+    from app.web.main import run_auto_update_child
+
+    run_auto_update_child(duck, sqlite)
+
+
 @router.get("/auto-update")
 def get_auto_update_status(request: Request) -> dict:
     """自动更新状态（PRD §15 只读展示）"""
