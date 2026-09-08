@@ -94,3 +94,27 @@
   资本历史域等全部通过。
 - 正式库数据修复：`vd data update --stocks 603365` 后三表 MAX(report_date)=2026-06-30、
   快照重算成功。
+
+## 2026-09-08 后续：数据状态页“待重试”清零
+
+根因：
+1. `_retry_failed_tasks` 未把 `etf_daily` 纳入可重试类型：16 条 ETF retry 每轮被跳过，
+   retry_count 恒为 0，状态页永远显示“待重试”。
+2. `EtfPriceUpdater` 与 `IndexValuationUpdater` 成功后不清除历史 retry/missing；
+   即使后来数据已抓到，队列仍滞留。
+3. 乐咕源触发反爬页面时 akshare 抛 `'NoneType' object has no attribute 'attrs'`，
+   4 条指数估值 retry 长期挂起。
+4. 受限启动环境下研究统计多进程重建抛 WinError 5，导致上一轮 job partial。
+
+修复：
+- auto-update 消费 `etf_daily` retry；缺 `HITHINK_FINANCE_API_KEY` 转
+  `missing_list(etf_daily, source_unconfigured)` 并移除重试条目。
+- ETF / 指数估值成功写入后 `_resolve_retry` + `_resolve_missing`。
+- 新增 `_cleanup_redundant_index_valuation_retries`：本地乐咕数据 ≤35 天时清噪声重试。
+- 乐咕 csrf 缺失错误显式化为 `legulegu_unavailable`。
+- 研究统计并行重建失败自动降级串行。
+
+验证：
+- 正式库手动增量更新 job 146 → `status=success`，`retry_count 20→0`。
+- 服务重启后 startup auto-update job 147 → `status=success`。
+- 数据状态页 `retry_count=0`；missing 为披露项（CSRC/HK 分红/ETF Key/国债待发布）。
