@@ -394,6 +394,12 @@ def create_app(
     @app.middleware("http")
     async def require_local_write_token(request: Request, call_next):
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/"):
+            # 运维级触发端点只认 x-vd-admin-token；普通浏览器写操作继续用
+            # /api/session 下发的 x-vd-write-token。两条路径互不混用。
+            if request.url.path == "/api/data-status/auto-update/trigger":
+                if request.headers.get("x-vd-admin-token") != request.app.state.admin_token:
+                    return JSONResponse(status_code=403, content={"detail": "admin token required"})
+                return await call_next(request)
             origin = request.headers.get("origin")
             if origin:
                 parsed_origin = urlsplit(origin)
