@@ -739,6 +739,12 @@ def trigger_auto_update(request: Request) -> dict:
 
         if any_write_lock_active(request.app.state.duck.db_path):
             return {"triggered": False, "reason": "another_update_running"}
+        # 价格已经覆盖最近一个应收盘交易日时，无需为"再次打开 start.bat"
+        # 启动一整轮无意义更新（公告/国债/低频域由各自调度与 retry 处理）。
+        from app.web.main import auto_update_is_due
+
+        if not auto_update_is_due(request.app.state.duck, request.app.state.sqlite):
+            return {"triggered": False, "reason": "already_up_to_date"}
     except HTTPException:
         raise
     except Exception:
