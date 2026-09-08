@@ -14,6 +14,7 @@ from app.core.etf_pool import (
     seed_etf_pool,
     write_merge_template,
 )
+from app.core.etf_reset import reset_portfolio
 from app.core.etf_strategy import load_etf_meta, upsert_etf_meta
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -117,3 +118,35 @@ def test_schema_v17_adds_category_column(database_paths) -> None:
     assert "category" in columns
     versions = sqlite.query("SELECT MAX(version) AS v FROM schema_migrations")[0]["v"]
     assert versions >= 17
+
+
+def test_reset_portfolio_clears_operations_but_keeps_pool(sqlite_store: SQLiteStore) -> None:
+    from app.core.etf_strategy import add_cash_flow, add_etf_trade, set_setting
+
+    upsert_etf_meta(sqlite_store, etf_code="512880", name="证券ETF",
+                    category="industry", budget=1000.0, step_pct=5.0)
+    upsert_etf_meta(sqlite_store, etf_code="512690", name="酒ETF",
+                    category="industry", budget=200.0, step_pct=5.0)  # 池外旧持仓
+    add_etf_trade(sqlite_store, etf_code="512880", trade_date="2026-09-04",
+                  direction="buy", price=1.0, shares=100)
+    add_cash_flow(sqlite_store, flow_date="2026-09-04", direction="in", amount=500.0)
+    set_setting(sqlite_store, "total_assets", "4100.99")
+
+    preview = reset_portfolio(sqlite_store)
+    assert preview["status"] == "preview"
+    assert preview["current"]["trades"] == 1
+    assert any(item["etf_code"] == "512690" for item in preview["non_pool_to_disable"])
+
+    report = reset_portfolio(sqlite_store, dry_run=False)
+    assert report["status"] == "reset_done"
+    assert sqlite_store.query("SELECT COUNT(*) AS c FROM etf_trades")[0]["c"] == 0
+    assert sqlite_store.query("SELECT COUNT(*) AS c FROM etf_cash_flows")[0]["c"] == 0
+    assert sqlite_store.query("SELECT COUNT(*) AS c FROM etf_sell_plans")[0]["c"] == 0
+    assert sqlite_store.query("SELECT COUNT(*) AS c FROM etf_settings")[0]["c"] == 0
+
+    metas = {m["etf_code"]: m for m in load_etf_meta(sqlite_store)}
+    assert metas["512880"]["category"] == "industry", "重置不得破坏池配置"
+    assert metas["512880"]["enabled"] == 1
+    assert metas["512880"]["budget"] == 0.0, "重新开始后预算归零，由用户重新填写"
+    assert metas["512690"]["enabled"] == 0, "池外旧持仓停止观察（记录保留）"
+    assert metas["513130"]["category"] == "market", "池同步必须校正市场层"

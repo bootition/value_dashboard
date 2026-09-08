@@ -260,6 +260,19 @@ def etf_merge_template(
     typer.echo(json.dumps(make_response("etf.merge-template", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
 
 
+@etf_app.command("reset-portfolio")
+def etf_reset_portfolio(
+    yes: bool = typer.Option(False, "--yes", help="确认执行重置（默认只预览）"),
+) -> None:
+    """清空 ETF 持仓/流水/资金/设置，保留三层池与行情数据（重新开始）"""
+    from app.cli.protocol import make_response
+    from app.core.etf_reset import reset_portfolio
+
+    _, _duck, sqlite = _database_context()
+    report = reset_portfolio(sqlite, dry_run=not yes)
+    typer.echo(json.dumps(make_response("etf.reset-portfolio", report), ensure_ascii=False, indent=2, default=_sanitize_path_json))
+
+
 @etf_app.command("update-prices")
 def etf_update_prices(
     codes: str = typer.Option("", "--codes", help="只更新指定 ETF 代码，逗号分隔（默认全部启用）"),
