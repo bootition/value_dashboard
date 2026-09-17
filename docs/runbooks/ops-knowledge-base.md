@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-09-05
+last-reviewed: 2026-09-17
 supersedes: null
 ---
 
@@ -56,7 +56,7 @@ supersedes: null
 | D6 | `vd backup` 对 26GB BLOB 表须**分块导出**（raw_response_archive_history 5000 行分块），单次 COPY 会受内存限制 | reports/102 |
 | D10 | `vd data auto-update status` 是**只读**命令（只查 SQLite，不打开 DuckDB）；其它 CLI 写命令在 schema 已最新时经 `skip_if_current=True` 跳过全量幂等 DDL，避免扫描 43GB BLOB 视图 OOM | reports/104 |
 | D11 | 数据状态重量摘要：后台 stale-while-revalidate，TTL 300s；空闲期前端每 300s 拉一次，更新 running→finished 时前端主动立即刷新一次。全量构建仍约 19-23s，但不得阻塞或拒绝普通查询 | reports/104；data_status.py |
-| D12 | **自动更新写连接窗口会阻塞 Web 查询**：DuckDB 单写者模型下，research_statistics 全量重建的发布阶段会持续持有写连接（2026-09-03 实测约 4-6 分钟），期间普通 K 线/详情/自选请求会等待或超时。这不是连接配置冲突；优化方向是分批可见发布或快照读，而不是调大超时硬扛 | reports/104；实测 |
+| D12 | **自动更新写连接窗口会阻塞 Web 查询**：DuckDB 单写者模型下，research_statistics 全量重建的发布阶段会持续持有写连接（2026-09-03 实测约 4-6 分钟），期间普通 K 线/详情/自选请求会等待或超时。这不是连接配置冲突；优化方向是分批可见发布或快照读，而不是调大超时硬扛。**2026-09-17 补充**：自动更新是独立子进程，其持锁期间 Web 进程**完全无法新建任何连接**（Windows 文件独占：`Cannot open file ... 另一个程序正在使用此文件` + `File is already open in <子进程 PID>`）；本次价格补抓 4732 只、约 66-98 只/分，仅 price 步骤约 70 分钟（整体 1.5-2h），期间只读能力完全依赖更新前预热缓存 | reports/104、reports/113；实测 |
 | D13 | `source_audit` 冷热分离：日常 readiness/lineage 只扫热表 `source_audit`；历史排查查 `source_audit_all`。归档命令 `vd data source-audit-archive --before YYYY-MM-DD`，按 id keyset 分页，每批独立事务；正式库已归档 30,039,082 行（cutoff 2025-01-01） | reports/106；app/core/source_audit_archive.py |
 | D14 | 分红融资比为 **A股流通股本口径**：`cumulative_dividend_amount` 用 `circ_shares` 优先，total_shares 中的 H 股不得混入；港股分红未采集即不计入、缺数据返回 NULL。600941 已修正为 34.7% | reports/106；calculator.py |
 | D15 | 2026-09-04 离线重建后主库 7.8GB：`source_audit_archive`（30,039,082 行）与 `raw_response_archive_history` payload 均只存外部 Parquet（`D:\vd-cold-archive`），主库仅空表/元数据；旧库 `valuedashboard.duckdb.old-20260904013322` 保留回滚 | reports/107 |
@@ -68,6 +68,9 @@ supersedes: null
 | D7 | **正式库 data/ 只读**：所有写操作必须经 CLI/维护脚本 + 单写者锁；S1 回归强制 `VD_ENV=test` + 正式库 SHA-256 指纹前后对比 | AGENTS.md；conftest.py |
 | D8 | ✅ 回滚快照已按窗口删除（2026-09-02）：9-01 22:52 完整成功周期（job 124）通过观察；两硬链接 + sqlite pre-rebuild 已删除，释放约 50GB | reports/101、102；job_logs 124 |
 | D9 | 重建/导出相关外部路径：新库构建 `D:\vd-rebuild-new-20260901`、Parquet 导出 `D:\vd-rebuild-export-20260901`、冷归档 `D:\vd-cold-archive` | reports/102 |
+| D21 | **读锁降级缓存铁律（2026-09-17 事故后）**：① 写操作后禁止用裸 `TTLCache.invalidate()` 删除旧快照——默认 `keep_stale=True`，旧值置为过期回退，重算遇 `DuckDBReadLockedError` 时返回旧值；只有"结果本身不可用"（如全 error 快照）才 `keep_stale=False` 或用 `reject`。② 只读接口必须区分 SQLite 用户数据（预算/持仓/流水/设置，实时读、不缓存）与 DuckDB 派生数据（价格/估值/分位，可缓存 + stale 回退），否则一次写后刷新就会在更新窗口内 503。③ 未单独捕获 `DuckDBReadLockedError` 的接口由 `app/web/main.py` 全局处理器统一降级 503（`reason_code=duckdb_read_locked`） | reports/113；app/web/api/_ttl_cache.py、etf_strategy.py、index_dashboard.py |
+| D22 | `_is_external_file_lock` 不能只看 `Cannot open file`：该文案对"拒绝访问/路径不可用"等永久性 IO 错误同样出现。只有 `另一个程序正在使用此文件` / `File is already open in`，或应用级更新锁文件确认存在时，才抛 `DuckDBReadLockedError` 立即降级；其余继续退避后如实报错 | reports/113；app/core/storage/duckdb_store.py |
+| D23 | **已知未修口径缺陷（P2，2026-09-17 登记）**：`etf_fundamentals.market_cap_series` 与 `index_dashboard._all_a_valuation_series` 的历史市值 = 前复权收盘 × `stock_meta.total_shares`（当前股本），与既有 `share_capital_history` 逐日股本口径冲突（分红低估、增发高估历史市值）；**当前值正确、仅历史段待修**。修复前上述 10 年历史市值/分位曲线不得当结论使用 | reports/113 §6；schema.py:456-459、statistics.py |
 
 ## 4. 数据口径与隔离表设计意图
 

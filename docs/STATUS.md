@@ -3,7 +3,7 @@ title: 项目当前状态（Single Source of Truth）
 status: approved
 category: decisions
 created: 2026-07-31
-last-reviewed: 2026-09-04
+last-reviewed: 2026-09-17
 ---
 
 # 项目当前状态（单一真相源 / Single Source of Truth）
@@ -11,8 +11,8 @@ last-reviewed: 2026-09-04
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
-- **最后更新**：2026-09-08
-- **更新人**：opencode 会话（2026-09-08 全项目红队修复闭环：`reports/112`）
+- **最后更新**：2026-09-17
+- **更新人**：opencode 会话（2026-09-17 ETF 预算保存报错事故 + 自动更新窗口读锁降级修复：`reports/113`）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
@@ -65,6 +65,7 @@ last-reviewed: 2026-09-04
 | 多指数 ERP 与 ETF 轮动工作台 | ✅ **实施完成，待用户浏览器验收与池删改（2026-09-05）**：顶层「指数」页（卡片墙/单指数 PE/PB/ERP 分位图/ETF 策略 Tab）；ERP=1/PE-TTM−10Y 国债，覆盖乐咕 12 宽基 + 申万一级 31（行业 ERP 标注无回测验证，回测二期）；ETF 工作台三层池（行业26/策略4/市场4，恒生科技归市场层）+持仓/流水/手动预算/5% 可配置网格/卖出计划/Excel 与合并 CSV 导入（`vd etf import-xlsx|import-merge|seed-pool`）与 THS 行情采集（`vd etf update-prices`）；schema v21-v23 + SQLite v17；正式库已回填宽基12+申万31（118,591 行）+41 只 ETF 5 年行情并导入真实 49 笔流水；后端隔离回归、Ruff、前端 57 tests/build 全绿；官方 S1 pytest 741 passed（wrapper 因无关 streamlit 进程 exit 97，环境项待复跑） | `reports/111`（2026-09-05） |
 | 2026-09-08 全项目红队修复闭环 | ✅ **PASS（2026-09-08）**：公告分类补 `"半年报"` 并按类别直判（603365 半年报漏抓修复，正式库已回填 2026H1 并重算快照）；披露季期望期改用 Asia/Shanghai；三表部分成功不再误入册；详情页财务新鲜度按披露季判断（半年报 06-30 不再显示“数据滞后”）；指标重算按价格域/完整域/分红融资域拆分，未变化股票直接跳过，累计分红股本查询窗口化；价格 DELETE+INSERT 仅限全历史请求并校验最老日期；funding 合法空保旧值与变更指纹补齐 `raise_funds_net`；CNINFO/Tencent/AKShare/BaoStock/TDX 截断与 partial 显式化；retry 耗尽转 missing、国债 retry 精确清理；筛选参数顺序/sort/columns/年限/稳定排序/DSL 简写与版本锁/草稿乐观锁修复；Web 重算端点升级运维令牌；Vite 构建清理（assets 391→40）。S1 **820 passed**、Ruff、前端 vue-tsc/57 tests/build 全绿 | `reports/112`（2026-09-08） |
 | 2026-09-08 重试队列收敛 | ✅ **完成（2026-09-08）**：`_retry_failed_tasks` 补 `etf_daily` 分支；THS 缺 API Key 转 `source_unconfigured` missing 并移出重试；ETF/指数估值成功后清理历史 retry/missing；本地数据新鲜的指数估值 retry 自动清理；乐咕 csrf 缺失错误显式化；研究统计并行失败降级串行。正式库执行增量更新 job 146 success、重启后 startup job 147 success，`retry_count 20→0`；剩余 missing 155 项均为如实披露缺口（CSRC 无分类 114、HK 分红无记录 23、ETF 未配 Key 16、国债 9/8 待发布 1 等），不是待重试 | `reports/112` 后续追加（2026-09-08） |
+| 2026-09-17 ETF 预算保存报错事故 | ✅ **完成（2026-09-17）**：自动更新子进程持 DuckDB 文件锁期间保存预算，`invalidate` 删除预热快照导致概览 503 + 前端整页错误；同步修复 index 对比 stale 死代码、未缓存只读接口裸 500、预算弹窗串 ETF、详情弹窗串数据、基本面图年度丢点等。**官方 S1 850 passed**（正式库前后 hash 一致 `delta_detected=false`）、Ruff、前端 lint/73 node/57 vitest/build 全绿；新代码已重启加载，且在新一轮价格补抓窗口内实测 ETF/指数/个股/自选接口 200（stale 降级生效）。**未修 P2**：全A/ETF 历史市值仍用当前股本（登记 `ops-knowledge-base` D23，修复前不得当结论）；更新窗口 `/api/health` 503 与 start.bat 误判第二实例为遗留运维风险 | `reports/113`（2026-09-17） |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。

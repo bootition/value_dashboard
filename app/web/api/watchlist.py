@@ -13,6 +13,8 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.core.storage.duckdb_store import DuckDBReadLockedError
+
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
 
 # 依赖 indicator_snapshot 的数值字段；信任决策阻断时必须遮蔽
@@ -104,6 +106,11 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             stock_codes,
         )
         info_map = {r["stock_code"]: r for r in stock_info}
+    except DuckDBReadLockedError as error:
+        # 自动更新/CLI 写进程持锁：如实提示"更新中"，不要把原始 IO 错误抛给用户。
+        raise HTTPException(
+            status_code=503, detail="数据正在自动更新中，请稍后刷新"
+        ) from error
     except Exception as error:
         raise HTTPException(
             status_code=503, detail={"error": "database unavailable", "detail": str(error)}

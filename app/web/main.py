@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import secrets
@@ -23,7 +24,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse
 
 from app.core.config import Config, is_frozen_runtime
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.duckdb_store import DuckDBReadLockedError, DuckDBStore
 from app.core.storage.path_policy import (
     DatabasePathSet,
     PathIsolationError,
@@ -250,6 +251,16 @@ def _run_startup_maintenance(
         }
         logger.warning("后台数据就绪核对失败: %s", error)
     try:
+        logger.info("自动更新前预热指数/ETF 只读缓存，避免更新期间详情页 500")
+        from app.web.api.etf_strategy import warm_etf_read_cache
+        from app.web.api.index_dashboard import warm_index_read_cache
+
+        warm_index_read_cache(duck)
+        warm_etf_read_cache(duck, sqlite)
+    except Exception as error:
+        logger.warning("只读缓存预热失败(非致命): %s", error)
+
+    try:
         from app.core.auto_update import AutoUpdateController
 
         controller = AutoUpdateController(duck=duck, sqlite=sqlite)
@@ -391,6 +402,23 @@ def create_app(
     app.state.write_token = secrets.token_urlsafe(32)
     app.state.admin_token = _admin_token(validated.sqlite_path)
 
+    @app.exception_handler(DuckDBReadLockedError)
+    async def duckdb_read_locked_handler(
+        _request: Request, _error: DuckDBReadLockedError
+    ) -> JSONResponse:
+        """外部写进程持锁时统一降级为明确的 503，而不是裸 500。
+
+        2026-09-17 线上：自动更新子进程运行期间未单独捕获该异常的只读接口
+        （个股详情/搜索等）直接 500，用户体感为"整个服务坏了"。
+        """
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "数据正在自动更新中，请稍后刷新",
+                "reason_code": "duckdb_read_locked",
+            },
+        )
+
     @app.middleware("http")
     async def require_local_write_token(request: Request, call_next):
         if request.method in {"POST", "PUT", "PATCH", "DELETE"} and request.url.path.startswith("/api/"):
@@ -445,7 +473,22 @@ def create_app(
                 status_code=503,
                 detail={"status": "unavailable", "error": str(error)},
             ) from error
-        return {"status": "ok", "version": "0.1.0", "config_loaded": True}
+        # 前端构建指纹（与页面右下角 VD build 标记一致），便于远程比对版本。
+        frontend_build = None
+        try:
+            index_path = static_dir / "index.html"
+            if index_path.exists():
+                frontend_build = hashlib.sha256(
+                    index_path.read_text(encoding="utf-8").encode("utf-8")
+                ).hexdigest()[:8]
+        except OSError:
+            frontend_build = None
+        return {
+            "status": "ok",
+            "version": "0.1.0",
+            "config_loaded": True,
+            "frontend_build": frontend_build,
+        }
 
     # ─── 数据库状态 ──────────────────────────────────────────────
     @app.get("/api/db/status")
@@ -539,8 +582,21 @@ def create_app(
                 raise HTTPException(status_code=404, detail="API endpoint not found")
             index_path = static_dir / "index.html"
             if index_path.exists():
+                html = index_path.read_text(encoding="utf-8")
+                # 2026-09-10 部署排查：构建标记 = 实际下发 index.html 的内容
+                # 哈希（资源名随构建变化 → 每次构建标记必变），用户报出标记
+                # 即可远程确认其浏览器是否拿到了最新构建，避免"旧快照 vs
+                # 新代码"无法区分的问题反复发作。
+                digest = hashlib.sha256(html.encode("utf-8")).hexdigest()[:8]
+                marker = (
+                    '<div id="vd-build-tag" style="position:fixed;right:8px;bottom:4px;'
+                    'z-index:99999;font-size:11px;color:#98a69c;pointer-events:none;'
+                    f'font-family:monospace">VD build {digest}</div>'
+                )
+                if 'id="vd-build-tag"' not in html and "</body>" in html:
+                    html = html.replace("</body>", f"{marker}</body>")
                 return HTMLResponse(
-                    index_path.read_text(encoding="utf-8"),
+                    html,
                     headers={"Cache-Control": "no-store"},
                 )
             raise HTTPException(status_code=503, detail="frontend static bundle is incomplete")

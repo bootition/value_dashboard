@@ -45,3 +45,22 @@ def test_connection_config_always_has_uniform_triple(duckdb_store: DuckDBStore) 
     assert set(config) == {"memory_limit", "threads", "preserve_insertion_order"}
     assert config["threads"]
     assert str(config["preserve_insertion_order"]).lower() in {"true", "false"}
+
+
+def test_external_file_lock_detection_requires_specific_evidence() -> None:
+    """2026-09-17：泛化的 "Cannot open file" 也可能是权限/路径等永久性
+    IO 错误，不能一律当成"外部更新持锁"，否则用户会永远看到"正在更新中"。"""
+    from app.core.storage.duckdb_store import _is_external_file_lock
+
+    assert _is_external_file_lock(
+        'IO Error: Cannot open file "D:\\a.duckdb": '
+        "另一个程序正在使用此文件，进程无法访问。"
+    )
+    assert _is_external_file_lock(
+        'IO Error: Cannot open file "D:\\a.duckdb"\n'
+        "File is already open in python.exe (PID 28840)"
+    )
+    # 无应用级更新锁时，泛化消息不得判定为锁竞争。
+    assert not _is_external_file_lock('IO Error: Cannot open file "D:\\a.duckdb": 拒绝访问。')
+    # 应用级更新锁文件确认存在时才接受泛化消息。
+    assert _is_external_file_lock('IO Error: Cannot open file "D:\\a.duckdb"', lock_active=True)

@@ -38,6 +38,36 @@ def test_create_app_wires_explicit_database_state(
     assert app.state.sqlite is sqlite
 
 
+def test_duckdb_read_locked_maps_to_friendly_503(
+    database_paths: DatabasePathSet,
+) -> None:
+    """2026-09-17：未单独捕获 DuckDBReadLockedError 的只读接口不得裸 500。"""
+    from app.core.storage.duckdb_store import DuckDBReadLockedError
+
+    class _LockedDuck:
+        """最小 DuckDB 桩：任何查询都表现为"外部写进程持锁"。"""
+
+        def __init__(self, db_path: Path) -> None:
+            self.db_path = db_path
+
+        def read_query(self, *_args: Any, **_kwargs: Any) -> list:
+            raise DuckDBReadLockedError("file already open in PID 28840")
+
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=_LockedDuck(database_paths.duckdb_path),
+        sqlite=SQLiteStore(paths=database_paths),
+    )
+
+    response = TestClient(app).get("/api/stock/search", params={"query": "600519"})
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["reason_code"] == "duckdb_read_locked"
+    assert "更新" in body["detail"]
+
+
 def test_spa_entry_is_never_cached(
     database_paths: DatabasePathSet,
 ) -> None:

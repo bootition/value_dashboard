@@ -206,11 +206,15 @@ def test_expected_financial_period_uses_beijing_time() -> None:
 def test_current_half_year_report_is_not_stale() -> None:
     from datetime import UTC, datetime
 
-    # 半年报季中，报告期 06-30 距今天自然有 60+ 天，但不应告警。
+    # 当前期望报告期（如半年报季的 06-30）距今天自然有 60+ 天，但不应因
+    # "财务年龄"告警。价格/快照年龄用当前时刻，保证只测财务口径。
+    # 2026-09-17 修复时间炸弹：原用例硬编码 2026-09-07，日期一过
+    # price_age_days > 7 必然失败，与产品行为无关。
+    now = datetime.now(UTC)
     metadata = build_freshness_metadata(
-        financial_date=date(2026, 6, 30),
-        price_date=date(2026, 9, 7),
-        calculated_at=datetime(2026, 9, 7, tzinfo=UTC),
+        financial_date=date.fromisoformat(expected_financial_period(now)),
+        price_date=now.date(),
+        calculated_at=now,
         data_version="audit-safe-v1",
     )
     assert metadata["stale_warning"] is False

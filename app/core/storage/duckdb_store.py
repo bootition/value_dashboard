@@ -214,6 +214,24 @@ class DuckDBWriteLockError(Exception):
     """DuckDB 写锁获取失败"""
 
 
+class DuckDBReadLockedError(Exception):
+    """外部写进程正占用 DuckDB 文件，当前无法新建只读连接。"""
+
+
+def _is_external_file_lock(message: str, *, lock_active: bool = False) -> bool:
+    """Windows 下外部 DuckDB 写进程持锁时，新只读连接会直接失败。
+
+    必须区分"外部写进程独占"与"路径/权限等永久性 IO 错误"：两者都可能
+    包含 ``Cannot open file``（2026-09-17 实测）。只有应用级更新锁文件表明
+    确有外部写进程时，才把泛化消息当成锁竞争；否则继续退避重试并如实抛出。
+    """
+    specific_lock = (
+        "另一个程序正在使用此文件" in message
+        or "File is already open in" in message
+    )
+    return specific_lock or (lock_active and "Cannot open file" in message)
+
+
 _MEMORY_LIMIT_OVERRIDE: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "value_dashboard_duckdb_memory_limit_override", default=None
 )
@@ -368,6 +386,11 @@ class DuckDBStore:
                     allow_same_process_rw = True
             except Exception as error:
                 last_error = error
+                if _is_external_file_lock(str(error), lock_active=lock_active):
+                    # 外部写进程（auto-update/CLI）持锁时 Windows 不允许新建
+                    # 只读连接；与其空转 ~28s 后 500，不如立即抛专用异常，
+                    # 让上层返回缓存旧值或 503 提示。
+                    raise DuckDBReadLockedError(str(error)) from error
             else:
                 try:
                     yield conn
