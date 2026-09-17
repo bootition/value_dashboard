@@ -113,3 +113,32 @@ export interface EtfDetail extends EtfOverviewItem {
   track_valuation: ValuationDetail | null
   settings: { total_assets: string | null; budget: number; step_pct: number }
 }
+
+export interface FundamentalPoint {
+  date: string
+  value: number
+  companies?: number
+}
+
+export interface IndustryContribution {
+  industry: string
+  current: number
+  delta: number
+  contribution_pct: number
+}
+
+export interface EtfFundamentals {
+  etf_code: string
+  name: string
+  method: string
+  companies: number
+  latest_profit: number | null
+  latest_market_cap: number | null
+  earnings: Array<{ report_date: string; value: number; companies: number }>
+  market_cap: Array<{ trade_date: string; value: number; companies: number }>
+  profit_growth: Array<{ report_date: string; value: number }>
+  profit_growth_qoq: Array<{ report_date: string; value: number }>
+  industry_contribution: IndustryContribution[]
+  industry_contribution_qoq: IndustryContribution[]
+  disclaimer: string
+}

@@ -130,6 +130,15 @@ def test_post_endpoints_validate_and_write(
     })
     assert bad_setting.status_code == 400
 
+    for invalid_value in ("abc", "-1", "NaN", "inf"):
+        rejected = client.post("/api/etf/settings", json={
+            "key": "total_assets", "value": invalid_value,
+        })
+        assert rejected.status_code == 400, f"非数字/负数/非有限总资产必须拒绝: {invalid_value}"
+    assert sqlite_store.query(
+        "SELECT value FROM etf_settings WHERE key='total_assets'"
+    )[0]["value"] == "4100.99", "非法设置不得覆盖已保存值"
+
     bad_meta = client.post("/api/etf/meta", json={
         "etf_code": "512000", "name": "测试", "primary_metric": "ps",
     })

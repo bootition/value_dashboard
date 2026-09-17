@@ -4,8 +4,8 @@
 - ERP 公式：1/PE*100 − 10Y 国债收益率（百分点口径）
 - 分位带：p20/p50/p80 与当前分位；样本不足/无数据语义
 - 同日期多源去重主源优先（宽基 legulegu、行业 sws）
-- API：/api/index/catalog、/overview、/erp-compare、/{code}/erp、
-  /{code}/valuation 与 404 守卫
+- API：/api/index/catalog、/overview、/erp-compare、/{code}/detail、
+  /{code}/erp、/{code}/valuation 与 404 守卫
 """
 
 from __future__ import annotations
@@ -22,6 +22,9 @@ from app.core.index_dashboard import (
     erp_compare,
     erp_detail,
     index_catalog,
+    index_detail,
+    index_summaries_batch,
+    index_summary,
     valuation_detail,
 )
 from app.core.storage.duckdb_store import DuckDBStore
@@ -104,7 +107,7 @@ def test_overview_and_erp_detail(duckdb_store: DuckDBStore, sqlite_store: SQLite
     _seed_treasury(duckdb_store)
 
     overview = erp_compare(duckdb_store)
-    assert len(overview["items"]) == 43  # 12 宽基 + 31 申万一级
+    assert len(overview["items"]) == 44  # 全A + 12 宽基 + 31 申万一级
     by_code = {item["code"]: item for item in overview["items"]}
     hs300 = by_code["000300"]
     assert hs300["status"] == "ok"
@@ -120,6 +123,10 @@ def test_overview_and_erp_detail(duckdb_store: DuckDBStore, sqlite_store: SQLite
     assert sw["backtest_validated"] is False
     assert sw["pe_metric"] == "sws_daily"
 
+    all_a = by_code["ALL_A"]
+    assert all_a["category"] == "broad"
+    assert all_a["status"] in {"ok", "partial"}
+
     detail = erp_detail(duckdb_store, "000300")
     assert len(detail["series"]) > 0
     assert detail["erp_bands"]["p50"] is not None
@@ -133,10 +140,25 @@ def test_overview_and_erp_detail(duckdb_store: DuckDBStore, sqlite_store: SQLite
     assert valuation["pe_bands"]["p20"] is not None
 
 
+def test_batch_summary_and_combined_detail_match_single_calls(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    _seed_index_valuation(duckdb_store)
+    _seed_treasury(duckdb_store)
+
+    batch = index_summaries_batch(duckdb_store, ["000300", "SW801010"])
+    assert batch["000300"] == index_summary(duckdb_store, "000300")
+    assert batch["SW801010"] == index_summary(duckdb_store, "SW801010")
+
+    combined = index_detail(duckdb_store, "000300")
+    assert combined["erp"] == erp_detail(duckdb_store, "000300")
+    assert combined["valuation"] == valuation_detail(duckdb_store, "000300")
+
+
 def test_unavailable_index_is_honest(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore) -> None:
     overview = erp_compare(duckdb_store)
     unavailable = [i for i in overview["items"] if i["status"] == "unavailable"]
-    assert len(unavailable) == 43, "空库时全部指数必须如实 unavailable，不伪造"
+    assert len(unavailable) == 43, "空库时除全A合成指数外必须如实 unavailable，不伪造"
 
 
 def test_index_api_endpoints(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore) -> None:
@@ -151,11 +173,11 @@ def test_index_api_endpoints(duckdb_store: DuckDBStore, sqlite_store: SQLiteStor
 
     catalog = client.get("/api/index/catalog")
     assert catalog.status_code == 200
-    assert len(catalog.json()["items"]) == 43
+    assert len(catalog.json()["items"]) == 44
 
     overview = client.get("/api/index/overview")
     assert overview.status_code == 200
-    assert len(overview.json()["items"]) == 43
+    assert len(overview.json()["items"]) == 44
 
     compare = client.get("/api/index/erp-compare")
     assert compare.status_code == 200
@@ -164,6 +186,11 @@ def test_index_api_endpoints(duckdb_store: DuckDBStore, sqlite_store: SQLiteStor
     assert erp.status_code == 200
     assert erp.json()["name"] == "沪深300"
     assert erp.json()["series"]
+
+    detail = client.get("/api/index/000300/detail")
+    assert detail.status_code == 200
+    assert detail.json()["erp"]["series"]
+    assert detail.json()["valuation"]["pe_series"]
 
     valuation = client.get("/api/index/SW801010/valuation")
     assert valuation.status_code == 200
@@ -178,3 +205,109 @@ def test_catalog_contains_agreed_universe() -> None:
     assert {"000300", "000905", "000852", "000016"} <= codes
     assert len({c for c in codes if c.startswith("SW")}) == 31
     assert "SW801150" in codes  # 医药生物
+
+
+def _index_client(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore) -> TestClient:
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(index_router)
+    return TestClient(app)
+
+
+def test_erp_compare_propagates_duckdb_read_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """外部写进程持锁必须向上抛，不能被吞成全 error 快照。
+
+    2026-09-17 修复：此前 erp_compare 的 except Exception 吞掉
+    DuckDBReadLockedError，导致 API 层 stale 回退成为死代码。
+    """
+    from app.core import index_dashboard as core
+    from app.core.storage.duckdb_store import DuckDBReadLockedError
+
+    def locked(*_args: object, **_kwargs: object) -> dict:
+        raise DuckDBReadLockedError("file already open in PID 28840")
+
+    monkeypatch.setattr(core, "grouped_valuation_rows", locked)
+    with pytest.raises(DuckDBReadLockedError):
+        core.erp_compare(object())
+
+
+def test_overview_keeps_warm_snapshot_when_duckdb_locked(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """更新窗口内卡片墙必须回退预热快照；无快照才 503。"""
+    from app.core.storage.duckdb_store import DuckDBReadLockedError
+    from app.web.api import index_dashboard as api
+
+    _seed_index_valuation(duckdb_store)
+    _seed_treasury(duckdb_store)
+    client = _index_client(duckdb_store, sqlite_store)
+
+    warm = client.get("/api/index/overview")
+    assert warm.status_code == 200
+    assert any(item.get("pe") is not None for item in warm.json()["items"])
+
+    key = ("overview", str(duckdb_store.db_path))
+    api._compare_cache.invalidate(key)  # 标记过期但保留旧快照
+
+    def locked(*_args: object, **_kwargs: object) -> dict:
+        raise DuckDBReadLockedError("file already open in PID 28840")
+
+    monkeypatch.setattr(api, "erp_compare", locked)
+
+    fallback = client.get("/api/index/overview")
+    assert fallback.status_code == 200, "有预热快照时必须回退旧值而不是 503"
+    assert fallback.json()["items"] == warm.json()["items"]
+
+    api._compare_cache.clear()
+    no_snapshot = client.get("/api/index/overview")
+    assert no_snapshot.status_code == 503
+
+
+def test_overview_rejects_all_error_snapshot_without_destroying_warm_cache(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全 error 快照不得覆盖/删除预热旧快照（非锁错误的源级失败场景）。"""
+    from app.web.api import index_dashboard as api
+
+    _seed_index_valuation(duckdb_store)
+    _seed_treasury(duckdb_store)
+    client = _index_client(duckdb_store, sqlite_store)
+
+    warm = client.get("/api/index/overview")
+    assert warm.status_code == 200
+
+    key = ("overview", str(duckdb_store.db_path))
+    api._compare_cache.invalidate(key)
+
+    calls = 0
+
+    def all_error(_duck: object) -> dict:
+        nonlocal calls
+        calls += 1
+        return {
+            "items": [
+                {**item, "status": "error", "error": "prefetch boom"}
+                for item in index_catalog()
+            ],
+            "updated_at": None,
+        }
+
+    monkeypatch.setattr(api, "erp_compare", all_error)
+
+    fallback = client.get("/api/index/overview")
+    assert fallback.status_code == 200
+    assert fallback.json()["items"] == warm.json()["items"], "应返回旧快照而不是全 error 快照"
+
+    # 无旧值时保留原契约：200 + 逐项 error，但坏快照不得写入缓存。
+    api._compare_cache.clear()
+    degraded = client.get("/api/index/overview")
+    assert degraded.status_code == 200
+    assert all(item.get("status") == "error" for item in degraded.json()["items"])
+    assert calls == 2
+    client.get("/api/index/overview")
+    assert calls == 3, "全 error 快照不得进入缓存"

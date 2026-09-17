@@ -14,7 +14,7 @@ from app.core.etf_pool import (
     seed_etf_pool,
     write_merge_template,
 )
-from app.core.etf_reset import reset_portfolio
+from app.core.etf_reset import bootstrap_portfolio, fresh_start, reset_portfolio
 from app.core.etf_strategy import load_etf_meta, upsert_etf_meta
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -24,9 +24,9 @@ def test_default_pool_layers_and_no_tool_industries_excluded() -> None:
     by_cat = {c: [i for i in items if i["category"] == c] for c in ("industry", "strategy", "market")}
     assert len(by_cat["industry"]) == 26
     assert len(by_cat["strategy"]) == 4
-    assert len(by_cat["market"]) == 4
+    assert len(by_cat["market"]) == 5
     market_codes = {i["etf_code"] for i in by_cat["market"]}
-    assert {"510300", "510500", "512100", "513130"} == market_codes, "恒生科技纳入市场层"
+    assert {"510300", "510500", "512100", "513130", "ALL_A"} == market_codes, "全A指数纳入市场层"
     for missing in ("纺织服饰", "轻工制造", "商贸零售", "综合", "美容护理"):
         assert not any(i["industry_group"] == missing for i in by_cat["industry"])
 
@@ -150,3 +150,66 @@ def test_reset_portfolio_clears_operations_but_keeps_pool(sqlite_store: SQLiteSt
     assert metas["512880"]["budget"] == 0.0, "重新开始后预算归零，由用户重新填写"
     assert metas["512690"]["enabled"] == 0, "池外旧持仓停止观察（记录保留）"
     assert metas["513130"]["category"] == "market", "池同步必须校正市场层"
+
+
+def test_fresh_start_deletes_all_meta_and_reseeds_pool(sqlite_store: SQLiteStore) -> None:
+    from app.core.etf_strategy import add_cash_flow, add_etf_trade, set_setting
+
+    upsert_etf_meta(sqlite_store, etf_code="512690", name="酒ETF",
+                    category="industry", budget=200.0, step_pct=5.0)
+    add_etf_trade(sqlite_store, etf_code="512690", trade_date="2026-09-04",
+                  direction="buy", price=1.0, shares=100)
+    add_cash_flow(sqlite_store, flow_date="2026-09-04", direction="in", amount=500.0)
+    set_setting(sqlite_store, "total_assets", "4100.99")
+
+    preview = fresh_start(sqlite_store)
+    assert preview["status"] == "preview"
+    assert preview["meta_to_delete"] >= 1
+
+    report = fresh_start(sqlite_store, dry_run=False)
+    assert report["status"] == "fresh_start_done"
+    assert sqlite_store.query("SELECT COUNT(*) AS c FROM etf_trades")[0]["c"] == 0
+    assert sqlite_store.query("SELECT COUNT(*) AS c FROM etf_settings")[0]["c"] == 0
+    metas = load_etf_meta(sqlite_store)
+    assert len(metas) == len(DEFAULT_ETF_POOL), "旧元数据必须全部删除后重建默认池"
+    assert all(meta["enabled"] == 1 for meta in metas)
+    assert all(meta["budget"] == 0.0 for meta in metas)
+    assert "512690" not in {meta["etf_code"] for meta in metas}
+
+
+def test_bootstrap_portfolio_writes_capital_meta_and_initial_trades(
+    sqlite_store: SQLiteStore,
+) -> None:
+    fresh_start(sqlite_store, dry_run=False)
+    report = bootstrap_portfolio(
+        sqlite_store,
+        total_assets=10000.0,
+        positions=[
+            {
+                "etf_code": "512880", "name": "证券ETF", "category": "industry",
+                "track_index_code": "SW801790", "track_index_name": "非银金融",
+                "primary_metric": "pb", "industry_group": "金融",
+                "budget": 2000.0, "step_pct": 5.0,
+                "shares": 1000, "price": 1.1, "trade_date": "2026-09-04",
+                "fee": 0.2,
+            },
+            {
+                "etf_code": "510300", "name": "沪深300ETF", "category": "market",
+                "track_index_code": "000300", "track_index_name": "沪深300",
+                "primary_metric": "pe", "industry_group": "市场指数",
+                "budget": 3000.0, "step_pct": 5.0,
+            },
+        ],
+    )
+    assert report["status"] == "bootstrapped"
+    assert report["positions_written"] == 2
+    assert report["trades_written"] == 1
+
+    metas = {meta["etf_code"]: meta for meta in load_etf_meta(sqlite_store)}
+    assert metas["512880"]["budget"] == 2000.0
+    assert metas["510300"]["budget"] == 3000.0
+    assert sqlite_store.query("SELECT value FROM etf_settings WHERE key='total_assets'")[0]["value"] == "10000.0"
+    trades = sqlite_store.query("SELECT * FROM etf_trades WHERE etf_code='512880'")
+    assert len(trades) == 1
+    assert trades[0]["direction"] == "buy"
+    assert trades[0]["note"] == "初始化持仓"

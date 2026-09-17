@@ -134,6 +134,9 @@ DEFAULT_ETF_POOL: tuple[dict[str, Any], ...] = tuple([
     {"etf_code": "513130", "name": "恒生科技", "category": "market",
      "track_index_code": None, "track_index_name": "恒生科技(同花顺5年分位)",
      "primary_metric": "pe", "industry_group": "市场指数"},
+    {"etf_code": "ALL_A", "name": "全A指数", "category": "market",
+     "track_index_code": None, "track_index_name": "全部A股上市公司",
+     "primary_metric": "pe", "industry_group": "全市场"},
 ])
 
 

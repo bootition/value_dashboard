@@ -34,8 +34,11 @@ __all__ = [
     "get_setting",
     "set_setting",
     "position_summary",
+    "position_summaries",
     "ensure_sell_plan",
     "grid_state",
+    "grid_state_from",
+    "grid_states_batch",
 ]
 
 
@@ -191,12 +194,7 @@ def set_setting(sqlite: SQLiteStore, key: str, value: str) -> None:
 
 # ─── 持仓汇总（摊余成本法） ────────────────────────────────────────────
 
-def position_summary(sqlite: SQLiteStore, etf_code: str) -> dict[str, Any]:
-    trades = sqlite.query(
-        """SELECT id, trade_date, direction, price, shares, amount, fee
-           FROM etf_trades WHERE etf_code = ? ORDER BY trade_date, id""",
-        [etf_code],
-    )
+def _position_from_rows(etf_code: str, trades: list[dict[str, Any]]) -> dict[str, Any]:
     shares = 0.0
     cost_basis = 0.0
     realized_pnl = 0.0
@@ -257,6 +255,63 @@ def position_summary(sqlite: SQLiteStore, etf_code: str) -> dict[str, Any]:
     }
 
 
+def _empty_position(etf_code: str) -> dict[str, Any]:
+    return {
+        "etf_code": etf_code,
+        "shares": 0.0,
+        "cost_basis": 0.0,
+        "avg_cost": None,
+        "realized_pnl": 0.0,
+        "buy_count": 0,
+        "sell_count": 0,
+        "total_buy_amount": 0.0,
+        "total_buy_fee": 0.0,
+        "total_sell_amount": 0.0,
+        "total_sell_fee": 0.0,
+        "last_buy_price": None,
+        "last_sell_price": None,
+        "first_buy_date": None,
+    }
+
+
+def position_summary(sqlite: SQLiteStore, etf_code: str) -> dict[str, Any]:
+    trades = sqlite.query(
+        """SELECT id, trade_date, direction, price, shares, amount, fee
+           FROM etf_trades WHERE etf_code = ? ORDER BY trade_date, id""",
+        [etf_code],
+    )
+    return _position_from_rows(etf_code, trades)
+
+
+def position_summaries(
+    sqlite: SQLiteStore,
+    etf_codes: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """一次查询算出全部（或指定）ETF 的摊余成本持仓，供概览批渲染。"""
+    if etf_codes is not None and not etf_codes:
+        return {}
+    if etf_codes:
+        placeholders = ", ".join("?" for _ in etf_codes)
+        rows = sqlite.query(
+            f"""SELECT etf_code, trade_date, direction, price, shares, amount, fee
+                FROM etf_trades WHERE etf_code IN ({placeholders})
+                ORDER BY trade_date, id""",
+            list(etf_codes),
+        )
+    else:
+        rows = sqlite.query(
+            """SELECT etf_code, trade_date, direction, price, shares, amount, fee
+               FROM etf_trades ORDER BY trade_date, id"""
+        )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["etf_code"]), []).append(row)
+    return {
+        code: _position_from_rows(code, grouped[code])
+        for code in grouped
+    }
+
+
 # ─── 卖出计划（触发 80% 分位时锁定） ───────────────────────────────────
 
 def ensure_sell_plan(
@@ -297,25 +352,19 @@ def ensure_sell_plan(
 
 # ─── 网格状态（信号 + 网格下一档） ─────────────────────────────────────
 
-def grid_state(
-    sqlite: SQLiteStore,
+def grid_state_from(
     *,
     etf_code: str,
     current_price: float | None,
     signal: str,
+    meta: dict[str, Any],
+    position: dict[str, Any],
+    sell_plan: dict[str, Any] | None,
     today: str | None = None,
-    persist_sell_plan: bool = True,
+    persist_sell_plan: bool = False,
+    sqlite: SQLiteStore | None = None,
 ) -> dict[str, Any]:
-    """汇总一只 ETF 的持仓、预算、网格与信号。
-
-    signal: buy / sell / neutral / unavailable（来自 signal_zone）。
-    current_price 为最新收盘价；无价格时盈亏与市值置 None。
-    """
-    meta_rows = sqlite.query("SELECT * FROM etf_meta WHERE etf_code = ?", [etf_code])
-    if not meta_rows:
-        raise KeyError(f"ETF 未配置: {etf_code}")
-    meta = meta_rows[0]
-    position = position_summary(sqlite, etf_code)
+    """用已取好的 meta/position/sell_plan 计算网格状态（批计算共用）。"""
     step = float(meta["step_pct"]) / 100.0
     budget = float(meta["budget"] or 0)
     tranche_amount = budget / MAX_TRANCHES if budget > 0 else 0.0
@@ -329,17 +378,13 @@ def grid_state(
         next_buy_price = position["last_buy_price"] * (1 - step)
 
     # 卖出侧（档数以实际卖出的交易笔数为准，卖出计划只锁定单档金额与首档锚点）
-    plan_rows = sqlite.query(
-        "SELECT trigger_date, trigger_price, tranche_amount, tranches_done FROM etf_sell_plans WHERE etf_code = ?",
-        [etf_code],
-    )
-    sell_plan = plan_rows[0] if plan_rows else None
     remaining_sells = max(0, SELL_TRANCHES - position["sell_count"])
     next_sell_price = None
     sell_tranche_amount = sell_plan["tranche_amount"] if sell_plan else 0.0
     if position["shares"] > 0 and signal == "sell":
         if sell_plan is None and current_price is not None:
             if persist_sell_plan:
+                assert sqlite is not None
                 plan_date = today or datetime.now(UTC).astimezone().date().isoformat()
                 sell_plan = ensure_sell_plan(
                     sqlite, etf_code=etf_code, trigger_date=plan_date,
@@ -397,6 +442,72 @@ def grid_state(
         "clear_tail": position["shares"] > 0 and position["sell_count"] >= SELL_TRANCHES,
         "enabled": bool(meta["enabled"]),
     }
+
+
+def grid_state(
+    sqlite: SQLiteStore,
+    *,
+    etf_code: str,
+    current_price: float | None,
+    signal: str,
+    today: str | None = None,
+    persist_sell_plan: bool = True,
+) -> dict[str, Any]:
+    """汇总一只 ETF 的持仓、预算、网格与信号。
+
+    signal: buy / sell / neutral / unavailable（来自 signal_zone）。
+    current_price 为最新收盘价；无价格时盈亏与市值置 None。
+    """
+    meta_rows = sqlite.query("SELECT * FROM etf_meta WHERE etf_code = ?", [etf_code])
+    if not meta_rows:
+        raise KeyError(f"ETF 未配置: {etf_code}")
+    meta = meta_rows[0]
+    position = position_summary(sqlite, etf_code)
+    plan_rows = sqlite.query(
+        "SELECT trigger_date, trigger_price, tranche_amount, tranches_done FROM etf_sell_plans WHERE etf_code = ?",
+        [etf_code],
+    )
+    return grid_state_from(
+        etf_code=etf_code, current_price=current_price, signal=signal,
+        meta=meta, position=position,
+        sell_plan=plan_rows[0] if plan_rows else None,
+        today=today, persist_sell_plan=persist_sell_plan, sqlite=sqlite,
+    )
+
+
+def grid_states_batch(
+    sqlite: SQLiteStore,
+    *,
+    metas: list[dict[str, Any]],
+    prices: dict[str, float | None],
+    signals: dict[str, str],
+    persist_sell_plan: bool = False,
+) -> dict[str, dict[str, Any]]:
+    """批量计算多只 ETF 的网格状态：持仓与卖出计划各一次查询。"""
+    if not metas:
+        return {}
+    codes = [str(meta["etf_code"]) for meta in metas]
+    positions = position_summaries(sqlite, codes)
+    plan_rows = sqlite.query(
+        """SELECT etf_code, trigger_date, trigger_price, tranche_amount, tranches_done
+           FROM etf_sell_plans"""
+    )
+    sell_plans: dict[str, dict[str, Any]] = {}
+    for row in plan_rows:
+        sell_plans[str(row["etf_code"])] = row
+    states: dict[str, dict[str, Any]] = {}
+    for meta in metas:
+        code = str(meta["etf_code"])
+        position = positions.get(code)
+        states[code] = grid_state_from(
+            etf_code=code, current_price=prices.get(code),
+            signal=signals.get(code, "unavailable"),
+            meta=meta,
+            position=position if position is not None else _empty_position(code),
+            sell_plan=sell_plans.get(code),
+            persist_sell_plan=persist_sell_plan, sqlite=sqlite,
+        )
+    return states
 
 
 def latest_close(duck: object, etf_code: str) -> float | None:

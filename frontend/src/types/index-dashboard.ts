@@ -4,7 +4,7 @@ export interface IndexCatalogItem {
   code: string
   name: string
   category: 'broad' | 'industry'
-  source: 'legulegu' | 'sws'
+  source: 'legulegu' | 'sws' | 'synthetic_all_a'
   cadence: 'monthly' | 'daily'
   backtest_validated: boolean
 }
@@ -64,4 +64,11 @@ export interface ValuationDetail {
   pb_bands: IndexBands
   pb_percentile: number | null
   pe_metric: string | null
+}
+
+/** `/api/index/{code}/detail` 合并响应：ERP 与 PE/PB 一次返回。 */
+export interface IndexDetailResponse {
+  code: string
+  erp: ErpDetail
+  valuation: ValuationDetail
 }

@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from app.core.etf_strategy import (
     MAX_TRANCHES,
@@ -19,14 +21,17 @@ from app.core.etf_strategy import (
     ensure_sell_plan,
     get_setting,
     grid_state,
+    grid_states_batch,
     latest_close,
+    position_summaries,
     position_summary,
     set_setting,
     signal_zone,
     upsert_etf_meta,
 )
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.duckdb_store import DuckDBReadLockedError, DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from app.web.api.etf_strategy import router as etf_router
 
 
 def _seed_meta(sqlite: SQLiteStore, *, budget: float = 1000.0, step_pct: float = 5.0) -> None:
@@ -85,6 +90,25 @@ def test_position_summary_rejects_oversell(sqlite_store: SQLiteStore) -> None:
     with pytest.raises(ValueError, match="超过持仓"):
         add_etf_trade(sqlite_store, etf_code="512880", trade_date="2026-01-06",
                       direction="sell", price=1.1, shares=101)
+
+
+def test_batch_grid_matches_single_calls(sqlite_store: SQLiteStore) -> None:
+    _seed_meta(sqlite_store)
+    add_etf_trade(sqlite_store, etf_code="512880", trade_date="2026-01-05",
+                  direction="buy", price=1.0, shares=100, fee=0.1)
+    meta = sqlite_store.query("SELECT * FROM etf_meta WHERE etf_code = '512880'")[0]
+
+    assert position_summaries(sqlite_store, ["512880"])["512880"] == position_summary(sqlite_store, "512880")
+
+    single = grid_state(sqlite_store, etf_code="512880", current_price=0.9, signal="buy")
+    batch = grid_states_batch(
+        sqlite_store,
+        metas=[meta],
+        prices={"512880": 0.9},
+        signals={"512880": "buy"},
+        persist_sell_plan=False,
+    )["512880"]
+    assert batch == single
 
 
 def test_grid_buy_side(sqlite_store: SQLiteStore) -> None:
@@ -157,6 +181,146 @@ def test_settings_and_cash_flows_roundtrip(sqlite_store: SQLiteStore) -> None:
     assert rows[0]["c"] == 1
 
 
+def test_post_settings_response_keeps_contract(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(etf_router)
+    client = TestClient(app)
+
+    before = client.get("/api/etf/overview")
+    assert before.status_code == 200
+    assert before.json()["total_assets"] is None
+
+    response = client.post(
+        "/api/etf/settings",
+        json={"key": "total_assets", "value": "4100.99"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"key": "total_assets", "value": "4100.99"}
+
+    after = client.get("/api/etf/overview")
+    assert after.status_code == 200
+    assert after.json()["total_assets"] == "4100.99", "写操作后必须立刻失效概览缓存"
+
+
+def _locked_market_context(*_args: object, **_kwargs: object) -> dict[str, object]:
+    raise DuckDBReadLockedError("Can't open a connection: file already open in PID 28840")
+
+
+def test_budget_write_keeps_overview_alive_when_duckdb_locked(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """线上事故回归（2026-09-17）：自动更新子进程持 DuckDB 文件锁时保存预算，
+    概览必须回退旧市场快照并立即展示新预算，而不是整页 503。"""
+    from app.web.api import etf_strategy as etf_api
+
+    etf_api._market_cache.clear()
+    _seed_meta(sqlite_store, budget=1000.0)
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(etf_router)
+    client = TestClient(app)
+
+    warm = client.get("/api/etf/overview")
+    assert warm.status_code == 200
+    assert warm.json()["items"][0]["budget"] == 1000.0
+
+    # 模拟外部更新进程持锁：市场快照的任何重算都失败。
+    monkeypatch.setattr(etf_api, "_compute_market_context", _locked_market_context)
+
+    saved = client.post("/api/etf/meta", json={
+        "etf_code": "512880", "name": "证券ETF", "category": "industry",
+        "track_index_code": "SW801790", "track_index_name": "非银金融",
+        "primary_metric": "pb", "industry_group": "金融",
+        "budget": 1500.0, "step_pct": 5.0, "enabled": True,
+    })
+    assert saved.status_code == 200
+
+    after = client.get("/api/etf/overview")
+    assert after.status_code == 200, "外部持锁期间概览必须回退旧快照而不是 503"
+    item = after.json()["items"][0]
+    assert item["budget"] == 1500.0, "预算来自 SQLite，必须实时生效"
+    assert item["tranche_amount"] == pytest.approx(150.0)
+
+    # 锁释放后必须重算并恢复正常读取。
+    monkeypatch.undo()
+    refreshed = client.get("/api/etf/overview")
+    assert refreshed.status_code == 200
+    assert refreshed.json()["items"][0]["budget"] == 1500.0
+
+
+def test_detail_shows_live_budget_when_duckdb_locked(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """详情页的流水/预算/设置实时读 SQLite；只有市场快照允许回退旧值。"""
+    from app.web.api import etf_strategy as etf_api
+
+    etf_api._market_cache.clear()
+    etf_api._valuation_history_cache.clear()
+    _seed_meta(sqlite_store, budget=1000.0)
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(etf_router)
+    client = TestClient(app)
+
+    first = client.get("/api/etf/512880/detail")
+    assert first.status_code == 200
+    assert first.json()["settings"]["budget"] == 1000.0
+
+    monkeypatch.setattr(etf_api, "_compute_market_context", _locked_market_context)
+    saved = client.post("/api/etf/meta", json={
+        "etf_code": "512880", "name": "证券ETF", "category": "industry",
+        "track_index_code": "SW801790", "track_index_name": "非银金融",
+        "primary_metric": "pb", "industry_group": "金融",
+        "budget": 1800.0, "step_pct": 4.0, "enabled": True,
+    })
+    assert saved.status_code == 200
+
+    detail = client.get("/api/etf/512880/detail")
+    assert detail.status_code == 200, "详情页不得因外部持锁而 503"
+    body = detail.json()
+    assert body["settings"]["budget"] == 1800.0
+    assert body["settings"]["step_pct"] == 4.0
+    assert body["budget"] == 1800.0
+
+
+def test_meta_post_without_note_preserves_existing_note(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """预算弹窗不携带 note：保存预算不得清空已存在的备注。"""
+    upsert_etf_meta(
+        sqlite_store, etf_code="512880", name="证券ETF",
+        track_index_code="SW801790", track_index_name="非银金融",
+        primary_metric="pb", industry_group="金融", budget=1000.0,
+        note="观察仓，跌破 1.0 再买",
+    )
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(etf_router)
+    client = TestClient(app)
+
+    response = client.post("/api/etf/meta", json={
+        "etf_code": "512880", "name": "证券ETF", "category": "industry",
+        "track_index_code": "SW801790", "track_index_name": "非银金融",
+        "primary_metric": "pb", "industry_group": "金融",
+        "budget": 1200.0, "step_pct": 5.0, "enabled": True,
+    })
+    assert response.status_code == 200
+    rows = sqlite_store.query("SELECT budget, note FROM etf_meta WHERE etf_code = '512880'")
+    assert rows[0]["budget"] == 1200.0
+    assert rows[0]["note"] == "观察仓，跌破 1.0 再买"
+
+
 def test_latest_close_reads_etf_daily(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
@@ -177,3 +341,47 @@ def test_ensure_sell_plan_idempotent(sqlite_store: SQLiteStore) -> None:
     assert first["created"] is True
     assert second["created"] is False
     assert second["tranche_amount"] == pytest.approx(24.0), "卖出计划必须锁定首次触发的单档金额"
+
+
+def test_reset_and_bootstrap_api_flow_invalidates_overview_cache(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(etf_router)
+    client = TestClient(app)
+
+    empty = client.get("/api/etf/overview").json()
+    assert empty["items"] == [] and empty["total_assets"] is None
+
+    preview = client.get("/api/etf/reset-preview")
+    assert preview.status_code == 200
+    assert preview.json()["status"] == "preview"
+
+    boot = client.post("/api/etf/bootstrap", json={
+        "total_assets": 10000.0,
+        "positions": [{
+            "etf_code": "512880", "name": "证券ETF", "category": "industry",
+            "track_index_code": "SW801790", "track_index_name": "非银金融",
+            "primary_metric": "pb", "industry_group": "金融",
+            "budget": 2000.0, "step_pct": 5.0,
+            "shares": 1000, "price": 1.1, "trade_date": "2026-09-04", "fee": 0.2,
+        }],
+    })
+    assert boot.status_code == 200 and boot.json()["status"] == "bootstrapped"
+
+    after_boot = client.get("/api/etf/overview").json()
+    assert after_boot["total_assets"] == "10000.0"
+    item = next(row for row in after_boot["items"] if row["etf_code"] == "512880")
+    assert item["position"]["buy_count"] == 1
+    assert item["budget"] == 2000.0
+
+    reset = client.post("/api/etf/reset", json={"purge_meta": True})
+    assert reset.status_code == 200
+    assert reset.json()["status"] == "fresh_start_done"
+
+    fresh = client.get("/api/etf/overview").json()
+    assert fresh["total_assets"] is None
+    assert len(fresh["items"]) >= 30, "重置后必须重建默认观察池"
+    assert all(row["position"]["buy_count"] == 0 for row in fresh["items"])
