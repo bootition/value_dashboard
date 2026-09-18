@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 23
+DUCKDB_SCHEMA_VERSION = 25
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -604,6 +604,163 @@ CREATE TABLE IF NOT EXISTS etf_daily (
 );
 CREATE INDEX IF NOT EXISTS idx_etf_daily_code
     ON etf_daily (etf_code, trade_date);
+
+-- 间接法现金流量表（2026-09-19 v24，Phase B 数据层）
+-- 来源：CSMAR C17 的 FS_Comscfi.dta（216,862 行，1997-06-30 ~ 2025-03-31），
+-- 属上市公司原始披露科目（非二次计算值），按「三色灯」green 直接导入。
+-- 域纪律：独立低频域，不进入 A 股 readiness；自由现金流、杠杆（EBITDA/EBIT）
+-- 与折旧摊销类指标依赖本表；缺失时相关指标必须如实 NULL，不得回退估算。
+-- 列名语义见 config/csmar_field_verdict.json（裁定表只含本项目判定，不含原文）。
+CREATE TABLE IF NOT EXISTS cash_flow_indirect (
+    stock_code                          VARCHAR NOT NULL,
+    report_date                         DATE    NOT NULL,
+    report_type                         VARCHAR,
+    net_profit                          DOUBLE,
+    credit_impairment_loss              DOUBLE,
+    unconfirmed_investment_loss         DOUBLE,
+    asset_impairment_provision          DOUBLE,
+    fixed_asset_depreciation            DOUBLE,
+    investment_property_depreciation    DOUBLE,
+    right_of_use_asset_depreciation     DOUBLE,
+    intangible_asset_amortization       DOUBLE,
+    long_term_prepaid_amortization      DOUBLE,
+    disposal_long_term_asset_loss       DOUBLE,
+    fixed_asset_scrap_loss              DOUBLE,
+    fair_value_change_loss              DOUBLE,
+    financial_expense                   DOUBLE,
+    investment_loss                     DOUBLE,
+    deferred_tax_asset_decrease         DOUBLE,
+    deferred_tax_liability_increase     DOUBLE,
+    inventory_decrease                  DOUBLE,
+    operating_receivable_decrease       DOUBLE,
+    operating_payable_increase          DOUBLE,
+    other_adjustment                    DOUBLE,
+    cf_from_operating_indirect          DOUBLE,
+    debt_to_capital                     DOUBLE,
+    convertible_bond_due_within_1y      DOUBLE,
+    finance_lease_fixed_assets          DOUBLE,
+    cash_ending_balance                 DOUBLE,
+    cash_beginning_balance              DOUBLE,
+    cash_equivalent_ending              DOUBLE,
+    cash_equivalent_beginning           DOUBLE,
+    cash_equivalent_net_increase        DOUBLE,
+    source                              VARCHAR NOT NULL,
+    fetch_time                          TIMESTAMP NOT NULL,
+    raw_response_hash                   VARCHAR NOT NULL,
+    confidence                          VARCHAR NOT NULL,
+    batch_id                            VARCHAR NOT NULL,
+    raw_data                            VARCHAR,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_cash_flow_indirect_date
+    ON cash_flow_indirect (report_date);
+
+-- 财报公布日期域（2026-09-19 v24，Phase B「时点可见性」）
+-- 来源：CSMAR C17 的 FAR_Finidx.Annodt（1990-2024 年报）。实测覆盖率 97.7%
+-- （74,509/76,262 条有效；1,753 条缺失集中在 2014-2021 年），缺失如实登记不补齐。
+-- 用途：本项目历史研究此前只能采用「最新重述回看」口径（用今天才知道的数字判断
+-- 当年），PRD §8.1 明确标注「非当时可见、不用于回测」。本表提供每份年报的公开日，
+-- 使「当时可见」口径成为可能（年度频率；季报/中报公布日 CSMAR 不提供）。
+-- 纪律：本表只描述「何时公开」，不改变任何财务数值口径。
+CREATE TABLE IF NOT EXISTS financial_report_dates (
+    stock_code     VARCHAR NOT NULL,
+    report_date    DATE    NOT NULL,
+    announce_date  DATE    NOT NULL,
+    source         VARCHAR NOT NULL,
+    fetch_time     TIMESTAMP NOT NULL,
+    batch_id       VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date, source)
+);
+CREATE INDEX IF NOT EXISTS idx_financial_report_dates_announce
+    ON financial_report_dates (announce_date);
+CREATE INDEX IF NOT EXISTS idx_financial_report_dates_stock
+    ON financial_report_dates (stock_code, report_date);
+
+-- 投资/筹资活动现金流量补充域（2026-09-19 v25，Phase B）
+-- 来源：CSMAR C17 的 FS_Comscfd.dta（直接法现金流量表）中本项目此前未映射的
+-- 投资/筹资活动科目。主要为自由现金流提供「资本支出」输入
+-- （资本支出 = 购建固定资产、无形资产和其他长期资产支付的现金），
+-- 同时可用于交叉核验分红总额（分配股利、利润或偿付利息支付的现金）
+-- 与融资活动流水（对应 funding_events）。
+-- 域纪律：独立低频域；不进入 A 股 readiness；不修改 cash_flow 主表。
+CREATE TABLE IF NOT EXISTS cash_flow_activity (
+    stock_code                    VARCHAR NOT NULL,
+    report_date                   DATE    NOT NULL,
+    report_type                   VARCHAR,
+    capex                         DOUBLE,   -- 购建固定资产、无形资产和其他长期资产支付的现金
+    investment_recovered          DOUBLE,   -- 收回投资收到的现金
+    investment_income_cash        DOUBLE,   -- 取得投资收益收到的现金
+    disposal_long_asset_cash      DOUBLE,   -- 处置固定资产、无形资产和其他长期资产收回的现金净额
+    disposal_subsidiary_cash      DOUBLE,   -- 处置子公司及其他营业单位收到的现金净额
+    other_investing_inflow        DOUBLE,   -- 收到的其他与投资活动有关的现金
+    investing_inflow_total        DOUBLE,   -- 投资活动现金流入小计
+    investment_paid               DOUBLE,   -- 投资支付的现金
+    acquire_subsidiary_cash       DOUBLE,   -- 取得子公司及其他营业单位支付的现金净额
+    other_investing_outflow       DOUBLE,   -- 支付其他与投资活动有关的现金
+    investing_outflow_total       DOUBLE,   -- 投资活动现金流出小计
+    equity_investment_received    DOUBLE,   -- 吸收权益性投资收到的现金
+    borrow_received               DOUBLE,   -- 取得借款收到的现金
+    bond_issued                   DOUBLE,   -- 发行债券收到的现金
+    other_financing_inflow        DOUBLE,   -- 收到其他与筹资活动有关的现金
+    financing_inflow_total        DOUBLE,   -- 筹资活动现金流入小计
+    debt_repaid                   DOUBLE,   -- 偿还债务支付的现金
+    dividend_interest_paid        DOUBLE,   -- 分配股利、利润或偿付利息支付的现金
+    other_financing_outflow       DOUBLE,   -- 支付其他与筹资活动有关的现金
+    financing_outflow_total       DOUBLE,   -- 筹资活动现金流出小计
+    other_cash_effect             DOUBLE,   -- 其他对现金的影响
+    source                        VARCHAR NOT NULL,
+    fetch_time                    TIMESTAMP NOT NULL,
+    raw_response_hash             VARCHAR NOT NULL,
+    confidence                    VARCHAR NOT NULL,
+    batch_id                      VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_cash_flow_activity_date
+    ON cash_flow_activity (report_date);
+
+-- 扩展指标域（2026-09-19 v25，Phase B「缺失指标族」）
+-- 用途：承载本项目此前完全没有、且 CSMAR C17 也无法直接采用（三色灯 yellow）的
+-- 指标族。按「先接间接法、再自算、CSMAR 值作核验」的裁定，本表数值全部由本项目
+-- 依据 config/csmar_field_verdict.json 记录的口径自算，source='derived_calculator'。
+-- 列族：
+--   turnover_*   周转率族（口径：累计营业收入或营业成本 ÷ 期末余额，CSMAR FI_T4「A」式）
+--   ebit/ebitda  息税前利润 / 息税折旧摊销前利润（CSMAR FI_T5 明确定义的公式）
+--   leverage_*   财务/经营/综合杠杆（CSMAR FI_T7 明确定义的公式）
+--   fcf_*        自由现金流（本项目口径：经营现金流净额 − 资本支出，已在列注释标注）
+-- 依赖：turnover 仅依赖 balance_sheet/income_statement；ebitda/leverage/fcf 另需
+-- cash_flow_indirect 与 cash_flow_activity，缺失时对应列为 NULL（如实缺失，不估算）。
+-- 域纪律：独立低频域，不进入 indicator_snapshot 主链，不影响 A 股 readiness。
+CREATE TABLE IF NOT EXISTS indicator_ext (
+    stock_code                    VARCHAR NOT NULL,
+    report_date                   DATE    NOT NULL,
+    -- 周转率族（CSMAR FI_T4「A」式：累计损益 ÷ 期末余额）
+    receivables_turnover          DOUBLE,   -- 应收账款周转率
+    inventory_turnover            DOUBLE,   -- 存货周转率
+    accounts_payable_turnover     DOUBLE,   -- 应付账款周转率
+    current_asset_turnover        DOUBLE,   -- 流动资产周转率
+    fixed_asset_turnover          DOUBLE,   -- 固定资产周转率
+    total_asset_turnover          DOUBLE,   -- 总资产周转率
+    equity_turnover               DOUBLE,   -- 股东权益周转率
+    operating_cycle_days          DOUBLE,   -- 营业周期（天）= 应收周转天数 + 存货周转天数
+    -- 现金流与自由现金流族
+    depreciation_amortization     DOUBLE,   -- 折旧摊销（固定资产折旧+无形资产摊销+长期待摊费用摊销）
+    capex                         DOUBLE,   -- 资本支出
+    operating_cash_flow           DOUBLE,   -- 经营活动现金流量净额
+    free_cash_flow                DOUBLE,   -- 自由现金流（本项目口径：经营现金流净额 − 资本支出）
+    fcf_margin                    DOUBLE,   -- 自由现金流 / 营业收入
+    -- 利润与杠杆族
+    ebit                          DOUBLE,   -- 息税前利润 = 净利润+所得税费用+财务费用
+    ebitda                        DOUBLE,   -- 息税折旧摊销前利润 = EBIT + 折旧摊销
+    leverage_financial            DOUBLE,   -- 财务杠杆 = EBIT / 利润总额
+    leverage_operating            DOUBLE,   -- 经营杠杆 = EBITDA / EBIT
+    leverage_total                DOUBLE,   -- 综合杠杆 = EBITDA / 利润总额
+    calculated_at                 TIMESTAMP NOT NULL,
+    source                        VARCHAR NOT NULL,
+    data_version                  INTEGER NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_indicator_ext_date
+    ON indicator_ext (report_date);
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -1300,6 +1457,57 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (23, 'ETF tracking-index PE-TTM five-year percentile column')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v24: CSMAR C17 数据层两域（2026-09-19，Phase B）。
+        # ① cash_flow_indirect —— 间接法现金流量表 29 科目（FS_Comscfi）。
+        #    为自由现金流族、杠杆（EBITDA/EBIT）、折旧摊销类指标提供输入；
+        #    此前本项目只有直接法，导致 FCF 无法编制。
+        # ② financial_report_dates —— 年报公布日（FAR_Finidx.Annodt，76,262 条）。
+        #    支撑「当时可见」口径，解除 PRD §8.1「不用于回测」的标注限制。
+        # 两表 DDL 在 DUCKDB_SCHEMA_V1 中，这里补齐索引与迁移记录。
+        # 域纪律：均为独立低频域，不进入 A 股 readiness 门禁；写路径走
+        # scripts/import_csmar_phase_b.py + 单写者锁。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cash_flow_indirect_date "
+            "ON cash_flow_indirect (report_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_financial_report_dates_announce "
+            "ON financial_report_dates (announce_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_financial_report_dates_stock "
+            "ON financial_report_dates (stock_code, report_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (24, 'CSMAR C17: indirect cash flow statement + annual report publish dates')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v25: CSMAR C17 Phase B 指标层（2026-09-19）。
+        # ① cash_flow_activity —— 直接法现金流量表的投资/筹资活动科目
+        #    （为自由现金流提供资本支出输入，并提供分红总额与融资流水的核验源）；
+        # ② indicator_ext —— 本项目此前完全缺失的三族指标：
+        #    周转率族（CSMAR FI_T4，green 可自算）、杠杆族（FI_T7）、
+        #    自由现金流族（FI_T6，yellow：公式透明但口径需自行定义）。
+        # 两表 DDL 在 DUCKDB_SCHEMA_V1 中，这里补齐索引与迁移记录。
+        # 域纪律：独立低频域，不进入 indicator_snapshot 主链与 readiness 门禁。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cash_flow_activity_date "
+            "ON cash_flow_activity (report_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_indicator_ext_date "
+            "ON indicator_ext (report_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (25, 'CSMAR C17: investing/financing cash flow + extended indicators (turnover/leverage/FCF)')
             ON CONFLICT (version) DO NOTHING
             """
         )

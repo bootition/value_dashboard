@@ -1,0 +1,89 @@
+"""CSMAR C17 Phase B 数据域回归（v24，2026-09-19）。
+
+守住两件事：
+1. schema v24 真的建出了 `cash_flow_indirect` 与 `financial_report_dates`
+   两表，列名与冻结的语义一致（列名是 DS 与指标层的契约，改名即破坏）；
+2. 两个域都带齐溯源列（source / fetch_time / batch_id / confidence），
+   延续项目「每格数据有出生证明」的纪律。
+
+数据层断言（间接法与直接法经营现金流一致性等）不放这里——测试库为空库，
+数据级校验由 scripts/import_csmar_phase_b.py 的入库证据承担。
+"""
+
+from __future__ import annotations
+
+from app.core.storage.duckdb_store import DuckDBStore
+
+INDIRECT_COLUMNS = {
+    "stock_code", "report_date", "report_type",
+    "net_profit", "credit_impairment_loss", "unconfirmed_investment_loss",
+    "asset_impairment_provision", "fixed_asset_depreciation",
+    "investment_property_depreciation", "right_of_use_asset_depreciation",
+    "intangible_asset_amortization", "long_term_prepaid_amortization",
+    "disposal_long_term_asset_loss", "fixed_asset_scrap_loss",
+    "fair_value_change_loss", "financial_expense", "investment_loss",
+    "deferred_tax_asset_decrease", "deferred_tax_liability_increase",
+    "inventory_decrease", "operating_receivable_decrease",
+    "operating_payable_increase", "other_adjustment",
+    "cf_from_operating_indirect", "debt_to_capital",
+    "convertible_bond_due_within_1y", "finance_lease_fixed_assets",
+    "cash_ending_balance", "cash_beginning_balance",
+    "cash_equivalent_ending", "cash_equivalent_beginning",
+    "cash_equivalent_net_increase",
+    "source", "fetch_time", "raw_response_hash", "confidence", "batch_id", "raw_data",
+}
+
+
+def _columns(store: DuckDBStore, table: str) -> set[str]:
+    return {
+        row["column_name"]
+        for row in store.read_query(
+            "SELECT column_name FROM duckdb_columns() WHERE table_name = ?", [table]
+        )
+    }
+
+
+def test_schema_v24_version_and_migration_record(duckdb_store: DuckDBStore) -> None:
+    from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
+
+    assert DUCKDB_SCHEMA_VERSION >= 24
+    rows = duckdb_store.read_query("SELECT MAX(version) AS v FROM schema_migrations")
+    assert rows[0]["v"] >= 24
+
+
+def test_cash_flow_indirect_table_shape(duckdb_store: DuckDBStore) -> None:
+    columns = _columns(duckdb_store, "cash_flow_indirect")
+    missing = INDIRECT_COLUMNS - columns
+    assert not missing, f"cash_flow_indirect 缺列: {sorted(missing)}"
+
+
+def test_financial_report_dates_table_shape(duckdb_store: DuckDBStore) -> None:
+    columns = _columns(duckdb_store, "financial_report_dates")
+    assert {"stock_code", "report_date", "announce_date", "source",
+            "fetch_time", "batch_id"} <= columns
+
+
+def test_phase_b_table_primary_keys(duckdb_store: DuckDBStore) -> None:
+    """主键是幂等 upsert 的依据，不得被改动。"""
+    for table, expected in (
+        ("cash_flow_indirect", {"stock_code", "report_date"}),
+        ("financial_report_dates", {"stock_code", "report_date", "source"}),
+    ):
+        rows = duckdb_store.read_query(
+            "SELECT constraint_column_names FROM duckdb_constraints() "
+            "WHERE table_name = ? AND constraint_type = 'PRIMARY KEY'",
+            [table],
+        )
+        assert rows, f"{table} 缺少主键"
+        keys = {str(name) for name in rows[0]["constraint_column_names"]}
+        assert keys == expected, f"{table} 主键应为 {expected}，实际 {keys}"
+
+
+def test_indirect_method_has_depreciation_inputs(duckdb_store: DuckDBStore) -> None:
+    """FCF / 杠杆（EBITDA/EBIT）依赖的折旧摊销三项必须在表内。"""
+    columns = _columns(duckdb_store, "cash_flow_indirect")
+    assert {
+        "fixed_asset_depreciation",
+        "intangible_asset_amortization",
+        "long_term_prepaid_amortization",
+    } <= columns

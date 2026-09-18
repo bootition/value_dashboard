@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-09-18T16:43:34.421241+00:00",
+  "purpose": "CSMAR C17 字段采用裁定（三色灯）。供代码在引入 CSMAR 字段前先查口径，避免『同名不同义』污染主链。",
+  "source_package": {
+    "name": "CSMAR C17 a股上市公司财务数据合集（90-25年）",
+    "location": "额外资料/（.gitignore，不入库）",
+    "coverage": "1990-12-31 ~ 2025-03-31（财务指标部分 2007-03-31 起）",
+    "contains_price_data": false,
+    "license": "商业授权，禁止对外分发；仅限本机核验与历史补全"
+  },
+  "rules": {
+    "green": "公式与本项目完全一致 → 可采用，并可作交叉核验",
+    "yellow": "公式接近但存在口径差异（科目/时点/分母）→ 只用不换，须标注差异",
+    "red": "字段名相近但含义不同 → 绝不采用，只作参考",
+    "none": "CSMAR 无对应字段"
+  },
+  "adoption_policy": {
+    "main_chain": "green 才可进主链或被引用为等价第三方；yellow/red 一律不得替换主链值",
+    "lineage_requirement": "任何来自 CSMAR 的写入必须带 source='csmar' 的 lineage",
+    "forbidden": "禁止在对外产物（数据包/导出/备份外发）中包含 CSMAR 原始值或衍生值"
+  },
+  "fields": [
+    {
+      "field": "debt_ratio",
+      "csmar_table": "FI_T1",
+      "csmar_code": "F011201A",
+      "color": "green",
+      "basis": "同为 负债合计/资产总计"
+    },
+    {
+      "field": "current_ratio",
+      "csmar_table": "FI_T1",
+      "csmar_code": "F010101A",
+      "color": "green",
+      "basis": "同为 流动资产/流动负债"
+    },
+    {
+      "field": "quick_ratio",
+      "csmar_table": "FI_T1",
+      "csmar_code": "F010201A",
+      "color": "green",
+      "basis": "同为 (流动资产-存货)/流动负债"
+    },
+    {
+      "field": "total_market_cap",
+      "csmar_table": "FI_T10",
+      "csmar_code": "F100801A",
+      "color": "red",
+      "basis": "CSMAR 市值含全部负债（企业价值口径），本项目为不含负债的普通市值",
+      "trap": true
+    },
+    {
+      "field": "circ_market_cap",
+      "csmar_table": null,
+      "csmar_code": null,
+      "color": "none",
+      "basis": "CSMAR 无流通市值字段"
+    },
+    {
+      "field": "pe_ttm",
+      "csmar_table": "FI_T10",
+      "csmar_code": "F100103C",
+      "color": "yellow",
+      "basis": "分母用实收资本而非总股本；且 CSMAR 为报告期末收盘价快照、本项目为最新收盘价"
+    },
+    {
+      "field": "pb_mrq",
+      "csmar_table": "FI_T10",
+      "csmar_code": "F100401A",
+      "color": "yellow",
+      "basis": "分母用所有者权益合计（含少数股东），本项目用归母权益；时点亦不同"
+    },
+    {
+      "field": "ps_ttm",
+      "csmar_table": "FI_T10",
+      "csmar_code": "F100203C",
+      "color": "yellow",
+      "basis": "同 PE：实收资本 vs 总股本 + 时点不同"
+    },
+    {
+      "field": "pcf_ttm",
+      "csmar_table": "FI_T10",
+      "csmar_code": "F100303C",
+      "color": "yellow",
+      "basis": "同 PE：实收资本 vs 总股本 + 时点不同"
+    },
+    {
+      "field": "dividend_yield",
+      "csmar_table": "FI_T10",
+      "csmar_code": "F101201B",
+      "color": "yellow",
+      "basis": "CSMAR 为税后每股派息口径，需比对税前后与窗口"
+    },
+    {
+      "field": "roe",
+      "csmar_table": "FI_T5",
+      "csmar_code": "F050504C",
+      "color": "yellow",
+      "basis": "分子统计口径与平均余额算法需比对"
+    },
+    {
+      "field": "roa",
+      "csmar_table": "FI_T5",
+      "csmar_code": "F050204C",
+      "color": "yellow",
+      "basis": "净利润是否含少数股东需比对"
+    },
+    {
+      "field": "gross_margin",
+      "csmar_table": "FI_T5",
+      "csmar_code": "F053301C",
+      "color": "yellow",
+      "basis": "收入/成本科目选择需比对（营业收入 vs 营业总收入）"
+    },
+    {
+      "field": "net_margin",
+      "csmar_table": "FI_T5",
+      "csmar_code": "F051501C",
+      "color": "yellow",
+      "basis": "口径需比对"
+    },
+    {
+      "field": "roic",
+      "csmar_table": "FI_T5",
+      "csmar_code": "F051201B",
+      "color": "yellow",
+      "basis": "投入资本定义不同（CSMAR 用 资产总计-流动负债+应付票据+短期借款+一年内到期非流动负债）"
+    },
+    {
+      "field": "interest_coverage",
+      "csmar_table": "FI_T1",
+      "csmar_code": "F010701B",
+      "color": "red",
+      "basis": "CSMAR 为 EBIT/财务费用口径，本项目为营业利润/利息费用"
+    },
+    {
+      "field": "interest_bearing_debt",
+      "csmar_table": null,
+      "csmar_code": null,
+      "color": "none",
+      "basis": "CSMAR 无对应字段"
+    },
+    {
+      "field": "cf_to_net_profit",
+      "csmar_table": "FI_T6",
+      "csmar_code": "F060101B",
+      "color": "yellow",
+      "basis": "口径需比对（净利润期间、是否 TTM）"
+    },
+    {
+      "field": "payout_ratio",
+      "csmar_table": "FI_T11",
+      "csmar_code": "F110301B",
+      "color": "yellow",
+      "basis": "CSMAR 用净利润本期值/实收资本，本项目用 TTM 归母/总股本"
+    },
+    {
+      "field": "dps",
+      "csmar_table": "FI_T11",
+      "csmar_code": "F110101B",
+      "color": "yellow",
+      "basis": "同为每股税前现金股利，年度归属口径需比对"
+    },
+    {
+      "field": "revenue_yoy",
+      "csmar_table": "FI_T8",
+      "csmar_code": "F081601B",
+      "color": "yellow",
+      "basis": "CSMAR『A』为单季度同比口径，本项目为 TTM 同比"
+    },
+    {
+      "field": "net_profit_yoy",
+      "csmar_table": "FI_T8",
+      "csmar_code": "F081001B",
+      "color": "yellow",
+      "basis": "同上，单季度口径差异"
+    }
+  ],
+  "families": [
+    {
+      "key": "turnover",
+      "name": "经营能力/周转率",
+      "csmar_table": "FI_T4",
+      "field_count": 67,
+      "color": "green",
+      "verdict": "可自算",
+      "basis": "公式仅使用本项目已有科目（营业收入/营业成本/应收账款/存货/资产总额/股东权益期末余额）",
+      "action": "自算为主链，CSMAR 值作交叉核验",
+      "status": "implemented",
+      "implemented_at": "2026-09-19",
+      "table": "indicator_ext",
+      "rows": 427675,
+      "verification": {
+        "method": "本项目自算值 vs CSMAR FI_T4 全历史比对",
+        "compared_rows": 301791,
+        "within_0.1pct": {
+          "存货周转率": 93.13,
+          "总资产周转率": 92.64,
+          "股东权益周转率": 92.53,
+          "应付账款周转率": 93.1,
+          "应收账款周转率": 86.55
+        },
+        "note": "应收账款偏低源于 2014 年前历史段；2014-2025 年按 1% 容差的复现率为 94.7%-97.3%，达 ≥95% 门槛"
+      }
+    },
+    {
+      "key": "cashflow_indirect",
+      "name": "现金流量表（间接法）",
+      "csmar_table": "FS_Comscfi",
+      "field_count": 29,
+      "color": "green",
+      "verdict": "直接导入（原始科目，无公式争议）",
+      "basis": "属上市公司原始披露科目，非二次计算值",
+      "action": "新建 cash_flow_indirect 域",
+      "status": "imported",
+      "imported_at": "2026-09-19",
+      "imported_rows": 216862,
+      "table": "cash_flow_indirect",
+      "note": "入库 216,862 行；与直接法经营现金流交叉核验 96.05% 完全一致（±1元）"
+    },
+    {
+      "key": "free_cash_flow",
+      "name": "自由现金流族",
+      "csmar_table": "FI_T6",
+      "field_count": 32,
+      "color": "yellow",
+      "verdict": "公式透明但依赖缺失输入",
+      "basis": "企业自由现金流 = 息前税后利润 + 折旧摊销 - 营运资本增加 - 资本支出；其中折旧摊销来自间接法（未导入）、资本支出来自直接法未映射科目",
+      "action": "先接间接法，再自算；CSMAR 值作核验",
+      "depends_on": [
+        "cashflow_indirect"
+      ],
+      "status": "implemented",
+      "implemented_at": "2026-09-19",
+      "table": "indicator_ext",
+      "unblocked_by": "cashflow_indirect + cashflow_activity",
+      "note": "按 CSMAR 明确公式自算；自由现金流采用本项目口径（经营现金流净额 − 资本支出）"
+    },
+    {
+      "key": "leverage",
+      "name": "风险水平/杠杆",
+      "csmar_table": "FI_T7",
+      "field_count": 3,
+      "color": "yellow",
+      "verdict": "公式透明但依赖缺失输入",
+      "basis": "财务杠杆 = EBIT/税前利润；经营杠杆 = EBITDA/EBIT；综合杠杆 = EBITDA/税前利润 —— 后两者均需折旧摊销",
+      "action": "先接间接法，再自算",
+      "depends_on": [
+        "cashflow_indirect"
+      ],
+      "status": "implemented",
+      "implemented_at": "2026-09-19",
+      "table": "indicator_ext",
+      "unblocked_by": "cashflow_indirect + cashflow_activity",
+      "note": "按 CSMAR 明确公式自算；自由现金流采用本项目口径（经营现金流净额 − 资本支出）"
+    },
+    {
+      "key": "ebitda",
+      "name": "EBIT/EBITDA",
+      "csmar_table": "FI_T5",
+      "field_count": 2,
+      "color": "yellow",
+      "verdict": "同上",
+      "basis": "EBITDA = 净利润 + 所得税 + 财务费用 + 折旧摊销",
+      "action": "先接间接法，再自算",
+      "depends_on": [
+        "cashflow_indirect"
+      ],
+      "status": "implemented",
+      "implemented_at": "2026-09-19",
+      "table": "indicator_ext",
+      "unblocked_by": "cashflow_indirect + cashflow_activity",
+      "note": "按 CSMAR 明确公式自算；自由现金流采用本项目口径（经营现金流净额 − 资本支出）"
+    },
+    {
+      "key": "report_publish_dates",
+      "name": "年报公布日（时点可见性）",
+      "csmar_table": "FAR_Finidx",
+      "field_count": 1,
+      "color": "green",
+      "verdict": "直接导入（日期事实，不涉及数值口径）",
+      "basis": "1990-2024 年报公布日；实测 74,509/76,262 有效（97.7%），缺失集中 2014-2021",
+      "action": "新建 financial_report_dates 域，支撑『当时可见』口径",
+      "depends_on": [],
+      "status": "imported",
+      "imported_at": "2026-09-19",
+      "imported_rows": 74509,
+      "table": "financial_report_dates"
+    }
+  ],
+  "traps": [
+    {
+      "id": "market_cap_includes_debt",
+      "field": "FI_T10 市值A / 市值B",
+      "fact": "公式在股价×股数之外额外加计『负债合计』，为企业价值口径",
+      "risk": "若按名称直接采用，高负债公司市值会被大幅高估"
+    },
+    {
+      "id": "equity_total_is_parent_only",
+      "field": "FAR_Finidx.A300000（标称『股东权益合计』）",
+      "fact": "实测与 FS_Combas.A003100000（归属于母公司所有者权益合计）100% 相同",
+      "risk": "用它反推股本，一致率由 98.51% 降至 42.11%；反推须改用 FS_Combas.A003000000"
+    }
+  ],
+  "data_tables": {
+    "cash_flow_indirect": {
+      "rows": 216862,
+      "coverage": "1997-06-30 ~ 2025-03-31",
+      "imported_at": "2026-09-19"
+    },
+    "cash_flow_activity": {
+      "rows": 339165,
+      "coverage": "1997-06-30 ~ 2025-03-31",
+      "imported_at": "2026-09-19"
+    },
+    "financial_report_dates": {
+      "rows": 74509,
+      "coverage": "1990-12-31 ~ 2024-12-31",
+      "fill_rate_pct": 97.7,
+      "imported_at": "2026-09-19",
+      "note": "1,753 条缺失集中在 2014-2021，如实缺失不补齐"
+    },
+    "indicator_ext": {
+      "rows": 427675,
+      "coverage": "1989-12-31 ~ 2026-06-30",
+      "built_at": "2026-09-19",
+      "filled": {
+        "free_cash_flow": 337327,
+        "total_asset_turnover": 425871,
+        "leverage_operating": 208893
+      }
+    }
+  }
+}

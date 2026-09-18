@@ -1052,6 +1052,28 @@ def data_compute_indicators() -> None:
     typer.echo(json.dumps(make_response("data.compute_indicators", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("compute-extended-indicators")
+def data_compute_extended_indicators(
+    codes: str = typer.Option("", "--codes", help="只重建指定股票代码，逗号分隔（默认全部）"),
+) -> None:
+    """构建扩展指标域 indicator_ext（周转率 / 自由现金流 / 杠杆，schema v25）
+
+    - 独立低频域，不写 `indicator_snapshot` 主链，不影响 readiness 门禁
+    - 依赖 cash_flow_indirect（折旧摊销）与 cash_flow_activity（资本支出）；
+      输入缺失时对应列为 NULL，不做估算
+    - 口径裁定见 `config/csmar_field_verdict.json`
+    """
+    from app.cli.protocol import make_response
+    from app.core.indicators.extended import ExtendedIndicatorBuilder
+
+    paths, duck, _sqlite = _database_context()
+    builder = ExtendedIndicatorBuilder(duck=duck, paths=paths)
+    code_list = [c.strip() for c in codes.split(",") if c.strip()] or None
+    report = builder.build(codes=code_list)
+
+    typer.echo(json.dumps(make_response("data.compute_extended_indicators", report), ensure_ascii=False, indent=2, default=str))
+
+
 # ─── DSL/复合指标命令 (PRD §16.1, §11.5) ─────────────────────────
 
 indicator_app = typer.Typer(help="复合指标管理 (DSL)")
