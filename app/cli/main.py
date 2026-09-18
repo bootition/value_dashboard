@@ -1074,6 +1074,43 @@ def data_compute_extended_indicators(
     typer.echo(json.dumps(make_response("data.compute_extended_indicators", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("report-dates")
+def data_report_dates(
+    code: str = typer.Option("", "--code", help="股票代码；留空则只打印公布日域覆盖概况"),
+    as_of: str = typer.Option("", "--as-of", help="观察日 YYYY-MM-DD；留空取今天"),
+) -> None:
+    """查询「当时可见」年报口径（point-in-time，年度频率）
+
+    - 回答「在 as_of 这一天，投资者能看到的最新一份年报是哪一期」
+    - 数据来源：financial_report_dates（CSMAR FAR_Finidx.Annodt，74,509 条）
+    - **仅年度频率**：CSMAR 不提供季报/中报公布日；缺失即返回无记录，不做推断
+    """
+    from datetime import date as _date
+
+    from app.cli.protocol import make_response
+    from app.core.point_in_time import coverage, latest_visible_annual, was_visible
+
+    _, duck, _sqlite = _database_context()
+    result: dict = {"coverage": coverage(duck)}
+    if code:
+        as_of_date = _date.fromisoformat(as_of) if as_of else _date.today()
+        visible = latest_visible_annual(duck, code, as_of_date)
+        result["query"] = {
+            "stock_code": code,
+            "as_of": str(as_of_date),
+            "visible_annual_period": str(visible.report_date) if visible else None,
+            "announce_date": str(visible.announce_date) if visible else None,
+            "days_since_announce": visible.days_since_announce if visible else None,
+            "is_stale": visible.is_stale if visible else None,
+            "note": "仅有年报公布日；未登记公布日的报告期不参与判定",
+        }
+        if visible:
+            result["query"]["that_period_was_visible"] = was_visible(
+                duck, code, visible.report_date, as_of_date
+            )
+    typer.echo(json.dumps(make_response("data.report_dates", result), ensure_ascii=False, indent=2, default=str))
+
+
 # ─── DSL/复合指标命令 (PRD §16.1, §11.5) ─────────────────────────
 
 indicator_app = typer.Typer(help="复合指标管理 (DSL)")
