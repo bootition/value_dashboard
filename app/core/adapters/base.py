@@ -51,7 +51,14 @@ DataType = Literal[
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
 # P0-1: cninfo_csrc 是 CSRC 行业适配器的独立源名（与 cninfo 公告/分红适配器区分）
-SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "sws", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend"]
+SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "sws", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend", "csmar"]
+# 2026-09-17 Phase B1：新增 csmar 源名。
+# 用途：CSMAR C17 学术数据包（额外资料/，商业授权、禁止对外分发）作为
+# 历史期第三方核验与回填源。该包只提供财务三表与财务指标、不含行情，
+# 时间截止 2025-03-31。写入必须带 source='csmar' 的 lineage，不得冒充免费源。
+# 字段采用遵循"三色灯"规则（详见
+# .planning/2026-09-17-datapackage-research/CSMAR_COLOR_VERDICT.md）：
+# 公式一致才可采用；名称相同但公式不同，只做参考、不进主链。
 
 
 # ─── 请求/响应模型 ──────────────────────────────────────────────────
