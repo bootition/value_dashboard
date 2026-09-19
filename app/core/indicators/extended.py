@@ -72,6 +72,11 @@ OPERATING_CYCLE_MAX_DAYS = 3650.0
 #    分布为 中位 1.1-1.5 / p99 8-22 / p99.9 47-133，|值|>100 已属病理值。
 #    注意必须用 ABS 判定：负值（EBIT 为负而利润总额为正）会绕过 `<= cap`。
 LEVERAGE_MAX = 100.0
+# 5) 费用率：分母（营业收入）极小时比率发散；|费用率| > 500% 判为无意义。
+EXPENSE_RATIO_MAX_ABS = 5.0
+# 6) 权益乘数 = 总资产/总权益；权益趋 0 时发散。>100 判为无意义（净资产为负时
+#    乘数为负，同样无业务含义，故用 ABS）。
+EQUITY_MULTIPLIER_MAX = 100.0
 
 # 周转率族：累计损益 ÷ 期末余额（CSMAR FI_T4「A」式）
 TURNOVER_RATIOS: tuple[tuple[str, str, str], ...] = (
@@ -118,6 +123,17 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         f"CASE WHEN {den} IS NULL OR {den} = 0 THEN NULL ELSE ({num}) / ({den}) END AS {alias}"
         for alias, num, den in TURNOVER_RATIOS
     )
+    expense_ratios = ", ".join(
+        f"CASE WHEN i.revenue IS NULL OR i.revenue = 0 THEN NULL "
+        f"WHEN ABS((i.{col}) / i.revenue) > {EXPENSE_RATIO_MAX_ABS} THEN NULL "
+        f"ELSE (i.{col}) / i.revenue END AS {alias}"
+        for alias, col in (
+            ("selling_expense_ratio", "selling_expenses"),
+            ("admin_expense_ratio", "administrative_expenses"),
+            ("rd_expense_ratio", "rd_expenses"),
+            ("finance_expense_ratio", "financial_expenses"),
+        )
+    )
     code_filter = ""
     if codes:
         quoted = ", ".join("'" + c.replace("'", "''") + "'" for c in codes)
@@ -154,6 +170,27 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         CASE WHEN {_EBIT_READY} AND {_DEP_READY} AND i.total_profit > 0
                   AND ABS(({_EBIT} + {_DEPRECIATION}) / i.total_profit) <= {LEVERAGE_MAX}
              THEN ({_EBIT} + {_DEPRECIATION}) / i.total_profit END AS leverage_total,
+        -- ─── 每股族（v26）────────────────────────────────────────────
+        -- 分母用「当时股数」：share_capital_history 中 effective_date <= 报告期的
+        -- 最近一笔。**不得**用 stock_meta.total_shares（当前股本），否则历史期
+        -- 每股指标会被后期增发/回购污染（ops-knowledge-base D23 同类口径问题）。
+        CASE WHEN sh.total_shares > 0 THEN
+            COALESCE(b.total_equity_parent, b.total_equity) / sh.total_shares END AS bps,
+        CASE WHEN sh.total_shares > 0 THEN i.revenue / sh.total_shares END AS revenue_per_share,
+        CASE WHEN sh.total_shares > 0 THEN c.cf_from_operating / sh.total_shares END AS ocf_per_share,
+        CASE WHEN sh.total_shares > 0 THEN
+            (COALESCE(b.surplus_reserve, 0) + COALESCE(b.undistributed_profit, 0)) / sh.total_shares
+        END AS retained_earnings_per_share,
+        -- ─── 费用率族（v26）──────────────────────────────────────────
+        {expense_ratios},
+        -- ─── 结构族（v26）───────────────────────────────────────────
+        CASE WHEN b.total_assets > 0 AND b.total_current_assets IS NOT NULL
+             THEN b.total_current_assets / b.total_assets END AS current_asset_ratio,
+        CASE WHEN b.total_assets > 0 AND b.fixed_assets IS NOT NULL
+             THEN b.fixed_assets / b.total_assets END AS fixed_asset_ratio,
+        CASE WHEN b.total_equity IS NOT NULL AND b.total_equity <> 0
+                  AND ABS(b.total_assets / b.total_equity) <= {EQUITY_MULTIPLIER_MAX}
+             THEN b.total_assets / b.total_equity END AS equity_multiplier,
         CAST(? AS TIMESTAMP) AS calculated_at,
         ? AS source,
         ? AS data_version
@@ -166,6 +203,11 @@ def build_select_sql(codes: list[str] | None = None) -> str:
       ON ci.stock_code = i.stock_code AND ci.report_date = i.report_date
     LEFT JOIN cash_flow_activity ca
       ON ca.stock_code = i.stock_code AND ca.report_date = i.report_date
+    LEFT JOIN LATERAL (
+        SELECT sch.total_shares FROM share_capital_history sch
+        WHERE sch.stock_code = i.stock_code AND sch.effective_date <= i.report_date
+        ORDER BY sch.effective_date DESC LIMIT 1
+    ) sh ON true
     WHERE i.report_date IS NOT NULL{code_filter}
     """
 

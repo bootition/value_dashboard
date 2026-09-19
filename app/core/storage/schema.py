@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 25
+DUCKDB_SCHEMA_VERSION = 26
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -1508,6 +1508,35 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (25, 'CSMAR C17: investing/financing cash flow + extended indicators (turnover/leverage/FCF)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v26: indicator_ext 扩展第二批（2026-09-19，"榨干数据包" R6）。
+        # 新增三族**可由本项目自算**的指标（不依赖 CSMAR，因此当期为最新）：
+        #   ① 每股族：每股净资产/每股营业收入/每股经营现金流/每股留存收益
+        #      —— 分母用 share_capital_history 的**当时股数**（effective_date<=报告期），
+        #      不得用 stock_meta.total_shares（那是当前股本，会造成历史口径错误，
+        #      参见 ops-knowledge-base D23）。
+        #   ② 费用率族：销售/管理/研发/财务费用率
+        #   ③ 结构族：流动资产占比、固定资产占比、权益乘数
+        for column, kind in (
+            ("bps", "DOUBLE"),
+            ("revenue_per_share", "DOUBLE"),
+            ("ocf_per_share", "DOUBLE"),
+            ("retained_earnings_per_share", "DOUBLE"),
+            ("selling_expense_ratio", "DOUBLE"),
+            ("admin_expense_ratio", "DOUBLE"),
+            ("rd_expense_ratio", "DOUBLE"),
+            ("finance_expense_ratio", "DOUBLE"),
+            ("current_asset_ratio", "DOUBLE"),
+            ("fixed_asset_ratio", "DOUBLE"),
+            ("equity_multiplier", "DOUBLE"),
+        ):
+            connection.execute(f"ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS {column} {kind}")
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (26, 'indicator_ext: per-share / expense-ratio / structure families')
             ON CONFLICT (version) DO NOTHING
             """
         )

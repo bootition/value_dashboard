@@ -296,3 +296,69 @@ def test_zero_denominator_yields_null_for_new_columns(
     row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600005'")[0]
     assert row["total_asset_turnover"] == 0.0
     assert row["equity_turnover"] is None
+
+
+# ─── v26：每股族 / 费用率族 / 结构族 ────────────────────────────────
+
+def test_per_share_uses_point_in_time_shares_not_current(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """每股指标的分母必须是「当时股数」（effective_date <= 报告期），
+    不得用 stock_meta.total_shares（当前股本）。
+
+    这是本项目反复踩过的口径坑（ops-knowledge-base D23：用当前股本算历史市值
+    会把增发高估、回购低估）。这里用两次股本变更来钉死语义：
+      2010-01-01 起 100 股 → 2026-01-01 起 200 股
+      报告期应使用 100 股，而不是 200 股。
+    """
+    _seed_income(duckdb_store, "600007", revenue=1000.0, net_profit=100.0,
+                 income_tax=0.0, financial_expenses=0.0, total_profit=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_equity,
+               total_equity_parent, surplus_reserve, undistributed_profit, total_current_assets,
+               fixed_assets) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ["600007", REPORT_DATE, 2000.0, 1000.0, 1000.0, 100.0, 300.0, 500.0, 800.0],
+        )
+        # 报告期(2024-12-31)之前生效的是 100 股；200 股在报告期之后才生效，
+        # 若误用「最新股数」就会得到 bps=5 而不是 10。
+        for eff, shares in (("2010-01-01", 100.0), ("2026-01-01", 200.0)):
+            conn.execute(
+                """INSERT INTO share_capital_history
+                   (stock_code, effective_date, total_shares, source, raw_hash, batch_id)
+                   VALUES (?, CAST(? AS DATE), ?, 'csmar', 'h', 'b')""",
+                ["600007", eff, shares],
+            )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600007'")[0]
+    assert row["bps"] == 10.0                    # 1000 / 100（当时股数），不是 1000/200=5
+    assert row["revenue_per_share"] == 10.0      # 1000 / 100
+    assert row["retained_earnings_per_share"] == 4.0   # (100+300)/100
+    # 费用率族与结构族
+    assert row["current_asset_ratio"] == 0.25    # 500/2000
+    assert row["fixed_asset_ratio"] == 0.4       # 800/2000
+    assert row["equity_multiplier"] == 2.0       # 2000/1000
+
+
+def test_expense_ratio_guard_and_structure_guard(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """费用率分母趋 0 时发散；权益乘数权益趋 0 时发散 —— 均须置 NULL。"""
+    # 费用率失真：收入 1 元、销售费用 100 元（10000%）
+    _seed_income(duckdb_store, "600008", revenue=1.0, selling_expenses=100.0)
+    # 权益乘数失真：权益 0.01、资产 1000（10 万倍）
+    _seed_income(duckdb_store, "600009", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_equity) VALUES (?, ?, ?, ?)",
+            ["600008", REPORT_DATE, 500.0, 100.0],
+        )
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_equity) VALUES (?, ?, ?, ?)",
+            ["600009", REPORT_DATE, 1000.0, 0.01],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    a = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600008'")[0]
+    b = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600009'")[0]
+    assert a["selling_expense_ratio"] is None      # 100 倍 > 5 倍上限
+    assert b["equity_multiplier"] is None          # 100000 倍 > 100 上限
