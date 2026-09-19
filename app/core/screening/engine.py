@@ -80,7 +80,7 @@ EXTENDED_COLUMNS: set[str] = {
     # 杠杆族 —— 判断「会不会被债压垮」
     "ebit", "ebitda", "leverage_financial", "leverage_operating", "leverage_total",
     # 每股族（v26）—— 分母用「当时股数」，非当前股本
-    "bps", "revenue_per_share", "ocf_per_share", "retained_earnings_per_share",
+    "bps", "bps_parent", "revenue_per_share", "ocf_per_share", "retained_earnings_per_share",
     # 费用率族（v26）
     "selling_expense_ratio", "admin_expense_ratio",
     "rd_expense_ratio", "finance_expense_ratio",

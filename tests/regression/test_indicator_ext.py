@@ -527,3 +527,44 @@ def test_valuation_null_without_price(
     assert row["market_cap_at_report"] is None
     assert row["tobin_q"] is None
     assert row["book_to_market"] is None
+
+
+# ─── v32：每股净资产口径修正（交叉核验驱动）────────────────────────
+
+def test_bps_uses_total_equity_and_bps_parent_uses_parent_equity(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """2026-09-19 用 CSMAR FI_T9 交叉核验发现：本项目 bps 名为「每股净资产」
+    却误用归母权益，一致率仅 25%。修正后两个概念各自成列：
+
+      bps        每股净资产         = 股东权益合计 / 股数（CSMAR F091001A，95.03%）
+      bps_parent 归属母公司每股净资产 = 归母权益   / 股数（CSMAR F091701A，95.04%）
+
+    本测试用「有少数股东权益」的场景把两者区分开（无少数股东时二者相等，
+    测不出回归）。
+    """
+    _seed_income(duckdb_store, "600040", revenue=1000.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets,
+               total_equity, total_equity_parent, minority_interest)
+               VALUES (?, ?, 5000.0, 1200.0, 1000.0, 200.0)""",
+            ["600040", REPORT_DATE],
+        )
+        conn.execute(
+            "INSERT INTO share_capital_history (stock_code, effective_date, total_shares, source, raw_hash, batch_id) "
+            "VALUES ('600040', CAST('2000-01-01' AS DATE), 100, 'csmar', 'h', 'b')"
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600040'")[0]
+    assert row["bps"] == 12.0          # 1200 / 100（股东权益合计，含少数股东）
+    assert row["bps_parent"] == 10.0   # 1000 / 100（归母权益）
+
+
+def test_per_share_history_domain_not_exposed_to_screening() -> None:
+    """FI_T9 历史域与 indicator_ext 每股族语义重叠，不得进筛选字段表
+    （同概念两套口径会造成伪选择）。"""
+    from app.core.screening.engine import EXTENDED_COLUMNS
+
+    assert "bps_parent" in EXTENDED_COLUMNS          # 自算列可用
+    assert "tangible_asset_per_share" not in EXTENDED_COLUMNS   # FI_T9 独有列不可用

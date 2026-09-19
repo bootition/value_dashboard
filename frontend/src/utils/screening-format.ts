@@ -37,6 +37,7 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   profit_per_employee: '人均创利',
   shareholder_occupation: '大股东占款率',
   bps: '每股净资产',
+  bps_parent: '归属母公司每股净资产',
   revenue_per_share: '每股营业收入',
   ocf_per_share: '每股经营现金流',
   retained_earnings_per_share: '每股留存收益',

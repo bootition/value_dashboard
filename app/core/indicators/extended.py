@@ -190,8 +190,14 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         -- 分母用「当时股数」：share_capital_history 中 effective_date <= 报告期的
         -- 最近一笔。**不得**用 stock_meta.total_shares（当前股本），否则历史期
         -- 每股指标会被后期增发/回购污染（ops-knowledge-base D23 同类口径问题）。
-        CASE WHEN sh.total_shares > 0 THEN
-            COALESCE(b.total_equity_parent, b.total_equity) / sh.total_shares END AS bps,
+        -- 每股净资产 = 股东权益合计 / 股数（CSMAR FI_T9.F091001A 口径）。
+        -- 2026-09-19 交叉核验修正：此处原先误用归母权益，与 CSMAR 一致率仅 25%；
+        -- 改用股东权益合计后 95.03%（1% 容差 96.67%）。
+        CASE WHEN sh.total_shares > 0 AND b.total_equity IS NOT NULL
+             THEN b.total_equity / sh.total_shares END AS bps,
+        -- 归属母公司每股净资产 = 归母权益 / 股数（CSMAR FI_T9.F091701A，一致率 95.04%）
+        CASE WHEN sh.total_shares > 0 AND b.total_equity_parent IS NOT NULL
+             THEN b.total_equity_parent / sh.total_shares END AS bps_parent,
         CASE WHEN sh.total_shares > 0 THEN i.revenue / sh.total_shares END AS revenue_per_share,
         CASE WHEN sh.total_shares > 0 THEN c.cf_from_operating / sh.total_shares END AS ocf_per_share,
         CASE WHEN sh.total_shares > 0 THEN

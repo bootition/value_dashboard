@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 30
+DUCKDB_SCHEMA_VERSION = 32
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -862,6 +862,41 @@ CREATE TABLE IF NOT EXISTS financial_sector_items (
 );
 CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock
     ON financial_sector_items (stock_code, report_date);
+
+
+-- CSMAR 每股指标历史域（2026-09-19 v31，"榨干数据包" R11）。
+-- 来源：CSMAR C17 FI_T9.dta（每股指标，303,065 行，1990-2025Q1）。
+--
+-- 定位：**交叉核验源**。本项目已自算 bps / revenue_per_share / ocf_per_share /
+-- retained_earnings_per_share（indicator_ext，覆盖最新报告期）；FI_T9 是
+-- CSMAR 用其自有股本口径独立算出的一套，可用于验证我们自算值是否可靠，
+-- 并提供我们未自算的每股明细（每股有形资产/负债/资本公积/盈余公积等）。
+--
+-- **不进筛选界面**：与 indicator_ext 的每股族语义重叠，且数据截止 2025Q1；
+-- 放进字段表会让用户在同一概念上看到两套口径相近却不同的数（伪选择）。
+-- 域纪律：独立历史域，只作核验与专项研究，不参与横截面筛选。
+CREATE TABLE IF NOT EXISTS csmar_per_share_history (
+    stock_code                     VARCHAR NOT NULL,
+    report_date                    DATE    NOT NULL,
+    bps                            DOUBLE,   -- F091001A 每股净资产1
+    bps_parent                     DOUBLE,   -- F091701A 归属母公司每股净资产1
+    revenue_per_share              DOUBLE,   -- F090501B 每股营业总收入1
+    ocf_per_share                  DOUBLE,   -- F091801B 每股经营活动现金流量净额1
+    operating_profit_per_share     DOUBLE,   -- F090901B 每股营业利润1
+    ebit_per_share                 DOUBLE,   -- F090701B 息税前每股收益1
+    tangible_asset_per_share       DOUBLE,   -- F091101A 每股有形资产1
+    liability_per_share            DOUBLE,   -- F091201A 每股负债1
+    capital_reserve_per_share      DOUBLE,   -- F091301A 每股资本公积1
+    surplus_reserve_per_share      DOUBLE,   -- F091401A 每股盈余公积1
+    undistributed_profit_per_share DOUBLE,   -- F091501A 每股未分配利润1
+    retained_earnings_per_share    DOUBLE,   -- F091601A 每股留存收益1
+    source                         VARCHAR NOT NULL,
+    fetch_time                     TIMESTAMP NOT NULL,
+    batch_id                       VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_per_share_history_stock
+    ON csmar_per_share_history (stock_code, report_date);
 
 
 """
@@ -1711,6 +1746,35 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (30, 'point-in-time market cap + tobin Q / book-to-market / EV-EBITDA')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v31: CSMAR 每股指标历史域（2026-09-19）—— 自算每股族的交叉核验源。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_csmar_per_share_history_stock "
+            "ON csmar_per_share_history (stock_code, report_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (31, 'CSMAR per-share indicator history (cross-check source)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v32: 修正「每股净资产」口径并补齐「归属母公司每股净资产」（2026-09-19）。
+        # 交叉核验（scripts/import_per_share_history.py）发现：本项目的 bps 名为
+        # 「每股净资产」却用了**归母权益**，与 CSMAR F091001A（股东权益合计口径）
+        # 一致率仅 25%。改用股东权益合计后一致率 95.03%（1% 容差 96.67%）。
+        # 两个概念都合法，故各自成列：
+        #   bps        每股净资产         = 股东权益合计 / 股数（CSMAR F091001A）
+        #   bps_parent 归属母公司每股净资产 = 归母权益   / 股数（CSMAR F091701A，95.04%）
+        connection.execute(
+            "ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS bps_parent DOUBLE"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (32, 'fix bps caliber (total equity) + add parent BPS')
             ON CONFLICT (version) DO NOTHING
             """
         )

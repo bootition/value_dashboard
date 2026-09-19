@@ -133,3 +133,14 @@ def test_schema_v29_version() -> None:
     from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
 
     assert DUCKDB_SCHEMA_VERSION >= 29
+
+
+def test_csmar_per_share_history_table_shape(duckdb_store: DuckDBStore) -> None:
+    columns = _columns(duckdb_store, "csmar_per_share_history")
+    assert {
+        "stock_code", "report_date", "bps", "bps_parent", "revenue_per_share",
+        "ocf_per_share", "operating_profit_per_share", "ebit_per_share",
+        "tangible_asset_per_share", "liability_per_share", "capital_reserve_per_share",
+        "surplus_reserve_per_share", "undistributed_profit_per_share",
+        "retained_earnings_per_share", "source", "fetch_time", "batch_id",
+    } <= columns
