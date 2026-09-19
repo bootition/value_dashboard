@@ -90,6 +90,10 @@ EXTENDED_COLUMNS: set[str] = {
     "shareholder_occupation",
     # 人效族（v28）—— 分母用「最接近报告期」的员工数，非当前快照
     "employee_count", "revenue_per_employee", "profit_per_employee",
+    # 时点估值族（v30）—— 市值 = 报告期当日原始收盘价 × 报告期时点股本，
+    # 绕开 ops-knowledge-base D23「历史市值用当前股本」的已知缺陷。
+    "report_date_close", "market_cap_at_report",
+    "tobin_q", "book_to_market", "ev_ebitda",
 }
 
 # 扩展指标域中【当前报告期数据充足、可直接暴露给用户】的子集。
@@ -169,6 +173,7 @@ RANKABLE_INDICATORS: set[str] = {
     "fcf_margin", "leverage_total",
     "bps", "equity_multiplier", "shareholder_occupation",
     "revenue_per_employee", "profit_per_employee",
+    "tobin_q", "market_cap_at_report", "ev_ebitda",
 }
 
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按

@@ -463,3 +463,67 @@ def test_per_employee_null_without_headcount(
     assert row["employee_count"] is None
     assert row["revenue_per_employee"] is None
     assert row["profit_per_employee"] is None
+
+
+# ─── v30：时点市值与估值衍生（绕开 D23）──────────────────────────────
+
+def test_market_cap_uses_report_date_price_and_shares(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """报告期市值 = 报告期当日原始收盘价 × 报告期时点股本。
+
+    这是对 ops-knowledge-base **D23**（历史市值误用当前股本）的正面绕开：
+    若用 stock_meta.total_shares（当前股本）或最新收盘价，历史估值全错。
+    构造三个干扰项：
+      · 报告期收盘价 10，最新收盘价 99（应取 10）
+      · 报告期时点股本 100，报告期后增至 400（应取 100）
+    """
+    _seed_income(duckdb_store, "600030", revenue=1000.0, net_profit=100.0,
+                 income_tax=0.0, financial_expenses=0.0, total_profit=100.0,
+                 )
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets,
+               total_liabilities, total_equity, total_equity_parent,
+               short_term_loans, long_term_loans, bonds_payable, monetary_funds)
+               VALUES (?, ?, 5000.0, 2000.0, 3000.0, 3000.0, 0, 0, 0, 500.0)""",
+            ["600030", REPORT_DATE],
+        )
+        conn.execute(
+            "INSERT INTO share_capital_history (stock_code, effective_date, total_shares, source, raw_hash, batch_id) "
+            "VALUES ('600030', CAST('2000-01-01' AS DATE), 100, 'csmar', 'h', 'b'), "
+            "       ('600030', CAST('2099-01-01' AS DATE), 400, 'csmar', 'h', 'b')"
+        )
+        conn.execute(
+            "INSERT INTO price_daily_raw (stock_code, trade_date, close) "
+            "VALUES ('600030', CAST('2019-12-31' AS DATE), 8.0), "
+            "       ('600030', CAST('2024-12-31' AS DATE), 10.0), "
+            "       ('600030', CAST('2026-09-17' AS DATE), 99.0)"
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600030'")[0]
+    assert row["report_date_close"] == 10.0            # 报告期当日价，不是最新价 99
+    assert row["market_cap_at_report"] == 1000.0       # 10 × 100（时点股本），不是 10 × 400
+    # 托宾Q = (1000 + 2000) / 5000 = 0.6
+    assert abs(row["tobin_q"] - 0.6) < 1e-9
+    # 账面市值比 = 3000 / 1000 = 3
+    assert abs(row["book_to_market"] - 3.0) < 1e-9
+
+
+def test_valuation_null_without_price(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """没有报告期价格时，市值与全套估值衍生必须 NULL，不得用最新价冒充。"""
+    _seed_income(duckdb_store, "600031", revenue=1000.0, net_profit=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities) "
+            "VALUES (?, ?, 5000.0, 2000.0)",
+            ["600031", REPORT_DATE],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600031'")[0]
+    assert row["report_date_close"] is None
+    assert row["market_cap_at_report"] is None
+    assert row["tobin_q"] is None
+    assert row["book_to_market"] is None

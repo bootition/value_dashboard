@@ -84,6 +84,15 @@ SHAREHOLDER_OCCUPATION_MAX_ABS = 2.0
 #    或 |人均创利| > 5 亿元/人 判为口径异常。
 REVENUE_PER_EMPLOYEE_MAX = 1e9
 PROFIT_PER_EMPLOYEE_MAX = 5e8
+# 9) 估值衍生（v30）：托宾Q / 账面市值比 / EV-EBITDA 的合理上界。
+#    分母（总资产/市值/EBITDA）趋 0 或为负时这些倍数没有业务含义。
+TOBIN_Q_MAX = 100.0
+BOOK_TO_MARKET_MAX = 10.0
+# 注意：EV/EBITDA **允许为负**且负值有意义 —— 现金超过「市值+有息负债」的
+# 净现金公司，其企业价值为负，代表「市场把主业定价为零甚至倒贴」
+# （实测长虹美菱 2026H1：货币资金 99.02 亿 > 市值 55.92 亿 + 有息负债 9.48 亿）。
+# 用 ABS 判定只是为了拦掉分母趋 0 导致的病态值，不是禁止负值。
+EV_EBITDA_MAX = 1000.0
 
 # 周转率族：累计损益 ÷ 期末余额（CSMAR FI_T4「A」式）
 TURNOVER_RATIOS: tuple[tuple[str, str, str], ...] = (
@@ -164,7 +173,7 @@ def build_select_sql(codes: list[str] | None = None) -> str:
              WHEN ABS((c.cf_from_operating - ca.capex) / i.revenue) > {FCF_MARGIN_MAX_ABS} THEN NULL
              ELSE (c.cf_from_operating - ca.capex) / i.revenue END AS fcf_margin,
         CASE WHEN {_EBIT_READY} THEN {_EBIT} END AS ebit,
-        CASE WHEN {_EBIT_READY} AND {_DEP_READY} THEN {_EBIT} + {_DEPRECIATION} END AS ebitda,
+        ebitda_val.ebitda AS ebitda,
         -- 财务杠杆 = EBIT / 利润总额（CSMAR FI_T7.F070101B）；亏损时无业务含义
         CASE WHEN {_EBIT_READY} AND i.total_profit > 0 AND {_EBIT} > 0
                   AND ABS({_EBIT} / i.total_profit) <= {LEVERAGE_MAX}
@@ -217,6 +226,39 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         --   · 历史期 → CSMAR FAR_Finidx.Nstaff 的当年员工数（时点正确）
         --   · 最近期 → company_profile 的当前快照（CSMAR 只到 2024 年报）
         -- 若一律用当前快照，历史期就会「今天的员工数 ÷ 当年的收入」（D23 同类错误）。
+        -- ─── 报告期市值与估值衍生（v30）─────────────────────────────
+        -- 市值 = 报告期当日原始收盘价 × 报告期时点股本。
+        -- **不得**用 stock_meta.total_shares（当前股本）——那是 D23 已知缺陷的口径。
+        CASE WHEN sh.total_shares > 0 THEN px.close * sh.total_shares END AS market_cap_at_report,
+        -- 托宾Q = (股权市值 + 总负债) / 总资产（与 CSMAR 市值A 口径一致：含负债）
+        CASE WHEN sh.total_shares > 0 AND px.close IS NOT NULL
+                  AND b.total_assets > 0 AND b.total_liabilities IS NOT NULL
+                  AND (px.close * sh.total_shares + b.total_liabilities) / b.total_assets
+                      <= {TOBIN_Q_MAX}
+             THEN (px.close * sh.total_shares + b.total_liabilities) / b.total_assets
+        END AS tobin_q,
+        -- 账面市值比 = 归母权益 / 股权市值
+        CASE WHEN sh.total_shares > 0 AND px.close > 0
+                  AND COALESCE(b.total_equity_parent, b.total_equity) > 0
+                  AND COALESCE(b.total_equity_parent, b.total_equity)
+                      / (px.close * sh.total_shares) <= {BOOK_TO_MARKET_MAX}
+             THEN COALESCE(b.total_equity_parent, b.total_equity)
+                  / (px.close * sh.total_shares)
+        END AS book_to_market,
+        -- 企业价值倍数 = (股权市值 + 有息负债 − 货币资金) / EBITDA
+        CASE WHEN sh.total_shares > 0 AND px.close IS NOT NULL
+                  AND ebitda_val.ebitda IS NOT NULL AND ebitda_val.ebitda > 0
+                  AND ABS((px.close * sh.total_shares
+                           + COALESCE(b.short_term_loans, 0) + COALESCE(b.long_term_loans, 0)
+                           + COALESCE(b.bonds_payable, 0) + COALESCE(bsx.non_current_liab_due_1y, 0)
+                           - COALESCE(b.monetary_funds, 0)) / ebitda_val.ebitda)
+                      <= {EV_EBITDA_MAX}
+             THEN (px.close * sh.total_shares
+                   + COALESCE(b.short_term_loans, 0) + COALESCE(b.long_term_loans, 0)
+                   + COALESCE(b.bonds_payable, 0) + COALESCE(bsx.non_current_liab_due_1y, 0)
+                   - COALESCE(b.monetary_funds, 0)) / ebitda_val.ebitda
+        END AS ev_ebitda,
+        px.close AS report_date_close,
         eh.employee_count,
         CASE WHEN eh.employee_count > 0 AND ABS(i.revenue / eh.employee_count) <= {REVENUE_PER_EMPLOYEE_MAX}
              THEN i.revenue / eh.employee_count END AS revenue_per_employee,
@@ -229,10 +271,18 @@ def build_select_sql(codes: list[str] | None = None) -> str:
     FROM income_statement i
     JOIN balance_sheet b
       ON b.stock_code = i.stock_code AND b.report_date = i.report_date
+    LEFT JOIN LATERAL (
+        SELECT p.close FROM price_daily_raw p
+        WHERE p.stock_code = i.stock_code AND p.trade_date <= i.report_date
+        ORDER BY p.trade_date DESC LIMIT 1
+    ) px ON true
     LEFT JOIN cash_flow c
       ON c.stock_code = i.stock_code AND c.report_date = i.report_date
     LEFT JOIN cash_flow_indirect ci
       ON ci.stock_code = i.stock_code AND ci.report_date = i.report_date
+    LEFT JOIN LATERAL (
+        SELECT CASE WHEN {_EBIT_READY} AND {_DEP_READY} THEN {_EBIT} + {_DEPRECIATION} END AS ebitda
+    ) ebitda_val ON true
     LEFT JOIN cash_flow_activity ca
       ON ca.stock_code = i.stock_code AND ca.report_date = i.report_date
     LEFT JOIN balance_sheet_ext bsx

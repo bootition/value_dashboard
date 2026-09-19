@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 29
+DUCKDB_SCHEMA_VERSION = 30
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -1690,6 +1690,27 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (29, 'financial sector specific line items (banks/insurers/securities)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v30: 报告期市值与估值衍生指标（2026-09-19）。
+        # 解除 ops-knowledge-base D23「历史市值用当前股本」的阻塞：
+        # 本域用【报告期当日原始收盘价 × 报告期时点股本】自算市值，而不是
+        # stock_meta.total_shares。据此派生：
+        #   tobin_q          托宾Q = (股权市值 + 总负债) / 总资产（CSMAR 市值A 口径）
+        #   book_to_market   账面市值比 = 归母权益 / 股权市值
+        #   ev_ebitda        企业价值倍数 = (股权市值 + 有息负债 − 货币资金) / EBITDA
+        # **注意**：本域只服务于 indicator_ext；主链 indicator_snapshot 的历史市值
+        # 仍受 D23 影响，未在本轮修复（需另立专项并评估对已发布研究结论的影响）。
+        for column in ("report_date_close", "market_cap_at_report",
+                       "tobin_q", "book_to_market", "ev_ebitda"):
+            connection.execute(
+                f"ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS {column} DOUBLE"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (30, 'point-in-time market cap + tobin Q / book-to-market / EV-EBITDA')
             ON CONFLICT (version) DO NOTHING
             """
         )
