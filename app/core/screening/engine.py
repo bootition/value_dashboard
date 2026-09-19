@@ -90,6 +90,19 @@ EXTENDED_COLUMNS: set[str] = {
     "shareholder_occupation",
     # 人效族（v28）—— 分母用「最接近报告期」的员工数，非当前快照
     "employee_count", "revenue_per_employee", "profit_per_employee",
+    # v37：CSMAR 有价值新概念的自算落地（偿债细分/现金质量/应计/每股明细）
+    "cash_ratio",
+    "conservative_quick_ratio",
+    "debt_to_equity",
+    "tangible_net_debt_ratio",
+    "ocf_to_liabilities",
+    "ebitda_to_liabilities",
+    "cash_content_of_revenue",
+    "ocf_to_operating_profit",
+    "accruals",
+    "tangible_asset_per_share",
+    "liability_per_share",
+    "capital_reserve_per_share",
     # 时点估值族（v30）—— 市值 = 报告期当日原始收盘价 × 报告期时点股本，
     # 绕开 ops-knowledge-base D23「历史市值用当前股本」的已知缺陷。
     "report_date_close", "market_cap_at_report",
@@ -185,6 +198,7 @@ RANKABLE_INDICATORS: set[str] = {
     "bps", "equity_multiplier", "shareholder_occupation",
     "revenue_per_employee", "profit_per_employee",
     "tobin_q", "market_cap_at_report", "ev_ebitda",
+    "cash_ratio", "debt_to_equity", "accruals", "cash_content_of_revenue",
 }
 
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按

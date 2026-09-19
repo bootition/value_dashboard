@@ -151,11 +151,13 @@ def test_csmar_per_share_history_table_shape(duckdb_store: DuckDBStore) -> None:
 CSMAR_FULL_TABLES = (
     "csmar_disclosure_metrics", "csmar_risk_factors",
     "csmar_fi_t1", "csmar_fi_t3", "csmar_fi_t4", "csmar_fi_t5",
-    "csmar_fi_t6", "csmar_fi_t7", "csmar_fi_t8", "csmar_fi_t9",
+    "csmar_fi_t6", "csmar_fi_t8", "csmar_fi_t9",   # fi_t7 已删（杠杆本项目已自算）
     "csmar_fi_t10", "csmar_fi_t11", "csmar_far_finidx",
     "csmar_balance_items", "csmar_income_items", "csmar_cashflow_items",
-    "csmar_financial_items", "csmar_aiq_annual",
+    "csmar_financial_items",
 )
+# 注：csmar_aiq_annual（54 列全与 FI_T* 重叠）与 csmar_fi_t7（杠杆已自算）
+# 已在「榨干纠偏」中连同 DDL 一起删除，故不在上表。
 
 
 def test_csmar_full_import_tables_exist(duckdb_store: DuckDBStore) -> None:
@@ -203,3 +205,19 @@ def test_risk_factors_imported(duckdb_store: DuckDBStore) -> None:
         "profits_volatility_3y", "cashflow_volatility_3y", "non_debt_tax_shield",
         "bank_loan_ratio", "short_loan_dependence", "tax_bearing",
     } <= columns
+
+
+def test_csmar_redundant_cleanup_kept_only_primary_variants() -> None:
+    """清理后：每概念只保留主口径，且不再有纯冗余表。
+
+    背景：为追求 100% 导入曾把 223 个「同概念不同算法」的变体列一并入库，
+    用户指出「无价值的冗余不应进库」。清理后 csmar_aiq_annual / csmar_fi_t7
+    已删除，变体列裁剪到每概念一个主口径。
+    """
+    from app.core.storage.schema import DUCKDB_SCHEMA_V1
+
+    assert "csmar_aiq_annual" not in DUCKDB_SCHEMA_V1, "AIQ 表 54 列全部与 FI_T* 重叠，应已删除"
+    assert "csmar_fi_t7" not in DUCKDB_SCHEMA_V1, "杠杆表本项目已自算，应已删除"
+    # 保留的表仍在（每概念一个主口径，供交叉核验）
+    for kept in ("csmar_fi_t1", "csmar_fi_t4", "csmar_fi_t5", "csmar_fi_t9"):
+        assert kept in DUCKDB_SCHEMA_V1

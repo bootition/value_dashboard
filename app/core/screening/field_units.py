@@ -32,7 +32,7 @@ PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     "selling_expense_ratio", "admin_expense_ratio",
     "rd_expense_ratio", "finance_expense_ratio",
     "current_asset_ratio", "fixed_asset_ratio",
-    "shareholder_occupation", "book_to_market",
+    "shareholder_occupation", "book_to_market", "accruals",
 })
 
 # 百分数原值存储（如 5.29 = 5.29%；与前端 PERCENT_FIELDS 对齐）
@@ -60,6 +60,9 @@ RATIO_FIELDS: frozenset[str] = frozenset({
     "equity_turnover",
     "leverage_financial", "leverage_operating", "leverage_total",
     "equity_multiplier", "tobin_q", "ev_ebitda",
+    "cash_ratio", "conservative_quick_ratio", "debt_to_equity",
+    "tangible_net_debt_ratio", "ocf_to_liabilities", "ebitda_to_liabilities",
+    "cash_content_of_revenue", "ocf_to_operating_profit",
 })
 # 扩展指标域中以「天」为单位的字段（前端按 plain 展示，仅此处登记语义）
 DAY_FIELDS: frozenset[str] = frozenset({

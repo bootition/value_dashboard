@@ -562,9 +562,71 @@ def test_bps_uses_total_equity_and_bps_parent_uses_parent_equity(
 
 
 def test_per_share_history_domain_not_exposed_to_screening() -> None:
-    """FI_T9 历史域与 indicator_ext 每股族语义重叠，不得进筛选字段表
-    （同概念两套口径会造成伪选择）。"""
+    """FI_T9 历史域**本身**不进筛选字段表（同概念两套口径会造成伪选择）；
+    但其中「有价值且可自算」的概念已在 v37 用本项目数据自算后暴露
+    （如 tangible_asset_per_share）。"""
     from app.core.screening.engine import EXTENDED_COLUMNS
 
     assert "bps_parent" in EXTENDED_COLUMNS          # 自算列可用
-    assert "tangible_asset_per_share" not in EXTENDED_COLUMNS   # FI_T9 独有列不可用
+    # 2026-09-19 v37 起 tangible_asset_per_share 也已由本项目自算并上界面
+    # （v37 的定位就是「把 CSMAR 有价值的概念自算出来」），故此处改为断言
+    # FI_T9 里**仍有未自算**的独有列不暴露。
+    assert "operating_profit_per_share" not in EXTENDED_COLUMNS
+    assert "ebit_per_share" not in EXTENDED_COLUMNS
+
+
+# ─── v37：CSMAR 有价值新概念的自算落地 ──────────────────────────────
+
+def test_v37_solvency_and_cash_quality_indicators(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """v37 的偿债细分 / 现金质量 / 应计 / 每股明细，公式取自 CSMAR 说明书，
+    但用本项目数据自算 —— 因此覆盖最新报告期、可直接进筛选界面。"""
+    _seed_income(duckdb_store, "600050", revenue=1000.0, net_profit=100.0,
+                 income_tax=0.0, financial_expenses=0.0, total_profit=100.0,
+                 operating_profit=120.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities,
+               total_equity, total_current_liabilities, monetary_funds, notes_receivable,
+               accounts_receivable, intangible_assets, goodwill, capital_reserve)
+               VALUES (?, ?, 5000.0, 2000.0, 3000.0, 800.0, 300.0, 50.0, 150.0, 200.0, 100.0, 400.0)""",
+            ["600050", REPORT_DATE],
+        )
+        conn.execute(
+            """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating, cash_ending,
+               cash_received_sales) VALUES (?, ?, 500.0, 250.0, 1100.0)""",
+            ["600050", REPORT_DATE],
+        )
+        conn.execute(
+            "INSERT INTO share_capital_history (stock_code, effective_date, total_shares, source, raw_hash, batch_id) "
+            "VALUES ('600050', CAST('2000-01-01' AS DATE), 100, 'csmar', 'h', 'b')"
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600050'")[0]
+    assert row["cash_ratio"] == 250.0 / 800.0                  # 现金及等价物期末 / 流动负债
+    assert row["conservative_quick_ratio"] == (300 + 50 + 150) / 800.0
+    assert row["debt_to_equity"] == 2000.0 / 3000.0            # 负债合计 / 所有者权益
+    assert row["tangible_net_debt_ratio"] == 2000.0 / (3000 - 200 - 100)
+    assert row["ocf_to_liabilities"] == 500.0 / 2000.0
+    assert row["cash_content_of_revenue"] == 1100.0 / 1000.0   # 销售收现 / 营业收入
+    assert row["ocf_to_operating_profit"] == 500.0 / 120.0     # 经营现金流 / 营业利润
+    assert row["accruals"] == (100.0 - 500.0) / 5000.0         # (净利 − 经营现金流)/总资产
+    assert row["tangible_asset_per_share"] == (5000 - 200 - 100) / 100
+    assert row["liability_per_share"] == 2000.0 / 100
+    assert row["capital_reserve_per_share"] == 400.0 / 100
+
+
+def test_loss_making_has_null_ocf_to_operating_profit(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """营业利润 <= 0 时「营业利润现金净含量」无业务含义 → NULL。"""
+    _seed_income(duckdb_store, "600051", revenue=1000.0, operating_profit=-50.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600051", REPORT_DATE, 5000.0])
+        conn.execute("INSERT INTO cash_flow (stock_code, report_date, cf_from_operating) VALUES (?, ?, ?)",
+                     ["600051", REPORT_DATE, 500.0])
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600051'")[0]
+    assert row["ocf_to_operating_profit"] is None

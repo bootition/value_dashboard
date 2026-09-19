@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 36
+DUCKDB_SCHEMA_VERSION = 37
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -1532,19 +1532,6 @@ CREATE TABLE IF NOT EXISTS csmar_far_finidx (
 );
 CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock_code, report_date);
 
--- FI_T7（261,379 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t7 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F070101B" DOUBLE,
-    "F070201B" DOUBLE,
-    "F070301B" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t7_stock ON csmar_fi_t7 (stock_code, report_date);
 
 -- ── CSMAR 三表剩余科目 + 金融专用科目全量（2026-09-19 v35）─────────────
 -- 「榨干」的最后一格：三张报表里本项目未映射的 100 个科目
@@ -1806,76 +1793,6 @@ CREATE TABLE IF NOT EXISTS csmar_financial_items (
 );
 CREATE INDEX IF NOT EXISTS idx_csmar_financial_items_stock ON csmar_financial_items (stock_code, report_date);
 
--- ── CSMAR AIQ 年度宽表 + 会计恒等式锚点（2026-09-19 v36）──────────────
--- 「榨干」收尾：
---   csmar_aiq_annual —— AIQ_LCFinIndexY.dta（68,059 行 / 54 列年度财务指标宽表）。
---     与 FI_T* 系列有重叠，导入目的为**完整归档**（数据包完整性）。
---   csmar_balance_items."A004000000" —— 「负债与所有者权益总计」，
---     会计恒等式「资产 = 负债 + 所有者权益」的现成对账锚点（99.999% 填充）。
--- AIQ_LCFinIndexY 年度财务指标宽表（54 列）；列名为 CSMAR 代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_aiq_annual (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "Cash" DOUBLE,
-    "AccountsReceivable" DOUBLE,
-    "NonCurrentAssetsInYear" DOUBLE,
-    "TotalCurrentAssets" DOUBLE,
-    "Inventory" DOUBLE,
-    "OtherCurrentAssets" DOUBLE,
-    "FixedAssets" DOUBLE,
-    "DisposalOfFixedAssets" DOUBLE,
-    "IntangibleAssets" DOUBLE,
-    "TotalAssets" DOUBLE,
-    "TotalCurrentliabilities" DOUBLE,
-    "TotalLiabilities" DOUBLE,
-    "ShortTermLoan" DOUBLE,
-    "AccountsPayable" DOUBLE,
-    "TaxePayable" DOUBLE,
-    "StockDividendPayable" DOUBLE,
-    "LongLiabInYearChange" DOUBLE,
-    "TotalEquity" DOUBLE,
-    "CapitalStock" DOUBLE,
-    "TotalRevenue" DOUBLE,
-    "OperatingRevenue" DOUBLE,
-    "TotalOperatingCost" DOUBLE,
-    "OperatingCost" DOUBLE,
-    "BusinessTaxAndSurcharge" DOUBLE,
-    "SellingExpenses" DOUBLE,
-    "ManagementExpense" DOUBLE,
-    "RDExpenses" DOUBLE,
-    "FinanceExpense" DOUBLE,
-    "OperatingProfit" DOUBLE,
-    "NonOperatingIncome" DOUBLE,
-    "NonOperatingExpenses" DOUBLE,
-    "TotalProfit" DOUBLE,
-    "IncomeTax" DOUBLE,
-    "NetProfit" DOUBLE,
-    "Depreciation" DOUBLE,
-    "AmorOfIntangibleAssets" DOUBLE,
-    "AmorOfDeferredExpenses" DOUBLE,
-    "OperatingNetCashFlow" DOUBLE,
-    "AssetLiabilityRatio" DOUBLE,
-    "ROTAA" DOUBLE,
-    "ROTAB" DOUBLE,
-    "ROTAC" DOUBLE,
-    "ROAA" DOUBLE,
-    "ROAB" DOUBLE,
-    "ROAC" DOUBLE,
-    "ROEA" DOUBLE,
-    "ROEB" DOUBLE,
-    "ROEC" DOUBLE,
-    "MarketValueA" DOUBLE,
-    "MarketValueB" DOUBLE,
-    "ValueBookRatioA" DOUBLE,
-    "ValueBookRatioB" DOUBLE,
-    "EPS" DOUBLE,
-    "NAVPS" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_aiq_annual_stock ON csmar_aiq_annual (stock_code, report_date);
 
 """
 
@@ -2783,7 +2700,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t4_stock ON csmar_fi_t4 (stock_code, report_date)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t11_stock ON csmar_fi_t11 (stock_code, report_date)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t7_stock ON csmar_fi_t7 (stock_code, report_date)")
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2804,10 +2720,8 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v36: AIQ 年度宽表 + 会计恒等式锚点（2026-09-19，"榨干"收尾）。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_csmar_aiq_annual_stock "
-            "ON csmar_aiq_annual (stock_code, report_date)"
-        )
+        # 注：csmar_aiq_annual 已于 v37 清理（54 列全部与 FI_T* 重叠），
+        # 表与 DDL 均已移除，此处不再建索引。
         connection.execute(
             'ALTER TABLE csmar_balance_items ADD COLUMN IF NOT EXISTS "A004000000" DOUBLE'
         )
@@ -2815,6 +2729,37 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (36, 'CSMAR AIQ annual wide table + accounting identity anchor')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v37: 把 CSMAR 里**有价值且可自算**的新概念落地为当期可用指标（2026-09-19）。
+        # 依据用户要求「有价值的要利用要上界面，没价值的不进库」：
+        # 不导入 CSMAR 的过期数值，而是**用它的公式在本项目数据上自算**，
+        # 从而覆盖最新报告期、可直接进筛选界面。
+        #   现金比率 / 保守速动比率 / 产权比率 / 有形净值债务率 / 经营现金流对负债 /
+        #   EBITDA对负债 / 营业收入现金含量 / 营业利润现金净含量 / 应计项目 /
+        #   每股有形资产 / 每股负债 / 每股资本公积
+        for column, kind in (
+            ("cash_ratio", "DOUBLE"),
+            ("conservative_quick_ratio", "DOUBLE"),
+            ("debt_to_equity", "DOUBLE"),
+            ("tangible_net_debt_ratio", "DOUBLE"),
+            ("ocf_to_liabilities", "DOUBLE"),
+            ("ebitda_to_liabilities", "DOUBLE"),
+            ("cash_content_of_revenue", "DOUBLE"),
+            ("ocf_to_operating_profit", "DOUBLE"),
+            ("accruals", "DOUBLE"),
+            ("tangible_asset_per_share", "DOUBLE"),
+            ("liability_per_share", "DOUBLE"),
+            ("capital_reserve_per_share", "DOUBLE"),
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS {column} {kind}"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (37, 'CSMAR-derived self-computed indicators (solvency/cash-quality/per-share)')
             ON CONFLICT (version) DO NOTHING
             """
         )

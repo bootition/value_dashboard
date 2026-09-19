@@ -27,6 +27,18 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   // 扩展指标域（schema v25，2026-09-19）：周转率族 / 自由现金流族 / 杠杆族，共 18 项。
   // 自由现金流与 EBITDA 一族最初因 CSMAR 截止 2025-03-31 而覆盖率为 0，未上界面；
   // 现由 scripts/fetch_cashflow_supplement.py 从东方财富补齐后已全量开放。
+  cash_ratio: '现金比率',
+  conservative_quick_ratio: '保守速动比率',
+  debt_to_equity: '产权比率',
+  tangible_net_debt_ratio: '有形净值债务率',
+  ocf_to_liabilities: '经营现金流对负债',
+  ebitda_to_liabilities: 'EBITDA对负债',
+  cash_content_of_revenue: '营业收入现金含量',
+  ocf_to_operating_profit: '营业利润现金净含量',
+  accruals: '应计项目',
+  tangible_asset_per_share: '每股有形资产',
+  liability_per_share: '每股负债',
+  capital_reserve_per_share: '每股资本公积',
   report_date_close: '报告期收盘价',
   market_cap_at_report: '报告期市值',
   tobin_q: '托宾Q',
@@ -302,7 +314,7 @@ return fallback || field
 /** 小数比例存储的百分比字段（条件输入 ÷100、展示 ×100+%）。 */
 const PCT_FIELDS = new Set([
   'fcf_margin',  // 扩展指标域：自由现金流率按小数比例存储
-  'shareholder_occupation', 'book_to_market',
+  'shareholder_occupation', 'book_to_market', 'accruals', 'cash_content_of_revenue',
   'selling_expense_ratio', 'admin_expense_ratio', 'rd_expense_ratio',
   'finance_expense_ratio', 'current_asset_ratio', 'fixed_asset_ratio',
   'roe', 'roa', 'roic',
@@ -346,6 +358,9 @@ const RATIO_FIELDS = new Set([
   'current_asset_turnover', 'fixed_asset_turnover', 'total_asset_turnover',
   'equity_turnover', 'leverage_financial', 'leverage_operating', 'leverage_total',
   'equity_multiplier', 'tobin_q', 'ev_ebitda',
+  'cash_ratio', 'conservative_quick_ratio', 'debt_to_equity',
+  'tangible_net_debt_ratio', 'ocf_to_liabilities', 'ebitda_to_liabilities',
+  'ocf_to_operating_profit',
 ])
 
 /** 使用“倍”作为输入/展示单位的估值倍数类指标。 */

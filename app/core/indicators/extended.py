@@ -265,6 +265,41 @@ def build_select_sql(codes: list[str] | None = None) -> str:
                    - COALESCE(b.monetary_funds, 0)) / ebitda_val.ebitda
         END AS ev_ebitda,
         px.close AS report_date_close,
+        -- ─── v37：CSMAR 有价值新概念的自算落地 ────────────────────────
+        -- 公式取自 CSMAR 说明书（见 .planning 的 csmar_formulas.json），
+        -- 但用本项目数据计算 → 覆盖最新报告期，可直接进筛选界面。
+        CASE WHEN b.total_current_liabilities > 0 AND c.cash_ending IS NOT NULL
+             THEN c.cash_ending / b.total_current_liabilities END AS cash_ratio,
+        CASE WHEN b.total_current_liabilities > 0 THEN
+            (COALESCE(b.monetary_funds,0) + COALESCE(b.trading_financial_assets,0)
+             + COALESCE(b.notes_receivable,0) + COALESCE(b.accounts_receivable,0))
+            / b.total_current_liabilities END AS conservative_quick_ratio,
+        CASE WHEN b.total_equity <> 0 THEN b.total_liabilities / b.total_equity END AS debt_to_equity,
+        CASE WHEN (b.total_equity - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0)) > 0
+             THEN b.total_liabilities
+                  / (b.total_equity - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0))
+        END AS tangible_net_debt_ratio,
+        CASE WHEN b.total_liabilities > 0 AND c.cf_from_operating IS NOT NULL
+             THEN c.cf_from_operating / b.total_liabilities END AS ocf_to_liabilities,
+        CASE WHEN b.total_liabilities > 0 AND ebitda_val.ebitda IS NOT NULL
+             THEN ebitda_val.ebitda / b.total_liabilities END AS ebitda_to_liabilities,
+        -- 营业收入现金含量：销售商品提供劳务收到的现金 / 营业收入（CSMAR FI_T6.F060201B）
+        CASE WHEN i.revenue > 0 AND c.cash_received_sales IS NOT NULL
+             THEN c.cash_received_sales / i.revenue END AS cash_content_of_revenue,
+        -- 营业利润现金净含量：经营现金流净额 / 营业利润（CSMAR FI_T6.F060401B）
+        CASE WHEN i.operating_profit > 0 AND c.cf_from_operating IS NOT NULL
+             THEN c.cf_from_operating / i.operating_profit END AS ocf_to_operating_profit,
+        -- 应计项目（本项目口径，简化式）：(净利润 − 经营现金流) / 总资产。
+        -- 正值越大说明利润里"没收到钱"的部分越多，是盈余质量的负面信号。
+        CASE WHEN b.total_assets > 0 AND i.net_profit IS NOT NULL
+                  AND c.cf_from_operating IS NOT NULL
+             THEN (i.net_profit - c.cf_from_operating) / b.total_assets END AS accruals,
+        -- 每股族（分母同为「当时股数」）
+        CASE WHEN sh.total_shares > 0 THEN
+            (b.total_assets - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0))
+            / sh.total_shares END AS tangible_asset_per_share,
+        CASE WHEN sh.total_shares > 0 THEN b.total_liabilities / sh.total_shares END AS liability_per_share,
+        CASE WHEN sh.total_shares > 0 THEN b.capital_reserve / sh.total_shares END AS capital_reserve_per_share,
         eh.employee_count,
         CASE WHEN eh.employee_count > 0 AND ABS(i.revenue / eh.employee_count) <= {REVENUE_PER_EMPLOYEE_MAX}
              THEN i.revenue / eh.employee_count END AS revenue_per_employee,
