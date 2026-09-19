@@ -144,3 +144,62 @@ def test_csmar_per_share_history_table_shape(duckdb_store: DuckDBStore) -> None:
         "surplus_reserve_per_share", "undistributed_profit_per_share",
         "retained_earnings_per_share", "source", "fetch_time", "batch_id",
     } <= columns
+
+
+# ─── v33~v36：CSMAR 全量导入域（「榨干」收尾）───────────────────────
+
+CSMAR_FULL_TABLES = (
+    "csmar_disclosure_metrics", "csmar_risk_factors",
+    "csmar_fi_t1", "csmar_fi_t3", "csmar_fi_t4", "csmar_fi_t5",
+    "csmar_fi_t6", "csmar_fi_t7", "csmar_fi_t8", "csmar_fi_t9",
+    "csmar_fi_t10", "csmar_fi_t11", "csmar_far_finidx",
+    "csmar_balance_items", "csmar_income_items", "csmar_cashflow_items",
+    "csmar_financial_items", "csmar_aiq_annual",
+)
+
+
+def test_csmar_full_import_tables_exist(duckdb_store: DuckDBStore) -> None:
+    """v33~v36 的 18 张 CSMAR 全量域表必须存在且带溯源列。"""
+    from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
+
+    assert DUCKDB_SCHEMA_VERSION >= 36
+    for table in CSMAR_FULL_TABLES:
+        columns = _columns(duckdb_store, table)
+        assert columns, f"{table} 未创建"
+        assert {"stock_code", "report_date", "source", "fetch_time", "batch_id"} <= columns, (
+            f"{table} 缺溯源列"
+        )
+
+
+def test_accounting_identity_anchor_available(duckdb_store: DuckDBStore) -> None:
+    """v36 补录「负债与所有者权益总计」，用于会计恒等式对账（资产 = 负债 + 权益）。"""
+    columns = _columns(duckdb_store, "csmar_balance_items")
+    assert "A004000000" in columns
+
+
+def test_csmar_full_tables_not_exposed_to_screening() -> None:
+    """全量归档域**不进筛选界面**：数据截止 2025Q1，且与自算指标大量重叠，
+    放进字段选择器会制造「同概念多套口径」的伪选择。"""
+    from app.core.screening.engine import EXTENDED_COLUMNS, NORMALIZED_FIELDS, SNAPSHOT_COLUMNS
+
+    known = EXTENDED_COLUMNS | SNAPSHOT_COLUMNS | NORMALIZED_FIELDS
+    for field in ("F050501B", "F090101B", "D000103000", "B005000000", "A001211000"):
+        assert field not in known, f"{field} 不应出现在筛选字段表中"
+
+
+def test_official_weighted_roe_is_imported(duckdb_store: DuckDBStore) -> None:
+    """官方「加权平均ROE」（证监会披露口径）已入库 —— 本项目的 roe 是简单口径。"""
+    columns = _columns(duckdb_store, "csmar_disclosure_metrics")
+    assert {
+        "roe_weighted", "roe_weighted_deducted", "non_recurring_gain_loss",
+        "eps_basic", "eps_diluted", "eps_deducted_basic",
+    } <= columns
+
+
+def test_risk_factors_imported(duckdb_store: DuckDBStore) -> None:
+    """需要多年序列才能自算的风险因子已入库。"""
+    columns = _columns(duckdb_store, "csmar_risk_factors")
+    assert {
+        "profits_volatility_3y", "cashflow_volatility_3y", "non_debt_tax_shield",
+        "bank_loan_ratio", "short_loan_dependence", "tax_bearing",
+    } <= columns

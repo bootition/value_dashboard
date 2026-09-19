@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 32
+DUCKDB_SCHEMA_VERSION = 36
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -899,6 +899,984 @@ CREATE INDEX IF NOT EXISTS idx_csmar_per_share_history_stock
     ON csmar_per_share_history (stock_code, report_date);
 
 
+-- CSMAR 披露指标域（2026-09-19 v33）。来源 FI_T2.dta（243,202 行）。
+-- 为什么单独建：这些是**上市公司年报财务摘要里的官方披露值**（非 CSMAR 二次计算），
+-- 与自算口径不同，尤其「加权平均ROE」是证监会/交易所标准披露口径
+-- （本项目的 roe 是简单口径：TTM 归母净利 / 平均归母权益）。
+--   non_recurring_gain_loss  非经常性损益
+--   roe_weighted             加权平均净资产收益率（官方口径）
+--   roe_weighted_deducted    扣非加权平均ROE
+--   eps_deducted_basic       扣非基本每股收益
+--   ocf_per_share_disclosed  每股经营活动现金流量净额
+--   bps_parent_disclosed     归属母公司每股净资产
+--   eps_basic / eps_diluted  基本/稀释每股收益
+-- 域纪律：独立域；duplicates 自算指标时只作交叉核验，不替换主链。
+CREATE TABLE IF NOT EXISTS csmar_disclosure_metrics (
+    stock_code                  VARCHAR NOT NULL,
+    report_date                 DATE    NOT NULL,
+    non_recurring_gain_loss     DOUBLE,
+    roe_weighted                DOUBLE,
+    roe_weighted_deducted       DOUBLE,
+    eps_deducted_basic          DOUBLE,
+    ocf_per_share_disclosed     DOUBLE,
+    bps_parent_disclosed        DOUBLE,
+    eps_basic                   DOUBLE,
+    eps_diluted                 DOUBLE,
+    source                      VARCHAR NOT NULL,
+    fetch_time                  TIMESTAMP NOT NULL,
+    batch_id                    VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_disclosure_metrics_stock
+    ON csmar_disclosure_metrics (stock_code, report_date);
+
+-- CSMAR 风险与治理因子域（2026-09-19 v33）。来源 BDT_FinIndex.dta（67,193 行）。
+-- 这批的核心价值是**需要多年序列才能自算**或**需要我们没有的原始科目**的因子：
+--   profits_volatility_3y    盈利波动性（(EBIT/总资产) 三年滚动标准差）
+--   cashflow_volatility_3y   现金流波动性（(现金流/总资产) 三年滚动标准差）
+--   non_debt_tax_shield      非债务税盾（折旧/总资产）
+--   tax_bearing              税负
+--   bank_loan_ratio          银行借款比例
+--   short_loan_dependence    短期借款依赖度
+--   shareholders_occupy      大股东占款（与 indicator_ext.shareholder_occupation 交叉核验）
+--   financial_liability      金融负债 / operating_liability 经营负债
+--   working_capital_turnover 营运资金周转率 / cash_equivalents_turnover 现金及现金等价物周转率
+--   tangible_asset_ratio     有形资产比率 / admin_expense_rate 管理费用率
+--   book_to_market_bdt       账面市值比 / effective_tax_rate 实际税率
+-- 域纪律：独立域，不进筛选界面（数据截止 2025Q1 且部分与自算指标重叠）。
+CREATE TABLE IF NOT EXISTS csmar_risk_factors (
+    stock_code                VARCHAR NOT NULL,
+    report_date               DATE    NOT NULL,
+    financial_liability       DOUBLE,
+    operating_liability       DOUBLE,
+    book_to_market_bdt        DOUBLE,
+    admin_expense_rate        DOUBLE,
+    tangible_asset_ratio      DOUBLE,
+    working_capital_turnover  DOUBLE,
+    cash_equivalents_turnover DOUBLE,
+    revenue_growth_bdt        DOUBLE,
+    non_debt_tax_shield       DOUBLE,
+    effective_tax_rate        DOUBLE,
+    profits_volatility_3y     DOUBLE,
+    cashflow_volatility_3y    DOUBLE,
+    interest_coverage_ratio   DOUBLE,
+    tax_bearing               DOUBLE,
+    bank_loan_ratio           DOUBLE,
+    short_loan_dependence     DOUBLE,
+    shareholders_occupy       DOUBLE,
+    source                    VARCHAR NOT NULL,
+    fetch_time                TIMESTAMP NOT NULL,
+    batch_id                  VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_risk_factors_stock
+    ON csmar_risk_factors (stock_code, report_date);
+
+
+-- ── CSMAR 剩余指标表全量导入域（2026-09-19 v34）──────────────────────
+-- 「榨干数据包」的完整性收口：把此前未接入的 11 张 CSMAR 指标表**整表导入**，
+-- 共 425 个数据字段。列名保留 CSMAR 原始代码（F010101A 等），
+-- 中文名与口径见 data package 内的字段字典（field_dictionary.csv）。
+--
+-- 为什么这批用代码列名而不逐个起可读名：
+--   这批字段里大量是同一概念的 A/B/C/D/TTM 变体（如 ROE 有 4 种算法 × 4 个期间），
+--   逐个起中文名既无必要也易出错；保留原始代码可保证与 CSMAR 文档一一对应，
+--   且查询时可用字典表 join 出中文名。
+--
+-- 域纪律：**不进筛选界面**。数据截止 2025-03-31，且与自算指标大量重叠；
+--   把它们放进全市场字段选择器会制造「同概念多套口径」的伪选择。
+--   定位是：完整归档 + 交叉核验 + 专项研究。
+-- FI_T1（302,959 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t1 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F010101A" DOUBLE,
+    "F010201A" DOUBLE,
+    "F010301A" DOUBLE,
+    "F010401A" DOUBLE,
+    "F010501A" DOUBLE,
+    "F010601A" DOUBLE,
+    "F010701B" DOUBLE,
+    "F010702B" DOUBLE,
+    "F010801B" DOUBLE,
+    "F010901B" DOUBLE,
+    "F011001B" DOUBLE,
+    "F011201A" DOUBLE,
+    "F011301A" DOUBLE,
+    "F011401A" DOUBLE,
+    "F011501A" DOUBLE,
+    "F011601A" DOUBLE,
+    "F011701A" DOUBLE,
+    "F011801A" DOUBLE,
+    "F011901A" DOUBLE,
+    "F012001A" DOUBLE,
+    "F012101A" DOUBLE,
+    "F012201B" DOUBLE,
+    "F012301B" DOUBLE,
+    "F012401B" DOUBLE,
+    "F012501B" DOUBLE,
+    "F012601B" DOUBLE,
+    "F012701B" DOUBLE,
+    "F020502A" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t1_stock ON csmar_fi_t1 (stock_code, report_date);
+
+-- FI_T8（302,716 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t8 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F080101A" DOUBLE,
+    "F080102A" DOUBLE,
+    "F080201A" DOUBLE,
+    "F080301A" DOUBLE,
+    "F080302A" DOUBLE,
+    "F080401A" DOUBLE,
+    "F080501A" DOUBLE,
+    "F080502A" DOUBLE,
+    "F080601A" DOUBLE,
+    "F080602A" DOUBLE,
+    "F080701B" DOUBLE,
+    "F080702B" DOUBLE,
+    "F080801B" DOUBLE,
+    "F080802B" DOUBLE,
+    "F080901B" DOUBLE,
+    "F080902B" DOUBLE,
+    "F081001B" DOUBLE,
+    "F081002B" DOUBLE,
+    "F081101B" DOUBLE,
+    "F081102B" DOUBLE,
+    "F081201B" DOUBLE,
+    "F081202B" DOUBLE,
+    "F081301B" DOUBLE,
+    "F081401B" DOUBLE,
+    "F081501B" DOUBLE,
+    "F081601B" DOUBLE,
+    "F081602C" DOUBLE,
+    "F081701B" DOUBLE,
+    "F081801B" DOUBLE,
+    "F081901B" DOUBLE,
+    "F082001B" DOUBLE,
+    "F082101B" DOUBLE,
+    "F082201B" DOUBLE,
+    "F082202B" DOUBLE,
+    "F082301B" DOUBLE,
+    "F082302B" DOUBLE,
+    "F082401B" DOUBLE,
+    "F082402B" DOUBLE,
+    "F082501B" DOUBLE,
+    "F082502B" DOUBLE,
+    "F082601B" DOUBLE,
+    "F082701A" DOUBLE,
+    "F082702A" DOUBLE,
+    "F082801A" DOUBLE,
+    "F082802A" DOUBLE,
+    "F082703A" DOUBLE,
+    "F082803A" DOUBLE,
+    "F080703B" DOUBLE,
+    "F081003B" DOUBLE,
+    "F081603B" DOUBLE,
+    "F080603A" DOUBLE,
+    "F081103B" DOUBLE,
+    "F080503A" DOUBLE,
+    "F080803B" DOUBLE,
+    "F081203B" DOUBLE,
+    "F082602B" DOUBLE,
+    "F082603B" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t8_stock ON csmar_fi_t8 (stock_code, report_date);
+
+-- FI_T9（303,065 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t9 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F090101B" DOUBLE,
+    "F090101C" DOUBLE,
+    "F090102B" DOUBLE,
+    "F090102C" DOUBLE,
+    "F090103B" DOUBLE,
+    "F090103C" DOUBLE,
+    "F090104B" DOUBLE,
+    "F090104C" DOUBLE,
+    "F090201B" DOUBLE,
+    "F090201C" DOUBLE,
+    "F090202B" DOUBLE,
+    "F090202C" DOUBLE,
+    "F090301B" DOUBLE,
+    "F090301C" DOUBLE,
+    "F090401B" DOUBLE,
+    "F090401C" DOUBLE,
+    "F090501B" DOUBLE,
+    "F090501C" DOUBLE,
+    "F090601B" DOUBLE,
+    "F090601C" DOUBLE,
+    "F090701B" DOUBLE,
+    "F090701C" DOUBLE,
+    "F090801B" DOUBLE,
+    "F090801C" DOUBLE,
+    "F090901B" DOUBLE,
+    "F090901C" DOUBLE,
+    "F091001A" DOUBLE,
+    "F091101A" DOUBLE,
+    "F091201A" DOUBLE,
+    "F091301A" DOUBLE,
+    "F091401A" DOUBLE,
+    "F091501A" DOUBLE,
+    "F091601A" DOUBLE,
+    "F091701A" DOUBLE,
+    "F091801B" DOUBLE,
+    "F091801C" DOUBLE,
+    "F091901B" DOUBLE,
+    "F091901C" DOUBLE,
+    "F092001B" DOUBLE,
+    "F092001C" DOUBLE,
+    "F092101B" DOUBLE,
+    "F092101C" DOUBLE,
+    "F092201B" DOUBLE,
+    "F092201C" DOUBLE,
+    "F092301B" DOUBLE,
+    "F092301C" DOUBLE,
+    "F092401B" DOUBLE,
+    "F092501B" DOUBLE,
+    "F092601B" DOUBLE,
+    "F092601C" DOUBLE,
+    "F092602B" DOUBLE,
+    "F092602C" DOUBLE,
+    "F090302B" DOUBLE,
+    "F090302C" DOUBLE,
+    "F090402B" DOUBLE,
+    "F090402C" DOUBLE,
+    "F090502B" DOUBLE,
+    "F090502C" DOUBLE,
+    "F090602B" DOUBLE,
+    "F090602C" DOUBLE,
+    "F090702B" DOUBLE,
+    "F090702C" DOUBLE,
+    "F090802B" DOUBLE,
+    "F090802C" DOUBLE,
+    "F090902B" DOUBLE,
+    "F090902C" DOUBLE,
+    "F091002A" DOUBLE,
+    "F091102A" DOUBLE,
+    "F091202A" DOUBLE,
+    "F091302A" DOUBLE,
+    "F091402A" DOUBLE,
+    "F091502A" DOUBLE,
+    "F091602A" DOUBLE,
+    "F091702A" DOUBLE,
+    "F091802B" DOUBLE,
+    "F091802C" DOUBLE,
+    "F091902B" DOUBLE,
+    "F091902C" DOUBLE,
+    "F092002B" DOUBLE,
+    "F092002C" DOUBLE,
+    "F092102B" DOUBLE,
+    "F092102C" DOUBLE,
+    "F092202B" DOUBLE,
+    "F092202C" DOUBLE,
+    "F092302B" DOUBLE,
+    "F092302C" DOUBLE,
+    "F092103B" DOUBLE,
+    "F092103C" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t9_stock ON csmar_fi_t9 (stock_code, report_date);
+
+-- FI_T3（302,959 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t3 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F030101A" DOUBLE,
+    "F030201A" DOUBLE,
+    "F030301A" DOUBLE,
+    "F030401A" DOUBLE,
+    "F030501A" DOUBLE,
+    "F030601A" DOUBLE,
+    "F030701A" DOUBLE,
+    "F030801A" DOUBLE,
+    "F030901A" DOUBLE,
+    "F031001A" DOUBLE,
+    "F031101A" DOUBLE,
+    "F031201A" DOUBLE,
+    "F031301A" DOUBLE,
+    "F031401A" DOUBLE,
+    "F031501A" DOUBLE,
+    "F031601A" DOUBLE,
+    "F031701A" DOUBLE,
+    "F031801A" DOUBLE,
+    "F031901A" DOUBLE,
+    "F032001A" DOUBLE,
+    "F032101B" DOUBLE,
+    "F032201B" DOUBLE,
+    "F032301B" DOUBLE,
+    "F032401B" DOUBLE,
+    "F032501B" DOUBLE,
+    "F032601B" DOUBLE,
+    "F032701B" DOUBLE,
+    "F032801B" DOUBLE,
+    "F032901B" DOUBLE,
+    "F033001B" DOUBLE,
+    "F033101B" DOUBLE,
+    "F033201B" DOUBLE,
+    "F033301B" DOUBLE,
+    "F033401B" DOUBLE,
+    "F033501A" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t3_stock ON csmar_fi_t3 (stock_code, report_date);
+
+-- FI_T6（301,294 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t6 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F060101B" DOUBLE,
+    "F060101C" DOUBLE,
+    "F060201B" DOUBLE,
+    "F060201C" DOUBLE,
+    "F060301B" DOUBLE,
+    "F060301C" DOUBLE,
+    "F060401B" DOUBLE,
+    "F060401C" DOUBLE,
+    "F060901B" DOUBLE,
+    "F060901C" DOUBLE,
+    "F061001B" DOUBLE,
+    "F061001C" DOUBLE,
+    "F061201B" DOUBLE,
+    "F061201C" DOUBLE,
+    "F061301B" DOUBLE,
+    "F061302B" DOUBLE,
+    "F061301C" DOUBLE,
+    "F061302C" DOUBLE,
+    "F061401B" DOUBLE,
+    "F061402B" DOUBLE,
+    "F061401C" DOUBLE,
+    "F061402C" DOUBLE,
+    "F061501B" DOUBLE,
+    "F061601B" DOUBLE,
+    "F061701B" DOUBLE,
+    "F061801B" DOUBLE,
+    "F061901B" DOUBLE,
+    "F062001B" DOUBLE,
+    "F062101B" DOUBLE,
+    "F062201B" DOUBLE,
+    "F062301B" DOUBLE,
+    "F062401B" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t6_stock ON csmar_fi_t6 (stock_code, report_date);
+
+-- FI_T5（305,273 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t5 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F050101B" DOUBLE,
+    "F050102B" DOUBLE,
+    "F050103B" DOUBLE,
+    "F050104C" DOUBLE,
+    "F050201B" DOUBLE,
+    "F050202B" DOUBLE,
+    "F050203B" DOUBLE,
+    "F050204C" DOUBLE,
+    "F050301B" DOUBLE,
+    "F050302B" DOUBLE,
+    "F050303B" DOUBLE,
+    "F050304C" DOUBLE,
+    "F050401B" DOUBLE,
+    "F050402B" DOUBLE,
+    "F050403B" DOUBLE,
+    "F050404C" DOUBLE,
+    "F050501B" DOUBLE,
+    "F050502B" DOUBLE,
+    "F050503B" DOUBLE,
+    "F050504C" DOUBLE,
+    "F050601B" DOUBLE,
+    "F050601C" DOUBLE,
+    "F050701B" DOUBLE,
+    "F050801B" DOUBLE,
+    "F050801C" DOUBLE,
+    "F050901B" DOUBLE,
+    "F051001B" DOUBLE,
+    "F051101B" DOUBLE,
+    "F051201B" DOUBLE,
+    "F053201B" DOUBLE,
+    "F053301B" DOUBLE,
+    "F053301C" DOUBLE,
+    "F051301B" DOUBLE,
+    "F051301C" DOUBLE,
+    "F051401B" DOUBLE,
+    "F051401C" DOUBLE,
+    "F051501B" DOUBLE,
+    "F051501C" DOUBLE,
+    "F051601B" DOUBLE,
+    "F051601C" DOUBLE,
+    "F051701B" DOUBLE,
+    "F051701C" DOUBLE,
+    "F051801B" DOUBLE,
+    "F051801C" DOUBLE,
+    "F051901B" DOUBLE,
+    "F051901C" DOUBLE,
+    "F053401B" DOUBLE,
+    "F052001B" DOUBLE,
+    "F052001C" DOUBLE,
+    "F052101B" DOUBLE,
+    "F052101C" DOUBLE,
+    "F052201B" DOUBLE,
+    "F052201C" DOUBLE,
+    "F052301B" DOUBLE,
+    "F052301C" DOUBLE,
+    "F052401B" DOUBLE,
+    "F052401C" DOUBLE,
+    "F052901B" DOUBLE,
+    "F052901C" DOUBLE,
+    "F053001B" DOUBLE,
+    "F053002B" DOUBLE,
+    "F053003B" DOUBLE,
+    "F053004C" DOUBLE,
+    "F053101B" DOUBLE,
+    "F053102B" DOUBLE,
+    "F053103B" DOUBLE,
+    "F053104C" DOUBLE,
+    "F053202B" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t5_stock ON csmar_fi_t5 (stock_code, report_date);
+
+-- FI_T10（264,772 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t10 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F100101B" DOUBLE,
+    "F100102B" DOUBLE,
+    "F100103C" DOUBLE,
+    "F100201B" DOUBLE,
+    "F100202B" DOUBLE,
+    "F100203C" DOUBLE,
+    "F100301B" DOUBLE,
+    "F100302B" DOUBLE,
+    "F100303C" DOUBLE,
+    "F100401A" DOUBLE,
+    "F100501A" DOUBLE,
+    "F100601B" DOUBLE,
+    "F100602B" DOUBLE,
+    "F100603C" DOUBLE,
+    "F100701A" DOUBLE,
+    "F100801A" DOUBLE,
+    "F100802A" DOUBLE,
+    "F100901A" DOUBLE,
+    "F100902A" DOUBLE,
+    "F100903A" DOUBLE,
+    "F100904A" DOUBLE,
+    "F101001A" DOUBLE,
+    "F101002A" DOUBLE,
+    "F101101B" DOUBLE,
+    "F101201B" DOUBLE,
+    "F101202B" DOUBLE,
+    "F101301B" DOUBLE,
+    "F101302C" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t10_stock ON csmar_fi_t10 (stock_code, report_date);
+
+-- FI_T4（304,505 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t4 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F040101B" DOUBLE,
+    "F040201B" DOUBLE,
+    "F040202B" DOUBLE,
+    "F040203B" DOUBLE,
+    "F040204B" DOUBLE,
+    "F040205C" DOUBLE,
+    "F040301B" DOUBLE,
+    "F040302B" DOUBLE,
+    "F040303B" DOUBLE,
+    "F040304C" DOUBLE,
+    "F040401B" DOUBLE,
+    "F040501B" DOUBLE,
+    "F040502B" DOUBLE,
+    "F040503B" DOUBLE,
+    "F040504B" DOUBLE,
+    "F040505C" DOUBLE,
+    "F040601B" DOUBLE,
+    "F040602B" DOUBLE,
+    "F040603B" DOUBLE,
+    "F040604C" DOUBLE,
+    "F040701B" DOUBLE,
+    "F040702B" DOUBLE,
+    "F040703B" DOUBLE,
+    "F040704C" DOUBLE,
+    "F040801B" DOUBLE,
+    "F040802B" DOUBLE,
+    "F040803B" DOUBLE,
+    "F040804B" DOUBLE,
+    "F040805C" DOUBLE,
+    "F040901B" DOUBLE,
+    "F040902B" DOUBLE,
+    "F040903B" DOUBLE,
+    "F040904B" DOUBLE,
+    "F040905C" DOUBLE,
+    "F041001B" DOUBLE,
+    "F041002B" DOUBLE,
+    "F041003B" DOUBLE,
+    "F041004B" DOUBLE,
+    "F041005C" DOUBLE,
+    "F041101B" DOUBLE,
+    "F041201B" DOUBLE,
+    "F041202B" DOUBLE,
+    "F041203B" DOUBLE,
+    "F041204B" DOUBLE,
+    "F041205C" DOUBLE,
+    "F041301B" DOUBLE,
+    "F041401B" DOUBLE,
+    "F041402B" DOUBLE,
+    "F041403B" DOUBLE,
+    "F041404B" DOUBLE,
+    "F041405C" DOUBLE,
+    "F041501B" DOUBLE,
+    "F041502B" DOUBLE,
+    "F041503B" DOUBLE,
+    "F041504B" DOUBLE,
+    "F041505C" DOUBLE,
+    "F041601B" DOUBLE,
+    "F041701B" DOUBLE,
+    "F041702B" DOUBLE,
+    "F041703B" DOUBLE,
+    "F041704B" DOUBLE,
+    "F041705C" DOUBLE,
+    "F041801B" DOUBLE,
+    "F041802B" DOUBLE,
+    "F041803B" DOUBLE,
+    "F041804B" DOUBLE,
+    "F041805C" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t4_stock ON csmar_fi_t4 (stock_code, report_date);
+
+-- FI_T11（260,092 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t11 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F110101B" DOUBLE,
+    "F110201B" DOUBLE,
+    "F110301B" DOUBLE,
+    "F110401B" DOUBLE,
+    "F110501B" DOUBLE,
+    "F110601B" DOUBLE,
+    "F110701B" DOUBLE,
+    "F110801B" DOUBLE,
+    "F110302B" DOUBLE,
+    "F110303B" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t11_stock ON csmar_fi_t11 (stock_code, report_date);
+
+-- FAR_Finidx（76,262 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_far_finidx (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "A100000" DOUBLE,
+    "A110601" DOUBLE,
+    "A111201" DOUBLE,
+    "A300000" DOUBLE,
+    "B110101" DOUBLE,
+    "B110303" DOUBLE,
+    "B230403" DOUBLE,
+    "D100000" DOUBLE,
+    "T30100" DOUBLE,
+    "T40100" DOUBLE,
+    "T40401" DOUBLE,
+    "T40402" DOUBLE,
+    "T40403" DOUBLE,
+    "T40700" DOUBLE,
+    "T40801" DOUBLE,
+    "T40802" DOUBLE,
+    "T40803" DOUBLE,
+    "T60200" DOUBLE,
+    "T60300" DOUBLE,
+    "Capexp" DOUBLE,
+    "Etaxrt" DOUBLE,
+    "Speitem" DOUBLE,
+    "Nstaff" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock_code, report_date);
+
+-- FI_T7（261,379 行）；列名为 CSMAR 原始代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_fi_t7 (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "F070101B" DOUBLE,
+    "F070201B" DOUBLE,
+    "F070301B" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_fi_t7_stock ON csmar_fi_t7 (stock_code, report_date);
+
+-- ── CSMAR 三表剩余科目 + 金融专用科目全量（2026-09-19 v35）─────────────
+-- 「榨干」的最后一格：三张报表里本项目未映射的 100 个科目
+-- （投资性房地产、开发支出、长期待摊费用、库存股、其他综合收益、专项储备、
+--   其他权益工具、持有待售资产、长期应收款、债权投资、持续经营/终止经营净利润、
+--   其他综合收益总额、资产处置收益…），以及金融专用科目全量 109 列。
+-- 列名保留 CSMAR 代码，中文名见数据包内的字段字典。
+-- 域纪律：归档与专项研究用，不进筛选界面（历史期 + 口径重叠）。
+-- FS_Combas 剩余科目（51 列）；列名为 CSMAR 代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_balance_items (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "A001109000" DOUBLE,
+    "A001127000" DOUBLE,
+    "A001119000" DOUBLE,
+    "A001120000" DOUBLE,
+    "A001123101" DOUBLE,
+    "A001129000" DOUBLE,
+    "A001124000" DOUBLE,
+    "A001125000" DOUBLE,
+    "A001226000" DOUBLE,
+    "A001202000" DOUBLE,
+    "A001227000" DOUBLE,
+    "A001203000" DOUBLE,
+    "A001204000" DOUBLE,
+    "A001228000" DOUBLE,
+    "A001229000" DOUBLE,
+    "A001206000" DOUBLE,
+    "A001207000" DOUBLE,
+    "A001211000" DOUBLE,
+    "A001214000" DOUBLE,
+    "A001215000" DOUBLE,
+    "A001216000" DOUBLE,
+    "A001217000" DOUBLE,
+    "A001218201" DOUBLE,
+    "A001219000" DOUBLE,
+    "A001219101" DOUBLE,
+    "A001221000" DOUBLE,
+    "A001223000" DOUBLE,
+    "A002105000" DOUBLE,
+    "A002114000" DOUBLE,
+    "A002115000" DOUBLE,
+    "A002120000" DOUBLE,
+    "A002129000" DOUBLE,
+    "A002125000" DOUBLE,
+    "A002126000" DOUBLE,
+    "A002127000" DOUBLE,
+    "A002204000" DOUBLE,
+    "A002212000" DOUBLE,
+    "A002205000" DOUBLE,
+    "A002206000" DOUBLE,
+    "A002207000" DOUBLE,
+    "A002208000" DOUBLE,
+    "A002209000" DOUBLE,
+    "A002210000" DOUBLE,
+    "A003112000" DOUBLE,
+    "A003112101" DOUBLE,
+    "A003112201" DOUBLE,
+    "A003112301" DOUBLE,
+    "A003102101" DOUBLE,
+    "A003106000" DOUBLE,
+    "A003107000" DOUBLE,
+    "A003111000" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_balance_items_stock ON csmar_balance_items (stock_code, report_date);
+
+-- FS_Comins 剩余科目（25 列）；列名为 CSMAR 代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_income_items (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "Bbd1102000" DOUBLE,
+    "Bbd1102101" DOUBLE,
+    "Bbd1102203" DOUBLE,
+    "B001305000" DOUBLE,
+    "B001302101" DOUBLE,
+    "B001302201" DOUBLE,
+    "B001303000" DOUBLE,
+    "B001306000" DOUBLE,
+    "B001308000" DOUBLE,
+    "B001304000" DOUBLE,
+    "B001400101" DOUBLE,
+    "B001500101" DOUBLE,
+    "B001500201" DOUBLE,
+    "B002200000" DOUBLE,
+    "B002300000" DOUBLE,
+    "B002000401" DOUBLE,
+    "B002000501" DOUBLE,
+    "B002000301" DOUBLE,
+    "B005000000" DOUBLE,
+    "B005000101" DOUBLE,
+    "B005000102" DOUBLE,
+    "B006000000" DOUBLE,
+    "B006000101" DOUBLE,
+    "B006000103" DOUBLE,
+    "B006000102" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_income_items_stock ON csmar_income_items (stock_code, report_date);
+
+-- FS_Comscfd 剩余科目（24 列）；列名为 CSMAR 代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_cashflow_items (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "C002001000" DOUBLE,
+    "C002002000" DOUBLE,
+    "C002003000" DOUBLE,
+    "C002004000" DOUBLE,
+    "C002005000" DOUBLE,
+    "C002100000" DOUBLE,
+    "C002006000" DOUBLE,
+    "C002007000" DOUBLE,
+    "C002009000" DOUBLE,
+    "C002010000" DOUBLE,
+    "C002200000" DOUBLE,
+    "C003008000" DOUBLE,
+    "C003001000" DOUBLE,
+    "C003001101" DOUBLE,
+    "C003003000" DOUBLE,
+    "C003002000" DOUBLE,
+    "C003004000" DOUBLE,
+    "C003100000" DOUBLE,
+    "C003005000" DOUBLE,
+    "C003006000" DOUBLE,
+    "C003006101" DOUBLE,
+    "C003007000" DOUBLE,
+    "C003200000" DOUBLE,
+    "C007000000" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_cashflow_items_stock ON csmar_cashflow_items (stock_code, report_date);
+
+-- 金融行业专用科目全量（109 列，银行/保险/证券/其他金融前缀）
+CREATE TABLE IF NOT EXISTS csmar_financial_items (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "A0D2130000" DOUBLE,
+    "A0F1132000" DOUBLE,
+    "A0F1133000" DOUBLE,
+    "A0F1224000" DOUBLE,
+    "A0F1232000" DOUBLE,
+    "A0F1233000" DOUBLE,
+    "A0F2210000" DOUBLE,
+    "A0F3108000" DOUBLE,
+    "A0F3109000" DOUBLE,
+    "A0b1103000" DOUBLE,
+    "A0b1104000" DOUBLE,
+    "A0b1105000" DOUBLE,
+    "A0b1201000" DOUBLE,
+    "A0b2102000" DOUBLE,
+    "A0b2103000" DOUBLE,
+    "A0b2103101" DOUBLE,
+    "A0b2103201" DOUBLE,
+    "A0d1101101" DOUBLE,
+    "A0d1102000" DOUBLE,
+    "A0d1102101" DOUBLE,
+    "A0d1126000" DOUBLE,
+    "A0d1218101" DOUBLE,
+    "A0d2101101" DOUBLE,
+    "A0d2122000" DOUBLE,
+    "A0d2123000" DOUBLE,
+    "A0d2202000" DOUBLE,
+    "A0f1106000" DOUBLE,
+    "A0f1108000" DOUBLE,
+    "A0f1122000" DOUBLE,
+    "A0f1300000" DOUBLE,
+    "A0f2104000" DOUBLE,
+    "A0f2106000" DOUBLE,
+    "A0f2110000" DOUBLE,
+    "A0f2300000" DOUBLE,
+    "A0f3104000" DOUBLE,
+    "A0i1113000" DOUBLE,
+    "A0i1114000" DOUBLE,
+    "A0i1115000" DOUBLE,
+    "A0i1116000" DOUBLE,
+    "A0i1116101" DOUBLE,
+    "A0i1116201" DOUBLE,
+    "A0i1116301" DOUBLE,
+    "A0i1116401" DOUBLE,
+    "A0i1209000" DOUBLE,
+    "A0i1210000" DOUBLE,
+    "A0i1224000" DOUBLE,
+    "A0i1225000" DOUBLE,
+    "A0i2111000" DOUBLE,
+    "A0i2116000" DOUBLE,
+    "A0i2117000" DOUBLE,
+    "A0i2118000" DOUBLE,
+    "A0i2119000" DOUBLE,
+    "A0i2119101" DOUBLE,
+    "A0i2119201" DOUBLE,
+    "A0i2119301" DOUBLE,
+    "A0i2119401" DOUBLE,
+    "A0i2121000" DOUBLE,
+    "A0i2124000" DOUBLE,
+    "B0I1214000" DOUBLE,
+    "B0d1104000" DOUBLE,
+    "B0d1104101" DOUBLE,
+    "B0d1104201" DOUBLE,
+    "B0d1104301" DOUBLE,
+    "B0d1104401" DOUBLE,
+    "B0d1104501" DOUBLE,
+    "B0f1105000" DOUBLE,
+    "B0f1208000" DOUBLE,
+    "B0f1213000" DOUBLE,
+    "B0i1103000" DOUBLE,
+    "B0i1103101" DOUBLE,
+    "B0i1103111" DOUBLE,
+    "B0i1103203" DOUBLE,
+    "B0i1103303" DOUBLE,
+    "B0i1202000" DOUBLE,
+    "B0i1203000" DOUBLE,
+    "B0i1203101" DOUBLE,
+    "B0i1203203" DOUBLE,
+    "B0i1204000" DOUBLE,
+    "B0i1204101" DOUBLE,
+    "B0i1204203" DOUBLE,
+    "B0i1205000" DOUBLE,
+    "B0i1206000" DOUBLE,
+    "B0i1208103" DOUBLE,
+    "C0F1023000" DOUBLE,
+    "C0F1024000" DOUBLE,
+    "C0F1025000" DOUBLE,
+    "C0F1026000" DOUBLE,
+    "C0F1027000" DOUBLE,
+    "C0F1028000" DOUBLE,
+    "C0F1029000" DOUBLE,
+    "C0F1030000" DOUBLE,
+    "C0F1031000" DOUBLE,
+    "C0F1032000" DOUBLE,
+    "C0b1002000" DOUBLE,
+    "C0b1003000" DOUBLE,
+    "C0b1004000" DOUBLE,
+    "C0b1015000" DOUBLE,
+    "C0b1016000" DOUBLE,
+    "C0d1008000" DOUBLE,
+    "C0d1010000" DOUBLE,
+    "C0d1011000" DOUBLE,
+    "C0f1009000" DOUBLE,
+    "C0f1018000" DOUBLE,
+    "C0i1005000" DOUBLE,
+    "C0i1006000" DOUBLE,
+    "C0i1007000" DOUBLE,
+    "C0i1017000" DOUBLE,
+    "C0i1019000" DOUBLE,
+    "C0i2008000" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_financial_items_stock ON csmar_financial_items (stock_code, report_date);
+
+-- ── CSMAR AIQ 年度宽表 + 会计恒等式锚点（2026-09-19 v36）──────────────
+-- 「榨干」收尾：
+--   csmar_aiq_annual —— AIQ_LCFinIndexY.dta（68,059 行 / 54 列年度财务指标宽表）。
+--     与 FI_T* 系列有重叠，导入目的为**完整归档**（数据包完整性）。
+--   csmar_balance_items."A004000000" —— 「负债与所有者权益总计」，
+--     会计恒等式「资产 = 负债 + 所有者权益」的现成对账锚点（99.999% 填充）。
+-- AIQ_LCFinIndexY 年度财务指标宽表（54 列）；列名为 CSMAR 代码，中文名见字段字典
+CREATE TABLE IF NOT EXISTS csmar_aiq_annual (
+    stock_code VARCHAR NOT NULL,
+    report_date DATE NOT NULL,
+    "Cash" DOUBLE,
+    "AccountsReceivable" DOUBLE,
+    "NonCurrentAssetsInYear" DOUBLE,
+    "TotalCurrentAssets" DOUBLE,
+    "Inventory" DOUBLE,
+    "OtherCurrentAssets" DOUBLE,
+    "FixedAssets" DOUBLE,
+    "DisposalOfFixedAssets" DOUBLE,
+    "IntangibleAssets" DOUBLE,
+    "TotalAssets" DOUBLE,
+    "TotalCurrentliabilities" DOUBLE,
+    "TotalLiabilities" DOUBLE,
+    "ShortTermLoan" DOUBLE,
+    "AccountsPayable" DOUBLE,
+    "TaxePayable" DOUBLE,
+    "StockDividendPayable" DOUBLE,
+    "LongLiabInYearChange" DOUBLE,
+    "TotalEquity" DOUBLE,
+    "CapitalStock" DOUBLE,
+    "TotalRevenue" DOUBLE,
+    "OperatingRevenue" DOUBLE,
+    "TotalOperatingCost" DOUBLE,
+    "OperatingCost" DOUBLE,
+    "BusinessTaxAndSurcharge" DOUBLE,
+    "SellingExpenses" DOUBLE,
+    "ManagementExpense" DOUBLE,
+    "RDExpenses" DOUBLE,
+    "FinanceExpense" DOUBLE,
+    "OperatingProfit" DOUBLE,
+    "NonOperatingIncome" DOUBLE,
+    "NonOperatingExpenses" DOUBLE,
+    "TotalProfit" DOUBLE,
+    "IncomeTax" DOUBLE,
+    "NetProfit" DOUBLE,
+    "Depreciation" DOUBLE,
+    "AmorOfIntangibleAssets" DOUBLE,
+    "AmorOfDeferredExpenses" DOUBLE,
+    "OperatingNetCashFlow" DOUBLE,
+    "AssetLiabilityRatio" DOUBLE,
+    "ROTAA" DOUBLE,
+    "ROTAB" DOUBLE,
+    "ROTAC" DOUBLE,
+    "ROAA" DOUBLE,
+    "ROAB" DOUBLE,
+    "ROAC" DOUBLE,
+    "ROEA" DOUBLE,
+    "ROEB" DOUBLE,
+    "ROEC" DOUBLE,
+    "MarketValueA" DOUBLE,
+    "MarketValueB" DOUBLE,
+    "ValueBookRatioA" DOUBLE,
+    "ValueBookRatioB" DOUBLE,
+    "EPS" DOUBLE,
+    "NAVPS" DOUBLE,
+    source VARCHAR NOT NULL,
+    fetch_time TIMESTAMP NOT NULL,
+    batch_id VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_csmar_aiq_annual_stock ON csmar_aiq_annual (stock_code, report_date);
+
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -1775,6 +2753,68 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (32, 'fix bps caliber (total equity) + add parent BPS')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v33: CSMAR 披露指标域 + 风险治理因子域（2026-09-19，"榨干" R12）。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_csmar_disclosure_metrics_stock "
+            "ON csmar_disclosure_metrics (stock_code, report_date)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_csmar_risk_factors_stock "
+            "ON csmar_risk_factors (stock_code, report_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (33, 'CSMAR disclosure metrics (official weighted ROE) + risk/governance factors')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v34: CSMAR 剩余指标表全量导入（2026-09-19，{n} 张表 / {c} 列）。
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t1_stock ON csmar_fi_t1 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t8_stock ON csmar_fi_t8 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t9_stock ON csmar_fi_t9 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t3_stock ON csmar_fi_t3 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t6_stock ON csmar_fi_t6 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t5_stock ON csmar_fi_t5 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t10_stock ON csmar_fi_t10 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t4_stock ON csmar_fi_t4 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t11_stock ON csmar_fi_t11 (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t7_stock ON csmar_fi_t7 (stock_code, report_date)")
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (34, 'CSMAR remaining indicator tables (full import)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v35: CSMAR 三表剩余科目 + 金融专用科目全量（2026-09-19）。
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_balance_items_stock ON csmar_balance_items (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_income_items_stock ON csmar_income_items (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_cashflow_items_stock ON csmar_cashflow_items (stock_code, report_date)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_financial_items_stock ON csmar_financial_items (stock_code, report_date)")
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (35, 'CSMAR statement remaining items + full financial sector items')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v36: AIQ 年度宽表 + 会计恒等式锚点（2026-09-19，"榨干"收尾）。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_csmar_aiq_annual_stock "
+            "ON csmar_aiq_annual (stock_code, report_date)"
+        )
+        connection.execute(
+            'ALTER TABLE csmar_balance_items ADD COLUMN IF NOT EXISTS "A004000000" DOUBLE'
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (36, 'CSMAR AIQ annual wide table + accounting identity anchor')
             ON CONFLICT (version) DO NOTHING
             """
         )
