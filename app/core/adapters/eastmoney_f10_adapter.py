@@ -326,8 +326,15 @@ class EastMoneyF10Adapter(BaseAdapter):
                 continue
             report_date = str(entry.get("REPORT_DATE") or "")[:10]
             try:
-                date.fromisoformat(report_date)
+                parsed_date = date.fromisoformat(report_date)
             except ValueError:
+                continue
+            # 2026-09-19 复审修复：东财会返回**尚未结束的报告期**（实测 2026-09-01
+            # 抓取时返回 REPORT_DATE=2026-12-31，11 行 / 2 只）。未来报告期在物理上
+            # 不可能存在，其数值含义不明（抽样中 4/11 等于上年年报值，其余不等），
+            # 若入库会污染"最新报告期"的判断。故在源头过滤，不入库。
+            if parsed_date > date.today():
+                logger.debug("跳过未来报告期 %s：%s", report_date, item_name)
                 continue
             ratio_value = _to_float(entry.get("MBI_RATIO"))
             rows.append({

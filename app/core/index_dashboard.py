@@ -309,7 +309,7 @@ def _all_a_valuation_series(duck: object) -> list[dict[str, Any]]:
     """全A合成估值月度序列：[{trade_date, pe_ttm, pb}]，按月末最后交易日采样。
 
     口径（如实披露，不伪装官方指数）：
-    - 市值：price_daily_qfq 收盘价 × stock_meta.total_shares，逐日全市场
+    - 市值：price_daily_qfq 收盘价 × **交易日当时股本**（share_capital_history ASOF），逐日全市场 —— D23 已修
       加总后取每月最后交易日；
     - PE：市值 / 归母净利润 TTM（按 report_date 对齐最新报告期；
       income_statement 无披露日字段，未做披露滞后调整）；
@@ -336,11 +336,16 @@ def _all_a_valuation_series(duck: object) -> list[dict[str, Any]]:
                ) = 1
            ),
            px AS (
-               SELECT me.trade_date, p.stock_code, p.close * s.total_shares AS cap
+               SELECT me.trade_date, p.stock_code,
+                      p.close * COALESCE(sh.total_shares, s.total_shares) AS cap
                FROM me
                JOIN price_daily_qfq p ON p.trade_date = me.trade_date
-               JOIN stock_meta s ON s.stock_code = p.stock_code
-               WHERE p.close IS NOT NULL AND s.total_shares > 0
+               -- D23 修复：用交易日**当时**股本，不用当前股本
+               ASOF LEFT JOIN share_capital_history sh
+                 ON p.stock_code = sh.stock_code AND p.trade_date >= sh.effective_date
+               LEFT JOIN stock_meta s ON s.stock_code = p.stock_code
+               WHERE p.close IS NOT NULL
+                 AND COALESCE(sh.total_shares, s.total_shares) > 0
            ),
            prof AS (
                SELECT stock_code, report_date, SUM(parent_net_profit) AS profit
@@ -424,11 +429,16 @@ def _all_a_market_snapshot(duck: object) -> dict[str, Any]:
     cap_rows = duck.read_query(
         """SELECT SUM(latest_cap) AS total_cap, MAX(trade_date) AS cap_date
            FROM (
-               SELECT p.stock_code, p.close * s.total_shares AS latest_cap, p.trade_date,
+               SELECT p.stock_code,
+                      p.close * COALESCE(sh.total_shares, s.total_shares) AS latest_cap, p.trade_date,
                       ROW_NUMBER() OVER (PARTITION BY p.stock_code ORDER BY p.trade_date DESC) AS rn
                FROM price_daily_qfq p
-               JOIN stock_meta s ON s.stock_code = p.stock_code
-               WHERE p.close IS NOT NULL AND s.total_shares > 0
+               -- D23 修复：用交易日**当时**股本，不用当前股本
+               ASOF LEFT JOIN share_capital_history sh
+                 ON p.stock_code = sh.stock_code AND p.trade_date >= sh.effective_date
+               LEFT JOIN stock_meta s ON s.stock_code = p.stock_code
+               WHERE p.close IS NOT NULL
+                 AND COALESCE(sh.total_shares, s.total_shares) > 0
            )
            WHERE rn = 1"""
     )

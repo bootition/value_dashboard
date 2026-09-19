@@ -124,14 +124,20 @@ def market_cap_series(duck: object, codes: list[str]) -> list[dict[str, Any]]:
     cutoff = (date.today() - timedelta(days=_LOOKBACK_DAYS)).isoformat()
     rows = duck.read_query(
         f"""SELECT p.trade_date AS trade_date,
-                   SUM(p.close * s.total_shares) AS total_market_cap,
+                   SUM(p.close * COALESCE(sh.total_shares, s.total_shares)) AS total_market_cap,
                    COUNT(DISTINCT p.stock_code) AS companies
             FROM price_daily_qfq p
-            JOIN stock_meta s ON s.stock_code = p.stock_code
+            -- D23 修复（2026-09-19）：市值必须用**当时股本**，不是当前股本。
+            -- 旧实现 JOIN stock_meta（当前总股本）配历史价格，会把增发高估、回购低估。
+            -- 改用 ASOF JOIN share_capital_history 取「报告/交易日当时」的股本；
+            -- 极少数无股本历史的老股回退到当前股本（COALESCE），如实兜底不丢数据。
+            ASOF LEFT JOIN share_capital_history sh
+              ON p.stock_code = sh.stock_code AND p.trade_date >= sh.effective_date
+            LEFT JOIN stock_meta s ON s.stock_code = p.stock_code
             WHERE p.stock_code IN ({_where_codes(codes)})
               AND p.trade_date >= ?
               AND p.close IS NOT NULL
-              AND s.total_shares > 0
+              AND COALESCE(sh.total_shares, s.total_shares) > 0
             GROUP BY p.trade_date
             ORDER BY p.trade_date""",
         [*codes, cutoff],
