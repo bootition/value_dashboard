@@ -24,9 +24,16 @@ export type FieldFormat = 'pct' | 'percent' | 'ratio' | 'price' | 'plain'
 
 /** 用户界面使用中文优先名称；稳定字段名仍只用于 API、规则 JSON 与导出。 */
 export const FIELD_LABELS: Readonly<Record<string, string>> = {
-  // 扩展指标域（schema v25，2026-09-19）：周转率族 + 可用杠杆/现金流列。
-  // 自由现金流 / EBITDA / 经营杠杆 / 综合杠杆依赖 CSMAR 折旧摊销与资本支出
-  // （CSMAR 截止 2025-03-31，最新报告期覆盖率为 0），暂不暴露，故此处亦无标签。
+  // 扩展指标域（schema v25，2026-09-19）：周转率族 / 自由现金流族 / 杠杆族，共 18 项。
+  // 自由现金流与 EBITDA 一族最初因 CSMAR 截止 2025-03-31 而覆盖率为 0，未上界面；
+  // 现由 scripts/fetch_cashflow_supplement.py 从东方财富补齐后已全量开放。
+  depreciation_amortization: '折旧摊销',
+  capex: '资本支出',
+  free_cash_flow: '自由现金流',
+  fcf_margin: '自由现金流率',
+  ebitda: '息税折旧摊销前利润（EBITDA）',
+  leverage_operating: '经营杠杆',
+  leverage_total: '综合杠杆',
   receivables_turnover: '应收账款周转率',
   inventory_turnover: '存货周转率',
   accounts_payable_turnover: '应付账款周转率',
@@ -273,6 +280,7 @@ return fallback || field
 
 /** 小数比例存储的百分比字段（条件输入 ÷100、展示 ×100+%）。 */
 const PCT_FIELDS = new Set([
+  'fcf_margin',  // 扩展指标域：自由现金流率按小数比例存储
   'roe', 'roa', 'roic',
   'gross_margin', 'net_margin', 'debt_ratio',
   'revenue_yoy', 'net_profit_yoy', 'deducted_profit_yoy',
@@ -311,7 +319,7 @@ const RATIO_FIELDS = new Set([
   // 扩展指标域：周转率与杠杆本身即倍数
   'receivables_turnover', 'inventory_turnover', 'accounts_payable_turnover',
   'current_asset_turnover', 'fixed_asset_turnover', 'total_asset_turnover',
-  'equity_turnover', 'leverage_financial',
+  'equity_turnover', 'leverage_financial', 'leverage_operating', 'leverage_total',
 ])
 
 /** 使用“倍”作为输入/展示单位的估值倍数类指标。 */

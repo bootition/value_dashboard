@@ -165,3 +165,134 @@ def test_scoped_rebuild_only_touches_given_codes(
     builder.build(codes=[STOCK])
     codes = {r["stock_code"] for r in duckdb_store.read_query("SELECT stock_code FROM indicator_ext")}
     assert codes == {STOCK, "000003"}
+
+
+# ─── 业务无意义护栏（2026-09-19 补齐折旧摊销后新增）────────────────────
+# 与 calculator.py 的 pe<=1000 / pb<=200 / |roe|<=1 同思路：触发护栏写 NULL，
+# 宁可如实缺失也不展示会误导人的数字。
+
+def _seed_income(store: DuckDBStore, code: str, **kw) -> None:
+    cols = ["stock_code", "report_date", *kw.keys()]
+    values = [code, REPORT_DATE, *kw.values()]
+    placeholders = ", ".join("?" for _ in cols)
+    with store.transaction() as conn:
+        conn.execute(f"INSERT INTO income_statement ({', '.join(cols)}) VALUES ({placeholders})", values)
+
+
+def test_loss_making_company_has_null_leverage(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """亏损（利润总额<=0）时杠杆无业务含义，必须为 NULL。"""
+    _seed_income(duckdb_store, "600001", revenue=100.0, net_profit=-50.0,
+                 income_tax=0.0, financial_expenses=5.0, total_profit=-45.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600001", REPORT_DATE, 500.0])
+        conn.execute(
+            """INSERT INTO cash_flow_indirect (stock_code, report_date, fixed_asset_depreciation,
+               source, fetch_time, raw_response_hash, confidence, batch_id)
+               VALUES (?, ?, 20.0, 'csmar', '2026-09-19 00:00:00', 'h', 'strict', 'b')""",
+            ["600001", REPORT_DATE],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600001'")[0]
+    assert row["ebit"] == -45.0            # EBIT 本身照常计算
+    assert row["ebitda"] == -25.0
+    assert row["leverage_financial"] is None
+    assert row["leverage_operating"] is None   # EBIT <= 0
+    assert row["leverage_total"] is None
+
+
+def test_absurd_fcf_margin_is_nulled(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """金融股经营现金流含客户资金，FCF率会得到 1000%+ 的荒谬值 → 必须 NULL。"""
+    _seed_income(duckdb_store, "600002", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600002", REPORT_DATE, 500.0])
+        conn.execute("INSERT INTO cash_flow (stock_code, report_date, cf_from_operating) VALUES (?, ?, ?)",
+                     ["600002", REPORT_DATE, 200000.0])
+        conn.execute(
+            """INSERT INTO cash_flow_activity (stock_code, report_date, capex,
+               source, fetch_time, raw_response_hash, confidence, batch_id)
+               VALUES (?, ?, 1000.0, 'eastmoney_f10', '2026-09-19 00:00:00', 'h', 'strict', 'b')""",
+            ["600002", REPORT_DATE],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600002'")[0]
+    assert row["free_cash_flow"] == 199000.0   # 绝对值照常
+    assert row["fcf_margin"] is None           # 1990 倍 > 5 倍上限
+
+
+def test_extreme_leverage_is_nulled_and_normal_one_kept(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """EBIT 为正但极小时杠杆会发散（实测最大 19 万）→ |杠杆| > 100 必须 NULL；
+    正常量级（2 倍、11 倍）必须保留。"""
+    # 正常量级：EBIT = -9 + 0 + 9.1 = 0.1，利润总额 0.05
+    _seed_income(duckdb_store, "600003", revenue=100.0, net_profit=-9.0,
+                 income_tax=0.0, financial_expenses=9.1, total_profit=0.05)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600003", REPORT_DATE, 500.0])
+        conn.execute(
+            """INSERT INTO cash_flow_indirect (stock_code, report_date, fixed_asset_depreciation,
+               source, fetch_time, raw_response_hash, confidence, batch_id)
+               VALUES (?, ?, 1.0, 'csmar', '2026-09-19 00:00:00', 'h', 'strict', 'b')""",
+            ["600003", REPORT_DATE],
+        )
+
+    # 散发量级：EBIT = -9.999 + 0 + 10.0 = 0.001，利润总额 1e-6
+    _seed_income(duckdb_store, "600006", revenue=100.0, net_profit=-9.999,
+                 income_tax=0.0, financial_expenses=10.0, total_profit=1e-6)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600006", REPORT_DATE, 500.0])
+        conn.execute(
+            """INSERT INTO cash_flow_indirect (stock_code, report_date, fixed_asset_depreciation,
+               source, fetch_time, raw_response_hash, confidence, batch_id)
+               VALUES (?, ?, 1.0, 'csmar', '2026-09-19 00:00:00', 'h', 'strict', 'b')""",
+            ["600006", REPORT_DATE],
+        )
+
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+
+    normal = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600003'")[0]
+    assert abs(normal["leverage_financial"] - 2.0) < 1e-9
+    assert abs(normal["leverage_operating"] - 11.0) < 1e-9
+
+    absurd = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600006'")[0]
+    assert abs(absurd["ebit"] - 0.001) < 1e-9   # 原始值照常计算
+    assert absurd["leverage_financial"] is None  # 1000 倍 > 100
+    assert absurd["leverage_operating"] is None  # 1001 倍 > 100
+
+
+def test_negative_leverage_does_not_bypass_the_cap(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """回归：负值会绕过 `<= cap` 判定（-3739 <= 100 成立），必须用 ABS。"""
+    _seed_income(duckdb_store, "600004", revenue=100.0, net_profit=0.5,
+                 income_tax=0.0, financial_expenses=-200.0, total_profit=0.05)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600004", REPORT_DATE, 500.0])
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600004'")[0]
+    # EBIT = 0.5 + 0 - 200 = -199.5 → EBIT <= 0，财务杠杆应为 NULL
+    assert row["leverage_financial"] is None
+
+
+def test_zero_denominator_yields_null_for_new_columns(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """新列同样不得产生 inf/NaN。"""
+    _seed_income(duckdb_store, "600005", revenue=0.0, net_profit=10.0,
+                 income_tax=0.0, financial_expenses=0.0, total_profit=10.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600005", REPORT_DATE, 500.0])
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600005'")[0]
+    assert row["total_asset_turnover"] == 0.0
+    assert row["equity_turnover"] is None

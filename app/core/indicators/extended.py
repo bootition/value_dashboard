@@ -9,25 +9,33 @@
    —— 判断「生意质量」的核心：存货是否积压、是否被客户占款、能占用供应商多久。
 2. **自由现金流族**（折旧摊销、资本支出、自由现金流、自由现金流率）
    —— 判断「利润是不是真钱」。此前**无法编制**，因为本项目只导入了直接法
-   现金流量表的主干科目，既无折旧摊销（间接法）也无资本支出（直接法投资活动）。
+   现金流量表的主干科目，既无折旧摊销（间接法）也无资本支出（投资活动）。
 3. **杠杆族**（EBIT、EBITDA、财务杠杆、经营杠杆、综合杠杆）
    —— 判断「赚的时候放大多少、亏的时候放大多少」。
 
 数据来源（依赖链）
 ------------------
-    balance_sheet ─┐
+    balance_sheet ────┐
     income_statement ─┼→ 周转率族、EBIT
     cash_flow ────────┤→ 经营现金流
-    cash_flow_indirect ┤→ 折旧摊销  ─┐
-    cash_flow_activity ┘→ 资本支出  ─┴→ EBITDA、杠杆族、自由现金流
+    cash_flow_indirect ┤→ 折旧摊销 ─┐
+    cash_flow_activity ┘→ 资本支出 ─┴→ EBITDA、杠杆族、自由现金流
+
+其中 `cash_flow_indirect` / `cash_flow_activity` 由两个来源共同填充：
+CSMAR C17（1997Q2–2025Q1）与东方财富 F10（2025Q2 起，见
+`scripts/fetch_cashflow_supplement.py`），按 (stock_code, report_date) 行级共存。
 
 口径裁定（config/csmar_field_verdict.json）
 ------------------------------------------
 - 周转率族 = green：CSMAR FI_T4 的公式只使用本项目已有科目 → **自算**
-  （口径：累计损益 ÷ 期末余额，即 CSMAR「A」式）
 - 杠杆族 / EBITDA = yellow：公式透明但依赖折旧摊销 → **自算**，不直接采用 CSMAR 值
 - 自由现金流 = yellow：CSMAR 的企业自由现金流公式含未定义的「息前税后利润」，
-  故本表采用**本项目口径**：`经营现金流净额 − 资本支出`，并在列注释中标注
+  故本表采用**本项目口径**：`经营现金流净额 − 资本支出`
+
+业务无意义护栏
+--------------
+与 `calculator.py` 的 `pe<=1000` / `pb<=200` / `|roe|<=1` 同思路：
+触发护栏时写 NULL，宁可如实缺失也不展示会误导人的数字。见下方常量。
 
 域纪律
 ------
@@ -50,8 +58,22 @@ logger = logging.getLogger(__name__)
 DATA_VERSION = 1
 SOURCE = "derived_calculator"
 
+# ─── 业务无意义护栏 ────────────────────────────────────────────────
+# 1) 自由现金流率：金融业（银行/券商/保险）的经营现金流包含客户资金与存贷款
+#    净变动，除以营业收入会得到 1000%+ 的荒谬值（2026-09-19 实测 600061
+#    国投资本 = 1302.45，即 130245%）。|FCF率| > 500% 判为业务无意义。
+FCF_MARGIN_MAX_ABS = 5.0
+# 2) 营业周期：周转率接近 0 时天数发散；超过 10 年（3650 天）判为无意义。
+OPERATING_CYCLE_MAX_DAYS = 3650.0
+# 3) 杠杆族：EBIT 或利润总额 ≤ 0（亏损）时，财务/经营/综合杠杆的符号与数值
+#    都没有业务含义（2026-09-19 实测 504 只亏损股出现负的经营杠杆）。
+# 4) 杠杆数值上限：分母（EBIT 或利润总额）为正但极小时杠杆会发散
+#    （实测最大值：经营杠杆 190348、财务杠杆 33332、综合杠杆 77514）。
+#    分布为 中位 1.1-1.5 / p99 8-22 / p99.9 47-133，|值|>100 已属病理值。
+#    注意必须用 ABS 判定：负值（EBIT 为负而利润总额为正）会绕过 `<= cap`。
+LEVERAGE_MAX = 100.0
+
 # 周转率族：累计损益 ÷ 期末余额（CSMAR FI_T4「A」式）
-# 每项为 (目标列, 分子表达式, 分母表达式)
 TURNOVER_RATIOS: tuple[tuple[str, str, str], ...] = (
     ("receivables_turnover", "i.revenue", "b.accounts_receivable"),
     ("inventory_turnover", "i.cost_of_revenue", "b.inventory"),
@@ -63,7 +85,7 @@ TURNOVER_RATIOS: tuple[tuple[str, str, str], ...] = (
 )
 
 # 报告期累计天数（营业周期用；与 CSMAR「计算期天数」口径一致）
-_PERIOD_DAYS_SQL = """
+_PERIOD_DAYS = """
     CASE strftime(i.report_date, '%m-%d')
         WHEN '12-31' THEN 365 WHEN '06-30' THEN 181
         WHEN '09-30' THEN 273 WHEN '03-31' THEN 90
@@ -71,28 +93,35 @@ _PERIOD_DAYS_SQL = """
     END
 """
 
-
-def _ratio(numerator: str, denominator: str, alias: str, multiplier: str = "1") -> str:
-    """生成 NULL 安全的比率表达式：分母为 NULL 或 0 时结果为 NULL。"""
-    return (
-        f"CASE WHEN {denominator} IS NULL OR {denominator} = 0 THEN NULL "
-        f"ELSE {multiplier} * ({numerator}) / ({denominator}) END AS {alias}"
-    )
+# EBIT = 净利润 + 所得税费用 + 财务费用（CSMAR FI_T5.F050601B 定义）
+_EBIT = "(i.net_profit + i.income_tax + i.financial_expenses)"
+# 折旧摊销 = 固定资产折旧 + 无形资产摊销 + 长期待摊费用摊销（CSMAR FI_T6.F061201B 定义）
+_DEPRECIATION = """(COALESCE(ci.fixed_asset_depreciation, 0)
+                    + COALESCE(ci.intangible_asset_amortization, 0)
+                    + COALESCE(ci.long_term_prepaid_amortization, 0))"""
+_EBIT_READY = ("i.net_profit IS NOT NULL AND i.income_tax IS NOT NULL "
+               "AND i.financial_expenses IS NOT NULL")
+_DEP_READY = ("(ci.fixed_asset_depreciation IS NOT NULL "
+              "OR ci.intangible_asset_amortization IS NOT NULL "
+              "OR ci.long_term_prepaid_amortization IS NOT NULL)")
+_CYCLE_DAYS = (f"(({_PERIOD_DAYS}) / NULLIF(i.revenue / NULLIF(b.accounts_receivable, 0), 0)"
+               f" + ({_PERIOD_DAYS}) / NULLIF(i.cost_of_revenue / NULLIF(b.inventory, 0), 0))")
 
 
 def build_select_sql(codes: list[str] | None = None) -> str:
     """生成 indicator_ext 的构建 SELECT。
 
-    以 income_statement × balance_sheet 的内连接为骨架（两者都有才计算），
+    以 income_statement × balance_sheet 内连接为骨架（两者都有才计算），
     再左连接现金流三张表——现金流缺失时相关列自然为 NULL。
     """
-    turnover_cols = ",\n           ".join(
-        _ratio(num, den, alias) for alias, num, den in TURNOVER_RATIOS
+    turnover_cols = ",\n        ".join(
+        f"CASE WHEN {den} IS NULL OR {den} = 0 THEN NULL ELSE ({num}) / ({den}) END AS {alias}"
+        for alias, num, den in TURNOVER_RATIOS
     )
     code_filter = ""
     if codes:
         quoted = ", ".join("'" + c.replace("'", "''") + "'" for c in codes)
-        code_filter = f"\n          AND i.stock_code IN ({quoted})"
+        code_filter = f"\n      AND i.stock_code IN ({quoted})"
 
     return f"""
     INSERT INTO indicator_ext BY NAME
@@ -100,55 +129,31 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         i.stock_code,
         i.report_date,
         {turnover_cols},
-        -- 营业周期 = 应收周转天数 + 存货周转天数 = 计算期天数/周转率 之和
-        CASE WHEN i.revenue IS NULL THEN NULL ELSE
-            ({_PERIOD_DAYS_SQL}) / NULLIF(i.revenue / NULLIF(b.accounts_receivable, 0), 0)
-          + ({_PERIOD_DAYS_SQL}) / NULLIF(i.cost_of_revenue / NULLIF(b.inventory, 0), 0)
-        END AS operating_cycle_days,
-        -- 折旧摊销（CSMAR FI_T6.F061201B 定义：固定资产折旧+无形资产摊销+长期待摊费用摊销）
-        CASE WHEN ci.stock_code IS NULL THEN NULL ELSE
-            COALESCE(ci.fixed_asset_depreciation, 0)
-          + COALESCE(ci.intangible_asset_amortization, 0)
-          + COALESCE(ci.long_term_prepaid_amortization, 0)
-        END AS depreciation_amortization,
+        CASE WHEN ({_CYCLE_DAYS}) > {OPERATING_CYCLE_MAX_DAYS} THEN NULL
+             ELSE ({_CYCLE_DAYS}) END AS operating_cycle_days,
+        CASE WHEN {_DEP_READY} THEN {_DEPRECIATION} END AS depreciation_amortization,
         ca.capex,
         c.cf_from_operating AS operating_cash_flow,
-        -- 自由现金流（本项目口径：经营现金流净额 − 资本支出）
         CASE WHEN c.cf_from_operating IS NULL OR ca.capex IS NULL THEN NULL
              ELSE c.cf_from_operating - ca.capex END AS free_cash_flow,
         CASE WHEN c.cf_from_operating IS NULL OR ca.capex IS NULL
                   OR i.revenue IS NULL OR i.revenue = 0 THEN NULL
+             WHEN ABS((c.cf_from_operating - ca.capex) / i.revenue) > {FCF_MARGIN_MAX_ABS} THEN NULL
              ELSE (c.cf_from_operating - ca.capex) / i.revenue END AS fcf_margin,
-        -- EBIT = 净利润 + 所得税费用 + 财务费用（CSMAR FI_T5.F050601B 定义）
-        CASE WHEN i.net_profit IS NULL OR i.income_tax IS NULL OR i.financial_expenses IS NULL
-             THEN NULL
-             ELSE i.net_profit + i.income_tax + i.financial_expenses END AS ebit,
-        -- EBITDA = EBIT + 折旧摊销（CSMAR FI_T5.F050801B 定义）
-        CASE WHEN i.net_profit IS NULL OR i.income_tax IS NULL OR i.financial_expenses IS NULL
-                  OR ci.stock_code IS NULL THEN NULL
-             ELSE i.net_profit + i.income_tax + i.financial_expenses
-                  + COALESCE(ci.fixed_asset_depreciation, 0)
-                  + COALESCE(ci.intangible_asset_amortization, 0)
-                  + COALESCE(ci.long_term_prepaid_amortization, 0) END AS ebitda,
-        -- 财务杠杆 = EBIT / 利润总额（CSMAR FI_T7.F070101B 定义）
-        {_ratio("i.net_profit + i.income_tax + i.financial_expenses", "i.total_profit", "leverage_financial")},
-        -- 经营杠杆 = EBITDA / EBIT（CSMAR FI_T7.F070201B 定义）
-        CASE WHEN i.net_profit IS NULL OR i.income_tax IS NULL OR i.financial_expenses IS NULL
-                  OR ci.stock_code IS NULL THEN NULL
-             WHEN (i.net_profit + i.income_tax + i.financial_expenses) = 0 THEN NULL
-             ELSE (i.net_profit + i.income_tax + i.financial_expenses
-                   + COALESCE(ci.fixed_asset_depreciation, 0)
-                   + COALESCE(ci.intangible_asset_amortization, 0)
-                   + COALESCE(ci.long_term_prepaid_amortization, 0))
-                  / (i.net_profit + i.income_tax + i.financial_expenses) END AS leverage_operating,
-        -- 综合杠杆 = EBITDA / 利润总额（CSMAR FI_T7.F070301B 定义）
-        CASE WHEN i.net_profit IS NULL OR i.income_tax IS NULL OR i.financial_expenses IS NULL
-                  OR ci.stock_code IS NULL OR i.total_profit = 0 THEN NULL
-             ELSE (i.net_profit + i.income_tax + i.financial_expenses
-                   + COALESCE(ci.fixed_asset_depreciation, 0)
-                   + COALESCE(ci.intangible_asset_amortization, 0)
-                   + COALESCE(ci.long_term_prepaid_amortization, 0)) / i.total_profit
-        END AS leverage_total,
+        CASE WHEN {_EBIT_READY} THEN {_EBIT} END AS ebit,
+        CASE WHEN {_EBIT_READY} AND {_DEP_READY} THEN {_EBIT} + {_DEPRECIATION} END AS ebitda,
+        -- 财务杠杆 = EBIT / 利润总额（CSMAR FI_T7.F070101B）；亏损时无业务含义
+        CASE WHEN {_EBIT_READY} AND i.total_profit > 0 AND {_EBIT} > 0
+                  AND ABS({_EBIT} / i.total_profit) <= {LEVERAGE_MAX}
+             THEN {_EBIT} / i.total_profit END AS leverage_financial,
+        -- 经营杠杆 = EBITDA / EBIT（CSMAR FI_T7.F070201B）；EBIT<=0 时无业务含义
+        CASE WHEN {_EBIT_READY} AND {_DEP_READY} AND {_EBIT} > 0
+                  AND ABS(({_EBIT} + {_DEPRECIATION}) / {_EBIT}) <= {LEVERAGE_MAX}
+             THEN ({_EBIT} + {_DEPRECIATION}) / {_EBIT} END AS leverage_operating,
+        -- 综合杠杆 = EBITDA / 利润总额（CSMAR FI_T7.F070301B）；亏损时无业务含义
+        CASE WHEN {_EBIT_READY} AND {_DEP_READY} AND i.total_profit > 0
+                  AND ABS(({_EBIT} + {_DEPRECIATION}) / i.total_profit) <= {LEVERAGE_MAX}
+             THEN ({_EBIT} + {_DEPRECIATION}) / i.total_profit END AS leverage_total,
         CAST(? AS TIMESTAMP) AS calculated_at,
         ? AS source,
         ? AS data_version

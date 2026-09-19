@@ -34,11 +34,15 @@ def test_ready_subset_of_extended_columns() -> None:
     )
 
 
-def test_ready_set_is_not_empty_and_has_room_to_grow() -> None:
-    """ready 必须非空（否则界面上一个都用不了）；
-    同时未就绪列必须显式保留在 EXTENDED_COLUMNS 中（历史研究仍可查）。"""
+def test_ready_set_is_not_empty() -> None:
+    """ready 必须非空，否则界面上一个都用不了。
+
+    注意：2026-09-19 起 18 列已全部就绪（ready == EXTENDED_COLUMNS）。
+    若将来新增扩展列却未达覆盖率门槛，它应只进 EXTENDED_COLUMNS 而不进 ready，
+    此时 `EXTENDED_SCREENING_READY < EXTENDED_COLUMNS` 会自然成立。
+    """
     assert EXTENDED_SCREENING_READY
-    assert EXTENDED_COLUMNS - EXTENDED_SCREENING_READY, "全部就绪时应删除本断言并更新注释"
+    assert EXTENDED_SCREENING_READY <= EXTENDED_COLUMNS
 
 
 def test_rankable_extended_fields_are_all_ready() -> None:

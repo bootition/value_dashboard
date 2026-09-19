@@ -83,23 +83,24 @@ EXTENDED_COLUMNS: set[str] = {
 
 # 扩展指标域中【当前报告期数据充足、可直接暴露给用户】的子集。
 #
-# 2026-09-19 实测（对齐全市场快照的最新报告期，5,542 只）：
-#   周转率族 + operating_cycle_days  97.0%~100%
-#   ebit / leverage_financial        97.4%（仅依赖利润表，不受 CSMAR 截止期影响）
-#   operating_cash_flow              100.0%（来自本项目主链 cash_flow）
-# 而下列 7 列在最新报告期覆盖率为 0%，**暂不对用户暴露**，避免出现
-# 「能选中但永远筛不出结果」的死条件（这正是 2026-09-17 扣非空洞的教训）：
-#   depreciation_amortization / capex / free_cash_flow / fcf_margin /
-#   ebitda / leverage_operating / leverage_total
-# 原因：这些列依赖 CSMAR 的折旧摊销与资本支出，而 CSMAR 数据截止 2025-03-31；
-# 需先把这两项数据采集扩展到最新报告期（见 task_plan R4 计划），再解除限制。
-# 它们仍保留在 EXTENDED_COLUMNS 中可查（历史研究可用），只是不进 UI 字段表。
-EXTENDED_SCREENING_READY: frozenset[str] = frozenset({
-    "receivables_turnover", "inventory_turnover", "accounts_payable_turnover",
-    "current_asset_turnover", "fixed_asset_turnover", "total_asset_turnover",
-    "equity_turnover", "operating_cycle_days",
-    "ebit", "leverage_financial", "operating_cash_flow",
-})
+# 2026-09-19 实测（对齐全市场快照的最新报告期，5,542 只，全部 ≥97%）：
+#   depreciation_amortization / total_asset_turnover / equity_turnover
+#   / operating_cash_flow                                   100.0%
+#   capex / free_cash_flow / fcf_margin                      99.5%
+#   ebit / ebitda / leverage_*                               97.4%
+#   应收/存货/流动资产/应付账款周转率、营业周期                 97.0%~99.0%
+#
+# 历史沿革（教训记录）：本集合最初只含 11 列。另外 7 列（折旧摊销/资本支出/
+# 自由现金流/FCF率/EBITDA/经营杠杆/综合杠杆）当时覆盖率为 0% —— 它们依赖
+# CSMAR 的折旧摊销与资本支出，而 CSMAR 数据截止 2025-03-31。
+# 若彼时直接暴露，就会变成「能选中但永远筛不出结果」的死条件
+# （与 2026-09-17 扣非空洞同类）。现已由 `scripts/fetch_cashflow_supplement.py`
+# 从东方财富 F10 补齐 CSMAR 截止后的 5 个报告期（2025-06-30 ~ 2026-06-30），
+# 覆盖率恢复到 97%~100%，故全量开放。
+#
+# 维护约定：新增扩展列时必须先确认其在最新报告期的覆盖率 ≥90%，
+# 否则只登记进 EXTENDED_COLUMNS 而不进本集合。
+EXTENDED_SCREENING_READY: frozenset[str] = frozenset(EXTENDED_COLUMNS)
 
 # Every normalized statement column is available to screening under its stable
 # DSL-style name. SQL only ever sees the generated internal alias below.
@@ -150,10 +151,11 @@ RANKABLE_INDICATORS: set[str] = {
     "div_yield_spread_2y", "div_yield_spread_3y", "div_yield_spread_5y",
     "div_yield_spread_7y", "div_yield_spread_10y", "div_yield_spread_30y",
 } | NORMALIZED_FIELDS | {
-    # 扩展指标域（schema v25）中当前期数据充足的一组参与横截面排名。
+    # 扩展指标域（schema v25）参与横截面排名的一组。
     # 只选 EXTENDED_SCREENING_READY 内的列，避免生成全空的排名列。
     "inventory_turnover", "receivables_turnover", "accounts_payable_turnover",
     "total_asset_turnover", "operating_cycle_days",
+    "fcf_margin", "leverage_total",
 }
 
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按
