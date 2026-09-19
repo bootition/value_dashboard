@@ -80,6 +80,10 @@ EQUITY_MULTIPLIER_MAX = 100.0
 # 7) 大股东占款 = (其他应收款 − 其他应付款) / 总资产（CSMAR BDT_FinIndex.ShareholdersOccupy
 #    同口径）。合计项已归一到总资产，绝对值 > 200% 判为异常（口径不匹配或数据错）。
 SHAREHOLDER_OCCUPATION_MAX_ABS = 2.0
+# 8) 人均指标：员工数极少（如 1 人）时人均额会失真；|人均创收| > 10 亿元/人
+#    或 |人均创利| > 5 亿元/人 判为口径异常。
+REVENUE_PER_EMPLOYEE_MAX = 1e9
+PROFIT_PER_EMPLOYEE_MAX = 5e8
 
 # 周转率族：累计损益 ÷ 期末余额（CSMAR FI_T4「A」式）
 TURNOVER_RATIOS: tuple[tuple[str, str, str], ...] = (
@@ -208,6 +212,17 @@ def build_select_sql(codes: list[str] | None = None) -> str:
              ELSE (COALESCE(bsx.total_other_receivable, b.other_receivables)
                    - bsx.other_payables) / b.total_assets
         END AS shareholder_occupation,
+        -- ─── 人效（v28）─────────────────────────────────────────────
+        -- 分母取「观测日最接近报告期」的员工数（过去优先）：
+        --   · 历史期 → CSMAR FAR_Finidx.Nstaff 的当年员工数（时点正确）
+        --   · 最近期 → company_profile 的当前快照（CSMAR 只到 2024 年报）
+        -- 若一律用当前快照，历史期就会「今天的员工数 ÷ 当年的收入」（D23 同类错误）。
+        eh.employee_count,
+        CASE WHEN eh.employee_count > 0 AND ABS(i.revenue / eh.employee_count) <= {REVENUE_PER_EMPLOYEE_MAX}
+             THEN i.revenue / eh.employee_count END AS revenue_per_employee,
+        CASE WHEN eh.employee_count > 0 AND i.net_profit IS NOT NULL
+                  AND ABS(i.net_profit / eh.employee_count) <= {PROFIT_PER_EMPLOYEE_MAX}
+             THEN i.net_profit / eh.employee_count END AS profit_per_employee,
         CAST(? AS TIMESTAMP) AS calculated_at,
         ? AS source,
         ? AS data_version
@@ -222,6 +237,13 @@ def build_select_sql(codes: list[str] | None = None) -> str:
       ON ca.stock_code = i.stock_code AND ca.report_date = i.report_date
     LEFT JOIN balance_sheet_ext bsx
       ON bsx.stock_code = i.stock_code AND bsx.report_date = i.report_date
+    LEFT JOIN LATERAL (
+        SELECT eh.employee_count FROM company_employee_history eh
+        WHERE eh.stock_code = i.stock_code
+        ORDER BY ABS(date_diff('day', eh.report_date, i.report_date)),
+                 CASE WHEN eh.report_date <= i.report_date THEN 0 ELSE 1 END
+        LIMIT 1
+    ) eh ON true
     LEFT JOIN LATERAL (
         SELECT sch.total_shares FROM share_capital_history sch
         WHERE sch.stock_code = i.stock_code AND sch.effective_date <= i.report_date

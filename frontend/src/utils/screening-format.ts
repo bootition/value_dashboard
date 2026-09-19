@@ -27,6 +27,9 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   // 扩展指标域（schema v25，2026-09-19）：周转率族 / 自由现金流族 / 杠杆族，共 18 项。
   // 自由现金流与 EBITDA 一族最初因 CSMAR 截止 2025-03-31 而覆盖率为 0，未上界面；
   // 现由 scripts/fetch_cashflow_supplement.py 从东方财富补齐后已全量开放。
+  employee_count: '员工人数',
+  revenue_per_employee: '人均创收',
+  profit_per_employee: '人均创利',
   shareholder_occupation: '大股东占款率',
   bps: '每股净资产',
   revenue_per_share: '每股营业收入',

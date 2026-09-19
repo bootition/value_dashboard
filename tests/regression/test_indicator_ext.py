@@ -404,3 +404,62 @@ def test_shareholder_occupation_null_when_payables_missing(
     ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
     row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600011'")[0]
     assert row["shareholder_occupation"] is None
+
+
+# ─── v28：人效（分母取最接近报告期的员工数）─────────────────────────
+
+def test_per_employee_uses_closest_headcount(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """人均指标的分母必须取「观测日最接近报告期」的员工数。
+
+    若一律用当前快照，历史期就会变成「今天的员工数 ÷ 当年的收入」
+    （ops-knowledge-base D23 同类口径错误）。这里给两个观测点：
+      2015-12-31 → 100 人（历史，应被 2015 报告期选中）
+      2026-09-17 → 500 人（当前快照，应被最近报告期选中）
+    """
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO income_statement (stock_code, report_date, revenue, net_profit)
+               VALUES ('600020', CAST('2015-12-31' AS DATE), 10000.0, 1000.0),
+                      ('600020', CAST('2024-12-31' AS DATE), 50000.0, 5000.0)"""
+        )
+        conn.execute(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
+               VALUES ('600020', CAST('2015-12-31' AS DATE), 1000.0),
+                      ('600020', CAST('2024-12-31' AS DATE), 2000.0)"""
+        )
+        conn.execute(
+            """INSERT INTO company_employee_history
+               (stock_code, report_date, employee_count, source, fetch_time, batch_id)
+               VALUES ('600020', CAST('2015-12-31' AS DATE), 100, 'csmar', '2026-09-19 00:00:00', 'b'),
+                      ('600020', CAST('2026-09-17' AS DATE), 500, 'eastmoney_f10', '2026-09-19 00:00:00', 'b')"""
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    rows = {
+        str(r["report_date"]): r
+        for r in duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600020'")
+    }
+    hist = rows["2015-12-31"]
+    assert hist["employee_count"] == 100.0              # 时点员工数，不是 500
+    assert hist["revenue_per_employee"] == 100.0        # 10000 / 100
+    assert hist["profit_per_employee"] == 10.0          # 1000 / 100
+    latest = rows["2024-12-31"]
+    # 2024-12-31 距 2015-12-31 为 3287 天、距 2026-09-17 为 625 天 → 选当前快照 500 人
+    assert latest["employee_count"] == 500.0
+    assert latest["revenue_per_employee"] == 100.0      # 50000 / 500
+
+
+def test_per_employee_null_without_headcount(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """没有任何员工数记录时，人均指标必须 NULL，不得用 1 或 0 冒充。"""
+    _seed_income(duckdb_store, "600021", revenue=100.0, net_profit=10.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES (?, ?, ?)",
+                     ["600021", REPORT_DATE, 500.0])
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600021'")[0]
+    assert row["employee_count"] is None
+    assert row["revenue_per_employee"] is None
+    assert row["profit_per_employee"] is None

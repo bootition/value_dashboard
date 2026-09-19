@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 27
+DUCKDB_SCHEMA_VERSION = 28
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -787,6 +787,25 @@ CREATE TABLE IF NOT EXISTS balance_sheet_ext (
 );
 CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date
     ON balance_sheet_ext (report_date);
+
+-- 员工人数历史域（2026-09-19 v28，"榨干数据包" R8）。
+-- 用途：计算「人均创收 / 人均创利」——判断公司是真高效还是靠堆人。
+-- 为什么需要历史序列：本项目 company_profile.employee_num 是**当前快照**，
+-- 用它去除历史期收入会把「今天的员工数」套到「当年的收入」上（同类口径错误
+-- 参见 ops-knowledge-base D23）。故历史期用 CSMAR FAR_Finidx.Nstaff 的
+-- 逐年员工数，当前期回退到 company_profile.employee_num。
+-- 来源：CSMAR C17 FAR_Finidx.Nstaff（1990-2024）+ company_profile（当前）。
+CREATE TABLE IF NOT EXISTS company_employee_history (
+    stock_code      VARCHAR NOT NULL,
+    report_date     DATE    NOT NULL,
+    employee_count  BIGINT,
+    source          VARCHAR NOT NULL,
+    fetch_time      TIMESTAMP NOT NULL,
+    batch_id        VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date, source)
+);
+CREATE INDEX IF NOT EXISTS idx_company_employee_history_stock
+    ON company_employee_history (stock_code, report_date);
 
 """
 
@@ -1582,6 +1601,24 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (27, 'balance_sheet_ext + shareholder occupation (governance red flag)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v28: 员工人数历史域 + 人效指标（2026-09-19）。
+        # company_employee_history 承载逐年员工数；indicator_ext 新增
+        # employee_count / revenue_per_employee / profit_per_employee。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_company_employee_history_stock "
+            "ON company_employee_history (stock_code, report_date)"
+        )
+        for column in ("employee_count", "revenue_per_employee", "profit_per_employee"):
+            connection.execute(
+                f"ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS {column} DOUBLE"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (28, 'employee headcount history + per-employee productivity')
             ON CONFLICT (version) DO NOTHING
             """
         )
