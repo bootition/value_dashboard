@@ -24,6 +24,20 @@ export type FieldFormat = 'pct' | 'percent' | 'ratio' | 'price' | 'plain'
 
 /** 用户界面使用中文优先名称；稳定字段名仍只用于 API、规则 JSON 与导出。 */
 export const FIELD_LABELS: Readonly<Record<string, string>> = {
+  // 扩展指标域（schema v25，2026-09-19）：周转率族 + 可用杠杆/现金流列。
+  // 自由现金流 / EBITDA / 经营杠杆 / 综合杠杆依赖 CSMAR 折旧摊销与资本支出
+  // （CSMAR 截止 2025-03-31，最新报告期覆盖率为 0），暂不暴露，故此处亦无标签。
+  receivables_turnover: '应收账款周转率',
+  inventory_turnover: '存货周转率',
+  accounts_payable_turnover: '应付账款周转率',
+  current_asset_turnover: '流动资产周转率',
+  fixed_asset_turnover: '固定资产周转率',
+  total_asset_turnover: '总资产周转率',
+  equity_turnover: '股东权益周转率',
+  operating_cycle_days: '营业周期（天）',
+  ebit: '息税前利润（EBIT）',
+  leverage_financial: '财务杠杆',
+  operating_cash_flow: '经营活动现金流量净额',
   stock_code: '股票代码',
   name: '股票名称',
   exchange: '交易所',
@@ -294,6 +308,10 @@ const PRICE_FIELDS = new Set([
 
 const RATIO_FIELDS = new Set([
   'current_ratio', 'quick_ratio', 'cf_to_net_profit', 'interest_coverage',
+  // 扩展指标域：周转率与杠杆本身即倍数
+  'receivables_turnover', 'inventory_turnover', 'accounts_payable_turnover',
+  'current_asset_turnover', 'fixed_asset_turnover', 'total_asset_turnover',
+  'equity_turnover', 'leverage_financial',
 ])
 
 /** 使用“倍”作为输入/展示单位的估值倍数类指标。 */

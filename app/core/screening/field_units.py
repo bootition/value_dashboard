@@ -27,6 +27,8 @@ PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     "deducted_profit_cagr3", "deducted_profit_cagr5",
     "dividend_yield", "goodwill_ratio", "payout_ratio",
     "period_return", "annualized_volatility", "max_drawdown",
+    # 扩展指标域（schema v25）：自由现金流率亦按小数比例存储
+    "fcf_margin",
 })
 
 # 百分数原值存储（如 5.29 = 5.29%；与前端 PERCENT_FIELDS 对齐）
@@ -48,6 +50,15 @@ PERCENT_STORED_FIELDS: frozenset[str] = frozenset({
 
 RATIO_FIELDS: frozenset[str] = frozenset({
     "current_ratio", "quick_ratio", "cf_to_net_profit", "interest_coverage",
+    # 扩展指标域（schema v25）：周转率与杠杆本身即倍数
+    "receivables_turnover", "inventory_turnover", "accounts_payable_turnover",
+    "current_asset_turnover", "fixed_asset_turnover", "total_asset_turnover",
+    "equity_turnover",
+    "leverage_financial", "leverage_operating", "leverage_total",
+})
+# 扩展指标域中以「天」为单位的字段（前端按 plain 展示，仅此处登记语义）
+DAY_FIELDS: frozenset[str] = frozenset({
+    "operating_cycle_days",
 })
 
 PRICE_FIELDS: frozenset[str] = frozenset({

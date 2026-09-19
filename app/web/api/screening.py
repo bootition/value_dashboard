@@ -653,6 +653,7 @@ def _dsl_indicator_unit(expression: dict[str, Any]) -> str:
 def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标"""
     from app.core.screening.engine import (
+        EXTENDED_SCREENING_READY,
         NORMALIZED_FIELDS,
         RANKABLE_INDICATORS,
         SNAPSHOT_COLUMNS,
@@ -675,6 +676,17 @@ def list_available_indicators(request: Request) -> dict:
             "name": field,
             "rankable": field in RANKABLE_INDICATORS,
             "unit": field_unit(field),
+        })
+    # 扩展指标域（schema v25）：只暴露当前报告期数据充足的子集。
+    # 未就绪的 7 列（自由现金流/EBITDA/杠杆等）依赖 CSMAR 折旧摊销与资本支出，
+    # 而 CSMAR 截止 2025-03-31，最新报告期覆盖率为 0 —— 暴露出来会变成
+    # 「能选中但永远筛不出结果」的死条件，故暂不列出。
+    for col in sorted(EXTENDED_SCREENING_READY):
+        indicators.append({
+            "name": col,
+            "rankable": col in RANKABLE_INDICATORS,
+            "unit": field_unit(col),
+            "domain": "extended",
         })
     for col in sorted(RANKABLE_INDICATORS):
         for suffix, label in (

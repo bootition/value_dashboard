@@ -62,6 +62,45 @@ SNAPSHOT_COLUMNS: set[str] = {
     "div_yield_spread_7y", "div_yield_spread_10y", "div_yield_spread_30y",
 }
 
+# 扩展指标域 indicator_ext（schema v25，2026-09-19 Phase B）。
+# 三族此前完全缺失的指标：周转率族、自由现金流族、杠杆族。
+# 数值由本项目自算（source='derived_calculator'），口径见 config/csmar_field_verdict.json。
+# 与 indicator_snapshot 的报告期按 (stock_code, report_date) 精确对齐（实测 5,542/5,542）。
+# 只暴露指标列本身；表内的 calculated_at/source/data_version 与快照同名，不在此暴露。
+EXTENDED_COLUMNS: set[str] = {
+    # 周转率族（倍）—— 判断「生意质量」：货是否积压、是否被客户占款
+    "receivables_turnover", "inventory_turnover", "accounts_payable_turnover",
+    "current_asset_turnover", "fixed_asset_turnover", "total_asset_turnover",
+    "equity_turnover",
+    # 营业周期（天）
+    "operating_cycle_days",
+    # 自由现金流族 —— 判断「利润是不是真钱」
+    "depreciation_amortization", "capex", "operating_cash_flow",
+    "free_cash_flow", "fcf_margin",
+    # 杠杆族 —— 判断「会不会被债压垮」
+    "ebit", "ebitda", "leverage_financial", "leverage_operating", "leverage_total",
+}
+
+# 扩展指标域中【当前报告期数据充足、可直接暴露给用户】的子集。
+#
+# 2026-09-19 实测（对齐全市场快照的最新报告期，5,542 只）：
+#   周转率族 + operating_cycle_days  97.0%~100%
+#   ebit / leverage_financial        97.4%（仅依赖利润表，不受 CSMAR 截止期影响）
+#   operating_cash_flow              100.0%（来自本项目主链 cash_flow）
+# 而下列 7 列在最新报告期覆盖率为 0%，**暂不对用户暴露**，避免出现
+# 「能选中但永远筛不出结果」的死条件（这正是 2026-09-17 扣非空洞的教训）：
+#   depreciation_amortization / capex / free_cash_flow / fcf_margin /
+#   ebitda / leverage_operating / leverage_total
+# 原因：这些列依赖 CSMAR 的折旧摊销与资本支出，而 CSMAR 数据截止 2025-03-31；
+# 需先把这两项数据采集扩展到最新报告期（见 task_plan R4 计划），再解除限制。
+# 它们仍保留在 EXTENDED_COLUMNS 中可查（历史研究可用），只是不进 UI 字段表。
+EXTENDED_SCREENING_READY: frozenset[str] = frozenset({
+    "receivables_turnover", "inventory_turnover", "accounts_payable_turnover",
+    "current_asset_turnover", "fixed_asset_turnover", "total_asset_turnover",
+    "equity_turnover", "operating_cycle_days",
+    "ebit", "leverage_financial", "operating_cash_flow",
+})
+
 # Every normalized statement column is available to screening under its stable
 # DSL-style name. SQL only ever sees the generated internal alias below.
 STATEMENT_FIELDS: dict[str, set[str]] = {
@@ -110,7 +149,12 @@ RANKABLE_INDICATORS: set[str] = {
     "div_yield_spread_0p25y", "div_yield_spread_0p5y", "div_yield_spread_1y",
     "div_yield_spread_2y", "div_yield_spread_3y", "div_yield_spread_5y",
     "div_yield_spread_7y", "div_yield_spread_10y", "div_yield_spread_30y",
-} | NORMALIZED_FIELDS
+} | NORMALIZED_FIELDS | {
+    # 扩展指标域（schema v25）中当前期数据充足的一组参与横截面排名。
+    # 只选 EXTENDED_SCREENING_READY 内的列，避免生成全空的排名列。
+    "inventory_turnover", "receivables_turnover", "accounts_payable_turnover",
+    "total_asset_turnover", "operating_cycle_days",
+}
 
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按
 # csrc_l1 分区），保留纯为兼容已保存规则/历史测试；产品与 /indicators 均
@@ -388,6 +432,9 @@ class ScreeningEngine:
             for table, fields in STATEMENT_FIELDS.items()
             for field in sorted(fields)
         ]
+        # 扩展指标域列：与快照报告期严格对齐（ex.report_date = s.report_date），
+        # 不取「各自最近一期」，避免与主链快照产生跨期拼接。
+        extended_selects = [f"ex.{column}" for column in sorted(EXTENDED_COLUMNS)]
         if overrides:
             placeholders = ", ".join("(?, ?, ?, ?)" for _ in overrides)
             sql_parts.append(
@@ -408,7 +455,7 @@ base_pool AS (
         m.csrc_l1, m.csrc_l2,
         m.is_st, m.is_suspended, m.listing_date,
         m.total_shares, m.circ_shares,
-        s.*, {', '.join(normalized_selects)}
+        s.*, {', '.join(extended_selects)}, {', '.join(normalized_selects)}
     FROM stock_meta m
     LEFT JOIN LATERAL (
         SELECT * FROM indicator_snapshot s
@@ -426,6 +473,10 @@ base_pool AS (
         SELECT * FROM cash_flow cf
         WHERE cf.stock_code = m.stock_code AND cf.report_date = s.report_date
     ) cf ON true
+    LEFT JOIN LATERAL (
+        SELECT * FROM indicator_ext ex
+        WHERE ex.stock_code = m.stock_code AND ex.report_date = s.report_date
+    ) ex ON true
     WHERE {pool_where}
 )""")
 
@@ -773,6 +824,7 @@ LIMIT {MAX_RESULT_ROWS}
         return (
             field in SNAPSHOT_COLUMNS
             or field in NORMALIZED_FIELDS
+            or field in EXTENDED_COLUMNS          # 扩展指标域（schema v25）
             or field in METADATA_COLUMNS
             or field in STAT_FIELDS
             or field in self._custom_fields
