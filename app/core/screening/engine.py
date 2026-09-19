@@ -98,7 +98,7 @@ EXTENDED_COLUMNS: set[str] = {
 
 # 扩展指标域中【当前报告期数据充足、可直接暴露给用户】的子集。
 #
-# 2026-09-19 实测（对齐全市场快照的最新报告期，5,542 只，全部 ≥97%）：
+# 2026-09-19 实测（对齐全市场快照的最新报告期，5,542 只）：
 #   depreciation_amortization / total_asset_turnover / equity_turnover
 #   / operating_cash_flow                                   100.0%
 #   capex / free_cash_flow / fcf_margin                      99.5%
@@ -113,8 +113,19 @@ EXTENDED_COLUMNS: set[str] = {
 # 从东方财富 F10 补齐 CSMAR 截止后的 5 个报告期（2025-06-30 ~ 2026-06-30），
 # 覆盖率恢复到 97%~100%，故全量开放。
 #
-# 维护约定：新增扩展列时必须先确认其在最新报告期的覆盖率 ≥90%，
-# 否则只登记进 EXTENDED_COLUMNS 而不进本集合。
+# 维护约定（判定标准）：新增扩展列进本集合前必须满足下列之一 ——
+#   (a) 最新报告期覆盖率 ≥ 90%；或
+#   (b) 覆盖率较低但**缺失语义正确**：该指标对某一类合法子群体本就不成立，
+#       且剩余样本量足以支撑筛选。
+# 反例（绝不允许）：字段全表 NULL、或缺失源于"我们的数据没取到" ——
+# 那会变成「能选中但永远筛不出结果」的死条件（2026-09-17 扣非空洞的教训）。
+#
+# 当前按 (b) 例外放行的 4 列（2026-09-19 实测）：
+#   leverage_financial 72.3% / leverage_operating 72.8% / leverage_total 72.5%
+#     —— 亏损公司（EBIT 或利润总额 ≤ 0）的杠杆没有业务含义，NULL 是正确表达；
+#        留存样本 4,000+ 只，筛选完全可用。
+#   ev_ebitda 82.7%
+#     —— 需 EBITDA 可用（依赖折旧摊销），留存 4,585 只。
 EXTENDED_SCREENING_READY: frozenset[str] = frozenset(EXTENDED_COLUMNS)
 
 # Every normalized statement column is available to screening under its stable
