@@ -87,3 +87,49 @@ def test_indirect_method_has_depreciation_inputs(duckdb_store: DuckDBStore) -> N
         "intangible_asset_amortization",
         "long_term_prepaid_amortization",
     } <= columns
+
+
+# ─── v28 / v29：员工人数历史域、金融行业专用科目域 ──────────────────
+
+def test_company_employee_history_table_shape(duckdb_store: DuckDBStore) -> None:
+    columns = _columns(duckdb_store, "company_employee_history")
+    assert {"stock_code", "report_date", "employee_count", "source",
+            "fetch_time", "batch_id"} <= columns
+
+
+def test_financial_sector_items_table_shape(duckdb_store: DuckDBStore) -> None:
+    """金融专用科目域：列名是行业研究接口的契约，改名即破坏。"""
+    columns = _columns(duckdb_store, "financial_sector_items")
+    assert {
+        "stock_code", "report_date", "report_type",
+        # 银行
+        "cash_and_cb_balance", "due_from_banks", "loans_and_advances",
+        "borrowing_from_cb", "deposits_and_interbank", "interbank_deposits",
+        "customer_deposits", "interest_income", "interest_expense", "net_interest_income",
+        # 保险
+        "premiums_receivable", "insurance_contract_reserve", "policyholder_deposits",
+        "earned_premiums", "claim_payments_net",
+        # 证券
+        "settlement_reserve", "customer_settlement_reserve", "margin_deposits_paid",
+        "client_securities_deposits", "underwriting_securities", "fee_commission_income_net",
+        # 其他金融
+        "interbank_lending", "reverse_repo_assets", "interbank_borrowing", "repo_liabilities",
+        "source", "fetch_time", "raw_response_hash", "confidence", "batch_id",
+    } <= columns
+
+
+def test_financial_sector_items_not_exposed_to_screening() -> None:
+    """金融专用科目**不得**进入筛选字段表 —— 它们只对金融行业成立，
+    放进全市场字段选择器会制造「98% 股票无数据」的伪条件。"""
+    from app.core.screening.engine import EXTENDED_COLUMNS, NORMALIZED_FIELDS, SNAPSHOT_COLUMNS
+
+    known = EXTENDED_COLUMNS | SNAPSHOT_COLUMNS | NORMALIZED_FIELDS
+    for field in ("customer_deposits", "loans_and_advances", "net_interest_income",
+                  "insurance_contract_reserve", "client_securities_deposits"):
+        assert field not in known, f"{field} 不应出现在筛选字段表中"
+
+
+def test_schema_v29_version() -> None:
+    from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
+
+    assert DUCKDB_SCHEMA_VERSION >= 29

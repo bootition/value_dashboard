@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 28
+DUCKDB_SCHEMA_VERSION = 29
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -806,6 +806,63 @@ CREATE TABLE IF NOT EXISTS company_employee_history (
 );
 CREATE INDEX IF NOT EXISTS idx_company_employee_history_stock
     ON company_employee_history (stock_code, report_date);
+
+-- 金融行业专用科目域（2026-09-19 v29，"榨干数据包" R9）。
+-- 来源：CSMAR C17 的 FS_Combas / FS_Comins 中 A0b*(银行) / A0i*(保险) /
+-- A0d*(证券) / A0f*(其他金融) 前缀科目，覆盖 78 只金融股（38 银行 + 36 券商 +
+-- 1 保险 + 1 信托 + 2 金控），1990-2025Q1。
+--
+-- **为什么不进筛选界面**：银行/保险/证券的科目名称与含义只对该行业成立，
+-- 对另外 5,464 只非金融股毫无意义。把它们放进全市场字段选择器，只会制造
+-- 「选中后 98% 的股票都无数据」的伪条件 —— 与死条件同样有害。
+-- 故本域定位为**行业研究域**：供个股详情/专项分析按行业取用，不做横截面筛选。
+--
+-- **已知不可得**：6 个监管比率（资本充足率/核心一级/一级/不良贷款率/
+-- 拨备覆盖率/风险覆盖率）**CSMAR C17 不含**，东财 F10 的可及端点也未提供。
+-- 主链 balance_sheet 的这 6 列保持 NULL 并如实披露，不用估算填充。
+CREATE TABLE IF NOT EXISTS financial_sector_items (
+    stock_code                     VARCHAR NOT NULL,
+    report_date                    DATE    NOT NULL,
+    report_type                    VARCHAR,
+    -- 银行
+    cash_and_cb_balance            DOUBLE,   -- 现金及存放中央银行款项
+    due_from_banks                 DOUBLE,   -- 存放同业款项
+    loans_and_advances             DOUBLE,   -- 发放贷款及垫款净额
+    borrowing_from_cb              DOUBLE,   -- 向中央银行借款
+    deposits_and_interbank         DOUBLE,   -- 吸收存款及同业存放
+    interbank_deposits             DOUBLE,   -- 其中：同业及其他金融机构存放款项
+    customer_deposits              DOUBLE,   -- 其中：吸收存款
+    interest_income                DOUBLE,   -- 利息收入
+    interest_expense               DOUBLE,   -- 利息支出
+    net_interest_income            DOUBLE,   -- 利息净收入
+    -- 保险
+    premiums_receivable            DOUBLE,   -- 应收保费净额
+    insurance_contract_reserve     DOUBLE,   -- 保险合同准备金
+    policyholder_deposits          DOUBLE,   -- 保户储金及投资款
+    earned_premiums                DOUBLE,   -- 已赚保费
+    claim_payments_net             DOUBLE,   -- 赔付支出净额
+    -- 证券
+    settlement_reserve             DOUBLE,   -- 结算备付金
+    customer_settlement_reserve    DOUBLE,   -- 其中：客户备付金
+    margin_deposits_paid           DOUBLE,   -- 存出保证金
+    client_securities_deposits     DOUBLE,   -- 代理买卖证券款
+    underwriting_securities        DOUBLE,   -- 代理承销证券款
+    fee_commission_income_net      DOUBLE,   -- 手续费及佣金净收入
+    -- 其他金融（通用）
+    interbank_lending              DOUBLE,   -- 拆出资金净额
+    reverse_repo_assets            DOUBLE,   -- 买入返售金融资产净额
+    interbank_borrowing            DOUBLE,   -- 拆入资金
+    repo_liabilities               DOUBLE,   -- 卖出回购金融资产款
+    source                         VARCHAR NOT NULL,
+    fetch_time                     TIMESTAMP NOT NULL,
+    raw_response_hash              VARCHAR NOT NULL,
+    confidence                     VARCHAR NOT NULL,
+    batch_id                       VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock
+    ON financial_sector_items (stock_code, report_date);
+
 
 """
 
@@ -1619,6 +1676,20 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (28, 'employee headcount history + per-employee productivity')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v29: 金融行业专用科目域（2026-09-19）。
+        # 78 只金融股的行业专用科目；**不进筛选界面**（只对该行业成立，
+        # 放进全市场字段表会制造「98% 股票无数据」的伪条件）。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock "
+            "ON financial_sector_items (stock_code, report_date)"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (29, 'financial sector specific line items (banks/insurers/securities)')
             ON CONFLICT (version) DO NOTHING
             """
         )
