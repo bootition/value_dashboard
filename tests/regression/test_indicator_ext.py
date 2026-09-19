@@ -362,3 +362,45 @@ def test_expense_ratio_guard_and_structure_guard(
     b = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600009'")[0]
     assert a["selling_expense_ratio"] is None      # 100 倍 > 5 倍上限
     assert b["equity_multiplier"] is None          # 100000 倍 > 100 上限
+
+
+# ─── v27：大股东占款（治理红旗）──────────────────────────────────────
+
+def test_shareholder_occupation_uses_ext_pair(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """大股东占款 = (其他应收款合计 − 其他应付款) / 总资产。
+
+    分子两侧必须同源配对（都用 balance_sheet_ext 的合计项），
+    否则主链 other_receivables（净额）与应付合计口径不一致会低估占款。
+    """
+    _seed_income(duckdb_store, "600010", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, other_receivables) VALUES (?, ?, ?, ?)",
+            ["600010", REPORT_DATE, 1000.0, 999.0],   # 主链净额故意设成误导值
+        )
+        conn.execute(
+            """INSERT INTO balance_sheet_ext (stock_code, report_date, other_payables,
+               total_other_receivable, source, fetch_time, raw_response_hash, confidence, batch_id)
+               VALUES (?, ?, ?, ?, 'eastmoney_f10', '2026-09-19 00:00:00', 'h', 'strict', 'b')""",
+            ["600010", REPORT_DATE, 100.0, 400.0],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600010'")[0]
+    assert row["shareholder_occupation"] == 0.3    # (400-100)/1000，不是 (999-100)/1000
+
+
+def test_shareholder_occupation_null_when_payables_missing(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """缺其他应付款时必须 NULL —— 不得用「0 应付」冒充，否则占款被高估。"""
+    _seed_income(duckdb_store, "600011", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, other_receivables) VALUES (?, ?, ?, ?)",
+            ["600011", REPORT_DATE, 1000.0, 300.0],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600011'")[0]
+    assert row["shareholder_occupation"] is None

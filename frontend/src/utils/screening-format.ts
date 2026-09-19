@@ -27,6 +27,7 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   // 扩展指标域（schema v25，2026-09-19）：周转率族 / 自由现金流族 / 杠杆族，共 18 项。
   // 自由现金流与 EBITDA 一族最初因 CSMAR 截止 2025-03-31 而覆盖率为 0，未上界面；
   // 现由 scripts/fetch_cashflow_supplement.py 从东方财富补齐后已全量开放。
+  shareholder_occupation: '大股东占款率',
   bps: '每股净资产',
   revenue_per_share: '每股营业收入',
   ocf_per_share: '每股经营现金流',
@@ -292,6 +293,7 @@ return fallback || field
 /** 小数比例存储的百分比字段（条件输入 ÷100、展示 ×100+%）。 */
 const PCT_FIELDS = new Set([
   'fcf_margin',  // 扩展指标域：自由现金流率按小数比例存储
+  'shareholder_occupation',
   'selling_expense_ratio', 'admin_expense_ratio', 'rd_expense_ratio',
   'finance_expense_ratio', 'current_asset_ratio', 'fixed_asset_ratio',
   'roe', 'roa', 'roic',

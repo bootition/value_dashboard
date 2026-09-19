@@ -77,6 +77,9 @@ EXPENSE_RATIO_MAX_ABS = 5.0
 # 6) 权益乘数 = 总资产/总权益；权益趋 0 时发散。>100 判为无意义（净资产为负时
 #    乘数为负，同样无业务含义，故用 ABS）。
 EQUITY_MULTIPLIER_MAX = 100.0
+# 7) 大股东占款 = (其他应收款 − 其他应付款) / 总资产（CSMAR BDT_FinIndex.ShareholdersOccupy
+#    同口径）。合计项已归一到总资产，绝对值 > 200% 判为异常（口径不匹配或数据错）。
+SHAREHOLDER_OCCUPATION_MAX_ABS = 2.0
 
 # 周转率族：累计损益 ÷ 期末余额（CSMAR FI_T4「A」式）
 TURNOVER_RATIOS: tuple[tuple[str, str, str], ...] = (
@@ -191,6 +194,20 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         CASE WHEN b.total_equity IS NOT NULL AND b.total_equity <> 0
                   AND ABS(b.total_assets / b.total_equity) <= {EQUITY_MULTIPLIER_MAX}
              THEN b.total_assets / b.total_equity END AS equity_multiplier,
+        -- ─── 治理红旗（v27）──────────────────────────────────────────
+        -- 大股东占款 = (其他应收款 − 其他应付款) / 总资产。
+        -- 正值越大，说明大股东/关联方占用上市公司资金越多。
+        -- 分子优先用 balance_sheet_ext 的合计项（与应付侧同源配对）；缺失时回退到
+        -- 主链 other_receivables（净额），两侧口径不完全对齐时如实可能低估。
+        CASE WHEN b.total_assets IS NULL OR b.total_assets = 0 THEN NULL
+             WHEN COALESCE(bsx.total_other_receivable, b.other_receivables) IS NULL
+                  OR bsx.other_payables IS NULL THEN NULL
+             WHEN ABS((COALESCE(bsx.total_other_receivable, b.other_receivables)
+                       - bsx.other_payables) / b.total_assets) > {SHAREHOLDER_OCCUPATION_MAX_ABS}
+                  THEN NULL
+             ELSE (COALESCE(bsx.total_other_receivable, b.other_receivables)
+                   - bsx.other_payables) / b.total_assets
+        END AS shareholder_occupation,
         CAST(? AS TIMESTAMP) AS calculated_at,
         ? AS source,
         ? AS data_version
@@ -203,6 +220,8 @@ def build_select_sql(codes: list[str] | None = None) -> str:
       ON ci.stock_code = i.stock_code AND ci.report_date = i.report_date
     LEFT JOIN cash_flow_activity ca
       ON ca.stock_code = i.stock_code AND ca.report_date = i.report_date
+    LEFT JOIN balance_sheet_ext bsx
+      ON bsx.stock_code = i.stock_code AND bsx.report_date = i.report_date
     LEFT JOIN LATERAL (
         SELECT sch.total_shares FROM share_capital_history sch
         WHERE sch.stock_code = i.stock_code AND sch.effective_date <= i.report_date

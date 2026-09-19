@@ -32,6 +32,7 @@ PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     "selling_expense_ratio", "admin_expense_ratio",
     "rd_expense_ratio", "finance_expense_ratio",
     "current_asset_ratio", "fixed_asset_ratio",
+    "shareholder_occupation",
 })
 
 # 百分数原值存储（如 5.29 = 5.29%；与前端 PERCENT_FIELDS 对齐）

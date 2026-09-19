@@ -86,6 +86,8 @@ EXTENDED_COLUMNS: set[str] = {
     "rd_expense_ratio", "finance_expense_ratio",
     # 结构族（v26）
     "current_asset_ratio", "fixed_asset_ratio", "equity_multiplier",
+    # 治理红旗（v27）—— 大股东占款越大越危险
+    "shareholder_occupation",
 }
 
 # 扩展指标域中【当前报告期数据充足、可直接暴露给用户】的子集。
@@ -163,7 +165,7 @@ RANKABLE_INDICATORS: set[str] = {
     "inventory_turnover", "receivables_turnover", "accounts_payable_turnover",
     "total_asset_turnover", "operating_cycle_days",
     "fcf_margin", "leverage_total",
-    "bps", "equity_multiplier",
+    "bps", "equity_multiplier", "shareholder_occupation",
 }
 
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按

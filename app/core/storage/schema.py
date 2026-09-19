@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 26
+DUCKDB_SCHEMA_VERSION = 27
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -761,6 +761,33 @@ CREATE TABLE IF NOT EXISTS indicator_ext (
 );
 CREATE INDEX IF NOT EXISTS idx_indicator_ext_date
     ON indicator_ext (report_date);
+-- 资产负债表补充域（2026-09-19 v27，"榨干数据包" R7）。
+-- 为什么单独建表：这三项是主链 balance_sheet 未映射、但价值投资常用且**无法自算**的科目。
+--   other_payables          其他应付款 —— 计算「大股东占款」（治理红旗）必需；
+--                           本项目已有 other_receivables，缺的正是应付这一侧。
+--   non_current_liab_due_1y 一年内到期的非流动负债 —— 有息负债完整口径必需
+--                           （主链 interest_bearing_debt 目前仅 短借+长借+应付债券，低估）。
+--   total_other_receivable  其他应收款合计 —— 与 other_payables 同源配对，
+--                           避免主链 other_receivables（净额）与应付口径不匹配。
+-- 来源：东方财富 F10 zcfzbAjaxNew（1 次请求/股票，5 个报告期），
+-- 见 scripts/fetch_balance_sheet_ext.py。域纪律：独立低频域，不改主链 balance_sheet。
+CREATE TABLE IF NOT EXISTS balance_sheet_ext (
+    stock_code                VARCHAR NOT NULL,
+    report_date               DATE    NOT NULL,
+    report_type               VARCHAR,
+    other_payables            DOUBLE,
+    non_current_liab_due_1y   DOUBLE,
+    total_other_receivable    DOUBLE,
+    source                    VARCHAR NOT NULL,
+    fetch_time                TIMESTAMP NOT NULL,
+    raw_response_hash         VARCHAR NOT NULL,
+    confidence                VARCHAR NOT NULL,
+    batch_id                  VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date
+    ON balance_sheet_ext (report_date);
+
 """
 
 # ─── SQLite Schema (操作库) ───────────────────────────────────────────
@@ -1537,6 +1564,24 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (26, 'indicator_ext: per-share / expense-ratio / structure families')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v27: 资产负债表补充域 + 大股东占款（2026-09-19）。
+        # balance_sheet_ext 承载主链未映射的「其他应付款 / 一年内到期非流动负债 /
+        # 其他应收款合计」；indicator_ext 新增 shareholder_occupation。
+        # 表 DDL 在 DUCKDB_SCHEMA_V1 中，这里补索引与迁移记录。
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date "
+            "ON balance_sheet_ext (report_date)"
+        )
+        connection.execute(
+            "ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS shareholder_occupation DOUBLE"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (27, 'balance_sheet_ext + shareholder occupation (governance red flag)')
             ON CONFLICT (version) DO NOTHING
             """
         )
