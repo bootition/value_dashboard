@@ -72,6 +72,21 @@ OPERATING_CYCLE_MAX_DAYS = 3650.0
 #    分布为 中位 1.1-1.5 / p99 8-22 / p99.9 47-133，|值|>100 已属病理值。
 #    注意必须用 ABS 判定：负值（EBIT 为负而利润总额为正）会绕过 `<= cap`。
 LEVERAGE_MAX = 100.0
+# 10) v37 指标护栏（2026-09-19 复审补加）。
+# 复审发现 v37 的 12 列**漏加护栏**，产生了大量业务无意义极值：
+#   cash_ratio 最大 213,591、accruals 最大 24,129（应计项目的数学上限是 2）、
+#   ocf_to_operating_profit 最小 -57,361。原因是分母趋 0 时比率发散。
+# 与既有 pe<=1000 / |roe|<=1 同思路：触发即 NULL，绝不展示会误导人的数字。
+CASH_RATIO_MAX = 100.0          # 现金及等价物 / 流动负债
+QUICK_RATIO_MAX = 100.0         # 保守速动比率
+DEBT_TO_EQUITY_MAX = 100.0      # 产权比率（权益<=0 时无业务含义，另行置 NULL）
+TANGIBLE_DEBT_MAX = 100.0       # 有形净值债务率（有形净值<=0 时无业务含义）
+OCF_TO_LIAB_MAX = 100.0         # 经营现金流 / 负债
+EBITDA_TO_LIAB_MAX = 100.0      # EBITDA / 负债
+CASH_CONTENT_MAX = 10.0         # 销售收现 / 营业收入（正常 0.5~1.5）
+OCF_TO_OP_PROFIT_MAX = 100.0    # 经营现金流 / 营业利润
+ACCRUALS_MAX = 2.0              # (净利−经营现金流)/总资产：数学上限即 ±2
+PER_SHARE_MAX = 1.0e6           # 每股类上限（元/股）
 # 5) 费用率：分母（营业收入）极小时比率发散；|费用率| > 500% 判为无意义。
 EXPENSE_RATIO_MAX_ABS = 5.0
 # 6) 权益乘数 = 总资产/总权益；权益趋 0 时发散。>100 判为无意义（净资产为负时
@@ -269,37 +284,56 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         -- 公式取自 CSMAR 说明书（见 .planning 的 csmar_formulas.json），
         -- 但用本项目数据计算 → 覆盖最新报告期，可直接进筛选界面。
         CASE WHEN b.total_current_liabilities > 0 AND c.cash_ending IS NOT NULL
+                  AND ABS(c.cash_ending / b.total_current_liabilities) <= {CASH_RATIO_MAX}
              THEN c.cash_ending / b.total_current_liabilities END AS cash_ratio,
-        CASE WHEN b.total_current_liabilities > 0 THEN
-            (COALESCE(b.monetary_funds,0) + COALESCE(b.trading_financial_assets,0)
-             + COALESCE(b.notes_receivable,0) + COALESCE(b.accounts_receivable,0))
-            / b.total_current_liabilities END AS conservative_quick_ratio,
-        CASE WHEN b.total_equity <> 0 THEN b.total_liabilities / b.total_equity END AS debt_to_equity,
+        CASE WHEN b.total_current_liabilities > 0
+                  AND ABS((COALESCE(b.monetary_funds,0) + COALESCE(b.trading_financial_assets,0)
+                       + COALESCE(b.notes_receivable,0) + COALESCE(b.accounts_receivable,0))
+                      / b.total_current_liabilities) <= {QUICK_RATIO_MAX}
+             THEN (COALESCE(b.monetary_funds,0) + COALESCE(b.trading_financial_assets,0)
+                   + COALESCE(b.notes_receivable,0) + COALESCE(b.accounts_receivable,0))
+                  / b.total_current_liabilities END AS conservative_quick_ratio,
+        CASE WHEN b.total_equity > 0 AND ABS(b.total_liabilities / b.total_equity) <= {DEBT_TO_EQUITY_MAX}
+             THEN b.total_liabilities / b.total_equity END AS debt_to_equity,
         CASE WHEN (b.total_equity - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0)) > 0
+                  AND ABS(b.total_liabilities
+                          / (b.total_equity - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0)))
+                      <= {TANGIBLE_DEBT_MAX}
              THEN b.total_liabilities
                   / (b.total_equity - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0))
         END AS tangible_net_debt_ratio,
         CASE WHEN b.total_liabilities > 0 AND c.cf_from_operating IS NOT NULL
+                  AND ABS(c.cf_from_operating / b.total_liabilities) <= {OCF_TO_LIAB_MAX}
              THEN c.cf_from_operating / b.total_liabilities END AS ocf_to_liabilities,
         CASE WHEN b.total_liabilities > 0 AND ebitda_val.ebitda IS NOT NULL
+                  AND ABS(ebitda_val.ebitda / b.total_liabilities) <= {EBITDA_TO_LIAB_MAX}
              THEN ebitda_val.ebitda / b.total_liabilities END AS ebitda_to_liabilities,
         -- 营业收入现金含量：销售商品提供劳务收到的现金 / 营业收入（CSMAR FI_T6.F060201B）
         CASE WHEN i.revenue > 0 AND c.cash_received_sales IS NOT NULL
+                  AND ABS(c.cash_received_sales / i.revenue) <= {CASH_CONTENT_MAX}
              THEN c.cash_received_sales / i.revenue END AS cash_content_of_revenue,
         -- 营业利润现金净含量：经营现金流净额 / 营业利润（CSMAR FI_T6.F060401B）
         CASE WHEN i.operating_profit > 0 AND c.cf_from_operating IS NOT NULL
+                  AND ABS(c.cf_from_operating / i.operating_profit) <= {OCF_TO_OP_PROFIT_MAX}
              THEN c.cf_from_operating / i.operating_profit END AS ocf_to_operating_profit,
         -- 应计项目（本项目口径，简化式）：(净利润 − 经营现金流) / 总资产。
         -- 正值越大说明利润里"没收到钱"的部分越多，是盈余质量的负面信号。
         CASE WHEN b.total_assets > 0 AND i.net_profit IS NOT NULL
                   AND c.cf_from_operating IS NOT NULL
+                  AND ABS((i.net_profit - c.cf_from_operating) / b.total_assets) <= {ACCRUALS_MAX}
              THEN (i.net_profit - c.cf_from_operating) / b.total_assets END AS accruals,
         -- 每股族（分母同为「当时股数」）
-        CASE WHEN sh.total_shares > 0 THEN
-            (b.total_assets - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0))
-            / sh.total_shares END AS tangible_asset_per_share,
-        CASE WHEN sh.total_shares > 0 THEN b.total_liabilities / sh.total_shares END AS liability_per_share,
-        CASE WHEN sh.total_shares > 0 THEN b.capital_reserve / sh.total_shares END AS capital_reserve_per_share,
+        CASE WHEN sh.total_shares > 0
+                  AND (b.total_assets - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0))
+                      / sh.total_shares <= {PER_SHARE_MAX}
+             THEN (b.total_assets - COALESCE(b.intangible_assets,0) - COALESCE(b.goodwill,0))
+                  / sh.total_shares END AS tangible_asset_per_share,
+        CASE WHEN sh.total_shares > 0 AND b.total_liabilities >= 0
+                  AND b.total_liabilities / sh.total_shares <= {PER_SHARE_MAX}
+             THEN b.total_liabilities / sh.total_shares END AS liability_per_share,
+        CASE WHEN sh.total_shares > 0 AND b.capital_reserve IS NOT NULL
+                  AND ABS(b.capital_reserve / sh.total_shares) <= {PER_SHARE_MAX}
+             THEN b.capital_reserve / sh.total_shares END AS capital_reserve_per_share,
         eh.employee_count,
         CASE WHEN eh.employee_count > 0 AND ABS(i.revenue / eh.employee_count) <= {REVENUE_PER_EMPLOYEE_MAX}
              THEN i.revenue / eh.employee_count END AS revenue_per_employee,

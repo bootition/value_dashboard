@@ -630,3 +630,68 @@ def test_loss_making_has_null_ocf_to_operating_profit(
     ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
     row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600051'")[0]
     assert row["ocf_to_operating_profit"] is None
+
+
+# ─── v37 指标护栏（2026-09-19 复审补加）─────────────────────────────
+
+def test_v37_guards_bound_business_meaningless_extremes(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """复审发现 v37 的 12 列**漏加护栏**，实测出现 cash_ratio 最大 21 万、
+    accruals 最大 2.4 万（其数学上限本是 ±2）等业务无意义极值。
+    本测试用「分母趋 0」的种子把护栏钉死。"""
+    # 流动负债 0.01、现金 100 万 → 现金比率 1 亿倍（应被护栏置空）
+    _seed_income(duckdb_store, "600060", revenue=1000.0, net_profit=100.0,
+                 operating_profit=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets,
+               total_liabilities, total_equity, total_current_liabilities, monetary_funds)
+               VALUES (?, ?, 5000.0, 2000.0, 3000.0, 0.01, 1000000.0)""",
+            ["600060", REPORT_DATE],
+        )
+        conn.execute(
+            """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating, cash_ending)
+               VALUES (?, ?, 300.0, 1000000.0)""",
+            ["600060", REPORT_DATE],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600060'")[0]
+    assert row["cash_ratio"] is None                 # 1 亿倍 > 100 上限
+    assert row["conservative_quick_ratio"] is None
+    assert row["debt_to_equity"] is not None          # 2000/3000 正常，保留
+    # 应计项目 = (100 − 300)/5000 = -0.04，在 ±2 内，保留
+    assert row["accruals"] is not None
+
+
+def test_accruals_is_bounded_by_two(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """应计项目 = (净利 − 经营现金流) / 总资产，数学上限是 ±2。
+    复审前实测出现 23,509 —— 说明总资产极小导致发散，护栏必须拦住。"""
+    _seed_income(duckdb_store, "600061", revenue=1.0, net_profit=-1000.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) "
+                     "VALUES (?, ?, 0.01)", ["600061", REPORT_DATE])
+        conn.execute("INSERT INTO cash_flow (stock_code, report_date, cf_from_operating) "
+                     "VALUES (?, ?, 0.0)", ["600061", REPORT_DATE])
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600061'")[0]
+    assert row["accruals"] is None   # -100000 远超 ±2
+
+
+def test_negative_equity_yields_null_debt_ratios(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """净资产为负时，产权比率与有形净值债务率都没有业务含义 → NULL。"""
+    _seed_income(duckdb_store, "600062", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities, "
+            "total_equity) VALUES (?, ?, 100.0, 300.0, -200.0)",
+            ["600062", REPORT_DATE],
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600062'")[0]
+    assert row["debt_to_equity"] is None
+    assert row["tangible_net_debt_ratio"] is None
