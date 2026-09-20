@@ -96,6 +96,9 @@ def test_update_etf_failure_preserves_old_and_records_retry(
     )
     updater = EtfPriceUpdater(duck=duckdb_store, sqlite=sqlite_store)
     updater._ths = FakeThs(daily_error="quota exhausted")  # type: ignore[assignment]
+    # 2026-09-20 起同花顺失败会先走腾讯回退；本测试针对的是**全部源都失败**的场景，
+    # 故把回退一并置空（否则会打真实网络且掩盖本测试要守的语义）。
+    updater._fetch_daily_via_tencent = lambda *a, **k: None  # type: ignore[method-assign]
 
     report = updater.update_etf("513130")
 
@@ -181,3 +184,44 @@ def test_etf_missing_api_key_records_missing_and_clears_retry(
            WHERE stock_code='510300' AND field_name='etf_daily'"""
     )
     assert missing and missing[0]["reason_code"] == "source_unconfigured"
+
+
+def test_update_etf_falls_back_to_tencent_when_ths_unavailable(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """2026-09-20：同花顺不可用（典型是 HITHINK_FINANCE_API_KEY 未配置）时，
+    必须回退到腾讯行情，而不是让整个 ETF 域停更（实测曾停滞 10 天）。
+
+    本测试用假的回退实现，**不打真实网络**。
+    """
+    from types import SimpleNamespace
+
+    upsert_etf_meta(sqlite_store, etf_code="513130", name="恒生科技",
+                    track_index_code=None, primary_metric="pe")
+    updater = EtfPriceUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    updater._ths = FakeThs(daily_error="环境变量 HITHINK_FINANCE_API_KEY 未设置")  # type: ignore[assignment]
+
+    def fake_fallback(etf_code: str, start: object, end: object) -> object:
+        return SimpleNamespace(
+            metadata=SimpleNamespace(error=None, source="tencent",
+                                     raw_response_hash="fake", confidence="strict"),
+            data=[{
+                "trade_date": "2026-09-18",
+                "open_price": 1.20, "close_price": 1.23,
+                "high_price": 1.25, "low_price": 1.19,
+                "volume": 1000.0, "turnover": None,
+            }],
+        )
+
+    updater._fetch_daily_via_tencent = fake_fallback  # type: ignore[method-assign]
+
+    report = updater.update_etf("513130", years=1)
+
+    assert report["status"] == "success", report
+    rows = duckdb_store.read_query(
+        "SELECT trade_date, close_price, source FROM etf_daily "
+        "WHERE etf_code='513130' AND source='tencent'"
+    )
+    assert len(rows) == 1, "回退源的数据应写入且带 tencent 溯源"
+    assert str(rows[0]["trade_date"]) == "2026-09-18"
+    assert float(rows[0]["close_price"]) == 1.23

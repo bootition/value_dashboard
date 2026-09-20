@@ -101,9 +101,9 @@ def _to_baostock_code(stock_code: str) -> str | None:
     if not code or not code[0].isdigit():
         return None
     first = code[0]
-    if first == "6":
+    if first in ("6", "5"):      # 6=沪市股票, 5=沪市基金/债券（2026-09-20 补）
         return f"sh.{code}"
-    if first in ("0", "3"):
+    if first in ("0", "1", "3"):  # 1=深市基金/债券（2026-09-20 补）
         return f"sz.{code}"
     # 8/4 → BSE
     return None

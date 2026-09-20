@@ -23,14 +23,26 @@ _MAX_BARS_PER_REQUEST = 640
 
 
 def _symbol(stock_code: str) -> str | None:
+    """标准 6 位代码 → 腾讯行情符号。
+
+    2026-09-20 修复：原实现对非 6/0/3 开头的一律回落到 `bj`，
+    导致 **ETF 代码被映射到北交所**（510300 → bj510300、159915 → bj159915），
+    抓取静默失败。补齐交易所上市基金/债券的映射：
+    - 5 开头 → 上交所（510xxx/512xxx 等 ETF、5xxxxx 国债）
+    - 1 开头 → 深交所（159xxx/16xxxx ETF、1xxxxx 债券）
+    - 4/8/9 开头 → 北交所
+    """
     code = stock_code.strip()
     if len(code) != 6 or not code.isdigit():
         return None
-    if code.startswith("6"):
-        return f"sh{code}"
-    if code.startswith(("0", "3")):
-        return f"sz{code}"
-    return f"bj{code}"
+    # 精确到两位前缀，避免 920xxx（北交所）被误判成 90xxxx（沪市B股）
+    if code.startswith(("60", "68", "90", "5")):
+        return f"sh{code}"          # 沪市股票/科创板/沪B/沪市基金债券
+    if code.startswith(("92", "43", "83", "87", "88")):
+        return f"bj{code}"          # 北交所
+    if code.startswith(("0", "1", "2", "3")):
+        return f"sz{code}"          # 深市股票/深市基金债券/深B
+    return f"sh{code}" 
 
 
 class TencentAdapter(BaseAdapter):

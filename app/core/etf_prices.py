@@ -59,6 +59,42 @@ class EtfPriceUpdater:
 
     # ─── 单只更新 ──────────────────────────────────────────────────────
 
+    def _fetch_daily_via_tencent(
+        self, etf_code: str, start: date, end: date
+    ) -> Any | None:
+        """用腾讯日线接口取 ETF 行情，字段名映射到 etf_daily 的 schema。
+
+        腾讯返回 `open/close/high/low/volume`，本表用 `*_price` 后缀。
+        `track_pe_ttm_five_year_percentile` 腾讯不提供 → 保持空值，
+        由后续的同花顺通道补齐（缺失不伪造）。
+        """
+        from app.core.adapters.base import FetchRequest as _Request
+        from app.core.adapters.tencent_adapter import TencentAdapter
+
+        try:
+            result = TencentAdapter(rate_limit=0.2).fetch(_Request(
+                data_type="price_daily", stock_codes=[etf_code],
+                start_date=start.isoformat(), end_date=end.isoformat(),
+            ))
+        except Exception as error:  # noqa: BLE001
+            logger.warning("ETF %s 腾讯回退源异常: %s", etf_code, error)
+            return None
+        if result.metadata.error or not result.data:
+            return None
+        result.data = [
+            {
+                "trade_date": row.get("trade_date"),
+                "open_price": row.get("open"),
+                "close_price": row.get("close"),
+                "high_price": row.get("high"),
+                "low_price": row.get("low"),
+                "volume": row.get("volume"),
+                "turnover": row.get("turnover"),
+            }
+            for row in result.data
+        ]
+        return result
+
     def update_etf(self, etf_code: str, *, years: int = MAX_YEARS) -> dict[str, Any]:
         years = max(1, min(int(years), MAX_YEARS))
         thscode = normalize_thscode(etf_code)
@@ -70,8 +106,15 @@ class EtfPriceUpdater:
             start_date=start.isoformat(), end_date=end.isoformat(),
         ))
         if daily.metadata.error:
-            self._record_retry(etf_code, daily.metadata.error)
-            return {"status": "failed", "error": daily.metadata.error}
+            # 回退源（2026-09-20）：ETF 与个股同为交易所上市品种、代码同格式，
+            # 同花顺不可用（典型是 HITHINK_FINANCE_API_KEY 未配置）时改用腾讯行情，
+            # 避免整个 ETF 域因单一源的配置缺失而长期停更（实测曾停滞 10 天）。
+            fallback = self._fetch_daily_via_tencent(etf_code, start, end)
+            if fallback is None:
+                self._record_retry(etf_code, daily.metadata.error)
+                return {"status": "failed", "error": daily.metadata.error}
+            daily = fallback
+            logger.info("ETF %s 同花顺不可用，已用腾讯行情回退（%d 条）", etf_code, len(daily.data))
 
         track = self._ths.fetch(FetchRequest(
             data_type="etf_track_percentile", stock_codes=[thscode],

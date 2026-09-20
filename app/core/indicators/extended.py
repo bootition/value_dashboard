@@ -141,6 +141,17 @@ _DEPRECIATION = """(COALESCE(ci.fixed_asset_depreciation, 0)
                     + COALESCE(ci.long_term_prepaid_amortization, 0))"""
 _EBIT_READY = ("i.net_profit IS NOT NULL AND i.income_tax IS NOT NULL "
                "AND i.financial_expenses IS NOT NULL")
+# 统一 EBIT 表达式（2026-09-20）：首选标准式，缺失时回退「利润总额 + 财务费用」。
+# **必须所有用到 EBIT 的指标共用同一表达式** —— 首版只改了 ebit 列，
+# 杠杆公式仍用 _EBIT_READY 判定，导致回退失效（覆盖率原地不动）。
+# 用 f-string **直接展开**：外层 SQL 模板的 .format() 只替换一层，
+# 若这里留 {占位符} 会原样进入 SQL 导致语法错误（首版踩过，覆盖率掉到 0）。
+_EBIT_EXPR = (
+    f"(CASE WHEN {_EBIT_READY} THEN {_EBIT} "
+    f"WHEN i.total_profit IS NOT NULL "
+    f"THEN i.total_profit + COALESCE(i.financial_expenses, 0) END)"
+)
+_EBIT_AVAILABLE = f"(i.total_profit IS NOT NULL OR {_EBIT_READY})"
 _DEP_READY = ("(ci.fixed_asset_depreciation IS NOT NULL "
               "OR ci.intangible_asset_amortization IS NOT NULL "
               "OR ci.long_term_prepaid_amortization IS NOT NULL)")
@@ -191,20 +202,24 @@ def build_select_sql(codes: list[str] | None = None) -> str:
                   OR i.revenue IS NULL OR i.revenue = 0 THEN NULL
              WHEN ABS((c.cf_from_operating - ca.capex) / i.revenue) > {FCF_MARGIN_MAX_ABS} THEN NULL
              ELSE (c.cf_from_operating - ca.capex) / i.revenue END AS fcf_margin,
-        CASE WHEN {_EBIT_READY} THEN {_EBIT} END AS ebit,
+        -- EBIT 口径（2026-09-20 补回退）：首选「净利润 + 所得税 + 财务费用」；
+        -- 金融企业（保险/券商）利润表不单列所得税与财务费用，实测 144 只因此缺失
+        -- → 回退用「利润总额 + 财务费用」（这 144 只的利润总额 100% 可用）。
+        -- 两式在标准利润表下等价：利润总额 = 净利润 + 所得税。
+        {_EBIT_EXPR} AS ebit,
         ebitda_val.ebitda AS ebitda,
         -- 财务杠杆 = EBIT / 利润总额（CSMAR FI_T7.F070101B）；亏损时无业务含义
-        CASE WHEN {_EBIT_READY} AND i.total_profit > 0 AND {_EBIT} > 0
-                  AND ABS({_EBIT} / i.total_profit) <= {LEVERAGE_MAX}
-             THEN {_EBIT} / i.total_profit END AS leverage_financial,
+        CASE WHEN {_EBIT_AVAILABLE} AND i.total_profit > 0 AND {_EBIT_EXPR} > 0
+                  AND ABS({_EBIT_EXPR} / i.total_profit) <= {LEVERAGE_MAX}
+             THEN {_EBIT_EXPR} / i.total_profit END AS leverage_financial,
         -- 经营杠杆 = EBITDA / EBIT（CSMAR FI_T7.F070201B）；EBIT<=0 时无业务含义
-        CASE WHEN {_EBIT_READY} AND {_DEP_READY} AND {_EBIT} > 0
-                  AND ABS(({_EBIT} + {_DEPRECIATION}) / {_EBIT}) <= {LEVERAGE_MAX}
-             THEN ({_EBIT} + {_DEPRECIATION}) / {_EBIT} END AS leverage_operating,
+        CASE WHEN {_EBIT_AVAILABLE} AND {_DEP_READY} AND {_EBIT_EXPR} > 0
+                  AND ABS(({_EBIT_EXPR} + {_DEPRECIATION}) / {_EBIT_EXPR}) <= {LEVERAGE_MAX}
+             THEN ({_EBIT_EXPR} + {_DEPRECIATION}) / {_EBIT_EXPR} END AS leverage_operating,
         -- 综合杠杆 = EBITDA / 利润总额（CSMAR FI_T7.F070301B）；亏损时无业务含义
-        CASE WHEN {_EBIT_READY} AND {_DEP_READY} AND i.total_profit > 0
-                  AND ABS(({_EBIT} + {_DEPRECIATION}) / i.total_profit) <= {LEVERAGE_MAX}
-             THEN ({_EBIT} + {_DEPRECIATION}) / i.total_profit END AS leverage_total,
+        CASE WHEN {_EBIT_AVAILABLE} AND {_DEP_READY} AND i.total_profit > 0
+                  AND ABS(({_EBIT_EXPR} + {_DEPRECIATION}) / i.total_profit) <= {LEVERAGE_MAX}
+             THEN ({_EBIT_EXPR} + {_DEPRECIATION}) / i.total_profit END AS leverage_total,
         -- ─── 每股族（v26）────────────────────────────────────────────
         -- 分母用「当时股数」：share_capital_history 中 effective_date <= 报告期的
         -- 最近一笔。**不得**用 stock_meta.total_shares（当前股本），否则历史期
@@ -408,7 +423,8 @@ def build_select_sql(codes: list[str] | None = None) -> str:
     LEFT JOIN cash_flow_indirect ci
       ON ci.stock_code = i.stock_code AND ci.report_date = i.report_date
     LEFT JOIN LATERAL (
-        SELECT CASE WHEN {_EBIT_READY} AND {_DEP_READY} THEN {_EBIT} + {_DEPRECIATION} END AS ebitda
+        SELECT CASE WHEN {_EBIT_AVAILABLE} AND {_DEP_READY}
+                    THEN {_EBIT_EXPR} + {_DEPRECIATION} END AS ebitda
     ) ebitda_val ON true
     LEFT JOIN cash_flow_activity ca
       ON ca.stock_code = i.stock_code AND ca.report_date = i.report_date

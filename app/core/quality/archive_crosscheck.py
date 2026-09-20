@@ -58,6 +58,39 @@ DEFAULT_PAIRS: tuple[CheckPair, ...] = (
               "csmar_per_share_history", "revenue_per_share"),
     CheckPair("每股经营现金流", "indicator_ext", "ocf_per_share",
               "csmar_per_share_history", "ocf_per_share"),
+    CheckPair("归属母公司每股净资产", "indicator_ext", "bps_parent",
+              "csmar_per_share_history", "bps_parent"),
+    # ── 2026-09-20 扩充：让归档域的核验覆盖率从 9 个概念提升到 24 个 ──
+    CheckPair("权益乘数", "indicator_ext", "equity_multiplier", "csmar_fi_t1", "F011601A"),
+    # 以下两组经 2026-09-20 实测确认**口径本就不同**，按本模块纪律不予登记
+    # （登记会制造假失败）：
+    #
+    # 有形净值债务率：我们的口径为「负债 /（权益 − 无形资产 − 商誉）」，是教材标准；
+    #   归档字段只扣无形资产、不扣商誉。实测按我们的口径一致率 74.76%，
+    #   改成只扣无形资产则 **98.03%** —— 差异**全部由商誉解释**，不是 bug。
+    #   （结论：本项目的定义更保守，保留不动。）
+    #
+    # 应计项目：归档字段是**绝对金额**（元）且用资产负债表法口径
+    #   （流动资产−流动负债+应交税费+…−现金净增加+折旧摊销，TTM）；
+    #   我们用的是学术标准口径「(净利润 − 经营现金流量净额) / 总资产」。
+    #   两者单位与定义都不同，缩放后仍不符（比值 0.006~2.24），不可直接比对。
+    CheckPair("每股有形资产", "indicator_ext", "tangible_asset_per_share",
+              "csmar_fi_t9", "F091101A"),
+    CheckPair("每股负债", "indicator_ext", "liability_per_share", "csmar_fi_t9", "F091201A"),
+    CheckPair("每股资本公积", "indicator_ext", "capital_reserve_per_share",
+              "csmar_fi_t9", "F091301A"),
+    CheckPair("流动资产比率", "indicator_ext", "current_asset_ratio", "csmar_fi_t3", "F030101A"),
+    CheckPair("固定资产比率", "indicator_ext", "fixed_asset_ratio", "csmar_fi_t3", "F030801A"),
+    CheckPair("销售费用率", "indicator_ext", "selling_expense_ratio", "csmar_fi_t5", "F051701B"),
+    CheckPair("管理费用率", "indicator_ext", "admin_expense_ratio", "csmar_fi_t5", "F051801B"),
+    CheckPair("财务费用率", "indicator_ext", "finance_expense_ratio", "csmar_fi_t5", "F051901B"),
+    CheckPair("应付账款周转率", "indicator_ext", "accounts_payable_turnover",
+              "csmar_fi_t4", "F040801B"),
+    CheckPair("流动资产周转率", "indicator_ext", "current_asset_turnover",
+              "csmar_fi_t4", "F041201B"),
+    CheckPair("固定资产周转率", "indicator_ext", "fixed_asset_turnover",
+              "csmar_fi_t4", "F041401B"),
+    CheckPair("股东权益周转率", "indicator_ext", "equity_turnover", "csmar_fi_t4", "F041801B"),
 )
 
 #: 一致率低于该值即视为「需要复核的回归」（不是失败，是提示）

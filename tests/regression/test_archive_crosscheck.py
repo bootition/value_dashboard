@@ -93,3 +93,28 @@ def test_crosscheck_flags_large_disagreement(duckdb_store) -> None:
     assert report.results[0].within_tolerance == 0.0
     assert report.results[0].needs_review is True
     assert report.flagged
+
+
+def test_crosscheck_covers_all_usable_archive_domains() -> None:
+    """核验面必须覆盖到「归档域真被利用」的程度。
+
+    2026-09-20 系统性审查发现 18 张归档域**零业务引用**；本模块把它们变成核验哨兵。
+    当初只登记 9 个概念，现已扩到 20+，覆盖 FI_T1/T3/T4/T5/T8/T9 与每股域。
+    """
+    tables = {p.archive_table for p in DEFAULT_PAIRS}
+    for expected in ("csmar_fi_t1", "csmar_fi_t4", "csmar_per_share_history"):
+        assert expected in tables, f"应覆盖 {expected}"
+    assert len(DEFAULT_PAIRS) >= 20, f"核验概念过少（{len(DEFAULT_PAIRS)}），归档域利用不足"
+
+
+def test_incomparable_calibers_are_not_registered() -> None:
+    """口径本就不同的概念绝不能登记 —— 那会制造假失败。
+
+    实测记录（2026-09-20）：
+    - 有形净值债务率：我们用「负债/(权益−无形−商誉)」标准口径；归档只扣无形资产。
+      按我方口径 74.76%，改成只扣无形资产则 98.03% —— 差异全部由商誉解释，不是 bug。
+    - 应计项目：归档是**绝对金额**且用资产负债表法；我们是「(净利−经营现金流)/总资产」。
+    """
+    concepts = {p.concept for p in DEFAULT_PAIRS}
+    assert "有形净值债务率" not in concepts, "口径不同（商誉）不应登记"
+    assert "应计项目" not in concepts, "口径与单位均不同，不应登记"

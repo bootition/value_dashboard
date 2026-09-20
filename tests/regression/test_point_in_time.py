@@ -24,6 +24,10 @@ SEED = [
     ("2022-12-31", "2023-04-03"),
     ("2023-12-31", "2024-04-03"),
     ("2024-12-31", "2025-03-28"),
+    # 季度行（2026-09-20 补全公布日后新增的能力）
+    ("2025-03-31", "2025-04-30"),
+    ("2025-06-30", "2025-08-30"),
+    ("2025-09-30", "2025-10-30"),
 ]
 
 
@@ -93,5 +97,41 @@ def test_coverage_exposes_honest_limitations(duckdb_store: DuckDBStore) -> None:
     assert info["rows"] == len(SEED)
     assert info["stocks"] == 1
     assert info["limitations"] == list(PIT_LIMITATIONS)
-    # 必须显式声明只有年度频率，避免被当成「最近一期财报」
-    assert any("仅年度频率" in item for item in info["limitations"])
+    # 2026-09-20 起公布日已补到**季度频率**（此前仅年报），边界声明须同步更新 ——
+    # 若仍有「仅年度频率」字样说明文档没跟上能力升级。
+    assert any("季度频率" in item for item in info["limitations"])
+    assert not any("仅年度频率" in item for item in info["limitations"])
+    # 无公布日记录的报告期不得参与判定（不能假设未登记即当天可见）
+    assert any("不参与判定" in item for item in info["limitations"])
+
+
+def test_frequency_filter_returns_expected_granularity(duckdb_store: DuckDBStore) -> None:
+    """`frequency` 参数：any 取最近一期，annual 只取年报。
+
+    这是 2026-09-20 公布日补全后的能力升级：此前只有年报可选，
+    现在「当时可见」可以精确到季度。
+    """
+    from datetime import date
+
+    from app.core.point_in_time import latest_visible_period
+
+    _seed(duckdb_store)
+    any_period = latest_visible_period(duckdb_store, STOCK, date(2025, 12, 31), frequency="any")
+    annual = latest_visible_period(duckdb_store, STOCK, date(2025, 12, 31), frequency="annual")
+    assert any_period is not None and annual is not None
+    # 年报口径的结果月份必须是 12
+    assert annual.report_date.month == 12
+    # any 口径能看到更新的期（季度披露），annual 只能看到年报 —— 这正是补全公布日
+    # 带来的精度提升（此前 any 与 annual 结果相同）。
+    assert any_period.report_date > annual.report_date
+    assert any_period.report_date.month != 12
+
+
+def test_unknown_frequency_raises(duckdb_store: DuckDBStore) -> None:
+    import pytest
+
+    from app.core.point_in_time import latest_visible_period
+
+    with pytest.raises(ValueError):
+        latest_visible_period(duckdb_store, "000001", __import__("datetime").date(2024, 1, 1),
+                              frequency="monthly")
