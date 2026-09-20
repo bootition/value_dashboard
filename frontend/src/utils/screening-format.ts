@@ -27,6 +27,10 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   // 扩展指标域（schema v25，2026-09-19）：周转率族 / 自由现金流族 / 杠杆族，共 18 项。
   // 自由现金流与 EBITDA 一族最初因 CSMAR 截止 2025-03-31 而覆盖率为 0，未上界面；
   // 现由 scripts/fetch_cashflow_supplement.py 从东方财富补齐后已全量开放。
+  dilution_3y: '近3年融资稀释率',
+  buyback_ratio_3y: '近3年回购占比',
+  bonus_share_ratio_3y: '近3年送转比例',
+  top_segment_share: '最大业务占比',
   cash_ratio: '现金比率',
   conservative_quick_ratio: '保守速动比率',
   debt_to_equity: '产权比率',
@@ -358,6 +362,7 @@ const RATIO_FIELDS = new Set([
   'current_asset_turnover', 'fixed_asset_turnover', 'total_asset_turnover',
   'equity_turnover', 'leverage_financial', 'leverage_operating', 'leverage_total',
   'equity_multiplier', 'tobin_q', 'ev_ebitda',
+  'dilution_3y', 'buyback_ratio_3y', 'bonus_share_ratio_3y', 'top_segment_share',
   'cash_ratio', 'conservative_quick_ratio', 'debt_to_equity',
   'tangible_net_debt_ratio', 'ocf_to_liabilities', 'ebitda_to_liabilities',
   'ocf_to_operating_profit',

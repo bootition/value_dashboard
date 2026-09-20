@@ -695,3 +695,90 @@ def test_negative_equity_yields_null_debt_ratios(
     row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600062'")[0]
     assert row["debt_to_equity"] is None
     assert row["tangible_net_debt_ratio"] is None
+
+
+# ─── v38：事件类指标（把「在库没用到」的数据落地）───────────────────
+
+def test_v38_event_indicators(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """近3年融资稀释 / 回购占比 / 送转 / 最大业务占比。
+
+    系统性审查发现 funding_events / buyback_events / xdxr / business_breakdown
+    四份数据（约 103 万行）「在库、进包，但零派生指标」。
+    """
+    _seed_income(duckdb_store, "600070", revenue=1000.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) "
+                     "VALUES (?, ?, 5000.0)", ["600070", REPORT_DATE])
+        conn.execute(
+            "INSERT INTO share_capital_history (stock_code, effective_date, total_shares, source, raw_hash, batch_id) "
+            "VALUES ('600070', CAST('2000-01-01' AS DATE), 1000, 'csmar', 'h', 'b')"
+        )
+        # 近 3 年内融资发行 200 股；窗口外（5 年前）发行 900 股应被排除
+        conn.execute(
+            "INSERT INTO funding_events (stock_code, event_type, list_date, issue_shares, source, fetch_time, raw_hash, batch_id, confidence) VALUES "
+            "('600070', 'a_placement', CAST('2023-06-30' AS DATE), 200, 't', now(), 'h', 'b', 'strict'), "
+            "('600070', 'ipo', CAST('2014-01-01' AS DATE), 900, 't', now(), 'h', 'b', 'strict')"
+        )
+        conn.execute(
+            "INSERT INTO buyback_events (stock_code, start_date, announce_date, buyback_shares, source, fetch_time, raw_hash, batch_id, confidence) VALUES "
+            "('600070', CAST('2023-01-01' AS DATE), CAST('2023-01-01' AS DATE), 50, 't', now(), 'h', 'b', 'strict')"
+        )
+        # 送转每 10 股送 2 股 → 比例 0.2
+        conn.execute("INSERT INTO xdxr (stock_code, event_date, category, songzhuangu) "
+                     "VALUES ('600070', CAST('2023-05-01' AS DATE), 1, 2.0)")
+        # 三段业务：1000 / 600 / 400 → 最大占比 0.5；另加一个负数段不应破坏占比
+        conn.execute(
+            "INSERT INTO business_breakdown (stock_code, report_date, type, item_name, amount, ratio, source, fetch_time, raw_hash, batch_id, confidence) VALUES "
+            "('600070', CAST('2023-12-31' AS DATE), 2, 'A', 1000, 50, 't', now(), 'h', 'b', 'strict'), "
+            "('600070', CAST('2023-12-31' AS DATE), 2, 'B', 600, 30, 't', now(), 'h', 'b', 'strict'), "
+            "('600070', CAST('2023-12-31' AS DATE), 2, 'C', 400, 20, 't', now(), 'h', 'b', 'strict'), "
+            "('600070', CAST('2023-12-31' AS DATE), 2, 'D', -200, -10, 't', now(), 'h', 'b', 'strict')"
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600070'")[0]
+    assert row["dilution_3y"] == 200 / 1000        # 只统计窗口内的 200，不含 5 年前的 900
+    assert row["buyback_ratio_3y"] == 50 / 1000
+    assert row["bonus_share_ratio_3y"] == 0.2      # 每 10 股送 2 股
+    # 只在正收入段上算：1000 / (1000+600+400) = 0.5（负数段不影响）
+    assert row["top_segment_share"] == 0.5
+
+
+def test_v38_no_financing_means_zero_dilution(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """窗口内无融资事件 = 零稀释。funding_events 含 IPO（覆盖 100% 在市股票），
+    故「窗口内无记录」等价于「窗口内无融资」，应记 0 而不是 NULL
+    （否则「近3年无稀释」这个筛选条件会因 NULL 而失效）。"""
+    _seed_income(duckdb_store, "600071", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) "
+                     "VALUES (?, ?, 5000.0)", ["600071", REPORT_DATE])
+        conn.execute(
+            "INSERT INTO share_capital_history (stock_code, effective_date, total_shares, source, raw_hash, batch_id) "
+            "VALUES ('600071', CAST('2000-01-01' AS DATE), 1000, 'csmar', 'h', 'b')"
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600071'")[0]
+    assert row["dilution_3y"] == 0.0
+    assert row["buyback_ratio_3y"] == 0.0
+
+
+def test_top_segment_share_never_exceeds_one(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    """回归：分业务收入可为负，用 MAX/SUM(全量) 会得出 >1 的伪占比
+    （真实库实测最大 11.36）。改为只在正收入段上计算，保证 ≤ 1。"""
+    _seed_income(duckdb_store, "600072", revenue=100.0)
+    with duckdb_store.transaction() as conn:
+        conn.execute("INSERT INTO balance_sheet (stock_code, report_date, total_assets) "
+                     "VALUES (?, ?, 5000.0)", ["600072", REPORT_DATE])
+        conn.execute(
+            "INSERT INTO business_breakdown (stock_code, report_date, type, item_name, amount, ratio, source, fetch_time, raw_hash, batch_id, confidence) VALUES "
+            "('600072', CAST('2023-12-31' AS DATE), 2, 'A', 100, 100, 't', now(), 'h', 'b', 'strict'), "
+            "('600072', CAST('2023-12-31' AS DATE), 2, 'B', -90, -90, 't', now(), 'h', 'b', 'strict')"
+        )
+    ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths).build()
+    row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600072'")[0]
+    assert row["top_segment_share"] == 1.0   # 而非 100/(100-90) = 10

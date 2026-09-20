@@ -103,6 +103,11 @@ EXTENDED_COLUMNS: set[str] = {
     "tangible_asset_per_share",
     "liability_per_share",
     "capital_reserve_per_share",
+    # v38：事件类指标（稀释 / 回购 / 送转 / 业务集中度）
+    "dilution_3y",
+    "buyback_ratio_3y",
+    "bonus_share_ratio_3y",
+    "top_segment_share",
     # 时点估值族（v30）—— 市值 = 报告期当日原始收盘价 × 报告期时点股本，
     # 绕开 ops-knowledge-base D23「历史市值用当前股本」的已知缺陷。
     "report_date_close", "market_cap_at_report",
@@ -199,6 +204,7 @@ RANKABLE_INDICATORS: set[str] = {
     "revenue_per_employee", "profit_per_employee",
     "tobin_q", "market_cap_at_report", "ev_ebitda",
     "cash_ratio", "debt_to_equity", "accruals", "cash_content_of_revenue",
+    "dilution_3y", "buyback_ratio_3y", "top_segment_share",
 }
 
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按

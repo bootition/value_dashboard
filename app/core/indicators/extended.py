@@ -72,6 +72,10 @@ OPERATING_CYCLE_MAX_DAYS = 3650.0
 #    分布为 中位 1.1-1.5 / p99 8-22 / p99.9 47-133，|值|>100 已属病理值。
 #    注意必须用 ABS 判定：负值（EBIT 为负而利润总额为正）会绕过 `<= cap`。
 LEVERAGE_MAX = 100.0
+# 11) v38 事件类指标护栏
+DILUTION_MAX = 5.0          # 近3年融资稀释率（>500% 视为数据异常）
+BUYBACK_MAX = 1.0           # 回购占比不可能超过总股本
+BONUS_MAX = 20.0            # 近3年送转比例合计上限
 # 10) v37 指标护栏（2026-09-19 复审补加）。
 # 复审发现 v37 的 12 列**漏加护栏**，产生了大量业务无意义极值：
 #   cash_ratio 最大 213,591、accruals 最大 24,129（应计项目的数学上限是 2）、
@@ -334,6 +338,19 @@ def build_select_sql(codes: list[str] | None = None) -> str:
         CASE WHEN sh.total_shares > 0 AND b.capital_reserve IS NOT NULL
                   AND ABS(b.capital_reserve / sh.total_shares) <= {PER_SHARE_MAX}
              THEN b.capital_reserve / sh.total_shares END AS capital_reserve_per_share,
+        -- ─── v38：事件类指标（把「在库但没用起来」的数据落地）────────
+        -- 无融资事件 = 三年零稀释，语义上就是 0（funding_events 含 IPO，
+        -- 已验证覆盖 100% 的在市股票，故"窗口内无记录"等价于"窗口内无融资"）。
+        CASE WHEN sh.total_shares > 0
+                  AND COALESCE(fe.issued, 0) / sh.total_shares <= {DILUTION_MAX}
+             THEN COALESCE(fe.issued, 0) / sh.total_shares END AS dilution_3y,
+        -- 同上，记为 0。注意 buyback_events 覆盖 51.8%（回购为自愿披露），
+        -- 未记录不等于绝对没回购 —— 该口径局限已在域说明中登记。
+        CASE WHEN sh.total_shares > 0
+                  AND COALESCE(bb.bought, 0) / sh.total_shares <= {BUYBACK_MAX}
+             THEN COALESCE(bb.bought, 0) / sh.total_shares END AS buyback_ratio_3y,
+        CASE WHEN COALESCE(xr.bonus, 0) <= {BONUS_MAX} THEN xr.bonus END AS bonus_share_ratio_3y,
+        seg.top_share AS top_segment_share,
         eh.employee_count,
         CASE WHEN eh.employee_count > 0 AND ABS(i.revenue / eh.employee_count) <= {REVENUE_PER_EMPLOYEE_MAX}
              THEN i.revenue / eh.employee_count END AS revenue_per_employee,
@@ -346,6 +363,41 @@ def build_select_sql(codes: list[str] | None = None) -> str:
     FROM income_statement i
     JOIN balance_sheet b
       ON b.stock_code = i.stock_code AND b.report_date = i.report_date
+    LEFT JOIN LATERAL (
+        -- 近 3 年融资发行股数合计（真实稀释，不含送转）
+        SELECT SUM(NULLIF(f.issue_shares, 0)) AS issued FROM funding_events f
+        WHERE f.stock_code = i.stock_code
+          AND f.list_date BETWEEN i.report_date - INTERVAL 3 YEAR AND i.report_date
+    ) fe ON true
+    LEFT JOIN LATERAL (
+        -- 近 3 年回购股数合计
+        SELECT SUM(NULLIF(b.buyback_shares, 0)) AS bought FROM buyback_events b
+        WHERE b.stock_code = i.stock_code
+          AND COALESCE(b.start_date, b.announce_date)
+              BETWEEN i.report_date - INTERVAL 3 YEAR AND i.report_date
+    ) bb ON true
+    LEFT JOIN LATERAL (
+        -- 近 3 年送转比例合计（每 10 股送转 X 股 → 换算成比例）
+        SELECT SUM(COALESCE(x.songzhuangu, 0)) / 10.0 AS bonus FROM xdxr x
+        WHERE x.stock_code = i.stock_code
+          AND x.event_date BETWEEN i.report_date - INTERVAL 3 YEAR AND i.report_date
+    ) xr ON true
+    LEFT JOIN LATERAL (
+        -- 最新可见报告期的最大业务收入占比（业务集中度）。
+        -- **不用** business_breakdown.ratio：实测该字段并非干净占比
+        -- （179 行 >100%，最大 1136%；7,226 个 (股票,期) 组合计 >105）。
+        -- 改为用 amount 自算 最大业务 / 该期合计，天然落在 (0, 1]。
+        -- 只在**正收入**分段上计算：分业务收入可以为负（亏损业务），
+        -- 用 MAX/SUM(全量) 会得出 >1 的伪占比（实测最大 11.36）。
+        SELECT CASE WHEN SUM(CASE WHEN sb.amount > 0 THEN sb.amount END) > 0
+                    THEN MAX(CASE WHEN sb.amount > 0 THEN sb.amount END)
+                         / SUM(CASE WHEN sb.amount > 0 THEN sb.amount END) END AS top_share
+        FROM business_breakdown sb
+        WHERE sb.stock_code = i.stock_code AND sb.type = 2
+          AND sb.report_date = (SELECT MAX(sb2.report_date) FROM business_breakdown sb2
+                                WHERE sb2.stock_code = i.stock_code AND sb2.type = 2
+                                  AND sb2.report_date <= i.report_date)
+    ) seg ON true
     LEFT JOIN LATERAL (
         SELECT p.close FROM price_daily_raw p
         WHERE p.stock_code = i.stock_code AND p.trade_date <= i.report_date

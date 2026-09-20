@@ -1074,6 +1074,27 @@ def data_compute_extended_indicators(
     typer.echo(json.dumps(make_response("data.compute_extended_indicators", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("cross-check-archive")
+def data_cross_check_archive() -> None:
+    """用历史归档域的独立实现，核验本项目自算指标（可重复执行的正确性哨兵）
+
+    - 归档域保存着外部数据包用**自己的算法**算出的同概念数值；
+      两者按 (股票, 报告期) 逐行比对，一致率即自算实现的独立证据
+    - 一致率 < 85% 的概念会被标记为 needs_review（提示复核，不是失败）
+    - 2026-09-20 系统性审查发现：18 张归档域此前**零业务引用**（导入了但没人读），
+      本命令把它们变成持续有效的核验机制
+    """
+    from app.cli.protocol import make_response
+    from app.core.quality.archive_crosscheck import run_crosscheck
+
+    _paths, duck, _sqlite = _database_context()
+    report = run_crosscheck(duck)
+    typer.echo(json.dumps(
+        make_response("data.cross_check_archive", report.as_dict()),
+        ensure_ascii=False, indent=2, default=str,
+    ))
+
+
 @data_app.command("report-dates")
 def data_report_dates(
     code: str = typer.Option("", "--code", help="股票代码；留空则只打印公布日域覆盖概况"),
@@ -1082,8 +1103,8 @@ def data_report_dates(
     """查询「当时可见」年报口径（point-in-time，年度频率）
 
     - 回答「在 as_of 这一天，投资者能看到的最新一份年报是哪一期」
-    - 数据来源：financial_report_dates（CSMAR FAR_Finidx.Annodt，74,509 条）
-    - **仅年度频率**：CSMAR 不提供季报/中报公布日；缺失即返回无记录，不做推断
+    - 数据来源：financial_report_dates（历史归档，74,509 条）
+    - **仅年度频率**：不提供季报/中报公布日；缺失即返回无记录，不做推断
     """
     from datetime import date as _date
 

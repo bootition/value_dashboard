@@ -63,6 +63,7 @@ RATIO_FIELDS: frozenset[str] = frozenset({
     "cash_ratio", "conservative_quick_ratio", "debt_to_equity",
     "tangible_net_debt_ratio", "ocf_to_liabilities", "ebitda_to_liabilities",
     "cash_content_of_revenue", "ocf_to_operating_profit",
+    "dilution_3y", "buyback_ratio_3y", "bonus_share_ratio_3y", "top_segment_share",
 })
 # 扩展指标域中以「天」为单位的字段（前端按 plain 展示，仅此处登记语义）
 DAY_FIELDS: frozenset[str] = frozenset({

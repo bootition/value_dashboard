@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 37
+DUCKDB_SCHEMA_VERSION = 38
 SQLITE_SCHEMA_VERSION = 17
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -2760,6 +2760,29 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (37, 'CSMAR-derived self-computed indicators (solvency/cash-quality/per-share)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v38: 把「入库了但没产出任何指标」的四份事件数据落地为可筛选指标（2026-09-20）。
+        # 系统性审查发现 funding_events / buyback_events / xdxr / business_breakdown
+        # 合计约 103 万行「在库、进包，但零派生指标」—— 与归档域零引用同类问题。
+        #   dilution_3y           近 3 年融资发行股数 / 时点总股本（真实稀释，不含送转）
+        #   buyback_ratio_3y      近 3 年回购股数 / 时点总股本
+        #   bonus_share_ratio_3y  近 3 年送转比例合计（纯股本拆细，非价值创造）
+        #   top_segment_share     最新报告期最大业务收入占比（业务集中度）
+        for column, kind in (
+            ("dilution_3y", "DOUBLE"),
+            ("buyback_ratio_3y", "DOUBLE"),
+            ("bonus_share_ratio_3y", "DOUBLE"),
+            ("top_segment_share", "DOUBLE"),
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS {column} {kind}"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (38, 'event-driven indicators (dilution / buyback / bonus / segment concentration)')
             ON CONFLICT (version) DO NOTHING
             """
         )
