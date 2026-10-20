@@ -360,12 +360,18 @@ class DuckDBStore:
             raise FileNotFoundError(f"database file not found: {self._db_path}")
         last_error: Exception | None = None
         lock_active = False
+        lock_owned_here = False
         try:
-            from app.core.storage.update_lock import update_lock_active
+            from app.core.storage.update_lock import (
+                update_lock_active,
+                update_lock_owned_by_current_process,
+            )
 
             lock_active = update_lock_active(self._db_path)
+            lock_owned_here = update_lock_owned_by_current_process(self._db_path)
         except Exception:
             lock_active = False
+            lock_owned_here = False
         attempts = 12
         allow_same_process_rw = False
         for attempt in range(attempts):
@@ -387,10 +393,16 @@ class DuckDBStore:
             except Exception as error:
                 last_error = error
                 if _is_external_file_lock(str(error), lock_active=lock_active):
-                    # 外部写进程（auto-update/CLI）持锁时 Windows 不允许新建
-                    # 只读连接；与其空转 ~28s 后 500，不如立即抛专用异常，
-                    # 让上层返回缓存旧值或 503 提示。
-                    raise DuckDBReadLockedError(str(error)) from error
+                    if lock_owned_here or allow_same_process_rw:
+                        # 本进程就是更新属主：这是自己的写事务与并发读连接
+                        # 争用同一个 DuckDB 文件锁，退避重试即可，不能按
+                        # "外部写进程持锁"立刻失败（2026-10-20 修复）。
+                        last_error = error
+                    else:
+                        # 外部写进程（auto-update/CLI）持锁时 Windows 不允许
+                        # 新建只读连接；与其空转 ~28s 后 500，不如立即抛专用
+                        # 异常，让上层返回缓存旧值或 503 提示。
+                        raise DuckDBReadLockedError(str(error)) from error
             else:
                 try:
                     yield conn
@@ -399,7 +411,7 @@ class DuckDBStore:
                 return
             base_delay = 0.25 * (2 ** min(attempt, 4))
             delay = min(base_delay, 3.0)
-            if lock_active and attempt == 0:
+            if lock_active and not lock_owned_here and attempt == 0:
                 delay += 2.0
             time.sleep(delay)
         assert last_error is not None

@@ -140,6 +140,24 @@ def _owner_is_dead(lock_path: Path) -> bool:
     return False
 
 
+def update_lock_owned_by_current_process(database_path: Path) -> bool:
+    """True when *this* process is the recorded owner of the update lock.
+
+    读路径用它区分两种情况：外部写进程持锁（应立即降级/503）与本进程自己
+    的写事务和并发读连接争用文件锁（应退避重试）。2026-10-20 实测：更新
+    子进程内并发的财务刷新会让只读连接回退为读写连接，撞上 Web 进程的
+    只读连接，Windows 报同一句 "Cannot open file"，被误判为外部锁后立即
+    失败，导致"最新报告期"读不到（返回 None）。
+    """
+    fields = _parse_lock(_lock_path(database_path))
+    if not fields:
+        return False
+    try:
+        return int(fields["pid"]) == os.getpid()
+    except ValueError:
+        return False
+
+
 def update_lock_active(database_path: Path) -> bool:
     """True when a live process holds the incremental-update write lock.
 
