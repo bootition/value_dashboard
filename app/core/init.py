@@ -1364,21 +1364,39 @@ class DataInitializer:
         stock_code: str, report_date_field: str, fetch_batch_id: str,
         field_whitelist: set[str] | None = None,
     ) -> None:
+        self._record_field_audit_bulk_in_connection(
+            conn, result, [(stock_code, rows)], report_date_field,
+            fetch_batch_id, field_whitelist,
+        )
+
+    def _record_field_audit_bulk_in_connection(
+        self, conn: Any, result: FetchResult,
+        per_stock_rows: list[tuple[str, list[dict[str, Any]]]],
+        report_date_field: str, fetch_batch_id: str,
+        field_whitelist: set[str] | None = None,
+    ) -> None:
+        """批量写入多只股票的值级溯源。
+
+        2026-10-20 提速：分红/除权批量抓取后，逐股一次 executemany 会把
+        535 只股票的审计拆成 535 次提交；合并为单次 executemany 后
+        单批事务只做一次 source_audit 写入。
+        """
         audit_rows: list[tuple[Any, ...]] = []
-        for row in rows:
-            report_date = row.get(report_date_field) or row.get(report_date_field.upper())
-            for source_field, value in row.items():
-                field_name = self._standard_audit_field(source_field)
-                if field_name is None or not isinstance(value, (int, float)):
-                    continue
-                if field_whitelist is not None and field_name not in field_whitelist:
-                    continue
-                audit_rows.append((
-                    stock_code, field_name, report_date, value, result.metadata.source,
-                    fetch_batch_id,
-                    result.metadata.fetch_time, result.metadata.raw_response_hash,
-                    result.metadata.confidence, None, result.metadata.api_version,
-                ))
+        for stock_code, rows in per_stock_rows:
+            for row in rows:
+                report_date = row.get(report_date_field) or row.get(report_date_field.upper())
+                for source_field, value in row.items():
+                    field_name = self._standard_audit_field(source_field)
+                    if field_name is None or not isinstance(value, (int, float)):
+                        continue
+                    if field_whitelist is not None and field_name not in field_whitelist:
+                        continue
+                    audit_rows.append((
+                        stock_code, field_name, report_date, value, result.metadata.source,
+                        fetch_batch_id,
+                        result.metadata.fetch_time, result.metadata.raw_response_hash,
+                        result.metadata.confidence, None, result.metadata.api_version,
+                    ))
         if not audit_rows:
             return
         conn.executemany(

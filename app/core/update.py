@@ -188,6 +188,11 @@ class IncrementalUpdater:
         self.price_fetch_timeout_seconds: int = self._load_update_config(
             "price_fetch_timeout_seconds", default=45
         )
+        # 分红/除权批量抓取批大小：TDX 建连约 5s/次，逐股调用会让整步耗时
+        # 数十分钟；同批共用一次 TDX 会话 + 一次事务落库（2026-10-20 提速）。
+        self.market_actions_batch_size: int = self._load_update_config(
+            "market_actions_batch_size", default=50
+        )
         self.price_fetch_max_concurrency: int = self._load_update_config(
             "price_fetch_max_concurrency", default=16
         )
@@ -2363,34 +2368,163 @@ class IncrementalUpdater:
             "pending_codes": pending_codes[:20],
         }
 
+    _MARKET_ACTION_DATA_TYPES = ("dividends", "xdxr")
+
     def _refresh_market_actions(
         self,
         stock_codes: list[str],
         *,
         detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        """Refresh dividend and corporate-action evidence alongside filing data."""
+        """Refresh dividend and corporate-action evidence alongside filing data.
+
+        2026-10-20 提速：原先逐股 ``refetch_one`` 会为每只股票新建一次 TDX
+        连接（``from_best_host`` 实测约 5s）并单独提交 fetch_batch/审计，
+        535 只股票耗时约 76 分钟。现在按批在同一会话内抓取、每批只做一次
+        事务与一次批量审计写入；批内缺席或整批失败的股票才回退逐股，
+        失败仍精确归因并进入 retry_list。
+        """
+        codes = list(dict.fromkeys(stock_codes))
+        batch_size = max(1, int(getattr(self, "market_actions_batch_size", 50)))
         succeeded = 0
         failed_codes: list[str] = []
-        for index, code in enumerate(stock_codes):
-            outcomes = [self.refetch_one(code, data_type) for data_type in ("dividends", "xdxr")]
-            if all(outcome["status"] == "success" for outcome in outcomes):
-                succeeded += 1
-            else:
-                failed_codes.append(code)
-            if detail_cb is not None:
-                detail_cb("market_actions", {
-                    "step": "market_actions",
-                    "label": "分红除权",
-                    "done": index + 1,
-                    "total": len(stock_codes),
-                    "current": code,
-                })
+        failures: dict[str, list[str]] = {}
+        processed = 0
+        for offset in range(0, len(codes), batch_size):
+            chunk = codes[offset:offset + batch_size]
+            chunk_failures = self._refresh_market_actions_chunk(chunk)
+            for code in chunk:
+                processed += 1
+                code_errors = chunk_failures.get(code) or []
+                if code_errors:
+                    failed_codes.append(code)
+                    failures[code] = code_errors
+                    for message in code_errors:
+                        data_type, _, detail = message.partition(": ")
+                        self._record_failure(
+                            code, data_type or "dividends", "manager",
+                            detail or message,
+                        )
+                else:
+                    succeeded += 1
+                if detail_cb is not None:
+                    detail_cb("market_actions", {
+                        "step": "market_actions",
+                        "label": "分红除权",
+                        "done": processed,
+                        "total": len(codes),
+                        "current": code,
+                    })
         return {
             "status": "success" if not failed_codes else "partial",
-            "total": len(stock_codes), "success": succeeded, "failed": len(failed_codes),
+            "total": len(codes), "success": succeeded, "failed": len(failed_codes),
             "failed_codes": failed_codes[:20],
+            "errors": {code: failures[code] for code in failed_codes[:20]},
+            "batch_size": batch_size,
         }
+
+    def _refresh_market_actions_chunk(self, codes: list[str]) -> dict[str, list[str]]:
+        """Fetch+persist dividends/xdxr for one batch; return per-stock errors."""
+        errors: dict[str, list[str]] = {}
+        for data_type in self._MARKET_ACTION_DATA_TYPES:
+            grouped, result = self._fetch_market_action_batch(data_type, codes)
+            if result is None:
+                self._fallback_market_actions(codes, data_type, errors)
+                continue
+            persist_errors = self._persist_market_action_batch(
+                data_type, result, grouped,
+            )
+            for code in codes:
+                if code in persist_errors or not grouped.get(code):
+                    # 批内没有该股记录、或该股行在批量事务里落库失败：逐股
+                    # 复核以保留精确归因（正常应极少，只作为兜底路径）。
+                    self._fallback_market_actions([code], data_type, errors)
+        return errors
+
+    def _fetch_market_action_batch(
+        self, data_type: str, codes: list[str],
+    ) -> tuple[dict[str, list[dict[str, Any]]], Any | None]:
+        """One adapter call for the whole batch; rows grouped by stock_code."""
+        try:
+            result = self.adapter_mgr.fetch(FetchRequest(
+                data_type=data_type, stock_codes=list(codes),
+            ))
+        except Exception as error:
+            logger.warning("批量抓取 %s 失败，回退逐股: %s", data_type, error)
+            return {}, None
+        if result.metadata.error and not result.data:
+            logger.warning(
+                "批量抓取 %s 无数据，回退逐股: %s", data_type, result.metadata.error,
+            )
+            return {}, None
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in result.data or []:
+            code = str(row.get("stock_code") or "")
+            if not code:
+                continue
+            grouped.setdefault(code, []).append(row)
+        return grouped, result
+
+    def _persist_market_action_batch(
+        self, data_type: str, result: Any,
+        grouped: dict[str, list[dict[str, Any]]],
+    ) -> dict[str, str]:
+        """Persist one batch in a single transaction; return per-stock errors."""
+        from app.core.init import DataInitializer
+
+        errors: dict[str, str] = {}
+        pairs: list[tuple[str, list[dict[str, Any]]]] = []
+        for code, rows in grouped.items():
+            if data_type == "xdxr":
+                valid = [
+                    row for row in rows
+                    if row.get("event_date") is not None
+                    and row.get("category") is not None
+                ]
+            else:
+                valid = [row for row in rows if row.get("ex_date")]
+            if not valid:
+                # 单只股票行不可用时不拖垮整批：交给逐股路径精确报错。
+                errors[code] = "no valid rows in batch response"
+                continue
+            pairs.append((code, valid))
+        if not pairs:
+            return errors
+        initializer = DataInitializer(
+            duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr,
+        )
+        report_field = "event_date" if data_type == "xdxr" else "report_date"
+        try:
+            with self.duck.transaction() as connection:
+                batch_id = initializer._record_batch_in_connection(
+                    connection, result, data_type,
+                    sum(len(rows) for _, rows in pairs),
+                )
+                for code, rows in pairs:
+                    if data_type == "xdxr":
+                        initializer._upsert_xdxr_rows(connection, code, rows)
+                    else:
+                        initializer._upsert_dividend_rows(connection, code, rows)
+                initializer._record_field_audit_bulk_in_connection(
+                    connection, result, pairs, report_field, batch_id,
+                )
+        except Exception as error:
+            logger.warning("批量落库 %s 失败，回退逐股: %s", data_type, error)
+            for code, _ in pairs:
+                errors[code] = str(error)
+        return errors
+
+    def _fallback_market_actions(
+        self, codes: list[str], data_type: str,
+        errors: dict[str, list[str]],
+    ) -> None:
+        """Per-stock fallback so failures keep precise attribution."""
+        for code in codes:
+            outcome = self.refetch_one(code, data_type)
+            if outcome.get("status") != "success":
+                errors.setdefault(code, []).append(
+                    f"{data_type}: {outcome.get('error') or 'failed'}"
+                )
 
     def _check_retry_tasks(self) -> list[dict]:
         """读取待重试任务列表"""

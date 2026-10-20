@@ -271,7 +271,25 @@ def test_classify_announcement_dividend_and_other() -> None:
 
 
 def test_announcement_refreshes_dividends_and_corporate_actions(duckdb_store, sqlite_store) -> None:
+    """批量抓取无数据时回退逐股，分红与除权除息两个数据域都要覆盖。"""
+    import hashlib
+
+    class EmptyBatchAdapter:
+        def fetch(self, request):
+            raw = b"{}"
+            return FetchResult(
+                data=[],
+                metadata=SourceMetadata(
+                    source="tdx", fetch_time=datetime.now(UTC),
+                    raw_response_hash=hashlib.sha256(raw).hexdigest(),
+                    confidence="approximate",
+                ),
+                raw_response=raw,
+            )
+
     updater = IncrementalUpdater.__new__(IncrementalUpdater)
+    updater.adapter_mgr = EmptyBatchAdapter()
+    updater.market_actions_batch_size = 50
     calls: list[tuple[str, str]] = []
     updater.refetch_one = lambda code, data_type: calls.append((code, data_type)) or {"status": "success"}
 
