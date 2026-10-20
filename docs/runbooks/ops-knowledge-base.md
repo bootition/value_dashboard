@@ -44,6 +44,7 @@ supersedes: null
 | S9 | 价格主链：腾讯（连接复用）→ baostock → tdx；连续流水线 `price_fetch_pipeline_depth=64` | config；update.py |
 | S10 | **港股分红源**：`ak.stock_hk_dividend_payout_em` 底层为 `datacenter.eastmoney.com`（非 push2）；适配器 `eastmoney_hk_dividend` 硬限速 **0.5s/请求（≤2 req/s）**，逐股串行，禁止并发；`stock_zh_ah_spot()` 为映射快照源（单次请求，不属于 datacenter 限速面） | app/core/adapters/hk_dividend_adapter.py；2026-09-04 实测 |
 | S18 | **价格更新默认禁止因"陈旧"整段重拉**：`update.incremental_window_days`（默认 30 天）只是陈旧阈值，整段重拉需显式 `update.price_full_refetch_on_stale=true`（数据修复用）。默认路径始终从本地最新日期增量补缺口。反例（2026-10-20）：停用 33 天后触发全市场 5,551 只 raw+qfq 全历史重拉，腾讯每只约 20 次分页请求 + 逐股 DELETE+INSERT，吞吐 148→6.2 只/分、ETA 14.7 小时 | reports/114；app/core/update.py |
+| S19 | **TDX 逐股建连是分红/除权步骤的瓶颈**：`TdxClient.from_best_host` 实测 **5.02s/次**，同一会话内 xdxr 查询仅 0.02–0.16s。任何逐股调用 TDX 的批处理都必须改成"同批共用一次会话"（`update.market_actions_batch_size`，默认 50）：535 只可从约 76 分钟降到 5–8 分钟；失败要写 retry_list，否则会静默丢失 | reports/115；app/core/update.py |
 
 ## 3. DuckDB / 存储约束
 
@@ -60,6 +61,7 @@ supersedes: null
 | D12 | **自动更新写连接窗口会阻塞 Web 查询**：DuckDB 单写者模型下，research_statistics 全量重建的发布阶段会持续持有写连接（2026-09-03 实测约 4-6 分钟），期间普通 K 线/详情/自选请求会等待或超时。这不是连接配置冲突；优化方向是分批可见发布或快照读，而不是调大超时硬扛。**2026-09-17 补充**：自动更新是独立子进程，其持锁期间 Web 进程**完全无法新建任何连接**（Windows 文件独占：`Cannot open file ... 另一个程序正在使用此文件` + `File is already open in <子进程 PID>`）；本次价格补抓 4732 只、约 66-98 只/分，仅 price 步骤约 70 分钟（整体 1.5-2h），期间只读能力完全依赖更新前预热缓存 | reports/104、reports/113；实测 |
 | D13 | `source_audit` 冷热分离：日常 readiness/lineage 只扫热表 `source_audit`；历史排查查 `source_audit_all`。归档命令 `vd data source-audit-archive --before YYYY-MM-DD`，按 id keyset 分页，每批独立事务；正式库已归档 30,039,082 行（cutoff 2025-01-01） | reports/106；app/core/source_audit_archive.py |
 | D24 | **价格表全量替换（`DELETE ... WHERE stock_code=?`）在正式库约 10s+/股**（两表各一次，1,700 万行 + ART 主键），是"整段重拉"模式下真正的瓶颈；正式库 20.2GB（2026-09-04 重建后 7.8GB）高水位继续被推高。数据修复模式请选收盘后执行并预留数小时；常规更新不得走该路径 | reports/114；py-spy 采样 |
+| D25 | **读连接"外部锁"判定必须区分锁属主**：autoupdate 子进程持有 `.value-dashboard.update.lock` 时，其只读连接回退为读写连接会与 Web 进程的只读连接争用文件锁，Windows 报 "Cannot open file ... 另一个程序正在使用此文件"；旧逻辑因 `lock_active=true` 立即抛 `DuckDBReadLockedError`，导致 `_get_latest_financial_report_date` 返回 None（可能触发财务全量重拉）。现由 `update_lock_owned_by_current_process()` 判定属主并退避重试 | reports/115；duckdb_store.py |
 | D14 | 分红融资比为 **A股流通股本口径**：`cumulative_dividend_amount` 用 `circ_shares` 优先，total_shares 中的 H 股不得混入；港股分红未采集即不计入、缺数据返回 NULL。600941 已修正为 34.7% | reports/106；calculator.py |
 | D15 | 2026-09-04 离线重建后主库 7.8GB：`source_audit_archive`（30,039,082 行）与 `raw_response_archive_history` payload 均只存外部 Parquet（`D:\vd-cold-archive`），主库仅空表/元数据；旧库 `valuedashboard.duckdb.old-20260904013322` 保留回滚 | reports/107 |
 | D16 | **总股本分红融资比暂不发布**：当前 `dividends`/`funding_events` 只有 A 股数据，用 total_shares（A+H）会出现 600941 825.9% 类错误；待港股分红与港股融资数据源接入后再增加全市场口径字段 | reports/107 |
@@ -96,6 +98,8 @@ supersedes: null
 | G5 | 写操作面：Web 页面只读（DS3）；危险操作两段式确认（plan_id，15 分钟有效） | PRD CL10/CL11；02 |
 
 | C-LOG | **长任务 CLI 必须自带 logging 配置**：`data auto-update run` 入口调用 `_configure_update_logging()` （INFO→stderr，行缓冲）。未配置时根 logger 只在 WARNING+ 经 lastResort 输出，更新过程的 INFO 日志全部丢失，`data/logs/auto-update-child.log` 会一直为空 | reports/114；app/cli/main.py |
+
+| C-S1 | **S1 门禁固定开销 = 2 次 19GB 全量哈希**（before/after）。一轮 S1 只应跑一次并合并目标测试：每次捕获两遍全量哈希、wrapper/conftest 重复捕获、`.old-*` 41GB 回滚快照与 logs 全树哈希都会成倍放大开销（改前约 190–600GB/轮、8.5–13 分钟；现 2 次约 90s）。合成哨兵测试（test_hash_preservation）仍走真实哈希路径 | reports/115；scripts/s1-*.ps1、conftest.py |
 
 ## 6. Git 纪律（AGENTS.md 摘要）
 
@@ -139,4 +143,4 @@ supersedes: null
 
 ---
 
-*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。2026-09-05 多指数 ERP + ETF 工作台：新增 S11-S16（乐咕月度与限流、申万 50000/页并发、THS httpx/QDII null、向量化批量泛化、S1 进程冻结），schema 版本 D5 更新为 23。2026-10-20 自动更新变慢事故：新增 S18（陈旧不整段重拉）、D24（全量替换 DELETE 约 10s+/股与正式库高水位）、C-LOG（长任务 CLI 必须配置 INFO 日志）；见 reports/114。*
+*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。2026-09-05 多指数 ERP + ETF 工作台：新增 S11-S16（乐咕月度与限流、申万 50000/页并发、THS httpx/QDII null、向量化批量泛化、S1 进程冻结），schema 版本 D5 更新为 23。2026-10-20 自动更新变慢事故：新增 S18（陈旧不整段重拉）、D24（全量替换 DELETE 约 10s+/股与正式库高水位）、C-LOG（长任务 CLI 必须配置 INFO 日志）；见 reports/114。2026-10-20 分红批量/S1 提速：新增 S19（TDX 逐股建连 5s 必须批量）、D25（读锁属主判定）、C-S1（S1 固定开销来源与最小成本）；见 reports/115。*
