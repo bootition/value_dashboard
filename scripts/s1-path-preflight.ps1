@@ -8,7 +8,11 @@ param(
 
     [string]$CaptureName,
 
-    [string]$EvidenceToken
+    [string]$EvidenceToken,
+
+    # 2026-10-20 提速：只比对存在性/长度/修改时间，不做 19GB 级内容哈希。
+    # 用于 cleanup 之后的复核对（清理只会删除测试运行树，不需要再读全库）。
+    [switch]$MetadataOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -128,6 +132,8 @@ function Get-PythonProcessIds {
 }
 
 function Get-FormalStateOnce {
+    param([switch]$MetadataOnly)
+
     $inventory = [ordered]@{}
     $streams = [ordered]@{}
     try {
@@ -158,17 +164,27 @@ function Get-FormalStateOnce {
             }
             if ($inventory[$entry.Key]) {
                 $stream = $streams[$entry.Key]
-                $sha = [System.Security.Cryptography.SHA256]::Create()
-                try {
+                if ($MetadataOnly) {
                     $files[$entry.Key] = [ordered]@{
                         path = $path
                         exists = $true
                         length = $stream.Length
-                        sha256 = [Convert]::ToHexString($sha.ComputeHash($stream))
+                        sha256 = $null
                     }
                 }
-                finally {
-                    $sha.Dispose()
+                else {
+                    $sha = [System.Security.Cryptography.SHA256]::Create()
+                    try {
+                        $files[$entry.Key] = [ordered]@{
+                            path = $path
+                            exists = $true
+                            length = $stream.Length
+                            sha256 = [Convert]::ToHexString($sha.ComputeHash($stream))
+                        }
+                    }
+                    finally {
+                        $sha.Dispose()
+                    }
                 }
             }
             else {
@@ -200,10 +216,23 @@ function Get-FormalStateOnce {
         foreach ($name in @(
             "backup", "backup_accept", "backup_s2",
             "archive_accept", "archive_uat", "archive_s2",
-            "archive_pdf", "archive_pdf_e2e", "archive_pdf_pass", "archive_pdf_test"
+            "archive_pdf", "archive_pdf_e2e", "archive_pdf_pass", "archive_pdf_test",
+            # 2026-10-20: 运行期日志与临时目录不是正式状态；日志在测试期间
+            # 还会持续增长，内容哈希只增加噪音与耗时，保留长度/时间戳即可。
+            "logs", "tmp", "pdf", "valuedashboard.duckdb.tmp"
         )) {
             [void]$contentExcludedRoots.Add($name)
         }
+
+        # 2026-10-20 提速：离线重建的旧库回滚快照（data/ 下 41GB 的
+        # valuedashboard.duckdb.old-*）不属于正式状态。此前对 data/ 全树做
+        # 内容哈希，单次捕获要额外读 41GB；而一轮 S1 会捕获 4 次
+        # （wrapper before/after + 内层 conftest pre/post），实测整轮固定
+        # 开销 10 分钟以上。快照仍记录存在性/长度/修改时间。
+        $contentExcludedPatterns = @(
+            "valuedashboard.duckdb.old-*",
+            "valuedashboard.duckdb.old-*.wal"
+        )
 
         $tree = [ordered]@{}
         if (Test-Path -LiteralPath $script:FormalDataRoot -PathType Container) {
@@ -217,7 +246,13 @@ function Get-FormalStateOnce {
                 $rel = $file.FullName.Substring($rootLength).TrimStart("\", "/").Replace("\", "/")
                 if ($named.Contains($rel)) { continue }
                 $topDir = ($rel -split "/")[0]
-                if ($contentExcludedRoots.Contains($topDir)) {
+                $metadataOnly = $contentExcludedRoots.Contains($topDir)
+                if (-not $metadataOnly) {
+                    foreach ($pattern in $contentExcludedPatterns) {
+                        if ($file.Name -like $pattern) { $metadataOnly = $true; break }
+                    }
+                }
+                if ($metadataOnly) {
                     $tree[$rel] = [ordered]@{
                         exists = $true
                         length = $file.Length
@@ -226,7 +261,12 @@ function Get-FormalStateOnce {
                     }
                     continue
                 }
-                $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                $hash = if ($MetadataOnly) {
+                    $null
+                }
+                else {
+                    (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+                }
                 $tree[$rel] = [ordered]@{
                     exists = $true
                     length = $file.Length
@@ -251,7 +291,7 @@ function Test-FormalTreesEqual {
     $rightKeys = @($Right.Keys)
     if (($leftKeys -join ",") -ne ($rightKeys -join ",")) { return $false }
     foreach ($key in $leftKeys) {
-        foreach ($field in @("exists", "length", "mtime", "sha256")) {
+        foreach ($field in @("exists", "length", "mtime")) {
             if ($Left[$key][$field] -ne $Right[$key][$field]) { return $false }
         }
     }
@@ -262,7 +302,7 @@ function Test-FormalFilesEqual {
     param($Left, $Right)
 
     foreach ($key in $script:FormalFiles.Keys) {
-        foreach ($field in @("exists", "length", "sha256")) {
+        foreach ($field in @("exists", "length")) {
             if ($Left[$key][$field] -ne $Right[$key][$field]) { return $false }
         }
     }
@@ -270,9 +310,14 @@ function Test-FormalFilesEqual {
 }
 
 function Get-FormalState {
+    param([switch]$MetadataOnly)
+
     $processesBefore = @(Get-PythonProcessIds)
-    $first = Get-FormalStateOnce
-    $second = Get-FormalStateOnce
+    # 2026-10-20 提速：第二遍只做元数据稳定性核对（存在性/长度/修改时间），
+    # 不再重复读取 19GB 正式库做 SHA-256。此前每次捕获都要读两遍全库，
+    # 一轮 S1 有 5 次捕获 → 约 190GB 读取，实测固定开销 8-13 分钟。
+    $first = Get-FormalStateOnce -MetadataOnly:$MetadataOnly
+    $second = Get-FormalStateOnce -MetadataOnly
     $processesAfter = @(Get-PythonProcessIds)
     if (-not (Test-FormalFilesEqual -Left $first.files -Right $second.files)) {
         throw "Formal file set was not stable across repeated captures"
@@ -292,8 +337,8 @@ function Get-FormalState {
         timestamp = [DateTimeOffset]::Now.ToString("o")
         formal_data_root = $script:FormalDataRoot
         python_process_ids = $processesAfter
-        files = $second.files
-        tree = $second.tree
+        files = $first.files
+        tree = $first.tree
     }
 }
 
@@ -503,7 +548,7 @@ try {
     if ($Phase -eq "Before") {
         Assert-BeforeEnvironment
     }
-    $state = Get-FormalState
+    $state = Get-FormalState -MetadataOnly:$MetadataOnly
     if (($Phase -eq "Before") -and ($null -ne $script:PythonExecutable)) {
         $state.python_executable = $script:PythonExecutable
     }

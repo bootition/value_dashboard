@@ -33,6 +33,14 @@ _FORMAL_FILES = (
     "valuedashboard.sqlite-shm",
 )
 _CHUNK_SIZE = 1024 * 1024
+# wrapper 捕获证据的键名 → 正式文件名（2026-10-20 内层证据复用）
+_WRAPPER_FILE_KEYS = {
+    "formal_duckdb": "valuedashboard.duckdb",
+    "formal_sqlite": "valuedashboard.sqlite",
+    "duckdb_wal": "valuedashboard.duckdb.wal",
+    "sqlite_wal": "valuedashboard.sqlite-wal",
+    "sqlite_shm": "valuedashboard.sqlite-shm",
+}
 
 
 def pytest_ignore_collect(collection_path: Path, /) -> bool:
@@ -53,17 +61,75 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _load_wrapper_fingerprint(path: str, phase: str) -> dict | None:
+    """把 wrapper 的 before/after 捕获转换为内层证据载荷。
+
+    2026-10-20 提速：正式库已增至 19GB，wrapper 会话前后各做一次完整内容
+    哈希就足够作为权威证据；内层证据（防御纵深）不再重复读取同一份字节。
+    """
+    try:
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    wrapper_files = raw.get("files")
+    if not isinstance(wrapper_files, dict):
+        return None
+    # 只在"同一个正式 data/ 根 + 同一组具名文件"时复用；合成哨兵目录
+    # （test_hash_preservation）必须继续走真实哈希路径。
+    if str(raw.get("formal_data_root") or "") != str(_FORMAL_DATA_ROOT):
+        return None
+    if set(wrapper_files) != set(_WRAPPER_FILE_KEYS):
+        return None
+    files: dict[str, dict] = {}
+    for name in _FORMAL_FILES:
+        if name not in _WRAPPER_FILE_KEYS.values():
+            return None
+    for wrapper_key, name in _WRAPPER_FILE_KEYS.items():
+        entry = wrapper_files.get(wrapper_key) or {}
+        files[name] = {
+            "exists": bool(entry.get("exists")),
+            "length": entry.get("length"),
+            "sha256": entry.get("sha256"),
+        }
+    return {
+        "schema_version": 1,
+        "phase": phase,
+        "timestamp_epoch": time.time(),
+        "formal_data_root": str(_FORMAL_DATA_ROOT),
+        "files": files,
+        "source": "wrapper-before-evidence",
+    }
+
+
 def _capture_inner_evidence(config: pytest.Config, phase: str) -> None:
     """防御纵深证据捕获：正式 data/ 具名文件的存在性/长度/哈希。
 
     证据根由 wrapper 以 ``VD_TEST_EVIDENCE_ROOT`` 提供；未提供时跳过
     （非 wrapper 手工 pytest 运行同样合法，门禁判断归 wrapper）。
+
+    2026-10-20 提速：wrapper 已提供基线（``VD_S1_BASELINE_FINGERPRINT``）
+    时，pre 直接复用该结果；``VD_S1_WRAPPER_OWNS_POST=1`` 时 post 由 wrapper
+    在 after 捕获后写出，避免内层重复哈希 19GB 正式库。
     """
     evidence_root = os.environ.get("VD_TEST_EVIDENCE_ROOT")
     if not evidence_root:
         return
     out_dir = Path(evidence_root)
     out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / f"inner-formal-fingerprint-{phase}.json"
+
+    baseline_path = os.environ.get("VD_S1_BASELINE_FINGERPRINT")
+    if phase == "pre" and baseline_path:
+        reused = _load_wrapper_fingerprint(baseline_path, phase)
+        if reused is not None:
+            target.write_text(
+                json.dumps(reused, ensure_ascii=False, indent=2), encoding="utf-8",
+            )
+            return
+    owns_post_root = os.environ.get("VD_S1_WRAPPER_OWNS_POST")
+    if phase == "post" and owns_post_root and owns_post_root == str(_FORMAL_DATA_ROOT):
+        return
+
     files: dict[str, dict] = {}
     for name in _FORMAL_FILES:
         path = _FORMAL_DATA_ROOT / name
@@ -82,7 +148,6 @@ def _capture_inner_evidence(config: pytest.Config, phase: str) -> None:
         "formal_data_root": str(_FORMAL_DATA_ROOT),
         "files": files,
     }
-    target = out_dir / f"inner-formal-fingerprint-{phase}.json"
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

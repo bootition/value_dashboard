@@ -94,20 +94,63 @@ function Assert-SafeRunTreeForCleanup {
     }
 }
 
+function Write-InnerPostFingerprint {
+    param(
+        [Parameter(Mandatory = $true)][string]$EvidenceDir,
+        [Parameter(Mandatory = $true)]$AfterEvidence
+    )
+
+    # 内层 post 证据与 wrapper after 捕获是同一时刻的同一份数据；直接复用，
+    # 避免 conftest 再哈希一遍 19GB 正式库（2026-10-20 提速）。
+    $map = [ordered]@{
+        formal_duckdb = "valuedashboard.duckdb"
+        formal_sqlite = "valuedashboard.sqlite"
+        duckdb_wal = "valuedashboard.duckdb.wal"
+        sqlite_wal = "valuedashboard.sqlite-wal"
+        sqlite_shm = "valuedashboard.sqlite-shm"
+    }
+    $files = [ordered]@{}
+    foreach ($key in $map.Keys) {
+        $entry = $AfterEvidence.files.$key
+        if ($null -eq $entry) { continue }
+        $files[$map[$key]] = [ordered]@{
+            exists = [bool]$entry.exists
+            length = $entry.length
+            sha256 = $entry.sha256
+        }
+    }
+    $payload = [ordered]@{
+        schema_version = 1
+        phase = "post"
+        timestamp_epoch = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000
+        formal_data_root = (Join-Path $projectRoot "data")
+        files = $files
+        source = "wrapper-after-evidence"
+    }
+    Write-NewUtf8File `
+        -Path (Join-Path $EvidenceDir "inner-formal-fingerprint-post.json") `
+        -Content ($payload | ConvertTo-Json -Depth 12)
+}
+
 function Compare-FormalState {
     param(
         [Parameter(Mandatory = $true)]$Before,
         [Parameter(Mandatory = $true)]$After,
         [Parameter(Mandatory = $true)][string]$OutputDirectory,
-        [string]$FilePrefix = ""
+        [string]$FilePrefix = "",
+        # 2026-10-20 提速：cleanup 之后的复核对只比元数据（存在性/长度/mtime），
+        # 不再为 19GB 正式库做第二次内容哈希。
+        [switch]$MetadataOnly
     )
 
+    $fileFields = if ($MetadataOnly) { @("exists", "length") } else { @("exists", "length", "sha256") }
+    $treeFields = if ($MetadataOnly) { @("exists", "length", "mtime") } else { @("exists", "length", "mtime", "sha256") }
     $differences = @()
     $keys = @("formal_duckdb", "formal_sqlite", "duckdb_wal", "sqlite_wal", "sqlite_shm")
     foreach ($key in $keys) {
         $beforeFile = $Before.files.$key
         $afterFile = $After.files.$key
-        foreach ($field in @("exists", "length", "sha256")) {
+        foreach ($field in $fileFields) {
             if ($beforeFile.$field -ne $afterFile.$field) {
                 $differences += [ordered]@{
                     file = $key
@@ -126,7 +169,7 @@ function Compare-FormalState {
     $afterTree = $After.tree
     $treeRelPaths = @($beforeTree.Keys + $afterTree.Keys) | Sort-Object -Unique
     foreach ($rel in $treeRelPaths) {
-        foreach ($field in @("exists", "length", "mtime", "sha256")) {
+        foreach ($field in $treeFields) {
             $beforeValue = if ($beforeTree.Contains($rel)) { $beforeTree[$rel][$field] } else { $null }
             $afterValue = if ($afterTree.Contains($rel)) { $afterTree[$rel][$field] } else { $null }
             if ($beforeValue -ne $afterValue) {
@@ -298,6 +341,10 @@ try {
         throw "Preflight Before failed"
     }
     $beforeCaptured = $true
+    # 2026-10-20 提速：把 wrapper 的 before 捕获作为内层证据基线，并声明
+    # post 由 wrapper 写出，避免 conftest 重复哈希 19GB 正式库。
+    $env:VD_S1_BASELINE_FINGERPRINT = Join-Path $runDir "pre\before-evidence.json"
+    $env:VD_S1_WRAPPER_OWNS_POST = (Join-Path $projectRoot "data")
 
     try {
         try {
@@ -373,6 +420,14 @@ try {
                 try {
                     $delta = Compare-FormalState -Before $before -After $after -OutputDirectory $runDir
                     $afterCaptured = $true
+                    try {
+                        Write-InnerPostFingerprint -EvidenceDir $runDir -AfterEvidence $after
+                    }
+                    catch {
+                        [Console]::Error.WriteLine(
+                            "Inner post fingerprint write failed: $($_.Exception.Message)"
+                        )
+                    }
                     $newAfterProcesses = @(
                         $after.python_process_ids |
                             Where-Object { $_ -notin $before.python_process_ids }
@@ -432,7 +487,8 @@ try {
                     -Phase After `
                     -EvidenceDir $runDir `
                     -CaptureName "after-cleanup" `
-                    -EvidenceToken $evidenceToken | Out-Null
+                    -EvidenceToken $evidenceToken `
+                    -MetadataOnly | Out-Null
                 if ($LASTEXITCODE -ne 0) {
                         throw "Post-cleanup formal-state capture failed"
                 }
@@ -442,7 +498,8 @@ try {
                         -Before $before `
                         -After $postCleanupAfter `
                         -OutputDirectory $runDir `
-                        -FilePrefix "post-cleanup-"
+                        -FilePrefix "post-cleanup-" `
+                        -MetadataOnly
                     if ($postCleanupDelta) {
                         $finalExit = 99
                     }
