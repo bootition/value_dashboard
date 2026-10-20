@@ -8,11 +8,32 @@ M7: 完整命令树
 from __future__ import annotations
 
 import json
+import logging
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import typer
+
+
+def _configure_update_logging() -> None:
+    """自动更新是长时间子进程：把 INFO 级日志写到 stderr。
+
+    此前 CLI 入口未配置 logging，根 logger 仅在 WARNING+ 时经 lastResort
+    输出，更新过程（阶段、缺口、吞吐、跳过原因）的 INFO 日志全部丢弃，
+    只能靠 SQLite 的 job_logs 事后还原（2026-10-20 更新变慢诊断）。
+    stderr 在 Python 3.9+ 始终行缓冲，重定向到 auto-update-child.log 后
+    可实时看到进度。
+    """
+    root = logging.getLogger()
+    if root.handlers:
+        return
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        stream=sys.stderr,
+    )
 
 
 def _sanitize_path_json(obj: Any) -> str:
@@ -1014,6 +1035,7 @@ def auto_update_run(
     max_stocks: int = typer.Option(0, "--max-stocks", help="最多更新N只股票(0=全部)"),
 ) -> None:
     """立即执行一次自动更新（等价手动触发）"""
+    _configure_update_logging()
     from app.cli.protocol import make_response
 
     controller = _auto_update_controller()
