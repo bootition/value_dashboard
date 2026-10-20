@@ -56,7 +56,9 @@ update:
   duckdb_memory_limit: "8GB"  # 全库更新子进程的 DuckDB 预算（更新后进程退出并释放）
   duckdb_threads: 2           # 全库更新低内存模式：低并行 + 关闭插入序保留
   startup: true           # 启动时自动执行增量更新
-  incremental_window_days: 30  # 本地价格陈旧超过该天数时 raw 全量重拉
+  incremental_window_days: 30  # 本地价格陈旧阈值（仅配合下一项的数据修复重拉）
+  price_full_refetch_on_stale: false  # 默认关闭：陈旧时仍从本地最新日期增量补缺口；
+                                      # true 才在超过 incremental_window_days 时整段重拉（修复用）
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
   announcement_catchup_days: 45  # 公告游标缺失时的首次追补窗口（覆盖中报季）
   announcement_financial_max_pages: 450  # CNINFO 每页固定 30 条；财务类别追补上限

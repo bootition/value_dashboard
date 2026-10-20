@@ -180,7 +180,7 @@ def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
 
 
 def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store) -> None:
-    """本地价格陈旧超过窗口上限（默认 30 天）时，raw 也整段重拉。"""
+    """显式开启数据修复开关时，本地价格陈旧超过窗口上限才整段重拉。"""
     requests = []
 
     class Adapter:
@@ -201,12 +201,52 @@ def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store)
     )
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._get_latest_local_price_date = lambda: "2026-06-01"
+    updater.price_full_refetch_on_stale = True
 
     result = updater._update_prices_incremental(max_stocks=1)
 
     assert result["success"] == 1
     assert result["raw_full_refetch"] is True
     assert all(request.start_date is None for request in requests)
+
+
+def test_stale_local_price_stays_incremental_by_default(duckdb_store, sqlite_store) -> None:
+    """默认配置下本地价格陈旧仍走增量：从本地最新日期补缺口，不整段重拉。
+
+    回归 2026-10-20 事故：长时间未启动后 gap > 30 天触发全市场全历史
+    DELETE+INSERT，吞吐从约 150 只/分跌到约 6 只/分。
+    """
+    requests = []
+
+    class Adapter:
+        def fetch(self, request):
+            requests.append(request)
+            raw_response = b'{"price_daily":true}'
+            return FetchResult(
+                data=[{"trade_date": "2026-07-30", "close": 10.0, "volume": 100.0}],
+                metadata=SourceMetadata(
+                    source="akshare_eastmoney", fetch_time=datetime.now(UTC),
+                    raw_response_hash=hashlib.sha256(raw_response).hexdigest(), confidence="approximate",
+                ),
+                raw_response=raw_response,
+            )
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000003', 'TEST', 'SZSE')"
+    )
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES ('000003', '2026-06-01', 9)"
+        )
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
+    updater._get_latest_local_price_date = lambda: "2026-06-01"
+
+    result = updater._update_prices_incremental(max_stocks=1)
+
+    assert result["success"] == 1
+    assert result["raw_full_refetch"] is False
+    starts = {request.adjust: request.start_date for request in requests}
+    assert starts == {"raw": "2026-06-01", "qfq": "2026-06-01"}
 
 
 def test_raw_and_qfq_fetch_in_parallel(duckdb_store, sqlite_store) -> None:
@@ -530,6 +570,8 @@ def test_full_replace_rejects_truncated_source_and_keeps_old_data(
     updater._PRICE_FULL_REPLACE_THRESHOLD = 0
     updater._PRICE_FULL_REPLACE_MIN_RATIO = 0.5
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
+    # 本用例验证"整段重拉遇到源截断"防线，需显式开启修复模式重拉
+    updater.price_full_refetch_on_stale = True
 
     report = updater._update_prices_incremental(max_stocks=1)
 

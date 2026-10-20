@@ -107,10 +107,16 @@ class IncrementalUpdater:
         self.adapter_mgr = adapter_mgr or AdapterManager()
         self.duck = duck
         self.sqlite = sqlite
-        # 增量窗口上限：本地价格距今超过该天数时，raw 也整段重拉
-        # （默认 30 天；可由 config/update.incremental_window_days 覆盖）
+        # 本地价格陈旧阈值：仅当显式开启 price_full_refetch_on_stale 时，
+        # 距今超过该天数的 raw 才整段重拉（数据修复场景）。
+        # 默认关闭：常规追赶一律从本地最新日期增量拉取。否则长时间未启动
+        # 会把全市场个股全历史（每股数千行）逐股 DELETE+INSERT 回主表，
+        # 实测吞吐从约 150 只/分跌到约 6 只/分（2026-10-20 诊断）。
         self.incremental_window_days: int = self._load_update_config(
             "incremental_window_days", default=30
+        )
+        self.price_full_refetch_on_stale: bool = self._load_update_config(
+            "price_full_refetch_on_stale", default=False
         )
         # 全市场公告检查的日期回看窗口（默认 3 天）
         self.announcement_lookback_days: int = self._load_update_config(
@@ -2442,7 +2448,8 @@ class IncrementalUpdater:
 
         - 普通股票：按 latest_local → today 增量补齐 raw + qfq
         - 发生除权除息（xdxr）的股票：qfq 全历史重拉，保证复权口径一致
-        - 本地价格陈旧超过窗口上限：raw 也走全量重拉
+        - 本地价格陈旧：默认仍从本地最新日期增量补缺口；
+          仅 price_full_refetch_on_stale=true 时才整段重拉（数据修复用）
 
         detail_cb: 每只股票处理完后的细粒度回调 (step_name, {done, total,
             current, label})，供前端实时进度条使用。
@@ -2535,9 +2542,12 @@ class IncrementalUpdater:
         if xdxr_codes:
             logger.info(f"[增量] {len(xdxr_codes)} 只股票在窗口内发生除权除息，qfq 将全历史重拉")
 
-        # 本地数据过于陈旧（超过窗口上限）：raw 也整段重拉
+        # 本地数据陈旧时默认仍走增量：从本地最新日期补缺口即可覆盖全部缺失
+        # 交易日。整段重拉只作为显式数据修复手段（price_full_refetch_on_stale），
+        # 因为它会把每股数千行历史 DELETE+INSERT 回 17M 行主表，实测单股 10s+，
+        # 全市场追赶一次要十几小时（2026-10-20 诊断，reports/114）。
         raw_full_refetch = False
-        if latest_local:
+        if self.price_full_refetch_on_stale and latest_local:
             try:
                 latest_date = datetime.strptime(latest_local, "%Y-%m-%d").date()
                 gap_days = (datetime.now().date() - latest_date).days
@@ -2546,6 +2556,8 @@ class IncrementalUpdater:
                 raw_full_refetch = False
         if raw_full_refetch:
             logger.info(f"[增量] 本地价格陈旧超过 {self.incremental_window_days} 天，raw 整段重拉")
+        elif latest_local:
+            logger.info(f"[增量] 本地价格截至 {latest_local}，从该日期增量补缺口（不整段重拉）")
 
         success_count = 0
         fail_count = 0
