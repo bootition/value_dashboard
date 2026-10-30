@@ -100,6 +100,10 @@ vd data capital-history --cross-only --max-stocks 250 --batch-size 50 --batch-co
 | 更新卡在 running | 先确认 `.value-dashboard.update.lock` 属主进程是否存活；无活锁时新版 trigger/父进程会自动结算 `recover_interrupted_run`。仍无法恢复则 `vd data reconcile_jobs` 生成确认 plan → `reconcile_jobs_execute` |
 | 子进程无 traceback 突然停止 | 查 Windows Application 事件 1000/1001（`python.exe`、`ucrtbase.dll`、`0xc0000409`/BEX64）与 `auto-update-child.log` 最后时间戳；新版 CLI 已启用 `faulthandler`，下次应落 Python 栈。参见 `reports/116` |
 | 重复打开 `start.bat` 只返回 `already_running` | 2026-10-30 起 trigger 以 child guard + 活锁判重；无活锁的陈旧 `running` 会先结算再触发。若仍出现，检查是否有活进程持锁 |
+| 页面“数据未就绪”但更新已结束 | 分别检查 `minimum_data_readiness.ready`、指标 `rejected` 原因、`/api/data-status/summary` 是否 200；`indicators.rejected` 常见于 `snapshot_publish_gate` 股本不变量（如新股 90 天豁免到期后 shares 仍 NULL） |
+| 指标快照 `rejected: share_capital_integrity` | 用 `SELECT stock_code,total_shares,circ_shares FROM stock_meta WHERE ...` 定位；用 SZSE/交易所官方清单 + 腾讯实时报价双源核验后，经 `scripts/rebuild_share_capital.py --only-codes <code>` 事务化补股本，再 `vd data compute_indicators`。禁止绕过门禁或猜测股本。参见 `reports/116` |
+| `price_freshness` 长期不消失 | 对比 raw/qfq 最新日期；旧 retry 可能只补 raw。现 retry 默认成对增量刷新，单边维护必须显式写 adjust。必要时 `scripts/repair_prices.py --phase incremental --codes-file <file>` 并重算指标。参见 `reports/116` |
+| `summary` 固定 503 `data quality status is unavailable` | 查 `start.log` 具体 Binder Error；2026-10-30 为 `raw_response_archive_all` 无 `storage` 列。新版改查 active 热表 `raw_response_archive`。若仍 503，核对归档合并视图列与应用查询。参见 `reports/116` |
 | 部分源失败 | 适配器自动回退链生效；查看 retry 列表，网络恢复后 scheduler 会因到期 retry 启动下一轮 |
 | legacy 空 payload | `vd data quarantine_legacy_records` + `_execute`（只隔离不删除证据） |
 | 东财行情源被封 | 仅 push2/push2his（行情/逐股信息）被封，IP 级临时封锁；F10 财报/股本/分红源仍可用。价格已回退腾讯/BaoStock/TDX，自动更新无需干预。冷却期至 2026-08-15 勿触碰 push2 系；到期后单次探测（见 `reports/61`） |

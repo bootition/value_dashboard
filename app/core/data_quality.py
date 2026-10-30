@@ -1370,9 +1370,11 @@ def build_data_quality_status(
                )) AS audit_archive_gap_rows,
             (SELECT COUNT(*) FROM source_audit s
              WHERE EXISTS (
-                 SELECT 1 FROM raw_response_archive_all archive
+                 -- 2026-10-30：active 热表直接检查空 payload。不能用
+                 -- raw_response_archive_all 的 storage 列：轮转/重建后的
+                 -- 合并视图不保证带 storage，曾导致 summary 每 5 分钟 503。
+                 SELECT 1 FROM raw_response_archive archive
                  WHERE archive.raw_response_hash = s.raw_response_hash
-                   AND archive.storage = 'active'
                    AND (archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0)
              )) AS empty_archive_payload_rows,
             (SELECT COUNT(*) FROM fetch_batch batch

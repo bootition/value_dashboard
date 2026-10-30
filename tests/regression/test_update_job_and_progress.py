@@ -889,3 +889,59 @@ def test_financial_detail_gap_uses_sector_universal_probes(
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     assert updater._financial_detail_gap_codes() == []
+
+
+def test_price_retry_without_adjust_refreshes_raw_and_qfq(
+    duckdb_store, sqlite_store
+) -> None:
+    """2026-10-30：价格失败默认为 raw+qfq 成对重试，不能只补 raw。
+
+    旧逻辑 extra_json={} 时 adjust 默认 raw，raw 重试成功后删除 retry，
+    qfq 永久停在旧日期，readiness 的 price_freshness 持续失败。
+    """
+    with duckdb_store.write_connection() as conn:
+        conn.execute(
+            """INSERT INTO stock_meta
+                   (stock_code, exchange, name, is_listed, is_suspended, listing_date)
+               VALUES ('000001', 'SZSE', 'fixture', TRUE, FALSE, '2020-01-01')
+               ON CONFLICT DO NOTHING"""
+        )
+        for table in ("price_daily_raw", "price_daily_qfq"):
+            conn.execute(
+                f"""INSERT INTO {table}
+                        (stock_code, trade_date, close)
+                    VALUES ('000001', '2026-08-05', 1.0)
+                    ON CONFLICT DO NOTHING"""
+            )
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            """INSERT INTO retry_list
+                   (stock_code, data_type, adapter, error, retry_count, extra_json)
+               VALUES ('000001', 'price_daily', 'manager', 'paired failure', 0, '{}')"""
+        )
+        retry_id = conn.execute(
+            "SELECT id FROM retry_list WHERE stock_code = '000001'"
+        ).fetchone()[0]
+
+    manager = _SimulatedPriceManager()
+    updater = IncrementalUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=manager,
+    )
+    report = updater._retry_failed_tasks([{
+        "id": retry_id,
+        "stock_code": "000001",
+        "data_type": "price_daily",
+        "adapter": "manager",
+        "error": "paired failure",
+        "retry_count": 0,
+        "extra_json": "{}",
+    }])
+
+    assert report["status"] == "success"
+    assert manager.calls == [("000001", "raw"), ("000001", "qfq")]
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        latest = duckdb_store.read_query(
+            f"SELECT MAX(trade_date) AS latest FROM {table} WHERE stock_code = '000001'"
+        )[0]["latest"]
+        assert str(latest)[:10] == "2026-08-06"
+    assert sqlite_store.query("SELECT id FROM retry_list") == []

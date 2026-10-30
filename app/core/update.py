@@ -2798,7 +2798,10 @@ class IncrementalUpdater:
             nonlocal success_count, updated_codes, fail_count
             if err is not None or raw_result is None:
                 fail_count += 1
-                self._record_failure(code, "price_daily", "manager", err or "empty")
+                self._record_failure(
+                    code, "price_daily", "manager", err or "empty",
+                    extra_json=json.dumps({"adjust": "both"}),
+                )
             else:
                 batch.append((code, raw_result, qfq_result, raw_full_requested, qfq_full_requested))
             if len(batch) >= batch_size:
@@ -3603,49 +3606,64 @@ class IncrementalUpdater:
                 still_failing += 1
                 self._mark_retry_failed(retry_id, "invalid retry metadata")
                 continue
-            adjust = extra.get("adjust", "raw")
-
-            # 增量重试：从本地最新日期起拉缺口，避免对已恢复历史的股票
-            # 重复全历史抓取（每条约 3000+ 行，串行处理时拖慢整个重试轮）。
-            table = "price_daily_raw" if adjust == "raw" else "price_daily_qfq"
-            start_from: str | None = None
-            try:
-                latest_rows = self.duck.read_query(
-                    f"SELECT MAX(trade_date) AS latest FROM {table} WHERE stock_code = ?",
-                    [stock_code],
-                )
-                latest_value = latest_rows[0]["latest"] if latest_rows else None
-                if latest_value:
-                    start_from = str(latest_value)[:10]
-            except Exception:
-                start_from = None
-
-            # 重新抓取
-            result = self.adapter_mgr.fetch(FetchRequest(
-                data_type=data_type,
-                stock_codes=[stock_code],
-                adjust=adjust,
-                start_date=start_from,
-                end_date=datetime.now().strftime("%Y-%m-%d"),
-            ))
-
-            if result.metadata.error or not result.data:
-                still_failing += 1
-                self._mark_retry_failed(
-                    retry_id,
-                    result.metadata.error or "empty result",
-                )
-            else:
+            # 2026-10-30 修复：价格管道 raw/qfq 是成对失败的，旧 retry
+            # 默认只重抓 raw，成功后删掉任务，导致 qfq 永久停在旧日期，
+            # readiness 的 price_freshness 持续失败。无显式 adjust 时
+            # 默认同时增量刷新 raw + qfq；显式单边任务保持原语义。
+            adjust = extra.get("adjust") or "both"
+            adjusts = ("raw", "qfq") if adjust == "both" else (adjust,)
+            end_date = datetime.now().strftime("%Y-%m-%d")
+            results: dict[str, Any] = {}
+            failure: str | None = None
+            for side in adjusts:
+                table = "price_daily_raw" if side == "raw" else "price_daily_qfq"
+                start_from: str | None = None
                 try:
-                    self._persist_price_with_lineage(stock_code, adjust, result)
-                except (RuntimeError, ValueError, TypeError) as error:
-                    still_failing += 1
-                    self._mark_retry_failed(retry_id, str(error))
-                    continue
-                self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
-                success_count += 1
-                note_snapshot_input(stock_code)
-                logger.info(f"  重试成功并落库: {stock_code} {data_type} adjust={adjust}")
+                    latest_rows = self.duck.read_query(
+                        f"SELECT MAX(trade_date) AS latest FROM {table} WHERE stock_code = ?",
+                        [stock_code],
+                    )
+                    latest_value = latest_rows[0]["latest"] if latest_rows else None
+                    if latest_value:
+                        start_from = str(latest_value)[:10]
+                except Exception:
+                    start_from = None
+                result = self.adapter_mgr.fetch(FetchRequest(
+                    data_type=data_type,
+                    stock_codes=[stock_code],
+                    adjust=side,
+                    start_date=start_from,
+                    end_date=end_date,
+                ))
+                if result.metadata.error or not result.data:
+                    failure = result.metadata.error or f"empty {side} result"
+                    break
+                results[side] = result
+
+            if failure is not None:
+                still_failing += 1
+                self._mark_retry_failed(retry_id, failure)
+                continue
+            try:
+                if adjust == "both":
+                    self._persist_incremental_price_pair(
+                        stock_code, results["raw"], results["qfq"],
+                        full_field_audit=True,
+                    )
+                else:
+                    self._persist_price_with_lineage(
+                        stock_code, adjust, results[adjust],
+                    )
+            except (RuntimeError, ValueError, TypeError) as error:
+                still_failing += 1
+                self._mark_retry_failed(retry_id, str(error))
+                continue
+            self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+            success_count += 1
+            note_snapshot_input(stock_code)
+            logger.info(
+                "  重试成功并落库: %s %s adjust=%s", stock_code, data_type, adjust,
+            )
 
         logger.info(f"[增量] 重试完成: 成功 {success_count}, 仍失败 {still_failing}")
         return {

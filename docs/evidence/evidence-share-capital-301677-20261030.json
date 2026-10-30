@@ -1,0 +1,63 @@
+{
+  "captured_at": "2026-10-30T03:08:03.564791+00:00",
+  "env": "formal",
+  "duckdb_path": "D:\\Mr.Q\\掌控经济\\value-dashboard\\data\\valuedashboard.duckdb",
+  "universe": 1,
+  "written": 1,
+  "skipped": {},
+  "mismatches": [],
+  "per_exchange": {
+    "SZSE": {
+      "written": 1
+    }
+  },
+  "samples": [
+    {
+      "stock_code": "301677",
+      "exchange": "SZSE",
+      "total": 100000000,
+      "circ": 21440018,
+      "as_of": "20261030",
+      "source": "official_list+tencent",
+      "quote_time": "20261030110757",
+      "note": "circ_confirmed;total_confirmed"
+    },
+    {
+      "stock_code": "301677",
+      "exchange": "SZSE",
+      "total": 100000000,
+      "circ": 21440018,
+      "as_of": "20261030",
+      "source": "official_list+tencent",
+      "quote_time": "20261030110757",
+      "note": "circ_confirmed;total_confirmed"
+    }
+  ],
+  "batch_id": "a482d4fa-8d5f-440e-985c-1e40ab12056f",
+  "raw_response_hash": "18ab65737059712675a7195bb511646e656b568f20840a5047412c8a33836927",
+  "skipped_codes": {},
+  "post_verification": {
+    "circ_exceeds_total_listed": 0,
+    "missing_by_exchange": [
+      {
+        "exchange": "BSE",
+        "missing_total": 0,
+        "missing_circ": 0,
+        "listed": 354
+      },
+      {
+        "exchange": "SSE",
+        "missing_total": 10,
+        "missing_circ": 10,
+        "listed": 2318
+      },
+      {
+        "exchange": "SZSE",
+        "missing_total": 14,
+        "missing_circ": 14,
+        "listed": 2905
+      }
+    ],
+    "audit_rows_for_batch": 2
+  }
+}
