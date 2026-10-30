@@ -1001,3 +1001,29 @@ def test_statistics_prime_batch_matches_per_stock_queries(
     assert plain._stats_for_stock("600519", plain.build_series("600519")) == batched._stats_for_stock(
         "600519", batched.build_series("600519")
     )
+
+
+def test_update_many_progress_carries_done_and_total(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """2026-10-30：历史股本进度必须回传 done/total，不能永远显示 0/0。"""
+    codes = ["600519", "600000"]
+    for code in codes:
+        _seed_stock(duckdb_store, code)
+    updater = _updater(
+        duckdb_store, sqlite_store, _FakeCapitalAdapter(main=_cross_main()),
+    )
+    events: list[dict] = []
+
+    report = updater.update_many(
+        codes,
+        cross_check=False,
+        progress_cb=lambda code, outcome: events.append(
+            {"code": code, **outcome}
+        ),
+    )
+
+    assert report["status"] == "success"
+    assert [event["done"] for event in events] == [1, 2]
+    assert [event["total"] for event in events] == [2, 2]
+    assert [event["code"] for event in events] == codes

@@ -21,6 +21,8 @@ last-reviewed: 2026-10-30
 | 指标快照被拒、页面“数据未就绪” | `snapshot_publish_gate` 的 `share_capital_integrity` 命中 `301677`：2026-07-30 上市，10-28 起超过 90 天新股豁免，而 `stock_meta.total_shares/circ_shares` 仍为 NULL；全市场快照 fail-closed | 用 SZSE 官方清单 + 腾讯实时报价双源核验 `100,000,000 / 21,440,018`，事务化补 `stock_meta`，证据见 `docs/evidence/evidence-share-capital-301677-20261030.json`；重算快照成功 5,575 只 |
 | `price_freshness` 6 只持续失败 | 6 只 raw 已到 10/30，但 qfq 停在 10/19；旧价格 retry 在 `extra_json={}` 时默认 `adjust=raw`，raw 成功后删除 retry，qfq 永不重试 | 价格失败登记调整为 raw+qfq；retry 默认成对增量刷新。6 只用 `repair_prices.py --phase incremental` 补 baostock raw/qfq 各 48 行，证据见 `docs/evidence/evidence-price-repair-20261030.json` |
 | `summary` 每 5 分钟 503 | `build_data_quality_status()` 使用 `raw_response_archive_all.storage='active'`，但轮转/重建后的视图没有 `storage` 列，报 `Referenced table "archive" not found` | 改为直接检查 active 热表 `raw_response_archive` 的空 payload；summary 恢复 HTTP 200 |
+| 历史股本进度恒为 `0/0` | `CapitalHistoryUpdater.update_many()` 传给 `progress_cb` 的只有 `update_stock()` outcome，不含 done/total；上层读不到就落成 0/0 | 回调改为 `{**outcome, "done": index+1, "total": total}`；定向回归断言 1/2、2/2 |
+| 侧边栏“数据就绪”但仍在更新 | “就绪”是 `minimum_data_readiness` 质量门禁，不是“没有后台任务”；自动更新仍会抓当天价格、公告、低频域和重建统计。侧边栏原来只读一次 summary，不知道 running 状态 | App.vue 每 30s 轻量轮询 auto-update；ready+running 显示“数据就绪 · 更新中”，未就绪+running 显示“数据未就绪 · 更新中” |
 
 ## 2. 日志证据
 
@@ -67,6 +69,7 @@ last-reviewed: 2026-10-30
    - 6 只 qfq 用 `scripts/repair_prices.py --phase incremental --codes-file ...`，单事务成对写 raw/qfq + lineage；成功 6/6，raw/qfq 各 48 行。
    - 重新执行 `vd data compute_indicators`：5,575 只成功、0 失败。
 4. 重启服务后：`ready=True`、`price=2026-10-30`、`indicator_snapshot.calculated_at=2026-10-30T11:37:33`、`summary` HTTP 200；新 scheduler 于 11:43:59 启动，job 197 于 11:44:00 开始。
+5. job 197 于 11:57:30 以 `success` 完成；重启加载 0/0/侧边栏修复后，job 198 于 12:00:48 启动，`ready=True` 且 API 仍显示 `running`，说明“数据就绪”和“后台更新中”可以同时成立。
 
 ## 6. 验证
 
@@ -79,7 +82,8 @@ last-reviewed: 2026-10-30
   `test_source_audit_archive.py`、`test_archive_safety.py`、
   `test_incremental_price_lineage.py`：**112 passed**。
 - Ruff：通过。
-- 正式库运行态验证：`/api/health` 200；`/api/data-status/summary` 200 且 `minimum_data_readiness.ready=true`；`/api/data-status/auto-update` 显示 job 197 `running` 且 announcements 分页进度持续推进。
+- 正式库运行态验证：`/api/health` 200；`/api/data-status/summary` 200 且 `minimum_data_readiness.ready=true`；`/api/data-status/auto-update` 显示 job 198 `running`；job 197 已 `success` 完成。
+- 本次 0/0/侧边栏定向验证：后端 `test_capital_history_domain.py` + `test_auto_update_progress.py` **39 passed**；前端 `npm run lint`、`npm run build`、**57 vitest passed**。
 - 官方 S1 全量未在更新子进程持锁期间执行（避免正式库指纹被真实更新污染）；待下一更新窗口结束后补跑。
 
 ## 7. 残留风险

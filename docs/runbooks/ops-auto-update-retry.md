@@ -101,6 +101,8 @@ vd data capital-history --cross-only --max-stocks 250 --batch-size 50 --batch-co
 | 子进程无 traceback 突然停止 | 查 Windows Application 事件 1000/1001（`python.exe`、`ucrtbase.dll`、`0xc0000409`/BEX64）与 `auto-update-child.log` 最后时间戳；新版 CLI 已启用 `faulthandler`，下次应落 Python 栈。参见 `reports/116` |
 | 重复打开 `start.bat` 只返回 `already_running` | 2026-10-30 起 trigger 以 child guard + 活锁判重；无活锁的陈旧 `running` 会先结算再触发。若仍出现，检查是否有活进程持锁 |
 | 页面“数据未就绪”但更新已结束 | 分别检查 `minimum_data_readiness.ready`、指标 `rejected` 原因、`/api/data-status/summary` 是否 200；`indicators.rejected` 常见于 `snapshot_publish_gate` 股本不变量（如新股 90 天豁免到期后 shares 仍 NULL） |
+| 侧边栏“数据就绪”但仍在更新 | 正常语义：“就绪”是研究质量门禁通过，不代表没有后台任务。新版侧边栏在 ready+running 时显示“数据就绪 · 更新中”；若仍只显示就绪，刷新页面加载新前端 |
+| 历史股本进度 `0/0` | 2026-10-30 前为 `progress_cb` 缺 done/total 的显示缺陷；新版显示 `N/20`。若仍 0/0，确认进程已加载最新 `app/core/capital.py` |
 | 指标快照 `rejected: share_capital_integrity` | 用 `SELECT stock_code,total_shares,circ_shares FROM stock_meta WHERE ...` 定位；用 SZSE/交易所官方清单 + 腾讯实时报价双源核验后，经 `scripts/rebuild_share_capital.py --only-codes <code>` 事务化补股本，再 `vd data compute_indicators`。禁止绕过门禁或猜测股本。参见 `reports/116` |
 | `price_freshness` 长期不消失 | 对比 raw/qfq 最新日期；旧 retry 可能只补 raw。现 retry 默认成对增量刷新，单边维护必须显式写 adjust。必要时 `scripts/repair_prices.py --phase incremental --codes-file <file>` 并重算指标。参见 `reports/116` |
 | `summary` 固定 503 `data quality status is unavailable` | 查 `start.log` 具体 Binder Error；2026-10-30 为 `raw_response_archive_all` 无 `storage` 列。新版改查 active 热表 `raw_response_archive`。若仍 503，核对归档合并视图列与应用查询。参见 `reports/116` |

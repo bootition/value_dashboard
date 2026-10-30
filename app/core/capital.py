@@ -664,7 +664,9 @@ class CapitalHistoryUpdater:
             elif outcome["status"] != "success":
                 failed.append(code)
             if progress_cb is not None:
-                progress_cb(code, outcome)
+                # 2026-10-30：进度回调必须携带本轮 done/total；旧实现只传
+                # outcome（update_stock 不含 done/total），状态页永远显示 0/0。
+                progress_cb(code, {**outcome, "done": index + 1, "total": total})
             # 连续交叉错误/空响应计数（cached*/verified 中断序列）
             cs = str(outcome.get("cross_status") or "")
             if cs.startswith("cross_unavailable"):
