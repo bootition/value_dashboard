@@ -88,3 +88,4 @@ last-reviewed: 2026-10-30
 2. 子进程若“活着但永久卡死”（锁仍被活进程持有），当前恢复逻辑不会杀它；仍需要人工干预或后续 heartbeat/watchdog。
 3. `last_success_at` 在 partial 轮次保持旧值是刻意语义；UI 文案“上次完整成功”宜作为后续小改动。
 4. `301677` 已修复；`minimum_data_readiness` 仍如实披露 24 只股本缺失、131 只分红 lineage 缺失、2 只财务期缺失，均为非阻断披露项或待后续轮次补齐；`LINEAGE_INVALID` 历史 676,272 行仍存在。
+5. CNINFO 公告超过 100 页时 `_query_announcements` 会丢弃前 100 页并递归按日期窗口补齐，但递归调用没有传 `progress_cb`；UI 会停在 `100/108` 看似卡死，实际 `auto-update-child.log` 仍每约 1.5s 发一次 CNINFO 请求。判定卡死前必须先看 child log 的 mtime/尾部；后续可把分段进度回传 UI。
