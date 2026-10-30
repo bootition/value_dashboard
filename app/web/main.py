@@ -82,45 +82,124 @@ def _auto_update_command() -> tuple[list[str], Path]:
     return [sys.executable, "-m", "app.cli.main", "data", "auto-update", "run"], project_root
 
 
-def run_auto_update_child(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
-    """Launch the isolated auto-update child when no other update is running.
+_auto_update_child_lock = threading.Lock()
+_auto_update_child_active = False
 
-    Used by startup maintenance, the post-close scheduler and the trigger API.
-    Returns False when another update already owns the lock.
+
+def auto_update_child_is_active() -> bool:
+    """True while this web process is waiting for its auto-update subprocess."""
+    with _auto_update_child_lock:
+        return _auto_update_child_active
+
+
+def recover_interrupted_auto_update(
+    duck: DuckDBStore,
+    sqlite: SQLiteStore,
+    *,
+    reason: str,
+) -> bool:
+    """Clear jobs/state left behind by a crashed update child.
+
+    The update lock is the liveness authority: if it is still owned by a live
+    process we must not touch anything. Once the lock owner is dead, the
+    ``job_logs`` row and ``auto_update_state.current_stage`` are stale and used
+    to block the trigger endpoint with ``already_running`` until the whole web
+    service was restarted. Reconciliation here makes the next scheduler tick or
+    ``start.bat`` trigger able to launch a fresh child without a restart.
     """
     from app.core.storage.update_lock import any_write_lock_active
 
     if any_write_lock_active(duck.db_path):
-        logger.info("已有更新任务持锁，自动更新触发让路")
         return False
     from app.core.update import IncrementalUpdater
 
-    IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
-    cmd, project_root = _auto_update_command()
-    log_path = Path(os.environ.get("VD_LOG_DIR", "data/logs")) / "auto-update-child.log"
-    logger.info("启动自动更新子进程（PRD §7.3）...")
     try:
-        with log_path.open("a", encoding="utf-8") as child_log:
-            completed = subprocess.run(
-                cmd,
-                cwd=project_root,
-                env=os.environ.copy(),
-                stdout=child_log,
-                stderr=subprocess.STDOUT,
-                check=False,
-            )
-        logger.info("自动更新子进程完成 exit=%s", completed.returncode)
-        return True
+        IncrementalUpdater(
+            duck=duck, sqlite=sqlite
+        )._reconcile_crashed_incremental_jobs()
     except Exception as error:
-        logger.warning("自动更新子进程启动失败(非致命): %s", error)
-        return False
+        logger.warning("结算悬挂更新作业失败(非致命): %s", error)
+    from app.core.auto_update import AutoUpdateController
+
+    try:
+        AutoUpdateController(
+            duck=duck, sqlite=sqlite
+        ).recover_interrupted_run(reason=reason)
+    except Exception as error:
+        logger.warning("恢复中断的自动更新状态失败(非致命): %s", error)
+    return True
+
+
+def run_auto_update_child(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
+    """Launch the isolated auto-update child when no other update is running.
+
+    Used by startup maintenance, the post-close scheduler and the trigger API.
+    Returns False when another update already owns the lock or when this web
+    process already has a child in flight. The in-process guard closes the gap
+    between spawning the child and it acquiring the cross-process lock file.
+    """
+    global _auto_update_child_active
+
+    from app.core.storage.update_lock import any_write_lock_active
+
+    with _auto_update_child_lock:
+        if _auto_update_child_active:
+            logger.info("已有自动更新子进程在运行，本次触发让路")
+            return False
+        if any_write_lock_active(duck.db_path):
+            logger.info("已有更新任务持锁，自动更新触发让路")
+            return False
+        _auto_update_child_active = True
+
+    from app.core.update import IncrementalUpdater
+
+    try:
+        IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
+        cmd, project_root = _auto_update_command()
+        log_path = Path(os.environ.get("VD_LOG_DIR", "data/logs")) / "auto-update-child.log"
+        logger.info("启动自动更新子进程（PRD §7.3）...")
+        try:
+            with log_path.open("a", encoding="utf-8") as child_log:
+                completed = subprocess.run(
+                    cmd,
+                    cwd=project_root,
+                    env=os.environ.copy(),
+                    stdout=child_log,
+                    stderr=subprocess.STDOUT,
+                    check=False,
+                )
+            logger.info("自动更新子进程完成 exit=%s", completed.returncode)
+            if completed.returncode != 0:
+                # 原生崩溃/被强杀不会执行子进程内的 finally，SQLite 会留下
+                # running 标记；父进程是唯一可靠的回收点。
+                recover_interrupted_auto_update(
+                    duck,
+                    sqlite,
+                    reason=f"update_child_exit_{completed.returncode}",
+                )
+            return True
+        except Exception as error:
+            logger.warning("自动更新子进程启动失败(非致命): %s", error)
+            recover_interrupted_auto_update(
+                duck,
+                sqlite,
+                reason=f"update_child_launch_failed: {error}",
+            )
+            return False
+    finally:
+        with _auto_update_child_lock:
+            _auto_update_child_active = False
 
 
 def auto_update_is_due(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
-    """Return True when the latest expected trading session has no price rows yet.
+    """Return True when the scheduler should launch another update cycle.
 
-    收盘前（<15:30 本地）期望目标是上一交易日；收盘后自动切到今日，服务
-    无需重启即可在首个调度周期抓取当天数据。
+    两个触发条件：
+    1. 最新应收盘的交易日还没有任何价格行（每日收盘后）；
+    2. retry_list 中存在已到下次重试时间的失败任务（失败任务下轮自动重试）。
+
+    收盘前（<15:30 本地）价格期望目标是上一交易日；收盘后自动切到今日，
+    服务无需重启即可在首个调度周期抓取当天数据。
     """
     try:
         from app.core.storage.update_lock import any_write_lock_active
@@ -132,6 +211,18 @@ def auto_update_is_due(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
         )
         if not state_rows or state_rows[0].get("state") != "enabled" or state_rows[0].get("paused"):
             return False
+        try:
+            retry_rows = sqlite.query(
+                """SELECT COUNT(*) AS due
+                   FROM retry_list
+                   WHERE retry_count < max_retries
+                     AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP)"""
+            )
+            if retry_rows and int(retry_rows[0].get("due") or 0) > 0:
+                return True
+        except Exception:
+            # 旧库/极早期启动可能还没有 retry_list；价格判定仍可独立工作。
+            pass
         now = datetime.now()
         cutoff = now.date() - timedelta(days=1) if now.strftime("%H:%M") < "15:30" else now.date()
         rows = sqlite.query(
@@ -260,6 +351,10 @@ def _run_startup_maintenance(
     except Exception as error:
         logger.warning("只读缓存预热失败(非致命): %s", error)
 
+    # 先启动常驻调度器，再执行可能阻塞数小时的首次更新子进程。
+    # 旧顺序把 scheduler 放在 subprocess.run 之后：子进程一旦原生崩溃/挂死，
+    # 这个启动线程永远走不到启动调度器那一步，只能靠人工重启整个服务。
+    _start_auto_update_scheduler(duck, sqlite)
     try:
         from app.core.auto_update import AutoUpdateController
 
@@ -272,7 +367,6 @@ def _run_startup_maintenance(
             run_auto_update_child(duck, sqlite)
         else:
             logger.info("自动更新已关闭或暂停，跳过")
-        _start_auto_update_scheduler(duck, sqlite)
     except Exception as error:
         logger.warning("后台自动更新失败(非致命): %s", error)
 

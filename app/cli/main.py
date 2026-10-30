@@ -25,7 +25,16 @@ def _configure_update_logging() -> None:
     只能靠 SQLite 的 job_logs 事后还原（2026-10-20 更新变慢诊断）。
     stderr 在 Python 3.9+ 始终行缓冲，重定向到 auto-update-child.log 后
     可实时看到进度。
+
+    同时启用 faulthandler：2026-10-29 更新子进程在 ucrtbase.dll 中
+    以 0xc0000409（BEX64/fail-fast）原生崩溃，日志只停在最后一条业务
+    INFO，既没有 Python traceback 也没有可定位的调用栈。faulthandler
+    会把致命信号发生时的 Python 线程栈写入同一个 stderr 日志，下一次
+    原生崩溃可直接定位到适配器/落库调用。
     """
+    import faulthandler
+
+    faulthandler.enable(file=sys.stderr, all_threads=True)
     root = logging.getLogger()
     if root.handlers:
         return

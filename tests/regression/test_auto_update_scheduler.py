@@ -62,3 +62,35 @@ def test_auto_update_not_due_when_disabled_or_paused(duckdb_store, sqlite_store,
     with sqlite_store.transaction() as conn:
         conn.execute("UPDATE auto_update_state SET state = 'disabled', paused = 0 WHERE id = 1")
     assert auto_update_is_due(duckdb_store, sqlite_store) is False
+
+
+def test_auto_update_due_when_retry_task_is_ready(
+    duckdb_store, sqlite_store, monkeypatch
+) -> None:
+    """价格已最新但存在到期 retry 时，调度器仍须启动下一轮更新。"""
+    monkeypatch.setattr("app.web.main.datetime", _FakeDatetime)
+    _ensure_auto_update_state(sqlite_store)
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO auto_update_state (id, state, paused, current_stage) "
+            "VALUES (1, 'enabled', 0, 'idle')"
+        )
+        conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-09-08')")
+        conn.execute(
+            """INSERT INTO retry_list
+                   (stock_code, data_type, adapter, error, retry_count, max_retries)
+               VALUES ('601091', 'dividends', 'manager', 'source error', 0, 5)"""
+        )
+    duckdb_store.write_query(
+        "INSERT INTO price_daily_raw (stock_code, trade_date, close) "
+        "VALUES ('000001', '2026-09-08', 11)"
+    )
+
+    assert auto_update_is_due(duckdb_store, sqlite_store) is True
+
+    with sqlite_store.transaction() as conn:
+        conn.execute(
+            "UPDATE retry_list SET retry_count = max_retries "
+            "WHERE stock_code = '601091'"
+        )
+    assert auto_update_is_due(duckdb_store, sqlite_store) is False

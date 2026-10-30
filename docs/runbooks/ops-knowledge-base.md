@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-10-20
+last-reviewed: 2026-10-30
 supersedes: null
 ---
 
@@ -141,6 +141,16 @@ supersedes: null
 | S16 | S1 包装器 preflight 会冻结**本机全部 python 进程状态**：无关 python 服务（如 streamlit）运行/变化会导致"Python process state changed"或 tmp 清理 PermissionError 误报；跑 S1 前需停掉无关 python 应用 | reports/82 §5.4、2026-09-05 实测 |
 | S17 | ETF 池三层（用户 2026-09-05 定稿）：industry=申万一级有工具的 26 个、strategy=红利/红利低波/央企红利/A500、market=沪深300/中证500/中证1000/**恒生科技**；无合适工具的申万行业不加入观察；`vd etf seed-pool --apply` 只插入缺失代码、不覆盖用户预算 | `app/core/etf_pool.py` |
 
+## 10. 自动更新子进程崩溃与调度恢复（2026-10-30）
+
+| # | 硬约束/事实 | 出处 |
+|---|---|---|
+| R1 | 更新子进程可能原生 fail-fast（2026-10-29 实测 `python.exe` + `ucrtbase.dll`，`0xc0000409`/BEX64），此时 Python logger 没有 traceback；排查必须同时看 Windows Application 事件 1000/1001 与 `auto-update-child.log` 最后时间戳。CLI 已启用 `faulthandler`，下次复现应落线程栈 | reports/116；WER AppCrash_python.exe_20261029 |
+| R2 | 原生崩溃/控制台被关闭不会执行 `AutoUpdateController.run_once` 的 finally，`auto_update_state.current_stage` 与 `job_logs.status` 会永久停在 `running`。**锁文件是唯一活性权威**：无活锁 + 无进程内 child = 陈旧标记，必须先 `recover_interrupted_auto_update()` 结算，不能仅凭 DB stage 返回 `already_running` | reports/116；app/web/main.py、app/web/api/data_status.py |
+| R3 | 启动维护必须**先启动收盘后 scheduler，再执行阻塞的首轮更新子进程**；否则首轮崩溃/挂死会让 scheduler 永远不启动，只能人工重启。`trigger_auto_update` 也必须用“child guard + 活锁”判重，而非只读持久化 stage | reports/116；app/web/main.py |
+| R4 | `auto_update_is_due()` 除价格目标日外，还必须把 `retry_list` 中 `retry_count < max_retries` 且 `next_retry_at <= now` 的任务视为 due，否则价格一旦达标，失败任务只能等人工重启才会重试 | reports/116；app/web/main.py |
+| R5 | 当前仍未覆盖“子进程活着但永久卡死”（活锁一直存在）；此类情形需要后续 heartbeat/watchdog 或人工处置 | reports/116 残留风险 |
+
 ---
 
-*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。2026-09-05 多指数 ERP + ETF 工作台：新增 S11-S16（乐咕月度与限流、申万 50000/页并发、THS httpx/QDII null、向量化批量泛化、S1 进程冻结），schema 版本 D5 更新为 23。2026-10-20 自动更新变慢事故：新增 S18（陈旧不整段重拉）、D24（全量替换 DELETE 约 10s+/股与正式库高水位）、C-LOG（长任务 CLI 必须配置 INFO 日志）；见 reports/114。2026-10-20 分红批量/S1 提速：新增 S19（TDX 逐股建连 5s 必须批量）、D25（读锁属主判定）、C-S1（S1 固定开销来源与最小成本）；见 reports/115。*
+*变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。2026-09-05 多指数 ERP + ETF 工作台：新增 S11-S16（乐咕月度与限流、申万 50000/页并发、THS httpx/QDII null、向量化批量泛化、S1 进程冻结），schema 版本 D5 更新为 23。2026-10-20 自动更新变慢事故：新增 S18（陈旧不整段重拉）、D24（全量替换 DELETE 约 10s+/股与正式库高水位）、C-LOG（长任务 CLI 必须配置 INFO 日志）；见 reports/114。2026-10-20 分红批量/S1 提速：新增 S19（TDX 逐股建连 5s 必须批量）、D25（读锁属主判定）、C-S1（S1 固定开销来源与最小成本）；见 reports/115。2026-10-30 自动更新原生崩溃恢复：新增 R1-R5（WER/faulthandler 取证、running 标记结算、scheduler 前置、retry due、活进程卡死残留）；见 reports/116。*

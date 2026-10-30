@@ -216,3 +216,27 @@ def test_crashed_running_marker_is_reset_to_idle(duckdb_store, sqlite_store) -> 
     second = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
 
     assert second.status()["current_stage"] == "idle"
+
+
+def test_recover_interrupted_run_clears_persisted_running_marker(
+    duckdb_store, sqlite_store
+) -> None:
+    """原生崩溃遗留的 running 必须可被父进程/trigger 显式结算。"""
+    first = AutoUpdateController(duck=duckdb_store, sqlite=sqlite_store)
+    first._current_stage = "running"
+    first._progress = {"phase": "step:financials", "job_id": "crash-job"}
+    first._persist()
+
+    recovered = AutoUpdateController(
+        duck=duckdb_store, sqlite=sqlite_store
+    ).recover_interrupted_run(reason="update_child_exit_3221225479")
+
+    assert recovered["current_stage"] == "idle"
+    assert recovered["last_error"] == "update_child_exit_3221225479"
+    assert recovered["last_result"] == "failed"
+    assert recovered["last_skip_reason"] == "update_child_exit_3221225479"
+    persisted = AutoUpdateController(
+        duck=duckdb_store, sqlite=sqlite_store
+    ).persisted_status()
+    assert persisted["current_stage"] == "idle"
+    assert persisted["last_result"] == "failed"

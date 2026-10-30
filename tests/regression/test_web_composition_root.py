@@ -298,3 +298,58 @@ def test_web_sources_have_no_implicit_database_constructors() -> None:
                 violations.append(f"{path.relative_to(WEB_ROOT)}:{node.lineno}:{name}()")
 
     assert violations == []
+
+
+def test_trigger_recovers_stale_running_marker_without_restart(
+    database_paths: DatabasePathSet, monkeypatch
+) -> None:
+    """崩溃遗留的 running 不得让 start.bat 的 trigger 永久 already_running。"""
+    import threading
+
+    duck = DuckDBStore(paths=database_paths)
+    sqlite = SQLiteStore(paths=database_paths)
+    init_duckdb_schema(duck)
+    init_sqlite_schema(sqlite)
+    from app.core.auto_update import AutoUpdateController
+
+    crashed = AutoUpdateController(duck=duck, sqlite=sqlite)
+    crashed._current_stage = "running"
+    crashed._persist()
+    with sqlite.transaction() as conn:
+        conn.execute(
+            """INSERT INTO job_logs (job_type, status, started_at)
+               VALUES ('incremental_update', 'running', '2026-10-29T05:00:00+00:00')"""
+        )
+
+    app = web_main.create_app(
+        paths=database_paths,
+        config=Config({}, paths=database_paths),
+        duck=duck,
+        sqlite=sqlite,
+    )
+    monkeypatch.setattr(web_main, "auto_update_is_due", lambda *_args, **_kwargs: True)
+    started = threading.Event()
+
+    def _fake_child(*_args: Any, **_kwargs: Any) -> None:
+        started.set()
+
+    monkeypatch.setattr(
+        "app.web.api.data_status._run_auto_update_child_in_process", _fake_child
+    )
+    response = TestClient(app).post(
+        "/api/data-status/auto-update/trigger",
+        headers={"x-vd-admin-token": app.state.admin_token},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"triggered": True}
+    assert started.wait(2)
+    state = sqlite.query(
+        "SELECT current_stage, last_error FROM auto_update_state WHERE id = 1"
+    )[0]
+    assert state["current_stage"] == "idle"
+    assert state["last_error"] == "stale_running_marker_recovered"
+    job = sqlite.query(
+        "SELECT status FROM job_logs WHERE job_type = 'incremental_update'"
+    )[0]
+    assert job["status"] == "failed"

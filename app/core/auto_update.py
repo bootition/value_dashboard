@@ -250,6 +250,42 @@ class AutoUpdateController:
             "updated_at": row.get("updated_at"),
         }
 
+    def recover_interrupted_run(self, *, reason: str = "update_interrupted") -> dict[str, Any]:
+        """Clear a persisted ``running`` marker left by an abruptly killed child.
+
+        正常失败会在 ``run_once`` 的异常分支写成 failed；但原生崩溃
+        （2026-10-29 0xc0000409）、断电或控制台被关闭时没有机会执行
+        finally，SQLite 中的 ``current_stage`` 会永久停在 running。
+        旧逻辑只有“重新构造控制器”时才在内存中把 running 改成 idle，
+        ``job_logs`` 仍是 running，重复打开 start.bat 的 trigger 端点也
+        一直返回 already_running。本方法把持久化状态改成可重试的 idle
+        并保留失败原因，使调度器/下一次 trigger 能真正启动新子进程。
+        """
+        with self._lock:
+            rows = self.sqlite.query(
+                f"SELECT state, paused, current_stage, progress_json "
+                f"FROM {STATE_TABLE} WHERE id = 1"
+            )
+            if not rows or rows[0].get("current_stage") != "running":
+                return self._status_unlocked()
+            row = rows[0]
+            try:
+                progress = json.loads(row.get("progress_json") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                progress = {}
+            progress["phase"] = "done"
+            progress["status"] = "failed"
+            progress["reason"] = reason
+            self._progress = progress
+            self._current_stage = "idle"
+            self._last_error = reason
+            state = row.get("state")
+            if state in VALID_STATES:
+                self._state = state
+            self._paused = bool(row.get("paused"))
+            self._persist()
+            return self._status_unlocked()
+
     # ─── 控制命令 ────────────────────────────────────────────────
 
     def enable(self) -> dict[str, Any]:

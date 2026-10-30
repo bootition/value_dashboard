@@ -730,19 +730,34 @@ def trigger_auto_update(request: Request) -> dict:
     if not admin_token or request.headers.get("x-vd-admin-token") != admin_token:
         raise HTTPException(status_code=403, detail="admin token required")
     try:
-        stage_rows = request.app.state.sqlite.query(
-            "SELECT current_stage FROM auto_update_state WHERE id = 1"
+        from app.web.main import (
+            auto_update_child_is_active,
+            auto_update_is_due,
+            recover_interrupted_auto_update,
         )
-        if stage_rows and stage_rows[0].get("current_stage") == "running":
+
+        # 进程内子进程标记优先：子进程刚 spawn、尚未写出锁文件时也不能重复启动。
+        if auto_update_child_is_active():
             return {"triggered": False, "reason": "already_running"}
         from app.core.storage.update_lock import any_write_lock_active
 
         if any_write_lock_active(request.app.state.duck.db_path):
             return {"triggered": False, "reason": "another_update_running"}
+        stage_rows = request.app.state.sqlite.query(
+            "SELECT current_stage FROM auto_update_state WHERE id = 1"
+        )
+        if stage_rows and stage_rows[0].get("current_stage") == "running":
+            # 没有活跃子进程/锁，却仍持久化为 running：典型是原生崩溃
+            # （2026-10-29 0xc0000409）或控制台被关闭。必须先结算悬挂
+            # job/状态，否则 start.bat 的 trigger 会永远 already_running。
+            logger.warning("发现无属主的 running 自动更新标记，执行崩溃恢复")
+            recover_interrupted_auto_update(
+                request.app.state.duck,
+                request.app.state.sqlite,
+                reason="stale_running_marker_recovered",
+            )
         # 价格已经覆盖最近一个应收盘交易日时，无需为"再次打开 start.bat"
-        # 启动一整轮无意义更新（公告/国债/低频域由各自调度与 retry 处理）。
-        from app.web.main import auto_update_is_due
-
+        # 启动一整轮无意义更新；到期的 retry 任务仍会由调度器触发。
         if not auto_update_is_due(request.app.state.duck, request.app.state.sqlite):
             return {"triggered": False, "reason": "already_up_to_date"}
     except HTTPException:
