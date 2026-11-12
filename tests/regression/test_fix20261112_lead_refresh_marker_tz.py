@@ -69,3 +69,21 @@ def test_stale_or_invalid_markers_are_due(
     assert updater._refresh_due("listing_info_last_refresh", 1) is True
 
     assert updater._refresh_due("never_written_key", 1) is True
+
+
+def test_freshness_ages_use_china_trading_date() -> None:
+    """详情页年龄必须按 CN 交易日计算（旧实现午夜后会算出 -1 天）。"""
+    from app.web.api.stock_detail import build_freshness_metadata
+
+    now_cn = datetime.now(CN_TZ)
+    today_cn = now_cn.date()
+
+    aware = build_freshness_metadata(today_cn, today_cn, now_cn, "audit-safe-v1")
+    assert aware["snapshot_age_days"] == 0
+    assert aware["price_age_days"] == 0
+    assert aware["stale_days"] is not None and aware["stale_days"] >= 0
+
+    # DuckDB 读回的 calculated_at 是**无时区**的本地时间戳，必须按 CN 解释。
+    naive = build_freshness_metadata(today_cn, today_cn, now_cn.replace(tzinfo=None), "audit-safe-v1")
+    assert naive["snapshot_age_days"] == 0
+    assert naive["price_age_days"] == 0

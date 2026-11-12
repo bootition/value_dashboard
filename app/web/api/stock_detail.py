@@ -11,7 +11,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -353,21 +353,29 @@ def build_freshness_metadata(
     report_date 距今天数（半年报 06-30 到 9 月自然有 60+ 天，但它是当期
     最新报告期，不是滞后）。价格/快照年龄仍按 7 天上限告警。
     """
-    from app.core.financial_period import expected_financial_period
+    from app.core.financial_period import CN_TZ, expected_financial_period
 
-    today = datetime.now(UTC).date()
+    # 2026-11-12 修复：年龄必须按**中国交易日**计算。旧实现用 UTC "今天"，
+    # 而 DuckDB 读回的 calculated_at 是无时区的本地（CN）时间戳、带时区的值
+    # 又统一 astimezone(UTC)——北京时间 00:00–08:00 期间两边相差一天，
+    # 详情页会显示 snapshot_age_days = -1（未来时间），stale_days 被负值拉低。
+    today = datetime.now(CN_TZ).date()
     expected_financial = date.fromisoformat(expected_financial_period())
     calculated_date: date | None = None
     if isinstance(calculated_at, datetime):
         if calculated_at.tzinfo is None:
-            calculated_date = calculated_at.date()
+            calculated_date = calculated_at.replace(tzinfo=CN_TZ).astimezone(CN_TZ).date()
         else:
-            calculated_date = calculated_at.astimezone(UTC).date()
+            calculated_date = calculated_at.astimezone(CN_TZ).date()
     elif isinstance(calculated_at, str):
         try:
-            calculated_date = datetime.fromisoformat(calculated_at.replace("Z", "+00:00")).astimezone(UTC).date()
+            parsed = datetime.fromisoformat(calculated_at.replace("Z", "+00:00"))
         except ValueError:
-            calculated_date = None
+            parsed = None
+        if parsed is not None:
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=CN_TZ)
+            calculated_date = parsed.astimezone(CN_TZ).date()
     price_age_days = (today - price_date).days if price_date else None
     financial_age_days = (today - financial_date).days if financial_date else None
     snapshot_age_days = (today - calculated_date).days if calculated_date else None
