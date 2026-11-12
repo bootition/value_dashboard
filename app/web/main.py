@@ -14,6 +14,7 @@ import webbrowser
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import uvicorn
@@ -37,6 +38,8 @@ logger = logging.getLogger(__name__)
 
 # P1-6修复: 模块级互斥, 保证每个 app 实例的启动维护至多一个在运行
 _STARTUP_MAINTENANCE_LOCK = threading.Lock()
+# 契约 §6：ready=False 时启动日志每类缺口展示的股票代码数。
+_MISSING_CODE_PREVIEW = 5
 
 
 def _admin_token(sqlite_path: Path) -> str:
@@ -277,6 +280,72 @@ def _start_auto_update_scheduler(duck: DuckDBStore, sqlite: SQLiteStore) -> None
     logger.info("自动更新收盘后调度器已启动（每 %s 秒检查一次）", _AUTO_UPDATE_SCHEDULER_INTERVAL_SECONDS)
 
 
+def _with_quality_warning_codes(
+    current: dict, duck: DuckDBStore, sqlite: SQLiteStore,
+) -> dict:
+    """Attach the quality warning vocabulary to a readiness payload.
+
+    2026-11-12 P1（契约 §6）：启动日志此前只打 ``ready=%s``，把 payload 里
+    已经算好的 ``missing_counts`` / ``warning_codes`` 全丢掉，运维无法从日志
+    判断"到底是哪些股票、哪类缺口"卡住门禁。
+
+    ``read_warning_codes`` 走缓存/持久化结果并在后台单飞重建，不会把启动
+    核对变成第二次 20-80s 全库扫描。
+    """
+    if current.get("warning_codes") is not None:
+        return current
+    try:
+        from app.core.data_quality import read_warning_codes
+
+        current["warning_codes"] = [str(code) for code in read_warning_codes(duck, sqlite)]
+    except Exception as error:
+        logger.warning("启动核对 warning_codes 读取失败(非致命): %s", error)
+        current["warning_codes"] = []
+    return current
+
+
+def _safe_count(value: Any) -> int:
+    """Coerce a readiness counter without raising (cached JSON may be anything)."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def format_readiness_log(current: dict) -> tuple[int, str]:
+    """Render one truthful startup readiness log line (contract §6).
+
+    ready=True → INFO。ready=False → WARNING，并逐类附上前 5 个股票代码，
+    让运维不必手跑全库扫描就知道是哪几只卡住了门禁。
+    """
+    ready = bool(current.get("ready"))
+    raw_counts = current.get("missing_counts") or {}
+    missing_counts = {str(key): _safe_count(value) for key, value in raw_counts.items()}
+    warning_codes = [str(code) for code in (current.get("warning_codes") or [])]
+    message = (
+        "后台数据就绪核对完成: "
+        f"ready={ready}, checking={bool(current.get('checking'))}, "
+        f"stock_count={current.get('stock_count')}, "
+        f"warning_codes={warning_codes}, missing_counts={missing_counts}"
+    )
+    if ready:
+        return logging.INFO, message
+    previews: list[str] = []
+    for key, codes in sorted((current.get("missing") or {}).items()):
+        if not codes:
+            continue
+        if isinstance(codes, str):
+            codes = [codes]
+        code_list = [str(code) for code in codes]
+        previews.append(
+            f"{key}[{missing_counts.get(str(key), len(code_list))}]="
+            f"{code_list[:_MISSING_CODE_PREVIEW]}"
+        )
+    if previews:
+        message += " | 缺口明细(每类前 5): " + "; ".join(previews)
+    return logging.WARNING, message
+
+
 def _run_startup_maintenance(
     duck: DuckDBStore,
     sqlite: SQLiteStore,
@@ -331,9 +400,11 @@ def _run_startup_maintenance(
             current.setdefault("missing", {})["initialization"] = [initialization_error]
             current.setdefault("missing_counts", {})["initialization"] = 1
             current["ready"] = False
+        current = _with_quality_warning_codes(current, duck, sqlite)
         if readiness_cb is not None:
             readiness_cb(current)
-        logger.info("后台数据就绪核对完成: ready=%s", current["ready"])
+        log_level, log_message = format_readiness_log(current)
+        logger.log(log_level, log_message)
     except Exception as error:
         current = {
             **current,
@@ -376,6 +447,7 @@ def _run_startup_maintenance(
         )
         if initialization_report is not None:
             current["initialization"] = initialization_report
+        current = _with_quality_warning_codes(current, duck, sqlite)
         if readiness_cb is not None:
             readiness_cb(current)
     except Exception as error:
@@ -554,6 +626,48 @@ def create_app(
     app.include_router(dsl_router)
     app.include_router(index_dashboard_router)
     app.include_router(etf_strategy_router)
+
+    # ─── 数据可筛性探针 ────────────────────────────────────────────
+    @app.get("/api/ready")
+    async def readiness_probe(request: Request) -> JSONResponse:
+        """Report whether the database can actually be screened (contract §6).
+
+        2026-11-12 P1：``/api/health`` 只做 ``SELECT 1``，于是"库能读但指标
+        全被 mask、筛选 409"的 11-03~11-11 事故期间探针一直 200。这里改用
+        readiness 结论：ready=True → 200，ready=False → 503，并把
+        ``warning_codes``/``missing_counts`` 一并暴露给运维与前端。
+
+        ``/api/health`` 的探活语义保持不变（只验证连接与版本）。
+        """
+        duck = request.app.state.duck
+        sqlite = request.app.state.sqlite
+        from app.core.data_quality import read_cached_data_readiness, read_warning_codes
+
+        readiness: dict = {}
+        try:
+            readiness = read_cached_data_readiness(sqlite) or {}
+        except Exception as error:
+            logger.warning("/api/ready 读取 readiness 缓存失败: %s", error)
+        if not readiness:
+            cached_state = getattr(request.app.state, "startup_readiness", None)
+            readiness = dict(cached_state) if isinstance(cached_state, dict) else {}
+        # 现算失败时保留核对快照里的 warning_codes 作为回退值。
+        warning_codes = readiness.get("warning_codes")
+        try:
+            warning_codes = [str(code) for code in read_warning_codes(duck, sqlite)]
+        except Exception as error:
+            logger.warning("/api/ready 读取 warning_codes 失败，回退到核对快照: %s", error)
+        ready = bool(readiness.get("ready"))
+        payload = {
+            "ready": ready,
+            "checked_at": readiness.get("checked_at"),
+            "warning_codes": [str(code) for code in (warning_codes or [])],
+            "missing_counts": readiness.get("missing_counts") or {},
+            "stock_count": readiness.get("stock_count"),
+        }
+        if not readiness:
+            payload["reason"] = "readiness_unavailable"
+        return JSONResponse(status_code=200 if ready else 503, content=payload)
 
     # ─── 健康检查 ──────────────────────────────────────────────────
     @app.get("/api/health")

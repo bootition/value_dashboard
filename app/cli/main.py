@@ -1400,7 +1400,12 @@ def data_status() -> None:
            WHERE stock.is_listed IS TRUE"""
     )
     retry_count = sqlite.query("SELECT COUNT(*) as cnt FROM retry_list")
-    missing_count = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
+    # 2026-11-12 P1（契约 §3）：missing_count 只有一个口径——可行动缺口
+    # （resolved_at IS NULL），与状态页/update.py 共用同一函数。此前这里用
+    # 裸 COUNT(*) 把已解决行也算进去，报 11,823 vs 状态页 162。
+    from app.core.data_quality import actionable_missing_count
+
+    missing_count = actionable_missing_count(sqlite)
     try:
         financial_detail_gap = [{"cnt": _financial_detail_gap_count(duck, sqlite)}]
     except Exception:
@@ -1421,7 +1426,7 @@ def data_status() -> None:
         "income_statement_count": ic_count[0]["cnt"],
         "cash_flow_count": cf_count[0]["cnt"],
         "retry_count": retry_count[0]["cnt"],
-        "missing_count": missing_count[0]["cnt"],
+        "missing_count": missing_count,
         "financial_detail_gap_count": (
             financial_detail_gap[0]["cnt"]
             if financial_detail_gap[0]["cnt"] >= 0 else "error"
@@ -2107,8 +2112,10 @@ def data_diagnose() -> None:
         report["retry_count"] = "error"
 
     try:
-        row = sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
-        report["missing_count"] = row[0]["cnt"]
+        # 同一口径函数（契约 §3），口径漂移会让健康报告与状态页对不上。
+        from app.core.data_quality import actionable_missing_count
+
+        report["missing_count"] = actionable_missing_count(sqlite)
     except Exception:
         report["missing_count"] = "error"
 

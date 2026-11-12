@@ -18,7 +18,7 @@ import logging
 import math
 import uuid
 from bisect import bisect_right
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -174,6 +174,7 @@ class IndicatorCalculator:
         stock_codes: list[str],
         *,
         force_codes: set[str] | None = None,
+        publish_gate: Callable[[DuckDBStore, SQLiteStore], dict[str, Any]] | None = None,
         progress_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """只更新价格域指标；最新价与既有快照相同且非强制的股票直接跳过。
@@ -181,15 +182,22 @@ class IndicatorCalculator:
         只有价格真正变化的股票才重算，未变化股票连查询都省掉；既有快照的
         报告期保持不变，基本面字段完全不触碰。
         """
-        codes = list(dict.fromkeys(stock_codes))
-        if not codes:
+        requested_codes = list(dict.fromkeys(stock_codes))
+        if not requested_codes:
             return {"status": "skipped", "reason": "no_changed_stocks", "success": 0, "failed": 0, "skipped": 0}
 
-        gate = self._snapshot_publish_gate()
-        if not gate.get("ready"):
+        # 契约 §4：hard_block 才整批拒绝；否则逐股隔离后发布其余。
+        gate_report = self._run_publish_gate(publish_gate)
+        if gate_report.get("hard_block"):
+            return self._gate_hard_block_result(gate_report, len(requested_codes))
+        codes, quarantined_codes = self._quarantine_split(requested_codes, gate_report)
+        quarantine = self._quarantine_fields(quarantined_codes)
+        if not codes:
             return {
-                "status": "rejected", "reason": "publish_gate_failed", "gate": gate,
-                "total": len(codes), "success": 0, "failed": len(codes), "skipped": 0,
+                "status": "partial",
+                "reason": "publish_gate_quarantined",
+                "total": len(requested_codes), "success": 0, "failed": 0, "skipped": 0,
+                **quarantine,
             }
 
         force = set(force_codes or ())
@@ -275,15 +283,28 @@ class IndicatorCalculator:
         if records:
             self._update_snapshot_price_fields(records)
 
+        quarantined = bool(quarantine)
+        status = (
+            "success"
+            if not failed_codes and not quarantined and full_report.get("status") != "partial"
+            else "partial"
+        )
+        if failed_codes:
+            reason = "changed_stock_not_ready"
+        elif quarantined:
+            reason = "publish_gate_quarantined"
+        else:
+            reason = None
         return {
-            "status": "success" if not failed_codes and full_report.get("status") != "partial" else "partial",
-            "reason": None if not failed_codes else "changed_stock_not_ready",
-            "total": len(codes),
+            "status": status,
+            "reason": reason,
+            "total": len(requested_codes),
             "success": len(records),
             "skipped": skipped,
             "failed": len(failed_codes) + int(full_report.get("failed") or 0),
             "failed_codes": (failed_codes + list(full_report.get("failed_codes") or []))[:20],
             "full_recompute": full_report,
+            **quarantine,
         }
 
     def refresh_funding_dividend_fields(self, stock_codes: list[str]) -> dict[str, Any]:
@@ -344,6 +365,59 @@ class IndicatorCalculator:
         from app.core.data_quality import snapshot_publish_gate
         return snapshot_publish_gate(self.duck, self.sqlite)
 
+    # ─── 发布门禁（2026-11-12 契约 §4）──────────────────────────────
+    def _run_publish_gate(
+        self,
+        publish_gate: Callable[[DuckDBStore, SQLiteStore], dict[str, Any]] | None,
+    ) -> dict[str, Any]:
+        """Resolve and run the publish gate exactly once per publish call."""
+        if publish_gate is None:
+            from app.core.data_quality import snapshot_publish_gate
+
+            publish_gate = snapshot_publish_gate
+        return publish_gate(self.duck, self.sqlite)
+
+    def _gate_hard_block_result(
+        self, gate_report: dict[str, Any], total: int,
+    ) -> dict[str, Any]:
+        """§4.1：只有 hard_block 才整批拒绝（一条不写，保留上一代快照）。"""
+        logger.error(
+            "指标快照发布被质量门禁硬拒绝(保留上一代快照): reason=%s violations=%s/%s",
+            gate_report.get("reason"),
+            gate_report.get("violation_count"),
+            gate_report.get("threshold"),
+        )
+        return {
+            "status": "rejected",
+            "reason": "publish_gate_failed",
+            "gate": gate_report,
+            "total": total,
+            "success": 0,
+            "failed": total,
+        }
+
+    @staticmethod
+    def _quarantine_split(
+        codes: Sequence[str], gate_report: dict[str, Any],
+    ) -> tuple[list[str], list[str]]:
+        """§4.2：把隔离股从本批发布集合里剔除（返回 allowed, quarantined）。"""
+        quarantined_codes = {str(code) for code in (gate_report.get("quarantined_codes") or ())}
+        if not quarantined_codes:
+            return list(codes), []
+        allowed = [code for code in codes if code not in quarantined_codes]
+        excluded = [code for code in codes if code in quarantined_codes]
+        return allowed, excluded
+
+    @staticmethod
+    def _quarantine_fields(quarantined_codes: Sequence[str]) -> dict[str, Any]:
+        """§4.2 附带的披露字段（最多 20 个代码 + 全量计数）。"""
+        if not quarantined_codes:
+            return {}
+        return {
+            "quarantined_codes": [str(code) for code in quarantined_codes][:20],
+            "quarantined_count": len(quarantined_codes),
+        }
+
     def compute_snapshot_for_all(
         self,
         batch_size: int = 100,
@@ -396,10 +470,22 @@ class IndicatorCalculator:
             WHERE m.is_listed IS TRUE
             ORDER BY m.stock_code
         """)
+        # 契约 §4：门禁先跑。只有 hard_block 才整批拒绝（保留上一代快照）；
+        # 否则把 quarantined_codes 从本批发布集合剔除后照常发布其余股票。
+        gate_report = self._run_publish_gate(publish_gate)
+        if gate_report.get("hard_block"):
+            return self._gate_hard_block_result(gate_report, len(readiness))
+        listed_codes = [row["stock_code"] for row in readiness]
+        publishable_codes, quarantined_codes = self._quarantine_split(listed_codes, gate_report)
+        publishable = set(publishable_codes)
+        quarantine = self._quarantine_fields(quarantined_codes)
+        # 先剔除隔离股再判断缺口：隔离股的数据缺口由门禁统一披露，
+        # 绝不能再借 minimum_data_not_ready 把整批发布拖死（2026-11-12 P0）。
         missing_codes = [
             row["stock_code"]
             for row in readiness
-            if not (
+            if row["stock_code"] in publishable
+            and not (
                 row["has_core_financials"]
                 and row["has_raw_price"]
                 and row["has_qfq_price"]
@@ -417,32 +503,26 @@ class IndicatorCalculator:
                 "success": 0,
                 "failed": len(missing_codes),
                 "failed_codes": missing_codes[:20],
-            }
-        # P1-2修复: 发布快照前执行完整质量门禁（默认覆盖股本关系
-        # circ_shares<=total_shares；调用方可注入 screening_readiness 等
-        # 更严格门禁）。门禁不通过则拒绝发布，保留上一代已发布快照。
-        gate = publish_gate
-        if gate is None:
-            from app.core.data_quality import snapshot_publish_gate
-            gate = snapshot_publish_gate
-        gate_report = gate(self.duck, self.sqlite)
-        if not gate_report.get("ready"):
-            logger.warning("指标快照发布被质量门禁拒绝: %s", gate_report)
-            return {
-                "status": "rejected",
-                "reason": "publish_gate_failed",
-                "gate": gate_report,
-                "total": len(readiness),
-                "success": 0,
-                "failed": len(readiness),
+                **quarantine,
             }
         stocks = [
             {"stock_code": row["stock_code"]}
             for row in readiness
-            if row["has_core_financials"] and row["has_raw_price"] and row["has_qfq_price"]
+            if row["stock_code"] in publishable
+            and row["has_core_financials"] and row["has_raw_price"] and row["has_qfq_price"]
         ]
         total = len(stocks)
         if total == 0:
+            if quarantine:
+                # 全部股票都被隔离：不是"库是空的"，而是逐股隔离后无可发布项。
+                return {
+                    "status": "partial",
+                    "reason": "publish_gate_quarantined",
+                    "total": len(readiness),
+                    "success": 0,
+                    "failed": 0,
+                    **quarantine,
+                }
             return {"status": "skipped", "reason": "no stocks in stock_meta"}
 
         logger.info(f"开始计算指标快照: {total} 只股票")
@@ -511,17 +591,27 @@ class IndicatorCalculator:
             try:
                 for i in range(0, len(computed_records), batch_size):
                     self._write_batch(computed_records[i:i + batch_size], staging_table)
-                self._publish_snapshot(staging_table, expected_count=success, records=computed_records)
+                self._publish_snapshot(
+                    staging_table, expected_count=success, records=computed_records,
+                    # 隔离股的上一代已发布行必须原样保留（契约 §4.2）。
+                    preserve_codes=quarantined_codes,
+                )
             finally:
                 self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
 
-        logger.info("指标快照计算完成: 成功 %s, 失败 %s", success, failed)
+        logger.info("指标快照计算完成: 成功 %s, 失败 %s, 隔离 %s", success, failed, len(quarantined_codes))
+        if failed or quarantine:
+            reason = "changed_stock_not_ready" if failed else "publish_gate_quarantined"
+        else:
+            reason = None
         return {
-            "status": "success" if failed == 0 else "partial",
+            "status": "success" if not failed and not quarantine else "partial",
+            "reason": reason,
             "total": total,
             "success": success,
             "failed": failed,
             "failed_codes": failed_codes[:20],
+            **quarantine,
         }
 
     def compute_snapshot_for_codes(
@@ -532,19 +622,21 @@ class IndicatorCalculator:
         progress_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """Atomically replace snapshots only for stocks whose prices changed."""
-        codes = list(dict.fromkeys(stock_codes))
-        if not codes:
+        requested_codes = list(dict.fromkeys(stock_codes))
+        if not requested_codes:
             return {"status": "skipped", "reason": "no_changed_stocks", "success": 0, "failed": 0}
 
-        gate = publish_gate
-        if gate is None:
-            from app.core.data_quality import snapshot_publish_gate
-            gate = snapshot_publish_gate
-        gate_report = gate(self.duck, self.sqlite)
-        if not gate_report.get("ready"):
+        # 契约 §4：hard_block 才整批拒绝；否则逐股隔离，其余照常发布。
+        gate_report = self._run_publish_gate(publish_gate)
+        if gate_report.get("hard_block"):
+            return self._gate_hard_block_result(gate_report, len(requested_codes))
+        codes, quarantined_codes = self._quarantine_split(requested_codes, gate_report)
+        quarantine = self._quarantine_fields(quarantined_codes)
+        if not codes:
             return {
-                "status": "rejected", "reason": "publish_gate_failed", "gate": gate_report,
-                "total": len(codes), "success": 0, "failed": len(codes),
+                "status": "partial", "reason": "publish_gate_quarantined",
+                "total": len(requested_codes), "success": 0, "failed": 0,
+                **quarantine,
             }
 
         records: list[dict[str, Any]] = []
@@ -576,8 +668,9 @@ class IndicatorCalculator:
         if not records and failed_codes:
             return {
                 "status": "partial", "reason": "changed_stock_not_ready",
-                "total": len(codes), "success": 0, "failed": len(failed_codes),
+                "total": len(requested_codes), "success": 0, "failed": len(failed_codes),
                 "failed_codes": failed_codes[:20],
+                **quarantine,
             }
 
         # 2026-08-27：即使少数股票计算失败，也要发布已成功计算的股票。
@@ -590,11 +683,18 @@ class IndicatorCalculator:
             [str(record["stock_code"]) for record in records],
             records,
         )
+        if failed_codes:
+            reason = "changed_stock_not_ready"
+        elif quarantine:
+            reason = "publish_gate_quarantined"
+        else:
+            reason = None
         return {
-            "status": "success" if not failed_codes else "partial",
-            "reason": None if not failed_codes else "changed_stock_not_ready",
-            "total": len(codes), "success": len(records),
+            "status": "success" if not failed_codes and not quarantine else "partial",
+            "reason": reason,
+            "total": len(requested_codes), "success": len(records),
             "failed": len(failed_codes), "failed_codes": failed_codes[:20],
+            **quarantine,
         }
 
     def refresh_treasury_spreads(
@@ -1907,7 +2007,16 @@ class IndicatorCalculator:
 
     def _publish_snapshot(
         self, staging_table: str, expected_count: int, records: list[dict[str, Any]],
+        *, preserve_codes: Sequence[str] = (),
     ) -> None:
+        """Replace the whole snapshot table, keeping quarantined codes untouched.
+
+        2026-11-12 契约 §4.2：被门禁隔离的股票不得因"整表替换"而丢掉上一代
+        已发布行——它们的旧快照继续参与显示与陈旧度披露，直到股本补全。
+        因此整表 DELETE 改成 ``DELETE ... WHERE stock_code NOT IN (隔离股)``，
+        并在同一事务内校验最终行数。
+        """
+        preserved = [str(code) for code in preserve_codes]
         with self.duck.transaction() as connection:
             row_count = connection.execute(
                 f'SELECT COUNT(*) FROM "{staging_table}"'
@@ -1935,10 +2044,32 @@ class IndicatorCalculator:
                     f"rows={row_count}, expected={expected_count}, "
                     f"duplicates={duplicate_count}, missing_keys={missing_key_count}"
                 )
-            connection.execute("DELETE FROM indicator_snapshot")
+            preserved_count = 0
+            if preserved:
+                placeholders = ", ".join("?" for _ in preserved)
+                preserved_count = connection.execute(
+                    f"SELECT COUNT(*) FROM indicator_snapshot "
+                    f"WHERE stock_code IN ({placeholders})",
+                    preserved,
+                ).fetchone()[0]
+                connection.execute(
+                    f"DELETE FROM indicator_snapshot WHERE stock_code NOT IN ({placeholders})",
+                    preserved,
+                )
+            else:
+                connection.execute("DELETE FROM indicator_snapshot")
             connection.execute(
                 f'INSERT INTO indicator_snapshot BY NAME SELECT * FROM "{staging_table}"'
             )
+            final_count = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            if final_count != expected_count + preserved_count:
+                raise RuntimeError(
+                    "snapshot validation failed: "
+                    f"rows={final_count}, expected={expected_count + preserved_count} "
+                    f"(published={expected_count}, preserved={preserved_count})"
+                )
             self._record_derived_lineage_in_connection(connection, records)
 
     def _insert_records_in_connection(

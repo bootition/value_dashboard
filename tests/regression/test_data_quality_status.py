@@ -121,6 +121,17 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    """新股 90 天豁免期内股本缺口不再计入 share_capital，越过豁免线仍阻断。
+
+    2026-11-12 契约 §3（语义变更）：此前 readiness 用自己的一份 SQL 判
+    ``has_share_capital``，把「上市 ≤90 天且 total/circ 皆为 NULL」的新股也写进
+    ``missing_counts["share_capital"]``（只在阻断循环里豁免），于是同一时刻
+    「门禁报 5 只、readiness 报 26 只」。现在 readiness 复用唯一真相函数
+    ``listed_share_capital_gap_codes()``，90 天豁免已内含其中，所以这批新股
+    根本不属于 share_capital 缺口（它们的缺口由 price_freshness /
+    financial_period 等类别披露），断言随之改为 "不在 missing_counts 里"。
+    一旦任一列有值（例如只填了 total_shares），豁免即失效 → 仍阻断。
+    """
     duckdb_store.write_query(
         """INSERT INTO stock_meta
              (stock_code, name, exchange, is_listed, listing_date, is_st, is_suspended)
@@ -132,7 +143,8 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     assert readiness["ready"] is True
     assert readiness["missing_counts"]["price_freshness"] == 1
     assert readiness["missing_counts"]["financial_period"] == 1
-    assert readiness["missing_counts"]["share_capital"] == 1
+    # 90 天豁免：两列皆 NULL 的新股不属于股本缺口（不再重复计入披露项）。
+    assert "share_capital" not in readiness["missing_counts"]
 
     duckdb_store.write_query(
         """UPDATE stock_meta SET total_shares = 100
@@ -142,6 +154,7 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
 
     assert readiness["ready"] is False
+    assert readiness["missing_counts"]["share_capital"] == 1
 
     duckdb_store.write_query(
         """UPDATE stock_meta SET circ_shares = 50

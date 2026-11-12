@@ -141,8 +141,9 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
 
         connection.execute(
             """
-            INSERT INTO source_audit_quarantine
-            SELECT audit.*, 'unsupported_legacy_lineage', ?
+            INSERT INTO source_audit_quarantine BY NAME
+            SELECT audit.*, 'unsupported_legacy_lineage' AS quarantine_reason,
+                   ? AS quarantined_at
             FROM source_audit audit
             LEFT JOIN fetch_batch batch ON audit.fetch_batch_id = batch.batch_id
             WHERE starts_with(audit.field_name, '__')
@@ -166,8 +167,9 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
         )
         connection.execute(
             """
-            INSERT INTO dividends_quarantine
-            SELECT dividend.*, 'unverified_period_end_placeholder', ?
+            INSERT INTO dividends_quarantine BY NAME
+            SELECT dividend.*, 'unverified_period_end_placeholder' AS quarantine_reason,
+                   ? AS quarantined_at
             FROM dividends dividend
             WHERE announcement_date IS NULL
               AND (
@@ -210,8 +212,9 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             ).fetchone()[0]
             connection.execute(
                 """
-                INSERT INTO raw_response_archive_quarantine
-                SELECT archive.*, 'unsupported_legacy_empty_payload', ?
+                INSERT INTO raw_response_archive_quarantine BY NAME
+                SELECT archive.*, 'unsupported_legacy_empty_payload' AS quarantine_reason,
+                       ? AS quarantined_at
                 FROM raw_response_archive_all archive
                 WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
                 """,
@@ -219,8 +222,9 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             )
             connection.execute(
                 """
-                INSERT INTO source_audit_quarantine
-                SELECT audit.*, 'unsupported_legacy_empty_payload', ?
+                INSERT INTO source_audit_quarantine BY NAME
+                SELECT audit.*, 'unsupported_legacy_empty_payload' AS quarantine_reason,
+                       ? AS quarantined_at
                 FROM source_audit audit
                 WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
                 """,
@@ -228,8 +232,9 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             )
             connection.execute(
                 """
-                INSERT INTO fetch_batch_quarantine
-                SELECT batch.*, 'unsupported_legacy_empty_payload', ?
+                INSERT INTO fetch_batch_quarantine BY NAME
+                SELECT batch.*, 'unsupported_legacy_empty_payload' AS quarantine_reason,
+                       ? AS quarantined_at
                 FROM fetch_batch batch
                 WHERE raw_response_hash IN (SELECT raw_response_hash FROM _vd_empty_hashes)
                 """,
@@ -277,8 +282,9 @@ def quarantine_legacy_records(duck: DuckDBStore) -> dict[str, int]:
             ).fetchone()[0]
             connection.execute(
                 """
-                INSERT INTO fetch_batch_quarantine
-                SELECT batch.*, 'unsupported_legacy_orphan_batch', ?
+                INSERT INTO fetch_batch_quarantine BY NAME
+                SELECT batch.*, 'unsupported_legacy_orphan_batch' AS quarantine_reason,
+                       ? AS quarantined_at
                 FROM fetch_batch batch
                 LEFT JOIN raw_response_archive_all archive ON batch.raw_response_hash = archive.raw_response_hash
                 WHERE archive.raw_response_hash IS NULL

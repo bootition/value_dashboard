@@ -26,6 +26,11 @@ _SCREENING_BLOCKING_WARNINGS = {
     "LIVE_SCHEMA_INCOMPATIBLE",
     "LINEAGE_INVALID",
 }
+# 2026-11-12 契约 §3：发布门禁的硬阻断阈值。违规票 ≤ 阈值时逐股隔离发布，
+# 超过阈值才认为"系统性单位错乱"并整批拒绝。
+# 正式库 ~5,580 只上市股票 → 阈值 max(50, 55) = 55 只。
+GATE_HARD_BLOCK_MIN = 50
+GATE_HARD_BLOCK_RATIO = 0.01
 
 
 def checking_data_readiness() -> dict:
@@ -502,53 +507,154 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
         return False
 
 
+# 2026-11-12 契约 §3：股本完整性地板的唯一 SQL。
+# 违规 = NOT(total>0 AND circ>0 AND circ<=total)，且不满足
+# 「上市 ≤90 天且 total/circ 皆为 NULL」的新股豁免。
+_SHARE_CAPITAL_FLOOR_SQL = """
+    SELECT stock_code
+    FROM stock_meta
+    WHERE is_listed IS TRUE
+      AND NOT (
+          listing_date IS NOT NULL
+          AND listing_date >= CURRENT_DATE - INTERVAL '90 days'
+          AND total_shares IS NULL AND circ_shares IS NULL
+       )
+      AND NOT (
+          total_shares IS NOT NULL AND total_shares > 0
+          AND circ_shares IS NOT NULL AND circ_shares > 0
+          AND circ_shares <= total_shares
+      )
+    ORDER BY stock_code
+"""
+
+
+def _strict_share_capital_gap_codes(duck: DuckDBStore) -> list[str]:
+    """Raw share-capital floor query; raises so callers can fail closed."""
+    rows = duck.read_query(_SHARE_CAPITAL_FLOOR_SQL)
+    return [str(row["stock_code"]) for row in rows]
+
+
+def listed_share_capital_gap_codes(duck: DuckDBStore) -> list[str]:
+    """List every listed stock that breaks the share-capital integrity floor.
+
+    **单一口径（契约 §3）**：发布门禁、minimum_data_readiness 的
+    ``has_share_capital``、以及 update.py 的每日定向补抓全部复用本函数，
+    禁止在别处复制这份 SQL。
+
+    永不抛异常：查询失败时记录 warning 并返回 ``[]``，避免一次瞬时读错误
+    把每日补抓流程整体打断。需要 fail-closed 的调用方（发布门禁）请使用
+    :func:`_strict_share_capital_gap_codes`，它会把异常抛给上层。
+    """
+    try:
+        return _strict_share_capital_gap_codes(duck)
+    except Exception as error:
+        logger.warning("股本完整性检查失败，缺口列表按空处理: %s", error)
+        return []
+
+
+def _listed_stock_count(duck: DuckDBStore) -> int:
+    rows = duck.read_query("SELECT COUNT(*) AS cnt FROM stock_meta WHERE is_listed IS TRUE")
+    return int(rows[0]["cnt"]) if rows else 0
+
+
+def gate_hard_block_threshold(listed_count: int) -> int:
+    """``max(50, int(listed_count * 0.01))`` — see contract §3."""
+    return max(GATE_HARD_BLOCK_MIN, int(listed_count * GATE_HARD_BLOCK_RATIO))
+
+
 def share_capital_violations(duck: DuckDBStore) -> list[str]:
-    """Return listed stocks whose share-capital relation fails the integrity floor."""
-    rows = duck.read_query(
-        """
-        SELECT stock_code
-        FROM stock_meta
-        WHERE is_listed IS TRUE
-          AND NOT (
-              listing_date IS NOT NULL
-              AND listing_date >= CURRENT_DATE - INTERVAL '90 days'
-              AND total_shares IS NULL AND circ_shares IS NULL
-           )
-          AND NOT (
-              total_shares IS NOT NULL AND total_shares > 0
-              AND circ_shares IS NOT NULL AND circ_shares > 0
-              AND circ_shares <= total_shares
-          )
-        ORDER BY stock_code
-        """
-    )
-    return [row["stock_code"] for row in rows]
+    """Deprecated alias — kept so existing callers keep one implementation (§3)."""
+    return listed_share_capital_gap_codes(duck)
 
 
 def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
-    """Fail-closed quality gate consulted before an indicator snapshot is published.
+    """Quality gate consulted before an indicator snapshot is published.
 
-    The default gate enforces the share-capital integrity floor from
-    minimum_data_readiness without repeating its full-universe history scan.
-    Callers that need the complete policy (lineage, trading calendar, fresh
-    prices) can inject screening_readiness instead.
+    2026-11-12 P0（契约 §3/§4）：此前本门禁是 fail-closed 的"一票否决"——
+    任一只上市股票股本不满足 ``total>0 AND circ>0 AND circ<=total`` 就
+    ``ready=False``，三个发布调用点随即整批拒绝，于是 26 只股本缺失票
+    （其中 5 只新股在 11-03~11-10 陆续越过 90 天豁免线）让全市场 5,580 只
+    快照自 10-30 起再没发布过。
+
+    新语义（分级）：
+    - ``violation_count > threshold``：怀疑系统性单位错乱 → ``hard_block``，
+      整批拒绝（保留上一代快照）；
+    - 否则 ``ready=True, hard_block=False``，违规票进 ``quarantined_codes``
+      逐股隔离，其余正常发布；
+    - 检查本身抛异常 → ``ready=False, hard_block=True``（fail-closed）。
+
+    唯一口径：违规集合来自 :func:`listed_share_capital_gap_codes`（含 90 天
+    新股豁免），readiness 的 ``has_share_capital`` 复用同一函数；本函数使用
+    其严格版本，以便把"查询失败"与"没有违规"区分开。
     """
     try:
-        violations = share_capital_violations(duck)
+        violations = _strict_share_capital_gap_codes(duck)
+        listed_count = _listed_stock_count(duck)
     except Exception as error:
+        # 门禁自身不可用必须 fail-closed：宁可保留上一代快照，也不发布
+        # 未经校验收割的快照。
+        logger.error("股本完整性门禁不可用，整批拒绝发布(fail-closed): %s", error)
         return {
             "ready": False,
             "reason": "share_capital_check_unavailable",
             "error": str(error),
-            "share_capital_violations": [],
-            "violation_count": None,
+            "hard_block": True,
+            "quarantined_codes": [],
+            "violations": [],
+            "violation_count": 0,
+            "listed_count": 0,
+            "threshold": max(GATE_HARD_BLOCK_MIN, 0),
         }
+    threshold = gate_hard_block_threshold(listed_count)
+    hard_block = len(violations) > threshold
+    if hard_block:
+        logger.error(
+            "股本完整性违规 %s 只 > 阈值 %s 只（上市 %s 只），疑似系统性单位错乱，整批拒绝发布",
+            len(violations),
+            threshold,
+            listed_count,
+        )
+    elif violations:
+        logger.warning(
+            "股本完整性违规 %s 只（上市 %s 只，阈值 %s 只）→ 逐股隔离发布: %s",
+            len(violations),
+            listed_count,
+            threshold,
+            violations[:20],
+        )
     return {
-        "ready": not violations,
-        "reason": None if not violations else "share_capital_integrity",
-        "share_capital_violations": violations[:20],
+        "ready": not hard_block,
+        "reason": "share_capital_integrity" if hard_block else None,
+        "hard_block": hard_block,
+        "quarantined_codes": list(violations),
+        "violations": violations[:20],
         "violation_count": len(violations),
+        "listed_count": listed_count,
+        "threshold": threshold,
     }
+
+
+def actionable_missing_count(sqlite: SQLiteStore) -> int:
+    """Single source of truth for the actionable ``missing_list`` count (§3).
+
+    口径 = ``resolved_at IS NULL`` 且"可行动"（复用 web 层的
+    ``_actionable_missing_condition()``）。2026-11-12 P1：此前 CLI 用
+    ``SELECT COUNT(*) FROM missing_list``（含已解决行）报 11,823，而状态页
+    用可行动口径报 162，同一时刻两个数字。
+
+    异常向上抛出（不返回 0）：把"查询坏了"伪装成"没有缺口"是假绿。
+    """
+    # 惰性导入：app.web.api.data_status 反向依赖本模块，模块级导入会成环。
+    from app.web.api.data_status import _actionable_missing_condition
+
+    condition, disabled = _actionable_missing_condition()
+    rows = sqlite.query(
+        f"SELECT COUNT(*) AS cnt FROM missing_list "
+        f"WHERE resolved_at IS NULL AND {condition}",
+        disabled,
+    )
+    return int(rows[0]["cnt"]) if rows else 0
+
 
 
 def snapshot_period_mismatches(duck: DuckDBStore) -> list[dict]:
@@ -709,9 +815,6 @@ def minimum_data_readiness(
              ) AS INTEGER)))) AS has_meaningful_volume,
             complete_financials.report_date >= CURRENT_DATE - INTERVAL '18 months'
                 AS has_complete_financial_period,
-            m.total_shares IS NOT NULL AND m.total_shares > 0
-              AND m.circ_shares IS NOT NULL AND m.circ_shares > 0
-              AND m.circ_shares <= m.total_shares AS has_share_capital,
             EXISTS (SELECT 1 FROM xdxr action WHERE action.stock_code = m.stock_code)
               AND EXISTS (
                 SELECT 1 FROM dividends dividend
@@ -812,7 +915,6 @@ def minimum_data_readiness(
             ("price_freshness", "has_fresh_prices"),
             ("meaningful_volume", "has_meaningful_volume"),
             ("financial_period", "has_complete_financial_period"),
-            ("share_capital", "has_share_capital"),
             ("corporate_action_dividend_lineage", "has_corporate_action_or_dividend_lineage"),
             ("sector_financials", "has_sector_financials"),
             ("regulatory_fields", "has_regulatory_fields"),
@@ -825,6 +927,9 @@ def minimum_data_readiness(
         if row.get("has_pending_incomplete_period"):
             issues["pending_financial_period"].append(row["stock_code"])
     issues["lineage_coverage"].extend(_missing_lineage_coverage(duck, rows))
+    # 股本完整性走唯一真相函数（契约 §3）：发布门禁与 readiness 同源，
+    # 90 天新股豁免已在该函数内实现，此处不得再写第二份判定。
+    issues["share_capital"] = listed_share_capital_gap_codes(duck)
     # P0-4/5: 快照期与最新完整三表期不一致是阻断项（与筛选引擎共用判定），
     # 消除 "ready=true 但筛选全部失败" 的假阳性。
     issues["snapshot_period_alignment"] = [
@@ -856,19 +961,15 @@ def minimum_data_readiness(
         if row.get("listing_date") is not None and row.get("is_recent_listing")
     }
     missing = {key: codes[:20] for key, codes in issues.items() if codes}
-    rows_by_code = {row["stock_code"]: row for row in rows}
     blocking: dict[str, list[str]] = {}
     for key, codes in issues.items():
         if key in disclosure_keys:
             continue
         blocking_codes = []
         for code in codes:
+            # 新品 90 天豁免已在唯一真相函数 / 各列 SQL 内判定，此处不再复制口径。
             if key in recent_listing_disclosure_keys and code in recent_codes:
                 continue
-            if key == "share_capital" and code in recent_codes:
-                stock = rows_by_code[code]
-                if stock.get("total_shares") is None and stock.get("circ_shares") is None:
-                    continue
             blocking_codes.append(code)
         if blocking_codes:
             blocking[key] = blocking_codes
@@ -1353,10 +1454,48 @@ def build_data_quality_status(
                   SELECT 1 FROM raw_response_archive_valid_hash v
                   WHERE v.raw_response_hash = a.raw_response_hash
               )
+        ), batch_hash AS (
+            -- 2026-11-12 契约 §3 扩展：归档缺口必须区分「真缺口」与「历史事实」。
+            -- 判据只有一条：**摘要形态**决定它是不是 legacy。
+            --   现行溯源约定是 64 位内容寻址 SHA256；**32 位十六进制字节串本身
+            --   就是 MD5 时代摘要的形态，与哪个适配器写的无关**。
+            --   现代批次（64 位 SHA256）：摘要即内容寻址，缺原始字节归档 =
+            --   真 lineage 断裂 → 计入 batch_archive_gap_rows → LINEAGE_INVALID 阻断。
+            --   legacy 批次（32 位 MD5 形态，2026-09-19~20 那批历史回填）：导入时
+            --   从未落原始字节，这是已由 STATUS 披露的历史事实，不是今天的数据损坏
+            --   → 只计入 legacy_archive_gap_batches 如实披露，不得触发 LINEAGE_INVALID。
+            -- 2026-11-12 二次裁决：曾用 `adapter_version LIKE 'csmar-%'` 白名单保守兜底，
+            -- 被正式库证伪——同一战役里还有 6 个东财批次（eastmoney-f10-xjllb/1、
+            -- eastmoney-f10-zcfzb/1、em-datacenter-mainfinadata），32 位 MD5 且无归档。
+            -- 白名单会把它们误判成 lineage 断裂，故收敛为纯形态判定（唯一表达式，
+            -- source_audit 侧与 fetch_batch 侧共用同一口径）。
+            SELECT b.batch_id,
+                   b.raw_response_hash,
+                   COALESCE(
+                       LENGTH(b.raw_response_hash) = 32
+                       AND regexp_matches(lower(b.raw_response_hash), '^[0-9a-f]{32}$'),
+                       FALSE
+                   ) AS is_legacy_digest,
+                   NOT EXISTS (
+                       SELECT 1 FROM valid_hashes archive
+                       WHERE archive.raw_response_hash = b.raw_response_hash
+                   ) AS archive_gap
+            FROM fetch_batch b
+        ), audit_hash AS (
+            -- legacy 形态只看该行自身的摘要字节串，与它属于哪个批次无关。
+            SELECT s.raw_response_hash,
+                   LENGTH(s.raw_response_hash) AS hash_len,
+                   COALESCE(
+                       LENGTH(s.raw_response_hash) = 32
+                       AND regexp_matches(lower(s.raw_response_hash), '^[0-9a-f]{32}$'),
+                       FALSE
+                   ) AS is_legacy_digest
+            FROM source_audit s
         )
         SELECT
-            (SELECT COUNT(*) FROM source_audit
-             WHERE LENGTH(raw_response_hash) != 64) AS invalid_hash_rows,
+            (SELECT COUNT(*) FROM audit_hash
+             WHERE hash_len != 64 AND NOT is_legacy_digest) AS invalid_hash_rows,
+            (SELECT COUNT(*) FROM audit_hash WHERE is_legacy_digest) AS legacy_hash_rows,
             (SELECT COUNT(*) FROM source_audit s
              WHERE s.fetch_batch_id IS NULL
                 OR NOT EXISTS (
@@ -1377,11 +1516,10 @@ def build_data_quality_status(
                  WHERE archive.raw_response_hash = s.raw_response_hash
                    AND (archive.payload IS NULL OR OCTET_LENGTH(archive.payload) = 0)
              )) AS empty_archive_payload_rows,
-            (SELECT COUNT(*) FROM fetch_batch batch
-             WHERE NOT EXISTS (
-                 SELECT 1 FROM valid_hashes archive
-                 WHERE archive.raw_response_hash = batch.raw_response_hash
-             )) AS batch_archive_gap_rows
+            (SELECT COUNT(*) FROM batch_hash
+             WHERE archive_gap AND NOT is_legacy_digest) AS batch_archive_gap_rows,
+            (SELECT COUNT(*) FROM batch_hash
+             WHERE archive_gap AND is_legacy_digest) AS legacy_archive_gap_batches
         """
     )[0]
     lineage["archive_gap_rows"] = (
@@ -1389,6 +1527,10 @@ def build_data_quality_status(
         + lineage["batch_archive_gap_rows"]
         + lineage["empty_archive_payload_rows"]
     )
+    # 注：legacy_archive_gap_batches（32 位 MD5 摘要的历史回填批次从未落原始字节，
+    # 与适配器无关）故意不计入 archive_gap_rows —— 它是已披露的历史事实，不是
+    # 今天的数据损坏。真缺口（64 位内容寻址批次缺归档）仍走 batch_archive_gap_rows
+    # → LINEAGE_INVALID 阻断。
     lineage["source_audit_archive"] = source_audit_archive_state
     # integrity_verified 标记由写路径在插入前校验；冷启动只重算未标记行，
     # 避免把 6GB+ 归档 BLOB 全部读回。未标记行仍逐条验证，验证失败继续
@@ -1561,6 +1703,8 @@ def _incompatible_schema_status(readiness: dict, sqlite: SQLiteStore) -> dict:
         "lineage": {
             "invalid_hash_rows": 0, "orphan_batch_rows": 0,
             "audit_archive_gap_rows": 0, "batch_archive_gap_rows": 0, "archive_gap_rows": 0,
+            # 2026-11-12：legacy 摘要披露项，schema 不兼容时同样给 0，保持载荷形状一致。
+            "legacy_hash_rows": 0, "legacy_archive_gap_batches": 0,
         },
         "code_identity": {"raw_alias_rows": 0},
         "operations": operations,

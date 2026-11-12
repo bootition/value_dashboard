@@ -465,6 +465,43 @@ def _build_summary_from_state(state) -> dict:
         summary["price_freshness"] = None
         errors.append("price_freshness")
 
+    # 2026-11-12 P2（契约 §6）：陈旧度不能只看 calculated_at。
+    # refresh_treasury_spreads 每次成功都会把全表 calculated_at 刷成当天，
+    # 于是 snapshot_age_days 永远是 0，14 天的真实价格陈旧被伪装修复。
+    # 这里额外暴露 data_age_days = 价格表最新交易日 − 快照 latest_price_date，
+    # 它只由数值本身决定，任何"只刷时间戳"的步骤都改不动它。
+    try:
+        ages = duck.read_query(
+            """SELECT (SELECT MAX(trade_date) FROM price_daily_raw) AS price_latest_date,
+                      (SELECT MAX(latest_price_date) FROM indicator_snapshot)
+                          AS snapshot_latest_price_date"""
+        )[0]
+        price_latest = ages.get("price_latest_date")
+        snapshot_latest = ages.get("snapshot_latest_price_date")
+        price_age_days = (
+            (datetime.now(UTC).date() - price_latest).days if price_latest else None
+        )
+        data_age_days = (
+            (price_latest - snapshot_latest).days
+            if price_latest and snapshot_latest
+            else None
+        )
+        summary["freshness"] = {
+            "price_latest_date": str(price_latest) if price_latest else None,
+            "snapshot_latest_price_date": str(snapshot_latest) if snapshot_latest else None,
+            "price_age_days": price_age_days,
+            "data_age_days": data_age_days,
+        }
+        if isinstance(summary.get("price_freshness"), dict):
+            summary["price_freshness"].update(summary["freshness"])
+    except Exception:
+        summary["freshness"] = None
+        if isinstance(summary.get("price_freshness"), dict):
+            summary["price_freshness"].update({
+                "price_age_days": None, "data_age_days": None,
+            })
+        errors.append("freshness")
+
     # 价格回填状态 (PRD §6.1 D4: 上市以来全部可得数据)
     try:
         row = duck.read_query(
@@ -624,13 +661,12 @@ def _build_summary_from_state(state) -> dict:
         errors.append("retry_count")
 
     try:
-        condition, disabled = _actionable_missing_condition()
-        row = sqlite.query(
-            f"SELECT COUNT(*) as cnt FROM missing_list "
-            f"WHERE resolved_at IS NULL AND {condition}",
-            disabled,
-        )
-        summary["missing_count"] = row[0]["cnt"]
+        # 2026-11-12 P1（契约 §3）：missing_count 只能有一个口径——
+        # resolved_at IS NULL 且可行动，与 CLI / update.py 共用同一函数，
+        # 禁止再在这里内联 COUNT(*)。
+        from app.core.data_quality import actionable_missing_count
+
+        summary["missing_count"] = actionable_missing_count(sqlite)
     except Exception:
         summary["missing_count"] = 0
         errors.append("missing_count")

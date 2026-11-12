@@ -234,12 +234,11 @@ def test_adapter_drops_future_points_from_history() -> None:
     client.close()
 
 
-def test_adapter_empty_and_malformed_are_missing() -> None:
-    for payload in (EMPTY_PAYLOAD, MISSING_PAYLOAD, b"not-json{{{"):
+def test_adapter_empty_payloads_are_legal_missing() -> None:
+    for payload in (EMPTY_PAYLOAD, MISSING_PAYLOAD):
         # B023：循环变量通过默认参数绑定，避免晚绑定读取最后一个 payload
-        def handler(request: httpx.Request, _payload: bytes | dict = payload) -> httpx.Response:
-            content = _payload if isinstance(_payload, bytes) else \
-                json.dumps(_payload, ensure_ascii=False).encode("utf-8")
+        def handler(request: httpx.Request, _payload: dict = payload) -> httpx.Response:
+            content = json.dumps(_payload, ensure_ascii=False).encode("utf-8")
             return httpx.Response(200, content=content)
 
         client = httpx.Client(transport=httpx.MockTransport(handler))
@@ -250,8 +249,28 @@ def test_adapter_empty_and_malformed_are_missing() -> None:
         ))
         assert result.data == []
         assert result.metadata.error is None
+        assert result.metadata.error_kind == "legal_empty"
+        assert result.metadata.reason
         assert result.metadata.confidence == "missing"
         client.close()
+
+
+def test_adapter_malformed_response_is_source_unavailable() -> None:
+    """2026-11-12 契约 §1：非 JSON 畸形响应 → source_unavailable。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"not-json{{{")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = TreasuryMofAdapter(rate_limit=0, session=client)
+    result = adapter.fetch(FetchRequest(
+        data_type="treasury_yield_curve",
+        extra_params={"mode": "daily", "work_time": "2026-08-07"},
+    ))
+    assert result.data == []
+    assert result.metadata.error is not None
+    assert result.metadata.error_kind == "source_unavailable"
+    assert result.metadata.confidence == "missing"
+    client.close()
 
 
 def test_adapter_network_error_sets_error() -> None:
@@ -616,18 +635,24 @@ def test_snapshot_ttm_dividend_yield_and_spread(
 
     _seed_stock(duckdb_store)
     _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
-    _seed_dividend(duckdb_store, "600519",
-                   date(2026, 6, 30), date(2026, 5, 1), 1.0)   # 12 个月内
-    _seed_dividend(duckdb_store, "600519",
-                   date(2025, 6, 30), date(2025, 5, 1), 0.5)   # 12 个月外
-    _seed_dividend(duckdb_store, "600519",
-                   date(2026, 9, 30), date(2026, 9, 1), 2.0)   # 未来除权不计入
-    # _seed_stock 会通过 conftest 写入价格史，曲线日期必须动态对齐
+    # _seed_stock 会通过 conftest 写入价格史，曲线与分红日期都必须动态对齐
     # 该股最新价格日，不能用固定日期或 Python 的 date.today()。
+    # 2026-11-12 修复（用例时间炸弹）：旧 fixture 把 2026-09-30 标成"未来除权"，
+    # 但 TTM 窗口锚在最新价格日（此处=CURRENT_DATE）。过了 2026-09-30 之后
+    # 这笔分红就落进 12 个月窗口，实测 ttm_dividend_yield=30.0（1.0+2.0）/10。
+    # 计算口径本身正确（`_calc_treasury_spread`：价格日前 12 个月内已除权且
+    # 已公告），因此只把三个分红日改为相对最新价格日，业务断言不变：
+    # TTM 股息率只包含"过去 12 个月内已实施"的现金分红。
     latest_row = duckdb_store.read_query(
         "SELECT CAST(MAX(trade_date) AS DATE) AS d FROM price_daily_raw WHERE stock_code = '600519'"
     )[0]["d"]
     latest = latest_row if isinstance(latest_row, date) else date.fromisoformat(str(latest_row)[:10])
+    _seed_dividend(duckdb_store, "600519",
+                   latest - timedelta(days=60), latest - timedelta(days=90), 1.0)    # 12 个月内
+    _seed_dividend(duckdb_store, "600519",
+                   latest - timedelta(days=400), latest - timedelta(days=430), 0.5)  # 12 个月外
+    _seed_dividend(duckdb_store, "600519",
+                   latest + timedelta(days=60), latest - timedelta(days=10), 2.0)   # 未来除权不计入
     _seed_curve(duckdb_store, latest, 10.0, 1.5)
     _seed_curve(duckdb_store, latest, 5.0, 1.4)
     _seed_curve(duckdb_store, latest - timedelta(days=18), 2.0, 1.3)  # 超过 5 日陈旧
