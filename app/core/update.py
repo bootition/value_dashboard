@@ -4170,6 +4170,7 @@ class IncrementalUpdater:
         success_count = 0
         still_failing = 0
         resolved_unconfigured = 0
+        resolved_non_retryable = 0
         recompute_codes: list[str] = []
 
         def note_snapshot_input(code: str) -> None:
@@ -4356,6 +4357,13 @@ class IncrementalUpdater:
                         "dividends", "xdxr",
                     }:
                         note_snapshot_input(stock_code)
+                elif self._settle_non_retryable_error(
+                    retry_id, stock_code, data_type, outcome,
+                ):
+                    # 2026-11-12：本次抓取已明确是"合法空/源不支持"（新股无实施
+                    # 分红、BSE 不支持），不得再消耗重试次数，也不得以
+                    # retry_exhausted 的假名义进 missing_list。
+                    resolved_non_retryable += 1
                 else:
                     still_failing += 1
                     self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
@@ -4438,9 +4446,39 @@ class IncrementalUpdater:
             "total": len(tasks),
             "succeeded": success_count,
             "resolved_unconfigured": resolved_unconfigured,
+            "resolved_non_retryable": resolved_non_retryable,
             "still_failing": still_failing,
             "recompute_codes": recompute_codes,
         }
+
+    def _settle_non_retryable_error(
+        self,
+        retry_id: int,
+        stock_code: str,
+        data_type: str,
+        outcome: dict[str, Any],
+    ) -> bool:
+        """Settle a retry whose re-fetch proved the failure is not retryable.
+
+        2026-11-12：`error_kind=legal_empty`（新股无已实施分红）与
+        `source_unsupported`（北交所/B 股无该源）不是故障。此前重试路径只看
+        ``status != success``，于是这些任务被反复重试直到 max_retries，最终以
+        ``retry_exhausted`` 的假名义永久写进 missing_list。现在直接按真实原因
+        登记 missing 并移除 retry 行，不消耗重试次数。
+
+        Returns: True 表示已结算（调用方不应再计为 still_failing）。
+        """
+        error_kind = str(outcome.get("error_kind") or "")
+        if error_kind not in _NON_RETRYABLE_ERROR_KINDS:
+            return False
+        reason_code = _ERROR_KIND_REASON_CODE.get(error_kind, "source_empty")
+        self._record_missing(stock_code, data_type, reason_code)
+        self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+        logger.info(
+            "[增量] %s %s 判定为 %s，直接登记 missing(%s) 并移出重试队列",
+            stock_code, data_type, error_kind, reason_code,
+        )
+        return True
 
     def refetch_one(self, stock_code: str, data_type: str, *, incremental: bool = False) -> dict[str, Any]:
         """Refetch one supported dataset through the same durable write paths as init.
@@ -4461,6 +4499,9 @@ class IncrementalUpdater:
                     "error": raw.metadata.error
                     or qfq.metadata.error
                     or "empty result",
+                    "error_kind": _source_error_kind(
+                        raw if (raw.metadata.error or not raw.data) else qfq
+                    ),
                 }
             try:
                 self._persist_incremental_price_pair(stock_code, raw, qfq, full_field_audit=True)
@@ -4479,7 +4520,11 @@ class IncrementalUpdater:
                 extra_params={"num": "1"},
             ))
             if result.metadata.error or not result.data:
-                return {"status": "failed", "error": result.metadata.error or "empty result"}
+                return {
+                    "status": "failed",
+                    "error": result.metadata.error or "empty result",
+                    "error_kind": _source_error_kind(result),
+                }
             new_rows = [
                 row for row in result.data
                 if not latest_local or str(row.get("report_date") or "") > latest_local
@@ -4511,7 +4556,11 @@ class IncrementalUpdater:
 
         result = self.adapter_mgr.fetch(FetchRequest(data_type=data_type, stock_codes=[stock_code]))
         if result.metadata.error or not result.data:
-            return {"status": "failed", "error": result.metadata.error or "empty result"}
+            return {
+                "status": "failed",
+                "error": result.metadata.error or "empty result",
+                "error_kind": _source_error_kind(result),
+            }
         initializer = DataInitializer(duck=self.duck, sqlite=self.sqlite, adapter_mgr=self.adapter_mgr)
         try:
             with self.duck.transaction() as conn:
