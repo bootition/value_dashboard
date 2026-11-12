@@ -1438,6 +1438,33 @@ class IncrementalUpdater:
         missing_count = int(missing_rows[0]["c"]) if missing_rows else 0
         return null_count > missing_count
 
+    @staticmethod
+    def _marker_cn_date(raw: Any) -> datetime | None:
+        """Normalize a refresh marker to its **China trading date**.
+
+        2026-11-12 修复：标记由 ``_mark_refreshed`` 以 **UTC ISO** 写入，而旧实现
+        直接截取字符串前 10 位当年月日，再与 ``datetime.now(_CN_TZ).date()`` 相减。
+        在北京时间 00:00–08:00 区间，UTC 日期比本地日期早一天，于是"今天刚刷新过"
+        的标记会被判成"已过期"——每次凌晨的更新都会重跑一次约 104s 的
+        universe 全量刷新，回归测试亦在跨零点后假失败。
+
+        现在统一按 CN 时区归一：带时区的 ISO 时间戳先 ``astimezone(_CN_TZ)``，
+        纯日期字符串按日期解释，其它格式视为无效（返回 ``None`` → 视为到期）。
+        """
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            try:
+                return datetime.strptime(text[:10], "%Y-%m-%d")
+            except (ValueError, TypeError):
+                return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(_CN_TZ)
+
     def _refresh_due(self, key: str, interval_days: int) -> bool:
         """Return whether a data-domain refresh marker is older than the interval."""
         rows = self.sqlite.query(
@@ -1446,11 +1473,10 @@ class IncrementalUpdater:
         )
         if not rows:
             return True
-        raw = rows[0].get("value")
-        try:
-            last_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
-        except (ValueError, TypeError):
+        last_moment = self._marker_cn_date(rows[0].get("value"))
+        if last_moment is None:
             return True
+        last_date = last_moment.date()
         return (datetime.now(_CN_TZ).date() - last_date).days >= interval_days
 
     def _mark_csrc_refreshed(self) -> None:
