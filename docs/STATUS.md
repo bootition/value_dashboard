@@ -3,7 +3,7 @@ title: 项目当前状态（Single Source of Truth）
 status: approved
 category: decisions
 created: 2026-07-31
-last-reviewed: 2026-10-20
+last-reviewed: 2026-11-12
 ---
 
 # 项目当前状态（单一真相源 / Single Source of Truth）
@@ -11,8 +11,8 @@ last-reviewed: 2026-10-20
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
-- **最后更新**：2026-10-30
-- **更新人**：opencode 会话（2026-10-30 自动更新崩溃恢复 + 301677 股本/6 只 qfq/summary 503 数据修复 `reports/116`；前序 2026-10-20 `reports/114`/`reports/115`）
+- **最后更新**：2026-11-12
+- **更新人**：opencode 会话（2026-11-12 自动更新日志复盘与修复闭环：发布门禁分级/股本缺口自动通道/价格吞吐/适配器错误分类/lineage 摘要形态判定 `reports/117`；前序 2026-10-30 `reports/116`、2026-10-20 `reports/114`/`reports/115`）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
@@ -69,11 +69,12 @@ last-reviewed: 2026-10-20
 | 2026-09-17 ETF 预算保存报错事故 | ✅ **完成（2026-09-17）**：自动更新子进程持 DuckDB 文件锁期间保存预算，`invalidate` 删除预热快照导致概览 503 + 前端整页错误；同步修复 index 对比 stale 死代码、未缓存只读接口裸 500、预算弹窗串 ETF、详情弹窗串数据、基本面图年度丢点等。**官方 S1 850 passed**（正式库前后 hash 一致 `delta_detected=false`）、Ruff、前端 lint/73 node/57 vitest/build 全绿；新代码已重启加载，且在新一轮价格补抓窗口内实测 ETF/指数/个股/自选接口 200（stale 降级生效）。**未修 P2**：全A/ETF 历史市值仍用当前股本（登记 `ops-knowledge-base` D23，修复前不得当结论）；更新窗口 `/api/health` 503 与 start.bat 误判第二实例为遗留运维风险 | `reports/113`（2026-09-17） |
 | 2026-10-20 自动更新价格步骤异常变慢 | ✅ **修复完成（2026-10-20）**：本地价格陈旧 33 天（> `incremental_window_days=30`）触发全市场 5,551 只 raw+qfq 全历史重拉，价格步骤从 148 只/分跌到 6.2 只/分（ETA 14.7h）；根因是逐股 `DELETE+INSERT` 全量替换打在 1,700 万行主表（py-spy 80% 采样在 DELETE）+ 腾讯全历史每只约 20 次分页请求。已改为默认仍从本地最新日期增量补缺口，整段重拉降级为显式修复开关 `update.price_full_refetch_on_stale=false`；并补齐自动更新子进程 INFO 日志（此前 `auto-update-child.log` 自 09-17 起无任何输出）。定向 S1 26 passed（正式库指纹一致）+ 相关链路 61 passed、Ruff 全绿；重启后实测 150.3 只/分、ETA 约 33 分钟 | `reports/114`（2026-10-20） |
 | 2026-10-20 分红批量提速与 S1 门禁提速 | ✅ **完成（2026-10-20）**：① 分红/除权原逐股调用，每只重建 TDX 连接（实测 `from_best_host` 5.02s），535 只约 76 分钟；改为 50 只/批同会话抓取 + 单事务 + 批量审计，预计 5–8 分钟，批内失败回退逐股并写 retry_list（此前静默丢弃）。② 修复本进程持更新锁时读连接被误判为“外部写进程”立即失败（当日 62 条），改为退避重试。③ S1 门禁原每轮 10 次 19GB 全量哈希（5 次捕获 × 2 遍稳定性核对 + 41GB 回滚快照全树哈希），改为 2 次全量哈希 + 元数据核对；97 项用例轮次8.5 → **5.4 分钟**、小集合 1m29s；`delta_detected=false`、Ruff 全绿 | `reports/115`（2026-10-20） |
+| 2026-11-12 自动更新日志复盘与修复闭环 | ✅ **完成（2026-11-12，`reports/117`）**：① **发布门禁分级**：`snapshot_publish_gate` 由"一票否决"改为"逐股隔离 + 阈值硬阻断"（`violation_count > max(50, 1%)` 才整批拒绝），5 只 90 天豁免到期的股本缺失新股不再锁死全市场（根因：26 只股本缺口既不在 missing/retry、也不被每日补抓选中；且 `akshare` 上交所清单**根本没有股本列**，沪市股本此前只能靠人工脚本）。② **股本缺口自动通道**：`_listing_info_gap_codes` 并入 `listed_share_capital_gap_codes`（单一真相，门禁/readiness/补抓同源），`_fetch_listing_info` 对仍缺失者登记 missing，并对沪市代码用腾讯报价字段 72/73 回填（名称+circ≤total 双校验）。正式库 26 只已双源补齐（`evidence-share-capital-26-20261112.json`，accepted=26/mismatches=0）。③ **状态不再假绿**：新增 `job_status.merge_step_status`（`rejected > failed > partial > success > skipped`），指标步三处覆盖式合并全部替换；`data_status` 增加 `data_age_days`。④ **价格吞吐根因修复**：除权窗口从全市场 `min()` 改为**按股票**（`xdxr_full_refetch` 32→293 的级联根因），全历史响应改**攒批单事务写**（8 只/20 万行/5s 上限，失败整批回滚+逐股回退），tencent 超时下限 0.1s→1s 且 deadline 检查移到限速之后。⑤ **适配器错误分类**：`SourceMetadata.error_kind`（legal_empty/per_symbol_data_error/source_unsupported/source_unavailable/deadline/truncated_ok），熔断桶改 `adapter:data_type` 且只计 `source_unavailable`，`retry_list.error_kind`（schema v18）使 BSE/无分红不再以 `retry_exhausted` 假名义进 missing，历史 `tried: []` 零尝试失败一次性重查。⑥ **lineage 按摘要形态判定**：676,272 行 32 位 MD5（CSMAR/东财历史回填）不再被判 `LINEAGE_INVALID`，改为如实披露 `legacy_hash_rows`/`legacy_archive_gap_batches`；现代 64 位缺归档仍阻断。⑦ **可观测性**：启动就绪日志带 `warning_codes`+`missing_counts`、新增 `/api/ready`（未就绪 503）、`missing_count` 全链路统一为"未解决且可行动"（此前 11,823 vs 162）。⑧ **上线后真实更新轮验证（2026-11-13 01:00–01:48）**：`xdxr_full_refetch` 293→**10**、价格 1,255 只全历史重拉 15.7 min/失败 0（此前 5,573 只 143.5 min/38.83 只每分）、批量事务日志出现、公告截断返回 600 行且计 `truncated_ok`、新股无分红降为 INFO、`indicators` 报 success 且确实发布 5,576 只。⑨ 另修两处 **UTC/CN 边界缺陷**：日节流标记（凌晨重跑 104s universe 全量）与详情页年龄（午夜后 `snapshot_age_days=-1`）均按 `CN_TZ` 归一；`_retry_failed_tasks` 尊重 `error_kind`，`legal_empty`/`source_unsupported` 直接结算 missing、不消耗重试次数。**验证**：全量 S1 **1055 passed**（正式库指纹 `delta_detected=false`）、Ruff 全绿；正式库股本缺口 26→0、`invalid_hash_rows` 676,272→0、`batch_archive_gap_rows` 33→0、`missing_count` 162；指标快照重新发布（5,576 只，`latest_price_date=2026-11-12`）、`ready=True`、`warning_codes=[]`；详情页 `pe_ttm` 恢复可见 | `reports/117`（2026-11-12） |
 ## 已知剩余缺口（诚实披露，未消除前不得宣称数据完整）
 1. **代码级 P2 与运维项（`reports/41` B1/B2）已全部关闭**：C1-C16 与 O1-O6 见 `reports/46`；O7 的按日节流、增量 CSRC 与可恢复价格更新当前由 `reports/52` 承接。
 2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
 3. **正式库质量修复已完成**：价格最新日期 2026-08-07 全市场达标；快照一致性与 lineage 缺口已清零（仅 6 只新股披露项）；`retry_list=1`（公告 pending 合法标记）；missing_list 未解决 0。
-4. **CNINFO 分红适配器 ex_date 死代码待办**（`reports/61` §3.2）：主源恒空、回退链（akshare 31 行/baostock 25 行）当前可用无数据缺口；修复评估（PDF 解析 / ex_date 降级 / 明确依赖回退链）已列入待办。**2026-08-14 由 `reports/81` 部分推进**：`dividends_quarantine` 50,359 行占位符经 xdxr 除权除息事件保守匹配完成修复——恢复真实 ex_date 278 行、判定重复件去重 41,614 行，剩余 8,467 行为真正不可核验项（无候选/歧义/冲突），继续如实隔离（证据 `docs/evidence/evidence-dividend-exdate-repair-20260814-131744.json`）。
+4. **CNINFO 分红适配器已退出默认链（2026-11-12 更新，`reports/117`）**：`cninfo._fetch_dividends` 恒无 `ex_date`（需 PDF 解析，未实现），此前它仍排在 `config/default.yaml` 的 dividends 回退链尾，导致**每票每轮必然失败一次并计入熔断**；现已从默认链移除，且该路径改为显式 `error_kind=source_unsupported`（error=None，不计熔断、不占重试）。ex_date 的补齐路线维持 `reports/81` 的 TDX `xdxr` 保守匹配结论，PDF 解析降级为远期。**残留**：`dividends_quarantine` 中 8,467 行真正不可核验项继续如实隔离。
 5. **P1-P4 新域待正式库推进**：业务概览、国债曲线、历史股本链与统计域均未在正式库全量回填；启动自动更新将有界续传（业务概览 20 只/轮、股本链 20 只/轮、统计域按输入指纹原子重建）。东财交叉源偶发风控期间主链独立成立但 verified=false。
 6. **P3/P4 红队已修复（`reports/74`，2026-08-12）**：reports/73 全部 P1/P2/P3 与交付缺口关闭，S1 562 全绿。**剩余约束**：① CNINFO 源风控冷却中（约 4,700 只股本链待续传，PE/PB 统计按覆盖门槛如实缺失；自动更新有界续传+retry 消费，无需干预）；② 2026-08-12 当日国债曲线未发布（合法缺失，次日自动补齐）；③ 统计域构建 partial（新股/无价格股票如实无记录，指纹变化后自动重建）。
 7. **东财交叉核验已补全（2026-08-13 关闭，见 `reports/75`）**：① `cross_status`/`error` 落盘缓存表（失败含原因可见）；② 批 50 + 冷却 30-60s 安全组合（探测 150 连发无风控、全量约 5,400 次请求 0 风控）；③ 批次审查固化进 `--check-only` 审计视图；④ 收紧评估完成，**用户决策：维持主链口径 + verified 披露**。正式库结果：沪深 5,207 只全部交叉核验（链上 203,149 verified 点/5,175 只）、北交所 334 只如实无交叉源、002731 主链缺失披露。过程中修复 P1 根因：vd.bat/start.bat 改用项目 venv（系统 akshare 1.18.64 无 SECUCODE 归一化且截断 20 条）；北交所不再请求东财（防熔断殃及沪深）。
@@ -88,6 +89,7 @@ last-reviewed: 2026-10-20
 - **分红批量/锁误判/S1 提速（2026-10-20，见 `reports/115`）**：批量路径尚未在真实分红公告批次验证（下一个分红公告日复核）；S1 每轮仍有 2 次 19.3GB 全量哈希（约 90s）为最低成本。
 - **自动更新崩溃恢复（2026-10-30，见 `reports/116`）**：10-29 真实批量分红路径发生一次子进程原生崩溃（`ucrtbase.dll`/`0xc0000409`），已加崩溃结算与调度恢复；同时修复 301677 股本门禁、6 只 qfq 陈旧、summary 归档视图 503、历史股本进度 0/0、侧边栏就绪/更新中语义。具体 C/C++ 触发点仍需下一次复现的 `faulthandler` 栈定位。官方 S1 全量待更新窗口结束后补跑。
 - **自动更新价格步骤变慢修复（2026-10-20，见 `reports/114`）**：默认不再因本地陈旧整段重拉，改为从本地最新日期增量补缺口；`price_full_refetch_on_stale` 只在数据修复时开启。修复后正式库正在按 150 只/分补齐 2026-09-18 ~ 2026-10-19 的价格缺口（约 33 分钟），随后自动重算快照与统计域。
+- **2026-11-12 修复后残留（`reports/117` §7）**：① tdx/sina/ths/cninfo_funding/capital_history/index_valuation 等适配器尚未迁移到 `error_kind`，靠 manager 兜底（error 非空+空数据仍计熔断）；② 价格全历史写已由"逐股事务"改为"整批事务"，但仍在主线程，下一步应改独立写线程+队列；③ `share_capital_history` 与 `stock_meta` 仍是两条链（history 不写 stock_meta）；④ `refresh_treasury_spreads` 仍刷新全表 `calculated_at`，页面陈旧度必须依赖 `data_age_days`；⑤ `TRADING_CALENDAR_UNAVAILABLE` 仅单次采样，未确证持续性。
 - **残留（不阻断）**：全量替换 `DELETE` 在 20.2GB 正式库上仍约 10s+/股（数据修复模式才触发）；`data/valuedashboard.duckdb.old-20260904013322`（43GB）与 `duckdb.tmp/` 仍占用磁盘，按 AGENTS.md 需登记保留依据后再清理。
 - **数据缺口补全（2026-08-25，见 `reports/82`）**：融资事件域（funding_events：IPO/增发/配股募资）与指数估值域（index_valuation：沪深300 PE 历史）代码/测试/CLI/自动更新接入完成，20 只真实数据抽样验证通过（IPO 18/20、增发配股 12/20、北交所如实 missing）。正式库 index_valuation 已全量落库；funding_events 已全量续传完成（5,550 只）。
 - **分红融资比复合指标（2026-08-26，见 `reports/83`）**：`dividend_financing_ratio` v2 已发布，使用百分数口径并含回购注销；正式库 Schema v15 已应用，buyback_events 已落库（5,271 条/2,863 只），融资域已全量覆盖，快照新字段已回填。

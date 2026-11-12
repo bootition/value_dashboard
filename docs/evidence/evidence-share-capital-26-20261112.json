@@ -1,0 +1,141 @@
+{
+  "captured_at": "2026-11-12T14:43:27.954520+00:00",
+  "env": "formal",
+  "duckdb_path": "D:\\Mr.Q\\掌控经济\\value-dashboard\\data\\valuedashboard.duckdb",
+  "universe": 26,
+  "written": 26,
+  "skipped": {},
+  "mismatches": [],
+  "per_exchange": {
+    "SZSE": {
+      "written": 15
+    },
+    "SSE": {
+      "written": 11
+    }
+  },
+  "samples": [
+    {
+      "stock_code": "001232",
+      "exchange": "SZSE",
+      "total": 555560000,
+      "circ": 44206549,
+      "as_of": "20261112",
+      "source": "official_list+tencent",
+      "quote_time": "20261112161445",
+      "note": "circ_confirmed;total_confirmed"
+    },
+    {
+      "stock_code": "001246",
+      "exchange": "SZSE",
+      "total": 1728821350,
+      "circ": 157326574,
+      "as_of": "20261112",
+      "source": "official_list+tencent",
+      "quote_time": "20261112161430",
+      "note": "circ_confirmed;total_company_wide_scope"
+    },
+    {
+      "stock_code": "001381",
+      "exchange": "SZSE",
+      "total": 468980000,
+      "circ": 44097241,
+      "as_of": "20261112",
+      "source": "official_list+tencent",
+      "quote_time": "20261112161445",
+      "note": "circ_confirmed;total_confirmed"
+    },
+    {
+      "stock_code": "301569",
+      "exchange": "SZSE",
+      "total": 891597091,
+      "circ": 116847958,
+      "as_of": "20261112",
+      "source": "official_list+tencent",
+      "quote_time": "20261112161445",
+      "note": "circ_confirmed;total_confirmed"
+    },
+    {
+      "stock_code": "301655",
+      "exchange": "SZSE",
+      "total": 455608235,
+      "circ": 44968188,
+      "as_of": "20261112",
+      "source": "official_list+tencent",
+      "quote_time": "20261112161445",
+      "note": "circ_confirmed;total_confirmed"
+    },
+    {
+      "stock_code": "688827",
+      "exchange": "SSE",
+      "total": 68514300,
+      "circ": 12877616,
+      "as_of": "20261112",
+      "source": "tencent",
+      "quote_time": "20261112161500"
+    },
+    {
+      "stock_code": "688828",
+      "exchange": "SSE",
+      "total": 400010000,
+      "circ": 26039033,
+      "as_of": "20261112",
+      "source": "tencent",
+      "quote_time": "20261112161458"
+    },
+    {
+      "stock_code": "688835",
+      "exchange": "SSE",
+      "total": 99950708,
+      "circ": 18782785,
+      "as_of": "20261112",
+      "source": "tencent",
+      "quote_time": "20261112161458"
+    },
+    {
+      "stock_code": "688836",
+      "exchange": "SSE",
+      "total": 404464340,
+      "circ": 30087720,
+      "as_of": "20261112",
+      "source": "tencent",
+      "quote_time": "20261112161439"
+    },
+    {
+      "stock_code": "688837",
+      "exchange": "SSE",
+      "total": 435489015,
+      "circ": 48593986,
+      "as_of": "20261112",
+      "source": "tencent",
+      "quote_time": "20261112161500"
+    }
+  ],
+  "batch_id": "cda925e5-8b63-4f50-bd24-69de18e36ebe",
+  "raw_response_hash": "0531d143cd13ed319d95dc423f7dda0558a9e47e383a6aff133f47bdf52c8d2b",
+  "skipped_codes": {},
+  "post_verification": {
+    "circ_exceeds_total_listed": 0,
+    "missing_by_exchange": [
+      {
+        "exchange": "BSE",
+        "missing_total": 0,
+        "missing_circ": 0,
+        "listed": 355
+      },
+      {
+        "exchange": "SSE",
+        "missing_total": 0,
+        "missing_circ": 0,
+        "listed": 2319
+      },
+      {
+        "exchange": "SZSE",
+        "missing_total": 0,
+        "missing_circ": 0,
+        "listed": 2906
+      }
+    ],
+    "audit_rows_for_batch": 52
+  }
+}
