@@ -495,15 +495,38 @@ class IndicatorCalculator:
                 and str(row["listing_date"]) >= str(datetime.now().date() - timedelta(days=90))
             )
         ]
+        # 2026-11-12 P0 收尾（与门禁同一政策）：输入缺口同样是**逐股排除**，
+        # 不是一票否决。此前只要有一只非新股缺核心三表/价格，整批 5,580 只
+        # 就不发布——和 share_capital 门禁是同一类"单点拖死全站"缺陷。
+        # 只有缺口规模超过同一阈值（max(50, 1%)）才视为系统性缺失、整批拒绝。
         if missing_codes:
-            return {
-                "status": "partial",
-                "reason": "minimum_data_not_ready",
-                "total": len(readiness),
-                "success": 0,
-                "failed": len(missing_codes),
-                "failed_codes": missing_codes[:20],
+            from app.core.data_quality import gate_hard_block_threshold
+
+            gap_threshold = gate_hard_block_threshold(len(readiness))
+            if len(missing_codes) > gap_threshold:
+                logger.error(
+                    "指标输入缺口 %s 只 > 阈值 %s 只，整批拒绝发布",
+                    len(missing_codes), gap_threshold,
+                )
+                return {
+                    "status": "partial",
+                    "reason": "minimum_data_not_ready",
+                    "total": len(readiness),
+                    "success": 0,
+                    "failed": len(missing_codes),
+                    "failed_codes": missing_codes[:20],
+                    **quarantine,
+                }
+            logger.warning(
+                "指标输入缺口 %s 只（<= 阈值 %s），逐股排除后继续发布其余股票: %s",
+                len(missing_codes), gap_threshold, ", ".join(missing_codes[:20]),
+            )
+            publishable = publishable - set(missing_codes)
+            quarantine = {
                 **quarantine,
+                "reason": "minimum_data_not_ready",
+                "missing_input_codes": missing_codes[:20],
+                "missing_input_count": len(missing_codes),
             }
         stocks = [
             {"stock_code": row["stock_code"]}
@@ -593,8 +616,10 @@ class IndicatorCalculator:
                     self._write_batch(computed_records[i:i + batch_size], staging_table)
                 self._publish_snapshot(
                     staging_table, expected_count=success, records=computed_records,
-                    # 隔离股的上一代已发布行必须原样保留（契约 §4.2）。
-                    preserve_codes=quarantined_codes,
+                    # 隔离股与"输入缺口股"的上一代已发布行必须原样保留
+                    # （契约 §4.2）。否则逐股排除会退化成"删掉旧行"，
+                    # 反而让这些股票彻底从详情页消失。
+                    preserve_codes=[*quarantined_codes, *missing_codes],
                 )
             finally:
                 self.duck.write_query(f'DROP TABLE IF EXISTS "{staging_table}"')
