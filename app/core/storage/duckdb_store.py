@@ -12,9 +12,9 @@ DuckDB 进程模型：单进程读写，或多进程只读，二者互斥。
 from __future__ import annotations
 
 import contextlib
-import contextvars
 import os
 import secrets
+import threading
 import time
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -232,9 +232,21 @@ def _is_external_file_lock(message: str, *, lock_active: bool = False) -> bool:
     return specific_lock or (lock_active and "Cannot open file" in message)
 
 
-_MEMORY_LIMIT_OVERRIDE: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
-    "value_dashboard_duckdb_memory_limit_override", default=None
-)
+# 进程级连接配置覆盖（2026-11-12 P2）。
+#
+# 旧实现用 ContextVar 保存 ``memory_limit()`` 的覆盖值——但 ContextVar 不会
+# 传播到 ThreadPoolExecutor 的工作线程：更新子进程里主线程设了
+# ``update.duckdb_memory_limit``，价格/财务流水线的工作线程却回落到
+# ``database.*`` 配置，于是同一数据库文件出现两套 configuration，抛出
+# ``Connection Error: Can't open a connection to same database file with a
+# different configuration``（2026-11-12 14:01 生产日志实锤一次）。
+#
+# 变更理由：更新/备份/重建都跑在**专用子进程**里，一个进程同一时刻只有一套
+# 覆盖值，进程级全局正是它要的语义，而且所有线程自然共享同一份配置。
+# Web 进程**禁止**调用 memory_limit()（见其 docstring），因此不会出现两个
+# 请求互相污染覆盖值的情况；仍加锁保护进入/退出的成对读写。
+_MEMORY_LIMIT_OVERRIDE: dict[str, str] = {}
+_MEMORY_LIMIT_OVERRIDE_LOCK = threading.Lock()
 
 
 class DuckDBStore:
@@ -293,7 +305,8 @@ class DuckDBStore:
         return default
 
     def _connection_config(self) -> dict[str, str]:
-        override = _MEMORY_LIMIT_OVERRIDE.get() or {}
+        with _MEMORY_LIMIT_OVERRIDE_LOCK:
+            override = dict(_MEMORY_LIMIT_OVERRIDE)
         return {
             "memory_limit": override.get("memory_limit") or self._memory_limit,
             "threads": override.get("threads") or self._threads,
@@ -310,7 +323,11 @@ class DuckDBStore:
         threads: int | None = None,
         preserve_insertion_order: bool | None = None,
     ) -> Iterator[None]:
-        """Temporarily override new connection settings on this thread/context.
+        """Temporarily override new connection settings **process-wide**.
+
+        2026-11-12 P2：覆盖值从 ContextVar 改为进程级全局，主线程设置的预算
+        对 ThreadPoolExecutor 工作线程同样生效；否则工作线程连接会回落到
+        ``database.*`` 配置并触发 DuckDB different-configuration 错误。
 
         仅供专用子进程/CLI 维护任务使用（如自动更新、备份、重建）。
         **禁止在 Web 服务进程内使用**：DuckDB 不允许同一进程对同一文件
@@ -328,11 +345,22 @@ class DuckDBStore:
             override["preserve_insertion_order"] = (
                 "true" if preserve_insertion_order else "false"
             )
-        token = _MEMORY_LIMIT_OVERRIDE.set(override)
+        # 进程级全局：主线程设置的预算必须对 ThreadPoolExecutor 工作线程
+        # 同样生效，否则同一文件会因配置不同而连接失败（见模块顶部说明）。
+        previous = self._swap_override(override)
         try:
             yield
         finally:
-            _MEMORY_LIMIT_OVERRIDE.reset(token)
+            self._swap_override(previous)
+
+    @staticmethod
+    def _swap_override(value: dict[str, str]) -> dict[str, str]:
+        """Atomically replace the process-wide connection override; return previous."""
+        with _MEMORY_LIMIT_OVERRIDE_LOCK:
+            previous = dict(_MEMORY_LIMIT_OVERRIDE)
+            _MEMORY_LIMIT_OVERRIDE.clear()
+            _MEMORY_LIMIT_OVERRIDE.update(value)
+            return previous
 
     def _revalidate(self) -> None:
         validated = self._path_set.validate()

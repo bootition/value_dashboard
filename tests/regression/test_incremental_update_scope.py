@@ -198,10 +198,13 @@ def test_universe_steps_are_throttled_by_daily_marker(
     )
 
     # 没有元数据缺口的正常库仍应命中节流；缺口新股会触发定向补抓（见下一条测试）。
+    # 契约 §5：缺口口径 = 三列元数据 ∪ 股本完整性，所以"无缺口"必须连股本一起给齐，
+    # 否则该股会被判为 share_capital 缺口并在日内窗口内定向补抓（这正是修复目标）。
     duckdb_store.write_query(
         """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', TRUE, FALSE, FALSE)"""
+           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended,
+            total_shares, circ_shares)
+           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', TRUE, FALSE, FALSE, 100, 80)"""
     )
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     step = updater._refresh_universe_metadata()

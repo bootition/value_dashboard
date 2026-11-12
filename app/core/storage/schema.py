@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 38
-SQLITE_SCHEMA_VERSION = 17
+SQLITE_SCHEMA_VERSION = 18
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
 
@@ -1920,7 +1920,10 @@ CREATE TABLE IF NOT EXISTS retry_list (
     max_retries   INTEGER DEFAULT 5,    -- P2修复: 最大重试次数
     next_retry_at TIMESTAMP,             -- P2修复: 下次重试时间
     last_attempt  TIMESTAMP,
-    extra_json    TEXT                    -- JSON: 请求补充参数，如 adjust=qfq
+    extra_json    TEXT,                   -- JSON: 请求补充参数，如 adjust=qfq
+    -- 2026-11-12 契约 §5：失败种类。legal_empty / source_unsupported 不是
+    -- 故障，直接结算进 missing_list，不得占用重试次数；unknown 兼容旧行。
+    error_kind    TEXT DEFAULT 'unknown'
 );
 
 -- 缺失列表
@@ -2993,6 +2996,12 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             conn.execute("ALTER TABLE retry_list ADD COLUMN max_retries INTEGER DEFAULT 5")
         if "next_retry_at" not in retry_columns:
             conn.execute("ALTER TABLE retry_list ADD COLUMN next_retry_at TIMESTAMP")
+        # 2026-11-12 契约 §5：历史库补 error_kind（默认 unknown 保持旧行为：
+        # 未知种类照常重试，只有明确分类的 legal_empty/source_unsupported 才直结）。
+        if "error_kind" not in retry_columns:
+            conn.execute(
+                "ALTER TABLE retry_list ADD COLUMN error_kind TEXT DEFAULT 'unknown'"
+            )
         missing_columns = {column[1] for column in conn.execute("PRAGMA table_info(missing_list)").fetchall()}
         if "resolved_at" not in missing_columns:
             conn.execute("ALTER TABLE missing_list ADD COLUMN resolved_at TIMESTAMP")
@@ -3197,6 +3206,28 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 (17, "ETF meta category: industry/strategy/market"),
             )
             logger.info("SQLite schema v17 已应用")
+
+        # v18: retry_list.error_kind（2026-11-12 契约 §5）。
+        # legal_empty（新股无分红等合法空）/ source_unsupported（BSE 等源不支持）
+        # 不是故障：直接结算进 missing_list，不得占用重试次数、不得以
+        # retry_exhausted 的假名义消失。历史行默认 unknown → 保持旧重试行为。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 18"
+        ).fetchone()
+        if row is None:
+            retry_columns = {
+                column[1] for column in conn.execute("PRAGMA table_info(retry_list)").fetchall()
+            }
+            if "error_kind" not in retry_columns:
+                conn.execute(
+                    "ALTER TABLE retry_list ADD COLUMN error_kind TEXT DEFAULT 'unknown'"
+                )
+            conn.execute("UPDATE retry_list SET error_kind = 'unknown' WHERE error_kind IS NULL")
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (18, "retry_list.error_kind: legal_empty/source_unsupported settle into missing_list"),
+            )
+            logger.info("SQLite schema v18 已应用")
 
 
 def init_all_schema(

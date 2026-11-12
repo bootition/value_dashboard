@@ -23,6 +23,9 @@ from typing import Any, Literal, assert_never
 
 from app.core.adapters.base import FetchRequest, FetchResult
 from app.core.adapters.manager import AdapterManager
+
+# 契约 §3：股本完整性只有一份 SQL，init 侧不得复制第二份口径。
+from app.core.data_quality import listed_share_capital_gap_codes
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -343,6 +346,7 @@ class DataInitializer:
                 "error": result.metadata.error or "empty result",
                 "count": 0,
                 "missing": len(incomplete_codes),
+                "share_capital_missing": 0,
             }
 
         records_by_code = {
@@ -350,10 +354,28 @@ class DataInitializer:
             for row in result.data
             if row.get("stock_code")
         }
+        # 契约 §1：源明确不支持的股票（如 BSE 无上市信息主源）不得混进 error，
+        # 直接如实登记 missing(source_unsupported)，也不写 retry。
+        skipped_codes = {
+            str(code): str(reason or "")
+            for code, reason in (
+                getattr(result.metadata, "skipped_codes", None) or {}
+            ).items()
+            if code
+        }
+        if skipped_codes:
+            for code in skipped_codes:
+                self._record_missing(code, "listing_info", "source_unsupported")
+            logger.info(
+                "[Step 1b] %d 只股票源不支持上市信息，已登记 missing(source_unsupported)",
+                len(skipped_codes),
+            )
         updated = 0
         missing_codes: list[str] = []
         with self.duck.write_connection() as conn:
             for code in stock_codes:
+                if code in skipped_codes:
+                    continue
                 row = records_by_code.get(code)
                 if row is None:
                     missing_codes.append(code)
@@ -390,11 +412,37 @@ class DataInitializer:
 
         for code in missing_codes:
             self._record_missing(code, "listing_info", "source_incomplete")
+        # 契约 §5：写库后股本仍 NULL/非法（<=0 或 circ>total）的股票必须登记
+        # missing，否则它们既不在 missing_list 也不在 retry_list，无人补抓。
+        # 这正是 26 只股本缺失股（含 5 只 90 天豁免到期的新股）锁死全市场
+        # 发布的根因。缺口口径复用 data_quality 的单一真相（含新股豁免）。
+        try:
+            share_capital_gaps = set(listed_share_capital_gap_codes(self.duck))
+        except Exception as error:  # 单一真相本身已 fail-soft，这里再防一层
+            logger.warning("查询股本缺口失败: %s", error)
+            share_capital_gaps = set()
+        share_capital_missing = [
+            code for code in stock_codes
+            if code in share_capital_gaps and code not in skipped_codes
+        ]
+        for code in share_capital_missing:
+            self._record_missing(code, "share_capital", "source_incomplete")
+        if share_capital_missing:
+            logger.warning(
+                "[Step 1b] %d 只股票股本仍缺失/非法，已登记 missing(share_capital)",
+                len(share_capital_missing),
+            )
         self._record_batch(result, "listing_info", updated)
+        # 注：股本缺口**不**把本步骤降级为 partial。三列元数据缺失仍需压低
+        # 刷新节流（下一轮尽快重抓），而股本缺口走独立的 missing_list +
+        # _listing_info_gap_codes 定向补抓通道——若把它也算 partial，26 只
+        # 长期缺股本的票会让 listing_info 全市场刷新每天都重跑一遍。
         return {
             "status": "success" if not missing_codes else "partial",
             "count": updated,
             "missing": len(missing_codes),
+            "share_capital_missing": len(share_capital_missing),
+            "share_capital_missing_codes": share_capital_missing[:20],
         }
 
     def _fetch_trading_dates(self) -> dict[str, Any]:
@@ -1485,21 +1533,25 @@ class DataInitializer:
         adapter: str,
         error: str,
         extra_json: str | None = None,
+        *,
+        error_kind: str = "unknown",
     ) -> None:
         """记录失败到 retry_list（与 update.py 语义一致：冲突只更新
-        error/last_attempt，不重置 retry_count）"""
+        error/last_attempt，不重置 retry_count；error_kind 供重试分类）"""
         try:
             with self.sqlite.transaction() as conn:
                 conn.execute(
                     """INSERT INTO retry_list
                        (stock_code, data_type, adapter, error, retry_count, last_attempt,
-                        extra_json)
-                       VALUES (?, ?, ?, ?, 0, ?, ?)
+                        extra_json, error_kind)
+                       VALUES (?, ?, ?, ?, 0, ?, ?, ?)
                        ON CONFLICT(stock_code, data_type, adapter, extra_json)
                        DO UPDATE SET error=excluded.error,
-                                     last_attempt=excluded.last_attempt""",
+                                     last_attempt=excluded.last_attempt,
+                                     error_kind=excluded.error_kind""",
                     [stock_code, data_type, adapter, error[:500],
-                     datetime.now(UTC).isoformat(), extra_json or "{}"],
+                     datetime.now(UTC).isoformat(), extra_json or "{}",
+                     str(error_kind or "unknown")],
                 )
         except Exception as e:
             logger.warning(f"记录失败信息失败: {e}")
@@ -1522,14 +1574,21 @@ class DataInitializer:
     def _record_failures(
         self, data_type: str, stock_codes: list[str], result: FetchResult
     ) -> None:
-        """批量记录失败"""
+        """批量记录失败（契约 §5：透传 metadata.error_kind 供重试分类）"""
+        # 契约 §1 的字段带默认值；getattr 容错让旧 FetchResult 形状继续可用。
+        error_kind = str(getattr(result.metadata, "error_kind", "") or "unknown")
+        error = result.metadata.error or getattr(result.metadata, "reason", None) or "unknown"
         if not stock_codes:
-            self._record_failure("ALL", data_type, result.metadata.source,
-                                 result.metadata.error or "unknown")
+            self._record_failure(
+                "ALL", data_type, result.metadata.source, error,
+                error_kind=error_kind,
+            )
         else:
             for code in stock_codes:
-                self._record_failure(code, data_type, result.metadata.source,
-                                     result.metadata.error or "unknown")
+                self._record_failure(
+                    code, data_type, result.metadata.source, error,
+                    error_kind=error_kind,
+                )
 
     def _log_job_start(self, job_type: str) -> int:
         """记录任务开始"""

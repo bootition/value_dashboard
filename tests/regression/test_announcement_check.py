@@ -50,10 +50,16 @@ def test_category_query_title_variant_triggers_financial_refresh(duckdb_store, s
 
 
 def test_financial_refresh_marks_skipped_but_current_period_as_succeeded(
-    duckdb_store, sqlite_store,
+    duckdb_store, sqlite_store, monkeypatch,
 ) -> None:
     """本地已有 2026-06-30 三表时，重新抓取全部 skipped 应视为成功，不是 pending。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    # 冻结"当前应发布报告期"：本用例固定 2026-06-30 的本地数据，若不冻结则
+    # 每到三季报季（11 月起 expected=09-30）就会误判为 pending。只影响测试注入点，
+    # 生产日期推导逻辑不变。
+    monkeypatch.setattr(
+        updater, "_current_expected_financial_period", lambda now=None: "2026-06-30",
+    )
     updater._fetch_financial_trio = lambda code: (
         [
             {"status": "success", "data_type": data_type, "skipped": True,

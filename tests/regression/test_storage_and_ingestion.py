@@ -252,7 +252,11 @@ def test_listing_info_is_persisted_without_defaulting_unknown_status(
         """SELECT reason_code FROM missing_list
            WHERE stock_code = '600519' AND field_name = 'listing_info'"""
     )
-    assert report == {"status": "partial", "count": 1, "missing": 1}
+    # 契约 §5：返回体新增 share_capital 缺口计数，故不再做精确 dict 等值断言。
+    assert report["status"] == "partial"
+    assert report["count"] == 1
+    assert report["missing"] == 1
+    assert report["share_capital_missing"] == 0, "本用例股本完整，缺口计数应为 0"
     assert str(row["listing_date"]) == "2001-08-27"
     assert row["is_st"] is False
     assert row["is_suspended"] is None

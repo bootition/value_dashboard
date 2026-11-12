@@ -25,9 +25,14 @@ from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
+
+# 契约 §3：股本完整性与 missing 口径的单一真相，禁止在本文件复制第二份 SQL。
+from app.core.data_quality import actionable_missing_count, listed_share_capital_gap_codes
 from app.core.financial_period import CN_TZ as _CN_TZ
 from app.core.financial_period import expected_financial_period
-from app.core.job_status import aggregate_job_status
+
+# 契约 §2：多子步骤状态归并按严重度取最坏值，rejected 不得被 success 覆盖。
+from app.core.job_status import aggregate_job_status, merge_step_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -74,6 +79,170 @@ def classify_announcement(title: str | None) -> str:
     if any(kw in title for kw in _ANNOUNCEMENT_DIVIDEND_KEYWORDS):
         return "dividend"
     return "other"
+
+
+def _as_counter(value: Any) -> int:
+    """Coerce a step counter to int without letting bad data break a merge."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _merge_indicator_steps(*steps: dict[str, Any] | None) -> dict[str, Any]:
+    """Merge indicator sub-steps by severity (contract §2) keeping counters.
+
+    2026-11-12 P0：历史写法 ``{**后一个子步骤, "full_recompute": 前一个}``
+    会让后一个子步骤的 status 覆盖前一个——于是 ``refresh_treasury_spreads``
+    的 success 抹掉了价格域/财务域重算的 ``rejected``，状态页假绿。
+    状态一律交给 :func:`app.core.job_status.merge_step_status`（rejected 最高
+    优先级），本函数只额外把 success/failed 计数汇总到外层便于观测。
+    """
+    merged = merge_step_status(*steps)
+    for counter in ("success", "failed"):
+        merged[counter] = sum(
+            _as_counter(step.get(counter)) for step in steps if isinstance(step, dict)
+        )
+    return merged
+
+
+# 契约 §1：这两类"失败"不是故障——源正常但本来就没有数据 / 源根本不支持该票。
+# 它们不得占用 retry 次数，必须直接如实登记为 missing_list。
+_NON_RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset({"legal_empty", "source_unsupported"})
+# legal_empty → source_empty；source_unsupported → source_unsupported（契约 §5）。
+_ERROR_KIND_REASON_CODE: dict[str, str] = {
+    "legal_empty": "source_empty",
+    "source_unsupported": "source_unsupported",
+}
+
+
+def _source_error_kind(result: Any) -> str:
+    """Read a fetch result's ``metadata.error_kind`` (contract §1).
+
+    只有明确的分类才被采用：``none``（"没错误"）出现在失败路径上说明适配器
+    漏标，按 ``source_unavailable`` 处理——真故障宁可贵一点也不能被当成合法空。
+    用 ``getattr`` 容错，``error_kind`` 字段缺失时同样回落到旧行为。
+    """
+    metadata = getattr(result, "metadata", None)
+    kind = str(getattr(metadata, "error_kind", "") or "").strip()
+    if kind and kind != "none":
+        return kind
+    return "source_unavailable"
+
+
+def _source_skipped_codes(result: Any) -> dict[str, str]:
+    """Read a fetch result's ``metadata.skipped_codes`` (code → reason), if any."""
+    metadata = getattr(result, "metadata", None)
+    skipped = getattr(metadata, "skipped_codes", None)
+    if not isinstance(skipped, dict):
+        return {}
+    return {str(code): str(reason or "") for code, reason in skipped.items() if code}
+
+
+def _source_truncated(result: Any) -> bool:
+    """Whether a fetch result is a legitimate-but-truncated response (contract §1)."""
+    metadata = getattr(result, "metadata", None)
+    return bool(getattr(metadata, "truncated", False)) or (
+        _source_error_kind(result) == "truncated_ok"
+    )
+
+
+def _announcement_step_result(check: dict[str, Any] | None) -> dict[str, Any]:
+    """Turn an announcement check report into a truthful ``steps.announcements``.
+
+    2026-11-12 P1：``report_step("announcements", ...)`` 原先只在
+    ``check_report["blocked"]`` 分支调用，于是当天两轮的公告截断/失败在
+    job_logs 里完全不可见。现在无论 available/partial/unavailable/truncated
+    都入册；截断是 ``partial`` + reason，不升级成 ERROR。
+    """
+    if not isinstance(check, dict):
+        return {"status": "skipped", "reason": "announcements_not_checked"}
+    raw_status = str(check.get("status") or "partial")
+    truncated = bool(check.get("truncated"))
+    errors = [str(error) for error in check.get("errors") or []]
+    warnings = [str(warning) for warning in check.get("warnings") or []]
+    if raw_status in {"deferred", "skipped"}:
+        status = "skipped"
+    elif raw_status in {"unavailable", "failed", "error"}:
+        status = "failed"
+    elif truncated or errors or raw_status == "partial":
+        status = "partial"
+    elif raw_status in {"available", "success", "ok"}:
+        status = "success"
+    else:
+        status = "partial"
+    reason = check.get("reason")
+    if not reason and status == "partial":
+        reason = "announcements_truncated" if truncated else "announcements_partial"
+    if not reason and status == "failed":
+        reason = "announcement_source_unavailable"
+    return {
+        "status": status,
+        "reason": reason,
+        "checked_remote": bool(check.get("checked_remote")),
+        "truncated": truncated,
+        "truncated_categories": list(check.get("truncated_categories") or []),
+        "affected_count": len(check.get("affected_stock_codes") or []),
+        "new_announcement_count": sum(
+            len(items) for items in (check.get("all_new_announcements") or {}).values()
+        ),
+        "errors": errors[:5],
+        "warnings": warnings[:5],
+    }
+
+
+class _PriceReplaceBuffer:
+    """Bounded buffer of full-history price responses awaiting one grouped write.
+
+    2026-11-12 P0（性能）：全历史响应走"逐股独立事务"时，正式库 17M 行表上
+    一份 DELETE+INSERT 就是一次 WAL 提交，日志里 144 处 ≥10s 全静默、共
+    96.5 分钟。改为攒批后一个事务写 N 只，提交次数下降一个量级。
+
+    硬上限（契约要求"内存有上限"）：只数 / 行数 / 存活秒数三者任一超限即
+    落盘；三者同时失效才会无限增长。注意行数据本身早已由抓取侧持有，本缓冲
+    只多持有一小段时间，不会把整表读进内存。
+    """
+
+    def __init__(self, *, max_stocks: int, max_rows: int, max_seconds: float) -> None:
+        self.max_stocks = max(1, int(max_stocks))
+        self.max_rows = max(1, int(max_rows))
+        self.max_seconds = max(0.001, float(max_seconds))
+        self._items: list[tuple[str, Any, Any, bool, bool]] = []
+        self._rows = 0
+        self._opened_at = time.monotonic()
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    @property
+    def rows(self) -> int:
+        return self._rows
+
+    def add(self, item: tuple[str, Any, Any, bool, bool]) -> None:
+        if not self._items:
+            self._opened_at = time.monotonic()
+        self._items.append(item)
+        _, raw_result, qfq_result, raw_full, qfq_full = item
+        if raw_full and raw_result is not None:
+            self._rows += len(raw_result.data or ())
+        if qfq_full and qfq_result is not None:
+            self._rows += len(qfq_result.data or ())
+
+    def should_flush(self) -> bool:
+        if not self._items:
+            return False
+        if len(self._items) >= self.max_stocks:
+            return True
+        if self._rows >= self.max_rows:
+            return True
+        return (time.monotonic() - self._opened_at) >= self.max_seconds
+
+    def drain(self) -> list[tuple[str, Any, Any, bool, bool]]:
+        items = self._items
+        self._items = []
+        self._rows = 0
+        self._opened_at = time.monotonic()
+        return items
 
 
 class IncrementalUpdater:
@@ -261,9 +430,13 @@ class IncrementalUpdater:
         # 3. 检查待重试任务
         report["retry_tasks"] = self._check_retry_tasks()
 
-        # 4. 缺失列表
-        missing = self.sqlite.query("SELECT COUNT(*) as cnt FROM missing_list")
-        report["missing_count"] = missing[0]["cnt"] if missing else 0
+        # 4. 缺失列表（契约 §3：可行动口径的单一真相，禁止用全表 COUNT
+        #    把已解决的历史行也算进缺口——旧口径报 11,823，而状态页报 162）
+        try:
+            report["missing_count"] = actionable_missing_count(self.sqlite)
+        except Exception as error:
+            logger.warning("统计可行动缺失数量失败: %s", error)
+            report["missing_count"] = None
 
         # 判断是否需要更新
         report["needs_update"] = bool(
@@ -515,7 +688,26 @@ class IncrementalUpdater:
         share_capital_changed = shares_before != shares_after
         report["share_capital_changed"] = share_capital_changed
 
-        announcement_check = self._check_new_announcements(persist=True, detail_cb=detail_cb)
+        # 2026-11-12 P1：公告检查无论 available/partial/unavailable/truncated
+        # 都必须入册——旧实现只在 check_report["blocked"] 分支 report_step，
+        # 当天两轮的截断/失败在 job_logs 里完全不可见。
+        try:
+            announcement_check = self._check_new_announcements(
+                persist=True, detail_cb=detail_cb,
+            )
+        except Exception as error:  # noqa: BLE001 - 公告失败不得炸掉整轮更新
+            logger.warning("公告检查异常: %s", error)
+            announcement_check = {
+                "status": "unavailable",
+                "reason": "announcement_check_exception",
+                "checked_remote": False,
+                "affected_stock_codes": [],
+                "affected_announcements": {},
+                "all_new_announcements": {},
+                "errors": [str(error)],
+                "truncated": False,
+            }
+        report_step("announcements", _announcement_step_result(announcement_check))
         report["check"]["announcement_check"] = announcement_check
         # 上一轮财务刷新失败/pending 的公告已持久化在 retry_list。把它们
         # 并入本轮待刷新集合：游标推进后不再重复翻 45 天公告，pending 也不丢。
@@ -739,10 +931,7 @@ class IncrementalUpdater:
                         progress_cb=indicator_progress,
                     )
                 if ran_indicator_step:
-                    snapshot_step = {
-                        **price_step,
-                        "full_recompute": snapshot_step,
-                    }
+                    snapshot_step = _merge_indicator_steps(snapshot_step, price_step)
                 else:
                     snapshot_step = price_step
                 ran_indicator_step = True
@@ -757,7 +946,7 @@ class IncrementalUpdater:
                 else:
                     event_step = event_method(event_codes)
                 if ran_indicator_step:
-                    snapshot_step = {**event_step, "full_recompute": snapshot_step}
+                    snapshot_step = _merge_indicator_steps(snapshot_step, event_step)
                 else:
                     snapshot_step = event_step
                 ran_indicator_step = True
@@ -770,9 +959,10 @@ class IncrementalUpdater:
                 # 在正式库为秒级，取代旧的约 12 分钟全量重算。
                 treasury_step = calculator.refresh_treasury_spreads(treasury_changed_codes)
                 if ran_indicator_step:
+                    # rejected/partial 绝不能被国债利差刷新的 success 覆盖。
                     report_step(
                         "indicators",
-                        {**treasury_step, "full_recompute": snapshot_step},
+                        _merge_indicator_steps(snapshot_step, treasury_step),
                     )
                 else:
                     report_step("indicators", treasury_step)
@@ -1117,14 +1307,23 @@ class IncrementalUpdater:
         return rows[0]["fp"] if rows else ""
 
     def _listing_info_gap_codes(self) -> list[str]:
-        """Return listed stocks missing metadata needed by the publish gate."""
+        """Return listed stocks missing metadata needed by the publish gate.
+
+        契约 §5：缺口 = 既有三列（listing_date/is_st/is_suspended）缺失
+        ∪ 股本完整性违例（:func:`data_quality.listed_share_capital_gap_codes`
+        的单一真相，含 90 天新股豁免）。旧实现只看三列，26 只股本缺失股
+        既不在 missing_list 也不在 retry_list——5 只新股豁免到期后直接锁死
+        全市场发布（2026-11-12 P0）。
+        """
         rows = self.duck.read_query(
             """SELECT stock_code FROM stock_meta
                WHERE is_listed IS TRUE
                  AND (listing_date IS NULL OR is_st IS NULL OR is_suspended IS NULL)
                ORDER BY stock_code"""
         )
-        return [row["stock_code"] for row in rows]
+        metadata_gaps = [str(row["stock_code"]) for row in rows]
+        share_capital_gaps = listed_share_capital_gap_codes(self.duck)
+        return sorted(dict.fromkeys([*metadata_gaps, *share_capital_gaps]))
 
     def _refresh_universe_metadata(self) -> dict[str, Any]:
         """PRD §7.7 第 4 项: 刷新股票池、上市/ST/停牌/股本与 CSRC 行业。
@@ -1420,7 +1619,7 @@ class IncrementalUpdater:
 
         def fetch_items(
             category: str | None, start_date: str, max_pages: int,
-        ) -> tuple[list[dict[str, Any]], str | None]:
+        ) -> tuple[list[dict[str, Any]], str | None, bool]:
             label = category_labels.get(category or "", "近期公告")
 
             def page_progress(info: dict[str, Any]) -> None:
@@ -1448,7 +1647,7 @@ class IncrementalUpdater:
                     },
                 ))
             except Exception as error:
-                return [], str(error)
+                return [], str(error), False
             items = list(result.data or [])
             # 类别接口已经按"半年报/一季报/三季报/年报/分红"精确过滤；
             # 携带来源类别，后面不再依赖标题措辞判断是否财务公告
@@ -1456,32 +1655,39 @@ class IncrementalUpdater:
             if category in _ANNOUNCEMENT_FINANCIAL_CATEGORIES or category == _ANNOUNCEMENT_DIVIDEND_CATEGORY:
                 for item in items:
                     item["_announcement_category"] = category
-            return items, result.metadata.error or None
+            return items, result.metadata.error or None, _source_truncated(result)
 
         all_items: list[dict[str, Any]] = []
         errors: list[str] = []
+        truncated_categories: list[str] = []
         last_error_source = "cninfo"
         for category in _ANNOUNCEMENT_FINANCIAL_CATEGORIES:
-            items, error = fetch_items(
+            items, error, truncated = fetch_items(
                 category, financial_start, financial_max_pages,
             )
             all_items.extend(items)
             if error:
                 errors.append(f"{category}: {error}")
-        dividend_items, dividend_error = fetch_items(
+            if truncated:
+                truncated_categories.append(category)
+        dividend_items, dividend_error, dividend_truncated = fetch_items(
             _ANNOUNCEMENT_DIVIDEND_CATEGORY, financial_start, financial_max_pages,
         )
         all_items.extend(dividend_items)
         if dividend_error:
             errors.append(f"dividend: {dividend_error}")
+        if dividend_truncated:
+            truncated_categories.append(_ANNOUNCEMENT_DIVIDEND_CATEGORY)
         # general 全文列表只用于"非财务公告登记"（可选簿记）；分红/除权公告
         # 已由上面的 dividend 类别精确覆盖，general 截断不再阻断游标推进，
         # 否则每个公告量大日都会把更新打成 partial 并反复重查同一窗口。
-        general_items, general_error = fetch_items(
+        general_items, general_error, general_truncated = fetch_items(
             None, general_start, general_max_pages,
         )
         all_items.extend(general_items)
         general_warning = f"general: {general_error}" if general_error else None
+        if general_truncated:
+            truncated_categories.append("general")
 
         # 类别查询与全文查询可能返回同一公告；按公告 ID 去重。
         unique_items: list[dict[str, Any]] = []
@@ -1506,11 +1712,14 @@ class IncrementalUpdater:
             return {
                 "status": "unavailable",
                 "checked_remote": True,
+                "reason": "announcement_source_unavailable",
                 "affected_stock_codes": [],
                 "affected_announcements": {},
                 "all_new_announcements": {},
                 "errors": errors,
                 "warnings": [general_warning] if general_warning else [],
+                "truncated": bool(truncated_categories),
+                "truncated_categories": truncated_categories,
             }
 
         # 批量查询本地登记表，避免每一条公告一次 SQL。
@@ -1563,8 +1772,20 @@ class IncrementalUpdater:
         # 游标不在这里推进：只有当本轮发现的财务公告全部成功刷新/入册后，
         # 才允许把“已检查到”的边界前移（见 _run_incremental_update_flow 末尾）。
         # 若中途失败，下一轮会重新发现未入册公告，断点不丢失。
+        # 截断 = 拿到部分数据但源标记不完整（契约 §1 truncated_ok）：如实的
+        # ``partial`` + reason，绝不升级成 ERROR，也不阻断游标推进。
+        if truncated_categories:
+            status = "partial"
+            reason = "announcements_truncated"
+        elif errors:
+            status = "partial"
+            reason = "announcements_partial"
+        else:
+            status = "available"
+            reason = None
         return {
-            "status": "available" if not errors else "partial",
+            "status": status,
+            "reason": reason,
             "checked_remote": True,
             "affected_stock_codes": sorted(financial_codes),
             "affected_announcements": financial_announcements,
@@ -1573,6 +1794,8 @@ class IncrementalUpdater:
             },
             "errors": errors,
             "warnings": [general_warning] if general_warning else [],
+            "truncated": bool(truncated_categories),
+            "truncated_categories": truncated_categories,
         }
 
     def _mark_announcements_seen(self, stock_code: str, announcements: list[dict[str, Any]]) -> None:
@@ -2388,15 +2611,20 @@ class IncrementalUpdater:
         batch_size = max(1, int(getattr(self, "market_actions_batch_size", 50)))
         succeeded = 0
         failed_codes: list[str] = []
+        skipped_codes: list[str] = []
         failures: dict[str, list[str]] = {}
         processed = 0
         for offset in range(0, len(codes), batch_size):
             chunk = codes[offset:offset + batch_size]
-            chunk_failures = self._refresh_market_actions_chunk(chunk)
+            chunk_failures, chunk_skipped = self._refresh_market_actions_chunk(chunk)
             for code in chunk:
                 processed += 1
                 code_errors = chunk_failures.get(code) or []
-                if code_errors:
+                if code in chunk_skipped:
+                    # 源明确不支持：已登记 missing(source_unsupported)，不算成功
+                    # 也不算失败，更不写 retry（契约 §1）。
+                    skipped_codes.append(code)
+                elif code_errors:
                     failed_codes.append(code)
                     failures[code] = code_errors
                     for message in code_errors:
@@ -2418,28 +2646,67 @@ class IncrementalUpdater:
         return {
             "status": "success" if not failed_codes else "partial",
             "total": len(codes), "success": succeeded, "failed": len(failed_codes),
+            "skipped": len(skipped_codes),
+            "skipped_codes": skipped_codes[:20],
             "failed_codes": failed_codes[:20],
             "errors": {code: failures[code] for code in failed_codes[:20]},
             "batch_size": batch_size,
         }
 
-    def _refresh_market_actions_chunk(self, codes: list[str]) -> dict[str, list[str]]:
-        """Fetch+persist dividends/xdxr for one batch; return per-stock errors."""
+    def _settle_skipped_codes(
+        self, data_type: str, skipped: dict[str, str],
+    ) -> None:
+        """Record codes the source explicitly cannot serve (contract §1).
+
+        ``SourceMetadata.skipped_codes`` 是源"明确不支持"的股票（如 BSE 无东财
+        分红/除权交叉源）。它们必须直接进 missing_list，**不得**写进 error
+        字符串、不得进 retry——601123/603435 的历史 ``无可用适配器 (tried: [])``
+        就是这样零尝试假失败、5 轮后以 retry_exhausted 永久消失的。
+        """
+        for code, reason in skipped.items():
+            self._record_missing(str(code), data_type, "source_unsupported")
+            logger.info(
+                "[增量] %s %s 源明确不支持，登记为缺失: %s",
+                code, data_type, reason or "source_unsupported",
+            )
+            # 已被误记为 retry 的同一请求顺带撤销（不占重试次数）。
+            with contextlib.suppress(Exception):
+                self.sqlite.execute(
+                    "DELETE FROM retry_list WHERE stock_code = ? AND data_type = ?",
+                    [str(code), data_type],
+                )
+
+    def _refresh_market_actions_chunk(
+        self, codes: list[str],
+    ) -> tuple[dict[str, list[str]], set[str]]:
+        """Fetch+persist dividends/xdxr for one batch.
+
+        Returns ``(per_stock_errors, source_skipped_codes)``. 后者是源明确不支持
+        的股票（契约 §1），已直接登记 missing，不得再走逐股回退/重试。
+        """
         errors: dict[str, list[str]] = {}
+        skipped_codes: set[str] = set()
         for data_type in self._MARKET_ACTION_DATA_TYPES:
             grouped, result = self._fetch_market_action_batch(data_type, codes)
             if result is None:
                 self._fallback_market_actions(codes, data_type, errors)
                 continue
+            skipped = _source_skipped_codes(result)
+            if skipped:
+                self._settle_skipped_codes(data_type, skipped)
+                skipped_codes.update(skipped)
             persist_errors = self._persist_market_action_batch(
                 data_type, result, grouped,
             )
             for code in codes:
+                if code in skipped:
+                    # 源明确不支持：零尝试假失败比真故障更糟，直接跳过。
+                    continue
                 if code in persist_errors or not grouped.get(code):
                     # 批内没有该股记录、或该股行在批量事务里落库失败：逐股
                     # 复核以保留精确归因（正常应极少，只作为兜底路径）。
                     self._fallback_market_actions([code], data_type, errors)
-        return errors
+        return errors, skipped_codes
 
     def _fetch_market_action_batch(
         self, data_type: str, codes: list[str],
@@ -2526,12 +2793,71 @@ class IncrementalUpdater:
                     f"{data_type}: {outcome.get('error') or 'failed'}"
                 )
 
-    def _check_retry_tasks(self) -> list[dict]:
-        """读取待重试任务列表"""
+    def _settle_non_retryable_retries(self) -> int:
+        """Settle legal-empty / source-unsupported retries straight into missing_list.
+
+        ``announcements`` 除外：它的 retry 行是公告 pending 的持久化标记
+        （PRD §7.4），由财务刷新流程消费，不能被当成缺失结算掉。
+
+        2026-11-12 P1（契约 §5）：``legal_empty``（新股无分红、当日无公告…）与
+        ``source_unsupported``（BSE 无交叉源）不是故障。旧流程让它们和真故障
+        共用"重试 5 次 → retry_exhausted"通道，于是 301688/301689/601091/920201
+        在 retry_count=4/5 时就会被以假名义永久丢进 missing_list。
+        现在直接结算并删除 retry 行：不占重试次数、原因如实。
+        """
         try:
             rows = self.sqlite.query(
-                "SELECT id, stock_code, data_type, adapter, error, retry_count, extra_json "
+                """SELECT id, stock_code, data_type,
+                          COALESCE(error_kind, 'unknown') AS error_kind
+                   FROM retry_list
+                   WHERE COALESCE(error_kind, 'unknown') IN ('legal_empty', 'source_unsupported')
+                     AND data_type != 'announcements'"""
+            )
+        except Exception as error:
+            logger.warning("读取不可重试任务失败: %s", error)
+            return 0
+        if not rows:
+            return 0
+        settled = 0
+        for row in rows:
+            kind = str(row["error_kind"] or "unknown")
+            reason_code = _ERROR_KIND_REASON_CODE.get(kind)
+            if reason_code is None:  # pragma: no cover - SQL 已过滤，防御性分支
+                continue
+            try:
+                with self.sqlite.transaction() as conn:
+                    conn.execute(
+                        """INSERT INTO missing_list (stock_code, field_name, reason_code)
+                           VALUES (?, ?, ?)
+                           ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                           DO UPDATE SET reason_code = excluded.reason_code,
+                                         detected_at = CURRENT_TIMESTAMP""",
+                        [row["stock_code"], row["data_type"], reason_code],
+                    )
+                    conn.execute("DELETE FROM retry_list WHERE id = ?", [row["id"]])
+                settled += 1
+            except Exception as error:
+                logger.warning(
+                    "结算不可重试任务失败 %s/%s: %s",
+                    row["stock_code"], row["data_type"], error,
+                )
+        if settled:
+            logger.info(
+                "[增量] %d 条合法空/源不支持任务已直接结算为 missing（不占重试次数）",
+                settled,
+            )
+        return settled
+
+    def _check_retry_tasks(self) -> list[dict]:
+        """读取待重试任务列表（先结算不可重试种类，再排除它们）"""
+        # 契约 §5：legal_empty / source_unsupported 不再进入重试队列，直接结算。
+        self._settle_non_retryable_retries()
+        try:
+            rows = self.sqlite.query(
+                "SELECT id, stock_code, data_type, adapter, error, retry_count, extra_json, "
+                "COALESCE(error_kind, 'unknown') AS error_kind "
                 "FROM retry_list WHERE retry_count < max_retries "
+                "AND COALESCE(error_kind, 'unknown') NOT IN ('legal_empty', 'source_unsupported') "
                 "AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP) "
                 "ORDER BY last_attempt ASC LIMIT 100"
             )
@@ -2558,17 +2884,100 @@ class IncrementalUpdater:
         logger.info(f"[增量] 交易日历更新完成: {len(result.data)} 个日期")
         return {"status": "success", "count": len(result.data)}
 
-    def _get_xdxr_codes_since(self, start_date: str) -> set[str]:
-        """Get stock codes with corporate-action events on/after start_date.
+    @staticmethod
+    def _local_price_window_start(stock: dict[str, Any], fallback_start: str) -> str:
+        """Per-stock lower bound for the xdxr lookback window.
+
+        取该股**自己**的 ``min(latest_raw_date, latest_qfq_date)``：只要有一侧
+        停在旧日期（典型：qfq 陈旧），更晚的除权事件就必须被看见，否则 qfq
+        永远不会全历史重拉。两侧都没有本地日期时回退 ``fallback_start``。
+        """
+        raw = str(stock.get("latest_raw_date") or "")[:10]
+        qfq = str(stock.get("latest_qfq_date") or "")[:10]
+        if raw and qfq:
+            return min(raw, qfq)
+        return raw or qfq or fallback_start
+
+    def _get_xdxr_codes_since(
+        self,
+        start_date: str,
+        *,
+        stock_codes: list[str] | None = None,
+        stock_windows: dict[str, str | None] | None = None,
+    ) -> set[str]:
+        """Get stock codes with corporate-action events inside their own window.
 
         前复权（qfq）价格以最新除权为基础重算历史，因此发生除权除息后，
         该股票的全部 qfq 历史都需要重拉（PRD §7.7 复权一致性）。
+
+        2026-11-12 P0：窗口必须**按股票**计算。旧实现把全市场
+        ``min(latest_raw_date/latest_qfq_date)`` 当唯一起点——一只 qfq 停在
+        2015 年的陈旧股就把全体拖进全历史重拉，``xdxr_full_refetch`` 从 32
+        涨到 293，价格步骤 143.5 分钟。现在一条 JOIN SQL 完成：
+        ``xdxr.event_date >= 该股自己的窗口起点``，无本地日期的股票回退
+        ``start_date``（``stock_codes`` 模式下由 SQL 自行求本地日期）。
+
+        Args:
+            start_date: 兜底窗口起点（YYYY-MM-DD），用于无任何本地价格的股票。
+            stock_codes: 只在这些股票范围内判定（应当是被本轮抓取的目标集）。
+            stock_windows: 预先算好的 {code: 窗口起点}；给出时避免再扫一遍
+                17M 行价格表（``_update_prices_incremental`` 已在手上）。
         """
         try:
-            rows = self.duck.read_query(
-                "SELECT DISTINCT stock_code FROM xdxr WHERE event_date >= ?",
-                [start_date],
-            )
+            if stock_windows:
+                codes = [str(code) for code in stock_windows]
+                windows = [
+                    str(stock_windows[code] or start_date)[:10] for code in codes
+                ]
+                rows = self.duck.read_query(
+                    """WITH target AS (
+                           SELECT unnest(?::VARCHAR[]) AS stock_code,
+                                  unnest(?::VARCHAR[]) AS window_start
+                       )
+                       SELECT DISTINCT action.stock_code AS stock_code
+                       FROM xdxr action
+                       JOIN target ON target.stock_code = action.stock_code
+                       WHERE action.event_date >= CAST(target.window_start AS DATE)
+                       ORDER BY action.stock_code""",
+                    [codes, windows],
+                )
+            elif stock_codes:
+                rows = self.duck.read_query(
+                    """WITH target AS (
+                           SELECT unnest(?::VARCHAR[]) AS stock_code
+                       ), local AS (
+                           SELECT target.stock_code,
+                                  CASE
+                                      WHEN raw.latest_raw_date IS NOT NULL
+                                       AND qfq.latest_qfq_date IS NOT NULL
+                                      THEN LEAST(raw.latest_raw_date, qfq.latest_qfq_date)
+                                      ELSE COALESCE(
+                                          raw.latest_raw_date, qfq.latest_qfq_date,
+                                          CAST(? AS DATE)
+                                      )
+                                  END AS window_start
+                           FROM target
+                           LEFT JOIN (
+                               SELECT stock_code, MAX(trade_date) AS latest_raw_date
+                               FROM price_daily_raw GROUP BY stock_code
+                           ) raw ON raw.stock_code = target.stock_code
+                           LEFT JOIN (
+                               SELECT stock_code, MAX(trade_date) AS latest_qfq_date
+                               FROM price_daily_qfq GROUP BY stock_code
+                           ) qfq ON qfq.stock_code = target.stock_code
+                       )
+                       SELECT DISTINCT action.stock_code AS stock_code
+                       FROM xdxr action
+                       JOIN local ON local.stock_code = action.stock_code
+                       WHERE action.event_date >= local.window_start
+                       ORDER BY action.stock_code""",
+                    [list(stock_codes), start_date],
+                )
+            else:
+                rows = self.duck.read_query(
+                    "SELECT DISTINCT stock_code FROM xdxr WHERE event_date >= ?",
+                    [start_date],
+                )
             return {str(row["stock_code"]) for row in rows}
         except Exception as e:
             logger.warning(f"查询 xdxr 股票失败: {e}")
@@ -2661,20 +3070,24 @@ class IncrementalUpdater:
             target_stocks = target_stocks[:max_stocks]
 
         fallback_start = latest_local or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-        target_dates = [
-            str(value)
-            for stock in target_stocks
-            for value in (stock.get("latest_raw_date"), stock.get("latest_qfq_date"))
-            if value is not None
-        ]
-        start_date = min(target_dates) if target_dates else fallback_start
         end_date = target_date
 
-        # 增量窗口内发生除权除息的股票：qfq 需要全历史重拉
-        xdxr_window_start = start_date
-        xdxr_codes = self._get_xdxr_codes_since(xdxr_window_start)
+        # 增量窗口内发生除权除息的股票：qfq 需要全历史重拉。
+        # 2026-11-12 P0：窗口按**每只股票自己**的本地最新 raw/qfq 计算。
+        # 旧实现取全市场 min(target_dates)，一只 qfq 停在旧日期的股票就
+        # 会把全体窗口拉回数年前——除权窗口越退越早、xdxr_full_refetch
+        # 32 → 293、价格步骤 143.5 分钟的根因之一。
+        stock_windows = {
+            str(stock["stock_code"]): self._local_price_window_start(
+                stock, fallback_start,
+            )
+            for stock in target_stocks
+        }
+        xdxr_codes = self._get_xdxr_codes_since(
+            fallback_start, stock_windows=stock_windows,
+        )
         if xdxr_codes:
-            logger.info(f"[增量] {len(xdxr_codes)} 只股票在窗口内发生除权除息，qfq 将全历史重拉")
+            logger.info(f"[增量] {len(xdxr_codes)} 只股票在各自窗口内发生除权除息，qfq 将全历史重拉")
 
         # 本地数据陈旧时默认仍走增量：从本地最新日期补缺口即可覆盖全部缺失
         # 交易日。整段重拉只作为显式数据修复手段（price_full_refetch_on_stale），
@@ -2696,6 +3109,8 @@ class IncrementalUpdater:
         success_count = 0
         fail_count = 0
         updated_codes: list[str] = []
+        # 2026-11-12 P1：失败代码必须可追溯（旧实现只有汇总行，DB/日志都查不到）。
+        failed_codes: list[str] = []
         completed: list[int] = [0]
         concurrency = max(1, int(self.price_fetch_concurrency))
         max_concurrency = max(concurrency, int(self.price_fetch_max_concurrency))
@@ -2703,6 +3118,12 @@ class IncrementalUpdater:
         scale_up_seconds = max(1, int(self.price_fetch_scale_up_seconds))
         fetch_timeout = max(1, int(self.price_fetch_timeout_seconds))
         batch_size = max(1, int(self.price_fetch_batch_size))
+        # 全历史替换的攒批缓冲（硬上限：只数 / 行数 / 存活秒数，见 _PriceReplaceBuffer）。
+        write_buffer = _PriceReplaceBuffer(
+            max_stocks=self._PRICE_WRITE_BUFFER_STOCKS,
+            max_rows=self._PRICE_WRITE_BUFFER_ROWS,
+            max_seconds=self._PRICE_WRITE_BUFFER_SECONDS,
+        )
         update_started = time.monotonic()
 
         request_executor = ThreadPoolExecutor(
@@ -2710,15 +3131,18 @@ class IncrementalUpdater:
             thread_name_prefix="vd-price-request",
         )
 
-        def fetch_one(stock: dict) -> tuple[str, Any, Any, str | None, bool, bool, bool]:
+        def fetch_one(
+            stock: dict,
+        ) -> tuple[str, Any, Any, str | None, bool, bool, bool, str]:
             """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。
 
             增量原则：raw 与 qfq 各自以本地最新日期为起点，仅缺失的一侧
             才全量拉取。绝不用全局最老日期拖低另一侧的起点——历史已完整的
             股票每次只拉缺口（通常几行），避免无意义的全历史重拉。
 
-            返回最后两个布尔值表示 raw/qfq 本次是否为"全历史请求"；只有
-            全历史请求才允许走 DELETE+INSERT 全量替换（2026-09-08 红队）。
+            返回最后三个值表示 raw/qfq 本次是否为"全历史请求"以及失败时的
+            ``error_kind``（契约 §1：只有 source_unavailable 计入重试消耗）。
+            只有全历史请求才允许走 DELETE+INSERT 全量替换（2026-09-08 红队）。
             """
             code = stock["stock_code"]
             need_qfq_full = code in xdxr_codes
@@ -2748,7 +3172,10 @@ class IncrementalUpdater:
                 recover = getattr(self.adapter_mgr, "recover_after_timeout", None)
                 if callable(recover):
                     recover()
-                return code, None, None, f"fetch timeout after {fetch_timeout}s", True, raw_full_requested, qfq_full_requested
+                return (
+                    code, None, None, f"fetch timeout after {fetch_timeout}s",
+                    True, raw_full_requested, qfq_full_requested, "source_unavailable",
+                )
             results: dict[str, Any] = {}
             slow = False
             try:
@@ -2757,14 +3184,29 @@ class IncrementalUpdater:
                     results[futures[future]] = result
                     slow = slow or elapsed > 30
             except Exception as exc:
-                return code, None, None, f"fetch exception: {exc}", False, raw_full_requested, qfq_full_requested
+                return (
+                    code, None, None, f"fetch exception: {exc}",
+                    False, raw_full_requested, qfq_full_requested, "source_unavailable",
+                )
             raw_result = results["raw"]
             qfq_result = results["qfq"]
             if raw_result.metadata.error or not raw_result.data:
-                return code, None, None, raw_result.metadata.error or "empty raw", slow, raw_full_requested, qfq_full_requested
+                return (
+                    code, None, None, raw_result.metadata.error or "empty raw",
+                    slow, raw_full_requested, qfq_full_requested,
+                    _source_error_kind(raw_result),
+                )
             if qfq_result.metadata.error or not qfq_result.data:
-                return code, None, None, (qfq_result.metadata.error or "empty qfq"), slow, raw_full_requested, qfq_full_requested
-            return code, raw_result, qfq_result, None, slow, raw_full_requested, qfq_full_requested
+                return (
+                    code, None, None,
+                    qfq_result.metadata.error or "empty qfq",
+                    slow, raw_full_requested, qfq_full_requested,
+                    _source_error_kind(qfq_result),
+                )
+            return (
+                code, raw_result, qfq_result, None,
+                slow, raw_full_requested, qfq_full_requested, "none",
+            )
 
         batch: list[tuple[str, Any, Any, bool, bool]] = []
         stable_since = time.monotonic()
@@ -2787,6 +3229,19 @@ class IncrementalUpdater:
                 next_index += 1
                 outstanding[stock_executor.submit(fetch_one, stock)] = stock
 
+        def flush_write_buffer() -> None:
+            """Write the pending full-history buffer in one transaction.
+
+            ``before_write`` 先补满流水线：写库期间主线程被占住，工作线程
+            必须已经在跑下一批抓取，否则它们会空等（2026-11-12 P0 ③）。
+            """
+            nonlocal success_count, updated_codes, fail_count
+            success_count, updated_codes, fail_count = self._persist_price_batch(
+                [], success_count, updated_codes, fail_count,
+                buffer=write_buffer, flush_buffer=True,
+                failed_codes=failed_codes, before_write=fill_pipeline,
+            )
+
         def handle_price_result(
             code: str,
             raw_result: Any,
@@ -2794,21 +3249,33 @@ class IncrementalUpdater:
             err: str | None,
             raw_full_requested: bool,
             qfq_full_requested: bool,
+            error_kind: str = "source_unavailable",
         ) -> None:
             nonlocal success_count, updated_codes, fail_count
             if err is not None or raw_result is None:
                 fail_count += 1
-                self._record_failure(
+                failed_codes.append(code)
+                # 2026-11-12 P1：逐只 WARNING，DB 与日志都能回答"今天哪几只失败"。
+                logger.warning(
+                    "[增量] 价格失败 %s: %s (error_kind=%s)",
+                    code, err or "empty", error_kind,
+                )
+                self._record_failure_or_missing(
                     code, "price_daily", "manager", err or "empty",
                     extra_json=json.dumps({"adjust": "both"}),
+                    error_kind=error_kind,
                 )
             else:
                 batch.append((code, raw_result, qfq_result, raw_full_requested, qfq_full_requested))
             if len(batch) >= batch_size:
                 success_count, updated_codes, fail_count = self._persist_price_batch(
-                    batch, success_count, updated_codes, fail_count
+                    batch, success_count, updated_codes, fail_count,
+                    buffer=write_buffer, before_write=fill_pipeline,
+                    failed_codes=failed_codes,
                 )
                 batch.clear()
+            elif write_buffer.should_flush():
+                flush_write_buffer()
 
         try:
             fill_pipeline()
@@ -2833,18 +3300,18 @@ class IncrementalUpdater:
                     try:
                         (
                             code, raw_result, qfq_result, err, slow,
-                            raw_full_requested, qfq_full_requested,
+                            raw_full_requested, qfq_full_requested, error_kind,
                         ) = future.result()
                         window_penalty = window_penalty or slow or err is not None
                         handle_price_result(
                             code, raw_result, qfq_result, err,
-                            raw_full_requested, qfq_full_requested,
+                            raw_full_requested, qfq_full_requested, error_kind,
                         )
                     except Exception as exc:
                         window_penalty = True
                         handle_price_result(
                             code, None, None, f"price pipeline exception: {exc}",
-                            False, False,
+                            False, False, "source_unavailable",
                         )
                     completed[0] += 1
                     if detail_cb is not None:
@@ -2877,19 +3344,45 @@ class IncrementalUpdater:
                 fill_pipeline()
             if batch:
                 success_count, updated_codes, fail_count = self._persist_price_batch(
-                    batch, success_count, updated_codes, fail_count
+                    batch, success_count, updated_codes, fail_count,
+                    buffer=write_buffer, before_write=fill_pipeline,
+                    failed_codes=failed_codes,
                 )
+                batch.clear()
         finally:
+            # ② 循环正常结束或抛异常都必须把剩余数据落盘：既包括未满一批的
+            #    暂存项（batch），也包括攒批缓冲（write_buffer）。已 DELETE 的
+            #    股票更不能停在"删了没插"的中间态。
+            try:
+                if batch:
+                    success_count, updated_codes, fail_count = self._persist_price_batch(
+                        list(batch), success_count, updated_codes, fail_count,
+                        buffer=write_buffer, failed_codes=failed_codes,
+                    )
+                    batch.clear()
+                if len(write_buffer):
+                    flush_write_buffer()
+            except Exception as error:  # noqa: BLE001 - 收尾写入失败必须留痕
+                logger.error(
+                    "价格收尾写入失败（暂存 %d 只 / 缓冲 %d 只）: %s",
+                    len(batch), len(write_buffer), error,
+                )
             request_executor.shutdown(wait=False, cancel_futures=True)
             stock_executor.shutdown(wait=False, cancel_futures=True)
 
         logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
+        if failed_codes:
+            logger.warning(
+                "[增量] 价格失败代码 %d 只: %s",
+                len(failed_codes), ", ".join(failed_codes[:20]),
+            )
         elapsed_seconds = max(time.monotonic() - update_started, 0.001)
         return {
             "status": "success" if fail_count == 0 else "partial",
             "total": len(target_stocks),
             "success": success_count,
             "failed": fail_count,
+            "failed_codes": failed_codes[:20],
             "xdxr_full_refetch": len(xdxr_codes),
             "raw_full_refetch": raw_full_refetch,
             "elapsed_seconds": round(elapsed_seconds, 3),
@@ -2923,6 +3416,130 @@ class IncrementalUpdater:
 
     _PRICE_FULL_REPLACE_THRESHOLD = 200
     _PRICE_FULL_REPLACE_MIN_RATIO = 0.5
+    # 全历史替换攒批上限（2026-11-12 P0 ②）：只数 / 行数 / 存活秒数任一超限
+    # 即刻落盘。8 只 ≈ 最坏 16 份全历史响应（约 4 万行）；5 秒保证慢网络下
+    # 缓冲不会长期滞留；20 万行是 17M 行表的 ~1%，绝不会把整表读进内存。
+    _PRICE_WRITE_BUFFER_STOCKS = 8
+    _PRICE_WRITE_BUFFER_ROWS = 200_000
+    _PRICE_WRITE_BUFFER_SECONDS = 5.0
+    _PRICE_INSERT_COLUMNS = (
+        "stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate"
+    )
+    _PRICE_INSERT_PLACEHOLDERS = "(?, ?, ?, ?, ?, ?, ?, ?, ?)"
+
+    @staticmethod
+    def _price_row_values(stock_code: str, result: Any) -> list[list[Any]]:
+        """Row payload for one price table — single source of truth for the shape."""
+        return [
+            [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
+             row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
+             row.get("turnover_rate")]
+            for row in result.data
+        ]
+
+    def _assert_price_full_replace_safe(
+        self, connection: Any, table: str, data_type: str, stock_code: str, result: Any,
+    ) -> None:
+        """Refuse a full-history replace that would silently drop local history."""
+        local_rows = connection.execute(
+            f"SELECT COUNT(*) AS count FROM {table} WHERE stock_code = ?",
+            [stock_code],
+        ).fetchone()
+        local_count = int(local_rows[0]) if local_rows else 0
+        if len(result.data) < local_count * self._PRICE_FULL_REPLACE_MIN_RATIO:
+            raise ValueError(
+                f"{stock_code} {data_type} full replace truncated "
+                f"({len(result.data)} remote vs {local_count} local); keeping old data"
+            )
+        # 全历史替换还必须覆盖本地最老日期；源侧截断为"最近 N 年"
+        # 时不得把更早的历史静默删掉（2026-09-08 红队 P0-1 防线）。
+        remote_dates = [
+            str(row.get("trade_date") or "")[:10]
+            for row in result.data
+            if str(row.get("trade_date") or "")[:10]
+        ]
+        if not remote_dates:
+            raise ValueError(
+                f"{stock_code} {data_type} full replace has no trade_date rows"
+            )
+        local_min_row = connection.execute(
+            f"SELECT MIN(trade_date) AS earliest FROM {table} WHERE stock_code = ?",
+            [stock_code],
+        ).fetchone()
+        local_min = str(local_min_row[0])[:10] if local_min_row and local_min_row[0] else ""
+        if local_min and min(remote_dates) > local_min:
+            raise ValueError(
+                f"{stock_code} {data_type} full replace would drop history "
+                f"before {min(remote_dates)} (local earliest {local_min}); keeping old data"
+            )
+
+    def _insert_price_rows(
+        self, connection: Any, table: str, stock_code: str, result: Any, *,
+        full_replace: bool,
+    ) -> None:
+        """Insert one stock's rows; full-history replies replace, incremental upsert."""
+        rows = self._price_row_values(stock_code, result)
+        if full_replace:
+            connection.executemany(
+                f"INSERT INTO {table} ({self._PRICE_INSERT_COLUMNS}) "
+                f"VALUES {self._PRICE_INSERT_PLACEHOLDERS}",
+                rows,
+            )
+            return
+        connection.executemany(
+            f"INSERT INTO {table} ({self._PRICE_INSERT_COLUMNS}) "
+            f"VALUES {self._PRICE_INSERT_PLACEHOLDERS} "
+            "ON CONFLICT(stock_code, trade_date) DO UPDATE SET "
+            f"open=COALESCE(excluded.open, {table}.open), "
+            f"high=COALESCE(excluded.high, {table}.high), "
+            f"low=COALESCE(excluded.low, {table}.low), "
+            f"close=COALESCE(excluded.close, {table}.close), "
+            f"volume=COALESCE(excluded.volume, {table}.volume), "
+            f"turnover=COALESCE(excluded.turnover, {table}.turnover), "
+            f"turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)",
+            rows,
+        )
+
+    def _record_price_lineage_in_connection(
+        self, connection: Any, lineage: Any, stock_code: str, table: str,
+        data_type: str, result: Any, *, full_field_audit: bool = False,
+    ) -> None:
+        """Persist batch lineage plus the per-stock ``latest_close`` audit row."""
+        batch_id = lineage._record_batch_in_connection(
+            connection, result, data_type, len(result.data)
+        )
+        if full_field_audit:
+            lineage._record_field_audit_in_connection(
+                connection, result, result.data, stock_code, "trade_date", batch_id,
+            )
+        latest_row = max(
+            result.data,
+            key=lambda row: str(row.get("trade_date") or ""),
+        )
+        latest_close = latest_row.get("close")
+        if isinstance(latest_close, (int, float)):
+            connection.execute(
+                """INSERT INTO source_audit
+                   (stock_code, field_name, report_date, value, source,
+                    fetch_batch_id, fetch_time, raw_response_hash, confidence,
+                    reason_code, api_version)
+                   VALUES (?, 'latest_close', ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
+                [
+                    stock_code,
+                    latest_row.get("trade_date"),
+                    latest_close,
+                    result.metadata.source,
+                    batch_id,
+                    result.metadata.fetch_time,
+                    result.metadata.raw_response_hash,
+                    result.metadata.confidence,
+                    result.metadata.api_version,
+                ],
+            )
+        # 价格行数极大（全历史重拉单只可达数千行），逐值审计会把
+        # source_audit 放大成千万行级且非 PRD §14 关键财务字段所需。
+        # 价格采用 batch 级溯源，并仅审计每股最新收盘价；财务/股本等
+        # 关键字段仍走逐值审计。
 
     def _persist_price_pair_in_connection(
         self, connection: Any, stock_code: str, raw_result: Any, qfq_result: Any,
@@ -2948,107 +3565,139 @@ class IncrementalUpdater:
             ("price_daily_raw", "price_daily_raw", raw_result, full_replace_raw),
             ("price_daily_qfq", "price_daily_qfq", qfq_result, full_replace_qfq),
         ):
+            if result is None:
+                continue
             if full_replace:
-                local_rows = connection.execute(
-                    f"SELECT COUNT(*) AS count FROM {table} WHERE stock_code = ?",
-                    [stock_code],
-                ).fetchone()
-                local_count = int(local_rows[0]) if local_rows else 0
-                if len(result.data) < local_count * self._PRICE_FULL_REPLACE_MIN_RATIO:
-                    raise ValueError(
-                        f"{stock_code} {data_type} full replace truncated "
-                        f"({len(result.data)} remote vs {local_count} local); keeping old data"
-                    )
-                # 全历史替换还必须覆盖本地最老日期；源侧截断为"最近 N 年"
-                # 时不得把更早的历史静默删掉（2026-09-08 红队 P0-1 防线）。
-                remote_dates = [
-                    str(row.get("trade_date") or "")[:10]
-                    for row in result.data
-                    if str(row.get("trade_date") or "")[:10]
-                ]
-                if not remote_dates:
-                    raise ValueError(
-                        f"{stock_code} {data_type} full replace has no trade_date rows"
-                    )
-                local_min_row = connection.execute(
-                    f"SELECT MIN(trade_date) AS earliest FROM {table} WHERE stock_code = ?",
-                    [stock_code],
-                ).fetchone()
-                local_min = str(local_min_row[0])[:10] if local_min_row and local_min_row[0] else ""
-                if local_min and min(remote_dates) > local_min:
-                    raise ValueError(
-                        f"{stock_code} {data_type} full replace would drop history "
-                        f"before {min(remote_dates)} (local earliest {local_min}); keeping old data"
-                    )
+                self._assert_price_full_replace_safe(
+                    connection, table, data_type, stock_code, result,
+                )
                 connection.execute(
                     f"DELETE FROM {table} WHERE stock_code = ?", [stock_code]
                 )
-                connection.executemany(
-                    f"""INSERT INTO {table}
-                        (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    [
-                        [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
-                         row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
-                         row.get("turnover_rate")]
-                        for row in result.data
-                    ],
-                )
-            else:
-                connection.executemany(
-                    f"""INSERT INTO {table}
-                        (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(stock_code, trade_date) DO UPDATE SET
-                          open=COALESCE(excluded.open, {table}.open),
-                          high=COALESCE(excluded.high, {table}.high),
-                          low=COALESCE(excluded.low, {table}.low),
-                          close=COALESCE(excluded.close, {table}.close),
-                          volume=COALESCE(excluded.volume, {table}.volume),
-                          turnover=COALESCE(excluded.turnover, {table}.turnover),
-                          turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
-                    [
-                        [stock_code, row.get("trade_date"), row.get("open"), row.get("high"),
-                         row.get("low"), row.get("close"), row.get("volume"), row.get("turnover"),
-                         row.get("turnover_rate")]
-                        for row in result.data
-                    ],
-                )
-            batch_id = lineage._record_batch_in_connection(
-                connection, result, data_type, len(result.data)
+            self._insert_price_rows(
+                connection, table, stock_code, result, full_replace=full_replace,
             )
-            if full_field_audit:
-                lineage._record_field_audit_in_connection(
-                    connection, result, result.data, stock_code, "trade_date", batch_id,
-                )
-            latest_row = max(
-                result.data,
-                key=lambda row: str(row.get("trade_date") or ""),
+            self._record_price_lineage_in_connection(
+                connection, lineage, stock_code, table, data_type, result,
+                full_field_audit=full_field_audit,
             )
-            latest_close = latest_row.get("close")
-            if isinstance(latest_close, (int, float)):
-                connection.execute(
-                    """INSERT INTO source_audit
-                       (stock_code, field_name, report_date, value, source,
-                        fetch_batch_id, fetch_time, raw_response_hash, confidence,
-                        reason_code, api_version)
-                       VALUES (?, 'latest_close', ?, ?, ?, ?, ?, ?, ?, NULL, ?)""",
-                    [
-                        stock_code,
-                        latest_row.get("trade_date"),
-                        latest_close,
-                        result.metadata.source,
-                        batch_id,
-                        result.metadata.fetch_time,
-                        result.metadata.raw_response_hash,
-                        result.metadata.confidence,
-                        result.metadata.api_version,
-                    ],
+
+    def _persist_price_replace_group_in_connection(
+        self, connection: Any, items: list[tuple[str, Any, Any, bool, bool]],
+    ) -> None:
+        """Replace N stocks' full history inside ONE transaction (grouped writes).
+
+        2026-11-12 P0（性能）：全历史响应原先逐股独立事务，每只一次 WAL 提交，
+        正式库 17M 行表上单股可达 10~159s，日志 144 处 ≥10s 全静默、共
+        96.5 分钟，是价格步骤 143.5 分钟的主因（剔除停顿后纯抓取 118 只/分）。
+        这里把 N 只并进一个事务：每张表只发一条 ``DELETE ... IN (...)``，
+        再逐股 ``executemany`` 插入（仍是整段替换语义，不会退化成 upsert 追加）。
+
+        不变量（契约要求）：
+        ① 批内 DELETE+INSERT 同事务，任一股票校验/写入失败 → 整批回滚，
+           旧行一条不丢；调用方随后回退逐股事务，单股原子性依旧成立。
+        ② 每只股票仍然"先删后插"的整段替换，绝不留下重复/新旧混合行。
+        """
+        from app.core.init import DataInitializer
+
+        lineage = DataInitializer.__new__(DataInitializer)
+        lineage._batch_id = str(uuid.uuid4())
+        sides = (
+            ("price_daily_raw", "price_daily_raw", 3),
+            ("price_daily_qfq", "price_daily_qfq", 4),
+        )
+        # 1) 先跑完全部截断防线：任意一只不合格就一行都不写。
+        for item in items:
+            stock_code, raw_result, qfq_result, raw_full, qfq_full = item
+            for table, data_type, index in sides:
+                full_replace = raw_full if index == 3 else qfq_full
+                result = raw_result if index == 3 else qfq_result
+                if full_replace and result is not None:
+                    self._assert_price_full_replace_safe(
+                        connection, table, data_type, stock_code, result,
+                    )
+        # 2) 每张表一条 DELETE ... IN (...)，把 N 次删除压成 1 次。
+        for table, _data_type, index in sides:
+            codes = [item[0] for item in items if item[index]]
+            if not codes:
+                continue
+            placeholders = ", ".join("?" for _ in codes)
+            connection.execute(
+                f"DELETE FROM {table} WHERE stock_code IN ({placeholders})", codes,
+            )
+        # 3) 逐股 INSERT（整段替换）+ 溯源。
+        for item in items:
+            stock_code, raw_result, qfq_result, raw_full, qfq_full = item
+            for table, data_type, index in sides:
+                full_replace = raw_full if index == 3 else qfq_full
+                result = raw_result if index == 3 else qfq_result
+                if result is None:
+                    continue
+                self._insert_price_rows(
+                    connection, table, stock_code, result, full_replace=full_replace,
                 )
-            # 价格行数极大（全历史重拉单只可达数千行），逐值审计会把
-            # source_audit 放大成千万行级且非 PRD §14 关键财务字段所需。
-            # 价格采用 batch 级溯源，并仅审计每股最新收盘价；财务/股本等
-            # 关键字段仍走逐值审计。
+                self._record_price_lineage_in_connection(
+                    connection, lineage, stock_code, table, data_type, result,
+                )
+
+    def _flush_price_replace_buffer(
+        self,
+        buffer: _PriceReplaceBuffer,
+        success_count: int,
+        updated_codes: list[str],
+        fail_count: int,
+        *,
+        failed_codes: list[str] | None = None,
+        before_write: Callable[[], None] | None = None,
+    ) -> tuple[int, list[str], int]:
+        """Write all buffered full-history responses in one transaction.
+
+        ``before_write`` 在拿到写锁前调用（生产上传 ``fill_pipeline``），
+        保证主线程阻塞在写库期间工作线程仍在抓取，不会把并发饿死。
+        整批失败时回退逐股事务：一只坏数据不能拖累同批其它股票。
+        """
+        items = buffer.drain()
+        if not items:
+            return success_count, updated_codes, fail_count
+        if before_write is not None:
+            with contextlib.suppress(Exception):
+                before_write()
+        rows = sum(
+            len(result.data or ())
+            for _code, raw_result, qfq_result, raw_full, qfq_full in items
+            for result, full in ((raw_result, raw_full), (qfq_result, qfq_full))
+            if full and result is not None
+        )
+        try:
+            with self.duck.transaction() as connection:
+                self._persist_price_replace_group_in_connection(connection, items)
+            success_count += len(items)
+            updated_codes.extend(item[0] for item in items)
+            logger.info(
+                "[增量] 价格全历史批量写入 %d 只 / %d 行（单事务）", len(items), rows,
+            )
+            return success_count, updated_codes, fail_count
+        except Exception as exc:
+            logger.warning(
+                "价格全历史批量事务失败（%d 只），已整批回滚，回退逐股事务: %s",
+                len(items), exc,
+            )
+        for code, raw_result, qfq_result, raw_large, qfq_large in items:
+            try:
+                with self.duck.transaction() as connection:
+                    self._persist_price_pair_in_connection(
+                        connection, code, raw_result, qfq_result,
+                        full_replace_raw=raw_large, full_replace_qfq=qfq_large,
+                    )
+                success_count += 1
+                updated_codes.append(code)
+            except Exception as exc:
+                fail_count += 1
+                if failed_codes is not None:
+                    failed_codes.append(code)
+                logger.warning("[增量] 价格落库失败 %s: %s", code, exc)
+                self._record_failure(code, "price_daily", "manager", str(exc))
+        return success_count, updated_codes, fail_count
 
     def _persist_incremental_price_pair(
         self, stock_code: str, raw_result: Any, qfq_result: Any, *, full_field_audit: bool = False,
@@ -3065,15 +3714,28 @@ class IncrementalUpdater:
         success_count: int,
         updated_codes: list[str],
         fail_count: int,
+        *,
+        buffer: _PriceReplaceBuffer | None = None,
+        flush_buffer: bool = False,
+        failed_codes: list[str] | None = None,
+        before_write: Callable[[], None] | None = None,
     ) -> tuple[int, list[str], int]:
-        """Persist many stocks in one DuckDB transaction (few commits, far fewer
-        WAL flushes than per-stock transactions). On failure, falls back to
-        per-stock atomic commits so one bad row never blocks the whole batch.
+        """Persist many stocks in few DuckDB transactions (ingest pipeline).
 
-        Large full-history responses are split out and committed as single-stock
-        full-replace transactions: DuckDB upserts degrade linearly with table
-        size, so a 2000-row conflict upsert stalls ~1 minute on the formal
-        table, while delete+insert completes in seconds.
+        Two write paths:
+
+        * incremental responses → one conflict-safe upsert transaction per call
+          (falls back to per-stock commits on failure);
+        * full-history responses (``*_full_requested`` and rows above
+          ``_PRICE_FULL_REPLACE_THRESHOLD``) → appended to ``buffer`` and, once
+          the buffer hits its stock/row/time budget, replaced by
+          :meth:`_flush_price_replace_buffer` in a **single** transaction with a
+          grouped ``DELETE ... IN (...)``. 2026-11-12 P0: per-stock transactions
+          were 93% of the incremental price step's wall clock (144 silent stalls
+          ≥10s, 96.5 min total) — not the network.
+
+        ``flush_buffer=True`` drains the buffer even when ``batch`` is empty, so
+        callers can flush the remainder in a ``finally`` block.
 
         2026-09-08 红队修复：只有 fetch_one 明确标记为"全历史请求"
         （raw_full_requested/qfq_full_requested）且行数超阈值，才允许
@@ -3097,45 +3759,66 @@ class IncrementalUpdater:
                 large.append((item, raw_large, qfq_large))
             else:
                 small.append(item)
-        for (code, raw_result, qfq_result, _, _), raw_large, qfq_large in large:
-            try:
-                with self.duck.transaction() as connection:
-                    self._persist_price_pair_in_connection(
-                        connection, code, raw_result, qfq_result,
-                        full_replace_raw=raw_large,
-                        full_replace_qfq=qfq_large,
-                    )
-                success_count += 1
-                updated_codes.append(code)
-            except Exception as exc:
-                fail_count += 1
-                self._record_failure(
-                    code, "price_daily", "manager", str(exc),
-                )
-        if not small:
-            return success_count, updated_codes, fail_count
-        try:
-            with self.duck.transaction() as connection:
-                for code, raw_result, qfq_result, _, _ in small:
-                    self._persist_price_pair_in_connection(connection, code, raw_result, qfq_result)
-            success_count += len(small)
-            updated_codes.extend(code for code, _, _, _, _ in small)
-            return success_count, updated_codes, fail_count
-        except Exception:
-            for code, raw_result, qfq_result, _, _ in small:
+        if large and buffer is None:
+            # 兼容无缓冲调用点：逐股独立事务（有缓冲时走批量路径）。
+            for (code, raw_result, qfq_result, _, _), raw_large, qfq_large in large:
                 try:
-                    self._persist_incremental_price_pair(code, raw_result, qfq_result)
+                    with self.duck.transaction() as connection:
+                        self._persist_price_pair_in_connection(
+                            connection, code, raw_result, qfq_result,
+                            full_replace_raw=raw_large,
+                            full_replace_qfq=qfq_large,
+                        )
                     success_count += 1
                     updated_codes.append(code)
                 except Exception as exc:
                     fail_count += 1
-                    source = getattr(raw_result, "metadata", None)
+                    if failed_codes is not None:
+                        failed_codes.append(code)
+                    logger.warning("[增量] 价格落库失败 %s: %s", code, exc)
                     self._record_failure(
-                        code, "price_daily",
-                        getattr(source, "source", "manager") if source is not None else "manager",
-                        str(exc),
+                        code, "price_daily", "manager", str(exc),
                     )
-            return success_count, updated_codes, fail_count
+        elif large and buffer is not None:
+            for item, raw_large, qfq_large in large:
+                buffer.add((item[0], item[1], item[2], raw_large, qfq_large))
+                if buffer.should_flush():
+                    success_count, updated_codes, fail_count = self._flush_price_replace_buffer(
+                        buffer, success_count, updated_codes, fail_count,
+                        failed_codes=failed_codes, before_write=before_write,
+                    )
+        if small:
+            try:
+                with self.duck.transaction() as connection:
+                    for code, raw_result, qfq_result, _, _ in small:
+                        self._persist_price_pair_in_connection(
+                            connection, code, raw_result, qfq_result,
+                        )
+                success_count += len(small)
+                updated_codes.extend(code for code, _, _, _, _ in small)
+            except Exception:
+                for code, raw_result, qfq_result, _, _ in small:
+                    try:
+                        self._persist_incremental_price_pair(code, raw_result, qfq_result)
+                        success_count += 1
+                        updated_codes.append(code)
+                    except Exception as exc:
+                        fail_count += 1
+                        if failed_codes is not None:
+                            failed_codes.append(code)
+                        logger.warning("[增量] 价格落库失败 %s: %s", code, exc)
+                        source = getattr(raw_result, "metadata", None)
+                        self._record_failure(
+                            code, "price_daily",
+                            getattr(source, "source", "manager") if source is not None else "manager",
+                            str(exc),
+                        )
+        if flush_buffer and buffer is not None and len(buffer):
+            success_count, updated_codes, fail_count = self._flush_price_replace_buffer(
+                buffer, success_count, updated_codes, fail_count,
+                failed_codes=failed_codes, before_write=before_write,
+            )
+        return success_count, updated_codes, fail_count
 
     def _cleanup_redundant_retries(self, target_date: str) -> int:
         """Drop price retry entries whose data is already up to date.
@@ -3303,6 +3986,56 @@ class IncrementalUpdater:
         logger.info("[增量] 标记 %d 条 listing_info 缺失已补齐", len(complete_codes))
         return len(complete_codes)
 
+    # 一次性重查标记（见 _recheck_zero_attempt_retries）。带此前缀的行不再重置，
+    # 所以每个历史行最多获得一次干净重试，不会变成每轮重置的死循环。
+    _ZERO_ATTEMPT_RECHECK_MARKER = "[zero_attempt_recheck]"
+    # 历史"零尝试假失败"的错误串：601123/603435 曾一次适配器都没真正尝试就被
+    # 记成 ``无可用适配器 (tried: [])``。
+    _ZERO_ATTEMPT_ERROR_PATTERNS = ("无可用适配器", "tried: []")
+
+    def _recheck_zero_attempt_retries(self) -> int:
+        """Give historical zero-attempt false failures one clean retry.
+
+        2026-11-12 P1：这些行其实从未真正请求过源，继续按"重试 5 次"计数只会
+        以 retry_exhausted 永久进 missing_list。重置 retry_count 让它们走一次
+        真实请求；成功后自动出队，仍失败则按错误种类正确归因。
+        """
+        try:
+            rows = self.sqlite.query(
+                "SELECT id, error FROM retry_list WHERE error IS NOT NULL"
+            )
+        except Exception as error:
+            logger.warning("读取零尝试失败任务失败: %s", error)
+            return 0
+        ids = [
+            row["id"]
+            for row in rows
+            if not str(row.get("error") or "").startswith(self._ZERO_ATTEMPT_RECHECK_MARKER)
+            and any(
+                pattern in str(row.get("error") or "")
+                for pattern in self._ZERO_ATTEMPT_ERROR_PATTERNS
+            )
+        ]
+        if not ids:
+            return 0
+        slots = ", ".join("?" for _ in ids)
+        try:
+            self.sqlite.execute(
+                f"""UPDATE retry_list
+                    SET retry_count = 0, next_retry_at = NULL,
+                        last_attempt = CURRENT_TIMESTAMP,
+                        error = ? || error
+                    WHERE id IN ({slots})""",
+                [f"{self._ZERO_ATTEMPT_RECHECK_MARKER} ", *ids],
+            )
+        except Exception as error:
+            logger.warning("重置零尝试失败任务失败: %s", error)
+            return 0
+        logger.info(
+            "[增量] %d 条零尝试假失败任务已重置为一次干净重试", len(ids),
+        )
+        return len(ids)
+
     def _cleanup_unretryable_tasks(self) -> int:
         """Drop retry entries whose data domain has no per-stock refetch path.
 
@@ -3311,6 +4044,8 @@ class IncrementalUpdater:
         (e.g. the akshare outage window) would otherwise fail forever on every
         retry round. Their remaining gaps stay visible in missing_list.
         """
+        # 先给"一次都没真正尝试"的历史行一次干净重试，再清理无路径域。
+        self._recheck_zero_attempt_retries()
         rows = self.sqlite.query(
             f"""SELECT id FROM retry_list
                 WHERE data_type IN ({", ".join("?" for _ in self._CLEANUP_RETRY_DATA_TYPES)})""",
@@ -3951,7 +4686,8 @@ class IncrementalUpdater:
             if cursor.rowcount != 1:
                 return
             rows = conn.execute(
-                """SELECT stock_code, data_type, extra_json, retry_count, max_retries
+                """SELECT stock_code, data_type, extra_json, retry_count, max_retries,
+                          COALESCE(error_kind, 'unknown') AS error_kind
                    FROM retry_list WHERE id = ?""",
                 [retry_id],
             ).fetchall()
@@ -3962,13 +4698,19 @@ class IncrementalUpdater:
             data_type = row["data_type"]
             if row["retry_count"] < row["max_retries"] or data_type == "announcements":
                 return
+            # 契约 §5：耗尽时 reason_code 保持 retry_exhausted，field_name 带上
+            # error_kind 便于追溯"为什么耗尽"（unknown 时不加后缀，兼容旧行）。
+            error_kind = str(row["error_kind"] or "unknown")
+            field_name = f"retry_exhausted:{data_type}"
+            if error_kind not in {"", "unknown", "none"}:
+                field_name = f"{field_name}:{error_kind}"
             conn.execute(
                 """INSERT INTO missing_list (stock_code, field_name, reason_code)
                    VALUES (?, ?, 'retry_exhausted')
                    ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
                    DO UPDATE SET reason_code = excluded.reason_code,
                                  detected_at = CURRENT_TIMESTAMP""",
-                [stock_code, f"retry_exhausted:{data_type}"],
+                [stock_code, field_name],
             )
             conn.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
 
@@ -3979,18 +4721,68 @@ class IncrementalUpdater:
         adapter: str,
         error: str,
         extra_json: str | None = None,
+        *,
+        error_kind: str = "unknown",
     ) -> None:
-        """记录失败到 retry_list"""
+        """记录失败到 retry_list（带 error_kind，供重试分类与追溯）"""
         try:
             with self.sqlite.transaction() as conn:
                 conn.execute(
                     """INSERT INTO retry_list
-                       (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
-                       VALUES (?, ?, ?, ?, 0, ?, ?)
+                       (stock_code, data_type, adapter, error, retry_count, last_attempt,
+                        extra_json, error_kind)
+                       VALUES (?, ?, ?, ?, 0, ?, ?, ?)
                        ON CONFLICT(stock_code, data_type, adapter, extra_json) DO UPDATE SET
-                         error=excluded.error, last_attempt=excluded.last_attempt""",
+                         error=excluded.error, last_attempt=excluded.last_attempt,
+                         error_kind=excluded.error_kind""",
                     [stock_code, data_type, adapter, error[:500],
-                     datetime.now(UTC).isoformat(), extra_json or "{}"],
+                     datetime.now(UTC).isoformat(), extra_json or "{}",
+                     str(error_kind or "unknown")],
                 )
         except Exception as e:
             logger.warning(f"记录失败信息失败: {e}")
+
+    def _record_missing(self, stock_code: str, field_name: str, reason_code: str) -> None:
+        """记录缺失到 missing_list（与 init.DataInitializer 同语义）"""
+        try:
+            with self.sqlite.transaction() as conn:
+                conn.execute(
+                    """INSERT INTO missing_list (stock_code, field_name, reason_code)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
+                       DO UPDATE SET reason_code = excluded.reason_code,
+                                     detected_at = CURRENT_TIMESTAMP""",
+                    [stock_code, field_name, reason_code],
+                )
+        except Exception as e:
+            logger.warning(f"记录缺失信息失败: {e}")
+
+    def _record_failure_or_missing(
+        self,
+        stock_code: str,
+        data_type: str,
+        adapter: str,
+        error: str,
+        *,
+        extra_json: str | None = None,
+        error_kind: str = "unknown",
+    ) -> None:
+        """如实归因一次抓取失败（契约 §1/§5）。
+
+        ``legal_empty``（源正常但没有数据）与 ``source_unsupported``（源不支持
+        该票）不是故障：直接写 missing_list，**不写 retry**、不占重试次数、
+        不会在 5 轮后以 ``retry_exhausted`` 的假名义永久消失。
+        """
+        kind = str(error_kind or "unknown")
+        reason_code = _ERROR_KIND_REASON_CODE.get(kind)
+        if reason_code is not None:
+            self._record_missing(stock_code, data_type, reason_code)
+            logger.info(
+                "[增量] %s %s 非故障失败已登记为缺失(%s): %s",
+                stock_code, data_type, reason_code, error,
+            )
+            return
+        self._record_failure(
+            stock_code, data_type, adapter, error,
+            extra_json=extra_json, error_kind=kind,
+        )
