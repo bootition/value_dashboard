@@ -34,7 +34,12 @@ adapters:
     income_statement: ["sina", "tdx", "akshare_eastmoney"]
     cash_flow: ["sina", "tdx", "akshare_eastmoney"]
     price_daily: ["tencent", "baostock", "tdx"]
-    dividends: ["akshare_eastmoney", "baostock", "cninfo"]
+    # 分红链：只挂真正能给出 ex_date + 每股数值的源。
+    # cninfo 分红实现恒返回 source_unsupported（权益分派公告不含结构化除权日，
+    # 需解析 PDF，尚未实现），这里**不得**挂进默认链——否则每票每轮必然失败
+    # 一次并污染熔断/retry。代码里保留 CNINFOAdapter._fetch_dividends 作为
+    # 未来 PDF 解析就绪后的显式挂载位（显式配置 cninfo 为 primary 时可见）。
+    dividends: ["akshare_eastmoney", "baostock"]
     xdxr: ["tdx"]
     announcements: ["cninfo"]
     listing_info: ["akshare_eastmoney"]
@@ -62,7 +67,10 @@ update:
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
   announcement_catchup_days: 45  # 公告游标缺失时的首次追补窗口（覆盖中报季）
   announcement_financial_max_pages: 450  # CNINFO 每页固定 30 条；财务类别追补上限
-  announcement_general_max_pages: 5  # 非财务公告只登记最近 3 天的前几页（可选登记，不做全量）
+  # 非财务公告 general 窗口的**单窗口**页上限（每页 30 条 → 5 页=150 条）。
+  # 窗口被截断且跨度 >1 天时，适配器按日期二分递归补齐（每个子窗口仍受本上限
+  # 约束）；单日/单选仍超限才标记 metadata.truncated 并返回已抓到的数据。
+  announcement_general_max_pages: 5
   price_fetch_concurrency: 8  # 自适应起始并发（HTTP 源；socket 源强制串行）
   price_fetch_max_concurrency: 16  # 连续 5 分钟无长尾/失败时每次 +4，最多 16
   price_fetch_concurrency_step: 4

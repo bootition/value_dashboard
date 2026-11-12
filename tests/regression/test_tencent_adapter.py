@@ -104,7 +104,8 @@ def test_tencent_bse_qfq_falls_back_to_raw_when_no_adjustment_exists(monkeypatch
     assert result.data[0]["close"] == 14.58
 
 
-def test_tencent_price_deadline_bounds_http_timeout(monkeypatch) -> None:
+def test_tencent_price_deadline_keeps_at_least_one_second_timeout(monkeypatch) -> None:
+    """2026-11-12 P1：0.1s 兜底超时必然假失败（实测 RTT 0.17~0.25s），下限改 1s。"""
     seen: dict[str, float] = {}
 
     def capture(*args, **kwargs):
@@ -117,9 +118,9 @@ def test_tencent_price_deadline_bounds_http_timeout(monkeypatch) -> None:
             data_type="price_daily",
             stock_codes=["920000"],
             adjust="qfq",
-            extra_params={"deadline_monotonic": time.monotonic() + 0.5},
+            extra_params={"deadline_monotonic": time.monotonic() + 5.0},
         )
     )
 
     assert result.metadata.error is None
-    assert 0 < seen["timeout"] <= 0.5
+    assert 1.0 <= seen["timeout"] <= 5.0

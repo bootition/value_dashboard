@@ -12,9 +12,9 @@ import threading
 import time
 from collections import deque
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +50,32 @@ DataType = Literal[
 
 AdjustType = Literal["raw", "qfq", "hfq"]
 ConfidenceLevel = Literal["strict", "approximate", "missing"]
+
+# 2026-11-12 契约 §1：适配器错误分类（单一真相，所有适配器/manager 共用）。
+#
+# 熔断判据（唯一实现在 AdapterManager._counts_toward_circuit）：
+#   计入熔断 = error_kind == "source_unavailable"
+#              OR (error_kind in ("none", "") AND error 非空 AND 无数据)
+#              ↑ 后者是**未迁移适配器的兜底**：本轮只把 T1 归属适配器迁移到
+#                明确分类，tdx/sina/ths/cninfo_funding/capital_history/
+#                index_valuation 等仍返回"error 非空 + 空数据"；若一律不计，
+#                真实源故障会被无限重捶，退化成"每只票白跑一轮"。
+#   不计熔断 = legal_empty / source_unsupported / per_symbol_data_error /
+#              deadline / truncated_ok（无论 error/reason 是否为空）
+ErrorKind = Literal[
+    "none",                  # 正常
+    "legal_empty",           # 源正常，但没有数据（无分红历史、当日无公告…）
+    "per_symbol_data_error", # 个别代码的数据格式问题（列缺失、单票解析失败）
+    "source_unsupported",    # 源能力缺失（BSE 不支持、CNINFO 分红需 PDF 解析）
+    "source_unavailable",    # 源真的不可用（网络/风控/5xx/超时/异常）→ 明确计入熔断
+    "deadline",              # 调用方预算耗尽（出生即超时）→ 不计熔断
+    "truncated_ok",          # 拿到部分数据且已标记截断（合法不完整）→ 不计熔断
+]
+
+#: 契约内明确计入熔断的 error_kind 集合（manager 只读这一份口径）。
+#: 未迁移适配器的 "none"+error+空数据 兜底不在此集合，见
+#: AdapterManager._counts_toward_circuit()（唯一判据实现）。
+CIRCUIT_FAILURE_ERROR_KINDS: Final[frozenset[str]] = frozenset({"source_unavailable"})
 # P0-1: cninfo_csrc 是 CSRC 行业适配器的独立源名（与 cninfo 公告/分红适配器区分）
 SourceName = Literal["cninfo", "cninfo_csrc", "akshare_eastmoney", "tdx", "baostock", "tencent", "sina", "ths", "sws", "local_cache", "eastmoney_f10", "czb_mof", "cninfo_capital", "cninfo_funding", "legulegu", "csindex", "eastmoney_repurchase", "eastmoney_hk_dividend", "csmar"]
 # 2026-09-17 Phase B1：新增 csmar 源名。
@@ -87,7 +113,12 @@ class FetchRequest(BaseModel):
 
 
 class SourceMetadata(BaseModel):
-    """每次抓取的溯源元数据"""
+    """每次抓取的溯源元数据。
+
+    2026-11-12 契约 §1：新增 error_kind/reason/skipped_codes/missing_columns/
+    truncated。全部带默认值，旧调用点（只传 source/fetch_time/hash/confidence/
+    error）继续可用。
+    """
     source: SourceName
     fetch_time: datetime
     raw_response_hash: str              # SHA256(raw_response)
@@ -95,6 +126,23 @@ class SourceMetadata(BaseModel):
     api_version: str | None = None
     row_count: int = 0
     error: str | None = None
+    #: 错误分类；默认 "none" 保证旧代码不炸，只有 "source_unavailable" 计入熔断。
+    error_kind: ErrorKind = "none"
+    #: 合法空/不支持/截断/超时的人读说明；日志必须用它，禁止打印字面 None。
+    reason: str | None = None
+    #: code → reason：源明确不支持的股票，不得拼进 error 字符串。
+    skipped_codes: dict[str, str] = Field(default_factory=dict)
+    #: 列名容错时缺失的标准字段名，供上层结构化披露。
+    missing_columns: list[str] = Field(default_factory=list)
+    #: 是否发生截断；error_kind="truncated_ok" 时强制为 True。
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def _truncated_implies_truncated_ok_flag(self) -> SourceMetadata:
+        """契约 §1：error_kind="truncated_ok" 必须同时 truncated=True。"""
+        if self.error_kind == "truncated_ok" and not self.truncated:
+            self.truncated = True
+        return self
 
 
 class FetchResult(BaseModel):
@@ -225,6 +273,12 @@ class BaseAdapter:
         confidence: ConfidenceLevel = "approximate",
         error: str | None = None,
         api_version: str | None = None,
+        *,
+        error_kind: ErrorKind = "none",
+        reason: str | None = None,
+        skipped_codes: dict[str, str] | None = None,
+        missing_columns: list[str] | None = None,
+        truncated: bool = False,
     ) -> SourceMetadata:
         """构建溯源元数据"""
         raw_bytes = b""
@@ -243,6 +297,11 @@ class BaseAdapter:
             api_version=api_version,
             row_count=row_count,
             error=error,
+            error_kind=error_kind,
+            reason=reason,
+            skipped_codes=dict(skipped_codes or {}),
+            missing_columns=list(missing_columns or []),
+            truncated=truncated,
         )
 
     def _make_result(
@@ -252,6 +311,12 @@ class BaseAdapter:
         confidence: ConfidenceLevel = "approximate",
         error: str | None = None,
         api_version: str | None = None,
+        *,
+        error_kind: ErrorKind = "none",
+        reason: str | None = None,
+        skipped_codes: dict[str, str] | None = None,
+        missing_columns: list[str] | None = None,
+        truncated: bool = False,
     ) -> FetchResult:
         """构建标准化结果"""
         metadata = self._make_metadata(
@@ -260,6 +325,11 @@ class BaseAdapter:
             confidence=confidence,
             error=error,
             api_version=api_version,
+            error_kind=error_kind,
+            reason=reason,
+            skipped_codes=skipped_codes,
+            missing_columns=missing_columns,
+            truncated=truncated,
         )
         return FetchResult(
             data=data,
@@ -270,13 +340,53 @@ class BaseAdapter:
             ),
         )
 
-    def _make_empty_result(self, reason: str, confidence: ConfidenceLevel = "missing") -> FetchResult:
-        """构建空结果（数据不可得）"""
+    def _make_empty_result(
+        self,
+        reason: str,
+        confidence: ConfidenceLevel = "missing",
+        *,
+        error_kind: ErrorKind = "source_unavailable",
+    ) -> FetchResult:
+        """构建"空结果 + error"（历史语义：空数据带说明=失败）。
+
+        默认 ``error_kind="source_unavailable"`` 保持旧行为：调用
+        ``_make_empty_result(reason)`` 的适配器仍被视作源不可用。已知是
+        合法空/能力缺失/超时的调用方必须显式传 error_kind，或改用
+        ``_make_legal_empty_result``。
+        """
         metadata = self._make_metadata(
             raw_response=None,
             row_count=0,
             confidence=confidence,
             error=reason,
+            error_kind=error_kind,
+            reason=reason,
+        )
+        return FetchResult(data=[], metadata=metadata)
+
+    def _make_legal_empty_result(
+        self,
+        reason: str,
+        *,
+        error_kind: ErrorKind = "legal_empty",
+        confidence: ConfidenceLevel = "missing",
+        skipped_codes: dict[str, str] | None = None,
+        missing_columns: list[str] | None = None,
+    ) -> FetchResult:
+        """构建"合法空"结果：error 保持 None，人读说明写 reason。
+
+        用于合法缺失/能力缺失/预算耗尽/截断：manager 不计熔断，日志禁止
+        打印字面 None。
+        """
+        metadata = self._make_metadata(
+            raw_response=None,
+            row_count=0,
+            confidence=confidence,
+            error=None,
+            error_kind=error_kind,
+            reason=reason,
+            skipped_codes=skipped_codes,
+            missing_columns=missing_columns,
         )
         return FetchResult(data=[], metadata=metadata)
 

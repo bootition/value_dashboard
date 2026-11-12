@@ -31,6 +31,7 @@ import httpx
 
 from app.core.adapters.base import (
     BaseAdapter,
+    ErrorKind,
     FetchRequest,
     FetchResult,
 )
@@ -169,9 +170,9 @@ class CNINFOAdapter(BaseAdapter):
             return self._fetch_announcements(request)
         if request.data_type == "dividends":
             return self._fetch_dividends(request)
-        return self._make_empty_result(
-            reason=f"CNINFO 不支持的数据类型: {request.data_type}",
-            confidence="missing",
+        return self._make_legal_empty_result(
+            f"CNINFO 不支持的数据类型: {request.data_type}",
+            error_kind="source_unsupported",
         )
 
     def close(self) -> None:
@@ -245,13 +246,19 @@ class CNINFOAdapter(BaseAdapter):
         max_pages: int = 20,
         column: str | None = None,
         progress_cb: Callable[[dict[str, Any]], None] | None = None,
+        truncation_cb: Callable[[dict[str, Any]], None] | None = None,
     ) -> list[dict[str, Any]]:
         """调用 CNINFO 公告搜索 API，自动翻页。
 
         返回规范化后的公告条目列表。stock_code 为 None 时执行全市场
         按日期段查询（不带 stock 参数），column 必须显式指定。
 
-        单股查询 orgId 无法解析时抛 ValueError。
+        单股查询 orgId 无法解析时抛 ValueError（真正的源/映射故障）。
+
+        2026-11-12 P1：窗口被 ``max_pages`` 截断时**不再 raise**（旧实现让
+        已抓到的 150 条整批丢弃并计熔断）。改为：
+        - 窗口跨度 > 1 天 → 复用日期二分递归补齐（子窗口各自受 max_pages 限）；
+        - 单选/单日仍超限 → 通过 ``truncation_cb`` 如实标记并返回已抓数据。
         """
         se_date = self._format_se_date(start_date, end_date)
 
@@ -268,15 +275,26 @@ class CNINFOAdapter(BaseAdapter):
             stock_param = f"{stock_code},{org_id}"
 
         # 2026-08-28 实测：CNINFO 忽略 pageSize>30，固定每页返回 30 条。
-        # 之前请求 50 但每页只得 30，代码用 `len(ann_list) < page_size`
-        # 判断“已到末页”，导致只读到第一页（全市场 3 个板块 90 条重复），
-        # 中报等财务公告因此长期漏检。这里强制使用源的真实页容量。
         if page_size > 30:
             page_size = 30
 
         results: list[dict[str, Any]] = []
         client = self._get_client()
         total_record = 0
+
+        def note_truncation(reason: str) -> None:
+            detail = {
+                "total": total_record,
+                "fetched": len(results),
+                "max_pages": max_pages,
+                "start_date": start_date,
+                "end_date": end_date,
+                "stock_code": stock_code,
+                "reason": reason,
+            }
+            logger.warning("CNINFO 公告窗口被截断（返回已抓取部分）: %s", detail)
+            if truncation_cb is not None:
+                truncation_cb(detail)
 
         for page_num in range(1, max_pages + 1):
             form: dict[str, str] = {
@@ -317,8 +335,8 @@ class CNINFOAdapter(BaseAdapter):
                     if backoff:
                         time.sleep(backoff)
             if payload is None:
-                # 页面级失败会向上传播为 partial/unavailable，调用方不得
-                # 把截断的公告列表误当成完整发现结果（中报漏检根因之一）。
+                # 页面级失败是真正的源故障：向上传播为 partial/unavailable，
+                # 调用方不得把截断的公告列表误当成完整发现结果。
                 raise RuntimeError(
                     f"CNINFO page {page_num} failed after retries: {last_error}"
                 ) from last_error
@@ -353,50 +371,64 @@ class CNINFOAdapter(BaseAdapter):
             if actual_page_size < page_size and not total_record:
                 break
             if page_num >= _CNINFO_MAX_PAGE_NUM and total_record > page_num * actual_page_size:
-                # CNINFO pageNum>100 会重复第 1 页；把日期窗口二分后递归补齐。
-                try:
-                    start_dt = datetime.strptime(start_date or "1990-01-01", "%Y-%m-%d").date()
-                    end_dt = datetime.strptime(end_date or "2099-12-31", "%Y-%m-%d").date()
-                except ValueError as exc:
-                    raise RuntimeError(
-                        "CNINFO announcements truncated: exceeded 100 pages and "
-                        "date window cannot be split"
-                    ) from exc
-                if start_dt >= end_dt:
-                    raise RuntimeError(
-                        "CNINFO announcements truncated: exceeded 100 pages on a "
-                        "single-day window"
-                    )
-                mid_dt = start_dt + (end_dt - start_dt) // 2
-                first = self._query_announcements(
+                # pageNum>100 会重复第 1 页：交给下方统一日期二分。
+                break
+
+        if not total_record or total_record <= len(results):
+            return results
+
+        # 窗口被截断：跨度 > 1 天时复用日期二分递归补齐（子窗口仍需受
+        # max_pages 限制；单日/单选仍超限则如实标记 truncated）。
+        window = self._split_announcement_window(start_date, end_date)
+        if window is not None:
+            (first_start, first_end), (second_start, second_end) = window
+            return [
+                *self._query_announcements(
                     stock_code=stock_code,
                     category=category,
-                    start_date=start_dt.strftime("%Y-%m-%d"),
-                    end_date=mid_dt.strftime("%Y-%m-%d"),
+                    start_date=first_start,
+                    end_date=first_end,
                     page_size=page_size,
                     max_pages=max_pages,
                     column=column,
-                )
-                second = self._query_announcements(
+                    progress_cb=progress_cb,
+                    truncation_cb=truncation_cb,
+                ),
+                *self._query_announcements(
                     stock_code=stock_code,
                     category=category,
-                    start_date=(mid_dt + timedelta(days=1)).strftime("%Y-%m-%d"),
-                    end_date=end_dt.strftime("%Y-%m-%d"),
+                    start_date=second_start,
+                    end_date=second_end,
                     page_size=page_size,
                     max_pages=max_pages,
                     column=column,
-                )
-                # 递归子窗口已覆盖整段日期；丢弃本层先取的 100 页，
-                # 避免“本层 3000 条 + 递归全量”重复请求（中报季提速）。
-                return [*first, *second]
+                    progress_cb=progress_cb,
+                    truncation_cb=truncation_cb,
+                ),
+            ]
 
-        if total_record and total_record > len(results):
-            raise RuntimeError(
-                f"CNINFO announcements truncated: total={total_record}, "
-                f"fetched={len(results)}, max_pages={max_pages}"
-            )
-
+        note_truncation("window_not_splittable")
         return results
+
+    @staticmethod
+    def _split_announcement_window(
+        start_date: str | None, end_date: str | None,
+    ) -> tuple[tuple[str, str], tuple[str, str]] | None:
+        """把公告日期窗口二分；无法解析或单日窗口返回 None。"""
+        if not start_date or not end_date:
+            return None
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            return None
+        if start_dt >= end_dt:
+            return None
+        mid_dt = start_dt + (end_dt - start_dt) // 2
+        return (
+            (start_dt.strftime("%Y-%m-%d"), mid_dt.strftime("%Y-%m-%d")),
+            ((mid_dt + timedelta(days=1)).strftime("%Y-%m-%d"), end_dt.strftime("%Y-%m-%d")),
+        )
 
     @staticmethod
     def _format_se_date(start: str | None, end: str | None) -> str:
@@ -451,6 +483,11 @@ class CNINFOAdapter(BaseAdapter):
         category = CATEGORY_MAP.get(category_raw, category_raw) if category_raw else None
         page_size = int(request.extra_params.get("page_size", 30))
         max_pages = int(request.extra_params.get("max_pages", 20))
+        progress_cb = request.extra_params.get("progress_cb")
+        truncations: list[dict[str, Any]] = []
+
+        def collect_truncation(detail: dict[str, Any]) -> None:
+            truncations.append(detail)
 
         # 全市场查询：不带 stock 参数。2026-08-28 实测 CNINFO 当前接口
         # 忽略 column 且三个板块返回同一份全市场列表；因此只查一次并按
@@ -467,7 +504,8 @@ class CNINFOAdapter(BaseAdapter):
                     page_size=page_size,
                     max_pages=max_pages,
                     column="szse",
-                    progress_cb=request.extra_params.get("progress_cb"),
+                    progress_cb=progress_cb,
+                    truncation_cb=collect_truncation,
                 )
                 seen_ids: set[str] = set()
                 for item in items:
@@ -478,7 +516,7 @@ class CNINFOAdapter(BaseAdapter):
                         seen_ids.add(announcement_id)
                     all_data.append(item)
             except Exception as e:
-                logger.exception("全市场公告查询异常")
+                logger.warning("全市场公告查询异常: %s", e)
                 errors.append(f"market: {e}")
             if errors:
                 errors = [f"all_boards_failed: {'; '.join(errors)}"]
@@ -487,6 +525,14 @@ class CNINFOAdapter(BaseAdapter):
                 label="announcements",
                 stock_count=0,
                 errors=errors or None,
+                error_kind=(
+                    "source_unavailable" if errors
+                    else "truncated_ok" if truncations
+                    else "legal_empty" if not all_data
+                    else "none"
+                ),
+                reason=self._announcement_reason(all_data, errors, truncations),
+                truncated=bool(truncations),
             )
 
         all_data = []
@@ -501,11 +547,12 @@ class CNINFOAdapter(BaseAdapter):
                     end_date=request.end_date,
                     page_size=page_size,
                     max_pages=max_pages,
-                    progress_cb=request.extra_params.get("progress_cb"),
+                    progress_cb=progress_cb,
+                    truncation_cb=collect_truncation,
                 )
                 all_data.extend(items)
             except Exception as e:
-                logger.exception("查询 %s 公告异常", code)
+                logger.warning("查询 %s 公告异常: %s", code, e)
                 errors.append(f"{code}: {e}")
 
         return self._finalize_result(
@@ -513,7 +560,41 @@ class CNINFOAdapter(BaseAdapter):
             label="announcements",
             stock_count=len(codes),
             errors=errors,
+            error_kind=(
+                "source_unavailable" if errors
+                else "truncated_ok" if truncations
+                else "legal_empty" if not all_data
+                else "none"
+            ),
+            reason=self._announcement_reason(all_data, errors, truncations),
+            truncated=bool(truncations),
         )
+
+    @staticmethod
+    def _announcement_reason(
+        data: list[dict[str, Any]],
+        errors: list[str],
+        truncations: list[dict[str, Any]],
+    ) -> str | None:
+        """公告结果的 reason：截断/失败/合法空的统一人读说明。"""
+        parts: list[str] = []
+        if errors:
+            parts.append("; ".join(errors))
+        if truncations:
+            details = []
+            for item in truncations[:8]:
+                scope = item.get("stock_code") or "market"
+                details.append(
+                    f"{scope}: total={item.get('total')} fetched={item.get('fetched')} "
+                    f"max_pages={item.get('max_pages')} "
+                    f"window={item.get('start_date')}~{item.get('end_date')}"
+                )
+            parts.append(
+                "CNINFO 公告被截断（已返回已抓取部分）: " + "; ".join(details)
+            )
+        if not parts and not data:
+            parts.append("CNINFO 公告窗口内无公告（合法空）")
+        return "; ".join(parts) or None
 
     # ─── dividends 处理器 ─────────────────────────────────────────
 
@@ -523,12 +604,10 @@ class CNINFOAdapter(BaseAdapter):
         # 该路径恒空。恒空若以 error=None 返回，会把“源能力缺失”伪装成
         # “合法无分红”；这里显式返回 unsupported error。默认链已把 cninfo
         # 从 dividends 优先级移除，仅保留未来 PDF 解析能力就绪的挂载位。
-        return self._make_empty_result(
-            reason=(
-                "CNINFO dividends unsupported: ex_date requires PDF parsing "
-                "(not implemented); returning empty rows would fake a legal empty"
-            ),
-            confidence="missing",
+        return self._make_legal_empty_result(
+            "CNINFO dividends unsupported: ex_date requires PDF parsing "
+            "(not implemented); returning empty rows would fake a legal empty",
+            error_kind="source_unsupported",
         )
 
     @staticmethod
@@ -611,18 +690,34 @@ class CNINFOAdapter(BaseAdapter):
         label: str,
         stock_count: int,
         errors: list[str] | None = None,
+        *,
+        error_kind: ErrorKind = "none",
+        reason: str | None = None,
+        truncated: bool = False,
     ) -> FetchResult:
-        """统一构建 FetchResult，confidence 固定 strict（法定披露源）"""
-        # 序列化规范化数据用于溯源哈希（datetime 用 str 兜底）
+        """统一构建 FetchResult。
+
+        confidence：完整成功才是 strict；partial/截断为 approximate；
+        空数据（无论是否带错误）为 missing——空数据 + 错误不得报 strict。
+        """
         raw_repr = json.dumps(
             {"source": "cninfo", "label": label, "stocks": stock_count, "rows": data},
             default=str,
             ensure_ascii=False,
         )
+        if not data:
+            confidence: str = "missing"
+        elif errors or truncated:
+            confidence = "approximate"
+        else:
+            confidence = "strict"
         return self._make_result(
             data=data,
             raw_response=raw_repr,
-            confidence="strict",
+            confidence=confidence,  # type: ignore[arg-type]
             error="; ".join(errors) if errors else None,
+            error_kind=error_kind,
+            reason=reason,
+            truncated=truncated,
             api_version="v1",
         )

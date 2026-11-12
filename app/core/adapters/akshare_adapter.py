@@ -26,10 +26,12 @@ from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
+import requests
 
 from app.core.adapters.base import (
     BaseAdapter,
     DataType,
+    ErrorKind,
     FetchRequest,
     FetchResult,
 )
@@ -202,6 +204,120 @@ def _generate_pinyin(name: str) -> str:
         return ""
 
 
+# ─── 股本回填（2026-11-12 P0：上交所清单不含股本列） ────────────────
+# 口径与 scripts/rebuild_share_capital.py 完全一致：腾讯实时行情字段
+# parts[72]=流通股本、parts[73]=总股本（单位：股），不得另起一套。
+
+_TENCENT_SHARE_QUOTE_URL = "https://qt.gtimg.cn/q="
+_TENCENT_SHARE_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://gu.qq.com/",
+}
+_TENCENT_SHARE_BATCH_SIZE = 50
+_TENCENT_SHARE_TIMEOUT_SECONDS = 10.0
+_TENCENT_QUOTE_LINE_RE = re.compile(r'v_([a-z]{2}\d{6})="(.*)"')
+_SHARE_NAME_PREFIX_RE = re.compile(r"^(?:\*?ST|XD|XR|DR|N|C)+", re.IGNORECASE)
+
+
+def _clean_share_name(name: str) -> str:
+    """去掉 ST/XD/XR/DR/N/C 等行情前缀后比较公司简称（与回填脚本同规则）。"""
+    cleaned = (name or "").replace(" ", "").upper()
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = _SHARE_NAME_PREFIX_RE.sub("", cleaned)
+    return cleaned
+
+
+def _tencent_quote_symbol(code: str) -> str | None:
+    """标准 6 位代码 → 腾讯行情符号（只用于股本回填批次）。"""
+    code = (code or "").strip()
+    if len(code) != 6 or not code.isdigit():
+        return None
+    if code.startswith(("92", "43", "83", "87", "88")):
+        return f"bj{code}"
+    if code.startswith("90"):
+        return f"sh{code}"          # 沪市 B 股
+    if code.startswith("2"):
+        return f"sz{code}"          # 深市 B 股
+    if code[0] == "6":
+        return f"sh{code}"
+    if code[0] in ("0", "3"):
+        return f"sz{code}"
+    return None
+
+
+def _fetch_tencent_share_capital(
+    codes: list[str],
+) -> tuple[dict[str, dict[str, Any]], str]:
+    """批量抓取腾讯实时行情中的总股本/流通股本。
+
+    Returns:
+        ({code: {"name": str, "total": int|None, "circ": int|None}}, raw_text)
+    """
+    symbols = [symbol for code in codes if (symbol := _tencent_quote_symbol(code))]
+    if not symbols:
+        return {}, ""
+    response = requests.get(
+        _TENCENT_SHARE_QUOTE_URL + ",".join(symbols),
+        headers=_TENCENT_SHARE_HEADERS,
+        timeout=_TENCENT_SHARE_TIMEOUT_SECONDS,
+    )
+    response.raise_for_status()
+    response.encoding = "gbk"
+    text = response.text
+    quotes: dict[str, dict[str, Any]] = {}
+    for line in text.split(";"):
+        line = line.strip()
+        if not line.startswith("v_"):
+            continue
+        match = _TENCENT_QUOTE_LINE_RE.match(line)
+        if not match:
+            continue
+        parts = match.group(2).split("~")
+        if len(parts) < 74 or not parts[1]:
+            continue
+        try:
+            circ = int(float(parts[72])) if parts[72] else None
+            total = int(float(parts[73])) if parts[73] else None
+        except (TypeError, ValueError):
+            continue
+        quotes[match.group(1)[2:]] = {
+            "name": parts[1],
+            "total": total,
+            "circ": circ,
+        }
+    return quotes, text
+
+
+def _has_complete_share_capital(row: dict[str, Any] | None) -> bool:
+    """交易所清单是否已同时给出正的总股本与流通股本。"""
+    if not row:
+        return False
+    total = row.get("total_shares")
+    circ = row.get("circ_shares")
+    return bool(total) and bool(circ)
+
+
+def _validate_tencent_share_quote(
+    exchange_name: str, quote: dict[str, Any],
+) -> str | None:
+    """校验腾讯股本：名称一致 + 正数 + circ<=total；返回拒绝原因或 None。"""
+    total = quote.get("total")
+    circ = quote.get("circ")
+    if not total or not circ:
+        return "missing_share_count"
+    if total <= 0 or circ <= 0:
+        return "non_positive_share_count"
+    if circ > total:
+        return "circ_exceeds_total"
+    if not exchange_name:
+        return "no_exchange_name_to_verify"
+    if _clean_share_name(exchange_name) != _clean_share_name(str(quote.get("name") or "")):
+        return "name_mismatch"
+    return None
+
+
 # ─── 适配器 ─────────────────────────────────────────────────────────
 
 
@@ -234,7 +350,9 @@ class AKShareAdapter(BaseAdapter):
 
     def fetch(self, request: FetchRequest) -> FetchResult:
         if not _AKSHARE_AVAILABLE:
-            return self._make_empty_result("akshare 未安装")
+            return self._make_legal_empty_result(
+                "akshare 未安装", error_kind="source_unsupported",
+            )
 
         handler: Callable[[FetchRequest], FetchResult] | None = {
             "stock_list": self._fetch_stock_list,
@@ -248,13 +366,18 @@ class AKShareAdapter(BaseAdapter):
         }.get(request.data_type)
 
         if handler is None:
-            return self._make_empty_result(f"不支持的数据类型: {request.data_type}")
+            return self._make_legal_empty_result(
+                f"不支持的数据类型: {request.data_type}",
+                error_kind="source_unsupported",
+            )
 
         try:
             return handler(request)
         except Exception as e:
             logger.exception(f"AKShare fetch {request.data_type} 失败")
-            return self._make_empty_result(f"{type(e).__name__}: {e}")
+            return self._make_empty_result(
+                f"{type(e).__name__}: {e}", error_kind="source_unavailable",
+            )
 
     # ─── handlers ───────────────────────────────────────────────
 
@@ -315,6 +438,7 @@ class AKShareAdapter(BaseAdapter):
                 raw_response=raw_response,
                 confidence="approximate",
                 error="partial stock list: " + "; ".join(source_errors),
+                error_kind="source_unavailable",
                 api_version=_AKSHARE_VERSION,
             )
 
@@ -330,6 +454,14 @@ class AKShareAdapter(BaseAdapter):
 
         An unavailable source leaves its field unknown. It must never turn an
         absent name into a claim that a stock is not ST or not suspended.
+
+        2026-11-12 P0：上交所清单（`stock_info_sh_name_code`）实测只有
+        「证券代码/证券简称/上市日期」等列，**没有总股本/流通股本**；深市
+        与北交所清单带股本。因此仅靠交易所清单，沪市股票永远拿不到股本，
+        90 天新股豁免到期后会把全市场发布门禁锁死。这里对 targets 中股本
+        仍缺失的代码用腾讯实时行情（字段 72/73，与
+        ``scripts/rebuild_share_capital.py`` 同口径）回填，并做名称一致性 +
+        circ<=total 校验；任一不过保持 None 并如实披露，绝不猜值。
         """
         exchange_rows: dict[str, dict[str, Any]] = {}
         raw_payloads: list[str] = []
@@ -400,10 +532,40 @@ class AKShareAdapter(BaseAdapter):
         if not targets:
             return self._make_empty_result("无法获取交易所股票清单")
 
+        # 只为股本仍缺失的代码做腾讯回填（交易所清单已有的绝不覆盖）。
+        # extra_params["share_backfill_only"] + ["share_backfill_codes"] 允许
+        # 上层（update/init）把回填限制在本地股本缺口股票上；缺省时按交易所
+        # 清单缺失判定（SSE 清单天然缺列 → 全部沪市股票）。
+        extra_params = request.extra_params
+        share_backfill_only = bool(extra_params.get("share_backfill_only"))
+        allowed_backfill_codes = {
+            str(code).strip()
+            for code in (extra_params.get("share_backfill_codes") or [])
+            if str(code).strip()
+        }
+        pending_share_codes = [
+            code for code in targets
+            if not _has_complete_share_capital(exchange_rows.get(code))
+            and (not share_backfill_only or code in allowed_backfill_codes)
+        ]
+        backfilled_shares, share_stats = self._backfill_missing_shares(
+            pending_share_codes, exchange_rows, request,
+        )
+
         records: list[dict[str, Any]] = []
         for code in targets:
             row = exchange_rows.get(code)
             name = row["name"] if row else ""
+            total_shares = row["total_shares"] if row else None
+            circ_shares = row["circ_shares"] if row else None
+            shares_source: str | None = (
+                "exchange" if (total_shares and circ_shares) else None
+            )
+            backfill = backfilled_shares.get(code)
+            if backfill is not None:
+                total_shares = total_shares or backfill["total_shares"]
+                circ_shares = circ_shares or backfill["circ_shares"]
+                shares_source = "tencent"
             records.append(
                 {
                     "stock_code": code,
@@ -412,8 +574,9 @@ class AKShareAdapter(BaseAdapter):
                     "is_st": name.upper().startswith(("ST", "*ST")) if row else None,
                     "is_suspended": code in suspension_codes if suspension_codes is not None else None,
                     "pinyin": _generate_pinyin(name),
-                    "total_shares": row["total_shares"] if row else None,
-                    "circ_shares": row["circ_shares"] if row else None,
+                    "total_shares": total_shares,
+                    "circ_shares": circ_shares,
+                    "shares_source": shares_source,
                 }
             )
 
@@ -428,8 +591,92 @@ class AKShareAdapter(BaseAdapter):
                 "partial listing_info: " + "; ".join(source_errors)
                 if source_errors else None
             ),
+            error_kind="source_unavailable" if source_errors else "none",
+            reason=self._share_backfill_reason(share_stats),
             api_version=_AKSHARE_VERSION,
         )
+
+    def _backfill_missing_shares(
+        self,
+        pending: list[str],
+        exchange_rows: dict[str, dict[str, Any]],
+        request: FetchRequest,
+    ) -> tuple[dict[str, dict[str, int]], dict[str, Any]]:
+        """用腾讯实时行情批量回填缺失股本（每批 ≤50），失败只披露不猜值。"""
+        backfilled: dict[str, dict[str, int]] = {}
+        stats: dict[str, Any] = {
+            "requested": len(pending),
+            "backfilled": 0,
+            "rejected": [],
+            "errors": [],
+        }
+        if not pending:
+            return backfilled, stats
+        for offset in range(0, len(pending), _TENCENT_SHARE_BATCH_SIZE):
+            if request.deadline_exceeded():
+                stats["errors"].append("deadline_exceeded")
+                break
+            batch = pending[offset:offset + _TENCENT_SHARE_BATCH_SIZE]
+            try:
+                self._wait_rate_limit()
+                quotes, _raw_text = _fetch_tencent_share_capital(batch)
+            except Exception as error:
+                logger.warning("腾讯股本回填批次失败（保留 None）: %s", error)
+                stats["errors"].append(f"{type(error).__name__}: {error}")
+                continue
+            for code in batch:
+                quote = quotes.get(code)
+                if not quote:
+                    stats["rejected"].append(f"{code}:no_quote")
+                    continue
+                exchange_row = exchange_rows.get(code) or {}
+                rejection = _validate_tencent_share_quote(
+                    str(exchange_row.get("name") or ""), quote,
+                )
+                if rejection is not None:
+                    stats["rejected"].append(f"{code}:{rejection}")
+                    continue
+                total_shares = exchange_row.get("total_shares") or quote["total"]
+                circ_shares = exchange_row.get("circ_shares") or quote["circ"]
+                if (
+                    not total_shares
+                    or not circ_shares
+                    or total_shares <= 0
+                    or circ_shares <= 0
+                    or circ_shares > total_shares
+                ):
+                    stats["rejected"].append(f"{code}:inconsistent_share_pair")
+                    continue
+                backfilled[code] = {
+                    "total_shares": int(total_shares),
+                    "circ_shares": int(circ_shares),
+                }
+        stats["backfilled"] = len(backfilled)
+        if stats["rejected"] or stats["errors"]:
+            logger.warning(
+                "腾讯股本回填未全部成功: requested=%d backfilled=%d rejected=%s errors=%s",
+                stats["requested"],
+                stats["backfilled"],
+                stats["rejected"][:10],
+                stats["errors"][:3],
+            )
+        return backfilled, stats
+
+    @staticmethod
+    def _share_backfill_reason(stats: dict[str, Any]) -> str | None:
+        """把股本回填结果汇总进 metadata.reason（不设 error，避免阻断落库）。"""
+        parts: list[str] = []
+        if stats.get("requested"):
+            parts.append(
+                f"shares_backfilled_from_tencent={stats.get('backfilled', 0)}"
+            )
+        rejected = stats.get("rejected") or []
+        if rejected:
+            parts.append("shares_backfill_rejected=" + ",".join(rejected[:10]))
+        errors = stats.get("errors") or []
+        if errors:
+            parts.append("shares_backfill_error=" + "; ".join(errors[:3]))
+        return "; ".join(parts) or None
 
     def _fetch_price_daily(self, request: FetchRequest) -> FetchResult:
         """日线行情 (raw/qfq/hfq)"""
@@ -481,6 +728,7 @@ class AKShareAdapter(BaseAdapter):
                 "partial price_daily: " + "; ".join(source_errors)
                 if source_errors else None
             ),
+            error_kind="source_unavailable" if source_errors else "none",
             api_version=_AKSHARE_VERSION,
         )
 
@@ -560,8 +808,48 @@ class AKShareAdapter(BaseAdapter):
                 f"partial {data_type_name}: " + "; ".join(source_errors)
                 if source_errors else None
             ),
+            error_kind="source_unavailable" if source_errors else "none",
             api_version=_AKSHARE_VERSION,
         )
+
+    #: 标准分红字段（_DIVIDEND_FIELD_MAP 的值），列容错时按它 reindex。
+    _DIVIDEND_STANDARD_COLUMNS: tuple[str, ...] = tuple(_DIVIDEND_FIELD_MAP.values())
+    #: 上游 akshare 在 CNINFO records=[] 时于 stock_dividend_cninfo.py 内
+    #: 访问这些列，抛 KeyError；这是"没有已实施分红"的合法空，不是源故障。
+    _DIVIDEND_EMPTY_KEYERROR_COLUMNS: frozenset[str] = frozenset(
+        {"实施方案公告日期", *_DIVIDEND_FIELD_MAP}
+    )
+
+    @classmethod
+    def _is_empty_dividend_keyerror(cls, error: KeyError) -> bool:
+        """KeyError 是否由上游"空 records → 无列可访问"导致。"""
+        text = " ".join(str(argument) for argument in error.args)
+        return any(column in text for column in cls._DIVIDEND_EMPTY_KEYERROR_COLUMNS)
+
+    @classmethod
+    def _dividend_records_for(
+        cls, df: pd.DataFrame, plain_code: str,
+    ) -> tuple[list[dict[str, Any]], list[str], int]:
+        """列容错地转换分红 DataFrame；返回 (有效行, 缺失标准列, 丢弃行数)。
+
+        缺 ex_date 的行一律丢弃——绝不补假除权日；缺失列写进
+        metadata.missing_columns 供上层结构化披露。
+        """
+        renamed = df.rename(columns=_DIVIDEND_FIELD_MAP)
+        missing_columns = [
+            column for column in cls._DIVIDEND_STANDARD_COLUMNS
+            if column not in renamed.columns
+        ]
+        standard = renamed.reindex(columns=list(cls._DIVIDEND_STANDARD_COLUMNS))
+        records = _df_to_records(standard)
+        usable: list[dict[str, Any]] = []
+        for record in records:
+            record["stock_code"] = plain_code
+            cls._normalize_dividend_fields(record)
+            if record.get("ex_date") is None:
+                continue
+            usable.append(record)
+        return usable, missing_columns, len(records) - len(usable)
 
     def _fetch_dividends(self, request: FetchRequest) -> FetchResult:
         """分红记录 (CNINFO) — symbol 为纯代码 (600519)
@@ -570,42 +858,106 @@ class AKShareAdapter(BaseAdapter):
         （cash_dividend_ratio/bonus_share_ratio/capitalization_ratio），
         必须归一化为标准"每股"字段（dividend_per_share 等），否则正式库
         dividends 表的数值字段会全部为空。
+
+        2026-11-12 P0：akshare 1.18.81 在 CNINFO ``records=[]``（新股只有
+        分红预案、没有已实施分红）时抛 ``KeyError: '实施方案公告日期'``。
+        这是**合法空**：不能计熔断、不能写进 source_errors、也不能进 retry。
         """
         if not request.stock_codes:
-            return self._make_empty_result("dividends 需要 stock_codes")
+            return self._make_legal_empty_result(
+                "dividends 需要 stock_codes", error_kind="per_symbol_data_error",
+            )
 
         all_records: list[dict[str, Any]] = []
         raw_payloads: list[str] = []
         source_errors: list[str] = []
+        per_symbol_errors: list[str] = []
+        legal_empty_codes: list[str] = []
+        dropped_notes: list[str] = []
+        missing_columns: set[str] = set()
+
         for code in request.stock_codes:
             plain_code = _strip_code(code)
             try:
                 self._wait_rate_limit()
                 df = ak.stock_dividend_cninfo(symbol=plain_code)
-                raw_payloads.append(df.to_json(orient="records", date_format="iso", force_ascii=False))
-                records = _df_to_records(df, _DIVIDEND_FIELD_MAP)
-                for rec in records:
-                    rec["stock_code"] = plain_code
-                    self._normalize_dividend_fields(rec)
-                all_records.extend(records)
-            except Exception as e:
-                logger.warning(f"stock_dividend_cninfo({plain_code}) 失败: {e}")
-                source_errors.append(f"{plain_code}: {e}")
+            except KeyError as error:
+                if self._is_empty_dividend_keyerror(error):
+                    legal_empty_codes.append(plain_code)
+                    logger.info(
+                        "stock_dividend_cninfo(%s) 无已实施分红（上游空 records）: %s",
+                        plain_code, error,
+                    )
+                    continue
+                logger.warning("stock_dividend_cninfo(%s) KeyError: %s", plain_code, error)
+                source_errors.append(f"{plain_code}: KeyError: {error}")
+                continue
+            except Exception as error:
+                logger.warning(f"stock_dividend_cninfo({plain_code}) 失败: {error}")
+                source_errors.append(f"{plain_code}: {error}")
+                continue
 
-        if not all_records:
-            reason = "无法获取分红记录"
-            if source_errors:
-                reason += ": " + "; ".join(source_errors)
-            return self._make_empty_result(reason)
+            if df is None or len(df) == 0:
+                legal_empty_codes.append(plain_code)
+                continue
+
+            raw_payloads.append(
+                df.to_json(orient="records", date_format="iso", force_ascii=False)
+            )
+            records, missing, dropped = self._dividend_records_for(df, plain_code)
+            missing_columns.update(missing)
+            if dropped:
+                dropped_notes.append(f"{plain_code}: dropped={dropped}")
+            if not records:
+                per_symbol_errors.append(
+                    f"{plain_code}: 缺 ex_date（拒绝写入无除权日的分红行）"
+                )
+                continue
+            all_records.extend(records)
+
+        reason_parts: list[str] = []
+        if legal_empty_codes:
+            reason_parts.append(
+                "无已实施分红记录（合法空）: " + ",".join(legal_empty_codes)
+            )
+        if per_symbol_errors:
+            reason_parts.append("per_symbol: " + "; ".join(per_symbol_errors))
+        if dropped_notes:
+            reason_parts.append("dropped_rows_without_ex_date: " + "; ".join(dropped_notes))
+        reason = "; ".join(reason_parts) or None
+
+        error: str | None = None
+        error_kind: ErrorKind
+        confidence: str
+        if source_errors:
+            error_kind = "source_unavailable"
+            error = (
+                ("partial dividends: " if all_records else "无法获取分红记录: ")
+                + "; ".join(source_errors)
+            )
+            if per_symbol_errors:
+                error += "; " + "; ".join(per_symbol_errors)
+            confidence = "approximate" if all_records else "missing"
+        elif per_symbol_errors:
+            error_kind = "per_symbol_data_error"
+            error = "per_symbol dividends: " + "; ".join(per_symbol_errors)
+            confidence = "approximate" if all_records else "missing"
+        elif all_records:
+            error_kind = "legal_empty" if legal_empty_codes else "none"
+            confidence = "strict"
+        else:
+            # 所有代码都是合法空 → 合法缺失，不计熔断、不进 retry。
+            error_kind = "legal_empty"
+            confidence = "missing"
 
         return self._make_result(
             data=all_records,
             raw_response="\n".join(raw_payloads),
-            confidence="strict",
-            error=(
-                "partial dividends: " + "; ".join(source_errors)
-                if source_errors else None
-            ),
+            confidence=confidence,  # type: ignore[arg-type]
+            error=error,
+            error_kind=error_kind,
+            reason=reason,
+            missing_columns=sorted(missing_columns) or None,
             api_version=_AKSHARE_VERSION,
         )
 

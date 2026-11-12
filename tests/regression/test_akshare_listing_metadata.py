@@ -42,6 +42,14 @@ def test_listing_info_uses_exchange_lists_and_current_suspension_data(monkeypatc
         stock_tfp_em=lambda date: pd.DataFrame([{"\u4ee3\u7801": "000001"}]),
     )
     monkeypatch.setattr(module, "ak", fake_akshare)
+    # 2026-11-12：listing_info 会对缺失股本的代码调用腾讯回填；单测不得联网。
+    quote_calls: list[list[str]] = []
+
+    def fake_quote(codes: list[str]) -> tuple[dict, str]:
+        quote_calls.append(list(codes))
+        return {}, ""
+
+    monkeypatch.setattr(module, "_fetch_tencent_share_capital", fake_quote)
 
     adapter = AKShareAdapter(rate_limit=0)
     result = adapter.fetch(FetchRequest(data_type="listing_info", stock_codes=["600001", "000001", "000002"]))
@@ -56,7 +64,10 @@ def test_listing_info_uses_exchange_lists_and_current_suspension_data(monkeypatc
         "pinyin": by_code["600001"]["pinyin"],
         "total_shares": None,
         "circ_shares": None,
+        "shares_source": None,
     }
+    # 538 已有交易所股本 → 不触发腾讯；600001（沪市无股本列）与 000002 才尝试
+    assert quote_calls and sorted(quote_calls[0]) == ["000002", "600001"]
     assert by_code["000001"]["listing_date"] == "1991-04-03"
     assert by_code["000001"]["is_st"] is False
     assert by_code["000001"]["is_suspended"] is True

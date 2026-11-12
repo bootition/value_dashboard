@@ -148,15 +148,29 @@ def test_placement_funding_bse_skipped_without_request(recorded: list | None = N
     client.close()
 
 
-def test_placement_funding_missing_or_malformed_returns_missing() -> None:
-    for payload in (MISSING_PAYLOAD, None):
-        client = _mock_f10_client(payload)
-        adapter = EastMoneyF10Adapter(rate_limit=0, session=client)
-        result = adapter.fetch(FetchRequest(data_type="placement_funding", stock_codes=["999999"]))
-        assert result.data == []
-        assert result.metadata.error is None
-        assert result.metadata.confidence == "missing"
-        client.close()
+def test_placement_funding_empty_is_legal_missing() -> None:
+    client = _mock_f10_client(MISSING_PAYLOAD)
+    adapter = EastMoneyF10Adapter(rate_limit=0, session=client)
+    result = adapter.fetch(FetchRequest(data_type="placement_funding", stock_codes=["600000"]))
+    assert result.data == []
+    assert result.metadata.error is None
+    assert result.metadata.error_kind == "legal_empty"
+    assert result.metadata.confidence == "missing"
+    client.close()
+
+
+def test_placement_funding_malformed_json_is_source_unavailable() -> None:
+    """JSON null/非对象 = 畸形响应；契约 §1 要求 source_unavailable 而非合法空。"""
+    client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, content=b"null"),
+    ))
+    adapter = EastMoneyF10Adapter(rate_limit=0, session=client)
+    result = adapter.fetch(FetchRequest(data_type="placement_funding", stock_codes=["600000"]))
+    assert result.data == []
+    assert result.metadata.error is not None
+    assert result.metadata.error_kind == "source_unavailable"
+    assert result.metadata.confidence == "missing"
+    client.close()
 
 
 # ─── adapter：cninfo_funding IPO ──────────────────────────────────────

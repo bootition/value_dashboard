@@ -24,6 +24,7 @@ import httpx
 
 from app.core.adapters.base import (
     BaseAdapter,
+    ErrorKind,
     FetchRequest,
     FetchResult,
 )
@@ -142,17 +143,28 @@ class EastMoneyF10Adapter(BaseAdapter):
             return self._fetch_analysis(request)
         if request.data_type == "placement_funding":
             return self._fetch_placement_funding(request)
-        return self._missing_result(f"东财 F10 不支持的数据类型: {request.data_type}")
+        return self._missing_result(
+            f"东财 F10 不支持的数据类型: {request.data_type}",
+            error_kind="source_unsupported",
+        )
 
-    def _missing_result(self, reason: str) -> FetchResult:
+    def _missing_result(
+        self, reason: str, *, error_kind: ErrorKind = "legal_empty",
+    ) -> FetchResult:
         """合法缺失结果：error=None（区别于源故障），confidence="missing"。
 
-        管理器据此不触发熔断（P1-27：无错误但空数据是合法空结果）；
-        调用方（业务概览更新器）据此保留旧值并登记 missing_list。
+        2026-11-12 契约 §1：reason 必须写进 metadata.reason，error_kind 默认
+        legal_empty。manager 只对 source_unavailable 计熔断，日志用 reason
+        而不是把 None 拼进错误串。
         """
         logger.info("%s", reason)
         metadata = self._make_metadata(
-            raw_response=None, row_count=0, confidence="missing",
+            raw_response=None,
+            row_count=0,
+            confidence="missing",
+            error=None,
+            error_kind=error_kind,
+            reason=reason,
         )
         return FetchResult(data=[], metadata=metadata)
 
@@ -195,27 +207,34 @@ class EastMoneyF10Adapter(BaseAdapter):
         all_data: list[dict[str, Any]] = []
         raw_parts: list[bytes] = []
         errors: list[str] = []
+        malformed: list[str] = []
         for code in codes:
             try:
                 rows, raw_bytes = self._query_survey(code)
             except Exception as error:
-                logger.exception("查询 %s F10 公司资料异常", code)
+                logger.warning("查询 %s F10 公司资料异常: %s", code, error)
                 errors.append(f"{code}: {error}")
+                continue
+            raw_parts.append(raw_bytes)
+            if rows is None:
+                malformed.append(f"{code}: 畸形响应（非 JSON/非对象）")
                 continue
             if rows:
                 all_data.extend(rows)
-                raw_parts.append(raw_bytes)
-        if errors:
+        if errors or malformed:
+            detail = "; ".join([*errors, *malformed])
             return self._make_result(
                 data=all_data,
                 raw_response=b"".join(raw_parts) or None,
-                confidence="approximate",
-                error="; ".join(errors),
+                confidence="approximate" if all_data else "missing",
+                error=detail,
+                error_kind="source_unavailable",
+                reason=detail,
                 api_version="v1",
             )
         if not all_data:
             return self._missing_result(
-                "company_profile 无可用数据（空或畸形响应）",
+                "company_profile 无可用数据（合法空：源返回空对象/空记录）",
             )
         return self._make_result(
             data=all_data,
@@ -225,7 +244,10 @@ class EastMoneyF10Adapter(BaseAdapter):
         )
 
     def _query_survey(self, stock_code: str) -> tuple[list[dict[str, Any]], bytes]:
-        """抓取并解析单只股票的公司资料；无数据/畸形响应返回 (None, raw)。"""
+        """抓取并解析单只股票的公司资料。
+
+        返回 ``(None, raw)``=畸形响应，``([], raw)``=合法空，非空=有效行。
+        """
         f10 = _f10_code(stock_code)
         if f10 is None:
             raise ValueError(f"无效股票代码: {stock_code}")
@@ -236,12 +258,15 @@ class EastMoneyF10Adapter(BaseAdapter):
         try:
             payload = resp.json()
         except ValueError:
-            return [], raw_bytes
+            return None, raw_bytes
         if not isinstance(payload, dict):
-            return [], raw_bytes
+            return None, raw_bytes
         jbzl = payload.get("jbzl")
-        if not isinstance(jbzl, list) or not jbzl or not isinstance(jbzl[0], dict):
+        if jbzl is None or jbzl == []:
+            # 键缺失/空列表 = 源正常但没有公司资料（北交所常见）→ 合法空
             return [], raw_bytes
+        if not isinstance(jbzl, list) or not isinstance(jbzl[0], dict):
+            return None, raw_bytes
         record = jbzl[0]
         profile = record.get("ORG_PROFILE")
         scope = record.get("BUSINESS_SCOPE")
@@ -269,27 +294,34 @@ class EastMoneyF10Adapter(BaseAdapter):
         all_data: list[dict[str, Any]] = []
         raw_parts: list[bytes] = []
         errors: list[str] = []
+        malformed: list[str] = []
         for code in codes:
             try:
                 rows, raw_bytes = self._query_analysis(code)
             except Exception as error:
-                logger.exception("查询 %s F10 主营构成异常", code)
+                logger.warning("查询 %s F10 主营构成异常: %s", code, error)
                 errors.append(f"{code}: {error}")
+                continue
+            raw_parts.append(raw_bytes)
+            if rows is None:
+                malformed.append(f"{code}: 畸形响应（非 JSON/非对象）")
                 continue
             if rows:
                 all_data.extend(rows)
-                raw_parts.append(raw_bytes)
-        if errors:
+        if errors or malformed:
+            detail = "; ".join([*errors, *malformed])
             return self._make_result(
                 data=all_data,
                 raw_response=b"".join(raw_parts) or None,
-                confidence="approximate",
-                error="; ".join(errors),
+                confidence="approximate" if all_data else "missing",
+                error=detail,
+                error_kind="source_unavailable",
+                reason=detail,
                 api_version="v1",
             )
         if not all_data:
             return self._missing_result(
-                "business_breakdown 无可用数据（空或畸形响应）",
+                "business_breakdown 无可用数据（合法空：源返回空对象/空记录）",
             )
         return self._make_result(
             data=all_data,
@@ -299,7 +331,10 @@ class EastMoneyF10Adapter(BaseAdapter):
         )
 
     def _query_analysis(self, stock_code: str) -> tuple[list[dict[str, Any]], bytes]:
-        """抓取并解析单只股票的主营构成；无数据/畸形响应返回 (None, raw)。"""
+        """抓取并解析单只股票的主营构成。
+
+        返回 ``(None, raw)``=畸形响应，``([]/rows, raw)``=合法空/有效行。
+        """
         f10 = _f10_code(stock_code)
         if f10 is None:
             raise ValueError(f"无效股票代码: {stock_code}")
@@ -310,12 +345,15 @@ class EastMoneyF10Adapter(BaseAdapter):
         try:
             payload = resp.json()
         except ValueError:
-            return [], raw_bytes
+            return None, raw_bytes
         if not isinstance(payload, dict):
-            return [], raw_bytes
+            return None, raw_bytes
         zygcfx = payload.get("zygcfx")
-        if not isinstance(zygcfx, list) or not zygcfx:
+        if zygcfx is None or zygcfx == []:
+            # 键缺失/空列表 = 源正常但没有主营构成 → 合法空
             return [], raw_bytes
+        if not isinstance(zygcfx, list):
+            return None, raw_bytes
         rows: list[dict[str, Any]] = []
         for entry in zygcfx:
             if not isinstance(entry, dict):
@@ -347,8 +385,6 @@ class EastMoneyF10Adapter(BaseAdapter):
                 "ratio": ratio_value * 100.0 if ratio_value is not None else None,
                 "rank": _to_int(entry.get("RANK")),
             })
-        if not rows:
-            return None, raw_bytes
         return rows, raw_bytes
 
     # ─── 增发/配股（placement_funding，数据补全 2026-08-25） ────────
@@ -368,35 +404,56 @@ class EastMoneyF10Adapter(BaseAdapter):
         all_data: list[dict[str, Any]] = []
         raw_parts: list[bytes] = []
         errors: list[str] = []
+        malformed: list[str] = []
+        skipped_bj: dict[str, str] = {}
         for code in codes:
             f10 = _f10_code(code)
             if f10 is None:
                 errors.append(f"{code}: 无效股票代码")
                 continue
             if f10.startswith("BJ"):
-                # 北交所无东财 F10 交叉源，如实记录合法缺失
+                # 北交所无东财 F10 交叉源：能力缺失，不是源故障
+                skipped_bj[code] = "bse_no_f10_cross_source"
                 self._wait_rate_limit()
                 logger.info("placement_funding %s: 北交所无东财交叉源，跳过", code)
                 continue
             try:
                 rows, raw_bytes = self._query_bonus_financing(code, f10)
             except Exception as error:
-                logger.exception("查询 %s F10 增发配股异常", code)
+                logger.warning("查询 %s F10 增发配股异常: %s", code, error)
                 errors.append(f"{code}: {error}")
+                continue
+            raw_parts.append(raw_bytes)
+            if rows is None:
+                malformed.append(f"{code}: 畸形响应（非 JSON/非对象）")
                 continue
             if rows:
                 all_data.extend(rows)
-                raw_parts.append(raw_bytes)
-        if errors:
+        if errors or malformed:
+            detail = "; ".join([*errors, *malformed])
             return self._make_result(
                 data=all_data,
                 raw_response=b"".join(raw_parts) or None,
-                confidence="approximate",
-                error="; ".join(errors),
+                confidence="approximate" if all_data else "missing",
+                error=detail,
+                error_kind="source_unavailable",
+                reason=detail,
+                skipped_codes=skipped_bj,
                 api_version="v1",
             )
         if not all_data:
-            return self._missing_result("placement_funding 无可用数据（空或畸形响应）")
+            if skipped_bj and len(skipped_bj) == len([code for code in codes if _f10_code(code)]):
+                return self._make_result(
+                    data=[],
+                    raw_response=b"".join(raw_parts) or None,
+                    confidence="missing",
+                    error=None,
+                    error_kind="source_unsupported",
+                    reason="北交所无东财 F10 交叉源（能力缺失）",
+                    skipped_codes=skipped_bj,
+                    api_version="v1",
+                )
+            return self._missing_result("placement_funding 无可用数据（合法空）")
         return self._make_result(
             data=all_data,
             raw_response=b"".join(raw_parts),
@@ -407,7 +464,10 @@ class EastMoneyF10Adapter(BaseAdapter):
     def _query_bonus_financing(
         self, stock_code: str, f10: str,
     ) -> tuple[list[dict[str, Any]], bytes]:
-        """抓取并解析单只股票的增发/配股事件；无数据返回 (None, raw)。"""
+        """抓取并解析单只股票的增发/配股事件。
+
+        返回 ``(None, raw)``=畸形响应，``([], raw)``=合法空，非空=有效行。
+        """
         self._wait_rate_limit()
         resp = self._get_client().get(_BONUS_URL, params={"code": f10})
         resp.raise_for_status()
@@ -415,9 +475,9 @@ class EastMoneyF10Adapter(BaseAdapter):
         try:
             payload = resp.json()
         except ValueError:
-            return [], raw_bytes
+            return None, raw_bytes
         if not isinstance(payload, dict):
-            return [], raw_bytes
+            return None, raw_bytes
 
         rows: list[dict[str, Any]] = []
         for entry in payload.get("zfmx") or []:

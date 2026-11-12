@@ -27,6 +27,7 @@ import httpx
 
 from app.core.adapters.base import (
     BaseAdapter,
+    ErrorKind,
     FetchRequest,
     FetchResult,
 )
@@ -124,12 +125,35 @@ class TreasuryMofAdapter(BaseAdapter):
             return self._fetch_history(request)
         return self._missing_result("treasury_yield_curve 需要 extra_params.mode=daily|history")
 
-    def _missing_result(self, reason: str) -> FetchResult:
+    def _missing_result(
+        self, reason: str, *, error_kind: ErrorKind = "legal_empty",
+    ) -> FetchResult:
+        """合法缺失：error=None + reason（manager 只对 source_unavailable 计熔断）。"""
         logger.info("%s", reason)
         metadata = self._make_metadata(
-            raw_response=None, row_count=0, confidence="missing",
+            raw_response=None,
+            row_count=0,
+            confidence="missing",
+            error=None,
+            error_kind=error_kind,
+            reason=reason,
         )
         return FetchResult(data=[], metadata=metadata)
+
+    def _malformed_result(
+        self, reason: str, raw_bytes: bytes | None = None,
+    ) -> FetchResult:
+        """畸形响应 = 源故障（source_unavailable），与"无数据"分开。"""
+        logger.warning("%s", reason)
+        return self._make_result(
+            data=[],
+            raw_response=raw_bytes,
+            confidence="missing",
+            error=reason,
+            error_kind="source_unavailable",
+            reason=reason,
+            api_version="v1",
+        )
 
     def close(self) -> None:
         if self._owned_client is not None:
@@ -180,20 +204,30 @@ class TreasuryMofAdapter(BaseAdapter):
             logger.warning("查询 %s 国债曲线异常: %s", work_date, error)
             return self._make_result(
                 data=[], raw_response=None, confidence="missing",
-                error=str(error), api_version="v1",
+                error=str(error), error_kind="source_unavailable",
+                reason=str(error), api_version="v1",
             )
 
         try:
             payload = resp.json()
         except ValueError:
-            return self._missing_result(
-                f"国债曲线响应畸形: {work_date}",
+            return self._malformed_result(
+                f"国债曲线响应非 JSON（畸形响应）: {work_date}", raw_bytes,
             )
 
         rows = self._parse_daily_payload(payload, work_date)
+        if rows is None:
+            if isinstance(payload, dict) and ("status" in payload or "message" in payload):
+                # 源侧"无数据"状态信封 = 合法空（不是畸形响应）
+                return self._missing_result(
+                    f"国债曲线源返回无数据状态（合法空）: {work_date}: {payload}",
+                )
+            return self._malformed_result(
+                f"国债曲线响应结构畸形: {work_date}", raw_bytes,
+            )
         if not rows:
             return self._missing_result(
-                f"国债曲线无可用数据（空或畸形响应）: {work_date}",
+                f"国债曲线无可用数据（合法空）: {work_date}",
             )
         return self._make_result(
             data=rows,
@@ -202,12 +236,19 @@ class TreasuryMofAdapter(BaseAdapter):
             api_version="v1",
         )
 
-    def _parse_daily_payload(self, payload: Any, work_date: date) -> list[dict[str, Any]]:
-        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+    def _parse_daily_payload(
+        self, payload: Any, work_date: date,
+    ) -> list[dict[str, Any]] | None:
+        """返回 None=畸形响应，[]=合法空，非空=有效行。"""
+        if not isinstance(payload, list):
+            return None
+        if not payload:
             return []
+        if not isinstance(payload[0], dict):
+            return None
         series = payload[0].get("seriesData")
         if not isinstance(series, list):
-            return []
+            return None
         rows: list[dict[str, Any]] = []
         for pair in series:
             if not isinstance(pair, (list, tuple)) or len(pair) < 2:
@@ -262,20 +303,29 @@ class TreasuryMofAdapter(BaseAdapter):
             logger.warning("查询国债 %s 年历史序列异常: %s", tenor_value, error)
             return self._make_result(
                 data=[], raw_response=None, confidence="missing",
-                error=str(error), api_version="v1",
+                error=str(error), error_kind="source_unavailable",
+                reason=str(error), api_version="v1",
             )
 
         try:
             payload = resp.json()
         except ValueError:
-            return self._missing_result(
-                f"国债 {tenor_value} 年历史序列响应畸形",
+            return self._malformed_result(
+                f"国债 {tenor_value} 年历史序列响应非 JSON（畸形响应）", raw_bytes,
             )
 
         rows = self._parse_history_payload(payload, tenor_value)
+        if rows is None:
+            if isinstance(payload, dict) and ("status" in payload or "message" in payload):
+                return self._missing_result(
+                    f"国债 {tenor_value} 年历史序列源返回无数据状态（合法空）: {payload}",
+                )
+            return self._malformed_result(
+                f"国债 {tenor_value} 年历史序列响应结构畸形", raw_bytes,
+            )
         if not rows:
             return self._missing_result(
-                f"国债 {tenor_value} 年历史序列无可用数据（空或畸形响应）",
+                f"国债 {tenor_value} 年历史序列无可用数据（合法空）",
             )
         return self._make_result(
             data=rows,
@@ -284,12 +334,19 @@ class TreasuryMofAdapter(BaseAdapter):
             api_version="v1",
         )
 
-    def _parse_history_payload(self, payload: Any, tenor_value: float) -> list[dict[str, Any]]:
-        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+    def _parse_history_payload(
+        self, payload: Any, tenor_value: float,
+    ) -> list[dict[str, Any]] | None:
+        """返回 None=畸形响应，[]=合法空，非空=有效行。"""
+        if not isinstance(payload, list):
+            return None
+        if not payload:
             return []
+        if not isinstance(payload[0], dict):
+            return None
         series = payload[0].get("seriesData")
         if not isinstance(series, list):
-            return []
+            return None
         today = _cn_today()
         rows: list[dict[str, Any]] = []
         for pair in series:

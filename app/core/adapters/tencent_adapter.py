@@ -20,6 +20,11 @@ _KLINE_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get
 _HEADERS = {"User-Agent": "Mozilla/5.0", "Referer": "https://gu.qq.com/"}
 # Tencent returns at most this many bars per request (most recent in window).
 _MAX_BARS_PER_REQUEST = 640
+# 2026-11-12 P1：剩余预算 <0.5s 时不再发请求（0.1s 超时必然假失败）；
+# 实际 RTT 实测 0.17~0.25s，因此 HTTP timeout 下限不得低于 1s。
+_MIN_REQUEST_BUDGET_SECONDS = 0.5
+_MIN_HTTP_TIMEOUT_SECONDS = 1.0
+_MAX_HTTP_TIMEOUT_SECONDS = 30.0
 
 
 def _symbol(stock_code: str) -> str | None:
@@ -92,11 +97,37 @@ class TencentAdapter(BaseAdapter):
         with contextlib.suppress(AttributeError):
             del self._session_local.session
 
+    def _deadline_result(
+        self,
+        reason: str,
+        records: list[dict[str, Any]],
+        responses: list[dict[str, Any]],
+    ) -> FetchResult:
+        """预算耗尽：不发新请求，不把 deadline 伪装成源故障/成功。"""
+        return self._make_result(
+            data=records,
+            raw_response=(
+                json.dumps(responses, ensure_ascii=False, separators=(",", ":"))
+                if responses else None
+            ),
+            confidence="approximate" if records else "missing",
+            error=None,
+            error_kind="deadline",
+            reason=reason,
+            api_version=_API_VERSION,
+        )
+
     def _fetch_price_daily(self, request: FetchRequest) -> FetchResult:
         if not request.stock_codes:
-            return self._make_empty_result("tencent price_daily requires stock_codes")
+            return self._make_empty_result(
+                "tencent price_daily requires stock_codes",
+                error_kind="per_symbol_data_error",
+            )
         if request.adjust not in {"raw", "qfq"}:
-            return self._make_empty_result("tencent supports raw and qfq prices only")
+            return self._make_empty_result(
+                "tencent supports raw and qfq prices only",
+                error_kind="per_symbol_data_error",
+            )
 
         records: list[dict[str, Any]] = []
         responses: list[dict[str, Any]] = []
@@ -104,7 +135,10 @@ class TencentAdapter(BaseAdapter):
         for stock_code in request.stock_codes:
             symbol = _symbol(stock_code)
             if symbol is None:
-                return self._make_empty_result(f"invalid stock code: {stock_code}")
+                return self._make_empty_result(
+                    f"invalid stock code: {stock_code}",
+                    error_kind="per_symbol_data_error",
+                )
             # Tencent's fqkline API requires dashed dates (2021-01-01).
             start = request.start_date or "1990-01-01"
             end = request.end_date or "2099-12-31"
@@ -114,21 +148,41 @@ class TencentAdapter(BaseAdapter):
             window_end = end
             pages = 0
             while window_end >= start and pages < 12:
-                if request.deadline_exceeded():
-                    return self._make_empty_result("tencent price deadline exceeded")
+                # 2026-11-12 P1：先排队限速再检查预算——限速等待可能吃掉
+                # 剩余预算，旧顺序会在预算耗尽后仍然发出 timeout=0.1s 的请求。
                 self._wait_rate_limit()
+                if request.deadline_exceeded():
+                    return self._deadline_result(
+                        f"tencent price budget exhausted before request: {stock_code}",
+                        records,
+                        responses,
+                    )
+                remaining = request.remaining_seconds(_MAX_HTTP_TIMEOUT_SECONDS)
+                if remaining < _MIN_REQUEST_BUDGET_SECONDS:
+                    return self._deadline_result(
+                        f"tencent price budget too small ({remaining:.2f}s < "
+                        f"{_MIN_REQUEST_BUDGET_SECONDS}s): {stock_code}",
+                        records,
+                        responses,
+                    )
                 suffix = "qfq" if request.adjust == "qfq" else ""
                 request_started = time.monotonic()
                 try:
                     response = self._session().get(
                         _KLINE_URL,
                         params={"param": f"{symbol},day,{start},{window_end},{_MAX_BARS_PER_REQUEST},{suffix}"},
-                        timeout=max(0.1, request.remaining_seconds(30)),
+                        timeout=max(
+                            _MIN_HTTP_TIMEOUT_SECONDS,
+                            min(_MAX_HTTP_TIMEOUT_SECONDS, remaining),
+                        ),
                     )
                     response.raise_for_status()
                     payload = response.json()
                 except (requests.RequestException, ValueError) as error:
-                    return self._make_empty_result(f"tencent price request failed: {error}")
+                    return self._make_empty_result(
+                        f"tencent price request failed: {error}",
+                        error_kind="source_unavailable",
+                    )
                 finally:
                     self.record_response_duration(time.monotonic() - request_started)
 
@@ -192,17 +246,24 @@ class TencentAdapter(BaseAdapter):
         if not records:
             return self._make_empty_result(
                 "tencent returned no parseable price bars"
-                + (f"; {error}" if error else "")
+                + (f"; {error}" if error else ""),
+                error_kind="truncated_ok" if truncated else "source_unavailable",
             )
         return self._make_result(
             records,
             raw_response=json.dumps(responses, ensure_ascii=False, separators=(",", ":")),
             confidence="approximate",
             error=error,
+            error_kind="truncated_ok" if truncated else "none",
+            reason=error,
+            truncated=bool(truncated),
             api_version=_API_VERSION,
         )
 
     def fetch(self, request: FetchRequest) -> FetchResult:
         if not self.can_handle(request):
-            return self._make_empty_result(f"tencent does not support {request.data_type}")
+            return self._make_legal_empty_result(
+                f"tencent does not support {request.data_type}",
+                error_kind="source_unsupported",
+            )
         return self._fetch_price_daily(request)

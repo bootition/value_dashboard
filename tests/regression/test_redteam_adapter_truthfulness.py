@@ -41,6 +41,7 @@ def _result(
     *,
     source: str = "tencent",
     error: str | None = None,
+    error_kind: str = "none",
 ) -> FetchResult:
     raw = json.dumps(data, ensure_ascii=False, default=str).encode("utf-8")
     return FetchResult(
@@ -51,6 +52,7 @@ def _result(
             raw_response_hash=hashlib.sha256(raw).hexdigest(),
             confidence="approximate" if error is None else "missing",
             error=error,
+            error_kind=error_kind,  # type: ignore[arg-type]
         ),
         raw_response=raw,
     )
@@ -94,24 +96,31 @@ def _cninfo_adapter(monkeypatch, client: httpx.Client) -> CNINFOAdapter:
     return adapter
 
 
-def test_cninfo_max_pages_truncation_raises_runtime_error(monkeypatch) -> None:
-    """max_pages<100 且 totalRecordNum>已取条数 → 必须显式 RuntimeError。"""
+def test_cninfo_max_pages_truncation_returns_partial_and_flags_it(monkeypatch) -> None:
+    """2026-11-12 P1：单日窗口被 max_pages 截断 → 返回已抓数据 + truncated，不 raise。"""
     client = _cninfo_mock_client({
-        ("2026-01-01~2026-12-31", 1): {
+        ("2026-08-07~2026-08-07", 1): {
             "announcements": [_ANN_RAW] * 30,
             "totalRecordNum": 90,
         },
     })
     adapter = _cninfo_adapter(monkeypatch, client)
 
-    with pytest.raises(RuntimeError, match="truncated"):
-        adapter._query_announcements(
-            stock_code="000001",
-            category=None,
-            start_date="2026-01-01",
-            end_date="2026-12-31",
-            max_pages=1,
-        )
+    truncations: list[dict[str, Any]] = []
+    items = adapter._query_announcements(
+        stock_code="000001",
+        category=None,
+        # 单日窗口：无法再按日期二分，只能如实标记 truncation。
+        start_date="2026-08-07",
+        end_date="2026-08-07",
+        max_pages=1,
+        truncation_cb=truncations.append,
+    )
+
+    assert len(items) == 30, "截断不得丢弃已抓到的 30 条"
+    assert truncations and truncations[0]["total"] == 90
+    assert truncations[0]["fetched"] == 30
+    assert truncations[0]["reason"] == "window_not_splittable"
     client.close()
 
 
@@ -158,8 +167,10 @@ def test_cninfo_dividends_is_explicitly_unsupported_and_removed_from_chain() -> 
     result = adapter.fetch(FetchRequest(data_type="dividends", stock_codes=["000001"]))
 
     assert result.data == []
-    assert result.metadata.error is not None
-    assert "unsupported" in result.metadata.error
+    # 契约 §1：能力缺失 = source_unsupported + reason，error 保持 None
+    assert result.metadata.error is None
+    assert result.metadata.error_kind == "source_unsupported"
+    assert "unsupported" in (result.metadata.reason or "")
     assert DEFAULT_ADAPTER_PRIORITY["dividends"] == ["akshare_eastmoney", "baostock"]
 
 
@@ -523,7 +534,6 @@ def test_manager_keeps_first_partial_and_merges_followup_errors() -> None:
 
 def test_manager_circuit_counts_only_empty_error_results() -> None:
     partial = _result([{"trade_date": "2026-08-05"}], source="tencent", error="partial")
-    empty_error = _result([], source="tencent", error="source down")
 
     partial_manager = _manager_with({"tencent": _FakeManagerAdapter(partial)})
     for _ in range(5):
@@ -531,17 +541,20 @@ def test_manager_circuit_counts_only_empty_error_results() -> None:
             FetchRequest(data_type="price_daily", stock_codes=["920000"]),
             ["tencent"],
         )
-    state = partial_manager._circuit_breaker.get("tencent", {})
+    state = partial_manager._circuit_breaker.get("tencent:price_daily", {})
     assert state.get("failures", 0) == 0
     assert not state.get("tripped_until")
 
+    empty_error = _result(
+        [], source="tencent", error="source down", error_kind="source_unavailable",
+    )
     error_manager = _manager_with({"tencent": _FakeManagerAdapter(empty_error)})
     for _ in range(5):
         error_manager.fetch_with_sources(
             FetchRequest(data_type="price_daily", stock_codes=["920000"]),
             ["tencent"],
         )
-    state = error_manager._circuit_breaker["tencent"]
+    state = error_manager._circuit_breaker["tencent:price_daily"]
     assert state["failures"] == 5
     assert state["tripped_until"] is not None
 

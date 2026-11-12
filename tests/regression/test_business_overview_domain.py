@@ -222,7 +222,8 @@ def test_eastmoney_f10_adapter_missing_payload_returns_missing(data_type: str) -
 
 
 @pytest.mark.parametrize("data_type", ["company_profile", "business_breakdown"])
-def test_eastmoney_f10_adapter_malformed_response_returns_missing(data_type: str) -> None:
+def test_eastmoney_f10_adapter_malformed_response_is_source_unavailable(data_type: str) -> None:
+    """2026-11-12 契约 §1：非 JSON 属畸形响应 → source_unavailable（不是合法空）。"""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not-json{{{")
 
@@ -231,7 +232,8 @@ def test_eastmoney_f10_adapter_malformed_response_returns_missing(data_type: str
     result = adapter.fetch(FetchRequest(data_type=data_type, stock_codes=["600519"]))
 
     assert result.data == []
-    assert result.metadata.error is None
+    assert result.metadata.error is not None
+    assert result.metadata.error_kind == "source_unavailable"
     assert result.metadata.confidence == "missing"
     client.close()
 

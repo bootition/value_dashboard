@@ -89,24 +89,39 @@ _A_SHARE_EPOCH_YEAR = 1990
 # ─── 工具函数 ──────────────────────────────────────────────────────
 
 
-def _to_baostock_code(stock_code: str) -> str | None:
-    """将标准股票代码转换为 BaoStock 代码格式。
+def _to_baostock_code(stock_code: str) -> tuple[str | None, str | None]:
+    """将标准股票代码转换为 BaoStock 代码格式，并给出 skip 原因。
 
-    规则：
-    - 6 开头 → sh.XXXXXX（上交所）
-    - 0/3 开头 → sz.XXXXXX（深交所）
-    - 8/4 开头 → 北交所，BaoStock 不支持，返回 None
+    返回 ``(bs_code, skip_reason)``：
+    - 6/5 开头 → sh.XXXXXX（沪市股票/基金）
+    - 0/1/3 开头 → sz.XXXXXX（深市股票/基金）
+    - 900xxx → sh.XXXXXX（沪市 B 股，能取则取）
+    - 200xxx / 2 开头 → sz.XXXXXX（深市 B 股，能取则取）
+    - 8/4/92 开头 → 北交所，BaoStock 不支持 → (None, "bse_unsupported")
+
+    2026-11-12 P1：旧实现把 ``9`` 开头一律判北交所，导致 900948
+    （沪市 B 股）被误标；且 skip 被拼进 error 字符串，被当成源故障计熔断。
     """
     code = _normalize_stock_code(stock_code)
-    if not code or not code[0].isdigit():
-        return None
-    first = code[0]
-    if first in ("6", "5"):      # 6=沪市股票, 5=沪市基金/债券（2026-09-20 补）
-        return f"sh.{code}"
-    if first in ("0", "1", "3"):  # 1=深市基金/债券（2026-09-20 补）
-        return f"sz.{code}"
-    # 8/4 → BSE
-    return None
+    if not code or not code[0].isdigit() or len(code) != 6:
+        return None, "invalid_code"
+    # 北交所必须先用两位前缀判定：920xxx 不是沪市 B 股 900xxx
+    if code.startswith(("8", "4", "92")):
+        return None, "bse_unsupported"
+    if code[0] == "9":      # 900xxx 沪市 B 股（其余 9 开头按沪市尝试）
+        return f"sh.{code}", None
+    if code[0] == "2":      # 200xxx 深市 B 股
+        return f"sz.{code}", None
+    if code[0] in ("6", "5"):      # 6=沪市股票, 5=沪市基金/债券
+        return f"sh.{code}", None
+    if code[0] in ("0", "1", "3"):  # 1=深市基金/债券
+        return f"sz.{code}", None
+    return None, "unsupported_code_prefix"
+
+
+def _is_b_share_code(code: str) -> bool:
+    """沪市 B 股 900xxx / 深市 B 股 200xxx。"""
+    return code.startswith(("900", "200"))
 
 
 def _normalize_stock_code(stock_code: str) -> str:
@@ -177,15 +192,15 @@ class BaoStockAdapter(BaseAdapter):
 
     def fetch(self, request: FetchRequest) -> FetchResult:
         if not _BAOSTOCK_AVAILABLE:
-            return self._make_empty_result(
-                reason="baostock 未安装（pip install baostock）",
-                confidence="missing",
+            return self._make_legal_empty_result(
+                "baostock 未安装（pip install baostock）",
+                error_kind="source_unsupported",
             )
 
         if not self.can_handle(request):
-            return self._make_empty_result(
-                reason=f"baostock 不支持数据类型: {request.data_type}",
-                confidence="missing",
+            return self._make_legal_empty_result(
+                f"baostock 不支持数据类型: {request.data_type}",
+                error_kind="source_unsupported",
             )
 
         handler = {
@@ -197,7 +212,10 @@ class BaoStockAdapter(BaseAdapter):
         try:
             with self._fetch_lock:
                 if request.deadline_exceeded():
-                    return self._make_empty_result("baostock request deadline exceeded")
+                    return self._make_legal_empty_result(
+                        "baostock 请求预算在进入前已耗尽（未发出请求）",
+                        error_kind="deadline",
+                    )
                 if self._relogin_requested and self.reuse_session:
                     self._reconnect()
                     self._relogin_requested = False
@@ -213,9 +231,9 @@ class BaoStockAdapter(BaseAdapter):
 
     def _fetch_price_daily(self, request: FetchRequest) -> FetchResult:
         if not request.stock_codes:
-            return self._make_empty_result(
-                reason="baostock price_daily 需指定 stock_codes（不支持全市场批量）",
-                confidence="missing",
+            return self._make_legal_empty_result(
+                "baostock price_daily 需指定 stock_codes（不支持全市场批量）",
+                error_kind="per_symbol_data_error",
             )
 
         adjustflag = _ADJUST_FLAG.get(request.adjust, "3")
@@ -224,18 +242,36 @@ class BaoStockAdapter(BaseAdapter):
 
         records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
-        skipped_bse: list[str] = []
+        skipped: dict[str, str] = {}
         query_errors: list[str] = []
+
+        def deadline_result(reason: str) -> FetchResult:
+            return self._make_result(
+                data=records,
+                raw_response="\n".join(raw_lines).encode("utf-8"),
+                confidence="approximate" if records else "missing",
+                error=None,
+                error_kind="deadline",
+                reason=reason,
+                skipped_codes=skipped,
+                api_version=_API_VERSION,
+            )
 
         with self._session():
             for raw_code in request.stock_codes:
-                if request.deadline_exceeded():
-                    return self._make_empty_result("baostock price deadline exceeded")
-                bs_code = _to_baostock_code(raw_code)
+                stock_code_norm = _normalize_stock_code(raw_code)
+                bs_code, skip_reason = _to_baostock_code(raw_code)
                 if bs_code is None:
-                    skipped_bse.append(_normalize_stock_code(raw_code))
-                    logger.debug("跳过 BSE 代码（baostock 不支持）: %s", raw_code)
+                    skipped[stock_code_norm] = skip_reason or "unsupported"
+                    logger.debug(
+                        "跳过不支持的代码（baostock）: %s (%s)", raw_code, skip_reason
+                    )
                     continue
+                if request.deadline_exceeded():
+                    return deadline_result(
+                        f"baostock price_daily 预算耗尽: 已返回 {len(records)} 行，"
+                        f"未查询 {stock_code_norm}"
+                    )
 
                 self._wait_rate_limit()
                 request_started = time.monotonic()
@@ -268,13 +304,22 @@ class BaoStockAdapter(BaseAdapter):
                         self.record_response_duration(time.monotonic() - request_started)
 
                 if rs.error_code != "0":
+                    if _is_b_share_code(stock_code_norm):
+                        # B 股行情“能取则取”；取不到是源能力缺失，不是源故障。
+                        skipped[stock_code_norm] = "b_share"
+                        raw_lines.append(f"SKIP {bs_code}: {rs.error_msg}")
+                        logger.info(
+                            "baostock 取不到 B 股行情 %s，归为能力缺失: %s",
+                            bs_code,
+                            rs.error_msg,
+                        )
+                        continue
                     msg = f"query_history_k_data_plus({bs_code}) 失败: {rs.error_msg}"
                     logger.warning(msg)
                     raw_lines.append(f"ERROR {bs_code}: {rs.error_msg}")
                     query_errors.append(msg)
                     continue
 
-                stock_code_norm = _normalize_stock_code(raw_code)
                 count = 0
                 while rs.next():
                     row = rs.get_row_data()
@@ -290,7 +335,7 @@ class BaoStockAdapter(BaseAdapter):
                             "close": _parse_float(row[4]),
                             "volume": _parse_float(row[5]),
                             "turnover": _parse_float(row[6]),  # amount → 成交额
-                            "turnover_rate": _parse_float(row[7]),  # 换手率 (V2-3.5修复: turn→turnover_rate 统一字段名)
+                            "turnover_rate": _parse_float(row[7]),  # 换手率
                         }
                     )
                     count += 1
@@ -300,28 +345,41 @@ class BaoStockAdapter(BaseAdapter):
                 )
                 logger.debug("baostock price_daily %s 取得 %d 条", bs_code, count)
 
-        error = (
-            f"跳过 BSE 代码（baostock 不支持）: {','.join(skipped_bse)}"
-            if skipped_bse
-            else None
-        )
-        if query_errors:
-            error = "; ".join(part for part in (error, *query_errors) if part)
+        error_kind, error, reason = self._classified_source_fields(skipped, query_errors)
         return self._make_result(
             data=records,
             raw_response="\n".join(raw_lines).encode("utf-8"),
             confidence="approximate",
             error=error,
+            error_kind=error_kind,
+            reason=reason,
+            skipped_codes=skipped,
             api_version=_API_VERSION,
         )
+
+    @staticmethod
+    def _classified_source_fields(
+        skipped: dict[str, str], query_errors: list[str],
+    ) -> tuple[str, str | None, str | None]:
+        """把"跳过的股票"和"真实查询错误"分开归类（skip 不得拼进 error）。"""
+        skip_note = None
+        if skipped:
+            skip_note = "跳过不支持的代码: " + ", ".join(
+                f"{code}({reason})" for code, reason in sorted(skipped.items())
+            )
+        if query_errors:
+            return "source_unavailable", "; ".join(query_errors), skip_note
+        if skipped:
+            return "source_unsupported", None, skip_note
+        return "none", None, None
 
     # ─── dividends ─────────────────────────────────────────────────
 
     def _fetch_dividends(self, request: FetchRequest) -> FetchResult:
         if not request.stock_codes:
-            return self._make_empty_result(
-                reason="baostock dividends 需指定 stock_codes",
-                confidence="missing",
+            return self._make_legal_empty_result(
+                "baostock dividends 需指定 stock_codes",
+                error_kind="per_symbol_data_error",
             )
 
         current_year = datetime.now().year
@@ -331,18 +389,20 @@ class BaoStockAdapter(BaseAdapter):
 
         records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
-        skipped_bse: list[str] = []
+        skipped: dict[str, str] = {}
         query_errors: list[str] = []
 
         with self._session():
             for raw_code in request.stock_codes:
-                bs_code = _to_baostock_code(raw_code)
+                stock_code_norm = _normalize_stock_code(raw_code)
+                bs_code, skip_reason = _to_baostock_code(raw_code)
                 if bs_code is None:
-                    skipped_bse.append(_normalize_stock_code(raw_code))
-                    logger.debug("跳过 BSE 代码（baostock 不支持）: %s", raw_code)
+                    skipped[stock_code_norm] = skip_reason or "unsupported"
+                    logger.debug(
+                        "跳过不支持的代码（baostock）: %s (%s)", raw_code, skip_reason
+                    )
                     continue
 
-                stock_code_norm = _normalize_stock_code(raw_code)
                 count_for_code = 0
 
                 for year in range(start_year, current_year + 1):
@@ -363,6 +423,17 @@ class BaoStockAdapter(BaseAdapter):
                         )
 
                     if rs.error_code != "0":
+                        if _is_b_share_code(stock_code_norm):
+                            skipped[stock_code_norm] = "b_share"
+                            raw_lines.append(
+                                f"SKIP {bs_code}/{year}: {rs.error_msg}"
+                            )
+                            logger.info(
+                                "baostock 取不到 B 股分红 %s，归为能力缺失: %s",
+                                bs_code,
+                                rs.error_msg,
+                            )
+                            break
                         msg = f"query_dividend_data({bs_code}, {year}) 失败: {rs.error_msg}"
                         logger.warning(
                             "query_dividend_data(%s, %d) 失败: %s",
@@ -391,18 +462,15 @@ class BaoStockAdapter(BaseAdapter):
                     "baostock dividends %s 取得 %d 条", bs_code, count_for_code
                 )
 
-        error = (
-            f"跳过 BSE 代码（baostock 不支持）: {','.join(skipped_bse)}"
-            if skipped_bse
-            else None
-        )
-        if query_errors:
-            error = "; ".join(part for part in (error, *query_errors) if part)
+        error_kind, error, reason = self._classified_source_fields(skipped, query_errors)
         return self._make_result(
             data=records,
             raw_response="\n".join(raw_lines).encode("utf-8"),
             confidence="approximate",
             error=error,
+            error_kind=error_kind,
+            reason=reason,
+            skipped_codes=skipped,
             api_version=_API_VERSION,
         )
 

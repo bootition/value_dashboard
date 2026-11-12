@@ -8,18 +8,41 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import UTC
-from typing import Any, Final
+import time
+from datetime import UTC, datetime, timedelta
+from typing import Any, Final, get_args
 
 from app.core.adapters.base import (
+    CIRCUIT_FAILURE_ERROR_KINDS,
     BaseAdapter,
     DataType,
+    ErrorKind,
     FetchRequest,
     FetchResult,
     SourceMetadata,
+    SourceName,
 )
 
 logger = logging.getLogger(__name__)
+
+#: SourceName 的合法取值集合：manager 构造兜底元数据时避免写入未知源名。
+_KNOWN_SOURCE_NAMES: Final[frozenset[str]] = frozenset(get_args(SourceName))
+
+#: error_kind 严重度（仅用于把多个结果归并成“最坏”的一个，不参与熔断判定）。
+_ERROR_KIND_SEVERITY: Final[dict[str, int]] = {
+    "none": 0,
+    "legal_empty": 1,
+    "source_unsupported": 1,
+    "deadline": 2,
+    "truncated_ok": 2,
+    "per_symbol_data_error": 3,
+    "source_unavailable": 4,
+}
+
+#: 源已响应但本结果不代表“源故障”的种类：不增加也不重置熔断计数。
+_CIRCUIT_NEUTRAL_ERROR_KINDS: Final[frozenset[str]] = frozenset(
+    {"deadline", "source_unsupported"}
+)
 
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
@@ -169,55 +192,90 @@ class AdapterManager:
         self._adapters: dict[str, BaseAdapter] = {}
         self._initialized = False
         self._rate_limits = _load_adapter_rate_limits()
-        # Circuit breaker: {adapter_name: {"failures": int, "tripped_until": datetime|None}}
+        # Circuit breaker: {"adapter:data_type": {"failures": int,
+        #   "tripped_until": datetime|None, "failure_times": [monotonic,...]}}
+        # 2026-11-12 P0：桶按 (adapter, data_type) 隔离，且失败计数限制在时间窗内。
         self._circuit_breaker: dict[str, dict[str, Any]] = {}
         self._state_lock = threading.RLock()
         self._initialization_lock = threading.Lock()
 
     # ─── Circuit breaker ─────────────────────────────────────────────
-    _CIRCUIT_FAILURE_THRESHOLD = 5       # 连续失败5次后熔断
+    _CIRCUIT_FAILURE_THRESHOLD = 5       # 同一 (adapter, data_type) 窗口内失败5次后熔断
     _CIRCUIT_COOLDOWN_SECONDS = 300      # 熔断后冷却5分钟
+    _CIRCUIT_FAILURE_WINDOW_SECONDS = 600  # 失败计数只统计最近10分钟（跨小时不再累计）
 
-    def _is_circuit_tripped(self, adapter_name: str) -> bool:
-        """检查适配器是否被熔断"""
+    def _circuit_key(self, adapter_name: str, data_type: str) -> str:
+        """熔断桶 key：``adapter:data_type``（契约 §1，跨 data_type 不得互相影响）。"""
+        return f"{adapter_name}:{data_type}"
+
+    def _circuit_cooldown_remaining(self, adapter_name: str, data_type: str) -> float:
+        """返回剩余冷却秒数（未熔断返回 0）。"""
         with self._state_lock:
-            state = self._circuit_breaker.get(adapter_name)
+            state = self._circuit_breaker.get(self._circuit_key(adapter_name, data_type))
+            if not state or not state.get("tripped_until"):
+                return 0.0
+            return max(0.0, (state["tripped_until"] - datetime.now(UTC)).total_seconds())
+
+    def _is_circuit_tripped(self, adapter_name: str, data_type: str) -> bool:
+        """检查 (adapter, data_type) 桶是否被熔断。"""
+        with self._state_lock:
+            state = self._circuit_breaker.get(self._circuit_key(adapter_name, data_type))
             if not state or not state.get("tripped_until"):
                 return False
-            from datetime import datetime
             now = datetime.now(UTC)
             if now < state["tripped_until"]:
                 remaining = (state["tripped_until"] - now).total_seconds()
                 logger.debug(
-                    f"熔断跳过 {adapter_name} (剩余冷却 {remaining:.0f}s, "
-                    f"连续失败 {state['failures']} 次)"
+                    "熔断跳过 %s data_type=%s (剩余冷却 %.0fs, 窗口内失败 %d 次)",
+                    adapter_name,
+                    data_type,
+                    remaining,
+                    state.get("failures", 0),
                 )
                 return True
             state["tripped_until"] = None
             state["failures"] = 0
+            state["failure_times"] = []
             return False
 
-    def _record_circuit_success(self, adapter_name: str) -> None:
-        """适配器成功，重置熔断计数器"""
+    def _record_circuit_success(self, adapter_name: str, data_type: str) -> None:
+        """源正常响应（含合法空），重置该 (adapter, data_type) 桶的失败计数。"""
+        key = self._circuit_key(adapter_name, data_type)
         with self._state_lock:
-            if adapter_name in self._circuit_breaker:
-                self._circuit_breaker[adapter_name]["failures"] = 0
-                self._circuit_breaker[adapter_name]["tripped_until"] = None
+            if key in self._circuit_breaker:
+                self._circuit_breaker[key]["failures"] = 0
+                self._circuit_breaker[key]["tripped_until"] = None
+                self._circuit_breaker[key]["failure_times"] = []
 
-    def _record_circuit_failure(self, adapter_name: str) -> None:
-        """适配器失败，增加计数器，超阈值则熔断"""
-        from datetime import datetime
+    def _record_circuit_failure(self, adapter_name: str, data_type: str) -> None:
+        """记录一次真源故障（只有 source_unavailable 会走到这里）。
+
+        2026-11-12 P0：连续失败必须限制在时间窗内且按 data_type 隔离。
+        原来的实现只按 adapter 累计、永不衰减，5 次跨 95 分钟、跨 2 个
+        data_type 的无关失败会把整个源熔断 300s。
+        """
+        key = self._circuit_key(adapter_name, data_type)
+        now_mono = time.monotonic()
+        now_dt = datetime.now(UTC)
         with self._state_lock:
-            if adapter_name not in self._circuit_breaker:
-                self._circuit_breaker[adapter_name] = {"failures": 0, "tripped_until": None}
-            state = self._circuit_breaker[adapter_name]
-            state["failures"] += 1
+            state = self._circuit_breaker.setdefault(
+                key, {"failures": 0, "tripped_until": None, "failure_times": []}
+            )
+            window_start = now_mono - self._CIRCUIT_FAILURE_WINDOW_SECONDS
+            recent = [t for t in state.get("failure_times", []) if t >= window_start]
+            recent.append(now_mono)
+            state["failure_times"] = recent
+            state["failures"] = len(recent)
             if state["failures"] >= self._CIRCUIT_FAILURE_THRESHOLD:
-                state["tripped_until"] = datetime.now(UTC) + \
-                    __import__("datetime").timedelta(seconds=self._CIRCUIT_COOLDOWN_SECONDS)
+                state["tripped_until"] = now_dt + timedelta(
+                    seconds=self._CIRCUIT_COOLDOWN_SECONDS
+                )
                 logger.warning(
-                    f"熔断触发: {adapter_name} 连续失败 {state['failures']} 次, "
-                    f"冷却 {self._CIRCUIT_COOLDOWN_SECONDS}s"
+                    "熔断触发: %s data_type=%s 窗口内连续失败 %d 次, 冷却 %ds",
+                    adapter_name,
+                    data_type,
+                    state["failures"],
+                    self._CIRCUIT_COOLDOWN_SECONDS,
                 )
 
     def register(self, adapter: BaseAdapter) -> None:
@@ -389,6 +447,87 @@ class AdapterManager:
         priority_list = ADAPTER_PRIORITY.get(request.data_type, [])
         return self.fetch_with_sources(request, priority_list)
 
+    def _codes_hint(self, request: FetchRequest) -> str:
+        """日志用代码摘要（最多 5 个，避免整批刷屏）。"""
+        codes = request.stock_codes
+        if not codes:
+            return "<all>"
+        shown = ",".join(codes[:5])
+        return f"{shown},+{len(codes) - 5}" if len(codes) > 5 else shown
+
+    @staticmethod
+    def _metadata_source(name: str | None) -> str:
+        """把候选源名收敛为合法的 SourceName，未知名回落到 local_cache。"""
+        return name if name in _KNOWN_SOURCE_NAMES else "local_cache"
+
+    @staticmethod
+    def _worst_error_kind(kinds: list[str]) -> str:
+        """把多个结果归并为最坏 error_kind（仅用于披露，不参与熔断判定）。"""
+        if not kinds:
+            return "none"
+        return max(kinds, key=lambda kind: _ERROR_KIND_SEVERITY.get(kind, 0))
+
+    @staticmethod
+    def _counts_toward_circuit(
+        metadata: SourceMetadata, data: list[dict[str, Any]],
+    ) -> bool:
+        """是否计入熔断（契约 §1 + Lead 2026-11-12 裁决）。
+
+        - ``source_unavailable``：迁移后的明确真源故障 → 计入；
+        - ``none``/``""`` + error 非空 + 无数据：未迁移适配器的兜底 → 计入；
+        - ``legal_empty``/``source_unsupported``/``per_symbol_data_error``/
+          ``deadline``/``truncated_ok``：无论 error/reason 是否为空 → 一律不计。
+        """
+        if metadata.error_kind in CIRCUIT_FAILURE_ERROR_KINDS:
+            return True
+        return (
+            metadata.error_kind in ("none", "")
+            and metadata.error is not None
+            and not data
+        )
+
+    @staticmethod
+    def _is_clean_success(metadata: SourceMetadata, data: list[dict[str, Any]]) -> bool:
+        """干净成功：有数据、无 error、未截断、且不是源级/个股级故障。"""
+        if not data or metadata.error is not None:
+            return False
+        if metadata.truncated:
+            return False
+        return metadata.error_kind not in {
+            "source_unavailable",
+            "per_symbol_data_error",
+            "truncated_ok",
+            "deadline",
+        }
+
+    def _deadline_result(
+        self, request: FetchRequest, candidates: list[str],
+    ) -> FetchResult:
+        """入口预算已耗尽：不发请求、不计熔断，返回 error_kind="deadline"。"""
+        source = self._metadata_source(candidates[0] if candidates else None)
+        message = (
+            f"请求预算在进入适配器前已耗尽（未发出任何请求）: "
+            f"data_type={request.data_type}, codes={self._codes_hint(request)}"
+        )
+        logger.warning(
+            "请求预算已耗尽，未发出请求: data_type=%s, candidates=%s, codes=%s",
+            request.data_type,
+            candidates,
+            self._codes_hint(request),
+        )
+        return FetchResult(
+            data=[],
+            metadata=SourceMetadata(
+                source=source,  # type: ignore[arg-type]
+                fetch_time=datetime.now(UTC),
+                raw_response_hash="",
+                confidence="missing",
+                error=None,
+                error_kind="deadline",
+                reason=message,
+            ),
+        )
+
     def fetch_with_sources(
         self,
         request: FetchRequest,
@@ -399,25 +538,43 @@ class AdapterManager:
         财务明细回填等批量任务用 "sina -> akshare_eastmoney" 快速失败，
         避免每个源缺口股票都落到 40s+ 的 TDX 回退上；需要 TDX 时调用方
         可显式传入 source_names=["tdx"]。
+
+        2026-11-12 契约 §1：
+        - 熔断桶按 (adapter, data_type) 隔离；
+        - 只有 error_kind="source_unavailable" 计入熔断；
+        - 入口 budget 耗尽 → 直接 deadline，不发请求；
+        - 全合法空/真失败/partial 三条日志分支都不得打印字面 None。
         """
         self._ensure_initialized()
         priority_list = source_names or ADAPTER_PRIORITY.get(request.data_type, [])
+        codes_hint = self._codes_hint(request)
         if not priority_list:
+            message = f"无适配器支持 data_type={request.data_type}（候选源为空）"
+            logger.warning("%s", message)
             return FetchResult(
                 data=[],
                 metadata=SourceMetadata(
                     source="local_cache",
-                    fetch_time=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                    fetch_time=datetime.now(UTC),
                     raw_response_hash="",
                     confidence="missing",
-                    error=f"无适配器支持 data_type={request.data_type}",
+                    error=message,
+                    error_kind="source_unsupported",
+                    reason=message,
                 ),
             )
+
+        # 2026-11-12 P1：预算出生即耗尽时不得再发请求（此前会继续调用适配器）。
+        if request.deadline_exceeded():
+            return self._deadline_result(request, priority_list)
 
         last_result: FetchResult | None = None
         first_partial: FetchResult | None = None
         followup_errors: list[str] = []
+        followup_kinds: list[str] = []
+        attempt_results: list[FetchResult] = []
         tried_adapters: list[str] = []
+        tripped: dict[str, float] = {}
 
         for adapter_name in priority_list:
             adapter = self._adapters.get(adapter_name)
@@ -428,8 +585,11 @@ class AdapterManager:
             if not adapter.can_handle(request):
                 continue
 
-            # 熔断检查：跳过被熔断的适配器
-            if self._is_circuit_tripped(adapter_name):
+            # 熔断检查：按 (adapter, data_type) 桶跳过被熔断的适配器
+            if self._is_circuit_tripped(adapter_name, request.data_type):
+                tripped[adapter_name] = self._circuit_cooldown_remaining(
+                    adapter_name, request.data_type
+                )
                 continue
 
             tried_adapters.append(adapter_name)
@@ -437,96 +597,239 @@ class AdapterManager:
 
             try:
                 result = adapter.fetch(request)
-                if result.metadata.error is None and len(result.data) > 0:
-                    logger.info(
-                        f"{adapter_name} 成功获取 {request.data_type}: "
-                        f"{len(result.data)} 行, confidence={result.metadata.confidence}"
-                    )
-                    self._record_circuit_success(adapter_name)
-                    return result
-
-                # P1-27修复: 区分"有错误"和"合法空结果"
-                # 有错误且无数据 → 完全失败，记录熔断
-                # 无错误但空数据 → 合法空，不触发熔断（可能是无分红的股票等）
-                # 有错误但有部分数据 → partial：保留首批数据继续尝试后续适配器；
-                #   不计入完全熔断失败（截断/子请求失败不应让源整体熔断）。
-                last_result = result
-                if result.metadata.error is not None:
-                    if result.data:
-                        if first_partial is None:
-                            first_partial = result
-                        else:
-                            followup_errors.append(result.metadata.error)
-                        logger.warning(
-                            f"{adapter_name} 返回 partial ({len(result.data)} 行): "
-                            f"{result.metadata.error}"
-                        )
-                    else:
-                        followup_errors.append(result.metadata.error)
-                        self._record_circuit_failure(adapter_name)
-                        logger.warning(
-                            f"{adapter_name} 返回错误: {result.metadata.error}"
-                        )
-                else:
-                    # 无错误但空数据，继续尝试下一个适配器但不计入熔断
-                    logger.debug(
-                        f"{adapter_name} 返回空数据（无错误）: {request.data_type}"
-                    )
-
             except Exception as e:
-                logger.error(f"{adapter_name} 抓取 {request.data_type} 失败: {e}")
-                self._record_circuit_failure(adapter_name)
-                followup_errors.append(f"{adapter_name}: {e}")
+                # 适配器抛异常 = 真源故障，唯一会计入熔断的异常路径。
+                logger.error("%s 抓取 %s 失败: %s", adapter_name, request.data_type, e)
+                self._record_circuit_failure(adapter_name, request.data_type)
+                reason = f"{adapter_name}: {e}"
+                followup_errors.append(reason)
+                followup_kinds.append("source_unavailable")
                 last_result = FetchResult(
                     data=[],
                     metadata=SourceMetadata(
-                        source=adapter_name,
-                        fetch_time=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                        source=self._metadata_source(adapter_name),  # type: ignore[arg-type]
+                        fetch_time=datetime.now(UTC),
                         raw_response_hash="",
                         confidence="missing",
                         error=str(e),
+                        error_kind="source_unavailable",
+                        reason=reason,
                     ),
                 )
+                attempt_results.append(last_result)
+                continue
 
-        # 全链失败时不得丢弃第一个带部分数据的适配器结果：保留 partial data，
-        # 并把后续失败说明合并进 metadata.error（调用方据此触发重试）。
+            metadata = result.metadata
+            kind = metadata.error_kind
+            counts_toward_circuit = self._counts_toward_circuit(metadata, result.data)
+            if kind in ("none", "") and counts_toward_circuit:
+                # 未迁移适配器兜底：error 非空 + 空数据 = 真源故障。归一化为
+                # source_unavailable，让后续日志/T2 的 error_kind 路由一致。
+                metadata = metadata.model_copy(update={"error_kind": "source_unavailable"})
+                result = result.model_copy(update={"metadata": metadata})
+                kind = "source_unavailable"
+            if counts_toward_circuit:
+                self._record_circuit_failure(adapter_name, request.data_type)
+            elif kind in _CIRCUIT_NEUTRAL_ERROR_KINDS:
+                # 预算耗尽/能力缺失不代表源故障：不增加也不重置计数。
+                pass
+            else:
+                # 源已正常响应（含合法空/个股级问题/截断）→ 连续失败计数归零。
+                self._record_circuit_success(adapter_name, request.data_type)
+
+            if self._is_clean_success(metadata, result.data):
+                logger.info(
+                    f"{adapter_name} 成功获取 {request.data_type}: "
+                    f"{len(result.data)} 行, confidence={metadata.confidence}"
+                )
+                return result
+
+            last_result = result
+            attempt_results.append(result)
+            note = metadata.reason or metadata.error or kind
+            has_data = bool(result.data)
+            is_partial = has_data and (
+                metadata.error is not None
+                or metadata.truncated
+                or kind in {"source_unavailable", "per_symbol_data_error", "deadline"}
+            )
+            if is_partial:
+                if first_partial is None:
+                    first_partial = result
+                else:
+                    followup_errors.append(note)
+                followup_kinds.append(kind)
+                logger.warning(
+                    "%s 仅返回部分数据 (data_type=%s, rows=%d, error_kind=%s): %s",
+                    adapter_name,
+                    request.data_type,
+                    len(result.data),
+                    kind,
+                    note,
+                )
+            elif kind in {"legal_empty", "source_unsupported"}:
+                logger.debug(
+                    "%s 无数据（%s）: data_type=%s, reason=%s",
+                    adapter_name,
+                    kind,
+                    request.data_type,
+                    note,
+                )
+            elif kind == "deadline":
+                logger.warning(
+                    "%s 预算耗尽（deadline）: data_type=%s, reason=%s",
+                    adapter_name,
+                    request.data_type,
+                    note,
+                )
+            else:
+                followup_errors.append(note)
+                followup_kinds.append(kind)
+                logger.warning(
+                    "%s 返回错误（%s）: data_type=%s, detail=%s",
+                    adapter_name,
+                    kind,
+                    request.data_type,
+                    note,
+                )
+
+        # 全链未完全成功时不得丢弃第一个带部分数据的适配器结果。
         if first_partial is not None:
-            merged_errors = [
-                error for error in (
-                    first_partial.metadata.error,
-                    *followup_errors,
-                ) if error
-            ]
-            merged_error = "; ".join(dict.fromkeys(merged_errors)) or None
-            logger.error(
-                f"所有适配器均未完全成功 ({tried_adapters})，返回首个 partial "
-                f"{first_partial.metadata.source} ({len(first_partial.data)} 行): "
-                f"{merged_error}"
+            merged_kind = self._worst_error_kind(
+                [first_partial.metadata.error_kind, *followup_kinds]
+            )
+            # error 只装"真错误"；truncated_ok/合法空的说明只进 reason，
+            # 否则会把合法的截断重新伪装成 error 并触发上层 retry。
+            error_parts = [first_partial.metadata.error, *followup_errors]
+            merged_error = "; ".join(dict.fromkeys(p for p in error_parts if p)) or None
+            reason_parts = [first_partial.metadata.reason, merged_error]
+            merged_reason = "; ".join(dict.fromkeys(p for p in reason_parts if p)) or None
+            log = (
+                logger.error
+                if merged_kind in CIRCUIT_FAILURE_ERROR_KINDS
+                else logger.warning
+            )
+            log(
+                "适配器仅返回 partial (tried=%s, data_type=%s, source=%s, "
+                "rows=%d, error_kind=%s): %s",
+                tried_adapters,
+                request.data_type,
+                first_partial.metadata.source,
+                len(first_partial.data),
+                merged_kind,
+                merged_reason or "partial",
             )
             return FetchResult(
                 data=first_partial.data,
                 metadata=first_partial.metadata.model_copy(
-                    update={"error": merged_error}
+                    update={
+                        "error": merged_error,
+                        "error_kind": merged_kind,
+                        "reason": merged_reason,
+                        "truncated": (
+                            first_partial.metadata.truncated
+                            or merged_kind == "truncated_ok"
+                        ),
+                    }
                 ),
                 raw_response=first_partial.raw_response,
             )
 
-        # 所有适配器都失败
-        if last_result:
-            logger.error(
-                f"所有适配器均失败 ({tried_adapters}): {last_result.metadata.error}"
+        # 所有适配器都没拿到数据
+        if tried_adapters and attempt_results:
+            kinds = [result.metadata.error_kind for result in attempt_results]
+            worst_kind = self._worst_error_kind(kinds)
+            notes = [
+                result.metadata.reason
+                or result.metadata.error
+                or result.metadata.error_kind
+                for result in attempt_results
+            ]
+            detail = "; ".join(dict.fromkeys(n for n in notes if n)) or "无数据"
+            truncated = any(result.metadata.truncated for result in attempt_results)
+            base = (last_result or attempt_results[-1]).metadata
+            error: str | None
+            if worst_kind in CIRCUIT_FAILURE_ERROR_KINDS:
+                logger.error(
+                    "所有来源均失败 (tried=%s, data_type=%s, codes=%s, "
+                    "error_kind=%s): %s",
+                    tried_adapters,
+                    request.data_type,
+                    codes_hint,
+                    worst_kind,
+                    detail,
+                )
+                error = detail
+            elif worst_kind == "per_symbol_data_error":
+                logger.warning(
+                    "所有来源均无可用数据（个股/格式问题）(tried=%s, data_type=%s, "
+                    "codes=%s): %s",
+                    tried_adapters,
+                    request.data_type,
+                    codes_hint,
+                    detail,
+                )
+                error = detail
+            elif worst_kind == "deadline":
+                logger.warning(
+                    "所有来源预算耗尽 (tried=%s, data_type=%s, codes=%s): %s",
+                    tried_adapters,
+                    request.data_type,
+                    codes_hint,
+                    detail,
+                )
+                error = None
+            else:
+                logger.info(
+                    "所有来源均无数据（合法缺失）(tried=%s, data_type=%s, codes=%s): %s",
+                    tried_adapters,
+                    request.data_type,
+                    codes_hint,
+                    detail,
+                )
+                error = None
+            return FetchResult(
+                data=[],
+                metadata=base.model_copy(
+                    update={
+                        "confidence": "missing",
+                        "error": error,
+                        "error_kind": worst_kind,
+                        "reason": detail,
+                        "truncated": truncated,
+                    }
+                ),
             )
-            return last_result
 
-        # 没有可用的适配器
+        # tried_adapters 为空：全链熔断（或候选源全部未注册/不可用）
+        if tripped:
+            cooldown = ", ".join(
+                f"{name}={seconds:.0f}s" for name, seconds in tripped.items()
+            )
+            message = (
+                f"全部候选源处于熔断冷却中 (data_type={request.data_type}, "
+                f"candidates={priority_list}, cooldown=[{cooldown}], tried=0)"
+            )
+            logger.warning("无可用适配器（全部熔断）: %s", message)
+            kind: ErrorKind = "source_unavailable"
+        else:
+            message = (
+                f"无可用适配器 (data_type={request.data_type}, "
+                f"candidates={priority_list}, "
+                f"registered={sorted(self._adapters)})"
+            )
+            logger.warning("无可用适配器: %s", message)
+            kind = "source_unsupported"
         return FetchResult(
             data=[],
             metadata=SourceMetadata(
-                source="local_cache",
-                fetch_time=__import__("datetime").datetime.now(__import__("datetime").timezone.utc),
+                source=self._metadata_source(priority_list[0]),  # type: ignore[arg-type]
+                fetch_time=datetime.now(UTC),
                 raw_response_hash="",
                 confidence="missing",
-                error=f"无可用适配器 (tried: {tried_adapters})",
+                error=message,
+                error_kind=kind,
+                reason=message,
             ),
         )
 
@@ -585,6 +888,10 @@ class AdapterManager:
                     close()
             self._adapters.clear()
             self._initialized = False
+            # 2026-11-12 P0：熔断状态只是**进程内隔离**的临时抑制窗口，
+            # 与持久化 retry/missing 无关。长任务结束/管理器关闭后必须清空，
+            # 否则下一轮更新会继承上一轮冷却（跨进程本来也不会共享）。
+            self._circuit_breaker.clear()
 
     def recover_after_timeout(self) -> None:
         """Ask stateful sources to recreate their session before their next request."""
