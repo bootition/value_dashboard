@@ -140,4 +140,9 @@ last-reviewed: 2026-11-13
 2. **熔断计数可被 `legal_empty`/`per_symbol_data_error` 清零**：源持续返回空表时该 `(adapter,data_type)` 桶永不熔断，每轮继续打同一死源。建议这两类改为"中性"（不增不减），只有明确成功才清零。
 3. **自建 `AdapterManager()`**（buyback/index_valuation/treasury/funding/capital/business/hk_dividends/pdf）每次调用都是全新熔断状态，熔断隔离在这些域上失效。建议在 `update.py` 构造处注入共享 `adapter_mgr`。
 4. **`capital_history` 的 due 判据**（`latest_cap < latest_price`）使几乎全部上市股票长期"due"，每轮 20 只、永远续不完；配合"每轮写 20 只 → 统计域 20 只重算"，成本可控但吞吐永远追不上。建议改为"覆盖到最新价格日即完成"或引入覆盖水位。
-5. **小库阈值**：`gate_hard_block_threshold = max(50, 1%)` 在上市股 <101 只的库里可把 100% 股票隔离光且只报 `partial`。建议加"隔离占比 ≥ X% 即 hard_block"。
+5. **`price_daily_qfq` 在收盘后首轮会大面积滞后，而价格步骤仍报 `success`（本轮新发现，P1）**：
+   实测 job 207（15:33–17:29，5,572 只、59.73 只每分、0 失败）结束后，   `price_freshness.qfq_current_count = 959 / 5,572`——即 **4,613 只的 qfq 仍停在 11-12**，而 raw 已到 11-13。   下一轮（18:02）因此重新选中 4,613 只（`needs_update=False` 但目标集非空），形成「每轮都在补 qfq」的稳态。
+   机制推断（证据：18:02 轮的响应分布为 1 行 × 1,213 / 2 行 × 1,200）：收盘后不久腾讯 `qfqday` 对多数股票尚未发布当日复权数据，   而 `fetch_one` 只以 **raw** 成功与否判定 `err`，qfq 返回空不算失败 → 该股 raw 前进、qfq 不动，步骤仍计 success。
+   后果：15:33 那一轮发布的指标快照用「当日 raw + 前一日 qfq」混算技术指标（MA/RSI/MACD），约 2.5 小时后下一轮才纠正。
+   建议（未实施）：① 价格步骤统计「raw 前进但 qfq 未前进」的只数并落进 step，超过阈值（如 5%）→ `partial` + `reason=qfq_lagged`；   ② 收盘后首轮延后到源稳定（16:30+），或对 qfq 滞后集合做一次定向重试。
+6. **小库阈值**：`gate_hard_block_threshold = max(50, 1%)` 在上市股 <101 只的库里可把 100% 股票隔离光且只报 `partial`。建议加"隔离占比 ≥ X% 即 hard_block"。
