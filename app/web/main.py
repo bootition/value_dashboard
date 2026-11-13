@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 _STARTUP_MAINTENANCE_LOCK = threading.Lock()
 # 契约 §6：ready=False 时启动日志每类缺口展示的股票代码数。
 _MISSING_CODE_PREVIEW = 5
+# `/api/ready` 的 readiness 缓存陈旧阈值：**只披露不翻状态**。
+# 应用空闲时 readiness 缓存本来几小时不刷新，按陈旧度翻 503 会制造假红；
+# 真正决定 200/503 的是「库现在能读吗」+「快照值是否被 mask」两道闸。
+READINESS_STALE_AFTER_SECONDS = 30 * 60
 
 
 def _admin_token(sqlite_path: Path) -> str:
@@ -630,18 +634,41 @@ def create_app(
     # ─── 数据可筛性探针 ────────────────────────────────────────────
     @app.get("/api/ready")
     async def readiness_probe(request: Request) -> JSONResponse:
-        """Report whether the database can actually be screened (contract §6).
+        """Report whether the database can actually be served AND trusted (§6).
 
-        2026-11-12 P1：``/api/health`` 只做 ``SELECT 1``，于是"库能读但指标
-        全被 mask、筛选 409"的 11-03~11-11 事故期间探针一直 200。这里改用
-        readiness 结论：ready=True → 200，ready=False → 503，并把
-        ``warning_codes``/``missing_counts`` 一并暴露给运维与前端。
+        2026-11-12 初版：只有 readiness 缓存结论，于是复刻了同一个人为缺陷。
+        2026-11-13 P0（生产实测）：应用持 DuckDB 写锁时同一秒
+        ``/api/ready`` 返回 200（13 小时前的全绿缓存），而
+        ``/api/health`` / ``/api/stock/…/indicators`` 全部 503。
+        现在改成三道闸，任一不过即 503：
+
+        1. **可用性**：真读一次 ``SELECT 1``（不是新鲜度，是"现在能读吗"）；
+        2. **实时遮蔽态**：用实时 ``warning_codes`` 跑 ``indicator_trust``，
+           ``untrusted_all`` 为真 → 库能读但所有快照数值都被 mask
+           （11-03~11-11 事故形态），必须 503；
+        3. **陈旧度只披露不翻状态**：``checked_at_age_seconds`` / ``stale``
+           仅作观测——空闲时 readiness 缓存本来几小时不刷新，按陈旧度翻
+           503 会制造假红。
 
         ``/api/health`` 的探活语义保持不变（只验证连接与版本）。
         """
         duck = request.app.state.duck
         sqlite = request.app.state.sqlite
-        from app.core.data_quality import read_cached_data_readiness, read_warning_codes
+        from app.core.data_quality import (
+            indicator_trust,
+            read_cached_data_readiness,
+            read_warning_codes,
+        )
+
+        # 闸 1（可用性）：更新进程持写锁 / 文件被独占时这里就抛。
+        db_available = True
+        db_error: str | None = None
+        try:
+            duck.read_query("SELECT 1 AS ready")
+        except Exception as error:
+            db_available = False
+            db_error = str(error)
+            logger.warning("/api/ready 数据库可用性探测失败: %s", error)
 
         readiness: dict = {}
         try:
@@ -657,16 +684,50 @@ def create_app(
             warning_codes = [str(code) for code in read_warning_codes(duck, sqlite)]
         except Exception as error:
             logger.warning("/api/ready 读取 warning_codes 失败，回退到核对快照: %s", error)
-        ready = bool(readiness.get("ready"))
+        warning_codes = [str(code) for code in (warning_codes or [])]
+        # 闸 2（实时遮蔽态）：与只读接口共用同一 trust 判定，杜绝"探针全绿、
+        # 页面全 null"。
+        trust = indicator_trust(warning_codes)
+
+        checked_at_age_seconds: int | None = None
+        stale: bool | None = None
+        checked_at = readiness.get("checked_at")
+        if checked_at:
+            try:
+                checked = datetime.fromisoformat(str(checked_at))
+                if checked.tzinfo is None:
+                    checked = checked.astimezone()
+                age = (datetime.now(checked.tzinfo) - checked).total_seconds()
+                checked_at_age_seconds = int(max(age, 0))
+                stale = checked_at_age_seconds > READINESS_STALE_AFTER_SECONDS
+            except (TypeError, ValueError) as error:
+                logger.warning("/api/ready 解析 checked_at 失败: %s", error)
+
+        reason: str | None = None
+        if not db_available:
+            reason = "database_unavailable"
+        elif trust["untrusted_all"]:
+            reason = "snapshot_values_masked"
+        elif not readiness:
+            reason = "readiness_unavailable"
+        elif not readiness.get("ready"):
+            reason = str(readiness.get("reason") or "minimum_data_not_ready")
+        ready = reason is None
+
         payload = {
             "ready": ready,
-            "checked_at": readiness.get("checked_at"),
-            "warning_codes": [str(code) for code in (warning_codes or [])],
+            "reason": reason,
+            "checked_at": checked_at,
+            "checked_at_age_seconds": checked_at_age_seconds,
+            "stale": stale,
+            "warning_codes": warning_codes,
             "missing_counts": readiness.get("missing_counts") or {},
             "stock_count": readiness.get("stock_count"),
+            "db_available": db_available,
+            "untrusted_all": bool(trust["untrusted_all"]),
         }
-        if not readiness:
-            payload["reason"] = "readiness_unavailable"
+        if db_error is not None:
+            payload["error"] = db_error
         return JSONResponse(status_code=200 if ready else 503, content=payload)
 
     # ─── 健康检查 ──────────────────────────────────────────────────

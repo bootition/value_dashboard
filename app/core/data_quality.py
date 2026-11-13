@@ -965,6 +965,9 @@ def minimum_data_readiness(
     for key, codes in issues.items():
         if key in disclosure_keys:
             continue
+        # share_capital 走「阈值政策」而非「一票否决」，见下方统一判定。
+        if key == "share_capital":
+            continue
         blocking_codes = []
         for code in codes:
             # 新品 90 天豁免已在唯一真相函数 / 各列 SQL 内判定，此处不再复制口径。
@@ -973,6 +976,18 @@ def minimum_data_readiness(
             blocking_codes.append(code)
         if blocking_codes:
             blocking[key] = blocking_codes
+    # 2026-11-13 P1：readiness 与发布门禁必须同一政策（阈值唯一实现在
+    # gate_hard_block_threshold）。
+    # 为什么不能"任一缺口即 ready=False"：少量股本缺口在发布侧是被逐股隔离、
+    # 其余股票照常发布的；若 readiness 对同一状态判 ready=False，/api/ready
+    # 就会 503 假红（同一状态两个相反结论）。只有缺口数超过硬阻断阈值
+    # （=怀疑系统性单位错乱、发布侧整批拒绝）才在这里阻断。
+    # 未超阈值时缺失计数仍在 missing_counts["share_capital"] 里如实披露。
+    share_capital_gaps = issues.get("share_capital") or []
+    share_capital_threshold = gate_hard_block_threshold(len(rows))
+    share_capital_blocking = len(share_capital_gaps) > share_capital_threshold
+    if share_capital_blocking:
+        blocking["share_capital"] = share_capital_gaps
     return {
         "ready": bool(rows) and not blocking,
         "stock_count": len(rows),
@@ -980,6 +995,13 @@ def minimum_data_readiness(
         "missing_counts": {key: len(codes) for key, codes in issues.items() if codes},
         "disclosure_missing_counts": {
             key: len(issues[key]) for key in disclosure_keys if issues.get(key)
+        },
+        # 股本缺口的阈值政策如实披露：多少个缺口、阈值多少、是否据此阻断。
+        "share_capital_policy": {
+            "gap_count": len(share_capital_gaps),
+            "threshold": share_capital_threshold,
+            "blocking": share_capital_blocking,
+            "quarantined": not share_capital_blocking and bool(share_capital_gaps),
         },
         "schema_compatibility": compatibility,
     }

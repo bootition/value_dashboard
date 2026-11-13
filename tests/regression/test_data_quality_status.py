@@ -121,16 +121,24 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    """新股 90 天豁免期内股本缺口不再计入 share_capital，越过豁免线仍阻断。
+    """新股 90 天豁免 + 股本缺口阈值政策（readiness 与发布门禁同源）。
 
-    2026-11-12 契约 §3（语义变更）：此前 readiness 用自己的一份 SQL 判
+    2026-11-12 契约 §3（语义变更一）：此前 readiness 用自己的一份 SQL 判
     ``has_share_capital``，把「上市 ≤90 天且 total/circ 皆为 NULL」的新股也写进
     ``missing_counts["share_capital"]``（只在阻断循环里豁免），于是同一时刻
     「门禁报 5 只、readiness 报 26 只」。现在 readiness 复用唯一真相函数
     ``listed_share_capital_gap_codes()``，90 天豁免已内含其中，所以这批新股
-    根本不属于 share_capital 缺口（它们的缺口由 price_freshness /
-    financial_period 等类别披露），断言随之改为 "不在 missing_counts 里"。
-    一旦任一列有值（例如只填了 total_shares），豁免即失效 → 仍阻断。
+    根本不属于 share_capital 缺口（缺口由 price_freshness / financial_period
+    等类别披露），断言为 "不在 missing_counts 里"。
+
+    2026-11-13 P1（语义变更二）：readiness 的 share_capital 不再"任一缺口即
+    blocking"，改用与 ``snapshot_publish_gate`` 同一阈值政策
+    （``gate_hard_block_threshold``）。小库阈值恒为下限 50，因此这里 1 只缺口
+    **不阻断** ready，只在 ``missing_counts["share_capital"]`` 与
+    ``share_capital_policy`` 里如实披露 —— 否则发布侧"逐股隔离后正常发布"与
+    readiness 侧"ready=False"会给同一状态两个相反结论（``/api/ready`` 假红）。
+    越过阈值的阻断分支见
+    ``test_fix20261113_probe_ready.py::test_readiness_blocks_when_share_capital_gaps_exceed_the_threshold``。
     """
     duckdb_store.write_query(
         """INSERT INTO stock_meta
@@ -153,8 +161,12 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
 
     readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
 
-    assert readiness["ready"] is False
+    # 豁免失效 → 缺口成立并如实计数；但 1 只 ≤ 阈值 50，不据此阻断 ready。
     assert readiness["missing_counts"]["share_capital"] == 1
+    assert readiness["missing"]["share_capital"] == ["301999"]
+    assert readiness["share_capital_policy"]["blocking"] is False
+    assert readiness["share_capital_policy"]["quarantined"] is True
+    assert readiness["ready"] is True
 
     duckdb_store.write_query(
         """UPDATE stock_meta SET circ_shares = 50
@@ -164,6 +176,8 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
 
     assert readiness["ready"] is True
+    assert "share_capital" not in readiness["missing_counts"]
+    assert readiness["share_capital_policy"]["gap_count"] == 0
 
 
 def test_quality_status_flags_active_dividend_alias_and_lineage_archive_gaps(

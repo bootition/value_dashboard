@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
+from app.core.financial_period import CN_TZ
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/data-status", tags=["data-status"])
@@ -181,6 +183,36 @@ def _actionable_missing_condition() -> tuple[str, list[str]]:
         _ACTIONABLE_MISSING_SQL.replace("{disabled_placeholders}", placeholders),
         list(_DISABLED_MISSING_FIELDS),
     )
+
+
+def _freshness_ages(duck, *, now: datetime | None = None) -> dict:
+    """Return price/data staleness ages for the data-status summary.
+
+    ``price_age_days`` = 今天 − 价格表最新交易日；``data_age_days`` =
+    价格表最新交易日 − 快照 ``latest_price_date``。后者与 ``calculated_at``
+    无关，因此"只刷时间戳"的维护步骤无法把它伪造成 0。
+
+    ``now`` 可注入以便测试（默认取北京时区当前时间）。日期差必须按
+    **CN_TZ** 计算：北京 00:00~08:00 期间 UTC 还在前一天，用 UTC 会少算 1 天。
+    """
+    ages = duck.read_query(
+        """SELECT (SELECT MAX(trade_date) FROM price_daily_raw) AS price_latest_date,
+                  (SELECT MAX(latest_price_date) FROM indicator_snapshot)
+                      AS snapshot_latest_price_date"""
+    )[0]
+    price_latest = ages.get("price_latest_date")
+    snapshot_latest = ages.get("snapshot_latest_price_date")
+    today = (now or datetime.now(CN_TZ)).astimezone(CN_TZ).date()
+    return {
+        "price_latest_date": str(price_latest) if price_latest else None,
+        "snapshot_latest_price_date": str(snapshot_latest) if snapshot_latest else None,
+        "price_age_days": (today - price_latest).days if price_latest else None,
+        "data_age_days": (
+            (price_latest - snapshot_latest).days
+            if price_latest and snapshot_latest
+            else None
+        ),
+    }
 
 
 @router.get("/indicator-recompute")
@@ -470,28 +502,11 @@ def _build_summary_from_state(state) -> dict:
     # 于是 snapshot_age_days 永远是 0，14 天的真实价格陈旧被伪装修复。
     # 这里额外暴露 data_age_days = 价格表最新交易日 − 快照 latest_price_date，
     # 它只由数值本身决定，任何"只刷时间戳"的步骤都改不动它。
+    # 2026-11-13 P2 时区回归：口径统一到 CN_TZ（与
+    # stock_detail.build_freshness_metadata 一致）。用 UTC 时，北京 00:00~08:00
+    # 期间 UTC 仍是前一天，price_age_days 会少算 1 天。
     try:
-        ages = duck.read_query(
-            """SELECT (SELECT MAX(trade_date) FROM price_daily_raw) AS price_latest_date,
-                      (SELECT MAX(latest_price_date) FROM indicator_snapshot)
-                          AS snapshot_latest_price_date"""
-        )[0]
-        price_latest = ages.get("price_latest_date")
-        snapshot_latest = ages.get("snapshot_latest_price_date")
-        price_age_days = (
-            (datetime.now(UTC).date() - price_latest).days if price_latest else None
-        )
-        data_age_days = (
-            (price_latest - snapshot_latest).days
-            if price_latest and snapshot_latest
-            else None
-        )
-        summary["freshness"] = {
-            "price_latest_date": str(price_latest) if price_latest else None,
-            "snapshot_latest_price_date": str(snapshot_latest) if snapshot_latest else None,
-            "price_age_days": price_age_days,
-            "data_age_days": data_age_days,
-        }
+        summary["freshness"] = _freshness_ages(duck)
         if isinstance(summary.get("price_freshness"), dict):
             summary["price_freshness"].update(summary["freshness"])
     except Exception:
