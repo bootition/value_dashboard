@@ -625,9 +625,15 @@ class StatisticsBuilder:
     def _stock_fingerprints(self, stock_codes: list[str]) -> dict[str, str]:
         """Compute one fingerprint per stock from the statistics input tables.
 
-        Treasury curve and verified-share counts are global inputs, so a
-        treasury-curve change marks every stock changed (correct: spread_10y
-        depends on the curve).
+        Treasury curve is a genuinely global input, so a curve change marks
+        every stock changed (correct: spread_10y depends on the curve).
+
+        2026-11-13 修复（性能）：**逐股指纹只能用逐股输入**。此前把全库
+        `COUNT(*) FROM share_capital_history WHERE verified` 塞进每只股票的
+        指纹，而 `capital_history` 每轮核验 20 只就会让这个全局计数 +20 →
+        5,580 只指纹全部失效 → 每轮全量重建统计域（实测 285–305 s/轮，
+        占无缺口轮次 65–76%，是"轮次 6.7–8.3 min、达不到 3–5 min 基线"的
+        唯一主因）。改为逐股 verified 计数后，一次核验只影响被核验的那几只。
         """
         rows = self.duck.read_query(
             """SELECT m.stock_code,
@@ -650,7 +656,10 @@ class StatisticsBuilder:
                       (SELECT COALESCE(CAST(MAX(d.ex_date) AS VARCHAR), '')
                          FROM dividends d WHERE d.stock_code = m.stock_code) AS div_date,
                       (SELECT COUNT(*) FROM dividends d
-                         WHERE d.stock_code = m.stock_code) AS div_cnt
+                         WHERE d.stock_code = m.stock_code) AS div_cnt,
+                      (SELECT COUNT(*) FROM share_capital_history cap
+                         WHERE cap.stock_code = m.stock_code
+                           AND cap.verified) AS cap_verified_cnt
                FROM stock_meta m
                WHERE m.stock_code IN ({placeholders})
                ORDER BY m.stock_code""".replace(
@@ -662,9 +671,6 @@ class StatisticsBuilder:
             "SELECT COALESCE(CAST(MAX(curve_date) AS VARCHAR), '') AS latest, "
             "COUNT(*) AS c FROM treasury_yield_curve"
         )[0]
-        verified = self.duck.read_query(
-            "SELECT COUNT(*) AS c FROM share_capital_history WHERE verified"
-        )[0]
         result: dict[str, str] = {}
         for row in rows:
             parts = [
@@ -674,7 +680,7 @@ class StatisticsBuilder:
                 "capital", str(row["cap_date"] or ""), str(row["cap_cnt"] or 0),
                 "dividends", str(row["div_date"] or ""), str(row["div_cnt"] or 0),
                 "treasury", str(curve.get("latest") or ""), str(curve.get("c") or 0),
-                "verified", str(verified.get("c") or 0),
+                "verified", str(row["cap_verified_cnt"] or 0),
             ]
             result[str(row["stock_code"])] = hashlib.sha256(
                 "|".join(parts).encode("utf-8")
