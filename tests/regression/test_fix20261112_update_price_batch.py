@@ -257,12 +257,21 @@ def test_buffer_is_bounded_by_stocks_rows_and_seconds() -> None:
     assert by_rows.rows >= 10
     assert by_rows.should_flush() is True, "行数达上限必须落盘（不得把整表读进内存）"
 
+    # 2026-11-13：时限判据改为"距上一次 add 的空闲时间"且**要求 ≥2 只**。
+    # 生产实测（1 只/事务 = 90.9%）证明"1 只就按时限落盘"会把攒批退化成逐股
+    # 事务，因此单只必须等到流水线排空时由 finally 收尾，而不是按时限刷出。
     by_time = _new_buffer(stocks=100, rows=10**9, seconds=0.001)
     by_time.add(item)
     deadline = time.monotonic() + 2.0
     while not by_time.should_flush() and time.monotonic() < deadline:
         time.sleep(0.005)
-    assert by_time.should_flush() is True, "存活时间达上限必须落盘"
+    assert by_time.should_flush() is False, "只有 1 只时不得按时限提前落盘"
+
+    by_time.add(("600405", item[1], item[2], True, True))
+    deadline = time.monotonic() + 2.0
+    while not by_time.should_flush() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert by_time.should_flush() is True, "已攒 ≥2 只且空闲超过阈值必须落盘"
 
     assert len(by_stocks.drain()) == 2
     assert len(by_stocks) == 0 and by_stocks.rows == 0, "drain 必须释放缓冲内存"

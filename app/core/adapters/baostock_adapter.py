@@ -345,7 +345,9 @@ class BaoStockAdapter(BaseAdapter):
                 )
                 logger.debug("baostock price_daily %s 取得 %d 条", bs_code, count)
 
-        error_kind, error, reason = self._classified_source_fields(skipped, query_errors)
+        error_kind, error, reason = self._classified_source_fields(
+            skipped, query_errors, len(records),
+        )
         return self._make_result(
             data=records,
             raw_response="\n".join(raw_lines).encode("utf-8"),
@@ -359,9 +361,15 @@ class BaoStockAdapter(BaseAdapter):
 
     @staticmethod
     def _classified_source_fields(
-        skipped: dict[str, str], query_errors: list[str],
+        skipped: dict[str, str], query_errors: list[str], record_count: int,
     ) -> tuple[str, str | None, str | None]:
-        """把"跳过的股票"和"真实查询错误"分开归类（skip 不得拼进 error）。"""
+        """把"跳过的股票"和"真实查询错误"分开归类（skip 不得拼进 error）。
+
+        2026-11-13 P2（F）：无 skip、无查询错误、但**0 条记录** = 源正常但区间
+        内没有数据（合法空）。必须显式标成 ``legal_empty`` 并给 reason，否则
+        manager 只能看到 ``error_kind=none`` + 空数据，打出误导性的
+        ``WARNING ... 返回错误（none）: detail=none``（今天生产 9 次）。
+        """
         skip_note = None
         if skipped:
             skip_note = "跳过不支持的代码: " + ", ".join(
@@ -371,6 +379,12 @@ class BaoStockAdapter(BaseAdapter):
             return "source_unavailable", "; ".join(query_errors), skip_note
         if skipped:
             return "source_unsupported", None, skip_note
+        if record_count <= 0:
+            return (
+                "legal_empty",
+                None,
+                "baostock 查询成功但返回 0 条记录（区间内无数据）",
+            )
         return "none", None, None
 
     # ─── dividends ─────────────────────────────────────────────────
@@ -462,7 +476,9 @@ class BaoStockAdapter(BaseAdapter):
                     "baostock dividends %s 取得 %d 条", bs_code, count_for_code
                 )
 
-        error_kind, error, reason = self._classified_source_fields(skipped, query_errors)
+        error_kind, error, reason = self._classified_source_fields(
+            skipped, query_errors, len(records),
+        )
         return self._make_result(
             data=records,
             raw_response="\n".join(raw_lines).encode("utf-8"),

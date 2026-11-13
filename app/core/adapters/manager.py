@@ -549,7 +549,13 @@ class AdapterManager:
         priority_list = source_names or ADAPTER_PRIORITY.get(request.data_type, [])
         codes_hint = self._codes_hint(request)
         if not priority_list:
-            message = f"无适配器支持 data_type={request.data_type}（候选源为空）"
+            # 2026-11-13 P1（D）：候选源为空是"没注册/配置缺失"，不是"源不支持
+            # 这只票"。source_unsupported 会被上层直接结算成永久 missing，
+            # 这里必须用可重试的 source_unavailable 并写明 adapter_not_registered。
+            message = (
+                f"adapter_not_registered: 无适配器支持 data_type={request.data_type}"
+                "（候选源为空，请检查依赖安装/配置）"
+            )
             logger.warning("%s", message)
             return FetchResult(
                 data=[],
@@ -559,7 +565,7 @@ class AdapterManager:
                     raw_response_hash="",
                     confidence="missing",
                     error=message,
-                    error_kind="source_unsupported",
+                    error_kind="source_unavailable",
                     reason=message,
                 ),
             )
@@ -667,12 +673,31 @@ class AdapterManager:
                     kind,
                     note,
                 )
-            elif kind in {"legal_empty", "source_unsupported"}:
+            elif kind == "legal_empty":
+                # 2026-11-13 P2（F）：合法空是"源正常、区间内没数据"，属信息级；
+                # 之前这里/debug + 末尾 else 会打出"返回错误（none）"的误导 WARNING。
+                logger.info(
+                    "%s 无数据（合法空 legal_empty）: data_type=%s, reason=%s",
+                    adapter_name,
+                    request.data_type,
+                    note,
+                )
+            elif kind == "source_unsupported":
                 logger.debug(
-                    "%s 无数据（%s）: data_type=%s, reason=%s",
+                    "%s 无数据（源不支持 %s）: data_type=%s, reason=%s",
                     adapter_name,
                     kind,
                     request.data_type,
+                    note,
+                )
+            elif kind == "none":
+                # 适配器没标注 error_kind、没错误、也没有数据：明确写清"未标注"，
+                # 不再用"返回错误（none）"这种把人吓一跳的措辞。
+                logger.info(
+                    "%s 无数据且未标注 error_kind: data_type=%s, rows=%d, reason=%s",
+                    adapter_name,
+                    request.data_type,
+                    len(result.data),
                     note,
                 )
             elif kind == "deadline":
@@ -802,24 +827,30 @@ class AdapterManager:
             )
 
         # tried_adapters 为空：全链熔断（或候选源全部未注册/不可用）
+        #
+        # 2026-11-13 P1（D）：这里**绝不能**返回 source_unsupported。
+        # 该 kind 属于"源本来就没有这只票的数据"，上层会直接结算进 missing 并
+        # 删除 retry（_NON_RETRYABLE_ERROR_KINDS）；而"没注册/依赖缺失/全链冷却"
+        # 是环境问题，一旦伪装成"该票没数据"就会造出永久假 missing。
+        # 现在两种情况都返回可重试的 source_unavailable，并在错误串里写明原因。
         if tripped:
             cooldown = ", ".join(
                 f"{name}={seconds:.0f}s" for name, seconds in tripped.items()
             )
             message = (
-                f"全部候选源处于熔断冷却中 (data_type={request.data_type}, "
-                f"candidates={priority_list}, cooldown=[{cooldown}], tried=0)"
+                f"adapter_cooldown: 全部候选源处于熔断冷却中 "
+                f"(data_type={request.data_type}, candidates={priority_list}, "
+                f"cooldown=[{cooldown}], tried=0)"
             )
-            logger.warning("无可用适配器（全部熔断）: %s", message)
-            kind: ErrorKind = "source_unavailable"
+            logger.warning("无可用适配器（全部熔断，可重试）: %s", message)
         else:
             message = (
-                f"无可用适配器 (data_type={request.data_type}, "
-                f"candidates={priority_list}, "
-                f"registered={sorted(self._adapters)})"
+                f"adapter_not_registered: 无可用适配器 "
+                f"(data_type={request.data_type}, candidates={priority_list}, "
+                f"registered={sorted(self._adapters)}, tried=0)"
             )
-            logger.warning("无可用适配器: %s", message)
-            kind = "source_unsupported"
+            logger.warning("无可用适配器（未注册/依赖缺失，可重试）: %s", message)
+        kind: ErrorKind = "source_unavailable"
         return FetchResult(
             data=[],
             metadata=SourceMetadata(
