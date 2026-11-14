@@ -19,7 +19,10 @@ import {
 
 test('KNOWN_WARNING_CODES is a readonly tuple of the known codes', () => {
   assert.ok(Array.isArray(KNOWN_WARNING_CODES))
-  assert.equal(KNOWN_WARNING_CODES.length, 9)
+  // 2026-11-14：新增 12 条 asset health 规则码（reports/120），9 → 21。
+  // 用下界断言而不是精确值，避免每加一条规则都要改测试；精确性由
+  // 下面"每个 code 都有中文文案"的穷尽性断言保证。
+  assert.ok(KNOWN_WARNING_CODES.length >= 9)
   const expected = [
     'FINANCIAL_SHELL_ROWS',
     'SNAPSHOT_STALE',

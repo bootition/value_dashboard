@@ -52,6 +52,14 @@ _PRIMARY_AMOUNT_RE = re.compile(
 )
 _PAREN_CNY_RE = re.compile(r"人民币\s*([0-9]+(?:\.[0-9]+)?)\s*元")
 _PAREN_HKD_RE = re.compile(r"(?:港币|港元)\s*([0-9]+(?:\.[0-9]+)?)\s*元")
+# 「相当于港币/人民币 X 元」是东财给出的**换算结果**，优先级高于裸币种匹配。
+_EQUIV_HKD_RE = re.compile(r"相当于\s*港币\s*([0-9]+(?:\.[0-9]+)?)\s*元")
+_EQUIV_CNY_RE = re.compile(r"相当于\s*人民币\s*([0-9]+(?:\.[0-9]+)?)\s*元")
+# 汇率注记：如「(汇率港币1.00元:人民币0.814190元)」「,汇率为0.84176)」。
+# 2026-11-14 修复：旧实现直接 `_PAREN_HKD_RE.search(text)` 左→右扫，会先撞上
+# 汇率里的「港币1.00元」，把**汇率**当成股息写进 dividend_per_share_hkd
+# （实测 89 行受影响，港币股息最多虚高 100 倍）。先剥掉汇率注记再匹配。
+_FX_NOTE_RE = re.compile(r"[（(]?\s*汇率[^）)]*[）)]?")
 
 
 @contextlib.contextmanager
@@ -121,10 +129,13 @@ def parse_hk_plan_explain(plan_explain: str | None) -> tuple[float | None, float
     - 每股派息港币2.4元                          → (2.4, None)
     - 每股派人民币2.51元(相当于港币2.9003元)     → (2.9003, 2.51)
     - 每股派港币1.582元(相当于人民币1.322元)     → (1.582, 1.322)
+    - 每股派人民币0.07元(汇率港币1.00元:人民币0.817元)(相当于港币0.0856元)
+                                                 → (0.0856, 0.07)  ← 汇率不是股息
     """
     if not plan_explain:
         return None, None
-    text = str(plan_explain).strip()
+    # 先剥掉汇率注记，避免「港币1.00元」这类汇率值被当成股息（89 行曾受影响）。
+    text = _FX_NOTE_RE.sub("", str(plan_explain)).strip()
     primary = _PRIMARY_AMOUNT_RE.search(text)
     if primary is None:
         return None, None
@@ -142,11 +153,12 @@ def parse_hk_plan_explain(plan_explain: str | None) -> tuple[float | None, float
         cny = amount
 
     if hkd is None:
-        match = _PAREN_HKD_RE.search(text)
+        # 优先「相当于港币 X 元」（换算结果），再退回裸「港币 X 元」。
+        match = _EQUIV_HKD_RE.search(text) or _PAREN_HKD_RE.search(text)
         if match is not None:
             hkd = _to_float(match.group(1))
     if cny is None:
-        match = _PAREN_CNY_RE.search(text)
+        match = _EQUIV_CNY_RE.search(text) or _PAREN_CNY_RE.search(text)
         if match is not None:
             cny = _to_float(match.group(1))
     return hkd, cny

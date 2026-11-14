@@ -93,7 +93,10 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
     const text = wrapper.text()
     // 覆盖统计
     expect(text).toContain('5533')
-    expect(text).toContain('STALE_RUNNING_JOBS')
+    // 2026-11-14：状态页改为展示中文文案（原始 code 放在 title 属性里），
+    // 断言从「裸 code」改成「中文文案 + title 里仍保留 code」。
+    expect(text).toContain('有超过 2 小时未结束的任务')
+    expect(wrapper.html()).toContain('STALE_RUNNING_JOBS')
     // 自动更新卡片
     expect(text).toContain('已完成')
     expect(text).toContain('job-1')

@@ -1,0 +1,129 @@
+# 冷库清单：CSMAR 历史归档域（17 张表 / 约 456 万行）
+# =============================================================================
+# 登记原则（为什么按"可变性"分层）
+# ---------------------------------
+# 这批表**源截止 2025-03-31、永不再变**，却和每天变化的行情/三表/指标挤在同一个
+# 28GB 正式库里，使备份、哈希核对、离线重建都要为这 456 万行重复付费。
+# 按可变性把它们移出主库（Parquet + ZSTD 冷库，主库仅留视图）是唯一能一次付清的做法。
+#
+# 为什么不是"按表大小"分层
+# ------------------------
+# 分层依据必须是**可变性**（会不会再写）而不是体积：体积会变、可变性不会。
+# 一张 300K 行的静态表每天被备份一次，成本会随时间无限累积；而一张 5GB 的
+# 每日热表不能分出去（它每天都要写）。所以本清单只收"写路径永久关闭"的表。
+#
+# 字段口径
+# --------
+#   table          主库物理表名
+#   reason         为什么这批数据可以冷存（不可变依据 + 域定位）
+#   source_cutoff  来源数据截止日（冷库内容的时间上界；之后不会再有新行）
+#   consumers      当前读取该表的代码路径（登记消费者，便于以后知道"谁在用"；
+#                  空列表 = 当前无运行时消费者，只有历史导入脚本写过）
+#
+# 域纪律：本清单里的表都**不进筛选界面**，冷存对用户可见能力零影响。
+# 例外登记：csmar_risk_factors 同样是静态数据，但本轮**有意保留在主库**做对照，
+# 待本轮冷热分离验证稳定后再单独评估（需要时在 tables 下追加即可）。
+# =============================================================================
+
+version: 1
+
+# 冷库整体数据截止日（与逐表 source_cutoff 保持一致，导出时写入 manifest）
+source_cutoff: "2025-03-31"
+
+tables:
+  # ── CSMAR FI_T* 指标族（9 张，共 2,647,635 行）──────────────────────────
+  - table: csmar_fi_t1
+    reason: "FI_T1 偿债与结构比率族（31 列）。外部数据包一次性导入，源截止 2025-03-31，无写路径；域定位为交叉核验源，不进筛选界面。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - app/core/quality/archive_crosscheck.py
+
+  - table: csmar_fi_t3
+    reason: "FI_T3 资产结构比率族（39 列）。同上，静态归档域，仅作交叉核验。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - app/core/quality/archive_crosscheck.py
+
+  - table: csmar_fi_t4
+    reason: "FI_T4 周转率族（23 列）。同上，静态归档域，仅作交叉核验。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - app/core/quality/archive_crosscheck.py
+
+  - table: csmar_fi_t5
+    reason: "FI_T5 费用率族（37 列）。同上，静态归档域，仅作交叉核验。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - app/core/quality/archive_crosscheck.py
+
+  - table: csmar_fi_t6
+    reason: "FI_T6 现金流/自由现金流族（23 列）。静态归档域，当前无运行时消费者；本项目已在 indicator_ext 自算同族指标。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  - table: csmar_fi_t8
+    reason: "FI_T8 指标族（33 列）。静态归档域，当前无运行时消费者，仅作专项研究备份。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  - table: csmar_fi_t9
+    reason: "FI_T9 每股指标（32 列）。静态归档域；是 bps/每股营业收入/每股经营现金流的**独立实现核验源**。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - app/core/quality/archive_crosscheck.py
+
+  - table: csmar_fi_t10
+    reason: "FI_T10 指标族（18 列）。静态归档域，当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  - table: csmar_fi_t11
+    reason: "FI_T11 指标族（13 列）。静态归档域，当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  # ── CSMAR 财务分析综合指标（1 张）───────────────────────────────────────
+  - table: csmar_far_finidx
+    reason: "FAR_Finidx 财务分析指标（28 列）。静态归档域，当前无运行时消费者；年报公布日等有用字段已单独落 financial_report_dates 热表。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  # ── CSMAR 三表剩余科目 + 金融专用科目（4 张）────────────────────────────
+  - table: csmar_balance_items
+    reason: "FS_Combas 剩余科目（57 列，本项目未映射的资产负债表科目）。静态归档与专项研究用，当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  - table: csmar_income_items
+    reason: "FS_Comins 剩余科目（30 列）。静态归档与专项研究用，当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  - table: csmar_cashflow_items
+    reason: "FS_Comscfd 剩余科目（29 列）。静态归档与专项研究用，当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  - table: csmar_financial_items
+    reason: "金融行业专用科目（114 列，银行/保险/证券/其他金融前缀）。覆盖 78 只金融股，静态归档域，当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []
+
+  # ── CSMAR 独立历史域（2 张）─────────────────────────────────────────────
+  - table: csmar_per_share_history
+    reason: "每股指标历史域（17 列，FI_T9 宽表）。静态归档域；是 indicator_ext 每股族（bps/每股营业收入/每股经营现金流/每股留存收益）的交叉核验源。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - app/core/quality/archive_crosscheck.py
+
+  - table: csmar_disclosure_metrics
+    reason: "官方披露指标域（13 列，含加权平均 ROE 等年报摘要口径）。静态归档域；主链不用它（口径与本项目自算不同），但数据包发布要带上。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - scripts/export_data_package.py
+
+  # ── 金融行业专用科目（1 张）─────────────────────────────────────────────
+  - table: financial_sector_items
+    reason: "金融行业专用科目域（33 列，78 只金融股 1990-2025Q1）。静态归档域；元数据列与 CSMAR 其余表不同（含 raw_response_hash/confidence），当前无运行时消费者。"
+    source_cutoff: "2025-03-31"
+    consumers: []

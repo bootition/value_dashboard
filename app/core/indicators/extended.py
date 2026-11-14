@@ -48,15 +48,20 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.update_lock import exclusive_update
+
+if TYPE_CHECKING:  # pragma: no cover - 仅类型标注
+    from app.core.storage.path_policy import DatabasePathSet
 
 logger = logging.getLogger(__name__)
 
 DATA_VERSION = 1
 SOURCE = "derived_calculator"
+#: 输入指纹落在 data_refresh_state 的键（自动更新用它判断"该不该重建"）
+FINGERPRINT_STATE_KEY = "indicator_ext_input_fingerprint"
 
 # ─── 业务无意义护栏 ────────────────────────────────────────────────
 # 1) 自由现金流率：金融业（银行/券商/保险）的经营现金流包含客户资金与存贷款
@@ -449,15 +454,24 @@ def build_select_sql(codes: list[str] | None = None) -> str:
 class ExtendedIndicatorBuilder:
     """把周转率/自由现金流/杠杆三族写入 indicator_ext（独立低频域）。"""
 
-    def __init__(self, duck: DuckDBStore, paths) -> None:
+    def __init__(self, duck: DuckDBStore, paths: DatabasePathSet | None = None) -> None:
         self._duck = duck
         self._paths = paths
+
+    def _lock_path(self):
+        """更新锁所在路径：优先注入的 DatabasePathSet，回退 DuckDB 自身路径。
+
+        自动更新主流程（`app/core/update.py`）只持有 duck/sqlite 两个 store，
+        没有 DatabasePathSet；用 `duck.db_path` 得到的锁文件位置与之等价，
+        且 `exclusive_update` 对同一进程是重入的（主流程已持锁不会卡死）。
+        """
+        return self._paths.duckdb_path if self._paths is not None else self._duck.db_path
 
     def build(self, *, codes: list[str] | None = None) -> dict[str, Any]:
         """全量（或按指定股票）重建 indicator_ext。"""
         calculated_at = datetime.now(UTC).replace(tzinfo=None)
         sql = build_select_sql(codes)
-        with exclusive_update(self._paths.duckdb_path), self._duck.write_connection() as conn:
+        with exclusive_update(self._lock_path()), self._duck.write_connection() as conn:
             before = conn.execute("SELECT COUNT(*) FROM indicator_ext").fetchone()[0]
             if codes:
                 quoted = ", ".join("'" + c.replace("'", "''") + "'" for c in codes)
@@ -489,3 +503,128 @@ class ExtendedIndicatorBuilder:
         }
         logger.info("indicator_ext 构建完成: %s", report)
         return report
+
+
+# ─── 自动更新门控：什么时候必须重建 indicator_ext ────────────────────────
+#
+# reports/119 D28 的教训：派生域没有"谁触发重建"的判据，就会在一个季度内
+# 变成死条件（ext 停在 2026-06-30，55 项扩展筛选字段全为 NULL）。
+# 这里把判据收敛为**两个明确条件**：
+#   1) `max(indicator_ext.report_date) < 最新完整三表报告期` → 必须重建；
+#   2) 否则只在输入指纹变化时重建（三表/补采表的最新报告期或行数变化）。
+# 指纹**不含**日线价格：`report_date_close` 依赖行情，但日线每天变化，
+# 若纳入指纹会让 35 万行整表每晚重建一次；报告期推进时自然会重建一次。
+
+#: 三表"完整报告期"的覆盖率下限：最新一期的三表齐备股票数必须达到历史上
+#  单期最大股票数的该比例，才算这个报告期已经完整发布（避免"个别抢先
+#  披露的股票"把完整期提前一个季度）。
+TRIO_COMPLETE_RATIO = 0.5
+
+#: 参与输入指纹的表：只放**报表期粒度**的输入。事件表（分红/融资/回购）
+#: 与日线价格不参与——它们的变化不该按日触发整表重建。
+_INPUT_TABLES: tuple[str, ...] = (
+    "income_statement",
+    "balance_sheet",
+    "cash_flow",
+    "cash_flow_indirect",
+    "cash_flow_activity",
+    "balance_sheet_ext",
+)
+
+
+def latest_complete_trio_period(duck: DuckDBStore) -> str | None:
+    """最新"三表齐备"的报告期（按覆盖率门限判定，不取绝对值最大值）。"""
+    try:
+        rows = duck.read_query(
+            """SELECT i.report_date AS report_date, COUNT(*) AS stocks
+               FROM income_statement i
+               JOIN balance_sheet b
+                 ON b.stock_code = i.stock_code AND b.report_date = i.report_date
+               JOIN cash_flow c
+                 ON c.stock_code = i.stock_code AND c.report_date = i.report_date
+               GROUP BY i.report_date
+               ORDER BY i.report_date DESC"""
+        )
+    except Exception as error:  # noqa: BLE001 - 判据失败按"未知"处理
+        logger.warning("查询三表完整报告期失败: %s", error)
+        return None
+    if not rows:
+        return None
+    peak = max(int(row["stocks"] or 0) for row in rows)
+    if peak <= 0:
+        return None
+    for row in rows:  # report_date 降序：第一个达标的即最新完整期
+        if int(row["stocks"] or 0) >= peak * TRIO_COMPLETE_RATIO:
+            return str(row["report_date"])[:10]
+    return None
+
+
+def input_state(duck: DuckDBStore) -> dict[str, Any]:
+    """采集 indicator_ext 的输入状态（指纹 + 报告期 + 行数），供门控判断。
+
+    只做聚合查询（COUNT/MAX），在正式库为亚秒级；不做任何写入。
+    """
+    tables: dict[str, dict[str, Any]] = {}
+    for table in _INPUT_TABLES:
+        try:
+            row = duck.read_query(
+                f"SELECT COUNT(*) AS rows, MAX(report_date) AS latest FROM {table}"
+            )[0]
+        except Exception as error:  # noqa: BLE001 - 表缺失/损坏按空表处理
+            logger.debug("读取 %s 输入状态失败: %s", table, error)
+            row = {"rows": 0, "latest": None}
+        tables[table] = {
+            "rows": int(row["rows"] or 0),
+            "latest": str(row["latest"])[:10] if row.get("latest") else None,
+        }
+    try:
+        ext = duck.read_query(
+            """SELECT COUNT(*) AS rows, MAX(report_date) AS latest,
+                      MAX(calculated_at) AS calculated_at
+               FROM indicator_ext"""
+        )[0]
+    except Exception as error:  # noqa: BLE001
+        logger.debug("读取 indicator_ext 状态失败: %s", error)
+        ext = {"rows": 0, "latest": None, "calculated_at": None}
+    fingerprint = "|".join(
+        f"{table}:{state['rows']}:{state['latest']}"
+        for table, state in sorted(tables.items())
+    )
+    return {
+        "fingerprint": fingerprint,
+        "tables": tables,
+        "complete_period": latest_complete_trio_period(duck),
+        "ext_rows": int(ext["rows"] or 0),
+        "ext_max_period": str(ext["latest"])[:10] if ext.get("latest") else None,
+        "ext_calculated_at": (
+            str(ext["calculated_at"]) if ext.get("calculated_at") else None
+        ),
+    }
+
+
+def rebuild_decision(
+    duck: DuckDBStore,
+    *,
+    stored_fingerprint: str | None = None,
+) -> dict[str, Any]:
+    """判断本轮是否需要重建 indicator_ext。
+
+    Returns:
+        {"required": bool, "reason": str, **input_state}
+
+        reason ∈ {indicator_ext_empty, ext_period_behind_trio,
+                  input_fingerprint_changed, up_to_date}
+    """
+    state = input_state(duck)
+    complete = state["complete_period"]
+    ext_max = state["ext_max_period"]
+    if not state["ext_rows"] or not ext_max:
+        required, reason = True, "indicator_ext_empty"
+    elif complete and ext_max < complete:
+        # 硬门禁：派生域落后于最新完整三表期 → 必须重建（D28 的直接修法）。
+        required, reason = True, "ext_period_behind_trio"
+    elif stored_fingerprint != state["fingerprint"]:
+        required, reason = True, "input_fingerprint_changed"
+    else:
+        required, reason = False, "up_to_date"
+    return {"required": required, "reason": reason, **state}

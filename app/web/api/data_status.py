@@ -21,6 +21,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.core.financial_period import CN_TZ
+from app.core.quality.null_reasons import DOMAINS, reason_distribution
 
 logger = logging.getLogger(__name__)
 
@@ -960,3 +961,54 @@ def get_missing_list(
         return {"count": count, "items": rows}
     except Exception as error:
         raise HTTPException(status_code=503, detail="missing list is unavailable") from error
+
+
+@router.get("/null-reasons")
+def get_null_reasons(
+    request: Request,
+    report_date: str | None = Query(
+        None,
+        description="报告期 YYYY-MM-DD；缺省取最近一次清扫的报告期",
+    ),
+    domain: str | None = Query(
+        None,
+        description=(
+            "指标域：snapshot | ext | income | balance | cashflow；缺省返回全部"
+        ),
+    ),
+) -> dict:
+    """指标 NULL 原因分布（只读，reports/119 §5 P2-1）。
+
+    背景：`indicator_snapshot` / `indicator_ext` 的 NULL 混了 6 种含义
+    （源缺失 / 不适用 / 分母无效 / 没去抓 / 被遮蔽 / 该算没算），前端却统一
+    画成「—」，用户无法区分「没有」和「坏了」。本端点把清扫器
+    （`scripts/classify_null_reasons.py`）写入的稀疏表
+    `indicator_null_reason` 按字段聚合成 `{field: {reason: count}}`，
+    让状态页能看出「哪个指标为什么空」。
+
+    只读：一条聚合查询扫的是稀疏表（万级行），不碰指标表，因此不参与
+    写竞争降级，写锁存在时直接读最近一次落库的结果。
+    """
+    if domain is not None and domain not in DOMAINS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown domain {domain!r}, expected one of {list(DOMAINS)}",
+        )
+    parsed_date = None
+    if report_date:
+        try:
+            parsed_date = datetime.strptime(report_date, "%Y-%m-%d").date()
+        except ValueError as error:
+            raise HTTPException(
+                status_code=400, detail=f"report_date must be YYYY-MM-DD, got {report_date!r}"
+            ) from error
+    try:
+        return reason_distribution(
+            request.app.state.duck, report_date=parsed_date, domain=domain
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status_code=503, detail=f"null reason distribution is unavailable: {error}"
+        ) from error

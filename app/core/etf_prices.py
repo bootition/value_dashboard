@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -209,27 +211,87 @@ class EtfPriceUpdater:
             "track_error": track.metadata.error,
         }
 
-    def update_all(self, codes: list[str] | None = None, *, years: int = MAX_YEARS) -> dict[str, Any]:
-        """更新全部启用 ETF（或指定代码），单实例限速逐只串行。"""
+    def update_all(
+        self,
+        codes: list[str] | None = None,
+        *,
+        years: int = MAX_YEARS,
+        max_etfs: int = 0,
+        deadline_seconds: float = 0.0,
+        progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any]:
+        """更新启用 ETF（或指定代码），单实例限速逐只串行。
+
+        2026-11-14（reports/119 D29）新增两个**有界**参数，供自动更新主流程
+        使用：ETF 域此前只在 retry 分支被碰到，停在 2026-09-18 无人推进。
+        - `max_etfs`：本轮最多刷新的只数（0=不限，CLI 语义不变）；
+        - `deadline_seconds`：本轮最大耗时，到点后剩余 ETF 标 deferred 并
+          留到下一轮，绝不把 12 分钟的更新周期拖长。
+
+        **只刷新 `etf_meta` 里的代码**（不做全市场 ETF 扫描），按"本地行情
+        最旧优先"排序，保证有界续传每一轮都在前沿推进而不是原地重跑同一批。
+        """
+        started = time.time()
         metas = self.sqlite.query(
             "SELECT etf_code, enabled FROM etf_meta ORDER BY etf_code"
         )
         selected = [row["etf_code"] for row in metas if bool(row["enabled"])]
         if codes:
-            selected = [c for c in codes if c in set(selected)]
+            wanted = set(selected)
+            selected = [c for c in codes if c in wanted]
+        selected = self._order_by_staleness(selected)
+        deferred = 0
+        if max_etfs > 0 and len(selected) > max_etfs:
+            deferred = len(selected) - max_etfs
+            selected = selected[:max_etfs]
         report: dict[str, Any] = {"status": "success", "etfs": {}, "summary": {
             "success": 0, "missing": 0, "failed": 0,
-        }}
-        for etf_code in selected:
+        }, "targeted": len(selected), "deferred": deferred}
+        for index, etf_code in enumerate(selected):
+            if deadline_seconds and (time.time() - started) >= deadline_seconds:
+                # 剩余只数（含当前）留到下一轮；按陈旧度排序 → 下一轮仍从最旧开始。
+                report["deferred"] += len(selected) - index
+                break
             try:
                 outcome = self.update_etf(etf_code, years=years)
             except Exception as error:  # noqa: BLE001
                 outcome = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
             report["etfs"][etf_code] = outcome
             report["summary"][outcome["status"]] = report["summary"].get(outcome["status"], 0) + 1
+            if progress_cb is not None:
+                progress_cb(etf_code, {
+                    "done": index + 1, "total": len(selected), "status": outcome["status"],
+                })
         if report["summary"]["failed"]:
             report["status"] = "partial"
+        if report["deferred"] and report["status"] == "success":
+            report["status"] = "partial"
+        report["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "ETF 行情批量: targeted=%d deferred=%d success=%d missing=%d failed=%d elapsed=%.1fs",
+            report["targeted"], report["deferred"], report["summary"]["success"],
+            report["summary"]["missing"], report["summary"]["failed"],
+            report["elapsed_seconds"],
+        )
         return report
+
+    def _order_by_staleness(self, codes: list[str]) -> list[str]:
+        """按本地 etf_daily 最新交易日升序排序（最旧/从未更新的排最前）。"""
+        if not codes:
+            return []
+        try:
+            rows = self.duck.read_query(
+                """SELECT etf_code, MAX(trade_date) AS latest
+                   FROM etf_daily GROUP BY etf_code"""
+            )
+            latest = {
+                str(row["etf_code"]): str(row["latest"])[:10]
+                for row in rows if row.get("latest") is not None
+            }
+        except Exception as error:  # noqa: BLE001 - 排序失败退化为代码序
+            logger.debug("ETF 陈旧度排序失败，退化为代码序: %s", error)
+            return sorted(codes)
+        return sorted(codes, key=lambda code: (latest.get(code) is not None, latest.get(code) or "", code))
 
     # ─── retry / missing 维护 ───────────────────────────────────────────
 

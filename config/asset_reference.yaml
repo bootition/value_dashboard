@@ -1,0 +1,117 @@
+# 零引用资产清单（reports/119 §2.2「CSMAR 474 列中 34 列在用」的机器化登记）
+#
+# 为什么需要这张表
+# ----------------
+# 2026-09-19/20 从 CSMAR C17 数据包导入了 17 张历史归档域，共 474 个数据列 /
+# 462 万行。2026-11-14 的兑现度审查发现：真正进入运行时代码的只有 34 列（7.2%），
+# 其余是「导入进库却从没人读」——它们占磁盘、拖慢备份、让「库里有数据」的错觉
+# 长期存在，属于负债不是资产。这份清单把每一张零引用表**逐条登记**，让
+# `vd data doctor` 的 ZERO_REFERENCE_ASSET（P3，仅披露）每轮复核：
+#   - 库内行数（表还在不在、有没有涨）
+#   - `app/` 下运行时代码的真实引用数（清单是否已过期）
+#
+# 判定口径（清单自检的唯一标准）
+# ------------------------------
+#   引用 = `app/**/*.py` 里出现的表名（排除 `app/core/storage/schema.py`，
+#   那是定义本身）。scripts/ 下的写入脚本**不算引用** —— "只进不出"正是
+#   要登记的问题，不是免罪理由。
+#   references > 0 → doctor 报「清单已过期」，必须回来改这份文件。
+#
+# 维护纪律
+# --------
+#  1. 任何表被运行时读取后，立刻在本文件删除该条（或把 retirement_candidate 置 false
+#     并写明兑现路径已打通）。
+#  2. 新增导入域时必须同时登记到这里（哪怕预期马上就会用）。
+#  3. 退役（DROP）之前先看 `retirement_candidate`：只有当**替代路径已存在**才可退役。
+
+meta:
+  last-reviewed: "2026-11-14"
+  source: "docs/reports/119（数据包价值兑现度审查）§2.2 字段级使用率表"
+  measure_command: "vd data doctor --json | jq '.result.data.findings[] | select(.code==\"ZERO_REFERENCE_ASSET\")'"
+
+# 表名 / 域 / 为什么它是零引用 / 兑现路径 / 是否退役候选
+zero_reference_tables:
+  - table: csmar_balance_items
+    domain: csmar_statement_items
+    rows_at_review: 356709
+    columns: 57
+    reason: "CSMAR 资产负债表未映射科目（58 列）；主链 balance_sheet 只映射了核心科目，其余从未被读"
+    fulfillment: "扩 balance_sheet 映射（需先裁决口径，见 config/csmar_field_verdict.json）"
+    retirement_candidate: false
+  - table: csmar_income_items
+    domain: csmar_statement_items
+    rows_at_review: 354877
+    columns: 30
+    reason: "CSMAR 利润表未映射科目；与主链 income_statement 重叠但未被任何指标读取"
+    fulfillment: "扩 income_statement 映射（同上）"
+    retirement_candidate: false
+  - table: csmar_cashflow_items
+    domain: csmar_statement_items
+    rows_at_review: 339035
+    columns: 29
+    reason: "CSMAR 现金流量表（直接法）未映射科目；自由现金流靠 cash_flow_activity 承接，本表未读"
+    fulfillment: "扩 cash_flow 映射，或明确退役（先比对 capex 与 cash_flow_activity）"
+    retirement_candidate: true
+  - table: csmar_financial_items
+    domain: csmar_financial_items
+    rows_at_review: 232421
+    columns: 114
+    reason: "金融专用科目 109 列 / 23 万行零引用（银行/券商口径）"
+    fulfillment: "做金融行业专用指标（配合 financial_sector_items），否则退役"
+    retirement_candidate: true
+  - table: csmar_disclosure_metrics
+    domain: csmar_disclosure
+    rows_at_review: 243202
+    columns: 13
+    reason: "披露类指标只被导入/导出/测试引用，无运行时读取"
+    fulfillment: "接入公司治理/披露质量维度（PRD 未排期）"
+    retirement_candidate: true
+  - table: csmar_risk_factors
+    domain: csmar_disclosure
+    rows_at_review: 67193
+    columns: 22
+    reason: "风险因子域只被导入/导出引用，无运行时读取"
+    fulfillment: "接入财务风险预警维度（PRD 未排期）"
+    retirement_candidate: true
+  - table: financial_sector_items
+    domain: financial_sector
+    rows_at_review: 5058
+    columns: 33
+    reason: "只有 scripts/fetch_regulatory_metrics.py 在写，6 个金融监管指标没有进入任何指标/筛选"
+    fulfillment: "把 6 个监管指标做成 financial_sector 筛选族（D29 ④ 的兑现）"
+    retirement_candidate: false
+  - table: csmar_far_finidx
+    domain: csmar_anchor
+    rows_at_review: 76262
+    columns: 28
+    reason: "年报公布日已由 financial_report_dates 承接（76,262 条，97.7% 有效），本表无人读"
+    fulfillment: "已兑现：改由 financial_report_dates + app/core/point_in_time.py 提供口径"
+    retirement_candidate: true
+  - table: csmar_fi_t6
+    domain: csmar_indicator_archive
+    rows_at_review: 301294
+    columns: 23
+    reason: "FI_T6 指标族未被 archive_crosscheck 登记为可核验概念（口径不同，登记会造假失败）"
+    fulfillment: "先做口径裁决（csmar_field_verdict.json），再决定是否登记核验对"
+    retirement_candidate: true
+  - table: csmar_fi_t8
+    domain: csmar_indicator_archive
+    rows_at_review: 302716
+    columns: 33
+    reason: "FI_T8 指标族未被任何核验对使用"
+    fulfillment: "同 csmar_fi_t6：先口径裁决"
+    retirement_candidate: true
+  - table: csmar_fi_t10
+    domain: csmar_indicator_archive
+    rows_at_review: 264772
+    columns: 18
+    reason: "FI_T10 指标族未被任何核验对使用"
+    fulfillment: "同 csmar_fi_t6：先口径裁决"
+    retirement_candidate: true
+  - table: csmar_fi_t11
+    domain: csmar_indicator_archive
+    rows_at_review: 260092
+    columns: 13
+    reason: "FI_T11 指标族未被任何核验对使用"
+    fulfillment: "同 csmar_fi_t6：先口径裁决"
+    retirement_candidate: true

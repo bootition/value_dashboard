@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 38
+DUCKDB_SCHEMA_VERSION = 39
 SQLITE_SCHEMA_VERSION = 18
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -761,6 +761,40 @@ CREATE TABLE IF NOT EXISTS indicator_ext (
 );
 CREATE INDEX IF NOT EXISTS idx_indicator_ext_date
     ON indicator_ext (report_date);
+-- 指标空值原因（2026-11-14，reports/119 §5 P2-1）。
+-- 为什么需要：indicator_snapshot / indicator_ext 的 NULL 至少有 6 种含义
+-- （源缺失 / 不适用 / 分母无效 / 没去抓 / 被遮蔽 / 该算没算），前端统一渲染成
+-- "—"，用户无法区分"没有"和"坏了"，我们也失去自检信号。
+-- 设计：稀疏表，只写「NULL 且原因已知」的单元格；不写正常有值的行。
+-- reason_code 枚举见 app/core/quality/null_reasons.py（单一真相）。
+CREATE TABLE IF NOT EXISTS indicator_null_reason (
+    stock_code   VARCHAR NOT NULL,
+    report_date  DATE    NOT NULL,
+    field_name   VARCHAR NOT NULL,
+    reason_code  VARCHAR NOT NULL,
+    detail       VARCHAR,
+    computed_at  TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, report_date, field_name)
+);
+CREATE INDEX IF NOT EXISTS idx_indicator_null_reason_field
+    ON indicator_null_reason (field_name, report_date);
+
+-- 字段覆盖率历史（2026-11-14，reports/119 §5 C2 覆盖率看门狗基线）。
+-- 为什么需要：现在"某字段覆盖率从 99.9% 掉到 1.8%"没有任何人知道
+-- （2026Q3 fixed_assets 实测）。每轮体检写一行，环比跌幅超阈值即告警。
+CREATE TABLE IF NOT EXISTS field_coverage_history (
+    recorded_at    TIMESTAMP NOT NULL,
+    run_id         VARCHAR   NOT NULL,
+    domain         VARCHAR   NOT NULL,
+    field_name     VARCHAR   NOT NULL,
+    report_date    DATE,
+    non_null_count BIGINT    NOT NULL,
+    total_count    BIGINT    NOT NULL,
+    coverage_pct   DOUBLE    NOT NULL,
+    PRIMARY KEY (run_id, domain, field_name)
+);
+CREATE INDEX IF NOT EXISTS idx_field_coverage_history_field
+    ON field_coverage_history (domain, field_name, recorded_at);
 -- 资产负债表补充域（2026-09-19 v27，"榨干数据包" R7）。
 -- 为什么单独建表：这三项是主链 balance_sheet 未映射、但价值投资常用且**无法自算**的科目。
 --   other_payables          其他应付款 —— 计算「大股东占款」（治理红旗）必需；
@@ -2786,6 +2820,17 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (38, 'event-driven indicators (dilution / buyback / bonus / segment concentration)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v39（2026-11-14, reports/120）：空值原因表 + 字段覆盖率历史表。
+        # 只建表、不加列，迁移本身零风险；版本号必须与 DUCKDB_SCHEMA_VERSION 同步，
+        # 否则 skip_if_current 快速路径会永久判"未到最新"而每次启动都跑全量 DDL
+        # （test_redteam_2026_08_13_fixes 的两个用例就是钉这条契约的）。
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (39, 'indicator_null_reason + field_coverage_history (asset health)')
             ON CONFLICT (version) DO NOTHING
             """
         )

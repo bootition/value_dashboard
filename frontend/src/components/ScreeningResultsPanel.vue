@@ -133,6 +133,39 @@ const columnOptions = computed(() => {
   }))
 })
 
+/**
+ * 空值原因文案（reports/119 §5 P2-1）。
+ *
+ * 后端 `indicator_snapshot` / `indicator_ext` 的 NULL 有 6 种完全不同的含义，
+ * 统一画成「—」会让用户分不清「本来没有」和「我们坏了」，也丢掉自检信号。
+ * 文案单一真相在 `app/core/quality/null_reasons.py::NULL_REASON_LABELS`；
+ * 这里只做离线兜底（reason code 是稳定枚举，不会随文案漂移），
+ * 后端下发未知码时直接显示原始 code —— 宁可丑，也不能把没见过的原因藏起来。
+ */
+const NULL_REASON_LABELS: Readonly<Record<string, string>> = {
+  SOURCE_EMPTY: '数据源未提供该科目',
+  NOT_APPLICABLE: '该指标对这类公司不适用',
+  INVALID_DENOMINATOR: '分母为 0 或负，比率无意义',
+  NOT_DISPATCHED: '本期没有调度抓取/计算',
+  MASKED_UNTRUSTED: '数据已入库但被可信门禁遮蔽',
+  NOT_COMPUTED: '该算未算（输入缺失或报告期未对齐）',
+}
+
+/** 结果行可能带原因码的字段形态（后端尚未统一下发，先兼容三种）。 */
+type NullReasonCarrier = {
+  null_reasons?: Record<string, string | null | undefined>
+  null_reason?: Record<string, string | null | undefined>
+}
+
+/** 取某字段的空值原因码；没有就返回 null（保持原来的「—」渲染）。 */
+function nullReasonCode(row: ScreeningResult, field: string): string | null {
+  const carrier = row as unknown as NullReasonCarrier & Record<string, unknown>
+  const mapped = carrier.null_reasons?.[field] ?? carrier.null_reason?.[field]
+  if (typeof mapped === 'string' && mapped) return mapped
+  const flat = carrier[`${field}_null_reason`]
+  return typeof flat === 'string' && flat ? flat : null
+}
+
 const tableColumns = computed(() => {
   if (!displayedResults.value.length) return []
   const firstRow = displayedResults.value[0]
@@ -166,6 +199,20 @@ const tableColumns = computed(() => {
             ])
           }
           // L0-2: 统一字段口径格式化（百分比/价格/比值/市值）
+          // reports/119 P2-1: 空单元格仍显示「—」，但若后端下了 null_reason，
+          // 把「为什么不适用/为什么没算」放进 title，鼠标悬停即可区分
+          // 「没有」和「坏了」。
+          if (v === null || v === undefined) {
+            const reasonCode = nullReasonCode(row, key)
+            if (reasonCode) {
+              const label = NULL_REASON_LABELS[reasonCode] ?? '未知原因'
+              return h(
+                'span',
+                { class: 'null-reason-cell', title: `${label}（${reasonCode}）` },
+                '—',
+              )
+            }
+          }
           return formatFieldValue(key, v)
         },
       })
@@ -376,4 +423,7 @@ async function addToWatchlist() {
 
 <style scoped>
 .screening-results-card { margin-top: 21px; padding: 27px 29px 29px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.results-heading { display: flex; justify-content: space-between; gap: 20px; }.results-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.results-heading h2 { margin: 7px 0 5px; font-size: 19px; }.results-heading span { color: #829087; font-size: 11px; }.results-heading > div:last-child { display: flex; align-items: start; gap: 8px; }.result-meta { display: flex; gap: 22px; margin: 21px 0 15px; color: #8b978f; font-size: 10px; }.result-meta b { color: #536359; }.column-config { margin: 0 0 15px; padding: 12px; border-radius: 8px; background: #fafcf9; }
+/* 空值原因可通过 title 悬停查看：给个下划线提示"这格有话说"，但不改颜色，
+   保持与真正缺失（无原因码的「—」）同一视觉层级。 */
+.null-reason-cell { border-bottom: 1px dashed #b9c5bd; cursor: help; }
 </style>

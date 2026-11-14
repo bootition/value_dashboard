@@ -1869,14 +1869,28 @@ class IndicatorCalculator:
 
     @staticmethod
     def _calc_interest_bearing_debt(financials: dict) -> float | None:
-        """有息负债 = 短期借款 + 长期借款 + 应付债券"""
-        st = financials.get("short_term_loans")
-        lt = financials.get("long_term_loans")
-        bp = financials.get("bonds_payable")
-        if st is None or lt is None or bp is None:
+        """有息负债 = 短期借款 + 长期借款 + 应付债券。
+
+        2026-11-14 修复（reports/119 P1-5）：旧实现要求三项**全部非空**才算，
+        但 `bonds_payable`（应付债券）全市场只有约 815 只非空 —— 绝大多数公司
+        本来就没有发债，该科目为空是**正常态**而非缺失。结果 `interest_bearing_debt`
+        与依赖它的 `roic` 覆盖率被压到 11.8%，且是"悄悄少算"（不是全空），
+        用户会误以为"全市场只有这么几家能算 ROIC"。
+
+        正确口径：缺失科目按 0 计，只要**至少一项有值**即可计算；
+        三项全空才返回 None（该股确实没有可识别的有息负债明细）。
+        """
+        components = [
+            value for value in (
+                financials.get("short_term_loans"),
+                financials.get("long_term_loans"),
+                financials.get("bonds_payable"),
+            )
+            if value is not None
+        ]
+        if not components:
             return None
-        total = st + lt + bp
-        return total
+        return float(sum(components))
 
     def _calc_consecutive_div_years(self, stock_code: str, as_of_date: Any | None = None) -> int | None:
         """计算连续分红年数（从最近年份往前数连续分红的年数）

@@ -175,7 +175,19 @@ def test_missing_debt_components_and_circulating_shares_remain_missing(
     )
 
     assert calculator._get_shares("600519", {})["circ_shares"] is None
-    assert calculator._calc_interest_bearing_debt({"short_term_loans": 1.0}) is None
+    # 2026-11-14 修复：缺「应付债券」按 0 计（多数公司本来就没有发债），
+    # 只有三项全空才返回 None。旧行为把 roic 覆盖率压到 11.8%。
+    assert calculator._calc_interest_bearing_debt({"short_term_loans": 1.0}) == 1.0
+    assert calculator._calc_interest_bearing_debt(
+        {"short_term_loans": 1.0, "long_term_loans": 2.0}
+    ) == 3.0
+    assert calculator._calc_interest_bearing_debt(
+        {"short_term_loans": 1.0, "long_term_loans": 2.0, "bonds_payable": None}
+    ) == 3.0
+    assert calculator._calc_interest_bearing_debt({}) is None
+    assert calculator._calc_interest_bearing_debt(
+        {"short_term_loans": None, "long_term_loans": None, "bonds_payable": None}
+    ) is None
     assert calculator._calc_safety(
         {"total_assets": 100.0, "total_liabilities": 20.0},
         {"operating_profit": 10.0, "financial_expenses": 2.0},

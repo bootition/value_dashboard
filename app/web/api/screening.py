@@ -649,6 +649,50 @@ def _dsl_indicator_unit(expression: dict[str, Any]) -> str:
         return "plain"
 
 
+# 扩展指标域动态放行阈值（reports/119 P0）：最新报告期覆盖率低于此值的字段不暴露，
+# 避免「能选中但筛不出结果」。50% 的取值理由：结构性可空的字段（亏损公司杠杆、
+# 无分红公司股息率）实测仍在 73%~85%，真正的"整族缺失"是 0.1%~2% 这种量级。
+_EXTENDED_MIN_COVERAGE_PCT = 50.0
+
+
+def _extended_field_coverage(request: Request) -> dict[str, float]:
+    """按 (字段 → 最新报告期覆盖率%) 实测 indicator_ext。
+
+    一次聚合查询算完 55 列（COUNT(col) 在 DuckDB 上是列存扫描，实测 < 0.6s）；
+    任何异常都返回空字典（调用方按"无数据不拦"处理），绝不能因为体检失败
+    把筛选指标列表整个打挂。
+    """
+    from app.core.screening.engine import EXTENDED_SCREENING_READY
+
+    columns = sorted(EXTENDED_SCREENING_READY)
+    if not columns:
+        return {}
+    counts = ", ".join(f'COUNT("{column}") AS "{column}"' for column in columns)
+    try:
+        rows = request.app.state.duck.read_query(
+            f"""
+            WITH latest AS (
+                SELECT MAX(report_date) AS report_date FROM indicator_ext
+            )
+            SELECT COUNT(*) AS total, {counts}
+            FROM indicator_ext e, latest
+            WHERE e.report_date = latest.report_date
+            """
+        )
+    except Exception:  # noqa: BLE001 - 体检失败不能影响指标列表
+        return {}
+    if not rows:
+        return {}
+    row = rows[0]
+    total = int(row.get("total") or 0)
+    if total <= 0:
+        return {}
+    return {
+        column: float(row.get(column) or 0) / total * 100.0
+        for column in columns
+    }
+
+
 @router.get("/indicators")
 def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标"""
@@ -664,6 +708,7 @@ def list_available_indicators(request: Request) -> dict:
     from app.core.screening.field_units import field_unit
 
     indicators: list[dict] = []
+    unavailable: list[dict] = []
     for col in sorted(SNAPSHOT_COLUMNS):
         indicators.append({
             "name": col,
@@ -677,16 +722,31 @@ def list_available_indicators(request: Request) -> dict:
             "rankable": field in RANKABLE_INDICATORS,
             "unit": field_unit(field),
         })
-    # 扩展指标域（schema v25）：只暴露当前报告期数据充足的子集。
-    # 未就绪的 7 列（自由现金流/EBITDA/杠杆等）依赖 CSMAR 折旧摊销与资本支出，
-    # 而 CSMAR 截止 2025-03-31，最新报告期覆盖率为 0 —— 暴露出来会变成
-    # 「能选中但永远筛不出结果」的死条件，故暂不列出。
+    # 扩展指标域（schema v25）：按**当前报告期实测覆盖率**动态放行。
+    #
+    # 2026-11-14（reports/119 P0）：`EXTENDED_SCREENING_READY` 是 2026-09-19 的静态
+    # 结论，此后 ext 冻结在 2026-06-30、报告期与快照错位一个月 → 55 项全部变成
+    # 「能选中但永远筛不出结果」的死条件。静态白名单挡不住这种腐化，改为运行时判定：
+    # 覆盖率 < 阈值（默认 50%）的字段**不暴露**，并用 `unavailable` 说明原因。
+    # 三季报不披露现金流量表补充资料，折旧摊销族天然缺失 —— 这正是需要隐藏而非
+    # 让用户筛出 0 结果的场景。
+    extended_coverage = _extended_field_coverage(request)
     for col in sorted(EXTENDED_SCREENING_READY):
+        coverage = extended_coverage.get(col)
+        if coverage is not None and coverage < _EXTENDED_MIN_COVERAGE_PCT:
+            unavailable.append({
+                "name": col,
+                "domain": "extended",
+                "coverage_pct": round(coverage, 2),
+                "reason": "not_available_for_latest_period",
+            })
+            continue
         indicators.append({
             "name": col,
             "rankable": col in RANKABLE_INDICATORS,
             "unit": field_unit(col),
             "domain": "extended",
+            "coverage_pct": None if coverage is None else round(coverage, 2),
         })
     for col in sorted(RANKABLE_INDICATORS):
         for suffix, label in (

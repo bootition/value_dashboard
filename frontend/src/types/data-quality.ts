@@ -29,6 +29,22 @@ export type KnownWarningCode =
   | 'MINIMUM_DATA_NOT_READY'
   | 'CODE_IDENTITY_ALIAS'
   | 'LIVE_SCHEMA_INCOMPATIBLE'
+  // 2026-11-14 资产健康检查（reports/119）：`app/core/quality/asset_health.py`
+  // 的 12 条规则。全部是**披露型**：默认不进任何阻断集合（不遮蔽指标、
+  // 不让筛选 409），P1 只出现在 warning_codes 供状态页展示。
+  // 升级为阻断型必须另开裁决（reports/119 §5）。
+  | 'EXT_PERIOD_MISMATCH'
+  | 'FIELD_COVERAGE_LOW'
+  | 'FIELD_COVERAGE_DROP'
+  | 'MANUAL_CHAIN_STALE'
+  | 'SNAPSHOT_PERIOD_GAP'
+  | 'STATIC_TABLE_STALE'
+  | 'PACKAGE_STALE'
+  | 'NULL_REASON_MISSING'
+  | 'CROSSCHECK_BELOW_THRESHOLD'
+  | 'SCHEMA_DDL_DRIFT'
+  | 'ZERO_REFERENCE_ASSET'
+  | 'DEDUCTED_PROFIT_GAP'
 
 /**
  * Warning code type. Accepts known codes with autocomplete, but also accepts
@@ -54,6 +70,19 @@ export const KNOWN_WARNING_CODES = [
   'MINIMUM_DATA_NOT_READY',
   'CODE_IDENTITY_ALIAS',
   'LIVE_SCHEMA_INCOMPATIBLE',
+  // 资产健康（reports/119）
+  'EXT_PERIOD_MISMATCH',
+  'FIELD_COVERAGE_LOW',
+  'FIELD_COVERAGE_DROP',
+  'MANUAL_CHAIN_STALE',
+  'SNAPSHOT_PERIOD_GAP',
+  'STATIC_TABLE_STALE',
+  'PACKAGE_STALE',
+  'NULL_REASON_MISSING',
+  'CROSSCHECK_BELOW_THRESHOLD',
+  'SCHEMA_DDL_DRIFT',
+  'ZERO_REFERENCE_ASSET',
+  'DEDUCTED_PROFIT_GAP',
 ] as const
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -123,6 +152,65 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   MINIMUM_DATA_NOT_READY: [],
   CODE_IDENTITY_ALIAS: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
   LIVE_SCHEMA_INCOMPATIBLE: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
+  // 2026-11-14 资产健康 12 条规则：**一律不遮蔽任何数值**。
+  // 后端同样没有把它们放进 `_SNAPSHOT_BLOCKING_WARNINGS` /
+  // `_SCREENING_BLOCKING_WARNINGS`：它们是"数据资产该维护了"的披露，
+  // 不是"这些数字不可信"。前后端口径必须一致，否则会出现
+  // 页面一片"—"而 API 仍返回数值的自相矛盾。
+  EXT_PERIOD_MISMATCH: [],
+  FIELD_COVERAGE_LOW: [],
+  FIELD_COVERAGE_DROP: [],
+  MANUAL_CHAIN_STALE: [],
+  SNAPSHOT_PERIOD_GAP: [],
+  STATIC_TABLE_STALE: [],
+  PACKAGE_STALE: [],
+  NULL_REASON_MISSING: [],
+  CROSSCHECK_BELOW_THRESHOLD: [],
+  SCHEMA_DDL_DRIFT: [],
+  ZERO_REFERENCE_ASSET: [],
+  DEDUCTED_PROFIT_GAP: [],
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 中文文案
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 每个 warning code 的中文文案（状态页/结果面板直接渲染，不再显示裸英文码）。
+ *
+ * 文案原则：先说"哪里不对"，再说"会有什么后果"。用户看不懂 code 不是他的问题。
+ * 资产健康 12 条（reports/119）与后端 `asset_health.RULE_CODES` 一一对应；
+ * 新增 code 时两边必须同时改，否则 Record 的穷尽性检查会直接编译失败。
+ */
+export const WARNING_CODE_LABELS: Readonly<Record<KnownWarningCode, string>> = {
+  FINANCIAL_SHELL_ROWS: '财务三表存在只有空壳的报告期',
+  SNAPSHOT_STALE: '指标快照落后于最新行情',
+  DIVIDEND_DATES_UNVERIFIED: '部分分红记录缺少公告日（除权日待核验）',
+  LINEAGE_INVALID: '数据溯源链断裂（原始响应归档缺失或摘要不匹配）',
+  UNPUBLISHED_OVERRIDES: '有手工覆盖值尚未发布',
+  STALE_RUNNING_JOBS: '有超过 2 小时未结束的任务',
+  MINIMUM_DATA_NOT_READY: '部分股票未达最小可用数据门槛',
+  CODE_IDENTITY_ALIAS: '行情表存在股票代码别名（同一只股票两种写法）',
+  LIVE_SCHEMA_INCOMPATIBLE: '库结构与当前代码要求的 schema 不兼容',
+  EXT_PERIOD_MISMATCH: '扩展指标的报告期与界面快照不一致',
+  FIELD_COVERAGE_LOW: '界面字段最新报告期覆盖率过低',
+  FIELD_COVERAGE_DROP: '界面字段覆盖率较上一期断崖下跌',
+  MANUAL_CHAIN_STALE: '手工派生链长时间未运行',
+  SNAPSHOT_PERIOD_GAP: '部分股票的快照报告期不是最新完整三表期',
+  STATIC_TABLE_STALE: '静态低频表落后应有报告期',
+  PACKAGE_STALE: '导出的数据包落后于库内行情',
+  NULL_REASON_MISSING: '空值未登记原因（分不清"没有"和"坏了"）',
+  CROSSCHECK_BELOW_THRESHOLD: '自算指标与归档域交叉核验一致率偏低',
+  SCHEMA_DDL_DRIFT: 'schema.py 声明的表与库内实际表不一致',
+  ZERO_REFERENCE_ASSET: '零引用资产（导入了但没人读）',
+  DEDUCTED_PROFIT_GAP: '扣非净利润最新报告期覆盖率塌陷',
+}
+
+/**
+ * 取中文文案；未知 code 返回原文（前向兼容：新后端码不会显示成空白）。
+ */
+export function warningCodeLabel(code: WarningCode): string {
+  return isKnownWarningCode(code) ? WARNING_CODE_LABELS[code] : String(code)
 }
 
 /**

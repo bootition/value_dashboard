@@ -205,6 +205,27 @@ def test_parse_hk_plan_explain_unrecognized_is_none() -> None:
     assert parse_hk_plan_explain(None) == (None, None)
 
 
+def test_parse_hk_plan_explain_does_not_treat_fx_rate_as_dividend() -> None:
+    """2026-11-14 修复：汇率注记里的「港币1.00元」曾被当成股息（89 行受影响）。
+
+    东财会把换算汇率写进方案串，例如
+    「每股派人民币0.07元(汇率港币1.00元:人民币0.817026元)(相当于港币0.0856元)」。
+    旧实现用 `_PAREN_HKD_RE.search()` 左→右扫，先撞上汇率里的 1.00，
+    于是把港币股息记成 1.0（真实 0.0856，虚高约 11.7 倍；极端样本达 100 倍）。
+    """
+    assert parse_hk_plan_explain(
+        "每股派人民币0.07元(汇率港币1.00元:人民币0.817026元)(相当于港币0.0856元)",
+    ) == (pytest.approx(0.0856), pytest.approx(0.07))
+    # 汇率写在后面的形态（「,汇率为0.84176)」）
+    assert parse_hk_plan_explain(
+        "每股派人民币0.06元(相当于港币0.071279元,汇率为0.84176)",
+    ) == (pytest.approx(0.071279), pytest.approx(0.06))
+    # 反向标注形态（汇率人民币…:港币1.00元）
+    assert parse_hk_plan_explain(
+        "每股派人民币0.05元(汇率人民币0.796442元:港币1.00元)(相当于港币0.0627元)",
+    ) == (pytest.approx(0.0627), pytest.approx(0.05))
+
+
 # ─── 适配器 ─────────────────────────────────────────────────────────
 
 class _FakeAK:

@@ -1675,6 +1675,19 @@ def build_data_quality_status(
     if not readiness["ready"]:
         warning_codes.append("MINIMUM_DATA_NOT_READY")
 
+    # 2026-11-14（reports/119）：把人工审查结论固化成的 12 条资产健康规则挂进
+    # 同一个状态载荷。这里只跑**廉价规则**（正式库实测 <2s），贵重规则（归档
+    # 交叉核验 ~31s）留给 `vd data doctor`；预算耗尽/未启用的规则在 asset_health
+    # 里如实标 skipped，不会被静默丢弃。
+    #
+    # 纪律：本模块的 code **不进** `_SNAPSHOT_BLOCKING_WARNINGS` /
+    # `_SCREENING_BLOCKING_WARNINGS` —— 它们只披露，不遮蔽指标、不让筛选 409。
+    # 升级为阻断型必须另开裁决。
+    asset_health = _asset_health_summary(duck, sqlite)
+    for code in asset_health.get("p1_codes", []):
+        if code not in warning_codes:
+            warning_codes.append(code)
+
     return {
         "minimum_data_readiness": readiness,
         "dates": dates,
@@ -1683,7 +1696,37 @@ def build_data_quality_status(
         "code_identity": code_identity,
         "operations": operations,
         "warning_codes": warning_codes,
+        "asset_health": asset_health,
     }
+
+
+def _asset_health_summary(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
+    """Run the cheap asset-health rules for the status payload (never raises).
+
+    体检本身坏掉时返回一个显式不可用的摘要，而不是让整个数据状态页 503：
+    状态页的主要价值（日期/lineage/warning_codes）不应被新加的披露项拖垮。
+    """
+    try:
+        from app.core.quality.asset_health import run_asset_health, summarize_asset_health
+
+        payload = run_asset_health(duck, sqlite, allow_expensive=False)
+        return summarize_asset_health(payload)
+    except Exception:
+        logger.warning("资产健康检查失败（数据状态降级，不阻断）", exc_info=True)
+        return {
+            "generated_at": None,
+            "run_id": None,
+            "level_counts": {},
+            "code_counts": {},
+            "p1_codes": [],
+            "finding_count": 0,
+            "findings": [],
+            "truncated": 0,
+            "rules": [],
+            "skipped": [],
+            "errors": [{"code": "ASSET_HEALTH_UNAVAILABLE", "error": "status build failed"}],
+            "elapsed_ms": None,
+        }
 
 
 def _live_schema_compatibility(duck: DuckDBStore) -> dict:
@@ -1783,6 +1826,22 @@ def _incompatible_schema_status(readiness: dict, sqlite: SQLiteStore) -> dict:
         "code_identity": {"raw_alias_rows": 0},
         "operations": operations,
         "warning_codes": ["LIVE_SCHEMA_INCOMPATIBLE", "MINIMUM_DATA_NOT_READY"],
+        # 载荷形状与正常构建保持一致：live schema 不兼容时体检无法进行，
+        # 如实披露 unavailable，而不是留一个键让前端判断 undefined。
+        "asset_health": {
+            "generated_at": None,
+            "run_id": None,
+            "level_counts": {},
+            "code_counts": {},
+            "p1_codes": [],
+            "finding_count": 0,
+            "findings": [],
+            "truncated": 0,
+            "rules": [],
+            "skipped": [{"code": "ALL", "reason": "live_schema_incompatible"}],
+            "errors": [],
+            "elapsed_ms": None,
+        },
     }
 
 

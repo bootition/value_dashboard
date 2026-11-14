@@ -390,6 +390,130 @@ class IncrementalUpdater:
             "universe_refresh_interval_days", default=1
         )
 
+        # ─── 手工链自动接入（2026-11-14，reports/119 D28/D29）───────────
+        # 背景：7 条数据链路"功能完整、跑通过、有数据"，但唯一触发方式是人
+        # 工敲命令，于是停在最后一次有人跑的那天（indicator_ext 停在
+        # 2026-06-30 → 界面 55 个扩展筛选字段全部失效）。这里给每条链补上
+        # 「开关 + 到期间隔 + 每轮上限」，默认值一律保守（宁可少跑不可拖长
+        # 更新周期），失败只让本步骤 failed/partial，绝不阻断主链。
+        self.cashflow_supplement_auto_enabled: bool = self._load_update_flag(
+            "cashflow_supplement_auto_enabled", default=True
+        )
+        self.cashflow_supplement_refresh_interval_days: int = self._load_update_config(
+            "cashflow_supplement_refresh_interval_days", default=7
+        )
+        self.cashflow_supplement_max_stocks_per_run: int = self._load_update_config(
+            "cashflow_supplement_max_stocks_per_run", default=200
+        )
+        self.cashflow_supplement_concurrency: int = self._load_update_config(
+            "cashflow_supplement_concurrency", default=4
+        )
+        self.cashflow_supplement_deadline_seconds: int = self._load_update_config(
+            "cashflow_supplement_deadline_seconds", default=240
+        )
+        self.cashflow_supplement_missing_retry_days: int = self._load_update_config(
+            "cashflow_supplement_missing_retry_days", default=7
+        )
+        self.balance_sheet_ext_auto_enabled: bool = self._load_update_flag(
+            "balance_sheet_ext_auto_enabled", default=True
+        )
+        self.balance_sheet_ext_refresh_interval_days: int = self._load_update_config(
+            "balance_sheet_ext_refresh_interval_days", default=7
+        )
+        self.balance_sheet_ext_max_stocks_per_run: int = self._load_update_config(
+            "balance_sheet_ext_max_stocks_per_run", default=200
+        )
+        self.balance_sheet_ext_concurrency: int = self._load_update_config(
+            "balance_sheet_ext_concurrency", default=4
+        )
+        self.balance_sheet_ext_deadline_seconds: int = self._load_update_config(
+            "balance_sheet_ext_deadline_seconds", default=240
+        )
+        self.balance_sheet_ext_missing_retry_days: int = self._load_update_config(
+            "balance_sheet_ext_missing_retry_days", default=7
+        )
+        self.deducted_profit_auto_enabled: bool = self._load_update_flag(
+            "deducted_profit_auto_enabled", default=True
+        )
+        self.deducted_profit_refresh_interval_days: int = self._load_update_config(
+            "deducted_profit_refresh_interval_days", default=7
+        )
+        self.deducted_profit_max_stocks_per_run: int = self._load_update_config(
+            "deducted_profit_max_stocks_per_run", default=600
+        )
+        self.deducted_profit_concurrency: int = self._load_update_config(
+            "deducted_profit_concurrency", default=6
+        )
+        self.deducted_profit_deadline_seconds: int = self._load_update_config(
+            "deducted_profit_deadline_seconds", default=240
+        )
+        self.deducted_profit_missing_retry_days: int = self._load_update_config(
+            "deducted_profit_missing_retry_days", default=7
+        )
+        # 固定资产净额补采（reports/119 P1-3，2026Q3 主链只剩 1.8%）
+        self.fixed_assets_auto_enabled: bool = self._load_update_flag(
+            "fixed_assets_auto_enabled", default=True
+        )
+        self.fixed_assets_refresh_interval_days: int = self._load_update_config(
+            "fixed_assets_refresh_interval_days", default=7
+        )
+        self.fixed_assets_max_stocks_per_run: int = self._load_update_config(
+            "fixed_assets_max_stocks_per_run", default=1000
+        )
+        self.fixed_assets_concurrency: int = self._load_update_config(
+            "fixed_assets_concurrency", default=8
+        )
+        self.fixed_assets_deadline_seconds: int = self._load_update_config(
+            "fixed_assets_deadline_seconds", default=240
+        )
+        self.fixed_assets_missing_retry_days: int = self._load_update_config(
+            "fixed_assets_missing_retry_days", default=7
+        )
+        self.regulatory_metrics_auto_enabled: bool = self._load_update_flag(
+            "regulatory_metrics_auto_enabled", default=True
+        )
+        self.regulatory_metrics_refresh_interval_days: int = self._load_update_config(
+            "regulatory_metrics_refresh_interval_days", default=7
+        )
+        self.regulatory_metrics_max_stocks_per_run: int = self._load_update_config(
+            "regulatory_metrics_max_stocks_per_run", default=200
+        )
+        self.regulatory_metrics_deadline_seconds: int = self._load_update_config(
+            "regulatory_metrics_deadline_seconds", default=180
+        )
+        self.indicator_ext_auto_enabled: bool = self._load_update_flag(
+            "indicator_ext_auto_enabled", default=True
+        )
+        # 报告期推进/指纹变化是主判据；该间隔只是"输入未变也不要永久停更"的
+        # 兜底（事件类列如送转/回购只能靠周期重建才更新）。
+        self.indicator_ext_max_age_days: int = self._load_update_config(
+            "indicator_ext_max_age_days", default=7
+        )
+        self.etf_prices_auto_enabled: bool = self._load_update_flag(
+            "etf_prices_auto_enabled", default=True
+        )
+        self.etf_prices_refresh_interval_days: int = self._load_update_config(
+            "etf_prices_refresh_interval_days", default=1
+        )
+        self.etf_prices_max_etfs_per_run: int = self._load_update_config(
+            "etf_prices_max_etfs_per_run", default=20
+        )
+        self.etf_prices_deadline_seconds: int = self._load_update_config(
+            "etf_prices_deadline_seconds", default=300
+        )
+        self.hk_dividends_auto_enabled: bool = self._load_update_flag(
+            "hk_dividends_auto_enabled", default=True
+        )
+        self.hk_dividends_refresh_interval_days: int = self._load_update_config(
+            "hk_dividends_refresh_interval_days", default=30
+        )
+        self.hk_dividends_max_stocks_per_run: int = self._load_update_config(
+            "hk_dividends_max_stocks_per_run", default=60
+        )
+        self.hk_dividends_deadline_seconds: int = self._load_update_config(
+            "hk_dividends_deadline_seconds", default=300
+        )
+
     @staticmethod
     def _update_duckdb_budget() -> tuple[str, int]:
         """更新专用的 DuckDB 低内存预算（4GB/2线程，可配置）。"""
@@ -412,6 +536,22 @@ class IncrementalUpdater:
             return int(value) if value else default
         except Exception:
             return default
+
+    @staticmethod
+    def _load_update_flag(key: str, *, default: bool) -> bool:
+        """读取布尔型 update.* 开关（YAML true/false 或 "true"/"false" 均可）。"""
+        try:
+            from app.core.config import Config
+            cfg = Config.current()
+            update_cfg = cfg.get_value("update", {})
+            value = update_cfg.get(key) if isinstance(update_cfg, dict) else None
+        except Exception:
+            return default
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
     def run_incremental_check(self, *, include_announcements: bool = True) -> dict[str, Any]:
         """执行增量检查，返回检查报告
@@ -844,6 +984,19 @@ class IncrementalUpdater:
                 ]
             except Exception as error:
                 logger.warning("查询国债利差重算范围失败: %s", error)
+
+        # 5.2 手工链自动接入①：补采域（reports/119 D29 ②③④）。
+        #     折旧摊销/资本支出与资产负债表补充科目是 indicator_ext 的直接
+        #     输入，扣非净利润是 income_statement 的列补全，金融监管指标是
+        #     balance_sheet 的 6 列 —— 全部必须在指标快照/extension 重建之前
+        #     落地，否则这轮重建又用旧输入算一遍。
+        #     顺序敏感：补采 → 扣非/监管，再进 indicator_ext。
+        report_step("cashflow_supplement", self._refresh_cashflow_supplement())
+        report_step("balance_sheet_ext", self._refresh_balance_sheet_ext())
+        report_step("deducted_profit", self._refresh_deducted_profit())
+        report_step("fixed_assets", self._refresh_fixed_assets())
+        report_step("regulatory_metrics", self._refresh_regulatory_metrics())
+
         # 6. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）。
         #    旧位置在统计域之后：重试成功的价格/财务/分红/融资/曲线数据会
         #    再等一整轮才进入快照。现在移到指标重算之前，并把影响快照的
@@ -866,6 +1019,12 @@ class IncrementalUpdater:
                 retry_recompute_codes = list(
                     retries_step.get("recompute_codes", [])
                 )
+
+        # 5.3 手工链自动接入②：扩展指标域重建（reports/119 D28，P0）。
+        #     必须排在快照指标之前：ext 落后于最新完整三表期时它就是死条件
+        #     （界面 55 个扩展筛选字段全 NULL）。该步骤失败只让自己 failed，
+        #     不动 indicator_snapshot，也不影响 readiness。
+        report_step("indicator_ext", self._refresh_indicator_ext())
 
         if share_capital_changed:
             # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
@@ -993,6 +1152,13 @@ class IncrementalUpdater:
                 detail_cb=detail_cb,
             ),
         )
+
+        # 5.4 手工链自动接入③：ETF 行情 + 港股分红（reports/119 D29 ⑤⑥）。
+        #     两者都是"独立低频域"：不进 A 股 readiness、不影响主链快照，
+        #     只用各自的水位 + 每轮上限推进。放在统计域之后，避免它们的
+        #     网络等待挤在价格/财务的临界路径上。
+        report_step("etf_prices", self._refresh_etf_prices())
+        report_step("hk_dividends", self._refresh_hk_dividends())
 
         # 5.1 融资事件/失败重试已提前到指标快照重算之前执行；这里只保留
         #     指数估值每日 1 次低频域。失败保留旧值并进入独立 retry/missing。
@@ -1234,6 +1400,526 @@ class IncrementalUpdater:
         except Exception as error:
             logger.warning("指数估值刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
+
+    # ─── 手工链自动接入（2026-11-14，reports/119 D28/D29）────────────────────
+    #
+    # 下面 7 个步骤对应审计报告 119 里"功能完整、跑通过、有数据，但没接进每天
+    # 自动跑的主流程"的链路（PDF 域不在本次范围）。统一约定：
+    #   1) 开关 update.<domain>_auto_enabled=false 时一律 skipped，无网络请求；
+    #   2) 用 data_refresh_state 记水位，`_refresh_due(key, interval_days)` 判到期；
+    #   3) 每步都有 max_stocks/截止时间上限，日志输出 counts + elapsed_seconds；
+    #   4) 任何异常只让本步骤 failed/partial，绝不让整轮更新失败，也不影响
+    #      readiness（readiness 只看数据日期，不看 job 步骤状态）。
+
+    _CASHFLOW_SUPPLEMENT_STATE_KEY = "cashflow_supplement_last_refresh"
+    _BALANCE_SHEET_EXT_STATE_KEY = "balance_sheet_ext_last_refresh"
+    _DEDUCTED_PROFIT_STATE_KEY = "deducted_profit_last_refresh"
+    _FIXED_ASSETS_STATE_KEY = "fixed_assets_supplement_last_refresh"
+    _REGULATORY_METRICS_STATE_KEY = "regulatory_metrics_last_refresh"
+    _INDICATOR_EXT_STATE_KEY = "indicator_ext_last_refresh"
+    _ETF_PRICES_STATE_KEY = "etf_prices_last_refresh"
+    _HK_DIVIDENDS_STATE_KEY = "hk_dividends_last_refresh"
+
+    #: 同一水位的第二个键名：`*_last_refresh` 是本文件历史命名
+    #: （buyback/csrc 同款）；`*_last_success_at` 是 reports/119 D29 与
+    #: `app/core/quality/asset_health.py::MANUAL_CHAIN_STALE` 约定的键名。
+    #: 两个都写，保证"水位/停摆探针"两套读取方都能看到同一事实。
+    _DOMAIN_SUCCESS_ALIASES: dict[str, str] = {
+        _CASHFLOW_SUPPLEMENT_STATE_KEY: "cashflow_supplement_last_success_at",
+        _BALANCE_SHEET_EXT_STATE_KEY: "balance_sheet_ext_last_success_at",
+        _DEDUCTED_PROFIT_STATE_KEY: "deducted_profit_last_success_at",
+        _FIXED_ASSETS_STATE_KEY: "fixed_assets_supplement_last_success_at",
+        _REGULATORY_METRICS_STATE_KEY: "regulatory_metrics_last_success_at",
+        _INDICATOR_EXT_STATE_KEY: "indicator_ext_last_success_at",
+        _ETF_PRICES_STATE_KEY: "etf_prices_last_success_at",
+        _HK_DIVIDENDS_STATE_KEY: "hk_dividends_last_success_at",
+    }
+
+    def _mark_domain_refreshed(self, state_key: str) -> None:
+        """写一个低频域的成功水位（同时写 `_last_refresh` 与 `_last_success_at`）。
+
+        两键同事务写入，避免出现"一个键写了、另一个没写"的半状态让
+        健康探针与到期判断各说各话。
+        """
+        now = datetime.now(UTC).isoformat()
+        keys = [state_key]
+        alias = self._DOMAIN_SUCCESS_ALIASES.get(state_key)
+        if alias:
+            keys.append(alias)
+        try:
+            with self.sqlite.transaction() as conn:
+                for key in keys:
+                    conn.execute(
+                        """INSERT INTO data_refresh_state (key, value, updated_at)
+                           VALUES (?, ?, ?)
+                           ON CONFLICT(key) DO UPDATE SET
+                             value = excluded.value, updated_at = excluded.updated_at""",
+                        [key, now, now],
+                    )
+        except Exception as error:  # noqa: BLE001 - 水位写失败不得炸掉步骤
+            logger.warning("写入域水位失败(%s): %s", state_key, error)
+
+    def _read_refresh_state(self, key: str) -> str | None:
+        """读取 data_refresh_state 的原始值（指纹等非时间戳用途）。"""
+        try:
+            rows = self.sqlite.query(
+                "SELECT value FROM data_refresh_state WHERE key = ?", [key],
+            )
+        except Exception as error:  # noqa: BLE001
+            logger.warning("读取刷新状态失败(%s): %s", key, error)
+            return None
+        return str(rows[0].get("value")) if rows else None
+
+    def _write_refresh_state(self, key: str, value: str) -> None:
+        """写入 data_refresh_state（与 `_mark_refreshed` 同表，用途不同）。"""
+        now = datetime.now(UTC).isoformat()
+        try:
+            with self.sqlite.transaction() as conn:
+                conn.execute(
+                    """INSERT INTO data_refresh_state (key, value, updated_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(key) DO UPDATE SET
+                         value = excluded.value, updated_at = excluded.updated_at""",
+                    [key, value, now],
+                )
+        except Exception as error:  # noqa: BLE001 - 状态写入失败不得炸掉步骤
+            logger.warning("写入刷新状态失败(%s): %s", key, error)
+
+    @staticmethod
+    def _new_domain_step(interval_days: int, *, max_stocks: int = 0) -> dict[str, Any]:
+        """低频域步骤的骨架结果（字段与既有域步骤对齐）。"""
+        return {
+            "status": "skipped",
+            "reason": None,
+            "updated": 0,
+            "skipped": 0,
+            "failed": 0,
+            "elapsed_seconds": 0.0,
+            "interval_days": interval_days,
+            "max_stocks_per_run": max_stocks,
+        }
+
+    def _refresh_supplement_dataset(
+        self,
+        dataset: str,
+        *,
+        state_key: str,
+        interval_days: int,
+        enabled: bool,
+        max_stocks: int,
+        concurrency: int,
+        deadline_seconds: int,
+        retry_days: int,
+    ) -> dict[str, Any]:
+        """补采域通用步骤（折旧摊销/资本支出、资产负债表补充科目、扣非净利润）。
+
+        到期才跑；每轮上限 = `max_stocks_per_run` + `deadline_seconds`；
+        只有成功且无残留失败才推进水位，失败/部分失败下一轮继续。
+        """
+        started = time.time()
+        step = self._new_domain_step(interval_days, max_stocks=max_stocks)
+        step["dataset"] = dataset
+        if not enabled:
+            step["reason"] = "disabled_by_config"
+            return step
+        if not self._refresh_due(state_key, interval_days):
+            step["reason"] = "refreshed_within_interval"
+            return step
+        try:
+            from app.core.supplement import SupplementFetcher
+
+            report = SupplementFetcher(
+                duck=self.duck, sqlite=self.sqlite,
+            ).refresh(
+                dataset,
+                max_stocks=max_stocks,
+                concurrency=concurrency,
+                deadline_seconds=deadline_seconds,
+                retry_days=retry_days,
+            )
+            step.update({
+                "status": report.get("status", "failed"),
+                "reason": report.get("reason"),
+                "targeted": report.get("targeted", 0),
+                "updated": report.get("updated", 0),
+                "skipped": report.get("skipped", 0),
+                "failed": report.get("failed", 0),
+                "deferred": report.get("deferred", 0),
+                "rows_written": report.get("rows_written", {}),
+                "periods": report.get("periods", []),
+                "failed_codes": report.get("failed_codes", []),
+                "remaining_pending": report.get("remaining_pending", 0),
+            })
+            # 只有"这一域已经追平"才推进水位：
+            #   · success + remaining_pending=0 → 全部目标期都已补齐；
+            #   · no_pending_codes → 本来就没得补（或都在失败冷却里）。
+            # 若还有残留（首次 Q3 追补就是这种：全市场 5,575 只一次跑不完），
+            # 不推进会 7 天白等，续传进度就会卡死在第一轮。
+            caught_up = (
+                step["status"] == "success" and not step.get("remaining_pending")
+            )
+            if caught_up or step.get("reason") == "no_pending_codes":
+                self._mark_domain_refreshed(state_key)
+        except Exception as error:  # noqa: BLE001 - 补采失败绝不阻断主链
+            logger.warning("补采步骤失败(非致命) dataset=%s: %s", dataset, error)
+            step["status"] = "failed"
+            step["reason"] = f"exception: {type(error).__name__}: {error}"
+        finally:
+            step["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "补采步骤 %s: status=%s targeted=%s updated=%s failed=%s deferred=%s "
+            "remaining=%s elapsed_seconds=%s",
+            dataset, step["status"], step.get("targeted", 0), step["updated"],
+            step["failed"], step.get("deferred", 0),
+            step.get("remaining_pending", 0), step["elapsed_seconds"],
+        )
+        return step
+
+    def _refresh_cashflow_supplement(self) -> dict[str, Any]:
+        """折旧摊销/资本支出补采（reports/119 D29 ②，停在 2026-06-30）。
+
+        根因**不是没人跑，而是续传判据写错**：旧脚本用"本表有任意
+        eastmoney_f10 行就跳过"，第一次跑完后再也补不到新报告期。判据已下沉
+        到 `app/core/supplement.py`（本源最新报告期 < 目标最新期即待补）。
+        """
+        return self._refresh_supplement_dataset(
+            "cash_flow_supplement",
+            state_key=self._CASHFLOW_SUPPLEMENT_STATE_KEY,
+            interval_days=self.cashflow_supplement_refresh_interval_days,
+            enabled=self.cashflow_supplement_auto_enabled,
+            max_stocks=self.cashflow_supplement_max_stocks_per_run,
+            concurrency=self.cashflow_supplement_concurrency,
+            deadline_seconds=self.cashflow_supplement_deadline_seconds,
+            retry_days=self.cashflow_supplement_missing_retry_days,
+        )
+
+    def _refresh_balance_sheet_ext(self) -> dict[str, Any]:
+        """资产负债表补充科目（其他应付款 / 一年内到期非流动负债 / 其他应收款）。
+
+        三个科目各自解锁 indicator_ext 里无法自算的一项能力（大股东占款、
+        有息负债口径、应收应付同源配对）；与折旧摊销同一模式、同一个续传 bug。
+        """
+        return self._refresh_supplement_dataset(
+            "balance_sheet_ext",
+            state_key=self._BALANCE_SHEET_EXT_STATE_KEY,
+            interval_days=self.balance_sheet_ext_refresh_interval_days,
+            enabled=self.balance_sheet_ext_auto_enabled,
+            max_stocks=self.balance_sheet_ext_max_stocks_per_run,
+            concurrency=self.balance_sheet_ext_concurrency,
+            deadline_seconds=self.balance_sheet_ext_deadline_seconds,
+            retry_days=self.balance_sheet_ext_missing_retry_days,
+        )
+
+    def _refresh_fixed_assets(self) -> dict[str, Any]:
+        """固定资产净额补采（reports/119 P1-3）。
+
+        2026Q3 主链 `balance_sheet.fixed_assets` 只剩 1.8%（上期 99.9%）：
+        新浪 Q3 响应里没有「固定资产净额」这一项。东财 F10 资产负债表有该字段，
+        此处**只回填 NULL**，既有值一律不动。
+        """
+        return self._refresh_supplement_dataset(
+            "fixed_assets_supplement",
+            state_key=self._FIXED_ASSETS_STATE_KEY,
+            interval_days=self.fixed_assets_refresh_interval_days,
+            enabled=self.fixed_assets_auto_enabled,
+            max_stocks=self.fixed_assets_max_stocks_per_run,
+            concurrency=self.fixed_assets_concurrency,
+            deadline_seconds=self.fixed_assets_deadline_seconds,
+            retry_days=self.fixed_assets_missing_retry_days,
+        )
+
+    def _refresh_deducted_profit(self) -> dict[str, Any]:
+        """扣非净利润补采（reports/119 D29 ③，2026-06 起基本没数）。
+
+        只 UPDATE `income_statement.deducted_net_profit` 的 NULL 值：既有
+        CSMAR/主链值保持不动；源字段缺失时结果是"没更新"而不会写坏三表。
+        """
+        return self._refresh_supplement_dataset(
+            "deducted_profit",
+            state_key=self._DEDUCTED_PROFIT_STATE_KEY,
+            interval_days=self.deducted_profit_refresh_interval_days,
+            enabled=self.deducted_profit_auto_enabled,
+            max_stocks=self.deducted_profit_max_stocks_per_run,
+            concurrency=self.deducted_profit_concurrency,
+            deadline_seconds=self.deducted_profit_deadline_seconds,
+            retry_days=self.deducted_profit_missing_retry_days,
+        )
+
+    def _refresh_regulatory_metrics(self) -> dict[str, Any]:
+        """6 个金融监管指标补采（reports/119 D29 ④，只到 2026-06-30）。
+
+        该域**每次到期全量重抓**（每只金融股 1 次请求、只取最新一期），没有
+        "有没有本源行"的续传判据，所以不存在上面那个判据 bug；接入调度只需
+        补上到期判断 + 每轮上限（默认 200 只，覆盖银行+券商全量）。
+        """
+        started = time.time()
+        step = self._new_domain_step(
+            self.regulatory_metrics_refresh_interval_days,
+            max_stocks=self.regulatory_metrics_max_stocks_per_run,
+        )
+        if not self.regulatory_metrics_auto_enabled:
+            step["reason"] = "disabled_by_config"
+            return step
+        if not self._refresh_due(
+            self._REGULATORY_METRICS_STATE_KEY,
+            self.regulatory_metrics_refresh_interval_days,
+        ):
+            step["reason"] = "refreshed_within_interval"
+            return step
+        try:
+            from app.core.supplement import RegulatoryMetricsUpdater
+
+            report = RegulatoryMetricsUpdater(duck=self.duck).refresh(
+                max_stocks=self.regulatory_metrics_max_stocks_per_run,
+                deadline_seconds=self.regulatory_metrics_deadline_seconds,
+            )
+            step.update({
+                "status": report.get("status", "failed"),
+                "reason": report.get("reason"),
+                "targeted": report.get("targeted", 0),
+                "updated": report.get("updated", 0),
+                "skipped": report.get("skipped", 0),
+                "failed": report.get("failed", 0),
+                "deferred": report.get("deferred", 0),
+                "rows_updated": report.get("rows_updated", 0),
+                "coverage_rows": report.get("coverage_rows", 0),
+                "failed_codes": report.get("failed_codes", []),
+            })
+            if step["status"] in {"success", "skipped"}:
+                self._mark_domain_refreshed(self._REGULATORY_METRICS_STATE_KEY)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("监管指标补采失败(非致命): %s", error)
+            step["status"] = "failed"
+            step["reason"] = f"exception: {type(error).__name__}: {error}"
+        finally:
+            step["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "监管指标步骤: status=%s targeted=%s updated=%s failed=%s elapsed_seconds=%s",
+            step["status"], step.get("targeted", 0), step["updated"],
+            step["failed"], step["elapsed_seconds"],
+        )
+        return step
+
+    def _refresh_indicator_ext(self) -> dict[str, Any]:
+        """扩展指标域 indicator_ext 重建（reports/119 D28，P0）。
+
+        门控（两条硬规则 + 一条兜底）：
+        1. `max(indicator_ext.report_date) < 最新完整三表报告期` → **必须**重建；
+        2. 否则只在输入指纹变化时重建（三表/补采表最新报告期或行数变化）；
+        3. 输入长期未变时按 `indicator_ext_max_age_days` 兜底重建一次
+           （送转/回购等事件类列不参与指纹，只能靠周期刷新）。
+        失败只让本步骤 failed，`indicator_ext` 保留旧值，主链快照与
+        readiness 完全不受影响。
+        """
+        started = time.time()
+        step = self._new_domain_step(self.indicator_ext_max_age_days)
+        if not self.indicator_ext_auto_enabled:
+            step["reason"] = "disabled_by_config"
+            return step
+        try:
+            from app.core.indicators.extended import (
+                FINGERPRINT_STATE_KEY,
+                ExtendedIndicatorBuilder,
+                rebuild_decision,
+            )
+
+            decision = rebuild_decision(
+                self.duck,
+                stored_fingerprint=self._read_refresh_state(FINGERPRINT_STATE_KEY),
+            )
+            step.update({
+                "ext_max_period": decision.get("ext_max_period"),
+                "complete_trio_period": decision.get("complete_period"),
+                "ext_rows": decision.get("ext_rows", 0),
+            })
+            if not decision["required"] and not self._refresh_due(
+                self._INDICATOR_EXT_STATE_KEY, self.indicator_ext_max_age_days,
+            ):
+                step["reason"] = "up_to_date"
+                step["skipped"] = 1
+                return step
+            build_reason = (
+                decision["reason"] if decision["required"] else "max_age_exceeded"
+            )
+            report = ExtendedIndicatorBuilder(duck=self.duck, paths=None).build()
+            step.update({
+                "status": "success" if report.get("status") == "success" else "failed",
+                "reason": build_reason,
+                "updated": int(report.get("rows_after", 0)),
+                "rows_written": report.get("rows_written", 0),
+                "filled": report.get("filled", {}),
+                "report_date_range": report.get("report_date_range", []),
+            })
+            if report.get("status") == "success":
+                self._mark_domain_refreshed(self._INDICATOR_EXT_STATE_KEY)
+                # 指纹按"重建后"的输入重新采集并落库，否则输入在重建期间又
+                # 变化时下一轮会重复全量重建。
+                refreshed = rebuild_decision(self.duck)
+                self._write_refresh_state(
+                    FINGERPRINT_STATE_KEY, str(refreshed.get("fingerprint") or ""),
+                )
+        except Exception as error:  # noqa: BLE001 - 派生域失败绝不阻断主链
+            logger.warning("扩展指标重建失败(非致命): %s", error)
+            step["status"] = "failed"
+            step["reason"] = f"exception: {type(error).__name__}: {error}"
+        finally:
+            step["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "indicator_ext 步骤: status=%s reason=%s rows=%s elapsed_seconds=%s",
+            step["status"], step.get("reason"), step.get("updated", 0),
+            step["elapsed_seconds"],
+        )
+        return step
+
+    def _refresh_etf_prices(self) -> dict[str, Any]:
+        """ETF 行情（reports/119 D29 ⑥，停在 2026-09-18）。
+
+        此前 ETF 只在 `retry` 分支被碰到：没有 retry 记录就永远不刷新。
+        现在按日到期 + 每轮上限 + 截止时间，只刷新 `etf_meta` 里登记的代码
+        （不做全市场扫描），并按"本地行情最旧优先"推进，避免永远只刷前几只。
+        """
+        started = time.time()
+        step = self._new_domain_step(
+            self.etf_prices_refresh_interval_days,
+            max_stocks=self.etf_prices_max_etfs_per_run,
+        )
+        if not self.etf_prices_auto_enabled:
+            step["reason"] = "disabled_by_config"
+            return step
+        if not self._refresh_due(
+            self._ETF_PRICES_STATE_KEY, self.etf_prices_refresh_interval_days,
+        ):
+            step["reason"] = "refreshed_within_interval"
+            return step
+        try:
+            from app.core.etf_prices import EtfPriceUpdater
+
+            report = EtfPriceUpdater(
+                duck=self.duck, sqlite=self.sqlite,
+            ).update_all(
+                max_etfs=self.etf_prices_max_etfs_per_run,
+                deadline_seconds=self.etf_prices_deadline_seconds,
+            )
+            summary = report.get("summary", {})
+            step.update({
+                "status": report.get("status", "failed"),
+                "reason": report.get("reason"),
+                "targeted": report.get("targeted", 0),
+                "updated": int(summary.get("success", 0)),
+                "skipped": int(summary.get("missing", 0)),
+                "failed": int(summary.get("failed", 0)),
+                "deferred": report.get("deferred", 0),
+            })
+            if step["status"] == "success":
+                self._mark_domain_refreshed(self._ETF_PRICES_STATE_KEY)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("ETF 行情刷新失败(非致命): %s", error)
+            step["status"] = "failed"
+            step["reason"] = f"exception: {type(error).__name__}: {error}"
+        finally:
+            step["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "ETF 行情步骤: status=%s targeted=%s updated=%s failed=%s deferred=%s "
+            "elapsed_seconds=%s",
+            step["status"], step.get("targeted", 0), step["updated"],
+            step["failed"], step.get("deferred", 0), step["elapsed_seconds"],
+        )
+        return step
+
+    def _refresh_hk_dividends(self) -> dict[str, Any]:
+        """港股分红（reports/119 D29 ⑤，2026-09-04 导入后没再跑）。
+
+        只刷新映射表里的 A+H 股票（约 179 只），按"最久未刷新优先"分批，
+        每批 20 只 + 总截止时间有界；源侧限速 ≤2 req/s，失败保留旧值并进入
+        retry/missing，不影响 A 股 readiness。
+        """
+        started = time.time()
+        step = self._new_domain_step(
+            self.hk_dividends_refresh_interval_days,
+            max_stocks=self.hk_dividends_max_stocks_per_run,
+        )
+        if not self.hk_dividends_auto_enabled:
+            step["reason"] = "disabled_by_config"
+            return step
+        if not self._refresh_due(
+            self._HK_DIVIDENDS_STATE_KEY, self.hk_dividends_refresh_interval_days,
+        ):
+            step["reason"] = "refreshed_within_interval"
+            return step
+        try:
+            from app.core.hk_dividends import HKDividendUpdater
+
+            updater = HKDividendUpdater(
+                duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+            )
+            mapping = updater.resolve_mapping().get("mapping", {})
+            targets = self._order_hk_dividend_targets(mapping)
+            if not targets:
+                step["status"] = "skipped"
+                step["reason"] = "no_ah_hk_mapping"
+                return step
+            targets = targets[: self.hk_dividends_max_stocks_per_run]
+            step["targeted"] = len(targets)
+            succeeded = failed = unmapped = deferred = 0
+            for start in range(0, len(targets), 20):
+                if (time.time() - started) >= self.hk_dividends_deadline_seconds:
+                    deferred = len(targets) - start
+                    break
+                report = updater.update_many(targets[start:start + 20], batch_size=20)
+                succeeded += int(report.get("succeeded", 0))
+                failed += int(report.get("failed", 0))
+                unmapped += int(report.get("unmapped", 0))
+            step.update({
+                "status": (
+                    "success" if failed == 0 and unmapped == 0 and deferred == 0
+                    else "partial"
+                ),
+                "updated": succeeded,
+                "failed": failed,
+                "skipped": unmapped,
+                "deferred": deferred,
+                "reason": None if failed == 0 else "partial_source_failures",
+            })
+            if step["status"] == "success":
+                self._mark_domain_refreshed(self._HK_DIVIDENDS_STATE_KEY)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("港股分红刷新失败(非致命): %s", error)
+            step["status"] = "failed"
+            step["reason"] = f"exception: {type(error).__name__}: {error}"
+        finally:
+            step["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "港股分红步骤: status=%s targeted=%s updated=%s failed=%s deferred=%s "
+            "elapsed_seconds=%s",
+            step["status"], step.get("targeted", 0), step["updated"],
+            step["failed"], step.get("deferred", 0), step["elapsed_seconds"],
+        )
+        return step
+
+    def _order_hk_dividend_targets(self, mapping: dict[str, Any]) -> list[str]:
+        """映射内 A 股代码按"港股分红最久未刷新优先"排序。"""
+        codes = sorted(str(code) for code in mapping)
+        if not codes:
+            return []
+        try:
+            rows = self.duck.read_query(
+                """SELECT stock_code, MAX(fetch_time) AS last_fetch
+                   FROM hk_dividends GROUP BY stock_code"""
+            )
+            last_fetch = {
+                str(row["stock_code"]).zfill(5): str(row["last_fetch"])
+                for row in rows if row.get("last_fetch") is not None
+            }
+        except Exception as error:  # noqa: BLE001 - 排序失败退化为代码序
+            logger.debug("港股分红陈旧度排序失败，退化为代码序: %s", error)
+            return codes
+
+        def _sort_key(code: str) -> tuple[bool, str, str]:
+            # hk_dividends.stock_code 存 5 位港股代码，映射里才是 A 股代码。
+            hk_code = str(mapping[code].get("hk_code", "")).zfill(5)
+            return (hk_code in last_fetch, last_fetch.get(hk_code, ""), code)
+
+        return sorted(codes, key=_sort_key)
 
     def _stale_price_snapshot_codes(self) -> list[str]:
         """Listed stocks whose snapshot price date is behind raw price."""

@@ -3,6 +3,7 @@ import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert, NProgress } from 'naive-ui'
 import axios from 'axios'
 import type { DataQualityStatus } from '../types'
+import { warningCodeLabel } from '../types/data-quality'
 
 interface RetryItem {
   stock_code: string
@@ -580,8 +581,9 @@ function skipReasonLabel(reason: string | null | undefined): string {
                 :key="code"
                 type="warning"
                 size="small"
+                :title="code"
               >
-                {{ code }}
+                {{ warningCodeLabel(code) }}
               </n-tag>
             </n-space>
             <n-descriptions bordered :column="2" size="small" label-placement="left">

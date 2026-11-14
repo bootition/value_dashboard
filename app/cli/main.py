@@ -1437,6 +1437,99 @@ def data_status() -> None:
     typer.echo(json.dumps(make_response("data.status", data), ensure_ascii=False, indent=2, default=str))
 
 
+def _format_doctor_report(payload: dict) -> str:
+    """把体检结果渲染成人能读的摘要（`--json` 之外的另一条出口）。
+
+    为什么两种出口都要：人看的是"哪条规则、哪个域、该跑什么命令"；
+    机器（自动更新 / CI / 另一个 agent）读的是结构化 findings。渲染时把
+    suggestion 单独缩进一行，避免报告里出现"知道坏了但不知道跑什么"。
+    """
+    counts = payload.get("level_counts") or {}
+    lines: list[str] = [
+        (
+            f"资产健康检查 run_id={payload.get('run_id')} "
+            f"耗时 {payload.get('elapsed_ms')}ms | "
+            f"P1 {counts.get('P1', 0)} / P2 {counts.get('P2', 0)} / P3 {counts.get('P3', 0)} "
+            f"（预算 {(payload.get('budget') or {}).get('max_seconds')}s）"
+        )
+    ]
+    findings = payload.get("findings") or []
+    if not findings:
+        lines.append("未发现异常。")
+    for finding in findings:
+        lines.append(
+            f"[{finding.get('level')}] {finding.get('code')} "
+            f"{finding.get('domain')}.{finding.get('field')} "
+            f"metric={finding.get('metric')} threshold={finding.get('threshold')}"
+        )
+        lines.append(f"    {finding.get('detail')}")
+        lines.append(f"    → {finding.get('suggestion')}")
+    rules = payload.get("rules") or []
+    warn_rules = [r for r in rules if r.get("status") in ("warn", "error")]
+    if warn_rules:
+        lines.append("命中规则: " + ", ".join(f"{r['code']}({r.get('findings')})" for r in warn_rules))
+    for skipped in payload.get("skipped") or []:
+        lines.append(f"跳过 {skipped.get('code')}: {skipped.get('reason')}")
+    for failure in payload.get("errors") or []:
+        lines.append(f"规则失败 {failure.get('code')}: {failure.get('error')}")
+    history = payload.get("history") or {}
+    if history:
+        lines.append(
+            f"覆盖率基线: {history.get('status')} rows={history.get('rows')} "
+            f"run_id={history.get('run_id')} {history.get('reason') or ''}".rstrip()
+        )
+    p1_codes = payload.get("p1_codes") or []
+    lines.append("P1 告警码: " + (", ".join(p1_codes) if p1_codes else "无"))
+    return "\n".join(lines)
+
+
+@data_app.command("doctor")
+def data_doctor(
+    json_output: bool = typer.Option(False, "--json", help="输出结构化 JSON（默认人类可读摘要）"),
+    write_history: bool = typer.Option(
+        False,
+        "--write-history",
+        help="把本轮字段覆盖率写入 field_coverage_history（下一轮环比的基线；唯一写路径）",
+    ),
+    fast: bool = typer.Option(
+        False,
+        "--fast",
+        help="只跑廉价规则，跳过归档交叉核验（正式库约 31s）",
+    ),
+    max_seconds: float = typer.Option(
+        0.0,
+        "--max-seconds",
+        help="整体时间预算（秒）；0 表示取配置 asset_health.max_seconds",
+    ),
+) -> None:
+    """资产健康检查：把 reports/119 的人工审查结论固化成 12 条可复跑的规则
+
+    - 12 条规则见 `app/core/quality/asset_health.py` 模块文档；P1 进
+      `data_quality.warning_codes`，P2/P3 只进数据状态页与本命令输出
+    - **只读**：默认不写库；`--write-history` 才写 `field_coverage_history`，
+      且写前自检更新锁（更新进行中拒绝写基线）
+    - 退出码：0 = 无 P1；1 = 有 P1（可直接用于自动更新后的门禁）
+    """
+    from app.cli.protocol import make_response
+    from app.core.quality.asset_health import run_doctor
+
+    duck, sqlite = _database_stores(initialize=False)
+    payload = run_doctor(
+        duck,
+        sqlite,
+        write_history=write_history,
+        allow_expensive=not fast,
+        max_seconds=max_seconds if max_seconds > 0 else None,
+    )
+    if json_output:
+        typer.echo(json.dumps(
+            make_response("data.doctor", payload), ensure_ascii=False, indent=2, default=str,
+        ))
+    else:
+        typer.echo(_format_doctor_report(payload))
+    raise typer.Exit(code=1 if (payload.get("level_counts") or {}).get("P1") else 0)
+
+
 @app.command()
 def status() -> None:
     """检查数据库连接状态"""
