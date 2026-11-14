@@ -265,9 +265,12 @@ def test_publish_quarantines_broken_stock_and_keeps_its_previous_row(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """存在隔离股时：其余股票照常发布，隔离股的旧快照行必须原样保留。"""
-    _insert_stock(duckdb_store, "000001")
+    # 2026-11-13：门禁增加「≥1/3 上市股违规 = 系统性」的占比判据，因此逐股隔离
+    # 路径必须用「占比低于 1/3」的库来测：4 只库里 1 只违规（25% < 1/3）。
+    for code in ("000001", "000003", "000004"):
+        _insert_stock(duckdb_store, code)
+        _insert_publish_sources(duckdb_store, code)
     _insert_stock(duckdb_store, "000002", total_shares=100, circ_shares=200)
-    _insert_publish_sources(duckdb_store, "000001")
     _insert_publish_sources(duckdb_store, "000002")
     # 隔离股上一代已发布行（旧报告期 + 旧价格），发布后必须还在。
     duckdb_store.write_query(
@@ -287,7 +290,7 @@ def test_publish_quarantines_broken_stock_and_keeps_its_previous_row(
     assert report["reason"] == "publish_gate_quarantined"
     assert report["quarantined_codes"] == ["000002"]
     assert report["quarantined_count"] == 1
-    assert report["success"] == 1
+    assert report["success"] == 3
     assert report["failed"] == 0
     rows = duckdb_store.read_query(
         "SELECT stock_code, report_date, latest_close FROM indicator_snapshot ORDER BY stock_code"
@@ -295,6 +298,8 @@ def test_publish_quarantines_broken_stock_and_keeps_its_previous_row(
     assert rows == [
         {"stock_code": "000001", "report_date": date(2025, 3, 31), "latest_close": 20.0},
         {"stock_code": "000002", "report_date": date(2024, 12, 31), "latest_close": 10.0},
+        {"stock_code": "000003", "report_date": date(2025, 3, 31), "latest_close": 20.0},
+        {"stock_code": "000004", "report_date": date(2025, 3, 31), "latest_close": 20.0},
     ]
 
 

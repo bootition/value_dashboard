@@ -39,10 +39,23 @@ _ERROR_KIND_SEVERITY: Final[dict[str, int]] = {
     "source_unavailable": 4,
 }
 
-#: 源已响应但本结果不代表“源故障”的种类：不增加也不重置熔断计数。
+#: 源已响应但本结果既不是“成功”、也不能证明源健康：**不增加也不重置**
+#: 熔断计数。2026-11-13 P1-a：legal_empty/per_symbol_data_error/truncated_ok
+#: 也必须中性——风控后的死源会持续返回空表/截断/个股格式错，若把它们当
+#: “源正常响应”清零，该 (adapter, data_type) 桶将永不熔断、每轮继续全量打。
 _CIRCUIT_NEUTRAL_ERROR_KINDS: Final[frozenset[str]] = frozenset(
-    {"deadline", "source_unsupported"}
+    {
+        "legal_empty",
+        "per_symbol_data_error",
+        "source_unsupported",
+        "deadline",
+        "truncated_ok",
+    }
 )
+
+#: 2026-11-13 P1-b：>=N 只股票的批量请求若整批 0 行且标记 legal_empty，
+#: 视为“疑似风控空表”（空 DataFrame 而非抛错），升级为 source_unavailable。
+_SUSPICIOUS_EMPTY_BATCH_THRESHOLD: Final[int] = 10
 
 # ─── 适配器优先级配置 ───────────────────────────────────────────────
 ADAPTER_ALIASES: Final[dict[str, str]] = {"akshare": "akshare_eastmoney"}
@@ -579,6 +592,7 @@ class AdapterManager:
         followup_errors: list[str] = []
         followup_kinds: list[str] = []
         attempt_results: list[FetchResult] = []
+        attempt_adapters: list[str] = []
         tried_adapters: list[str] = []
         tripped: dict[str, float] = {}
 
@@ -623,6 +637,7 @@ class AdapterManager:
                     ),
                 )
                 attempt_results.append(last_result)
+                attempt_adapters.append(adapter_name)
                 continue
 
             metadata = result.metadata
@@ -637,10 +652,10 @@ class AdapterManager:
             if counts_toward_circuit:
                 self._record_circuit_failure(adapter_name, request.data_type)
             elif kind in _CIRCUIT_NEUTRAL_ERROR_KINDS:
-                # 预算耗尽/能力缺失不代表源故障：不增加也不重置计数。
+                # 合法空/个股错/能力缺失/预算耗尽/截断：不增加也不重置。
                 pass
-            else:
-                # 源已正常响应（含合法空/个股级问题/截断）→ 连续失败计数归零。
+            elif self._is_clean_success(metadata, result.data):
+                # 只有真正拿到数据且无 error 才算源健康、清零失败计数。
                 self._record_circuit_success(adapter_name, request.data_type)
 
             if self._is_clean_success(metadata, result.data):
@@ -652,6 +667,7 @@ class AdapterManager:
 
             last_result = result
             attempt_results.append(result)
+            attempt_adapters.append(adapter_name)
             note = metadata.reason or metadata.error or kind
             has_data = bool(result.data)
             is_partial = has_data and (
@@ -773,6 +789,26 @@ class AdapterManager:
             detail = "; ".join(dict.fromkeys(n for n in notes if n)) or "无数据"
             truncated = any(result.metadata.truncated for result in attempt_results)
             base = (last_result or attempt_results[-1]).metadata
+            # 2026-11-13 P1-b：大请求整批 0 行 + legal_empty → 疑似风控空表。
+            # 保守方向：宁可多试一次，也不让整批股票被永久写 missing。
+            if (
+                worst_kind == "legal_empty"
+                and len(request.stock_codes) >= _SUSPICIOUS_EMPTY_BATCH_THRESHOLD
+                and not any(result.data for result in attempt_results)
+            ):
+                marker = (
+                    f"batch_suspicious_empty: "
+                    f"requested={len(request.stock_codes)}, rows=0"
+                )
+                detail = f"{detail}; {marker}" if detail else marker
+                worst_kind = "source_unavailable"
+                for attempt_name, attempt in zip(
+                    attempt_adapters, attempt_results, strict=False
+                ):
+                    if attempt.metadata.error_kind == "legal_empty":
+                        self._record_circuit_failure(
+                            attempt_name, request.data_type
+                        )
             error: str | None
             if worst_kind in CIRCUIT_FAILURE_ERROR_KINDS:
                 logger.error(

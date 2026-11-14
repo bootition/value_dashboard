@@ -257,23 +257,24 @@ def test_snapshot_readiness_gate_covers_each_required_input(
         assert rows == [{"stock_code": "OLD001"}]
 
 
-def test_snapshot_quarantines_the_only_broken_share_capital_stock(
+def test_snapshot_hard_blocks_when_the_whole_small_library_is_broken(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2026-11-12 契约 §3/§4：股本关系破坏不再整批 rejected。
+    """股本门禁语义三段演进（本用例随契约同步更新，勿回退）：
 
-    旧语义（fail-closed 一票否决）：任一只股本违规 → ``ready=False`` →
-    ``status=rejected / reason=publish_gate_failed``，全市场一条不写。
-    生产代价：26 只缺口票里 5 只新股越过 90 天豁免线后，5,580 只快照
-    自 10-30 起再没发布过（前端指标全 null、筛选 409）。
-
-    新语义：违规数 ≤ 阈值 → ``hard_block=False``，违规票逐股隔离
-    （``quarantined_codes``），其余照常发布并返回
-    ``status=partial / reason=publish_gate_quarantined``；被隔离股票的
-    旧快照行保留不动。本用例里唯一一只上市股票就是违规票，因此"其余"
-    为空集，断言也随之变为 partial 而非 rejected。
+    1. 2026-11-12 之前（fail-closed 一票否决）：任一只股本违规 → ``ready=False``
+       → ``status=rejected``，全市场一条不写。生产代价：26 只缺口票里 5 只新股
+       越过 90 天豁免线后，5,580 只快照自 10-30 起再没发布过。
+    2. 2026-11-12（契约 §3/§4）：违规票逐股隔离，其余照常发布。本用例当时
+       断言 ``partial / publish_gate_quarantined``——因为唯一一只上市股票就是
+       违规票，"其余"是空集。
+    3. 2026-11-13 P1：零容忍"整库被隔离"。``max(50, 1%)`` 在小库上形同虚设
+       （<101 只时恒为 50），于是补占比判据「≥1/3 上市股同时违规 = 系统性」
+       → ``hard_block``。本 fixture 是 1 只库、100% 违规 → 命中占比判据，
+       断言回到 ``rejected / publish_gate_failed``（但理由已不同：这次是
+       "系统性错乱"，不是"任一只即否决"）。
     """
     _insert_ready_stock(duckdb_store, exchange="SSE", omit="")
     duckdb_store.write_query(
@@ -292,15 +293,18 @@ def test_snapshot_quarantines_the_only_broken_share_capital_stock(
 
     report = calculator.compute_snapshot_for_all()
 
-    assert report["status"] == "partial"
-    assert report["reason"] == "publish_gate_quarantined"
-    assert report["quarantined_codes"] == ["000001"]
-    assert report["quarantined_count"] == 1
+    assert report["status"] == "rejected"
+    assert report["reason"] == "publish_gate_failed"
+    assert report["gate"]["hard_block"] is True
+    # 命中的是占比判据（1/1 ≥ 1/3），不是绝对阈值（1 ≤ 50）
+    assert report["gate"]["hard_block_rule"] == "share"
     assert report["success"] == 0
-    # 隔离股的旧行不得被删除，且不会被新值覆盖。
+    # 整批拒绝：隔离股与非隔离股的旧行都保持原样
     assert duckdb_store.read_query(
         "SELECT stock_code FROM indicator_snapshot ORDER BY stock_code"
     ) == [{"stock_code": "OLD001"}]
+    # 逐股隔离路径（partial + publish_gate_quarantined）由
+    # test_fix20261112_gate_contract.py 的非系统性规模用例覆盖。
 
 
 def test_snapshot_hard_blocks_when_the_gate_reports_a_systemic_violation(

@@ -536,11 +536,39 @@ class IndicatorCalculator:
         ]
         total = len(stocks)
         if total == 0:
-            if quarantine:
-                # 全部股票都被隔离：不是"库是空的"，而是逐股隔离后无可发布项。
+            quarantined_count = int(quarantine.get("quarantined_count") or 0)
+            if quarantined_count:
+                # 2026-11-13 P1：整库被门禁隔离 = "永不出新快照"的事故形态，
+                # 绝不能用 partial 掩盖（partial 会被上层当"部分成功"放过）。
+                # 返回 rejected，让 update.py 的 merge_step_status 冒泡到最坏值。
+                logger.error(
+                    "指标快照发布集合被门禁隔离光，整批拒绝发布: quarantined=%s",
+                    quarantined_count,
+                )
+                return {
+                    "status": "rejected",
+                    "reason": "publish_gate_quarantined_all",
+                    "total": len(readiness),
+                    "success": 0,
+                    "failed": 0,
+                    **quarantine,
+                }
+            if missing_codes:
+                # 2026-11-13 修复：`quarantine` 也可能只承载"输入缺口"标记
+                # （没有 quarantined_count），此前直接取键会 KeyError。
                 return {
                     "status": "partial",
-                    "reason": "publish_gate_quarantined",
+                    "reason": "minimum_data_not_ready",
+                    "total": len(readiness),
+                    "success": 0,
+                    "failed": len(missing_codes),
+                    "failed_codes": missing_codes[:20],
+                    **quarantine,
+                }
+            if quarantine:
+                return {
+                    "status": "partial",
+                    "reason": quarantine.get("reason") or "no_publishable_stocks",
                     "total": len(readiness),
                     "success": 0,
                     "failed": 0,

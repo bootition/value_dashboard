@@ -212,8 +212,12 @@ def test_ready_returns_503_when_no_readiness_evidence_exists(
 def test_readiness_does_not_block_on_share_capital_gaps_below_the_threshold(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    """缺口数 ≤ 阈值（=发布侧逐股隔离）→ ready 仍为 True，但计数如实披露。"""
-    for code in ("000001", "000002"):
+    """缺口占比 < 1/3（=发布侧逐股隔离）→ ready 仍为 True，但计数如实披露。
+
+    2026-11-13 起门禁/readiness 共用「绝对阈值 OR ≥1/3 占比」判据，所以这里
+    必须造一个占比低于 1/3 的库（4 只库里 1 只违规 = 25%）。
+    """
+    for code in ("000001", "000002", "000003", "000004"):
         duckdb_store.write_query(
             """INSERT INTO stock_meta
                    (stock_code, name, exchange, listing_date, is_st, is_suspended)
@@ -269,32 +273,42 @@ def test_readiness_blocks_when_share_capital_gaps_exceed_the_threshold(
     assert readiness["ready"] is False
 
 
+@pytest.mark.parametrize(("total", "broken"), [(10, 2), (5, 5)])
 def test_readiness_keeps_share_capital_gate_aligned_with_publish_gate(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+    total: int, broken: int,
 ) -> None:
     """同一状态两个结论必须消失：readiness 阻断 ⇔ 发布门禁 hard_block。
 
-    两边都只经由 `gate_hard_block_threshold` 判定阈值，因此同一 fixture 下
-    两个布尔值必须一致（小库：缺口 5 只 ≤ 阈值 50 → 两边都不阻断）。
+    两边都只经由 `share_capital_hard_block`（绝对阈值 OR ≥1/3 占比）判定，
+    因此同一 fixture 下两个布尔值必须一致：10 只库 2 只违规（20%）→ 都不阻断；
+    5 只库 5 只违规（100%）→ 都阻断（占比判据）。
     """
     from app.core.data_quality import snapshot_publish_gate
 
-    for index in range(5):
-        code = f"60000{index}"
-        duckdb_store.write_query(
+    codes = [f"6000{index}" for index in range(total)]
+    with duckdb_store.write_connection() as connection:
+        connection.executemany(
             """INSERT INTO stock_meta (stock_code, name, exchange, listing_date)
                VALUES (?, ?, 'SSE', '2020-01-01')""",
-            [code, code],
+            [(code, code) for code in codes],
         )
-    duckdb_store.write_query("UPDATE stock_meta SET total_shares = 100, circ_shares = 200")
+        # 先给**所有**股票合法股本（否则 NULL 股本在 90 天豁免外同样是违规，
+        # 会让 gap_count 从 broken 变成 total，测例失真）。
+        connection.execute("UPDATE stock_meta SET total_shares = 100, circ_shares = 80")
+        connection.execute(
+            "UPDATE stock_meta SET circ_shares = 200 "
+            f"WHERE stock_code IN ({', '.join('?' for _ in range(broken))})",
+            codes[:broken],
+        )
 
     gate = snapshot_publish_gate(duckdb_store, sqlite_store)
     readiness = minimum_data_readiness(duckdb_store, sqlite_store)
 
     assert gate["threshold"] == readiness["share_capital_policy"]["threshold"]
     assert gate["hard_block"] is readiness["share_capital_policy"]["blocking"]
-    assert gate["hard_block"] is False
-    assert readiness["share_capital_policy"]["gap_count"] == gate["violation_count"] == 5
+    assert gate["violation_count"] == readiness["share_capital_policy"]["gap_count"] == broken
+    assert gate["hard_block"] is (broken * 3 >= total)
 
 
 # ─── P2：price_age_days 必须是北京时区 ───────────────────────────────

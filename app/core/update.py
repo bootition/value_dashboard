@@ -1642,6 +1642,55 @@ class IncrementalUpdater:
         logger.info("[增量] %d 只 qfq 已完成全历史重拉，移出待重拉集合", cleared)
         return cleared
 
+    def _qfq_lag_summary(
+        self, target_codes: list[str], target_date: str,
+    ) -> dict[str, Any]:
+        """Count target stocks whose local qfq history still ends before target_date.
+
+        2026-11-13 P1（1）：生产 job 207 收尾 0 失败、却只有 959/5,572 只 qfq
+        到达当日（raw 已到 11-13）。因为 raw/qfq 是成对抓取的，两侧都可能
+        "成功但只到前一天"（源侧 qfq 滞后），步骤只按 fail_count 判定就会
+        报 success，下一轮又把 4,613 只重新选中，形成"每轮补 qfq"的稳态。
+
+        这里用一条 SQL 统计目标集内 ``MAX(price_daily_qfq.trade_date) < target_date``
+        的只数（NULL 也算滞后），供调用方把假绿降级为 partial(qfq_lagged)。
+        """
+        codes = [str(code) for code in dict.fromkeys(target_codes) if code]
+        if not codes:
+            return {"qfq_lag_count": 0, "qfq_lag_ratio": 0.0, "qfq_lag_codes": []}
+        try:
+            rows = self.duck.read_query(
+                """WITH target AS (
+                       SELECT unnest(?::VARCHAR[]) AS stock_code
+                   ), latest AS (
+                       SELECT qfq.stock_code, MAX(qfq.trade_date) AS latest_qfq_date
+                       FROM price_daily_qfq qfq
+                       JOIN target ON target.stock_code = qfq.stock_code
+                       GROUP BY qfq.stock_code
+                   )
+                   SELECT target.stock_code AS stock_code
+                   FROM target
+                   LEFT JOIN latest ON latest.stock_code = target.stock_code
+                   WHERE latest.latest_qfq_date IS NULL
+                      OR latest.latest_qfq_date < CAST(? AS DATE)
+                   ORDER BY target.stock_code""",
+                [codes, target_date],
+            )
+        except Exception as error:
+            logger.warning("统计 qfq 滞后失败（不改变步骤状态）: %s", error)
+            return {
+                "qfq_lag_count": 0,
+                "qfq_lag_ratio": 0.0,
+                "qfq_lag_codes": [],
+                "qfq_lag_error": str(error),
+            }
+        lag_codes = [str(row["stock_code"]) for row in rows]
+        return {
+            "qfq_lag_count": len(lag_codes),
+            "qfq_lag_ratio": round(len(lag_codes) / len(codes), 4),
+            "qfq_lag_codes": lag_codes[:20],
+        }
+
     def _xdxr_event_fingerprints(self, codes: list[str]) -> set[tuple[str, str, str, str]]:
         """Fingerprint existing xdxr events so new/changed ones can be detected.
 
@@ -2365,7 +2414,12 @@ class IncrementalUpdater:
             before_by_code = {row["stock_code"]: row["amount"] for row in before}
             from app.core.buyback import BuybackUpdater
 
-            report = BuybackUpdater(duck=self.duck, sqlite=self.sqlite).refresh_all()
+            # 2026-11-13 P1（3）：必须注入更新进程共享的 adapter_mgr，否则
+            # BuybackUpdater 内部会自建 AdapterManager() —— 每次调用都是全新
+            # 熔断状态，东财回购源即使持续失败也永远不会熔断（其余域早已注入）。
+            report = BuybackUpdater(
+                duck=self.duck, sqlite=self.sqlite, adapter=self.adapter_mgr,
+            ).refresh_all()
             if report.get("status") != "success":
                 return report
             after = self.duck.read_query(
@@ -3676,13 +3730,38 @@ class IncrementalUpdater:
                 "[增量] 价格失败代码 %d 只: %s",
                 len(failed_codes), ", ".join(failed_codes[:20]),
             )
+        # 2026-11-13 P1（1）：raw 全成功但 qfq 大面积滞后 → 必须降级 partial，
+        # 不能让"0 失败"掩盖 4,613 只 qfq 停在昨天的假绿。
+        qfq_lag = self._qfq_lag_summary(
+            [str(stock["stock_code"]) for stock in target_stocks], target_date,
+        )
+        qfq_lag_threshold = max(5, int(len(target_stocks) * 0.01))
+        step_status = "success" if fail_count == 0 else "partial"
+        step_reason: str | None = None
+        if fail_count == 0 and qfq_lag["qfq_lag_count"] > qfq_lag_threshold:
+            step_status = "partial"
+            step_reason = "qfq_lagged"
+            logger.warning(
+                "[增量] qfq 滞后 %d/%d 只（阈值 %d）→ 价格步骤降级 partial(qfq_lagged): %s",
+                qfq_lag["qfq_lag_count"],
+                len(target_stocks),
+                qfq_lag_threshold,
+                ", ".join(qfq_lag["qfq_lag_codes"]),
+            )
         elapsed_seconds = max(time.monotonic() - update_started, 0.001)
         return {
-            "status": "success" if fail_count == 0 else "partial",
+            "status": step_status,
+            "reason": step_reason,
             "total": len(target_stocks),
             "success": success_count,
             "failed": fail_count,
             "failed_codes": failed_codes[:20],
+            # qfq 滞后可观测性（job_logs 可见）
+            "qfq_lag_count": qfq_lag["qfq_lag_count"],
+            "qfq_lag_ratio": qfq_lag["qfq_lag_ratio"],
+            "qfq_lag_threshold": qfq_lag_threshold,
+            "qfq_lag_codes": qfq_lag["qfq_lag_codes"],
+            **({"qfq_lag_error": qfq_lag["qfq_lag_error"]} if "qfq_lag_error" in qfq_lag else {}),
             "xdxr_full_refetch": len(xdxr_codes),
             "raw_full_refetch": raw_full_refetch,
             "elapsed_seconds": round(elapsed_seconds, 3),

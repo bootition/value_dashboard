@@ -20,7 +20,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.base import FetchRequest
@@ -85,6 +85,23 @@ class CapitalHistoryUpdater:
     _CROSS_CACHE_OK_STATUSES = {"verified", "empty"}
     _CROSS_ERROR_RETRY_DELAY_SECONDS = 1800  # error 行 30 分钟内不重试
     CROSS_ERROR_ABORT_THRESHOLD = 8          # 连续 N 次交叉错误中止批次
+
+    @staticmethod
+    def _parse_cache_moment(value: Any) -> datetime | None:
+        """Parse a cache timestamp defensively; naive values are treated as UTC.
+
+        历史行可能来自不带时区的旧写入（`datetime.fromisoformat` 会返回 naive），
+        直接与 `datetime.now(UTC)` 相减会抛 TypeError 并炸掉整条 due 计算。
+        """
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
 
     def _ensure_cross_cache_table(self) -> None:
         try:
@@ -778,28 +795,32 @@ class CapitalHistoryUpdater:
                               p.latest_price, CURRENT_DATE - INTERVAL '7 days'))"""
             )
             now = datetime.now(UTC)
+            watermark = timedelta(days=self._MAIN_CACHE_TTL_DAYS)
             for row in rows:
                 code = row["stock_code"]
                 cached = main_cache.get(code)
                 status = (cached or {}).get("main_status")
-                fetched_raw = (cached or {}).get("main_fetched_at")
-                if status == "ok" and fetched_raw:
-                    try:
-                        fetched = datetime.fromisoformat(fetched_raw)
-                    except ValueError:
-                        fetched = None
-                    if fetched is not None and (now - fetched).days < self._MAIN_CACHE_TTL_DAYS:
-                        # 主链已成功抓取且在 TTL 内：不得因为
-                        # 锚点天然早于最新价格而重复排在队头。
-                        continue
+                fetched = self._parse_cache_moment(
+                    (cached or {}).get("main_fetched_at")
+                )
+                # 2026-11-13 P1（2）：最近核验时间水位。
+                # 股本变动一年才几次，`latest_cap < latest_price` 对几乎全部
+                # 5,572 只恒真；没有水位时队头永远是同一批股票（每轮 20 只、
+                # 永远续不完，还会连带每轮重算这 20 只的统计域）。
+                # 只要 7 天内抓过主链（成功或失败），本轮就不 due：
+                # 失败由 retry_list（有 max_retries 上限）负责，不靠 due 扫描
+                # 反复重试同一批队头。无缓存/无记录（fetched is None）照常 due。
+                if fetched is not None and (now - fetched) < watermark:
+                    continue
+                if status == "ok":
                     main_due.append((1, code))  # 过期主链，周期复刷
                     continue
-                if status == "error" and fetched_raw:
-                    try:
-                        fetched = datetime.fromisoformat(fetched_raw)
-                    except ValueError:
-                        fetched = None
-                    if fetched is not None and (now - fetched).total_seconds() < self._MAIN_ERROR_RETRY_DELAY_SECONDS:
+                if status == "error":
+                    if (
+                        fetched is not None
+                        and (now - fetched).total_seconds()
+                        < self._MAIN_ERROR_RETRY_DELAY_SECONDS
+                    ):
                         continue
                     main_due.append((2, code))
                     continue

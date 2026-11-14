@@ -31,6 +31,11 @@ _SCREENING_BLOCKING_WARNINGS = {
 # 正式库 ~5,580 只上市股票 → 阈值 max(50, 55) = 55 只。
 GATE_HARD_BLOCK_MIN = 50
 GATE_HARD_BLOCK_RATIO = 0.01
+# 2026-11-13 P1：绝对阈值在小库/退化库上形同虚设——上市股 <101 只时阈值恒为 50，
+# 于是 30 只库里 30 只全违规也只会被逐股隔离、ready=True、发布集合空（等价于
+# "永不出新快照"）。补一条与库大小无关的占比判据：**≥1/3 的上市股同时违规**
+# 一律视为系统性错乱。分母 3 用整数比较实现，避免浮点边界问题。
+GATE_HARD_BLOCK_SHARE_DIVISOR = 3
 
 
 def checking_data_readiness() -> dict:
@@ -562,6 +567,36 @@ def gate_hard_block_threshold(listed_count: int) -> int:
     return max(GATE_HARD_BLOCK_MIN, int(listed_count * GATE_HARD_BLOCK_RATIO))
 
 
+def gate_hard_blocks_by_share(violation_count: int, listed_count: int) -> bool:
+    """「≥1/3 上市股同时违规」→ 系统性错乱（与库大小无关，小库也能触发）。
+
+    用整数比较 ``violation_count * 3 >= listed_count`` 实现"≥1/3"，
+    而不是 ``violation_count >= int(listed_count / 3)``：后者在 20 只库里
+    会把 6 只（30%）误判成系统性（``int(20/3) == 6``），与"≥1/3"不符。
+    空库（``listed_count <= 0``）或零违规一律不触发。
+    """
+    if listed_count <= 0 or violation_count <= 0:
+        return False
+    return violation_count * GATE_HARD_BLOCK_SHARE_DIVISOR >= listed_count
+
+
+def share_capital_hard_block(violation_count: int, listed_count: int) -> bool:
+    """发布门禁与 readiness 共用的硬阻断判定（契约 §3 唯一实现）。
+
+    命中任一即整批拒绝（hard_block）：
+    * ``violation_count > gate_hard_block_threshold(listed_count)``
+      —— 系统性规模（正式库 5,580 只 → 55 只）；
+    * ``violation_count >= listed_count / 3``
+      —— 占比兜底，小库/退化库上同样能识别"整库都被隔离"。
+    ``snapshot_publish_gate`` 与 ``minimum_data_readiness`` 都必须调用本函数，
+    禁止各写一份判定（否则同一状态会得出两个相反结论）。
+    """
+    return (
+        violation_count > gate_hard_block_threshold(listed_count)
+        or gate_hard_blocks_by_share(violation_count, listed_count)
+    )
+
+
 def share_capital_violations(duck: DuckDBStore) -> list[str]:
     """Deprecated alias — kept so existing callers keep one implementation (§3)."""
     return listed_share_capital_gap_codes(duck)
@@ -604,15 +639,26 @@ def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
             "violation_count": 0,
             "listed_count": 0,
             "threshold": max(GATE_HARD_BLOCK_MIN, 0),
+            "hard_block_rule": "check_unavailable",
         }
     threshold = gate_hard_block_threshold(listed_count)
-    hard_block = len(violations) > threshold
+    violation_count = len(violations)
+    # 2026-11-13 P1：绝对阈值 OR 占比判据（≥1/3），唯一实现见
+    # share_capital_hard_block。占比判据让 30 只的小库也能识别"整库被隔离"。
+    over_threshold = violation_count > threshold
+    over_share = gate_hard_blocks_by_share(violation_count, listed_count)
+    hard_block = over_threshold or over_share
+    hard_block_rule = (
+        "threshold" if over_threshold else "share" if over_share else None
+    )
     if hard_block:
         logger.error(
-            "股本完整性违规 %s 只 > 阈值 %s 只（上市 %s 只），疑似系统性单位错乱，整批拒绝发布",
-            len(violations),
-            threshold,
+            "股本完整性违规 %s 只（上市 %s 只，绝对阈值 %s 只，命中=%s），"
+            "疑似系统性单位错乱，整批拒绝发布",
+            violation_count,
             listed_count,
+            threshold,
+            hard_block_rule,
         )
     elif violations:
         logger.warning(
@@ -626,9 +672,11 @@ def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
         "ready": not hard_block,
         "reason": "share_capital_integrity" if hard_block else None,
         "hard_block": hard_block,
+        # 命中哪条规则：threshold（绝对阈值）/ share（≥1/3 占比）/ None。
+        "hard_block_rule": hard_block_rule,
         "quarantined_codes": list(violations),
         "violations": violations[:20],
-        "violation_count": len(violations),
+        "violation_count": violation_count,
         "listed_count": listed_count,
         "threshold": threshold,
     }
@@ -985,7 +1033,11 @@ def minimum_data_readiness(
     # 未超阈值时缺失计数仍在 missing_counts["share_capital"] 里如实披露。
     share_capital_gaps = issues.get("share_capital") or []
     share_capital_threshold = gate_hard_block_threshold(len(rows))
-    share_capital_blocking = len(share_capital_gaps) > share_capital_threshold
+    # 与 snapshot_publish_gate 同一判定：绝对阈值 OR ≥1/3 占比。两边必须
+    # 同源，否则同一状态会出现"发布侧整批拒绝 / readiness=ready"或反之。
+    share_capital_blocking = share_capital_hard_block(
+        len(share_capital_gaps), len(rows),
+    )
     if share_capital_blocking:
         blocking["share_capital"] = share_capital_gaps
     return {

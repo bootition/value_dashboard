@@ -131,14 +131,12 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     根本不属于 share_capital 缺口（缺口由 price_freshness / financial_period
     等类别披露），断言为 "不在 missing_counts 里"。
 
-    2026-11-13 P1（语义变更二）：readiness 的 share_capital 不再"任一缺口即
-    blocking"，改用与 ``snapshot_publish_gate`` 同一阈值政策
-    （``gate_hard_block_threshold``）。小库阈值恒为下限 50，因此这里 1 只缺口
-    **不阻断** ready，只在 ``missing_counts["share_capital"]`` 与
-    ``share_capital_policy`` 里如实披露 —— 否则发布侧"逐股隔离后正常发布"与
-    readiness 侧"ready=False"会给同一状态两个相反结论（``/api/ready`` 假红）。
-    越过阈值的阻断分支见
-    ``test_fix20261113_probe_ready.py::test_readiness_blocks_when_share_capital_gaps_exceed_the_threshold``。
+    2026-11-13 P1（语义变更二）：readiness 的 share_capital 改用与
+    ``snapshot_publish_gate`` 同一判定 ``share_capital_hard_block``：
+    「绝对阈值``max(50,1%)`` **或** ≥1/3 上市股违规」。本 fixture 只有 1 只上市
+    股票，1 只缺口即 100% ≥ 1/3 → 判为系统性 → 仍阻断 ready（与旧断言一致，
+    但理由变成占比判据，而不是"任一缺口即否决"）。缺口计数与
+    ``share_capital_policy`` 在任何情况下都如实披露。
     """
     duckdb_store.write_query(
         """INSERT INTO stock_meta
@@ -161,12 +159,12 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
 
     readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
 
-    # 豁免失效 → 缺口成立并如实计数；但 1 只 ≤ 阈值 50，不据此阻断 ready。
+    # 豁免失效 → 缺口成立并如实计数；1/1 = 100% ≥ 1/3 → 占比判据阻断。
     assert readiness["missing_counts"]["share_capital"] == 1
     assert readiness["missing"]["share_capital"] == ["301999"]
-    assert readiness["share_capital_policy"]["blocking"] is False
-    assert readiness["share_capital_policy"]["quarantined"] is True
-    assert readiness["ready"] is True
+    assert readiness["share_capital_policy"]["blocking"] is True
+    assert readiness["share_capital_policy"]["quarantined"] is False
+    assert readiness["ready"] is False
 
     duckdb_store.write_query(
         """UPDATE stock_meta SET circ_shares = 50
