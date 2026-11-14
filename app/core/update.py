@@ -648,12 +648,6 @@ class IncrementalUpdater:
             if detail_cb is not None:
                 detail_cb("indicators", info)
 
-        if check_report["blocked"]:
-            report_step("announcements", {
-                "status": "partial",
-                "reason": "authoritative announcement and financial freshness check is unavailable",
-            })
-
         # 1. 价格新鲜度是每日启动的首要目标。低频股票池/行业或公告源
         # 变慢时，不应阻塞已上市股票的日线补齐。
         if check_report["new_trading_days"]:
@@ -686,6 +680,10 @@ class IncrementalUpdater:
                     )
                 )
                 report_step("indicators", snapshot_step)
+            # 2026-11-14 清理：早先这里有一个"blocked 时先写 partial"的兜底，
+            # 而主流程随后会用 `_announcement_step_result()` 覆盖它（写两次、
+            # 后者覆盖前者）。已删除死写；有界更新（--max-stocks）按既有契约
+            # 只跑价格 + 指标两段，不在此处塞入公告步骤。
             report["status"] = aggregate_job_status(report["steps"])
             report["finished_at"] = datetime.now(UTC).isoformat()
             logger.info("有界价格更新完成: %s", report["status"])
