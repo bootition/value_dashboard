@@ -34,6 +34,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -50,7 +51,7 @@ from typing import Any
 import pandas as pd
 import requests
 
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -858,8 +859,13 @@ class SupplementFetcher:
         fetched_at: datetime,
         src_hash: str,
         periods: Sequence[str],
+        lineage_payload: bytes | None = None,
     ) -> dict[str, int]:
-        """按数据集写入模式落库，返回 {table: 写入/更新行数}。"""
+        """按数据集写入模式落库，返回 {table: 写入/更新行数}。
+
+        `lineage_payload`：本轮请求描述（JSON 字节），会用 `src_hash` 归档进
+        `raw_response_archive`，使 `fetch_batch` 的摘要与归档一一对应。
+        """
         written: dict[str, int] = {}
         with self.duck.transaction() as conn:
             for table, columns in spec.columns.items():
@@ -909,6 +915,17 @@ class SupplementFetcher:
                 finally:
                     conn.unregister("_supp_rows")
                 written[table] = len(frame)
+            # 先归档 lineage payload，再登记批次：否则 batch_hash 侧会判
+            # "有摘要、无归档" = 真断裂（正是本轮事故的形态）。
+            if lineage_payload is not None:
+                archive_raw_response_if_absent(
+                    conn,
+                    raw_response_hash=src_hash,
+                    source=f"supplement:{spec.endpoint}",
+                    fetch_time=fetched_at,
+                    payload=lineage_payload,
+                    api_version=spec.api_version,
+                )
             conn.execute(
                 """INSERT INTO fetch_batch
                    (batch_id, data_type, source, adapter_version, fetch_time,
@@ -999,7 +1016,29 @@ class SupplementFetcher:
 
         batch_id = uuid.uuid4().hex
         fetched_at = datetime.now(UTC).replace(tzinfo=None)
-        src_hash = f"{spec.endpoint}:{batch_id}"[:32]
+        # 2026-11-15（reports/124）：这里原来写 `f"{spec.endpoint}:{batch_id}"[:32]`，
+        # 产出的是 "xjllbAjaxNew:451ef0802792468b909c" 这种 **32 位非十六进制**串。
+        # 数据质量规则按"32 位且形如 MD5 = legacy 历史批次"判定，其余形态一律算
+        # **真 lineage 断裂** → LINEAGE_INVALID → 整个快照被遮蔽（实测 13 个批次
+        # 把 5,579 只股票的 34 个指标全部打成 null）。
+        # 改成内容寻址：对"本轮请求描述"取 SHA256（64 位十六进制），并把该描述
+        # 作为 payload 归档，使 fetch_batch.raw_response_hash 与归档一一对应。
+        lineage_payload = json.dumps(
+            {
+                "endpoint": spec.endpoint,
+                "endpoints": list(spec.endpoints or ()),
+                "batch_id": batch_id,
+                "data_type": spec.data_type,
+                "source": SOURCE,
+                "api_version": spec.api_version,
+                "codes": sorted(c for c, _ in pending),
+                "periods": [str(p)[:10] for p in periods],
+                "fetched_at": fetched_at.isoformat(),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ).encode("utf-8")
+        src_hash = hashlib.sha256(lineage_payload).hexdigest()
         rows_by_table: dict[str, list[dict[str, Any]]] = {table: [] for table in spec.columns}
         fetched_codes: list[str] = []
         failed_codes: list[str] = []
@@ -1061,7 +1100,7 @@ class SupplementFetcher:
             written = self._persist_rows(
                 spec, rows_by_table,
                 batch_id=batch_id, fetched_at=fetched_at, src_hash=src_hash,
-                periods=resolved_periods,
+                periods=resolved_periods, lineage_payload=lineage_payload,
             ) if fetched_codes else {}
         except Exception as error:  # noqa: BLE001 - 落库失败整批回滚，旧值保留
             logger.warning("补采落库失败(%s): %s", key, error)

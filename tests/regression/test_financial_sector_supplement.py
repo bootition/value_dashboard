@@ -552,3 +552,54 @@ def test_exchange_gain_dry_run_does_not_write(
         "SELECT exchange_gain FROM income_statement WHERE stock_code = '600028'"
     )[0]["exchange_gain"] is None
     assert _count(duckdb_store, "fetch_batch") == batches_before
+
+
+def test_supplement_batch_lineage_hash_is_sha256_and_archived(
+    fetcher, duckdb_store, monkeypatch,
+) -> None:
+    """补采批次的血缘摘要必须是 64 位 SHA256，且**先归档再登记**（reports/124）。
+
+    背景（2026-11-15 事故）：`refresh()` 原来写
+    `src_hash = f"{spec.endpoint}:{batch_id}"[:32]`，产出
+    `xjllbAjaxNew:451ef0802792468b909` 这种 **32 位非十六进制**串。数据质量规则
+    按"32 位且形如 MD5 = legacy 历史批次"判定，其余形态一律算真血缘断裂 →
+    `LINEAGE_INVALID` → `_SNAPSHOT_BLOCKING_WARNINGS` → **整个快照被遮蔽**
+    （实测 13 个批次让 5,579 只股票的 34 个指标全部变 null）。
+
+    本用例钉死三件事：① 摘要是 64 位十六进制；② 该摘要能在
+    `raw_response_archive_valid_hash` 里查到（不是"有摘要无归档"）；③ 归档
+    payload 是请求描述（含 batch_id / periods），不是空。
+    """
+    import re
+
+    _seed_stock(duckdb_store, "601398", "工商银行", sw_level1="银行")
+    _seed_income(duckdb_store, "601398", "2026-09-30", revenue=100.0)
+    monkeypatch.setattr(
+        SupplementFetcher, "_fetch_rows",
+        lambda self, spec, code, exchange, dates, timeout=25.0: _fake_icbc_rows(),
+    )
+
+    report = fetch_financial_sector.run(
+        fetcher, limit=5, write=True, sample=1, timeout=1.0,
+    )
+    assert report["status"] in {"success", "ok"}
+
+    batch = duckdb_store.read_query(
+        "SELECT batch_id, raw_response_hash FROM fetch_batch "
+        "ORDER BY fetch_time DESC LIMIT 1"
+    )[0]
+    digest = str(batch["raw_response_hash"])
+    assert re.fullmatch(r"[0-9a-f]{64}", digest), (
+        f"批次摘要必须是 64 位 SHA256，实际={digest!r}（32 位非十六进制会被判成血缘断裂）"
+    )
+    archived = duckdb_store.read_query(
+        "SELECT 1 FROM raw_response_archive_valid_hash WHERE raw_response_hash = ?",
+        [digest],
+    )
+    assert archived, "摘要必须能在归档中查到，否则 batch_archive_gap_rows>0 → 全站遮蔽"
+    payload = duckdb_store.read_query(
+        "SELECT OCTET_LENGTH(payload) AS n FROM raw_response_archive_all "
+        "WHERE raw_response_hash = ?",
+        [digest],
+    )[0]["n"]
+    assert payload and payload > 0, "归档 payload 不能为空"
