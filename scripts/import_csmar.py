@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import duckdb
 import pandas as pd
 
+from app.core.storage.cold_archive_guard import guard_writable_or_exit  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
 
@@ -543,6 +544,7 @@ def main():
 
     tables = args.tables or ["stock_meta", "balance_sheet", "income_statement", "cash_flow", "dividends"]
     if not args.dry_run:
+        guard_writable_or_exit(store, tables, logger=logger)
         backup_tables(store, tables, tag="import-csmar")
     results = {}
     importers = {

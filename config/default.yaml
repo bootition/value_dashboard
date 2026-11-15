@@ -198,10 +198,24 @@ logging:
   level: INFO
   format: '%(asctime)s %(levelname)s %(name)s: %(message)s'
 
-# 资产健康检查（reports/119）——`app/core/quality/asset_health.py` + `vd data doctor`
-# 12 条规则每轮体检跑一次：P1 进 data_quality.warning_codes（披露型，不遮蔽指标、
-# 不让筛选 409），P2/P3 只进数据状态页与 doctor 输出。
+# 资产健康检查（reports/119 / reports/120 §5）——`app/core/quality/asset_health.py` + `vd data doctor`
+# 13 条规则、两个档位。每条规则带 severity（block | disclose | inventory）：
+#   block     = 屏幕上的数字可能不可信 / 该域已失效 → 进 level_counts 与
+#               p1_codes（→ data_quality.warning_codes、doctor 退出码 1）；
+#   disclose  = 如实披露的待办/维护项（链路停摆、数据包过期、结构性可空字段
+#               覆盖率低……）→ 看得见，但不遮蔽数字、不让退出码变红；
+#   inventory = 纯清单（零引用资产），永远不参与健康判定。
 asset_health:
+  # 分层调度契约（reports/120 §5 J10）：
+  #   cheap     = 目标 <5s：数据状态页 + 每轮自动更新后都跑；
+  #   expensive = 归档交叉核验（正式库实测 ~35s）：只由 `vd data doctor` 全量
+  #               或每日定时任务跑。状态页不跑它，但会从 data_refresh_state
+  #               读取"上次运行时间 + 结果摘要"附在 asset_health.expensive
+  #               （没有记录则标 status=not_run）。
+  # 取值是调度语义标签，由调用方（状态页/自动更新/定时任务）自行解释。
+  schedule:
+    cheap: every_update
+    expensive: daily
   # 整体时间预算（秒）。正式库放宽：`vd data doctor` 是人工/更新后命令，
   # 10s 是给测试库和轻量体检的上限；超过预算的规则标 skipped 并如实披露。
   max_seconds: 10.0
@@ -215,6 +229,15 @@ asset_health:
   deducted_profit_coverage_pct: 50.0  # DEDUCTED_PROFIT_GAP
   package_lag_trading_days: 5     # PACKAGE_STALE
   static_lag_periods: 1           # STATIC_TABLE_STALE：落后 1 期即告警
+  # CHAIN_PROGRESS_STALLED：待补数量 ≥ 上一轮且 ≥ 该值即判"跑也白跑"
+  # （默认 1：只要还有待补且没下降就算停滞）。
+  chain_stall_min_backlog: 1
+  # 追加的"结构性可空"字段（亏损/无分红/无商誉即合法为空）。代码里已有默认
+  # 白名单（pe_ttm/pcf_ttm/payout_ratio/dividend_yield/ttm_dividend_yield/
+  # goodwill_ratio/ev_ebitda + div_yield_spread_*/leverage_* 前缀），这里只能**追加**，
+  # 用于不同库/口径的补充；追加后这些字段的 FIELD_COVERAGE_LOW / NULL_REASON_MISSING
+  # 只披露（severity=disclose），不遮蔽数字、不让医生退出码变红。
+  # structural_null_fields: ["some_field_that_is_legally_null"]
   # 覆盖率类判定（FIELD_COVERAGE_LOW/DROP、NULL_REASON_MISSING、
   # DEDUCTED_PROFIT_GAP）的最小样本量：低于该行数的库上覆盖率只有 0%/100%
   # 两种结果，判定没有意义（S1 夹具库曾被 1 行快照误报 55 条 P1）。

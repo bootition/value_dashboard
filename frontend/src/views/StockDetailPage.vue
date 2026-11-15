@@ -14,6 +14,8 @@ import StockTocNav from '../components/StockTocNav.vue'
 import type { TocItem } from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
+import PointInTimeCard from '../components/PointInTimeCard.vue'
+import AnnouncementTimelineCard from '../components/AnnouncementTimelineCard.vue'
 import MetricHistoryChart from '../components/MetricHistoryChart.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
 import { fmt } from '../utils/formatters.ts'
@@ -195,6 +197,8 @@ const safetyMetricOptions = [
 const tocItems: readonly TocItem[] = [
   { id: 'overview', label: '概览' },
   { id: 'valuation', label: '估值与市场' },
+  { id: 'point-in-time', label: '当时可见' },
+  { id: 'announcements', label: '公告时间线' },
   { id: 'operations', label: '经营与成长' },
   { id: 'safety', label: '财务安全' },
   { id: 'return', label: '股东回报' },
@@ -312,6 +316,9 @@ onUnmounted(() => {
       <div class="detail-topbar">
         <router-link to="/stock" class="stock-search-back">← 返回个股搜索</router-link>
       </div>
+      <p class="caliber-note">
+        口径提示：本页默认是重述回看口径（最新重述值），回测请用『当时可见』。
+      </p>
 
       <div class="stock-detail-layout">
         <div class="stock-detail-main">
@@ -376,6 +383,13 @@ onUnmounted(() => {
           >
             <div class="section-inner-block">
               <ResearchStatisticsCard :stock-code="stockCode" default-metric="pe_ttm" />
+            </div>
+            <!-- reports/119 §5 D 类：时点可见财务值 + 公告时间线（挨着历史研究统计） -->
+            <div id="point-in-time" :ref="setSectionRef('point-in-time')" class="section-inner-block stock-section">
+              <PointInTimeCard :stock-code="stockCode" />
+            </div>
+            <div id="announcements" :ref="setSectionRef('announcements')" class="section-inner-block stock-section">
+              <AnnouncementTimelineCard :stock-code="stockCode" />
             </div>
           </IndicatorGroupSection>
 
@@ -446,6 +460,15 @@ onUnmounted(() => {
 }
 .detail-topbar {
   margin-bottom: 21px;
+}
+.caliber-note {
+  margin: -10px 0 18px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: #f3f8f3;
+  color: #6c8074;
+  font-size: 11px;
+  line-height: 1.6;
 }
 .stock-search-back {
   display: inline-block;

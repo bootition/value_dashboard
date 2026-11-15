@@ -1298,6 +1298,49 @@ DIVIDEND_INDICATOR_FIELDS = (
     "div_yield_spread_30y",
 )
 
+# ─── 字段级遮蔽策略（reports/120 §5 J9）──────────────────────────────────────
+# 背景：`vd data doctor` 一次报 32 条 FIELD_COVERAGE_LOW + 54 条
+# NULL_REASON_MISSING，真问题（扩展指标报告期错位、扣非整期空）被噪音淹没；
+# 而这两条真问题本该**字段级遮蔽**，不是全站阻断。此处的策略表是"哪个
+# warning code 让哪些字段不可信"的唯一真相，筛选接口与引擎都从这里取。
+#
+# 维护约定：新增一条要有"为什么只坏这几个字段"的判据；宁可少遮（可解释）
+# 也不要多遮（整页 NULL 等于把信息全丢掉）。
+DEDUCTED_PROFIT_INDICATOR_FIELDS: tuple[str, ...] = (
+    "deducted_profit_yoy",
+    "deducted_profit_cagr3",
+    "deducted_profit_cagr5",
+    "income.deducted_net_profit",
+)
+
+# 扩展域字段清单从筛引擎常量派生（单一真相），延迟导入避免循环依赖。
+def _extended_indicator_fields() -> tuple[str, ...]:
+    """扩展指标域字段清单（来自 `screening.engine.EXTENDED_COLUMNS`）。"""
+    try:
+        from app.core.screening.engine import EXTENDED_COLUMNS
+    except Exception:  # pragma: no cover - 只在极端导入失败时降级
+        logger.warning("读取 EXTENDED_COLUMNS 失败，扩展域遮蔽退化为空集", exc_info=True)
+        return ()
+    return tuple(sorted(EXTENDED_COLUMNS))
+
+
+def masked_fields_for_codes(warning_codes: list[str] | tuple[str, ...]) -> list[str]:
+    """把 warning codes 翻译成"不可信字段"清单（字段级遮蔽的唯一入口）。"""
+    codes = set(warning_codes)
+    masked: set[str] = set()
+    if "EXT_PERIOD_MISMATCH" in codes:
+        # ext 与快照报告期错位 → 按报告期严格 join 的扩展字段全空/错期。
+        # 快照域（PE/PB/ROE/技术指标）不受影响，绝不能被一起遮掉。
+        masked.update(_extended_indicator_fields())
+    if "DEDUCTED_PROFIT_GAP" in codes:
+        masked.update(DEDUCTED_PROFIT_INDICATOR_FIELDS)
+    return sorted(masked)
+
+
+def masked_indicator_fields(warning_codes: list[str] | tuple[str, ...]) -> list[str]:
+    """`indicator_trust()["masked_fields"]` 的函数式别名（调用方读起来更直白）。"""
+    return masked_fields_for_codes(warning_codes)
+
 
 def indicator_trust(warning_codes: list[str]) -> dict:
     """Server-authoritative trust decision for snapshot-derived indicator values.
@@ -1307,6 +1350,17 @@ def indicator_trust(warning_codes: list[str]) -> dict:
     only dividend fields, and operational warnings invalidate no numeric
     field. Read-only endpoints mask the affected values instead of serving
     them as normal research data.
+
+    2026-11-14（reports/120 §5 J9）**字段级遮蔽**：还有一个中间档 ——
+    `masked_fields`。它回答的是"这次坏的是**哪几个字段**"，而不是
+    "整站数字能不能信"：
+
+      EXT_PERIOD_MISMATCH → 只遮扩展域（ext 与快照报告期错位的 55 列）；
+      DEDUCTED_PROFIT_GAP → 只遮扣非四兄弟（yoy/cagr3/cagr5/明细列）。
+
+    为什么不能塞进 `untrusted_all`：那会把 PE/PB/ROE 这些完全正常的价格域/
+    财务域指标一起打成 NULL（整页"—"），用户无法区分"这一个字段坏了"和
+    "全站坏了"。字段级遮蔽才是这两条规则的正确表达。
     """
     codes = set(warning_codes)
     return {
@@ -1317,6 +1371,7 @@ def indicator_trust(warning_codes: list[str]) -> dict:
             if codes & _DIVIDEND_BLOCKING_WARNINGS
             else []
         ),
+        "masked_fields": masked_fields_for_codes(warning_codes),
     }
 
 
@@ -1324,7 +1379,7 @@ def mask_untrusted_values(values: dict, trust: dict) -> dict:
     """Null the snapshot-derived values the server cannot vouch for (fail closed)."""
     if trust["untrusted_all"]:
         return {key: None for key in values}
-    untrusted = set(trust["untrusted_fields"])
+    untrusted = set(trust["untrusted_fields"]) | set(trust.get("masked_fields") or ())
     return {
         key: (None if key in untrusted else value)
         for key, value in values.items()
@@ -1705,18 +1760,31 @@ def _asset_health_summary(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
 
     体检本身坏掉时返回一个显式不可用的摘要，而不是让整个数据状态页 503：
     状态页的主要价值（日期/lineage/warning_codes）不应被新加的披露项拖垮。
+
+    2026-11-14（reports/120 §5 J10）**分层调度**：状态页/每轮只跑 cheap 档
+    （目标 <5s）；expensive 档（归档交叉核验 ~35s）只由 `vd data doctor`
+    全量或每日定时跑。这里不跑它，但必须把它的"上次运行时间 + 结果摘要"
+    从缓存读出来附在 `asset_health.expensive` 里 —— 否则运维只能靠人记得
+    "上次核验是什么时候"，等于没有分层。
     """
     try:
-        from app.core.quality.asset_health import run_asset_health, summarize_asset_health
+        from app.core.quality.asset_health import (
+            load_expensive_summary,
+            run_asset_health,
+            summarize_asset_health,
+        )
 
         payload = run_asset_health(duck, sqlite, allow_expensive=False)
-        return summarize_asset_health(payload)
+        summary = summarize_asset_health(payload)
+        summary["expensive"] = load_expensive_summary(sqlite)
+        return summary
     except Exception:
         logger.warning("资产健康检查失败（数据状态降级，不阻断）", exc_info=True)
         return {
             "generated_at": None,
             "run_id": None,
             "level_counts": {},
+            "severity_counts": {},
             "code_counts": {},
             "p1_codes": [],
             "finding_count": 0,
@@ -1726,6 +1794,7 @@ def _asset_health_summary(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
             "skipped": [],
             "errors": [{"code": "ASSET_HEALTH_UNAVAILABLE", "error": "status build failed"}],
             "elapsed_ms": None,
+            "expensive": {"status": "not_run", "reason": "asset_health_unavailable"},
         }
 
 
@@ -1832,6 +1901,7 @@ def _incompatible_schema_status(readiness: dict, sqlite: SQLiteStore) -> dict:
             "generated_at": None,
             "run_id": None,
             "level_counts": {},
+            "severity_counts": {},
             "code_counts": {},
             "p1_codes": [],
             "finding_count": 0,
@@ -1841,6 +1911,7 @@ def _incompatible_schema_status(readiness: dict, sqlite: SQLiteStore) -> dict:
             "skipped": [{"code": "ALL", "reason": "live_schema_incompatible"}],
             "errors": [],
             "elapsed_ms": None,
+            "expensive": {"status": "not_run", "reason": "live_schema_incompatible"},
         },
     }
 

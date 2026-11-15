@@ -233,8 +233,9 @@ export interface AuditFieldRow {
   readonly effective_date?: string | null
   readonly data_version?: string | null
   readonly formula?: string | null
-  readonly as_reported_value?: number | null
-  readonly latest_restated_diff?: number | null
+  // 2026-11-14（reports/119 §5 D 类）：`as_reported_value` / `latest_restated_diff`
+  // 已删除——后端此前把它们硬编码为 NULL（假接口）。「当时可见」口径改由
+  // GET /api/research/as-reported 提供（见 types/research.ts）。
 }
 
 export interface AuditBatchRow {

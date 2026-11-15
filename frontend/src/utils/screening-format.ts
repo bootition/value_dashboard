@@ -245,7 +245,7 @@ const INCOME_FIELD_LABELS: Readonly<Record<string, string>> = {
   interest_income: '利息收入',
   asset_impairment_loss: '资产减值损失',
   credit_impairment_loss: '信用减值损失',
-  exchange_gain: '汇兑收益',
+  exchange_gain: '公允价值变动收益',
   investment_income: '投资收益',
   operating_profit: '营业利润',
   non_operating_income: '营业外收入',

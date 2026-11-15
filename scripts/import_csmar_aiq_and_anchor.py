@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
+from app.core.storage.cold_archive_guard import guard_writable_or_exit  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     PathIsolationError,
@@ -82,6 +83,7 @@ def main() -> None:
         logger.info("[DRY RUN] 未写库")
         return
 
+    guard_writable_or_exit(duck, ("csmar_balance_items",), logger=logger)
     backup = PROJECT_ROOT / ".planning" / f"maintenance-backup-csmar-aiq-{datetime.now():%Y%m%d_%H%M%S}"
     backup.mkdir(parents=True, exist_ok=True)
     fetched_at = datetime.now(UTC).replace(tzinfo=None)

@@ -5,37 +5,45 @@
 2026-11-14 的数据包价值兑现度审查找出的每一个问题（扩展指标冻结在旧报告期、
 扣非净利润归零、字段覆盖率塌陷、手工链不跑、数据包过期、schema 漂移、
 零引用资产……），当时**全部只能靠人去库上手工查**。人工审完就散会，问题
-下个季度原样回潮。本模块把这些判定写成 12 条可复跑的规则（编号即报告编号），
-每轮更新后由 `vd data doctor` 与数据状态页自动执行。
+下个季度原样回潮。本模块把这些判定写成 13 条可复跑的规则（编号即报告编号），
+由 `vd data doctor` 与数据状态页自动执行。
 
-规则清单（code → 判定 → 阈值）
-------------------------------
- 1 EXT_PERIOD_MISMATCH        P1  max(indicator_ext.report_date) ≠ max(indicator_snapshot.report_date)
- 2 FIELD_COVERAGE_LOW         P1  上界面字段最新报告期覆盖率 < 90%
- 3 FIELD_COVERAGE_DROP        P1  同字段本期 vs 上一期基线跌幅 > 10pp 或 > 50%
- 4 MANUAL_CHAIN_STALE         P1  手工派生链最后成功时间超过该链 stale_after_days
- 5 SNAPSHOT_PERIOD_GAP        P1  复用 snapshot_period_mismatches()，有缺口即告警
- 6 STATIC_TABLE_STALE         P2  company_employee_history / financial_report_dates 落后应有报告期
- 7 PACKAGE_STALE              P2  数据包 manifest.as_of.price_latest 落后行情 > 5 交易日
- 8 NULL_REASON_MISSING        P2  上界面字段有 NULL 但 indicator_null_reason 登记率 < 80%
- 9 CROSSCHECK_BELOW_THRESHOLD P2  run_crosscheck() 一致率 < 85%
-10 SCHEMA_DDL_DRIFT           P1  schema.py DDL 表名 vs 库内实际表，双向差集非空
-11 ZERO_REFERENCE_ASSET      P3  零引用资产清单（config/asset_reference.yaml）如实披露
-12 DEDUCTED_PROFIT_GAP        P1  income_statement 最新报告期 deducted_net_profit 覆盖率 < 50%
+规则清单（code → 判定 → 级别 → severity → tier）
+-------------------------------------------------
+ 1 EXT_PERIOD_MISMATCH        P1  block       cheap      ext 报告期 ≠ 快照报告期（→ 字段级遮蔽扩展域）
+ 2 FIELD_COVERAGE_LOW         P1  block/disclose cheap 上界面字段最新报告期覆盖率 < 90%（结构性可空字段只披露）
+ 3 FIELD_COVERAGE_DROP        P1  block       cheap      同字段本期 vs 上一期基线跌幅 > 10pp 或 > 50%
+ 4 MANUAL_CHAIN_STALE         P1  block       cheap      手工派生链最后成功时间超过该链 stale_after_days
+ 5 SNAPSHOT_PERIOD_GAP        P1  block       cheap      复用 snapshot_period_mismatches()，有缺口即告警
+ 6 STATIC_TABLE_STALE         P2  disclose    cheap      company_employee_history / financial_report_dates 落后应有报告期
+ 7 PACKAGE_STALE              P2  disclose    cheap      数据包 manifest.as_of.price_latest 落后行情 > 5 交易日
+ 8 NULL_REASON_MISSING        P2  block/disclose cheap 上界面字段有 NULL 但 indicator_null_reason 登记率 < 80%
+ 9 CROSSCHECK_BELOW_THRESHOLD P2  disclose    expensive  run_crosscheck() 一致率 < 85%（~35s，只给 doctor 全量/每日定时）
+10 SCHEMA_DDL_DRIFT           P1  block       cheap      schema.py DDL 表名 vs 库内实际表，双向差集非空
+11 ZERO_REFERENCE_ASSET      P3  inventory   cheap      零引用资产清单（config/asset_reference.yaml）如实披露
+12 DEDUCTED_PROFIT_GAP        P1  block       cheap      income_statement 最新报告期 deducted_net_profit 覆盖率 < 50%（→ 扣非四兄弟遮蔽）
+13 CHAIN_PROGRESS_STALLED     P1  block       cheap      补采链在跑但待补数量不降（"跑也白跑"，J1 防复发）
+
+severity 语义：只有 **block** 进 `level_counts` / `p1_codes` / `warning_codes` /
+`vd data doctor` 退出码；disclose 看得见但不阻断；inventory 是纯清单。
 
 设计约定（为什么这样写）
 ------------------------
-1. **只读**：引擎只发 SELECT。唯一写路径 `write_field_coverage_history()` 是
-   opt-in（`vd data doctor --write-history`），且写前自检
-   `update_lock.any_write_lock_active()` —— 自动更新进行中绝不写基线，
-   否则会把"更新到一半的覆盖率"当成正常基线，下一轮必然假报警。
+1. **只读（DuckDB）**：引擎对分析库只发 SELECT。**唯一**写路径是
+   `write_field_coverage_history()`（opt-in：`vd data doctor --write-history`）
+   与 `data_refresh_state` 里的**状态记账**（expensive 档摘要、链路待补水位），
+   两者都写 SQLite 状态库、写前自检 `update_lock.any_write_lock_active()`，
+   绝不写任何业务表。业务库更新进行中绝不写基线，否则会把"更新到一半的
+   覆盖率"当成正常基线，下一轮必然假报警。
 2. **聚合 SQL**：每条规则只用少量聚合查询（正式库单条 < 1s）。贵重规则
-   （规则 9 归档交叉核验，正式库实测 ~31s）由全局时间预算控制：超预算时
-   **跳过并如实披露**（status=skipped + reason），绝不静默丢规则。
-3. **披露型告警**：本模块的 code **一律不进入**
-   `data_quality._SNAPSHOT_BLOCKING_WARNINGS` / `_SCREENING_BLOCKING_WARNINGS`。
-   P1 只进 `warning_codes`（状态页可见），不会遮蔽指标、也不会让筛选 409。
-   升级为阻断型必须另开裁决（reports/119 §5 的建议清单）。
+   （规则 9 归档交叉核验，正式库实测 ~31s）由 tier=expensive 与全局时间预算
+   双重控制：未启用/超预算时**跳过并如实披露**（status=skipped + reason），
+   绝不静默丢规则。
+3. **分级而不是"只披露"**：本模块的 code 一律不进
+   `data_quality._SNAPSHOT_BLOCKING_WARNINGS` / `_SCREENING_BLOCKING_WARNINGS`
+   （不会让筛选整体 409），但 block 级中"某几个字段不可信"的两条
+   （规则 1/12）通过 `data_quality.masked_fields_for_codes()` 做**字段级遮蔽**
+   —— 只遮坏掉的字段，其余照常可用（reports/120 §5 J9）。
 4. **规则失败 ≠ 资产健康**：单条规则抛错时该规则记 status=error 并出现在
    输出里，其余规则照跑；引擎整体永不因单条规则失败而抛异常。
 5. **口径复用**：规则 5 直接调用 `data_quality.snapshot_period_mismatches()`，
@@ -64,6 +72,40 @@ P2 = "P2"
 P3 = "P3"
 _LEVEL_ORDER = {P1: 0, P2: 1, P3: 2}
 
+# ─── 分级：severity（这条命中意味着什么）＆ tier（跑一次多贵）─────────────
+#
+# severity（2026-11-14 reports/120 §5 J9）：
+#   block     = 屏幕上的数字可能不可信 / 该域已失效，属于**必须修**的问题；
+#               只有 block 才计入 level_counts 与 p1_codes（→ warning_codes /
+#               `vd data doctor` 退出码）。
+#   disclose  = 如实披露的待办/维护项（链路停摆、数据包过期、空值原因没登记、
+#               交叉核验偏低、结构性可空字段覆盖率低……）。看得见，但不遮蔽
+#               任何数字、不让医生退出码变红。
+#   inventory = 纯清单（零引用资产），永远不参与健康判定。
+#
+# 为什么不是"级别越高越重要"就够了：体检首轮实测 32 条 FIELD_COVERAGE_LOW
+# + 54 条 NULL_REASON_MISSING，其中绝大多数是"亏损公司杠杆天然为空"这类
+# **永远红且无法变绿**的项。它们把真问题（扩展指标报告期错位、扣非整期空）
+# 淹没在噪音里 → 于是有了 severity 与下面的结构性可空白名单。
+SEVERITY_BLOCK = "block"
+SEVERITY_DISCLOSE = "disclose"
+SEVERITY_INVENTORY = "inventory"
+SEVERITIES: tuple[str, ...] = (SEVERITY_BLOCK, SEVERITY_DISCLOSE, SEVERITY_INVENTORY)
+_SEVERITY_ORDER = {SEVERITY_BLOCK: 0, SEVERITY_DISCLOSE: 1, SEVERITY_INVENTORY: 2}
+
+# tier（2026-11-14 reports/120 §5 J10）：体检分两档调度。
+#   cheap     = 目标 <5s，状态页/每轮自动更新后都跑；
+#   expensive = 归档交叉核验（正式库实测 ~35s），只给 `vd data doctor`
+#               全量或每日定时任务跑。
+# 契约写在 config/default.yaml 的 `asset_health.schedule`。
+TIER_CHEAP = "cheap"
+TIER_EXPENSIVE = "expensive"
+TIERS: tuple[str, ...] = (TIER_CHEAP, TIER_EXPENSIVE)
+DEFAULT_SCHEDULE: dict[str, str] = {
+    TIER_CHEAP: "every_update",
+    TIER_EXPENSIVE: "daily",
+}
+
 SNAPSHOT_DOMAIN = "indicator_snapshot"
 EXTENDED_DOMAIN = "indicator_ext"
 
@@ -83,6 +125,8 @@ DEFAULT_STATIC_LAG_PERIODS = 1
 DEFAULT_MIN_DOMAIN_ROWS = 100
 DEFAULT_MAX_SECONDS = 10.0
 DEFAULT_EXPENSIVE_MAX_SECONDS = 180.0
+# 链路水位停滞判定：连续两次测量"待补数量 ≥ 上一轮 且 > 0"即命中。
+DEFAULT_CHAIN_STALL_MIN_BACKLOG = 1
 
 IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DDL_TABLE_PATTERN = re.compile(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", re.IGNORECASE)
@@ -99,6 +143,14 @@ _MODULE_PATH = Path(__file__).resolve()
 PROJECT_ROOT = _MODULE_PATH.parents[3]
 
 
+def _count_by(values: list[str]) -> dict[str, int]:
+    """计数字典（按 key 排序，便于 JSON 输出稳定 diff）。"""
+    counts: dict[str, int] = {}
+    for value in values:
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 结构化输出
 # ─────────────────────────────────────────────────────────────────────────────
@@ -106,7 +158,13 @@ PROJECT_ROOT = _MODULE_PATH.parents[3]
 
 @dataclass(frozen=True)
 class Finding:
-    """一条规则命中的结构化结论（字段固定，供 CLI / 状态页 / 测试共用）。"""
+    """一条规则命中的结构化结论（字段固定，供 CLI / 状态页 / 测试共用）。
+
+    `severity` 是**逐条**的，不是逐规则的：同一条 FIELD_COVERAGE_LOW 里，
+    "扩展域自由现金流覆盖率 0%（源没取到）"是 block（该字段已失效），
+    而"亏损公司杠杆 72%"是 disclose（NULL 本来就是正确表达）。规则只给
+    默认值，具体哪条命中由规则函数决定。
+    """
 
     code: str
     level: str
@@ -116,11 +174,13 @@ class Finding:
     threshold: Any
     detail: str
     suggestion: str
+    severity: str = SEVERITY_DISCLOSE
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "level": self.level,
+            "severity": self.severity,
             "domain": self.domain,
             "field": self.field,
             "metric": self.metric,
@@ -129,8 +189,15 @@ class Finding:
             "suggestion": self.suggestion,
         }
 
-    def sort_key(self) -> tuple[int, str, str, str]:
-        return (_LEVEL_ORDER.get(self.level, 9), self.code, self.domain, self.field)
+    def sort_key(self) -> tuple[int, int, str, str, str]:
+        # block 排最前：医生输出的前几条必须是"要动手的"，disclose 垫底。
+        return (
+            _SEVERITY_ORDER.get(self.severity, 9),
+            _LEVEL_ORDER.get(self.level, 9),
+            self.code,
+            self.domain,
+            self.field,
+        )
 
 
 @dataclass
@@ -144,14 +211,21 @@ class RuleOutcome:
     note: str = ""
     elapsed_ms: int = 0
     findings: list[Finding] = field(default_factory=list)
+    severity: str = SEVERITY_DISCLOSE
+    tier: str = TIER_CHEAP
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "level": self.level,
+            "severity": self.severity,
+            "tier": self.tier,
             "title": self.title,
             "status": self.status,
             "findings": len(self.findings),
+            "findings_by_severity": _count_by(
+                [finding.severity for finding in self.findings],
+            ),
             "elapsed_ms": self.elapsed_ms,
             "note": self.note,
         }
@@ -215,7 +289,10 @@ MANUAL_CHAINS: tuple[ManualChain, ...] = (
         ),
         probe_kind="period",
         default_stale_after_days=150,
-        rebuild="python scripts/patch_deducted_profit.py",
+        # 2026-11-14：旧 patch_deducted_profit.py 已移入 legacy_dangerous/
+        # （DELETE ... report_date > x 再回灌 CSV，CSV 不全会打空三表）。
+        rebuild="python scripts/fetch_deducted_profit.py",
+        rebuild_note="旧 patch_deducted_profit.py 会 DELETE 后回灌，已废弃禁止使用",
     ),
     ManualChain(
         chain="regulatory_metrics",
@@ -270,6 +347,92 @@ STRUCTURAL_NULL_NOTES: dict[str, str] = {
     "leverage_total": "结构性可空：亏损公司综合杠杆无业务含义",
     "ev_ebitda": "结构性可空：需 EBITDA 可用（依赖折旧摊销），留存样本仍 >4,500 只",
 }
+
+# ─── 结构性可空白名单（reports/120 §5 J9-1）─────────────────────────────────
+# 判定标准（写死在这里，避免下一个人凭感觉往里加）：**这个字段为空本身是
+# 一种合法状态，而不是"我们的数据坏了"** —— 亏损、无分红、无商誉、无有息
+# 负债、无国债基准对应期限…… 对这些字段报 FIELD_COVERAGE_LOW / NULL_REASON
+# 只会产生"永远红且无法变绿"的噪音，把真问题埋掉。
+#
+# 处理方式：仍然**保留在 findings 里**（可审计、可解释），但 severity 降为
+# `disclose`：不进 level_counts / p1_codes，不进 warning_codes，不遮蔽任何
+# 数字、不让筛选 409。
+STRUCTURAL_NULL_FIELDS: frozenset[str] = frozenset({
+    # 亏损/无利润 → PE/PCF 无意义（分组报表要求净利润为正才有 PE）
+    "pe_ttm",
+    "pcf_ttm",
+    # 无分红（或当年不分红）→ 派息率/股息率/利差天然为空
+    "payout_ratio",
+    "dividend_yield",
+    "ttm_dividend_yield",
+    "consecutive_div_years",   # 从未分红 → 连续分红年数为空是正确表达
+    # 无商誉（绝大多数公司从未做过溢价并购）→ 商誉占比无意义
+    "goodwill_ratio",
+    # 无折旧摊销 → EV/EBITDA 不可算（与 ENGINE (b) 类例外同源）
+    "ev_ebitda",
+    # ── 2026-11-15 追加（reports/122）──
+    # 三季报不披露现金流量表补充资料 → 折旧/EBITDA 族在 Q3 天然为空
+    # （数据源限制，不是"没去抓"；已由 null_reason 标 SOURCE_EMPTY）
+    "depreciation_amortization",
+    "ebitda",
+    "ebitda_to_liabilities",
+    # 无有息负债（三项全空）→ 有息负债与利息保障无意义
+    "interest_bearing_debt",
+    "interest_coverage",
+    # 净利润/营业利润 ≤ 0 → 现金含量类比率无经济含义
+    "cf_to_net_profit",
+    "ocf_to_operating_profit",
+    # 3/5 年复合增长率需要连续 N 年可比数据 → 次新股天然为空
+    "net_profit_cagr3",
+    "net_profit_cagr5",
+    "deducted_profit_cagr3",
+    "deducted_profit_cagr5",
+    "revenue_cagr3",
+    "revenue_cagr5",
+})
+
+# 前缀型白名单：整族字段共享同一语义（无国债基准期限 / 亏损公司杠杆）。
+STRUCTURAL_NULL_PREFIXES: tuple[str, ...] = (
+    "div_yield_spread_",   # 无对应期限的国债基准 → 利差为空是正确表达
+    "leverage_",           # 亏损公司杠杆无业务含义
+)
+
+
+def is_structurally_nullable(field: str, extra_fields: set[str] | None = None) -> bool:
+    """该字段为空是否属于"合法空"（structural null）。
+
+    `extra_fields` 来自 `config/default.yaml` 的
+    `asset_health.structural_null_fields`：不同库/不同口径可以追加，
+    但代码里的默认集合是唯一裁决基线（配置只能**加**不能删）。
+    """
+    if not field:
+        return False
+    # 2026-11-15：覆盖率规则传进来的是带域前缀的字段名（如
+    # `indicator_ext.depreciation_amortization`），白名单按裸列名登记，
+    # 这里先剥掉一层域前缀再比对，否则白名单形同虚设（实测 32 条仍报 P1）。
+    bare = field.rsplit(".", 1)[-1]
+    if bare in STRUCTURAL_NULL_FIELDS:
+        return True
+    if extra_fields and bare in extra_fields:
+        return True
+    return any(bare.startswith(prefix) for prefix in STRUCTURAL_NULL_PREFIXES)
+
+
+def _structural_extra_fields(settings: dict[str, Any]) -> set[str]:
+    """配置里追加的结构性可空字段（非法形态一律忽略，绝不因此让体检失败）。"""
+    raw = settings.get("structural_null_fields")
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    return {str(item).strip() for item in raw if str(item or "").strip()}
+
+
+def _structural_null_detail(field: str, settings: dict[str, Any]) -> str | None:
+    """结构性可空字段的人话解释（用于 detail 与降级判定）。"""
+    if not is_structurally_nullable(field, _structural_extra_fields(settings)):
+        return None
+    return STRUCTURAL_NULL_NOTES.get(
+        field, "结构性可空：该字段对某类合法子群体本就不成立（亏损/无分红/无商誉）",
+    )
 
 # 静态低频域：最新报告期落后"应有报告期"即告警（reports/119 D29 ②/③ 的衍生域）。
 STATIC_TABLE_SPECS: tuple[tuple[str, str], ...] = (
@@ -573,6 +736,8 @@ def _rule_ext_period_mismatch(ctx: HealthContext) -> list[Finding]:
                 f"{snap_max.isoformat()}；按报告期严格对齐的扩展筛选字段当前全部为空"
             ),
             suggestion="重建扩展指标：`vd data compute-extended-indicators`",
+            # 只让扩展域不可信（data_quality.masked_fields），不是全站阻断。
+            severity=SEVERITY_BLOCK,
         )
     ]
 
@@ -582,6 +747,10 @@ def _rule_field_coverage_low(ctx: HealthContext) -> list[Finding]:
 
     每个域按**自己的**最新报告期算：跨域错位由规则 1 负责（否则这里会给
     整域 60 个字段各报一条 0%，噪声淹没根因）。
+
+    结构性可空字段（亏损/无分红/无商誉/无国债基准）**照样进 findings**，
+    但 severity 降为 disclose：它们是"这个字段对某类公司天然为空"，
+    不是"我们的数据坏了"，不该让医生退出码变红（reports/120 §5 J9-1）。
     """
     threshold = _setting_number(ctx.settings, "coverage_low_pct", DEFAULT_COVERAGE_LOW_PCT)
     findings: list[Finding] = []
@@ -597,6 +766,7 @@ def _rule_field_coverage_low(ctx: HealthContext) -> list[Finding]:
             pct = float(stats["coverage_pct"])
             if pct >= threshold:
                 continue
+            structural_note = _structural_null_detail(name, ctx.settings)
             findings.append(
                 Finding(
                     code="FIELD_COVERAGE_LOW",
@@ -608,17 +778,20 @@ def _rule_field_coverage_low(ctx: HealthContext) -> list[Finding]:
                     detail=(
                         f"{report_date} 期 {stats['non_null']}/{measurement['total']} 行非空"
                         f"（{pct:.2f}%）"
-                        + (
-                            f"；{STRUCTURAL_NULL_NOTES[name]}"
-                            if name in STRUCTURAL_NULL_NOTES
-                            else ""
-                        )
+                        + (f"；{structural_note}" if structural_note else "")
                     ),
                     suggestion=(
-                        "重建扩展指标：`vd data compute-extended-indicators`"
-                        if domain == EXTENDED_DOMAIN
-                        else "重算指标快照：`vd data compute_indicators`；"
-                        "若字段依赖上游补充域，先补采上游（ops-knowledge-base D30/D31）"
+                        "该字段为空是合法状态：确认覆盖人群与口径即可，不必追着修"
+                        if structural_note
+                        else (
+                            "重建扩展指标：`vd data compute-extended-indicators`"
+                            if domain == EXTENDED_DOMAIN
+                            else "重算指标快照：`vd data compute_indicators`；"
+                            "若字段依赖上游补充域，先补采上游（ops-knowledge-base D30/D31）"
+                        )
+                    ),
+                    severity=(
+                        SEVERITY_DISCLOSE if structural_note else SEVERITY_BLOCK
                     ),
                 )
             )
@@ -693,6 +866,7 @@ def _rule_field_coverage_drop(ctx: HealthContext) -> list[Finding]:
                         "先确认是上游断供还是重算漏项；确认后重建对应域"
                         "（`vd data compute-extended-indicators` / `vd data compute_indicators`）"
                     ),
+                    severity=SEVERITY_BLOCK,
                 )
             )
     return findings
@@ -769,8 +943,296 @@ def _rule_manual_chain_stale(ctx: HealthContext) -> list[Finding]:
                     f"（{age_days} 天前 > {stale_days} 天；来源：{source}）"
                 ),
                 suggestion=chain.suggestion(),
+                severity=SEVERITY_BLOCK,
             )
         )
+    return findings
+
+
+# ─── 规则 13 CHAIN_PROGRESS_STALLED（reports/120 §5 J1 防复发）───────────────
+#
+# "跑了但没进展"是 2026-09 那批事故的共同形态：补采链每轮都 success、
+# last_success_at 一直在动，但目标期该补的股票数一个没少（续传判据写错：
+# "本表有任意本源行就跳过"）。只看"最后成功时间"永远看不见这种停滞 ——
+# 它看起来比谁都健康。
+#
+# 判据（连续两次测量）：某条链的**待补数量** = 目标报告期上缺列/缺行的
+# 上市股票数；两次记录满足 `本轮 ≥ 上一轮 且 本轮 > 0` → 判"跑也白跑"。
+# 逻辑放在这里而不是各脚本里：脚本改不动历史，体检能看见所有链。
+CHAIN_PROGRESS_STATE_KEY = "chain_progress_history"
+
+
+@dataclass(frozen=True)
+class ChainBacklogProbe:
+    """一条补采链的"待补数量"探针（目标期缺行/缺列的上市股票数）。
+
+    `marker_keys` 是该链在 `data_refresh_state` 里的成功水位键（自动更新步骤用
+    `_mark_domain_refreshed` 双写 `*_last_refresh` 与 `*_last_success_at`）。
+    用它判断"链在推进"，而不是只靠 `MANUAL_CHAINS` —— 后两条链（
+    balance_sheet_ext / fixed_assets）已接进自动更新，不需要再登记成
+    MANUAL_CHAIN_STALE 的判定对象。
+    """
+
+    chain: str
+    label: str
+    backlog_sql: str
+    missing_hint: str
+    suggestion: str
+    marker_keys: tuple[str, ...] = ()
+
+
+# 目标报告期统一取"最新完整资产负债表期"（与规则 6/12 同口径）：探针必须
+# 跟着**应有**报告期走，不能跟着各链自己的 MAX(report_date) 走 —— 否则链
+# 停在哪一期，待补数就是 0，永远报不出来（这正是 J1 的形态）。
+_CHAIN_TARGET_PERIOD_CTE = """
+    WITH target_period AS (
+        SELECT MAX(report_date) AS period FROM balance_sheet
+        WHERE total_assets IS NOT NULL
+          AND total_liabilities IS NOT NULL
+          AND COALESCE(total_equity_parent, total_equity) IS NOT NULL
+    )
+"""
+
+CHAIN_BACKLOG_PROBES: tuple[ChainBacklogProbe, ...] = (
+    ChainBacklogProbe(
+        chain="cashflow_supplement",
+        label="现金流补充域 cash_flow_indirect",
+        backlog_sql=_CHAIN_TARGET_PERIOD_CTE + """
+        SELECT COUNT(*) AS backlog FROM stock_meta m, target_period p
+        WHERE m.is_listed IS TRUE AND p.period IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM cash_flow_indirect c
+              WHERE c.stock_code = m.stock_code AND c.report_date = p.period
+          )
+        """,
+        missing_hint="目标期缺整行 cash_flow_indirect",
+        suggestion="重跑现金流补充链：`python scripts/fetch_cashflow_supplement.py`",
+        marker_keys=(
+            "cashflow_supplement_last_success_at", "cashflow_supplement_last_refresh",
+        ),
+    ),
+    ChainBacklogProbe(
+        chain="balance_sheet_ext",
+        label="资产负债表补充科目 balance_sheet_ext",
+        backlog_sql=_CHAIN_TARGET_PERIOD_CTE + """
+        SELECT COUNT(*) AS backlog FROM stock_meta m, target_period p
+        WHERE m.is_listed IS TRUE AND p.period IS NOT NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM balance_sheet_ext c
+              WHERE c.stock_code = m.stock_code AND c.report_date = p.period
+          )
+        """,
+        missing_hint="目标期缺整行 balance_sheet_ext",
+        suggestion="重跑资产负债表补充链：`python scripts/fetch_balance_sheet_ext.py`",
+        marker_keys=("balance_sheet_ext_last_success_at", "balance_sheet_ext_last_refresh"),
+    ),
+    ChainBacklogProbe(
+        chain="deducted_profit",
+        label="扣非净利润补丁 income_statement.deducted_net_profit",
+        backlog_sql=_CHAIN_TARGET_PERIOD_CTE + """
+        SELECT COUNT(*) AS backlog FROM stock_meta m, target_period p
+        WHERE m.is_listed IS TRUE AND p.period IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM income_statement i
+              WHERE i.stock_code = m.stock_code AND i.report_date = p.period
+                AND i.deducted_net_profit IS NULL
+          )
+        """,
+        missing_hint="目标期有利润表行但 deducted_net_profit 为空",
+        suggestion=(
+            "重跑扣非补采：`python scripts/fetch_deducted_profit.py`"
+            "（旧 `patch_deducted_profit.py` 会 DELETE 后回灌，已不推荐）"
+        ),
+        marker_keys=(
+            "deducted_profit_last_success_at", "deducted_profit_last_refresh",
+        ),
+    ),
+    ChainBacklogProbe(
+        chain="fixed_assets",
+        label="固定资产补采 balance_sheet.fixed_assets",
+        backlog_sql=_CHAIN_TARGET_PERIOD_CTE + """
+        SELECT COUNT(*) AS backlog FROM stock_meta m, target_period p
+        WHERE m.is_listed IS TRUE AND p.period IS NOT NULL
+          AND EXISTS (
+              SELECT 1 FROM balance_sheet b
+              WHERE b.stock_code = m.stock_code AND b.report_date = p.period
+                AND b.fixed_assets IS NULL
+          )
+        """,
+        missing_hint="目标期有资产负债表行但 fixed_assets 为空",
+        suggestion="重跑固定资产补采（`vd data update` 的 fixed_assets 步骤）",
+        marker_keys=(
+            "fixed_assets_supplement_last_success_at",
+            "fixed_assets_supplement_last_refresh",
+        ),
+    ),
+)
+
+
+def _load_chain_progress_history(ctx: HealthContext) -> dict[str, dict[str, Any]]:
+    """读取上一轮各链待补数量（SQLite data_refresh_state，JSON 对象）。"""
+    if ctx.sqlite is None:
+        return {}
+    try:
+        rows = ctx.sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [CHAIN_PROGRESS_STATE_KEY],
+        )
+    except Exception as error:  # noqa: BLE001 - 读不到历史只是"没有基线"
+        logger.warning("读取链路水位停滞基线失败: %s", error)
+        return {}
+    if not rows:
+        return {}
+    raw = rows[0].get("value")
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(chain): entry for chain, entry in parsed.items() if isinstance(entry, dict)
+    }
+
+
+def _latest_marker(ctx: HealthContext, keys: tuple[str, ...]) -> datetime | None:
+    """链在 `data_refresh_state` 里的最新成功水位（多键取最大）。"""
+    if ctx.sqlite is None or not keys:
+        return None
+    latest: datetime | None = None
+    for key in keys:
+        try:
+            rows = ctx.sqlite.query(
+                "SELECT value FROM data_refresh_state WHERE key = ?", [key],
+            )
+        except Exception:  # noqa: BLE001 - 单键读失败不影响判定
+            continue
+        if not rows:
+            continue
+        moment = _as_datetime(rows[0].get("value"))
+        if moment is not None and (latest is None or moment > latest):
+            latest = moment
+    return latest
+
+
+def _measure_chain_backlogs(ctx: HealthContext) -> dict[str, dict[str, Any]]:
+    """跑四条探针，返回 {chain: {count, last_success_at, label, ...}}。"""
+    chain_index = {chain.chain: chain for chain in MANUAL_CHAINS}
+    measured: dict[str, dict[str, Any]] = {}
+    for probe in CHAIN_BACKLOG_PROBES:
+        try:
+            rows = ctx.duck.read_query(probe.backlog_sql)
+        except Exception as error:  # noqa: BLE001 - 表缺失/列缺失 → 该链不判
+            logger.debug("链路待补数量探针不可用(%s): %s", probe.chain, error)
+            continue
+        if not rows:
+            continue
+        marker = _latest_marker(ctx, probe.marker_keys)
+        chain = chain_index.get(probe.chain)
+        if marker is None and chain is not None:
+            marker, _source = _chain_last_success(ctx, chain)
+        measured[probe.chain] = {
+            "label": probe.label,
+            "count": int(rows[0].get("backlog") or 0),
+            "last_success_at": _iso(marker),
+            "missing_hint": probe.missing_hint,
+            "suggestion": probe.suggestion,
+        }
+    return measured
+
+
+def _record_chain_progress(ctx: HealthContext, measured: dict[str, dict[str, Any]]) -> bool:
+    """把本轮待补数量写成下一轮的比较基线（写前自检更新锁）。"""
+    if ctx.sqlite is None or not measured:
+        return False
+    try:
+        from app.core.storage.update_lock import update_lock_active
+
+        if update_lock_active(ctx.duck.db_path):
+            return False
+    except Exception:  # noqa: BLE001 - 探测不到锁就照常记账
+        pass
+    payload = {}
+    for chain, snapshot in measured.items():
+        payload[chain] = {
+            "count": int(snapshot.get("count") or 0),
+            "measured_at": _iso(ctx.now),
+            "last_success_at": snapshot.get("last_success_at"),
+            "label": snapshot.get("label"),
+        }
+    try:
+        with ctx.sqlite.transaction() as connection:
+            connection.execute(
+                """INSERT INTO data_refresh_state (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value, updated_at=excluded.updated_at""",
+                [
+                    CHAIN_PROGRESS_STATE_KEY,
+                    json.dumps(payload, ensure_ascii=False),
+                    datetime.now(UTC).isoformat(),
+                ],
+            )
+    except Exception as error:  # noqa: BLE001 - 记账失败只影响下一轮比较
+        logger.warning("写入链路水位停滞基线失败: %s", error)
+        return False
+    return True
+
+
+def _rule_chain_progress_stalled(ctx: HealthContext) -> list[Finding]:
+    """水位停滞：最后成功时间在推进，但待补数量没有下降（J1 防复发）。"""
+    if ctx.sqlite is None:
+        raise _RuleSkipped("无 SQLite 状态库（data_refresh_state），无法比较两轮待补数量")
+    measured = _measure_chain_backlogs(ctx)
+    if not measured:
+        raise _RuleSkipped("四条补采链的待补数量探针都不可用（表/列缺失）")
+    minimum = int(
+        _setting_number(ctx.settings, "chain_stall_min_backlog", DEFAULT_CHAIN_STALL_MIN_BACKLOG)
+    )
+    previous = _load_chain_progress_history(ctx)
+    findings: list[Finding] = []
+    for chain, snapshot in measured.items():
+        prior = previous.get(chain)
+        if not prior:
+            continue  # 第一轮只记基线
+        before = int(prior.get("count") or 0)
+        now_count = int(snapshot.get("count") or 0)
+        if before <= 0 or now_count <= 0 or now_count < max(before, minimum):
+            continue  # 待补已清零 / 仍在下降 → 链在推进，正常
+        now_marker = _as_datetime(snapshot.get("last_success_at"))
+        before_marker = _as_datetime(prior.get("last_success_at"))
+        if now_marker is not None and before_marker is not None and now_marker <= before_marker:
+            # 链根本没跑（last_success_at 没动）→ 那是 MANUAL_CHAIN_STALE 的职责，
+            # 不在这里重复报"跑也白跑"（它压根没跑）。
+            continue
+        delta = now_count - before
+        marker_text = (
+            f"last_success_at {before_marker.date().isoformat()} → "
+            f"{now_marker.date().isoformat()}"
+            if now_marker is not None and before_marker is not None
+            else "无成功时间记账（凭数据侧探针判定）"
+        )
+        findings.append(
+            Finding(
+                code="CHAIN_PROGRESS_STALLED",
+                level=P1,
+                domain=chain,
+                field="backlog",
+                metric=now_count,
+                threshold=before,
+                detail=(
+                    f"{snapshot['label']} 待补 {now_count} 只（上一轮 {before} 只，"
+                    f"差值 {delta:+d}）→ 链在跑但水位没降；{marker_text}；"
+                    f"上一轮测量 {(_iso(prior.get('measured_at')) or '未记录')}"
+                ),
+                suggestion=(
+                    f"{snapshot['suggestion']}；先核对续传判据（"
+                    "reports/120 §3 事实 1：旧逻辑「本表有任意本源行就跳过」会跑也白跑）"
+                ),
+                severity=SEVERITY_BLOCK,
+            )
+        )
+    _record_chain_progress(ctx, measured)
     return findings
 
 
@@ -795,6 +1257,7 @@ def _rule_snapshot_period_gap(ctx: HealthContext) -> list[Finding]:
                 "重算指标快照：`vd data compute_indicators`；"
                 "若三表缺核心字段，先补财务数据（`vd data update`）"
             ),
+            severity=SEVERITY_BLOCK,
         )
     ]
 
@@ -981,6 +1444,9 @@ def _rule_null_reason_missing(ctx: HealthContext) -> list[Finding]:
             ratio = 100.0 * min(registered.get(name, 0), null_count) / null_count
             if ratio >= limit:
                 continue
+            # 结构性可空字段同理降级：它们的 NULL 本来就该发生，要求逐格登记
+            # 原因是纯噪音（reports/120 §5 J9-1）。仍然披露，方便核对。
+            structural_note = _structural_null_detail(name, ctx.settings)
             findings.append(
                 Finding(
                     code="NULL_REASON_MISSING",
@@ -992,10 +1458,18 @@ def _rule_null_reason_missing(ctx: HealthContext) -> list[Finding]:
                     detail=(
                         f"{report_date.isoformat()} 期 {null_count} 个 NULL 单元格中仅 "
                         f"{registered.get(name, 0)} 个登记了原因（{ratio:.2f}%）"
+                        + (f"；{structural_note}" if structural_note else "")
                     ),
                     suggestion=(
-                        "补登记空值原因：按 `app/core/quality/null_reasons.py` 的 reason_code "
-                        "枚举写入 indicator_null_reason（前端才能区分「没有」和「坏了」）"
+                        "结构性可空字段，不要求逐格登记原因（确认口径即可）"
+                        if structural_note
+                        else (
+                            "补登记空值原因：按 `app/core/quality/null_reasons.py` 的 reason_code "
+                            "枚举写入 indicator_null_reason（前端才能区分「没有」和「坏了」）"
+                        )
+                    ),
+                    severity=(
+                        SEVERITY_DISCLOSE if structural_note else SEVERITY_BLOCK
                     ),
                 )
             )
@@ -1097,6 +1571,7 @@ def _rule_schema_ddl_drift(ctx: HealthContext) -> list[Finding]:
                 threshold="双向差集为空",
                 detail=f"schema.py 声明了 {table}，但正式库里没有这张表（版本未迁移）",
                 suggestion="执行 schema 初始化/迁移：`vd data init`（或等下一轮自动更新）",
+                severity=SEVERITY_BLOCK,
             )
         )
     for table in orphan:
@@ -1112,6 +1587,7 @@ def _rule_schema_ddl_drift(ctx: HealthContext) -> list[Finding]:
                 suggestion=(
                     "在 config/asset_reference.yaml 登记该表来源与用途，或按退役流程删除"
                 ),
+                severity=SEVERITY_BLOCK,
             )
         )
     return findings
@@ -1224,6 +1700,8 @@ def _rule_zero_reference_asset(ctx: HealthContext) -> list[Finding]:
                         else f"先兑现：{fulfillment}" if fulfillment else "先完善登记理由"
                     )
                 ),
+                # 纯清单：看得见，但永远不参与 healthy / 退出码判定。
+                severity=SEVERITY_INVENTORY,
             )
         )
     return findings
@@ -1274,9 +1752,12 @@ def _rule_deducted_profit_gap(ctx: HealthContext) -> list[Finding]:
                 f"（{pct:.2f}%）"
             ),
             suggestion=(
-                "补采扣非净利润：`python scripts/patch_deducted_profit.py`"
-                "（也可 `python scripts/import_csmar_deducted_profit.py` 走 CSMAR 归档）"
+                "补采扣非净利润：`python scripts/fetch_deducted_profit.py`"
+                "（只填 NULL；旧 `scripts/patch_deducted_profit.py` 会 DELETE 后回灌、"
+                "CSV 不全会打空三表，已移入 legacy_dangerous 禁止使用）"
             ),
+            # 扣非四兄弟因此不可信 → data_quality.masked_fields 字段级遮蔽
+            severity=SEVERITY_BLOCK,
         )
     ]
 
@@ -1290,29 +1771,80 @@ class _RuleSkipped(Exception):
     """规则本次不适用（表缺失/无基线/预算不足）—— 记 skipped，不算失败。"""
 
 
-_RULES: tuple[tuple[str, str, str, bool, Any], ...] = (
-    ("EXT_PERIOD_MISMATCH", P1, "扩展指标域报告期与界面快照错位", False, _rule_ext_period_mismatch),
-    ("FIELD_COVERAGE_LOW", P1, "上界面字段最新报告期覆盖率过低", False, _rule_field_coverage_low),
-    ("FIELD_COVERAGE_DROP", P1, "上界面字段覆盖率环比断崖", False, _rule_field_coverage_drop),
-    ("MANUAL_CHAIN_STALE", P1, "手工派生链超期未跑", False, _rule_manual_chain_stale),
-    ("SNAPSHOT_PERIOD_GAP", P1, "快照报告期与完整三表期存在缺口", False, _rule_snapshot_period_gap),
-    ("STATIC_TABLE_STALE", P2, "静态低频域落后应有报告期", False, _rule_static_table_stale),
-    ("PACKAGE_STALE", P2, "数据包行情截止日落后于库内行情", False, _rule_package_stale),
-    ("NULL_REASON_MISSING", P2, "上界面字段有 NULL 但未登记原因", False, _rule_null_reason_missing),
+# 规则注册表：(code, level, title, tier, 默认 severity, 规则函数)
+#
+# 为什么 tier 与 severity 分开写：
+#   tier     = "跑一次多贵"（调度用）。cheap 进状态页/每轮，expensive 只给
+#              `vd data doctor` 全量或每日定时（config `asset_health.schedule`）。
+#   severity = "命中意味着什么"（分级用）。block 才计入 level_counts/p1_codes。
+# 一条规则可以是 P1 但 disclose（例如"手工链超期"是必须维护但不代表当前
+# 数字错），也可以是 P2 但 block（未来若出现），两者互不推导。
+_RULES: tuple[tuple[str, str, str, str, str, Any], ...] = (
+    (
+        "EXT_PERIOD_MISMATCH", P1, "扩展指标域报告期与界面快照错位",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_ext_period_mismatch,
+    ),
+    (
+        "FIELD_COVERAGE_LOW", P1, "上界面字段最新报告期覆盖率过低",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_field_coverage_low,
+    ),
+    (
+        "FIELD_COVERAGE_DROP", P1, "上界面字段覆盖率环比断崖",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_field_coverage_drop,
+    ),
+    (
+        "MANUAL_CHAIN_STALE", P1, "手工派生链超期未跑",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_manual_chain_stale,
+    ),
+    (
+        "SNAPSHOT_PERIOD_GAP", P1, "快照报告期与完整三表期存在缺口",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_snapshot_period_gap,
+    ),
+    (
+        "STATIC_TABLE_STALE", P2, "静态低频域落后应有报告期",
+        TIER_CHEAP, SEVERITY_DISCLOSE, _rule_static_table_stale,
+    ),
+    (
+        "PACKAGE_STALE", P2, "数据包行情截止日落后于库内行情",
+        TIER_CHEAP, SEVERITY_DISCLOSE, _rule_package_stale,
+    ),
+    (
+        "NULL_REASON_MISSING", P2, "上界面字段有 NULL 但未登记原因",
+        TIER_CHEAP, SEVERITY_DISCLOSE, _rule_null_reason_missing,
+    ),
     (
         "CROSSCHECK_BELOW_THRESHOLD",
         P2,
         "归档交叉核验一致率低于阈值",
-        True,
+        TIER_EXPENSIVE,
+        SEVERITY_DISCLOSE,
         _rule_crosscheck_below_threshold,
     ),
-    ("SCHEMA_DDL_DRIFT", P1, "schema.py DDL 与库内实际表漂移", False, _rule_schema_ddl_drift),
-    ("ZERO_REFERENCE_ASSET", P3, "零引用资产清单（仅披露）", False, _rule_zero_reference_asset),
-    ("DEDUCTED_PROFIT_GAP", P1, "扣非净利润最新报告期覆盖率塌陷", False, _rule_deducted_profit_gap),
+    (
+        "SCHEMA_DDL_DRIFT", P1, "schema.py DDL 与库内实际表漂移",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_schema_ddl_drift,
+    ),
+    (
+        "ZERO_REFERENCE_ASSET", P3, "零引用资产清单（仅披露）",
+        TIER_CHEAP, SEVERITY_INVENTORY, _rule_zero_reference_asset,
+    ),
+    (
+        "DEDUCTED_PROFIT_GAP", P1, "扣非净利润最新报告期覆盖率塌陷",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_deducted_profit_gap,
+    ),
+    (
+        "CHAIN_PROGRESS_STALLED", P1, "补采链在跑但待补水位不降（跑也白跑）",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_chain_progress_stalled,
+    ),
 )
 
 RULE_CODES: tuple[str, ...] = tuple(spec[0] for spec in _RULES)
 P1_CODES: frozenset[str] = frozenset(spec[0] for spec in _RULES if spec[1] == P1)
+EXPENSIVE_RULE_CODES: frozenset[str] = frozenset(
+    spec[0] for spec in _RULES if spec[3] == TIER_EXPENSIVE
+)
+RULE_SEVERITIES: dict[str, str] = {spec[0]: spec[4] for spec in _RULES}
+RULE_TIERS: dict[str, str] = {spec[0]: spec[3] for spec in _RULES}
 
 
 def run_asset_health(
@@ -1325,17 +1857,29 @@ def run_asset_health(
     allow_expensive: bool = True,
     max_seconds: float | None = None,
     settings: dict[str, Any] | None = None,
+    tier: str | None = None,
 ) -> dict[str, Any]:
-    """跑完 12 条规则，返回结构化结果（永不抛异常给调用方）。
+    """跑完全部规则，返回结构化结果（永不抛异常给调用方）。
+
+    `tier` 是调度层的显式入口（config `asset_health.schedule`）：
+      tier="cheap"     → 跳过 expensive 档（等价 allow_expensive=False）；
+      tier="expensive" → 允许昂贵规则（等价 allow_expensive=True）。
+    `allow_expensive` 保留为兼容参数；两者都传时以 `tier` 为准。
 
     返回体字段：
-      generated_at / run_id / elapsed_ms / budget / level_counts / code_counts /
-      p1_codes / findings（扁平列表，按 级别→code→domain→field 排序）/
-      rules（每条规则的 status/note/耗时）/ skipped（被跳过的 code 与原因）
+      generated_at / run_id / tier / elapsed_ms / budget / schedule /
+      level_counts（仅 severity=block 的 finding，按级别计数）/
+      severity_counts（全部 finding 按 block/disclose/inventory 计数）/
+      code_counts（全部 finding，按 code 计数）/ p1_codes（block 的 P1 code）/
+      findings（扁平列表，按 severity→级别→code→domain→field 排序）/
+      rules（每条规则的 status/severity/tier/note/耗时）/ skipped / errors
     """
     started = time.monotonic()
     moment = now or datetime.now(UTC)
     health_settings = dict(settings) if settings is not None else load_settings()
+    if tier is not None:
+        allow_expensive = str(tier).strip().lower() == TIER_EXPENSIVE
+    active_tier = TIER_EXPENSIVE if allow_expensive else TIER_CHEAP
     budget = (
         float(max_seconds)
         if max_seconds is not None
@@ -1364,15 +1908,18 @@ def run_asset_health(
 
     outcomes: list[RuleOutcome] = []
     findings: list[Finding] = []
-    for code, level, title, expensive, check in _RULES:
-        outcome = RuleOutcome(code=code, level=level, title=title)
+    for code, level, title, rule_tier, severity, check in _RULES:
+        outcome = RuleOutcome(
+            code=code, level=level, title=title, severity=severity, tier=rule_tier,
+        )
         rule_started = time.monotonic()
+        expensive = rule_tier == TIER_EXPENSIVE
         if code in disabled_codes:
             outcome.status = "skipped"
             outcome.note = "配置 asset_health.disabled_rules 显式关闭"
         elif expensive and not allow_expensive:
             outcome.status = "skipped"
-            outcome.note = "昂贵规则未启用（`--fast`）"
+            outcome.note = f"expensive 档未启用（tier={active_tier}；`--fast` 或状态页）"
         elif expensive and ctx.budget_left() <= 0:
             outcome.status = "skipped"
             outcome.note = f"时间预算 {budget:.0f}s 已耗尽"
@@ -1392,24 +1939,37 @@ def run_asset_health(
         findings.extend(outcome.findings)
 
     findings.sort(key=Finding.sort_key)
+    # level_counts / p1_codes **只统计 severity=block**：disclose/inventory 是
+    # "看得见但不用修"的披露，混进来就又把真问题淹了（J9 的核心诉求）。
+    # code_counts 则统计全部 finding，便于核对"某条规则一共报了多少"。
     level_counts = {P1: 0, P2: 0, P3: 0}
     code_counts: dict[str, int] = {}
+    severity_counts = {severity: 0 for severity in SEVERITIES}
     for finding in findings:
-        level_counts[finding.level] = level_counts.get(finding.level, 0) + 1
         code_counts[finding.code] = code_counts.get(finding.code, 0) + 1
-    p1_codes = sorted({f.code for f in findings if f.level == P1})
+        severity_counts[finding.severity] = severity_counts.get(finding.severity, 0) + 1
+        if finding.severity == SEVERITY_BLOCK:
+            level_counts[finding.level] = level_counts.get(finding.level, 0) + 1
+    p1_codes = sorted({
+        f.code for f in findings
+        if f.level == P1 and f.severity == SEVERITY_BLOCK
+    })
+    schedule = _schedule_settings(health_settings)
     return {
         "generated_at": moment.astimezone(UTC).isoformat(),
         "run_id": ctx.run_id,
+        "tier": active_tier,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
         "budget": {
             "max_seconds": budget,
             "expensive_allowed": allow_expensive,
         },
+        "schedule": schedule,
         # healthy 供 CLI 协议层判定 result.status（与 `vd data diagnose` 同约定）。
-        # 体检"不健康"= 有 P1；P2/P3 是待办清单，不影响 healthy。
+        # 体检"不健康"= 有 block 级的 P1 命中；disclose/inventory 不影响 healthy。
         "healthy": not p1_codes,
         "level_counts": level_counts,
+        "severity_counts": severity_counts,
         "code_counts": dict(sorted(code_counts.items())),
         "p1_codes": p1_codes,
         "findings": [finding.as_dict() for finding in findings],
@@ -1437,7 +1997,10 @@ def summarize_asset_health(payload: dict[str, Any], *, max_findings: int = 20) -
     return {
         "generated_at": payload.get("generated_at"),
         "run_id": payload.get("run_id"),
+        "tier": payload.get("tier"),
+        "schedule": payload.get("schedule", dict(DEFAULT_SCHEDULE)),
         "level_counts": payload.get("level_counts", {}),
+        "severity_counts": payload.get("severity_counts", {}),
         "code_counts": payload.get("code_counts", {}),
         "p1_codes": payload.get("p1_codes", []),
         "finding_count": len(findings),
@@ -1448,6 +2011,172 @@ def summarize_asset_health(payload: dict[str, Any], *, max_findings: int = 20) -
         "errors": payload.get("errors", []),
         "elapsed_ms": payload.get("elapsed_ms"),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 分层调度（cheap / expensive）与昂贵档结果缓存
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+EXPENSIVE_SUMMARY_STATE_KEY = "asset_health_expensive_summary"
+
+
+def _schedule_settings(settings: dict[str, Any]) -> dict[str, str]:
+    """读取 `asset_health.schedule`（缺省给 every_update / daily）。"""
+    schedule = dict(DEFAULT_SCHEDULE)
+    raw = settings.get("schedule")
+    if isinstance(raw, dict):
+        for tier in TIERS:
+            value = raw.get(tier)
+            if isinstance(value, str) and value.strip():
+                schedule[tier] = value.strip()
+    return schedule
+
+
+def expensive_summary_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """把一次全量（expensive 档）体检压成"上次运行摘要"。"""
+    findings = payload.get("findings") or []
+    expensive_findings = [
+        finding for finding in findings
+        if finding.get("code") in EXPENSIVE_RULE_CODES
+    ]
+    expensive_rules = [
+        rule for rule in (payload.get("rules") or [])
+        if rule.get("code") in EXPENSIVE_RULE_CODES
+    ]
+    return {
+        "status": "ok",
+        "run_id": payload.get("run_id"),
+        "generated_at": payload.get("generated_at"),
+        "tier": payload.get("tier"),
+        "elapsed_ms": payload.get("elapsed_ms"),
+        "level_counts": payload.get("level_counts", {}),
+        "severity_counts": payload.get("severity_counts", {}),
+        "p1_codes": payload.get("p1_codes", []),
+        "code_counts": payload.get("code_counts", {}),
+        "finding_count": len(findings),
+        "expensive_rules": expensive_rules,
+        "expensive_findings": expensive_findings,
+        "expensive_p1_codes": sorted({
+            str(finding.get("code")) for finding in expensive_findings
+            if finding.get("level") == P1 and finding.get("severity") == SEVERITY_BLOCK
+        }),
+        "crosscheck": next(
+            (rule for rule in expensive_rules if rule.get("code") == "CROSSCHECK_BELOW_THRESHOLD"),
+            None,
+        ),
+    }
+
+
+def store_expensive_summary(
+    sqlite: SQLiteStore | None, payload: dict[str, Any],
+) -> dict[str, Any]:
+    """把 expensive 档结果摘要写进 `data_refresh_state`（供状态页透传）。"""
+    summary = expensive_summary_payload(payload)
+    if sqlite is None:
+        summary["status"] = "not_stored"
+        summary["reason"] = "sqlite_unavailable"
+        return summary
+    try:
+        with sqlite.transaction() as connection:
+            connection.execute(
+                """INSERT INTO data_refresh_state (key, value, updated_at)
+                   VALUES (?, ?, ?)
+                   ON CONFLICT(key) DO UPDATE SET
+                     value=excluded.value, updated_at=excluded.updated_at""",
+                [
+                    EXPENSIVE_SUMMARY_STATE_KEY,
+                    json.dumps(summary, ensure_ascii=False, default=str),
+                    datetime.now(UTC).isoformat(),
+                ],
+            )
+    except Exception as error:  # noqa: BLE001 - 缓存写失败不得让医生失败
+        logger.warning("写入 expensive 档摘要失败: %s", error)
+        summary["status"] = "not_stored"
+        summary["reason"] = f"{type(error).__name__}: {error}"
+    return summary
+
+
+def load_expensive_summary(sqlite: SQLiteStore | None) -> dict[str, Any]:
+    """读取上次 expensive 档摘要；没有就跑 `not_run`（不许留 undefined）。"""
+    if sqlite is None:
+        return {"status": "not_run", "reason": "sqlite_unavailable"}
+    try:
+        rows = sqlite.query(
+            "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
+            [EXPENSIVE_SUMMARY_STATE_KEY],
+        )
+    except Exception as error:  # noqa: BLE001 - 状态页降级不得抛
+        return {"status": "not_run", "reason": f"{type(error).__name__}: {error}"}
+    if not rows or not rows[0].get("value"):
+        return {
+            "status": "not_run",
+            "reason": "尚无 expensive 档运行记录（跑 `vd data doctor` 全量或每日定时）",
+        }
+    try:
+        parsed = json.loads(rows[0]["value"])
+    except (json.JSONDecodeError, TypeError):
+        return {"status": "not_run", "reason": "缓存内容无法解析"}
+    if not isinstance(parsed, dict):
+        return {"status": "not_run", "reason": "缓存内容形态异常"}
+    parsed.setdefault("status", "ok")
+    parsed["cached_at"] = rows[0].get("updated_at")
+    return parsed
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 字段级遮蔽的"字段清单"入口（供筛选引擎在执行前自查）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# 只有这两条规则的语义是"某几个字段不可信"（可以字段级遮蔽）。
+# 其它 block 级规则（schema 漂移/快照缺口/链路停摆）要么与字段无关，要么
+# 影响面无法收敛到一个字段清单 —— 它们走原来的"披露"路径。
+FIELD_MASK_RULES: tuple[str, ...] = ("EXT_PERIOD_MISMATCH", "DEDUCTED_PROFIT_GAP")
+
+
+def masked_fields_for_database(
+    duck: DuckDBStore, *, settings: dict[str, Any] | None = None,
+) -> list[str]:
+    """直接判定"这个库现在有哪些字段不可信"（字段级遮蔽的引擎入口）。
+
+    为什么不让调用方先跑整份数据质量构建：筛选热路径上不允许几十秒的全表
+    扫描。这里只跑 :data:`FIELD_MASK_RULES` 两条规则 —— 都是 2 条聚合查询
+    （正式库实测 < 0.3s），命中后再由
+    ``data_quality.masked_fields_for_codes`` 翻译成字段清单（字段清单只有
+    一处真相，不在引擎里抄第二份）。
+    """
+    from app.core.data_quality import masked_fields_for_codes
+
+    health_settings = dict(settings) if settings is not None else load_settings()
+    ctx = HealthContext(
+        duck=duck,
+        sqlite=None,
+        now=datetime.now(UTC),
+        repo_root=PROJECT_ROOT,
+        run_id="field-trust-probe",
+        allow_expensive=False,
+        deadline=time.monotonic() + DEFAULT_MAX_SECONDS,
+        settings=health_settings,
+        min_domain_rows=int(
+            _setting_number(health_settings, "min_domain_rows", DEFAULT_MIN_DOMAIN_ROWS)
+        ),
+    )
+    checks = {
+        "EXT_PERIOD_MISMATCH": _rule_ext_period_mismatch,
+        "DEDUCTED_PROFIT_GAP": _rule_deducted_profit_gap,
+    }
+    codes: list[str] = []
+    for code in FIELD_MASK_RULES:
+        check = checks.get(code)
+        if check is None:
+            continue
+        try:
+            if check(ctx):
+                codes.append(code)
+        except Exception:  # noqa: BLE001 - 探针失败按"不遮蔽"处理，绝不 500
+            logger.debug("字段遮蔽探针 %s 执行失败", code, exc_info=True)
+    return masked_fields_for_codes(codes)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1538,7 +2267,12 @@ def run_doctor(
     now: datetime | None = None,
     repo_root: Path | None = None,
 ) -> dict[str, Any]:
-    """`vd data doctor` 的完整实现：体检 +（可选）写基线。"""
+    """`vd data doctor` 的完整实现：体检 +（可选）写基线。
+
+    2026-11-14（J10 分层调度）：跑的是 **expensive 档**（`--fast` 时降级
+    cheap）。跑完把"上次 expensive 摘要"写进 `data_refresh_state` —— 状态页/
+    每轮只跑 cheap，但需要知道最近一次全量核验是什么时候、结果如何。
+    """
     payload = run_asset_health(
         duck,
         sqlite,
@@ -1547,6 +2281,10 @@ def run_doctor(
         allow_expensive=allow_expensive,
         max_seconds=max_seconds,
     )
+    if allow_expensive:
+        payload["expensive_summary"] = store_expensive_summary(sqlite, payload)
+    else:
+        payload["expensive_summary"] = load_expensive_summary(sqlite)
     if write_history:
         payload["history"] = write_field_coverage_history(
             duck, sqlite, now=now, run_id=payload["run_id"]

@@ -620,6 +620,7 @@ def create_app(
     from app.web.api.dsl import router as dsl_router
     from app.web.api.etf_strategy import router as etf_strategy_router
     from app.web.api.index_dashboard import router as index_dashboard_router
+    from app.web.api.research import router as research_router
     from app.web.api.screening import router as screening_router
     from app.web.api.stock_detail import router as stock_detail_router
     from app.web.api.watchlist import router as watchlist_router
@@ -630,6 +631,8 @@ def create_app(
     app.include_router(dsl_router)
     app.include_router(index_dashboard_router)
     app.include_router(etf_strategy_router)
+    # 研究域只读 API（reports/119 §5 D 类）：时点可见性 + 公告时间线
+    app.include_router(research_router)
 
     # ─── 数据可筛性探针 ────────────────────────────────────────────
     @app.get("/api/ready")

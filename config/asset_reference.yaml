@@ -73,13 +73,9 @@ zero_reference_tables:
     reason: "风险因子域只被导入/导出引用，无运行时读取"
     fulfillment: "接入财务风险预警维度（PRD 未排期）"
     retirement_candidate: true
-  - table: financial_sector_items
-    domain: financial_sector
-    rows_at_review: 5058
-    columns: 33
-    reason: "只有 scripts/fetch_regulatory_metrics.py 在写，6 个金融监管指标没有进入任何指标/筛选"
-    fulfillment: "把 6 个监管指标做成 financial_sector 筛选族（D29 ④ 的兑现）"
-    retirement_candidate: false
+  # 2026-11-15（reports/121）：`financial_sector_items` 已从零引用清单移除 ——
+  # `app/core/supplement.py::FINANCIAL_SECTOR` 现在会写它（6 次引用），
+  # 金融股 25 个专用科目已通过东财 F10 补到 2025Q2+。保留本注释用于追溯。
   - table: csmar_far_finidx
     domain: csmar_anchor
     rows_at_review: 76262

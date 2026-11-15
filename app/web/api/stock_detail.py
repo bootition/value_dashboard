@@ -1258,7 +1258,14 @@ def get_source_audit(
 ) -> dict:
     """溯源信息 (PRD §14 SD8-SD10: 报告期/来源/置信度/公式)
 
-    M4-问题5修复: 补充生效日期/数据版本/公式/as_reported差异
+    M4-问题5修复: 补充生效日期/数据版本/公式
+
+    2026-11-14（reports/119 §5 D 类）：原来这里写着 `NULL AS as_reported_value`
+    与 `NULL AS latest_restated_diff`——两个字段进了响应但**恒为 NULL**，
+    属于「假接口」（比没有更糟：前端以为拿到了当时可见值）。
+    现在二者已从 SQL 与前端类型里删除；「当时可见值 vs 最新重述值」改由
+    `GET /api/research/as-reported`（app/web/api/research.py）如实提供，
+    且该接口会明确标注 value_basis=latest_restated（库内无历史数值版本）。
     """
     duck = request.app.state.duck
 
@@ -1269,9 +1276,7 @@ def get_source_audit(
                   api_version,
                    effective_date,
                    data_version,
-                   formula,
-                  NULL AS as_reported_value,
-                  NULL AS latest_restated_diff
+                   formula
            FROM source_audit_all
            WHERE stock_code = ?
            ORDER BY fetch_time DESC

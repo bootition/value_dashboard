@@ -62,6 +62,63 @@ SNAPSHOT_COLUMNS: set[str] = {
     "div_yield_spread_7y", "div_yield_spread_10y", "div_yield_spread_30y",
 }
 
+# ─── 废弃字段（仍可执行，但不再出现在指标列表里）─────────────────────────────
+# 2026-11-14（reports/120 §5 J5）：`dividend_yield` 与 `ttm_dividend_yield` 在
+# 正式库实测 **3,605 只精确 100 倍关系** —— 同一口径、只是时点基准不同：
+#   dividend_yield     分母用 `now()`（今天）→ 分子分母跨期，非 TTM 口径；
+#   ttm_dividend_yield 分母用 `latest_price_date`（快照价日）→ 自洽可复现。
+# 两者同时暴露等于让用户在两列几乎一样的数字里挑，且旧列会随"今天"漂移
+# （昨天筛出的结果今天不一样，不可复现）。
+#
+# 处理（不删列、不删口径，避免打断已保存规则）：
+#   1. 标 deprecated，`/api/screening/indicators` 不再列出它（进 unavailable）；
+#   2. 旧规则引用它 → **仍可执行**，结果里带 warnings。
+DEPRECATED_COLUMNS: dict[str, str] = {
+    "dividend_yield": "ttm_dividend_yield",
+}
+
+
+def deprecated_field_warnings(fields: Any) -> list[str]:
+    """把引用到的废弃字段翻译成人话警告（顺序稳定，便于断言与展示）。"""
+    return [
+        f"field_deprecated:{field}, 建议改用 {DEPRECATED_COLUMNS[field]}"
+        for field in sorted({str(item) for item in (fields or ())})
+        if field in DEPRECATED_COLUMNS
+    ]
+
+
+class MaskedFieldError(ValueError):
+    """规则引用了"当前不可信"的字段 → 拒绝执行（HTTP 409），不静默返回空集。
+
+    继承 ValueError 是刻意的：`/api/screening/run` 之外的调用方（自选刷新、
+    CLI）已有 `except ValueError` 的兜底，这样它们得到的是"带原因的失败"
+    而不是 500。`/api/screening/run` 自己先捕获本类型并映射成 409。
+
+    为什么必须拒绝而不是返回空结果：字段不可信时，空结果集会被用户读成
+    "全市场没有一只股票满足条件"，这是一个**错误的事实陈述**；而 409 +
+    reason 能如实说"这个字段现在不可信，原因是什么"。
+    """
+
+    def __init__(self, fields: list[str], *, reason: str = "masked_untrusted") -> None:
+        self.fields = sorted(dict.fromkeys(str(field) for field in fields))
+        self.reason = reason
+        super().__init__(
+            f"{reason}: 字段当前不可信，拒绝执行筛选（{', '.join(self.fields)}）",
+        )
+
+    def as_detail(self) -> dict[str, Any]:
+        return {
+            "reason_code": self.reason,
+            "masked_fields": self.fields,
+            "message": (
+                "以下字段当前不可信（数据质量规则判定为遮蔽状态），"
+                "为避免给出错误结论，本次筛选已拒绝执行："
+                + "、".join(self.fields)
+                + "。请先修复数据质量告警（见 /api/data-status/summary 的 "
+                "asset_health）后重试。"
+            ),
+        }
+
 # 扩展指标域 indicator_ext（schema v25，2026-09-19 Phase B）。
 # 三族此前完全缺失的指标：周转率族、自由现金流族、杠杆族。
 # 数值由本项目自算（source='derived_calculator'），口径见 config/csmar_field_verdict.json。
@@ -283,6 +340,7 @@ class ScreeningEngine:
         min_listing_years: int = 1,
         strict_only: bool = False,
         locked_indicators: dict[str, dict[str, Any]] | None = None,
+        masked_fields: Any = None,
     ) -> dict[str, Any]:
         """执行筛选
 
@@ -291,6 +349,10 @@ class ScreeningEngine:
             include_st: 是否包含 ST/*ST 股票
             include_suspended: 是否包含停牌股票
             min_listing_years: 最低上市年限
+            masked_fields: "当前不可信"的字段清单（字段级遮蔽）。传 None 时
+                由 `asset_health.masked_fields_for_database()` 现算（2 条聚合
+                查询）；命中即抛 :class:`MaskedFieldError`（HTTP 409），
+                **不静默返回空集** —— 空集会被读成"全市场没有符合的股票"。
 
         Returns:
             {
@@ -299,6 +361,7 @@ class ScreeningEngine:
                 "execution_time_ms": float,
                 "base_pool_size": int,
                 "data_date": str,
+                "warnings": [...],   # 例如 field_deprecated:dividend_yield
             }
         """
         start_time = time.monotonic()
@@ -346,6 +409,15 @@ class ScreeningEngine:
             for base in (field, self._rank_base(field))
             if base in SNAPSHOT_COLUMNS or base in NORMALIZED_FIELDS or base in self._custom_fields
         }
+
+        # 2.1 字段级遮蔽（reports/120 §5 J9）：字段当前不可信 → 拒绝执行。
+        #     检查 rank 基名（`free_cash_flow_market_rank` 引用的是
+        #     `free_cash_flow`），否则遮蔽会被排名列绕过。
+        self._reject_masked_fields(referenced_fields, masked_fields)
+
+        # 2.2 废弃字段（reports/120 §5 J5）：仍可执行，但结果必须自带警告，
+        #     否则用户不知道自己在用一个会随"今天"漂移的旧口径列。
+        deprecation_warnings = deprecated_field_warnings(referenced_fields)
 
         # 2026-08-27：不再因个别股票存在快照/完整期不一致而阻断全市场筛选。
         # 改为把这类股票从本次基础池中排除，其他正常股票照常筛选/导出。
@@ -429,6 +501,8 @@ class ScreeningEngine:
             "strict_availability": strict_availability,
             "strict_mode_warning": strict_mode_warning,
             "locked_indicators": locked_indicators or {},
+            # 废弃字段警告（例如 dividend_yield → ttm_dividend_yield）
+            "warnings": deprecation_warnings,
         }
 
     def _build_sql(
@@ -870,6 +944,36 @@ LIMIT {MAX_RESULT_ROWS}
     def _field_sql_name(field: str) -> str:
         """Map a validated public field to its generated SQL identifier."""
         return field.replace(".", "__")
+
+    def _effective_masked_fields(self, masked_fields: Any) -> set[str]:
+        """解析"当前不可信字段"清单；未显式传入时现算（廉价聚合探针）。"""
+        if masked_fields is not None:
+            return {str(field) for field in masked_fields}
+        try:
+            from app.core.quality.asset_health import masked_fields_for_database
+
+            return set(masked_fields_for_database(self.duck))
+        except Exception:  # noqa: BLE001 - 探针失败按"不遮蔽"处理，绝不 500
+            logger.warning("字段遮蔽探针失败（本次不遮蔽）", exc_info=True)
+            return set()
+
+    def _reject_masked_fields(self, referenced_fields: set[str], masked_fields: Any) -> None:
+        """引用了"当前不可信"字段 → 抛 :class:`MaskedFieldError`（409）。
+
+        为什么拒绝而不是返回空集：空结果集是一个**错误的事实陈述**（"全市场
+        没有一只股票满足"），而 409 能如实说"这个字段现在不可信"。
+        """
+        masked = self._effective_masked_fields(masked_fields)
+        if not masked:
+            return
+        blocked = sorted(
+            field
+            for field in referenced_fields
+            if field in masked or self._rank_base(field) in masked
+        )
+        if blocked:
+            logger.warning("筛选引用了不可信字段，拒绝执行: %s", blocked)
+            raise MaskedFieldError(blocked)
 
     def _is_known_field(self, field: str) -> bool:
         return (

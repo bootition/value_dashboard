@@ -37,6 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
+from app.core.storage.cold_archive_guard import guard_writable_or_exit  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     PathIsolationError,
@@ -157,6 +158,7 @@ def main() -> None:
         logger.info("[DRY RUN] 未写库")
         return
 
+    guard_writable_or_exit(duck, ("csmar_per_share_history",), logger=logger)
     ev_dir = PROJECT_ROOT / ".planning" / "2026-09-17-datapackage-research" / "evidence"
     ev_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")

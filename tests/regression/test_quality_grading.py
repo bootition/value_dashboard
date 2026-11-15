@@ -1,0 +1,570 @@
+"""告警分级 / 字段级遮蔽 / 体检分层调度 / 废弃字段 —— reports/120 §5 J9/J10/J5 回归。
+
+本文件守住四件事：
+
+1. **分级（J9-1）**：每条规则有 `severity ∈ {block, disclose, inventory}`；
+   结构性可空字段（亏损无 PE、无分红无股息率、无商誉）只披露不阻断。
+   `level_counts` / `p1_codes` **只统计 block** —— 否则 32 条
+   FIELD_COVERAGE_LOW + 54 条 NULL_REASON_MISSING 会把真问题埋掉。
+2. **字段级遮蔽（J9-2）**：`EXT_PERIOD_MISMATCH` 只遮扩展域、
+   `DEDUCTED_PROFIT_GAP` 只遮扣非四兄弟；`/api/screening/indicators` 把它们
+   移到 `unavailable`，筛选引擎命中即拒绝执行（409），**不静默返回空集**。
+3. **分层调度（J10）**：cheap 档不跑归档交叉核验（~35s），状态页只跑 cheap
+   但会透传 expensive 档"上次运行摘要"。
+4. **废弃字段（J5）**：`dividend_yield` 标 deprecated、不再列出，但旧规则
+   仍可执行并带回 `warnings`。
+
+全部用 tmp_path 里的临时 DuckDB/SQLite（S1 隔离），不触碰 data/ 正式库。
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, date, datetime
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+import yaml
+
+from app.core.data_quality import (
+    DEDUCTED_PROFIT_INDICATOR_FIELDS,
+    build_data_quality_status,
+    indicator_trust,
+    mask_untrusted_values,
+    masked_fields_for_codes,
+)
+from app.core.quality import asset_health
+from app.core.quality.asset_health import (
+    RULE_CODES,
+    RULE_SEVERITIES,
+    RULE_TIERS,
+    SEVERITY_BLOCK,
+    SEVERITY_DISCLOSE,
+    SEVERITY_INVENTORY,
+    is_structurally_nullable,
+    load_expensive_summary,
+    run_asset_health,
+    run_doctor,
+)
+from app.core.screening import engine as engine_module
+from app.core.screening.engine import (
+    DEPRECATED_COLUMNS,
+    EXTENDED_COLUMNS,
+    MaskedFieldError,
+    ScreeningEngine,
+)
+from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.sqlite_store import SQLiteStore
+
+NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SAMPLE = 100
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 夹具
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _payload(duck: DuckDBStore, sqlite: SQLiteStore | None = None, **kwargs: Any) -> dict:
+    kwargs.setdefault("now", NOW)
+    kwargs.setdefault("allow_expensive", False)
+    return run_asset_health(duck, sqlite, **kwargs)
+
+
+def _findings(payload: dict, code: str) -> list[dict]:
+    return [item for item in payload["findings"] if item["code"] == code]
+
+
+def _bulk_domain(
+    duck: DuckDBStore,
+    table: str,
+    columns: list[str],
+    report_date: date,
+    *,
+    constants: dict[str, Any] | None = None,
+    null_every: dict[str, int] | None = None,
+    count: int = DEFAULT_SAMPLE,
+) -> None:
+    constants = constants or {}
+    null_every = null_every or {}
+    head = ["stock_code", "report_date", *constants]
+    selects = ["'C' || lpad(i::VARCHAR, 6, '0')", "?", *("?" for _ in constants)]
+    for column in columns:
+        step = null_every.get(column)
+        selects.append(
+            f"CASE WHEN i % {step} = 0 THEN NULL ELSE 1.0 END" if step else "1.0"
+        )
+    duck.write_query(
+        f"INSERT INTO {table} ({', '.join([*head, *columns])}) "
+        f"SELECT {', '.join(selects)} FROM range(0, ?) AS t(i)",
+        [report_date, *constants.values(), count],
+    )
+
+
+def _bulk_snapshot(
+    duck: DuckDBStore, report_date: date, *, null_every: dict[str, int] | None = None,
+) -> None:
+    from app.core.screening.engine import SNAPSHOT_COLUMNS
+
+    _bulk_domain(
+        duck, "indicator_snapshot", sorted(SNAPSHOT_COLUMNS), report_date,
+        constants={"calculated_at": NOW}, null_every=null_every,
+    )
+
+
+def _bulk_extended(
+    duck: DuckDBStore, report_date: date, *, null_every: dict[str, int] | None = None,
+) -> None:
+    _bulk_domain(
+        duck, "indicator_ext", sorted(EXTENDED_COLUMNS), report_date,
+        constants={"calculated_at": NOW, "source": "fixture", "data_version": 1},
+        null_every=null_every,
+    )
+
+
+def _stub_request(duck: DuckDBStore, sqlite: SQLiteStore) -> SimpleNamespace:
+    state = SimpleNamespace(duck=duck, sqlite=sqlite)
+    return SimpleNamespace(app=SimpleNamespace(state=state))
+
+
+def _indicators_payload(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
+    from app.web.api.screening import list_available_indicators
+
+    return list_available_indicators(_stub_request(duck, sqlite))
+
+
+def _patch_warning_codes(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> None:
+    """把"当前 warning codes"注入指标列表（不跑全量数据质量构建）。"""
+    import app.core.data_quality as data_quality_module
+
+    monkeypatch.setattr(data_quality_module, "read_warning_codes", lambda *a, **k: list(codes))
+
+
+def _seed_screenable(duck: DuckDBStore, values: dict[str, Any] | None = None) -> None:
+    """最小可筛选夹具：1 只票 + 1 行快照。"""
+    values = values or {}
+    duck.write_query(
+        """INSERT INTO stock_meta
+               (stock_code, name, exchange, listing_date, is_st, is_suspended)
+           VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false)"""
+    )
+    duck.write_query(
+        """INSERT INTO indicator_snapshot
+               (stock_code, report_date, calculated_at, latest_close, roe, dividend_yield)
+           VALUES ('000001', '2025-12-31', ?, 10, ?, ?)""",
+        [NOW, values.get("roe", 12.0), values.get("dividend_yield", 0.02)],
+    )
+    duck.write_query(
+        """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
+           VALUES ('000001', '2025-12-31', 100)"""
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1. 告警分级（J9-1）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_every_rule_declares_tier_and_severity() -> None:
+    """13 条规则一条都不能漏登记 —— 漏一条就等于少一个调度/分级依据。"""
+    assert set(RULE_SEVERITIES) == set(RULE_CODES)
+    assert set(RULE_TIERS) == set(RULE_CODES)
+    assert set(RULE_SEVERITIES.values()) <= {
+        SEVERITY_BLOCK, SEVERITY_DISCLOSE, SEVERITY_INVENTORY,
+    }
+    assert set(RULE_TIERS.values()) <= {"cheap", "expensive"}
+    assert RULE_SEVERITIES["EXT_PERIOD_MISMATCH"] == SEVERITY_BLOCK
+    assert RULE_SEVERITIES["DEDUCTED_PROFIT_GAP"] == SEVERITY_BLOCK
+    assert RULE_SEVERITIES["ZERO_REFERENCE_ASSET"] == SEVERITY_INVENTORY
+    assert RULE_TIERS["CROSSCHECK_BELOW_THRESHOLD"] == "expensive"
+
+
+def test_structural_null_allowlist_covers_documented_fields() -> None:
+    """结构性可空白名单必须覆盖"亏损/无分红/无商誉即合法为空"的那批字段。"""
+    for field in (
+        "pe_ttm", "pcf_ttm", "payout_ratio", "dividend_yield",
+        "ttm_dividend_yield", "goodwill_ratio",
+        "div_yield_spread_1y", "div_yield_spread_10y",
+        "leverage_financial", "leverage_operating", "leverage_total",
+    ):
+        assert is_structurally_nullable(field), field
+    # 真正的"该有值却没有"的字段不许混进白名单
+    for field in ("roe", "revenue_yoy", "free_cash_flow", "net_margin"):
+        assert not is_structurally_nullable(field), field
+
+
+def test_structural_null_field_is_disclose_not_block(duckdb_store: DuckDBStore) -> None:
+    """股息率 25% 覆盖：披露，但不进 P1（无分红公司本来就没有股息率）。"""
+    _bulk_snapshot(duckdb_store, date(2026, 9, 30), null_every={"dividend_yield": 4})
+
+    payload = _payload(duckdb_store)
+
+    findings = [
+        item for item in _findings(payload, "FIELD_COVERAGE_LOW")
+        if item["field"] == "dividend_yield"
+    ]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == SEVERITY_DISCLOSE
+    assert "结构性可空" in findings[0]["detail"]
+    assert payload["level_counts"]["P1"] == 0
+    assert "FIELD_COVERAGE_LOW" not in payload["p1_codes"]
+    assert payload["severity_counts"]["disclose"] >= 1
+
+
+def test_non_structural_field_stays_block(duckdb_store: DuckDBStore) -> None:
+    """ROE 只有 50% 覆盖 = 真的坏了 → 必须仍是 block（P1）。"""
+    _bulk_snapshot(duckdb_store, date(2026, 9, 30), null_every={"roe": 2})
+
+    payload = _payload(duckdb_store)
+
+    findings = [
+        item for item in _findings(payload, "FIELD_COVERAGE_LOW")
+        if item["field"] == "roe"
+    ]
+    assert len(findings) == 1
+    assert findings[0]["severity"] == SEVERITY_BLOCK
+    assert payload["level_counts"]["P1"] == 1
+    assert payload["p1_codes"] == ["FIELD_COVERAGE_LOW"]
+    assert payload["healthy"] is False
+
+
+def test_disclose_findings_do_not_enter_warning_codes(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """P3 清单（inventory）与 disclose 都不得触发 warning_codes / healthy=False。"""
+    status = build_data_quality_status(duckdb_store, sqlite_store)
+    summary = status["asset_health"]
+
+    assert summary["severity_counts"]["inventory"] > 0  # 零引用资产清单
+    assert "ZERO_REFERENCE_ASSET" not in status["warning_codes"]
+    assert "ZERO_REFERENCE_ASSET" not in summary["p1_codes"]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2. 字段级遮蔽（J9-2）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_indicator_trust_masks_extended_domain_only() -> None:
+    trust = indicator_trust(["EXT_PERIOD_MISMATCH"])
+
+    assert trust["untrusted_all"] is False
+    assert set(trust["masked_fields"]) == set(EXTENDED_COLUMNS)
+    for snapshot_field in ("pe_ttm", "pb_mrq", "roe", "annualized_volatility"):
+        assert snapshot_field not in trust["masked_fields"]
+
+    masked = mask_untrusted_values(
+        {"pe_ttm": 12.5, "free_cash_flow": 1e9, "roe": 0.15}, trust,
+    )
+    assert masked == {"pe_ttm": 12.5, "free_cash_flow": None, "roe": 0.15}
+
+
+def test_indicator_trust_masks_deducted_profit_family() -> None:
+    trust = indicator_trust(["DEDUCTED_PROFIT_GAP"])
+
+    assert trust["untrusted_all"] is False
+    assert set(trust["masked_fields"]) == set(DEDUCTED_PROFIT_INDICATOR_FIELDS)
+    assert "pe_ttm" not in trust["masked_fields"]
+    assert "revenue_yoy" not in trust["masked_fields"]
+
+    masked = mask_untrusted_values(
+        {"deducted_profit_yoy": 12.0, "net_profit_yoy": 8.0,
+         "income.deducted_net_profit": 1e8},
+        trust,
+    )
+    assert masked == {
+        "deducted_profit_yoy": None,
+        "net_profit_yoy": 8.0,
+        "income.deducted_net_profit": None,
+    }
+
+
+def test_no_masking_without_the_two_codes() -> None:
+    """其它资产健康码一律不遮蔽字段（披露 ≠ 不可信）。"""
+    for code in (
+        "FIELD_COVERAGE_LOW", "FIELD_COVERAGE_DROP", "MANUAL_CHAIN_STALE",
+        "SNAPSHOT_PERIOD_GAP", "NULL_REASON_MISSING", "CROSSCHECK_BELOW_THRESHOLD",
+        "SCHEMA_DDL_DRIFT", "ZERO_REFERENCE_ASSET", "CHAIN_PROGRESS_STALLED",
+        "PACKAGE_STALE", "STATIC_TABLE_STALE",
+    ):
+        assert masked_fields_for_codes([code]) == [], code
+
+
+def test_indicators_endpoint_moves_masked_extended_fields_to_unavailable(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_warning_codes(monkeypatch, ["EXT_PERIOD_MISMATCH"])
+
+    payload = _indicators_payload(duckdb_store, sqlite_store)
+
+    names = {item["name"] for item in payload["indicators"]}
+    unavailable = {item["name"]: item for item in payload["unavailable"]}
+    # 扩展域：整族被移到 unavailable，且原因明确
+    assert "free_cash_flow" not in names
+    assert "free_cash_flow" in unavailable
+    assert unavailable["free_cash_flow"]["reason"] == "masked_untrusted"
+    assert set(unavailable) >= set(EXTENDED_COLUMNS)
+    # 快照域不受影响
+    assert {"pe_ttm", "roe", "net_margin"} <= names
+    assert payload["masked_fields"] == sorted(EXTENDED_COLUMNS)
+
+
+def test_indicators_endpoint_masks_deducted_profit_only(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_warning_codes(monkeypatch, ["DEDUCTED_PROFIT_GAP"])
+
+    payload = _indicators_payload(duckdb_store, sqlite_store)
+
+    names = {item["name"] for item in payload["indicators"]}
+    unavailable = {item["name"]: item for item in payload["unavailable"]}
+    for field in ("deducted_profit_yoy", "deducted_profit_cagr3", "deducted_profit_cagr5"):
+        assert field not in names
+        assert unavailable[field]["reason"] == "masked_untrusted"
+    assert "roe" in names and "revenue_yoy" in names
+
+
+def test_engine_refuses_masked_field_condition(duckdb_store: DuckDBStore) -> None:
+    """引用不可信字段 → 拒绝执行（不返回空集）。"""
+    _seed_screenable(duckdb_store)
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    with pytest.raises(MaskedFieldError) as excinfo:
+        engine.run(
+            {"conditions": {"logic": "AND", "rules": [
+                {"field": "free_cash_flow", "op": ">", "value": 1},
+            ]}},
+            min_listing_years=0,
+            masked_fields=sorted(EXTENDED_COLUMNS),
+        )
+
+    detail = excinfo.value.as_detail()
+    assert detail["reason_code"] == "masked_untrusted"
+    assert detail["masked_fields"] == ["free_cash_flow"]
+
+
+def test_engine_refuses_masked_rank_base_field(duckdb_store: DuckDBStore) -> None:
+    """排名列（`fcf_margin_market_rank`）不能绕过遮蔽。"""
+    _seed_screenable(duckdb_store)
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    with pytest.raises(MaskedFieldError) as excinfo:
+        engine.run(
+            {"conditions": {"logic": "AND", "rules": [
+                {"field": "fcf_margin_market_rank", "op": ">", "value": 1},
+            ]}},
+            min_listing_years=0,
+            masked_fields=["fcf_margin"],
+        )
+
+    assert excinfo.value.fields == ["fcf_margin_market_rank"]
+
+
+def test_engine_runs_normally_when_only_unrelated_fields_are_masked(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """遮蔽是字段级的：只遮扣非时，按 ROE 筛选必须照常跑出结果。"""
+    _seed_screenable(duckdb_store, {"roe": 12.0})
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    result = engine.run(
+        {"conditions": {"logic": "AND", "rules": [
+            {"field": "roe", "op": ">", "value": 5},
+        ]}, "columns": ["stock_code", "roe"]},
+        min_listing_years=0,
+        masked_fields=list(DEDUCTED_PROFIT_INDICATOR_FIELDS),
+    )
+
+    assert [row["stock_code"] for row in result["results"]] == ["000001"]
+
+
+def test_engine_without_explicit_masked_fields_derives_them_from_database(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """调用方没传时引擎自查（自选刷新/CLI 也有保护）。
+
+    造一个"扩展域报告期落后快照"的库 → 扩展字段应被判为不可信。
+    """
+    _seed_screenable(duckdb_store)
+    _bulk_extended(duckdb_store, date(2026, 6, 30))
+
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    with pytest.raises(MaskedFieldError):
+        engine.run(
+            {"conditions": {"logic": "AND", "rules": [
+                {"field": "free_cash_flow", "op": ">", "value": 1},
+            ]}},
+            min_listing_years=0,
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 3. 体检分层调度（J10）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_cheap_tier_never_runs_archive_crosscheck(
+    duckdb_store: DuckDBStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cheap 档（状态页/每轮）绝不能触发 ~35s 的归档交叉核验。"""
+    calls: list[str] = []
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        calls.append("crosscheck")
+        raise AssertionError("cheap 档不允许执行归档交叉核验")
+
+    monkeypatch.setattr(
+        "app.core.quality.archive_crosscheck.run_crosscheck", _boom,
+    )
+
+    payload = _payload(duckdb_store, tier="cheap")
+
+    assert calls == []
+    assert payload["tier"] == "cheap"
+    rule = next(
+        item for item in payload["rules"] if item["code"] == "CROSSCHECK_BELOW_THRESHOLD"
+    )
+    assert rule["status"] == "skipped"
+    assert rule["tier"] == "expensive"
+    assert "CROSSCHECK_BELOW_THRESHOLD" in {item["code"] for item in payload["skipped"]}
+
+
+def test_status_page_runs_cheap_only_but_passes_expensive_summary(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """状态页：只跑 cheap；expensive 的"上次运行"必须能从缓存透传。"""
+    fresh = build_data_quality_status(duckdb_store, sqlite_store)
+    assert fresh["asset_health"]["expensive"]["status"] == "not_run"
+    assert not any(
+        rule["code"] == "CROSSCHECK_BELOW_THRESHOLD" and rule["status"] == "warn"
+        for rule in fresh["asset_health"]["rules"]
+    )
+
+    # 全量 doctor 跑一次 → 摘要落库
+    doctor = run_doctor(duckdb_store, sqlite_store, now=NOW, allow_expensive=True)
+    assert json.loads(
+        sqlite_store.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [asset_health.EXPENSIVE_SUMMARY_STATE_KEY],
+        )[0]["value"]
+    )["status"] == "ok"
+
+    # 状态页下一次构建就能透传（不必重跑 expensive）
+    after = build_data_quality_status(duckdb_store, sqlite_store)
+    expensive = after["asset_health"]["expensive"]
+    assert expensive["status"] == "ok"
+    assert expensive["generated_at"] == doctor["generated_at"]
+    assert expensive["run_id"] == doctor["run_id"]
+    assert expensive["cached_at"]
+    assert expensive["crosscheck"] is not None
+    assert expensive["crosscheck"]["tier"] == "expensive"
+    # cheap 档本身依然把 expensive 规则标 skipped
+    assert any(
+        rule["code"] == "CROSSCHECK_BELOW_THRESHOLD" and rule["status"] == "skipped"
+        for rule in after["asset_health"]["rules"]
+    )
+
+
+def test_expensive_summary_marks_not_run_without_cache(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    summary = load_expensive_summary(sqlite_store)
+
+    assert summary["status"] == "not_run"
+    assert "vd data doctor" in summary["reason"]
+
+
+def test_schedule_contract_is_declared_in_config() -> None:
+    """分层调度必须有显式配置契约，而不是散落在调用方代码里。"""
+    config = yaml.safe_load((PROJECT_ROOT / "config" / "default.yaml").read_text("utf-8"))
+
+    assert config["asset_health"]["schedule"] == {
+        "cheap": "every_update",
+        "expensive": "daily",
+    }
+    assert asset_health.DEFAULT_SCHEDULE == {"cheap": "every_update", "expensive": "daily"}
+
+
+def test_status_summary_exposes_schedule_and_tier(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    status = build_data_quality_status(duckdb_store, sqlite_store)
+
+    summary = status["asset_health"]
+    assert summary["tier"] == "cheap"
+    assert summary["schedule"] == {"cheap": "every_update", "expensive": "daily"}
+    assert {rule["tier"] for rule in summary["rules"]} == {"cheap", "expensive"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. 废弃字段（J5）：dividend_yield
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_dividend_yield_is_deprecated() -> None:
+    assert DEPRECATED_COLUMNS["dividend_yield"] == "ttm_dividend_yield"
+    # 不删列：引擎仍认得它（旧规则必须还能跑）
+    from app.core.screening.engine import SNAPSHOT_COLUMNS
+
+    assert "dividend_yield" in SNAPSHOT_COLUMNS
+
+
+def test_indicators_endpoint_hides_deprecated_dividend_yield(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_warning_codes(monkeypatch, [])
+
+    payload = _indicators_payload(duckdb_store, sqlite_store)
+
+    names = {item["name"] for item in payload["indicators"]}
+    unavailable = {item["name"]: item for item in payload["unavailable"]}
+    assert "dividend_yield" not in names
+    assert unavailable["dividend_yield"]["reason"] == "deprecated"
+    assert unavailable["dividend_yield"]["replaced_by"] == "ttm_dividend_yield"
+    assert "ttm_dividend_yield" in names
+    assert payload["deprecated_fields"] == ["dividend_yield"]
+
+
+def test_deprecated_field_still_runs_with_warning(duckdb_store: DuckDBStore) -> None:
+    """旧规则引用 dividend_yield：仍可执行，但结果必须带 warnings。"""
+    _seed_screenable(duckdb_store, {"dividend_yield": 0.02})
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    result = engine.run(
+        {
+            "conditions": {"logic": "AND", "rules": [
+                {"field": "dividend_yield", "op": ">", "value": 0.01},
+            ]},
+            "columns": ["stock_code", "dividend_yield"],
+        },
+        min_listing_years=0,
+        masked_fields=[],
+    )
+
+    assert [row["stock_code"] for row in result["results"]] == ["000001"]
+    assert result["warnings"] == [
+        "field_deprecated:dividend_yield, 建议改用 ttm_dividend_yield"
+    ]
+
+
+def test_non_deprecated_rule_has_no_warnings(duckdb_store: DuckDBStore) -> None:
+    _seed_screenable(duckdb_store, {"roe": 12.0})
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    result = engine.run(
+        {
+            "conditions": {"logic": "AND", "rules": [
+                {"field": "roe", "op": ">", "value": 5},
+            ]},
+            "columns": ["stock_code"],
+        },
+        min_listing_years=0,
+        masked_fields=[],
+    )
+
+    assert result["warnings"] == []
+    assert engine_module.DEPRECATED_COLUMNS == {"dividend_yield": "ttm_dividend_yield"}

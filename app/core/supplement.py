@@ -8,7 +8,7 @@
 2. `balance_sheet_ext`   —— 其他应付款 / 一年内到期非流动负债 / 其他应收款合计；
    来源 `scripts/fetch_balance_sheet_ext.py`
 3. `deducted_profit`     —— 扣非净利润（只 UPDATE `income_statement` 既有行）；
-   来源 `scripts/patch_deducted_profit.py`
+   来源 `scripts/fetch_deducted_profit.py`
 
 为什么必须抽出来：不是"调度缺失"，是**续传判据错了**
 ----------------------------------------------------
@@ -43,7 +43,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -60,6 +60,8 @@ __all__ = [
     "CASHFLOW_SUPPLEMENT",
     "CSMAR_CUTOFF",
     "DEDUCTED_PROFIT",
+    "EXCHANGE_GAIN",
+    "FINANCIAL_SECTOR",
     "REGULATORY_METRICS",
     "SPECS",
     "RegulatoryMetricsUpdater",
@@ -88,6 +90,9 @@ BALANCE_SHEET_EXT = "balance_sheet_ext"
 DEDUCTED_PROFIT = "deducted_profit"
 FIXED_ASSET_SUPPLEMENT = "fixed_assets_supplement"
 REGULATORY_METRICS = "regulatory_metrics"
+# 2026-11-15 新增（reports/122）：金融股专用三表 2025Q2+ / 公允价值变动收益回填
+FINANCIAL_SECTOR = "financial_sector_items"
+EXCHANGE_GAIN = "exchange_gain_supplement"
 
 # 折旧摊销族 → cash_flow_indirect 列名（实测确认，见旧脚本 docstring）
 INDIRECT_FIELD_MAP: dict[str, str] = {
@@ -117,6 +122,18 @@ BALANCE_EXT_FIELD_MAP: dict[str, str] = {
 DEDUCTED_FIELD_MAP: dict[str, str] = {
     "DEDUCT_PARENT_NETPROFIT": "deducted_net_profit",
 }
+# 公允价值变动收益 → income_statement.exchange_gain。
+# ⚠️ 列名与语义的历史包袱（2026-11-15 实测，reports/122）：`exchange_gain` 这个
+# 列**存的是公允价值变动收益**（schema.py 注释、CSMAR `B001301000`、akshare
+# `FAIRVALUE_CHANGE_INCOME` 三方一致，且 600028/600030 逐值核对相等），而不是
+# 汇兑收益。新浪适配器把「汇兑收益」映射到本列属于口径错误，且新浪只在 ~194 只
+# 股票上返回该科目 → 造成 52.1%→3.5% 的"断崖"。东财 F10 `lrbAjaxNew` 同时有
+# `FAIRVALUE_CHANGE_INCOME`（本列语义）与 `EXCHANGE_INCOME`（汇兑收益），
+# 这里按**列既有语义**取前者，只回填 NULL。
+EXCHANGE_GAIN_FIELD_MAP: dict[str, str] = {
+    "FAIRVALUE_CHANGE_INCOME": "exchange_gain",
+}
+EXCHANGE_GAIN_COLUMNS: tuple[str, ...] = ("stock_code", "report_date", "exchange_gain")
 
 INDIRECT_COLUMNS: tuple[str, ...] = (
     "stock_code", "report_date", "report_type", "fixed_asset_depreciation",
@@ -146,6 +163,90 @@ FIXED_ASSET_FIELD_MAP: dict[str, str] = {
 }
 FIXED_ASSET_COLUMNS: tuple[str, ...] = ("stock_code", "report_date", "fixed_assets")
 
+# ─── 金融股专用三表（2026-11-15，reports/122 §A）─────────────────────────
+#
+# 背景：`financial_sector_items` 5,058 行 / 25 个业务列（含主键与元数据共 33 列，
+# 以 pragma 实测为准）只覆盖到 2025-03-31（CSMAR C17 截止），2025Q2 之后
+# 银行/券商/保险的专用科目**一个来源都没有**。
+#
+# 实测（2026-11-15，东财 F10 `zcfzbAjaxNew` / `lrbAjaxNew`）：
+# - 金融股必须先解析 `companyType`（银行=3 / 保险=2 / 证券=1 / 通用=4），
+#   `companyType=4` 对金融股的**资产负债表直接返回空**、利润表返回通用模板
+#   （行名不同：无 `INTEREST_NI`/`FEE_COMMISSION_NI`），因此本 spec 打开
+#   `resolve_company_type`，先取页面 `hidctype` 再发请求。
+# - 响应行自带 `ORG_TYPE`（"银行"/"证券"/"保险"），据此选择按行业字段映射，
+#   避免同名不同义（券商 `CUSTOMER_DEPOSIT` 是「客户资金存款」资产科目，
+#   绝不能写进「吸收存款」）。
+# - 2025-03-31 逐值比对：工行/招行 14 个银行科目与 CSMAR **完全相等**
+#  （ratio=1.000000），中信证券 9 个券商科目同样完全相等。
+FINANCIAL_SECTOR_FIELD_MAP_BANK: dict[str, str] = {
+    "CASH_DEPOSIT_PBC": "cash_and_cb_balance",       # 现金及存放中央银行款项
+    "DEPOSIT_INTERBANK": "due_from_banks",           # 存放同业款项
+    "LOAN_ADVANCE": "loans_and_advances",            # 发放贷款及垫款净额
+    "LOAN_PBC": "borrowing_from_cb",                 # 向中央银行借款
+    "IOFI_DEPOSIT": "interbank_deposits",            # 同业及其他金融机构存放款项
+    "ACCEPT_DEPOSIT": "customer_deposits",           # 吸收存款
+    "INTEREST_INCOME": "interest_income",            # 利息收入
+    "INTEREST_EXPENSE": "interest_expense",          # 利息支出
+    "INTEREST_NI": "net_interest_income",            # 利息净收入
+    "FEE_COMMISSION_NI": "fee_commission_income_net",  # 手续费及佣金净收入
+    "LEND_FUND": "interbank_lending",                # 拆出资金
+    "BUY_RESALE_FINASSET": "reverse_repo_assets",    # 买入返售金融资产
+    "BORROW_FUND": "interbank_borrowing",            # 拆入资金
+    "SELL_REPO_FINASSET": "repo_liabilities",        # 卖出回购金融资产款
+}
+FINANCIAL_SECTOR_FIELD_MAP_BROKER: dict[str, str] = {
+    "SETTLE_EXCESS_RESERVE": "settlement_reserve",           # 结算备付金
+    "CUSTOMER_EXCESS_RESERVE": "customer_settlement_reserve",  # 其中：客户备付金
+    "REFUND_DEPOSIT_PAY": "margin_deposits_paid",            # 存出保证金
+    "AGENT_TRADE_SECURITY": "client_securities_deposits",    # 代理买卖证券款
+    "AGENT_UNDERWRITE_SECURITY": "underwriting_securities",  # 代理承销证券款
+    "INTEREST_NI": "net_interest_income",                    # 利息净收入
+    "FEE_COMMISSION_NI": "fee_commission_income_net",        # 手续费及佣金净收入
+    "LEND_FUND": "interbank_lending",                        # 拆出资金
+    "BUY_RESALE_FINASSET": "reverse_repo_assets",            # 买入返售金融资产
+    "BORROW_FUND": "interbank_borrowing",                    # 拆入资金
+    "SELL_REPO_FINASSET": "repo_liabilities",                # 卖出回购金融资产款
+}
+FINANCIAL_SECTOR_FIELD_MAP_INSURER: dict[str, str] = {
+    "EARNED_PREMIUM": "earned_premiums",  # 已赚保费
+}
+# 按 ORG_TYPE 选择的字段映射；未命中的行业（信托/金控/期货/租赁 → "通用"）
+# 用空映射：抓得到行但没有本表科目，如实计 no_data，绝不猜。
+FINANCIAL_SECTOR_ORG_FIELD_MAPS: dict[str, dict[str, str]] = {
+    "银行": FINANCIAL_SECTOR_FIELD_MAP_BANK,
+    "证券": FINANCIAL_SECTOR_FIELD_MAP_BROKER,
+    "保险": FINANCIAL_SECTOR_FIELD_MAP_INSURER,
+}
+# 派生科目：东财银行模板没有「吸收存款及同业存放」小计，但
+# 2025-03-31 实测 CSMAR 该列 == 吸收存款 + 同业存放（工行/招行差值均为 0），
+# 因此按两项之和派生，而不是留空。
+FINANCIAL_SECTOR_ORG_DERIVED_SUMS: dict[str, dict[str, tuple[str, ...]]] = {
+    "银行": {"deposits_and_interbank": ("ACCEPT_DEPOSIT", "IOFI_DEPOSIT")},
+}
+FINANCIAL_SECTOR_VALUE_COLUMNS: tuple[str, ...] = (
+    "cash_and_cb_balance", "due_from_banks", "loans_and_advances", "borrowing_from_cb",
+    "deposits_and_interbank", "interbank_deposits", "customer_deposits",
+    "interest_income", "interest_expense", "net_interest_income",
+    "premiums_receivable", "insurance_contract_reserve", "policyholder_deposits",
+    "earned_premiums", "claim_payments_net",
+    "settlement_reserve", "customer_settlement_reserve", "margin_deposits_paid",
+    "client_securities_deposits", "underwriting_securities", "fee_commission_income_net",
+    "interbank_lending", "reverse_repo_assets", "interbank_borrowing", "repo_liabilities",
+)
+FINANCIAL_SECTOR_COLUMNS: tuple[str, ...] = (
+    "stock_code", "report_date", "report_type",
+    *FINANCIAL_SECTOR_VALUE_COLUMNS,
+    "source", "fetch_time", "raw_response_hash", "confidence", "batch_id",
+)
+# 只补金融行业股票：申万一级「银行」「非银金融」。CSMAR 的 78 只金融股
+# （38 银行 + 36 券商 + 1 保险 + 1 信托 + 2 金控）全部落在这个口径内
+#（其中 3 只已退市：中天金融/宏源证券/海通证券，被 `is_listed` 过滤掉）。
+FINANCIAL_SECTOR_UNIVERSE_PREDICATE = (
+    "m.sw_level1 IN ('银行', '非银金融')"
+    " OR (m.sw_level1 IS NULL AND m.csrc_l1 = '金融业')"
+)
+
 
 @dataclass(frozen=True)
 class SupplementSpec:
@@ -166,6 +267,22 @@ class SupplementSpec:
     #: 待补报告期的下界（只补 CSMAR 未覆盖期）
     period_floor: date | None = None
     fills_null_only: bool = False
+    #: 按行业（源行 `ORG_TYPE`：银行/证券/保险…）覆盖 `field_map`。
+    #: 同名不同义（券商 `CUSTOMER_DEPOSIT` 是客户资金存款）必须在这里分开映射。
+    org_field_maps: Mapping[str, Mapping[str, str]] | None = None
+    #: 按行业派生科目：{行业: {目标列: (源字段1, 源字段2, …)}}，取非空项求和。
+    org_derived_sums: Mapping[str, Mapping[str, tuple[str, ...]]] | None = None
+    #: 待补股票池 SQL 谓词（用 `m.` 前缀引用 stock_meta）；None=全市场。
+    universe_predicate: str | None = None
+    #: 抓取前先解析页面 `hidctype` 得到 companyType（金融股必须）。
+    resolve_company_type: bool = False
+    #: `resolve_periods` 默认回溯的季末数（>PERIODS_PER_REQUEST 会分块请求）。
+    backfill_periods: int = PERIODS_PER_REQUEST
+    #: replace 模式的删除范围：all=该股全部同源行；batch_periods=仅本批报告期。
+    #: 用 batch_periods 时旧报告期行不会因后续抓取窗口前移而被删掉。
+    delete_scope: str = "all"
+    #: 需要合并抓取的端点（金融股三表 = 资产负债表 + 利润表）；None=只用 endpoint。
+    endpoints: tuple[str, ...] | None = None
 
 
 SPECS: dict[str, SupplementSpec] = {
@@ -219,6 +336,48 @@ SPECS: dict[str, SupplementSpec] = {
         judge_table="income_statement",
         period_floor=CSMAR_CUTOFF,
         fills_null_only=True,
+    ),
+    # 金融股专用三表：2025Q2 起（CSMAR 止于 2025-03-31）。
+    # 抓两个端点（资产负债表 + 利润表）→ 写同一张 `financial_sector_items`。
+    FINANCIAL_SECTOR: SupplementSpec(
+        key=FINANCIAL_SECTOR,
+        data_type="financial_sector_items",
+        endpoint="zcfzbAjaxNew",  # 说明性；实际两个端点都抓，见 _fetch_rows
+        api_version="eastmoney-f10-financial-sector/1",
+        field_map={},  # 按 ORG_TYPE 选择，见 org_field_maps
+        columns={"financial_sector_items": FINANCIAL_SECTOR_COLUMNS},
+        write_mode="replace_source_rows",
+        pending_mode="latest_period",
+        judge_table="financial_sector_items",
+        period_floor=CSMAR_CUTOFF,
+        org_field_maps={
+            org: dict(mapping)
+            for org, mapping in FINANCIAL_SECTOR_ORG_FIELD_MAPS.items()
+        },
+        org_derived_sums={
+            org: dict(mapping)
+            for org, mapping in FINANCIAL_SECTOR_ORG_DERIVED_SUMS.items()
+        },
+        universe_predicate=FINANCIAL_SECTOR_UNIVERSE_PREDICATE,
+        resolve_company_type=True,
+        backfill_periods=8,
+        delete_scope="batch_periods",
+        endpoints=("zcfzbAjaxNew", "lrbAjaxNew"),
+    ),
+    # 公允价值变动收益（列 `exchange_gain` 的真实语义）只回填 NULL。
+    EXCHANGE_GAIN: SupplementSpec(
+        key=EXCHANGE_GAIN,
+        data_type="exchange_gain_supplement",
+        endpoint="lrbAjaxNew",
+        api_version="eastmoney-f10-lrb-exchange-gain/1",
+        field_map=dict(EXCHANGE_GAIN_FIELD_MAP),
+        columns={"income_statement": EXCHANGE_GAIN_COLUMNS},
+        write_mode="update_existing",
+        pending_mode="missing_field",
+        judge_table="income_statement",
+        period_floor=CSMAR_CUTOFF,
+        fills_null_only=True,
+        backfill_periods=8,
     ),
 }
 
@@ -305,9 +464,16 @@ class SupplementFetcher:
         today: date | None = None,
         periods: Sequence[str] | None = None,
     ) -> list[str]:
-        """目标报告期：显式传入优先，否则取最近 5 个季末（过滤 CSMAR 覆盖期）。"""
+        """目标报告期：显式传入优先，否则取最近 `backfill_periods` 个季末。
+
+        `period_floor` 之后的所有期都要，才能把 2025-06-30 这类"CSMAR 截止后
+        第一季"补上；`_fetch_rows` 会按接口上限（5 期/请求）自动分块。
+        """
         spec = SPECS[key]
-        raw = list(periods) if periods else recent_quarter_ends(today=today)
+        raw = (
+            list(periods) if periods
+            else recent_quarter_ends(today=today, n=spec.backfill_periods)
+        )
         if spec.period_floor is not None:
             raw = [
                 item for item in raw
@@ -358,6 +524,11 @@ class SupplementFetcher:
 
     @staticmethod
     def _pending_sql(spec: SupplementSpec) -> str:
+        # 股票池过滤：金融股专用三表只对申万「银行/非银金融」跑，不能扫全市场
+        #（否则 5,500 只制造业股票会被当成"从来没用本源补过"的待补股）。
+        listed_clause = "m.is_listed IS TRUE"
+        if spec.universe_predicate:
+            listed_clause = f"({listed_clause}) AND ({spec.universe_predicate})"
         if spec.pending_mode == "missing_field":
             # 只关心近期窗口内仍为空的行；更早的报告期源侧不再返回，抓了也补不上。
             # 2026-11-14：原实现硬编码 income_statement.deducted_net_profit，
@@ -375,7 +546,7 @@ class SupplementFetcher:
                        MIN(i.report_date) AS first_gap
                 FROM stock_meta m
                 JOIN {table} i ON i.stock_code = m.stock_code
-                WHERE m.is_listed IS TRUE
+                WHERE {listed_clause}
                   AND i.report_date >= CAST(? AS DATE)
                   AND i.report_date <= CAST(? AS DATE)
                   AND ({null_clause})
@@ -389,7 +560,7 @@ class SupplementFetcher:
                        COALESCE(m.exchange, '') AS exchange
                 FROM stock_meta m
                 JOIN income_statement i ON i.stock_code = m.stock_code
-                WHERE m.is_listed IS TRUE
+                WHERE {listed_clause}
             )
             SELECT u.stock_code AS stock_code,
                    u.exchange AS exchange,
@@ -493,10 +664,43 @@ class SupplementFetcher:
         *,
         timeout: float = 25.0,
     ) -> list[dict[str, Any]]:
-        """拉取单只股票的目标报告期数据；失败返回空列表（逐股失败不中断整轮）。"""
+        """拉取单只股票的目标报告期数据；失败返回空列表（逐股失败不中断整轮）。
+
+        - 报告期数 > `PERIODS_PER_REQUEST`（5）时**分块请求**：接口单次最多回 5 期，
+          传 6 个日期会静默丢掉最老的一期（2025-06-30 正是第 6 期）。
+        - `resolve_company_type` 打开的 spec（金融股）：先用页面 `hidctype`
+          解析 companyType（银行=3/保险=2/证券=1），否则 `companyType=4` 对
+          金融股的资产负债表直接返回空、利润表返回行名不同的通用模板。
+        - 多端点 spec（金融股三表 = 资产负债表 + 利润表）逐端点抓取后合并。
+        """
         symbol = em_symbol(code, exchange)
+        company_type = "4"
+        if spec.resolve_company_type:
+            company_type = self._company_type(symbol, timeout) or "4"
+        date_list = [str(item)[:10] for item in dates]
+        collected: list[dict[str, Any]] = []
+        for endpoint in spec.endpoints or (spec.endpoint,):
+            for start in range(0, len(date_list), PERIODS_PER_REQUEST):
+                chunk = date_list[start:start + PERIODS_PER_REQUEST]
+                rows, company_type = self._fetch_endpoint(
+                    spec, endpoint, symbol, company_type, chunk, timeout=timeout,
+                )
+                collected.extend(rows)
+        return collected
+
+    def _fetch_endpoint(
+        self,
+        spec: SupplementSpec,
+        endpoint: str,
+        symbol: str,
+        company_type: str,
+        dates: Sequence[str],
+        *,
+        timeout: float,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """单个端点/单个日期块；返回 (rows, 生效的 company_type)。"""
         params = {
-            "companyType": "4",       # 通用企业；金融股首次空结果时回退 hidctype
+            "companyType": company_type,
             "reportDateType": "0",
             "reportType": "1",        # 1=按报告期（累计）
             "dates": ",".join(dates),
@@ -505,24 +709,25 @@ class SupplementFetcher:
         for attempt in range(MAX_RETRY):
             try:
                 response = _session().get(
-                    f"{BASE}/{spec.endpoint}", params=params, timeout=timeout,
+                    f"{BASE}/{endpoint}", params=params, timeout=timeout,
                 )
                 response.raise_for_status()
                 rows = response.json().get("data") or []
                 if rows:
-                    return rows
+                    return rows, company_type
                 if attempt == 0:
-                    company_type = self._company_type(symbol, timeout)
-                    if company_type and company_type != "4":
-                        params["companyType"] = company_type
+                    detected = self._company_type(symbol, timeout)
+                    if detected and detected != company_type:
+                        company_type = detected
+                        params["companyType"] = detected
                         continue
-                return []
+                return [], company_type
             except Exception as error:  # noqa: BLE001
                 if attempt == MAX_RETRY - 1:
-                    logger.debug("补采取数失败 %s(%s): %s", code, spec.key, error)
-                    return []
+                    logger.debug("补采取数失败 %s(%s/%s): %s", symbol, spec.key, endpoint, error)
+                    return [], company_type
                 time.sleep(1.5 * (attempt + 1) + random.random())
-        return []
+        return [], company_type
 
     # ─── 解析 ─────────────────────────────────────────────────────
 
@@ -536,20 +741,51 @@ class SupplementFetcher:
         fetched_at: datetime,
         src_hash: str,
     ) -> dict[str, list[dict[str, Any]]]:
-        """把源返回的原始行解析成按表分组的落库行（列名显式，不依赖列序）。"""
+        """把源返回的原始行解析成按表分组的落库行（列名显式，不依赖列序）。
+
+        多端点 spec（金融股）会把同一报告期的资产负债表行与利润表行**合并**
+        成一行；否则两行同主键会在 INSERT 时撞 PK。
+        """
         parsed: dict[str, list[dict[str, Any]]] = {table: [] for table in spec.columns}
+        floor = spec.period_floor if spec.period_floor is not None else CSMAR_CUTOFF
+        # ORG_TYPE 是公司属性，不是单行属性：先定一次，避免同一只股票的两张表
+        # （或缺失该键的行）用不同行业映射解析。
+        stock_org = next(
+            (
+                str(row.get("ORG_TYPE") or "").strip()
+                for row in rows
+                if str(row.get("ORG_TYPE") or "").strip()
+            ),
+            "",
+        )
+        merged: dict[date, dict[str, Any]] = {}
         for row in rows:
             raw_date = str(row.get("REPORT_DATE") or "")[:10]
             try:
                 report_date = date.fromisoformat(raw_date)
             except ValueError:
                 continue
-            if report_date <= CSMAR_CUTOFF:
+            if report_date <= floor:
                 continue  # 只补 CSMAR 未覆盖的报告期
-            values = {
+            # 按行业选映射：同名不同义（券商 CUSTOMER_DEPOSIT=客户资金存款）。
+            em_map: Mapping[str, str] = spec.field_map
+            derived: Mapping[str, tuple[str, ...]] = {}
+            if spec.org_field_maps is not None:
+                em_map = spec.org_field_maps.get(stock_org, spec.field_map)
+                if spec.org_derived_sums is not None:
+                    derived = spec.org_derived_sums.get(stock_org, {})
+            values: dict[str, float | None] = {
                 column: _to_float(row.get(em_field))
-                for em_field, column in spec.field_map.items()
+                for em_field, column in em_map.items()
             }
+            for column, parts in derived.items():
+                present = [
+                    value
+                    for value in (_to_float(row.get(part)) for part in parts)
+                    if value is not None
+                ]
+                if present:
+                    values[column] = sum(present)
             if not any(value is not None for value in values.values()):
                 continue
             base = {
@@ -580,9 +816,14 @@ class SupplementFetcher:
                     parsed["cash_flow_activity"].append({
                         **base, "capex": values["capex"], "source": SOURCE,
                     })
-            elif spec.key == BALANCE_SHEET_EXT:
-                parsed["balance_sheet_ext"].append({
-                    **base, **values, "source": SOURCE,
+            elif spec.write_mode == "replace_source_rows":
+                # 通用 replace 模式（balance_sheet_ext / 金融股专用三表）：
+                # 同报告期的多端点行合并，非空值优先。
+                record = merged.setdefault(report_date, {**base, "source": SOURCE})
+                record.update({
+                    column: value
+                    for column, value in values.items()
+                    if value is not None
                 })
             else:
                 # update_existing 模式（扣非净利润 / 固定资产净额…）：
@@ -601,6 +842,9 @@ class SupplementFetcher:
                     "report_date": report_date,
                     **row_values,
                 })
+        if merged:
+            target_table = next(iter(spec.columns))
+            parsed[target_table].extend(merged.values())
         return parsed
 
     # ─── 落库 ─────────────────────────────────────────────────────
@@ -629,11 +873,22 @@ class SupplementFetcher:
                 conn.register("_supp_rows", frame)
                 try:
                     if spec.write_mode == "replace_source_rows":
-                        conn.execute(
-                            f"DELETE FROM {table} WHERE source = ? AND stock_code IN "
-                            "(SELECT DISTINCT stock_code FROM _supp_rows)",
-                            [SOURCE],
-                        )
+                        if spec.delete_scope == "batch_periods":
+                            # 只删本批要重写的报告期：抓取窗口前移后，早期
+                            # （2025-06-30…）的同源行不会被后续轮次误删。
+                            conn.execute(
+                                f"DELETE FROM {table} WHERE source = ? AND stock_code IN "
+                                "(SELECT DISTINCT stock_code FROM _supp_rows) "
+                                "AND report_date IN "
+                                "(SELECT DISTINCT report_date FROM _supp_rows)",
+                                [SOURCE],
+                            )
+                        else:
+                            conn.execute(
+                                f"DELETE FROM {table} WHERE source = ? AND stock_code IN "
+                                "(SELECT DISTINCT stock_code FROM _supp_rows)",
+                                [SOURCE],
+                            )
                         conn.execute(f"INSERT INTO {table} BY NAME SELECT * FROM _supp_rows")
                     else:
                         # 只填 NULL：既有的 CSMAR / 其他源值保持不动（主链只读纪律）。
@@ -680,6 +935,7 @@ class SupplementFetcher:
         deadline_seconds: float = 0.0,
         retry_days: int = 0,
         progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
+        field_map: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """有界补采一轮：到期由调用方判断，本方法只管"本轮抓哪些、抓多少"。
 
@@ -688,6 +944,9 @@ class SupplementFetcher:
             deadline_seconds: 本轮最大耗时（秒）；到点后剩余股票转 deferred，
                 下一轮继续（按 max_report_date 升序，进度只前进不回头）。
             retry_days: 失败冷却天数，抓过但仍无该期数据的股票在冷却期内跳过。
+            field_map: 临时覆盖 spec 的字段映射（同一张表可能存在两种口径，
+                例如 `exchange_gain` 的"公允价值变动收益 vs 汇兑收益"之辨）；
+                只影响解析，不影响待补判据。
 
         Returns:
             {status, reason, periods, targeted, updated, skipped, failed,
@@ -695,6 +954,8 @@ class SupplementFetcher:
         """
         started = time.time()
         spec = SPECS[key]
+        if field_map is not None:
+            spec = replace(spec, field_map=dict(field_map))
         resolved_periods = self.resolve_periods(key, periods=periods)
         report: dict[str, Any] = {
             "dataset": key,
@@ -705,6 +966,7 @@ class SupplementFetcher:
             "updated": 0,
             "skipped": 0,
             "failed": 0,
+            "no_data": 0,
             "deferred": 0,
             "rows_written": {},
             "failed_codes": [],
@@ -741,6 +1003,7 @@ class SupplementFetcher:
         rows_by_table: dict[str, list[dict[str, Any]]] = {table: [] for table in spec.columns}
         fetched_codes: list[str] = []
         failed_codes: list[str] = []
+        no_data_codes: list[str] = []
         deferred: list[str] = []
 
         pool = ThreadPoolExecutor(max_workers=max(1, int(concurrency)))
@@ -773,12 +1036,16 @@ class SupplementFetcher:
                     if any(parsed.values()):
                         fetched_codes.append(code)
                     else:
-                        failed_codes.append(code)
+                        # 取数成功但该行业在本表没有适用科目（信托/金控/期货走
+                        # 通用模板）：这是"无适用字段"而不是取数失败，分开计数，
+                        # 避免金融股补采每轮都报 partial。
+                        no_data_codes.append(code)
                     for table, items in parsed.items():
                         rows_by_table[table].extend(items)
                     if progress_cb is not None:
                         progress_cb(code, {
-                            "done": len(fetched_codes) + len(failed_codes),
+                            "done": len(fetched_codes) + len(failed_codes)
+                            + len(no_data_codes),
                             "total": len(pending),
                         })
                 if deadline_seconds and (time.time() - started) >= deadline_seconds:
@@ -803,6 +1070,7 @@ class SupplementFetcher:
                 "reason": f"persist_failed: {type(error).__name__}: {error}",
                 "targeted": len(pending),
                 "failed": len(failed_codes),
+                "no_data": len(no_data_codes),
                 "failed_codes": failed_codes[:20],
                 "elapsed_seconds": round(time.time() - started, 2),
             })
@@ -810,12 +1078,18 @@ class SupplementFetcher:
 
         # 只把**真正尝试过**的股票记入失败冷却：deferred 是"截止时间到了、
         # 还没来得及抓"，若也记进去会被冷却窗口白挡 7 天。
-        self._record_attempts(key, list(fetched_codes) + failed_codes)
+        self._record_attempts(
+            key, list(fetched_codes) + failed_codes + no_data_codes,
+        )
 
         updated = len(fetched_codes)
         if updated == 0:
-            status = "failed"
-            reason = "no_rows_fetched"
+            if no_data_codes and not failed_codes:
+                status = "skipped"
+                reason = "no_applicable_fields"
+            else:
+                status = "failed"
+                reason = "no_rows_fetched"
         elif failed_codes or deferred:
             status = "partial"
             reason = "partial_source_failures"
@@ -828,21 +1102,27 @@ class SupplementFetcher:
             "targeted": len(pending),
             "updated": updated,
             "failed": len(failed_codes),
+            "no_data": len(no_data_codes),
             "deferred": len(deferred),
-            "skipped": max(0, len(pending) - updated - len(failed_codes) - len(deferred)),
+            "skipped": max(
+                0,
+                len(pending) - updated - len(failed_codes) - len(no_data_codes)
+                - len(deferred),
+            ),
             "rows_written": written,
             "failed_codes": failed_codes[:20],
+            "no_data_codes": no_data_codes[:20],
             # 本轮之后还剩多少只待补（含本轮 deferred）。调用方据此决定
             # 是否推进水位：还有残留就下一轮继续，否则会被间隔白挡 7 天。
             "remaining_pending": max(0, len(all_pending) - updated),
             "elapsed_seconds": round(time.time() - started, 2),
         })
         logger.info(
-            "补采 %s: targeted=%d updated=%d failed=%d deferred=%d remaining=%d "
-            "rows=%s elapsed=%.1fs",
+            "补采 %s: targeted=%d updated=%d failed=%d no_data=%d deferred=%d "
+            "remaining=%d rows=%s elapsed=%.1fs",
             key, report["targeted"], report["updated"], report["failed"],
-            report["deferred"], report["remaining_pending"], written,
-            report["elapsed_seconds"],
+            report["no_data"], report["deferred"], report["remaining_pending"],
+            written, report["elapsed_seconds"],
         )
         return report
 

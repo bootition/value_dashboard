@@ -45,6 +45,7 @@ export type KnownWarningCode =
   | 'SCHEMA_DDL_DRIFT'
   | 'ZERO_REFERENCE_ASSET'
   | 'DEDUCTED_PROFIT_GAP'
+  | 'CHAIN_PROGRESS_STALLED'
 
 /**
  * Warning code type. Accepts known codes with autocomplete, but also accepts
@@ -83,6 +84,8 @@ export const KNOWN_WARNING_CODES = [
   'SCHEMA_DDL_DRIFT',
   'ZERO_REFERENCE_ASSET',
   'DEDUCTED_PROFIT_GAP',
+  // 2026-11-14 reports/120 §5 J1：补采链"跑也白跑"（水位停滞）
+  'CHAIN_PROGRESS_STALLED',
 ] as const
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -115,6 +118,83 @@ export const DIVIDEND_INDICATOR_FIELDS = [
   'div_yield_spread_7y',
   'div_yield_spread_10y',
   'div_yield_spread_30y',
+] as const
+
+/**
+ * 扩展指标域字段（`indicator_ext`，后端 `screening.engine.EXTENDED_COLUMNS`）。
+ *
+ * 用途：`EXT_PERIOD_MISMATCH`（ext 报告期与快照错位）时**只遮这一族**——
+ * 按报告期严格 join 的扩展字段会整族为空/错期，而快照域（PE/PB/ROE/技术指标）
+ * 完全不受影响。两侧字段清单必须与后端保持一致（穷尽性由契约测试守护）。
+ */
+export const EXTENDED_INDICATOR_FIELDS = [
+  'accounts_payable_turnover',
+  'accruals',
+  'admin_expense_ratio',
+  'bonus_share_ratio_3y',
+  'book_to_market',
+  'bps',
+  'bps_parent',
+  'buyback_ratio_3y',
+  'capex',
+  'capital_reserve_per_share',
+  'cash_content_of_revenue',
+  'cash_ratio',
+  'conservative_quick_ratio',
+  'current_asset_ratio',
+  'current_asset_turnover',
+  'debt_to_equity',
+  'depreciation_amortization',
+  'dilution_3y',
+  'ebit',
+  'ebitda',
+  'ebitda_to_liabilities',
+  'employee_count',
+  'equity_multiplier',
+  'equity_turnover',
+  'ev_ebitda',
+  'fcf_margin',
+  'finance_expense_ratio',
+  'fixed_asset_ratio',
+  'fixed_asset_turnover',
+  'free_cash_flow',
+  'inventory_turnover',
+  'leverage_financial',
+  'leverage_operating',
+  'leverage_total',
+  'liability_per_share',
+  'market_cap_at_report',
+  'ocf_per_share',
+  'ocf_to_liabilities',
+  'ocf_to_operating_profit',
+  'operating_cash_flow',
+  'operating_cycle_days',
+  'profit_per_employee',
+  'rd_expense_ratio',
+  'receivables_turnover',
+  'report_date_close',
+  'retained_earnings_per_share',
+  'revenue_per_employee',
+  'revenue_per_share',
+  'selling_expense_ratio',
+  'shareholder_occupation',
+  'tangible_asset_per_share',
+  'tangible_net_debt_ratio',
+  'tobin_q',
+  'top_segment_share',
+  'total_asset_turnover',
+] as const
+
+/**
+ * 扣非净利润四兄弟（`DEDUCTED_PROFIT_GAP` 时字段级遮蔽）。
+ *
+ * 与后端 `data_quality.DEDUCTED_PROFIT_INDICATOR_FIELDS` 一一对应。
+ */
+export const DEDUCTED_PROFIT_INDICATOR_FIELDS = [
+  'deducted_profit_yoy',
+  'deducted_profit_cagr3',
+  'deducted_profit_cagr5',
+  'income.deducted_net_profit',
 ] as const
 
 /**
@@ -152,12 +232,14 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   MINIMUM_DATA_NOT_READY: [],
   CODE_IDENTITY_ALIAS: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
   LIVE_SCHEMA_INCOMPATIBLE: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
-  // 2026-11-14 资产健康 12 条规则：**一律不遮蔽任何数值**。
-  // 后端同样没有把它们放进 `_SNAPSHOT_BLOCKING_WARNINGS` /
-  // `_SCREENING_BLOCKING_WARNINGS`：它们是"数据资产该维护了"的披露，
-  // 不是"这些数字不可信"。前后端口径必须一致，否则会出现
-  // 页面一片"—"而 API 仍返回数值的自相矛盾。
-  EXT_PERIOD_MISMATCH: [],
+  // 2026-11-14 资产健康 13 条规则（reports/120 §5 J9）：
+  // - 绝大多数是披露型 → []：它们是"数据资产该维护了"，不是"这些数字不可信"；
+  // - 两条是**字段级遮蔽**（EXT_PERIOD_MISMATCH / DEDUCTED_PROFIT_GAP）→
+  //   只遮各自域，与后端 data_quality.masked_fields_for_codes() 同源。
+  // 前后端口径必须一致，否则会出现页面一片"—"而 API 仍返回数值的自相矛盾。
+  // 2026-11-14（reports/120 §5 J9）字段级遮蔽：这两条**只**让各自域不可信，
+  // 不能写成 '*'（那会把 PE/PB/ROE 一起打成"—"，用户分不清局部坏还是全站坏）。
+  EXT_PERIOD_MISMATCH: EXTENDED_INDICATOR_FIELDS,
   FIELD_COVERAGE_LOW: [],
   FIELD_COVERAGE_DROP: [],
   MANUAL_CHAIN_STALE: [],
@@ -168,7 +250,8 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   CROSSCHECK_BELOW_THRESHOLD: [],
   SCHEMA_DDL_DRIFT: [],
   ZERO_REFERENCE_ASSET: [],
-  DEDUCTED_PROFIT_GAP: [],
+  DEDUCTED_PROFIT_GAP: DEDUCTED_PROFIT_INDICATOR_FIELDS,
+  CHAIN_PROGRESS_STALLED: [],
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,6 +287,7 @@ export const WARNING_CODE_LABELS: Readonly<Record<KnownWarningCode, string>> = {
   SCHEMA_DDL_DRIFT: 'schema.py 声明的表与库内实际表不一致',
   ZERO_REFERENCE_ASSET: '零引用资产（导入了但没人读）',
   DEDUCTED_PROFIT_GAP: '扣非净利润最新报告期覆盖率塌陷',
+  CHAIN_PROGRESS_STALLED: '补采链在跑但待补数量没有下降（跑也白跑）',
 }
 
 /**
@@ -386,6 +470,17 @@ export interface IndicatorTrust {
   readonly warning_codes: readonly WarningCode[]
   readonly untrusted_all: boolean
   readonly untrusted_fields: readonly string[]
+  /**
+   * 字段级遮蔽清单（2026-11-14，reports/120 §5 J9）：这次坏的是**哪几个字段**。
+   *
+   * 与 `untrusted_fields`（按 warning code 决定的一族）并列存在：
+   * - `untrusted_all`    = 整站不可信（快照阻断类）
+   * - `untrusted_fields` = 某一族不可信（分红域等）
+   * - `masked_fields`    = 精确到字段的不可信（扩展域 / 扣非四兄弟）
+   *
+   * 后端 `mask_untrusted_values` 已按这三档一起置 NULL。
+   */
+  readonly masked_fields: readonly string[]
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

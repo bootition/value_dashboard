@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -224,6 +225,116 @@ def test_parse_hk_plan_explain_does_not_treat_fx_rate_as_dividend() -> None:
     assert parse_hk_plan_explain(
         "每股派人民币0.05元(汇率人民币0.796442元:港币1.00元)(相当于港币0.0627元)",
     ) == (pytest.approx(0.0627), pytest.approx(0.05))
+
+# ─── 真实源样本长驻 fixture（J4 / reports/120 §5）──────────────────────
+#
+# 2026-11-14 从正式库只读抽取：`hk_dividends` 中 `plan_explain LIKE '%汇率%'`
+# 共 89 条。下面 16 条覆盖当时全部已识别形态（汇率注记在前/在后、港币或
+# 人民币在前、带「为」/无「为」、错别字「换人民币」、传统「港元」等），
+# 只保留方案原文（不含股票代码，已脱敏）。
+#
+# 防回归目标：旧解析器会把汇率注记里的「港币1.00元」当成股息（hkd=1.0），
+# 因此每条都断言 hkd 落在真实每股股息区间、且 hkd ≈ cny / (CNY per HKD)。
+_HK_FX_PLAN_FIXTURES = (
+    # (plan_explain 原文, 汇率[CNY/HKD], 期望 hkd, 期望 cny)
+    ("每股派人民币0.041元(相当于港币0.04885元,汇率0.83928)", 0.83928, 0.04885, 0.041),
+    ("每股派人民币0.08元(相当于港币0.094624元,汇率0.84545)", 0.84545, 0.094624, 0.08),
+    (
+        "每股派人民币0.05元(汇率港币1.00元:人民币0.812153元)(相当于港币0.0616元)",
+        0.812153, 0.0616, 0.05,
+    ),
+    (
+        "每股派人民币0.048元(汇率港币1.00元:人民币0.813196元)(相当于港币0.0590元)",
+        0.813196, 0.059, 0.048,
+    ),
+    # 1 CNY = 1.22957 HKD：汇率方向与常见写法相反，需换算成 CNY/HKD。
+    (
+        "每股派人民币0.1元(汇率人民币1.00元:港币1.22957元)(相当于港币0.1229元)",
+        1.0 / 1.22957, 0.1229, 0.1,
+    ),
+    (
+        "每股派人民币0.13元(汇率港币1.00元:人民币0.79899元) (相当于港币0.1627元)",
+        0.79899, 0.1627, 0.13,
+    ),
+    (
+        "每股派人民币0.06元(汇率人民币0.799478元:港币1.00元)(相当于港币0.07504元)",
+        0.799478, 0.07504, 0.06,
+    ),
+    # 少左括号的历史脏数据形态。
+    ("每股派人民币0.068元相当于港币0.079781元,汇率0.852334)", 0.852334, 0.079781, 0.068),
+    ("每股派人民币0.30元(相当于港币0.377元,汇率0.795738)", 0.795738, 0.377, 0.3),
+    ("每股派人民币0.06元(相当于港币0.071279元,汇率为0.84176)", 0.84176, 0.071279, 0.06),
+    ("每股派人民币0.3元(相当于港币0.338233元,汇率0.886962)", 0.886962, 0.338233, 0.3),
+    ("每股派人民币0.0717元(相当于港元0.0849元,汇率0.844662)", 0.844662, 0.0849, 0.0717),
+    ("每股派人民币0.15元(相当于港币0.1770元,汇率0.8474)", 0.8474, 0.177, 0.15),
+    # 东财脏数据错别字：「换人民币」。
+    (
+        "每股派人民币0.065元(汇率港币1.00元:换人民币0.79591元)(相当于港币0.082元)",
+        0.79591, 0.082, 0.065,
+    ),
+    (
+        "每股派人民币0.32056元(汇率港币1.00元:人民币0.816102元)(相当于港币0.3927元)",
+        0.816102, 0.3927, 0.32056,
+    ),
+    (
+        "每股派人民币0.07元(汇率港币1.00元:人民币0.817026元)(相当于港币0.0856元)",
+        0.817026, 0.0856, 0.07,
+    ),
+)
+
+
+def _cny_per_hkd(plan_explain: str) -> float:
+    """Extract the CNY-per-HKD rate from an Eastmoney plan string."""
+    directional_hkd = re.search(
+        r"汇率\s*港币\s*1\.00\s*(?:港)?元?\s*[:：]\s*换?人民币\s*([0-9.]+)",
+        plan_explain,
+    )
+    if directional_hkd:
+        return float(directional_hkd.group(1))
+    directional_cny = re.search(
+        r"汇率\s*人民币\s*([0-9.]+)\s*元?\s*[:：]\s*港币\s*1\.00",
+        plan_explain,
+    )
+    if directional_cny:
+        return float(directional_cny.group(1))
+    reverse_cny = re.search(
+        r"汇率\s*人民币\s*1\.00\s*元?\s*[:：]\s*港币\s*([0-9.]+)",
+        plan_explain,
+    )
+    if reverse_cny:
+        return 1.0 / float(reverse_cny.group(1))
+    trailing = re.search(r"汇率(?:为)?\s*([0-9.]+)", plan_explain)
+    if trailing:
+        return float(trailing.group(1))
+    raise AssertionError(f"fixture 缺少可提取的汇率: {plan_explain!r}")
+
+
+@pytest.mark.parametrize(
+    ("plan_explain", "expected_rate", "expected_hkd", "expected_cny"),
+    _HK_FX_PLAN_FIXTURES,
+    ids=[f"real-fx-{index:02d}" for index in range(len(_HK_FX_PLAN_FIXTURES))],
+)
+def test_parse_hk_plan_explain_real_fx_samples(
+    plan_explain: str,
+    expected_rate: float,
+    expected_hkd: float,
+    expected_cny: float,
+) -> None:
+    """89 条真实含「汇率」样本的代表形态：汇率不能再次被当成股息。"""
+    rate = _cny_per_hkd(plan_explain)
+    assert rate == pytest.approx(expected_rate, rel=1e-9)
+
+    hkd, cny = parse_hk_plan_explain(plan_explain)
+
+    assert hkd is not None and cny is not None
+    assert hkd == pytest.approx(expected_hkd, rel=1e-9)
+    assert cny == pytest.approx(expected_cny, rel=1e-9)
+    # 真实每股股息区间：汇率 1.00 若被误当股息会立刻越界。
+    assert 0.005 <= hkd <= 0.6
+    assert 0.01 <= cny <= 0.5
+    # hkd ≈ cny / (CNY per HKD)，±2% 容忍源侧四舍五入。
+    assert hkd == pytest.approx(cny / rate, rel=0.02)
+    assert hkd != pytest.approx(1.0)
 
 
 # ─── 适配器 ─────────────────────────────────────────────────────────
@@ -452,3 +563,191 @@ def test_manager_registers_hk_dividend_adapter_with_half_second_limit() -> None:
     assert adapter is not None
     assert adapter.rate_limit_interval == 0.5
     assert adapter.supported_data_types == {"hk_dividends"}
+
+
+# ─── reparse 维护脚本（J4）────────────────────────────────────────────
+
+def _seed_reparse_row(
+    duck: DuckDBStore,
+    stock_code: str,
+    ex_date: str,
+    plan_explain: str,
+    hkd: float | None,
+    cny: float | None,
+) -> None:
+    duck.write_query(
+        """INSERT INTO hk_dividends
+           (stock_code, ex_date, plan_explain, dividend_per_share_hkd,
+            dividend_per_share_cny, source, fetch_time, raw_response_hash,
+            confidence, batch_id)
+           VALUES (?, ?, ?, ?, ?, 'eastmoney_hk_dividend', CURRENT_TIMESTAMP,
+                   ?, 'approximate', 'reparse-test')""",
+        [stock_code, ex_date, plan_explain, hkd, cny, "0" * 64],
+    )
+
+
+def test_reparse_script_dry_run_does_not_modify_temp_db(
+    duckdb_store: DuckDBStore,
+) -> None:
+    from scripts.reparse_hk_dividends import execute_reparse
+
+    _seed_reparse_row(
+        duckdb_store, "00941", "2026-08-25",
+        "每股派人民币0.07元(汇率港币1.00元:人民币0.817026元)(相当于港币0.0856元)",
+        1.0, 0.07,
+    )
+    _seed_reparse_row(
+        duckdb_store, "00941", "2026-09-25", "每10股转1股", None, None,
+    )
+
+    plan = execute_reparse(duckdb_store, write=False)
+
+    assert plan.changed_rows == 1
+    assert plan.unparsed_rows == 1
+    assert plan.changes[0].new_hkd == pytest.approx(0.0856)
+    rows = duckdb_store.read_query(
+        """SELECT plan_explain, dividend_per_share_hkd, dividend_per_share_cny
+           FROM hk_dividends WHERE ex_date = '2026-08-25'""",
+    )
+    assert rows[0]["dividend_per_share_hkd"] == 1.0, "dry-run 不得改数据"
+    assert rows[0]["dividend_per_share_cny"] == pytest.approx(0.07)
+
+
+def test_reparse_script_writes_only_parsed_side_and_skips_unparsed(
+    duckdb_store: DuckDBStore,
+) -> None:
+    from scripts.reparse_hk_dividends import execute_reparse
+
+    _seed_reparse_row(
+        duckdb_store, "00941", "2026-08-25",
+        "每股派人民币0.07元(汇率港币1.00元:人民币0.817026元)(相当于港币0.0856元)",
+        1.0, 0.07,
+    )
+    _seed_reparse_row(
+        duckdb_store, "00941", "2026-09-25", "每10股转1股", None, None,
+    )
+
+    execute_reparse(duckdb_store, write=True)
+
+    fixed = duckdb_store.read_query(
+        "SELECT dividend_per_share_hkd, dividend_per_share_cny "
+        "FROM hk_dividends WHERE ex_date = '2026-08-25'",
+    )[0]
+    assert fixed["dividend_per_share_hkd"] == pytest.approx(0.0856)
+    assert fixed["dividend_per_share_cny"] == pytest.approx(0.07)
+    unparsed = duckdb_store.read_query(
+        "SELECT dividend_per_share_hkd, dividend_per_share_cny "
+        "FROM hk_dividends WHERE ex_date = '2026-09-25'",
+    )[0]
+    assert unparsed["dividend_per_share_hkd"] is None
+    assert unparsed["dividend_per_share_cny"] is None
+
+
+def test_hk_dividend_empty_with_a_share_dividend_is_not_legal_empty(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """J4：A 股已实施分红 + 港股源 0 行 → source_incomplete，不是 legal_empty。"""
+    _seed_stock(duckdb_store, "600941", "中国移动")
+    duckdb_store.write_query(
+        """INSERT INTO dividends
+           (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600941', '2024-06-30', '2024-06-01', 2.51)""",
+    )
+    fake = _FakeHKAdapter(by_hk={"00941": _result([], confidence="missing")})
+    updater = HKDividendUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter=fake,
+    )
+
+    report = updater.update_stock("600941", mapping={"600941": {"hk_code": "00941"}})
+
+    assert report["status"] == "success"
+    assert report["retained"] is True
+    assert report["reason"] == "source_incomplete"
+    missing = sqlite_store.query(
+        """SELECT reason_code FROM missing_list
+           WHERE stock_code = '600941' AND field_name = 'hk_dividends'
+             AND resolved_at IS NULL""",
+    )
+    assert missing and missing[0]["reason_code"] == "source_incomplete"
+    assert all(row["reason_code"] != "source_empty" for row in missing)
+    assert duckdb_store.read_query(
+        "SELECT COUNT(*) AS n FROM hk_dividends WHERE stock_code = '00941'",
+    )[0]["n"] == 0
+
+
+def test_hk_dividend_empty_without_a_share_dividend_stays_legal_empty(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """对照：A 股也没有已实施分红时，才允许判 source_empty。"""
+    _seed_stock(duckdb_store, "600941", "中国移动")
+    # 未实施（除净日在未来）不算"已实施"。
+    duckdb_store.write_query(
+        """INSERT INTO dividends
+           (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600941', CURRENT_DATE + INTERVAL '30 days', CURRENT_DATE, 1.0)""",
+    )
+    fake = _FakeHKAdapter(by_hk={"00941": _result([], confidence="missing")})
+    updater = HKDividendUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter=fake,
+    )
+
+    report = updater.update_stock("600941", mapping={"600941": {"hk_code": "00941"}})
+
+    assert report["reason"] == "source_empty"
+    missing = sqlite_store.query(
+        """SELECT reason_code FROM missing_list
+           WHERE stock_code = '600941' AND field_name = 'hk_dividends'
+             AND resolved_at IS NULL""",
+    )
+    assert missing[0]["reason_code"] == "source_empty"
+
+
+def test_repair_hk_legal_empty_only_flips_mislabeled_rows(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """D3：只把"A 股有已实施分红"的 source_empty 改为 source_incomplete。"""
+    from scripts.repair_hk_legal_empty import find_mislabeled_rows, repair_rows
+
+    duckdb_store.write_query(
+        """INSERT INTO dividends
+           (stock_code, ex_date, announcement_date, dividend_per_share)
+           VALUES ('600941', '2024-06-30', '2024-06-01', 2.51)""",
+    )
+    for code in ("600941", "000001"):
+        sqlite_store.execute(
+            """INSERT INTO missing_list (stock_code, field_name, reason_code)
+               VALUES (?, 'hk_dividends', 'source_empty')""",
+            [code],
+        )
+
+    mislabeled, genuinely_empty = find_mislabeled_rows(duckdb_store, sqlite_store)
+
+    assert [row["stock_code"] for row in mislabeled] == ["600941"]
+    assert [row["stock_code"] for row in genuinely_empty] == ["000001"]
+    # dry-run 阶段：调用方不执行 repair_rows，数据库保持原样。
+    before = sqlite_store.query(
+        "SELECT stock_code, reason_code FROM missing_list ORDER BY stock_code",
+    )
+    assert before == [
+        {"stock_code": "000001", "reason_code": "source_empty"},
+        {"stock_code": "600941", "reason_code": "source_empty"},
+    ]
+
+    updated = repair_rows(sqlite_store, mislabeled)
+
+    assert updated == 1
+    after = {
+        row["stock_code"]: row["reason_code"]
+        for row in sqlite_store.query(
+            "SELECT stock_code, reason_code FROM missing_list",
+        )
+    }
+    assert after == {"000001": "source_empty", "600941": "source_incomplete"}
+    # 不写 retry_list：hk_dividends 没有 refetch_one 路径，靠 update_all 重抓。
+    retry = sqlite_store.query(
+        "SELECT COUNT(*) AS n FROM retry_list WHERE data_type = 'hk_dividends'",
+    )
+    assert retry[0]["n"] == 0

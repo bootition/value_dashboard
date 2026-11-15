@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
-import { NButton, NSwitch, NInput, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, useMessage, useDialog } from 'naive-ui'
+import { NButton, NSwitch, NInput, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
@@ -31,6 +31,19 @@ function apiErrorText(e: unknown, fallback: string): string {
   return friendlyErrorMessage(e, fallback)
 }
 const indicators = ref<readonly ScreeningIndicator[]>([])
+// 2026-11-14（reports/120 §5 J5/J9）：后端把「当前报告期不可用/被遮蔽」的字段
+// 从 indicators 移到 unavailable（字段名 + reason + coverage_pct）。
+// 只让字段消失不给理由，用户会以为功能没了——这里在指标选择区灰显并给 tooltip。
+interface UnavailableIndicator {
+  readonly name?: string
+  readonly field?: string
+  readonly domain?: string
+  readonly reason?: string
+  readonly coverage_pct?: number | null
+  readonly message?: string
+  readonly replaced_by?: string
+}
+const unavailableIndicators = ref<readonly UnavailableIndicator[]>([])
 const loading = ref(false)
 const results = ref<readonly ScreeningResult[]>([])
 const executionTime = ref(0)
@@ -168,6 +181,40 @@ const resultColumns = computed(() => {
   if (!results.value.length) return []
   return Object.keys(results.value[0])
 })
+
+// ─── 当前报告期不可用指标（unavailable）────────────────────────────────
+const UNAVAILABLE_REASON_LABELS: Readonly<Record<string, string>> = {
+  not_available_for_latest_period: '当前报告期不可用（该期覆盖率不足）',
+  masked_untrusted: '数据质量遮蔽（当前不可信）',
+  deprecated: '字段已废弃（口径不可复现）',
+}
+
+function unavailableName(item: UnavailableIndicator): string {
+  return item.name ?? item.field ?? '未命名字段'
+}
+
+function unavailableLabel(item: UnavailableIndicator): string {
+  const name = unavailableName(item)
+  return name === '未命名字段' ? name : fieldDisplayName(name)
+}
+
+function unavailableReasonText(item: UnavailableIndicator): string {
+  const reason = item.reason?.trim()
+  if (!reason) return '原因未标注'
+  return `${UNAVAILABLE_REASON_LABELS[reason] ?? '当前不可用'}（reason: ${reason}）`
+}
+
+function unavailableCoverageText(item: UnavailableIndicator): string {
+  const coverage = item.coverage_pct
+  if (typeof coverage === 'number' && Number.isFinite(coverage)) {
+    return `覆盖率 ${coverage.toFixed(1)}%`
+  }
+  return '覆盖率未知'
+}
+
+function unavailableKey(item: UnavailableIndicator): string {
+  return `${unavailableName(item)}:${item.reason ?? ''}`
+}
 
 const ruleFields = computed(() => collectRuleFields(ruleTree))
 
@@ -588,14 +635,18 @@ onMounted(async () => {
   await loadSavedRules()
   
   try {
-    const resp = await axios.get<{ indicators: readonly ScreeningIndicator[] }>(
-      '/api/screening/indicators',
-    )
-    indicators.value = resp.data.indicators
+    const resp = await axios.get<{
+      indicators?: readonly ScreeningIndicator[]
+      unavailable?: readonly UnavailableIndicator[]
+    }>('/api/screening/indicators')
+    // 降级：旧后端 / 抓包数据的 `indicators` 或 `unavailable` 缺失时都不崩。
+    const loadedIndicators = Array.isArray(resp.data.indicators) ? resp.data.indicators : []
+    indicators.value = loadedIndicators
+    unavailableIndicators.value = Array.isArray(resp.data.unavailable) ? resp.data.unavailable : []
     // 2026-08-14 红队 F3：应用后端下发的单位元数据（单一来源），
     // 修复小数/百分数双口径下条件输入与结果展示的 100 倍误差。
     const units: Record<string, string> = {}
-    for (const indicator of resp.data.indicators) {
+    for (const indicator of loadedIndicators) {
       if (indicator.unit) units[indicator.name] = indicator.unit
     }
     applyIndicatorUnits(units)
@@ -706,6 +757,34 @@ onUnmounted(() => {
           </div>
           <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
           <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" />
+          <div v-if="unavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
+            <div class="unavailable-indicators-heading">
+              <strong>当前报告期不可用指标（{{ unavailableIndicators.length }}）</strong>
+              <span>这些字段已从可选指标中移除；悬停查看原因与覆盖率。</span>
+            </div>
+            <div class="unavailable-indicators-list">
+              <n-tooltip
+                v-for="item in unavailableIndicators"
+                :key="unavailableKey(item)"
+                trigger="hover"
+                placement="top"
+              >
+                <template #trigger>
+                  <span class="unavailable-chip">
+                    <span class="unavailable-chip-name">{{ unavailableLabel(item) }}</span>
+                    <span class="unavailable-chip-coverage">{{ unavailableCoverageText(item) }}</span>
+                  </span>
+                </template>
+                <div class="unavailable-tooltip">
+                  <b>{{ unavailableLabel(item) }}</b>
+                  <p>原因：{{ unavailableReasonText(item) }}</p>
+                  <p>{{ unavailableCoverageText(item) }}</p>
+                  <p v-if="item.message" class="unavailable-tooltip-message">{{ item.message }}</p>
+                  <p v-if="item.replaced_by" class="unavailable-tooltip-message">替代字段：{{ item.replaced_by }}</p>
+                </div>
+              </n-tooltip>
+            </div>
+          </div>
         </div>
 
         <div class="screening-section">
@@ -833,6 +912,18 @@ onUnmounted(() => {
 .conditions-join { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; height: 36px; color: #73917d; font-size: 9px; font-weight: 700; }
 .conditions-join::before, .conditions-join::after { content: ''; border-top: 1px solid #edf1ee; }
 .conditions-workbench { overflow: hidden; border-radius: 9px; }
+.unavailable-indicators { margin-top: 14px; padding: 12px 14px; border: 1px dashed #e2e7e3; border-radius: 9px; background: #fafbfa; }
+.unavailable-indicators-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.unavailable-indicators-heading strong { color: #8a958d; font-size: 11px; }
+.unavailable-indicators-heading span { color: #a3ada6; font-size: 9px; }
+.unavailable-indicators-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
+.unavailable-chip { display: inline-flex; align-items: baseline; gap: 7px; padding: 4px 9px; border-radius: 999px; background: #f0f2f0; color: #9aa69f; cursor: help; font-size: 10px; opacity: .85; }
+.unavailable-chip-name { text-decoration: line-through; text-decoration-color: #c3ccc5; }
+.unavailable-chip-coverage { color: #b0b8b2; font-size: 9px; font-variant-numeric: tabular-nums; }
+.unavailable-tooltip { max-width: 320px; font-size: 11px; line-height: 1.6; }
+.unavailable-tooltip b { display: block; margin-bottom: 4px; }
+.unavailable-tooltip p { margin: 2px 0; }
+.unavailable-tooltip-message { color: #d9d2b8; }
 .dsl-manager { margin-top: 4px; }
 .screening-run-panel { position: sticky; top: 28px; align-self: start; padding: 25px; border-radius: 16px; background: #eff7f1; box-shadow: 0 5px 17px rgba(47, 114, 74, .055); }
 .screening-ready { display: flex; align-items: center; gap: 6px; color: #659d75; font-size: 10px; }

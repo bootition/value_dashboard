@@ -273,11 +273,25 @@ def _write_manifest(repo_root: Path, price_latest: str) -> Path:
 
 
 def test_engine_covers_every_documented_rule(duckdb_store: DuckDBStore) -> None:
-    """12 条规则一条都不能少——少一条就是少一条自动检查。"""
+    """13 条规则一条都不能少——少一条就是少一条自动检查。
+
+    2026-11-14 第二轮（reports/120 §5 J1/J9/J10）新增第 13 条
+    CHAIN_PROGRESS_STALLED；同时每条规则都带 tier（cheap/expensive）与
+    severity（block/disclose/inventory）—— 两者是**独立**维度，
+    分级/调度都从这里取，不允许在别处再写一份。
+    """
     payload = _payload(duckdb_store, repo_root=PROJECT_ROOT)
     assert [rule["code"] for rule in payload["rules"]] == list(RULE_CODES)
-    assert len(RULE_CODES) == 12
+    assert len(RULE_CODES) == 13
     assert set(payload["level_counts"]) == {"P1", "P2", "P3"}
+    assert set(payload["severity_counts"]) == {"block", "disclose", "inventory"}
+    for rule in payload["rules"]:
+        assert rule["tier"] in {"cheap", "expensive"}
+        assert rule["severity"] in {"block", "disclose", "inventory"}
+    assert {rule["code"] for rule in payload["rules"] if rule["tier"] == "expensive"} == {
+        "CROSSCHECK_BELOW_THRESHOLD"
+    }
+    assert payload["schedule"] == {"cheap": "every_update", "expensive": "daily"}
 
 
 def test_single_rule_failure_is_reported_not_raised(
@@ -293,14 +307,14 @@ def test_single_rule_failure_is_reported_not_raised(
         asset_health.__dict__,
         "_RULES",
         tuple(
-            (code, level, title, expensive, boom if code == "DEDUCTED_PROFIT_GAP" else check)
-            for code, level, title, expensive, check in asset_health._RULES
+            (code, level, title, tier, severity, boom if code == "DEDUCTED_PROFIT_GAP" else check)
+            for code, level, title, tier, severity, check in asset_health._RULES
         ),
     )
     payload = _payload(duckdb_store, repo_root=PROJECT_ROOT)
     assert _rule(payload, "DEDUCTED_PROFIT_GAP")["status"] == "error"
     assert payload["errors"][0]["code"] == "DEDUCTED_PROFIT_GAP"
-    assert len(payload["rules"]) == 12
+    assert len(payload["rules"]) == 13
 
 
 def test_expensive_rule_is_skipped_when_not_allowed(duckdb_store: DuckDBStore) -> None:
@@ -669,7 +683,29 @@ def test_null_reason_missing_skips_on_empty_table(duckdb_store: DuckDBStore) -> 
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _create_csmar_fi_t1(duck: DuckDBStore) -> None:
+    """冷热分库后 csmar_fi_t1 不在 schema.py 里 —— 交叉核验规则的正例自己造最小表。
+
+    2026-11-15：16 张 CSMAR 静态归档表迁 Parquet 冷库，主库改成 read_parquet 视图；
+    测试库没有建视图，所以这里按规则实际读取的列建一张最小物理表
+    （stock_code / report_date / F011701A + 溯源列）。规则逻辑（一致率判定）不变。
+    """
+    duck.execute_script(
+        """
+        CREATE TABLE IF NOT EXISTS csmar_fi_t1 (
+            stock_code VARCHAR NOT NULL,
+            report_date DATE NOT NULL,
+            "F011701A" DOUBLE,
+            source VARCHAR NOT NULL,
+            fetch_time TIMESTAMP NOT NULL,
+            batch_id VARCHAR NOT NULL
+        )
+        """
+    )
+
+
 def test_crosscheck_fires_when_agreement_below_threshold(duckdb_store: DuckDBStore) -> None:
+    _create_csmar_fi_t1(duckdb_store)
     _insert_extended(duckdb_store, date(2026, 6, 30), ["000001"], values={"debt_to_equity": 1.0})
     duckdb_store.write_query(
         """INSERT INTO csmar_fi_t1
@@ -688,6 +724,7 @@ def test_crosscheck_fires_when_agreement_below_threshold(duckdb_store: DuckDBSto
 
 
 def test_crosscheck_silent_when_agreement_matches(duckdb_store: DuckDBStore) -> None:
+    _create_csmar_fi_t1(duckdb_store)
     _insert_extended(duckdb_store, date(2026, 6, 30), ["000001"], values={"debt_to_equity": 1.0})
     duckdb_store.write_query(
         """INSERT INTO csmar_fi_t1
@@ -716,12 +753,14 @@ def test_schema_ddl_drift_silent_when_schema_matches(
 def test_schema_ddl_drift_detects_missing_table(
     duckdb_store: DuckDBStore, health_repo: Path
 ) -> None:
-    duckdb_store.execute_script("DROP TABLE csmar_fi_t6")
+    # 2026-11-15：csmar_fi_t6 已迁冷库（schema.py 不再声明），漂移规则再也看不到它；
+    # 用仍在 schema.py 里的对照表 csmar_risk_factors 验"缺表"分支。
+    duckdb_store.execute_script("DROP TABLE csmar_risk_factors")
 
     findings = _findings(_payload(duckdb_store, repo_root=health_repo), "SCHEMA_DDL_DRIFT")
 
     assert len(findings) == 1
-    assert findings[0]["field"] == "csmar_fi_t6"
+    assert findings[0]["field"] == "csmar_risk_factors"
     assert findings[0]["metric"] == "declared_not_in_db"
     assert findings[0]["level"] == "P1"
 
@@ -802,10 +841,20 @@ def test_zero_reference_asset_flags_stale_inventory(
 
 
 def test_shipped_asset_reference_matches_runtime_code(duckdb_store: DuckDBStore) -> None:
-    """仓库里这份清单必须与 `app/` 的真实引用情况一致（12 张表全部零引用）。"""
-    findings = _findings(_payload(duckdb_store, repo_root=PROJECT_ROOT), "ZERO_REFERENCE_ASSET")
+    """仓库里这份清单必须与 `app/` 的真实引用情况一致（清单内每张表都是零引用）。
 
-    assert len(findings) == 12
+    2026-11-15：`financial_sector_items` 已被 `app/core/supplement.py` 的
+    FINANCIAL_SECTOR 补采 spec 引用（6 处），按"兑现即出清单"的规则从
+    `config/asset_reference.yaml` 移除 → 清单从 12 张降为 11 张。
+    断言改成"条数与 YAML 一致 + 全部 metric=0"，避免每次兑现都要改魔数。
+    """
+    findings = _findings(_payload(duckdb_store, repo_root=PROJECT_ROOT), "ZERO_REFERENCE_ASSET")
+    import yaml
+
+    shipped = yaml.safe_load(
+        (PROJECT_ROOT / "config" / "asset_reference.yaml").read_text(encoding="utf-8")
+    )
+    assert len(findings) == len(shipped["zero_reference_tables"])
     assert {item["metric"] for item in findings} == {0}
 
 
@@ -839,6 +888,133 @@ def test_deducted_profit_gap_silent_above_threshold(duckdb_store: DuckDBStore) -
     _bulk_income(duckdb_store, date(2026, 9, 30), deducted_non_null=75)  # 75%
 
     assert _findings(_payload(duckdb_store, repo_root=PROJECT_ROOT), "DEDUCTED_PROFIT_GAP") == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 规则 13 CHAIN_PROGRESS_STALLED（reports/120 §5 J1 防复发）
+# ─────────────────────────────────────────────────────────────────────────────
+
+CHAIN_STATE_KEY = "chain_progress_history"
+
+
+def _seed_chain_backlog(
+    duckdb_store: DuckDBStore, *, listed: int = 3, cashflow_rows: int = 0,
+) -> None:
+    """listed 只票有完整资产负债表；其中 cashflow_rows 只补了 cash_flow_indirect。"""
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
+           SELECT 'C' || lpad(i::VARCHAR, 6, '0'), 'x', 'SZSE', TRUE
+           FROM range(0, ?) AS t(i)""",
+        [listed],
+    )
+    duckdb_store.write_query(
+        """INSERT INTO balance_sheet
+               (stock_code, report_date, total_assets, total_liabilities, total_equity)
+           SELECT 'C' || lpad(i::VARCHAR, 6, '0'), ?, 100, 20, 80
+           FROM range(0, ?) AS t(i)""",
+        [date(2026, 9, 30), listed],
+    )
+    if cashflow_rows:
+        duckdb_store.write_query(
+            """INSERT INTO cash_flow_indirect
+                   (stock_code, report_date, net_profit, source, fetch_time,
+                    raw_response_hash, confidence, batch_id)
+               SELECT 'C' || lpad(i::VARCHAR, 6, '0'), ?, 10, 'fixture', ?,
+                      'hash', 'strict', 'b'
+               FROM range(0, ?) AS t(i)""",
+            [date(2026, 9, 30), NOW, cashflow_rows],
+        )
+
+
+def _chain_state(sqlite_store: SQLiteStore, **chains: tuple[int, str | None]) -> None:
+    """写上一轮基线：chain=(待补数量, last_success_at)。"""
+    payload = {
+        chain: {
+            "count": count,
+            "measured_at": (NOW - timedelta(days=1)).isoformat(),
+            "last_success_at": marker,
+        }
+        for chain, (count, marker) in chains.items()
+    }
+    _set_refresh_state(sqlite_store, CHAIN_STATE_KEY, json.dumps(payload))
+
+
+def test_chain_progress_stalled_fires_when_backlog_does_not_drop(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore
+) -> None:
+    """两轮待补数量相同（且 >0）→ "跑也白跑"，这是 reports/120 §3 事实 1 的形态。"""
+    _seed_chain_backlog(duckdb_store, listed=3, cashflow_rows=0)
+    # 上一轮记账与链 marker 都比现在早一天 → 链在推进，但待补没降。
+    _chain_state(
+        sqlite_store,
+        cashflow_supplement=(3, (NOW - timedelta(days=2)).isoformat()),
+    )
+    _set_refresh_state(
+        sqlite_store, "cashflow_supplement_last_success_at", NOW.isoformat(),
+    )
+
+    findings = _findings(
+        _payload(duckdb_store, sqlite_store, repo_root=PROJECT_ROOT),
+        "CHAIN_PROGRESS_STALLED",
+    )
+
+    assert [item["domain"] for item in findings] == ["cashflow_supplement"]
+    assert findings[0]["metric"] == 3
+    assert findings[0]["threshold"] == 3
+    assert findings[0]["level"] == "P1"
+    assert findings[0]["severity"] == "block"
+    # 命中的规则必须是注册表里那一条（否则 CLI/状态页看不到）
+    assert "CHAIN_PROGRESS_STALLED" in RULE_CODES
+
+
+def test_chain_progress_stalled_silent_when_backlog_drops(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore
+) -> None:
+    """待补从 3 降到 1 → 链在推进，不该报"跑也白跑"。"""
+    _seed_chain_backlog(duckdb_store, listed=3, cashflow_rows=2)
+    _chain_state(
+        sqlite_store,
+        cashflow_supplement=(3, (NOW - timedelta(days=2)).isoformat()),
+    )
+    _set_refresh_state(
+        sqlite_store, "cashflow_supplement_last_success_at", NOW.isoformat(),
+    )
+
+    payload = _payload(duckdb_store, sqlite_store, repo_root=PROJECT_ROOT)
+
+    assert _findings(payload, "CHAIN_PROGRESS_STALLED") == []
+
+
+def test_chain_progress_stalled_silent_when_chain_never_ran(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore
+) -> None:
+    """last_success_at 完全没动 = 链根本没跑 → 那是 MANUAL_CHAIN_STALE 的职责。"""
+    _seed_chain_backlog(duckdb_store, listed=3, cashflow_rows=0)
+    frozen = (NOW - timedelta(days=10)).isoformat()
+    _chain_state(sqlite_store, cashflow_supplement=(3, frozen))
+    _set_refresh_state(sqlite_store, "cashflow_supplement_last_success_at", frozen)
+
+    payload = _payload(duckdb_store, sqlite_store, repo_root=PROJECT_ROOT)
+
+    assert _findings(payload, "CHAIN_PROGRESS_STALLED") == []
+
+
+def test_chain_progress_stalled_needs_two_rounds(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore
+) -> None:
+    """第一轮只记基线：没有上一轮就无从比较，不能凭一次测量判停滞。"""
+    _seed_chain_backlog(duckdb_store, listed=3, cashflow_rows=0)
+
+    first = _findings(
+        _payload(duckdb_store, sqlite_store, repo_root=PROJECT_ROOT),
+        "CHAIN_PROGRESS_STALLED",
+    )
+    rows = sqlite_store.query(
+        "SELECT value FROM data_refresh_state WHERE key = ?", [CHAIN_STATE_KEY],
+    )
+
+    assert first == []
+    assert rows and json.loads(rows[0]["value"])["cashflow_supplement"]["count"] == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────

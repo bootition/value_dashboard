@@ -8,7 +8,7 @@
   352,702 行中【非空 0 行】（0.00%）；
 - 根因是两条路径互相让位：
     1) scripts/import_csmar.py 在导入利润表时显式 `insert_df["deducted_net_profit"] = None`；
-    2) scripts/patch_deducted_profit.py 设 CSMAR_CUTOFF="2025-03-31" 并
+    2) scripts/fetch_deducted_profit.py 设 CSMAR_CUTOFF="2025-03-31" 并
        `if rd <= CSMAR_CUTOFF: continue`（假设 CSMAR 已覆盖，但实际从未导入）。
 - 后果：indicator_snapshot.deducted_profit_yoy / _cagr3 / _cagr5 全表 5,542 行
   均为 NULL，而这三个字段已注册进 DSL 字段表（dsl/ast_nodes.py）、
@@ -59,6 +59,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import pandas as pd  # noqa: E402
 
+from app.core.storage.cold_archive_guard import guard_writable_or_exit  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     PathIsolationError,
@@ -264,6 +265,9 @@ def main() -> None:
         logger.info("没有可回填的行，退出。")
         return
 
+    guard_writable_or_exit(
+        duck, ("income_statement", "source_audit", "fetch_batch"), logger=logger
+    )
     backup_dir = _backup(duck, "csmar-deducted-profit")
     result = _apply(duck, paths, plan, backup_dir)
     logger.info("写库完成: %s", result)

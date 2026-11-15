@@ -8,6 +8,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +22,8 @@ from app.core.data_quality import (
     screening_readiness_cache_key,
     store_screening_readiness_cache,
 )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/screening", tags=["screening"])
 MAX_RULE_JSON_BYTES = 100_000
@@ -233,6 +236,8 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
         [f"-{SCREENING_RUN_TTL_HOURS} hours"],
     )
     locked_indicators = json.loads(rule_rows[0]["locked_indicators"] or "{}")
+    from app.core.screening.engine import MaskedFieldError
+
     engine = ScreeningEngine(duck=request.app.state.duck, sqlite=request.app.state.sqlite)
     try:
         result = engine.run(
@@ -242,7 +247,12 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
             min_listing_years=req.min_listing_years,
             strict_only=req.strict_only,
             locked_indicators=locked_indicators,
+            # 字段级遮蔽（reports/120 §5 J9）：显式传入与 /indicators 同源的
+            # 不可信字段清单，命中即 409 —— 绝不静默返回空结果集。
+            masked_fields=_masked_indicator_fields(request),
         )
+    except MaskedFieldError as error:
+        raise HTTPException(status_code=409, detail=error.as_detail()) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -693,9 +703,44 @@ def _extended_field_coverage(request: Request) -> dict[str, float]:
     }
 
 
+def _masked_indicator_fields(request: Request) -> list[str]:
+    """当前"不可信"字段清单（字段级遮蔽，reports/120 §5 J9）。
+
+    来源是 `data_quality.indicator_trust()["masked_fields"]` —— 与只读端点
+    （个股详情/自选）同一份判定，避免"筛选说能用、详情说不可信"的分裂。
+    任何异常都退化为空清单（宁可少遮一个字段，也不让指标列表整个 500）。
+    """
+    from app.core.data_quality import indicator_trust, read_warning_codes
+
+    try:
+        warning_codes = read_warning_codes(
+            request.app.state.duck, request.app.state.sqlite,
+        )
+        return list(indicator_trust(warning_codes)["masked_fields"])
+    except Exception:  # noqa: BLE001 - 遮蔽信息拿不到就不遮，绝不阻断列表
+        logger.warning("读取字段遮蔽清单失败（本次不遮蔽）", exc_info=True)
+        return []
+
+
+def _deprecated_indicator_names() -> dict[str, str]:
+    """废弃字段 → 替代字段（reports/120 §5 J5，dividend_yield）。"""
+    from app.core.screening.engine import DEPRECATED_COLUMNS
+
+    return dict(DEPRECATED_COLUMNS)
+
+
 @router.get("/indicators")
 def list_available_indicators(request: Request) -> dict:
-    """列出可用的筛选指标"""
+    """列出可用的筛选指标
+
+    2026-11-14（reports/120 §5 J5/J9）两条过滤规则：
+    1. **废弃字段不再列出**（`dividend_yield` → `ttm_dividend_yield`）：
+       旧列分母用 `now()`，同一天不同时刻结果不同，不可复现；
+    2. **当前不可信字段移到 `unavailable`**（reason=`masked_untrusted`）：
+       扩展指标报告期错位时，55 个扩展字段"能选中但筛不出"，必须明示而不是
+       让用户以为"全市场都不满足"。
+    `unavailable` 过去只构造不返回（前端拿不到原因），这次一并返回。
+    """
     from app.core.screening.engine import (
         EXTENDED_SCREENING_READY,
         NORMALIZED_FIELDS,
@@ -793,9 +838,46 @@ def list_available_indicators(request: Request) -> dict:
             "version": expression["version"], "content_hash": expression["content_hash"],
             "dsl": True,
         })
+    # ── 两条过滤：废弃字段 & 当前不可信字段（字段级遮蔽）─────────────────
+    deprecated = _deprecated_indicator_names()
+    masked = set(_masked_indicator_fields(request))
+    kept: list[dict] = []
+    for entry in indicators:
+        name = entry.get("name")
+        if name in deprecated:
+            unavailable.append({
+                "name": name,
+                "domain": entry.get("domain") or "snapshot",
+                "reason": "deprecated",
+                "replaced_by": deprecated[name],
+                "message": (
+                    f"字段已废弃（口径不可复现）：请改用 {deprecated[name]}"
+                ),
+            })
+            continue
+        if name in masked:
+            unavailable.append({
+                "name": name,
+                "domain": entry.get("domain") or "snapshot",
+                "reason": "masked_untrusted",
+                "message": (
+                    "字段当前不可信（数据质量规则判定为遮蔽状态），"
+                    "已从可选指标中移除；引用它的规则运行会被拒绝（409）"
+                ),
+            })
+            continue
+        kept.append(entry)
+    indicators = kept
+
     return {
         "indicators": indicators,
         "count": len(indicators),
+        # 不暴露的字段必须**带原因**返回：只消失不给理由，用户会以为功能没了。
+        # reason ∈ {deprecated, masked_untrusted, not_available_for_latest_period}
+        "unavailable": unavailable,
+        "unavailable_count": len(unavailable),
+        "masked_fields": sorted(masked),
+        "deprecated_fields": sorted(deprecated),
         # 单位口径说明（与 app/core/screening/field_units.py 对齐）：
         # plain 明确表示“原始数值，不进行百分比换算”（金额/股数/倍率等），
         # 供前端展示与输入换算时判断。

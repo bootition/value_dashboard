@@ -34,11 +34,48 @@ from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
-__all__ = ["HKDividendUpdater"]
+__all__ = ["HKDividendUpdater", "has_implemented_a_share_dividend"]
 
 RETRY_DATA_TYPE = "hk_dividends"
 MISSING_FIELD = "hk_dividends"
 MISSING_MAPPING_FIELD = "hk_dividends_mapping"
+# 源正常返回 0 行、且 A 股侧也没有任何已实施分红 → 合法空。
+SOURCE_EMPTY_REASON = "source_empty"
+# 源返回 0 行、但 A 股侧已有已实施分红 → 港股源不完整，必须可重试。
+# 2026-11-14 J4：一批 A 股有分红记录的股票曾被误标 legal_empty（永不重试；
+# 任务书口径 16 只，本轮正式库 open 记录实测 15 只）。
+SOURCE_INCOMPLETE_REASON = "source_incomplete"
+
+
+def has_implemented_a_share_dividend(duck: DuckDBStore, stock_code: str) -> bool:
+    """A 股侧是否已有"已实施"的现金分红记录。
+
+    判据：`dividends` 存在 `ex_date <= 今天` 且 `dividend_per_share > 0` 的行。
+    不要求 `announcement_date`：除权除息日已经发生就代表分红已实施；
+    公告日缺失是另一个字段的完整性问题，不能反过来否认分红事实。
+
+    查询失败时返回 True（fail-safe）：宁可把空响应登记成 source_incomplete
+    继续重试，也不能因为一次查询异常就把股票永久判成 legal_empty。
+    """
+    try:
+        rows = duck.read_query(
+            """SELECT 1 AS hit FROM dividends
+               WHERE stock_code = ?
+                 AND ex_date IS NOT NULL
+                 AND ex_date <= CURRENT_DATE
+                 AND dividend_per_share IS NOT NULL
+                 AND dividend_per_share > 0
+               LIMIT 1""",
+            [stock_code],
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.warning(
+            "检查 A 股分红历史失败（按 source_incomplete 处理） %s: %s",
+            stock_code, error,
+        )
+        return True
+    return bool(rows)
+
 
 _HK_DIVIDEND_COLUMNS = (
     "stock_code",
@@ -190,9 +227,22 @@ class HKDividendUpdater:
             self._resolve_missing(stock_code, MISSING_FIELD)
             self._resolve_retry(stock_code)
         else:
-            # 合法空响应：源当前无该股分红记录。保留既有数据，
-            # 只登记 missing，避免瞬时接口空窗清空历史。
-            self._record_missing(stock_code, MISSING_FIELD, "source_empty")
+            # 源当前无该股分红记录。保留既有数据，避免瞬时接口空窗清空历史。
+            # 2026-11-14 J4：不能一律判"合法空"——若 A 股侧已经有已实施分红，
+            # 说明这家公司确实分红过，港股侧却 0 行属于源不完整，必须可重试。
+            # `update_all()` 的 pending 判据是"该港股代码在 hk_dividends 无行"，
+            # 所以 source_incomplete 的股票下一轮仍会被重新抓取；不写 retry_list
+            # 是因为 refetch_one() 尚不支持 hk_dividends 这个 data_type。
+            if self._has_implemented_a_share_dividend(stock_code):
+                missing_reason = SOURCE_INCOMPLETE_REASON
+                logger.info(
+                    "港股分红 %s(%s) 源返回 0 行，但 A 股已有已实施分红；"
+                    "登记 source_incomplete 并保留重试",
+                    stock_code, hk_code,
+                )
+            else:
+                missing_reason = SOURCE_EMPTY_REASON
+            self._record_missing(stock_code, MISSING_FIELD, missing_reason)
 
         return {
             "status": "success",
@@ -202,7 +252,12 @@ class HKDividendUpdater:
             "event_rows": len(rows),
             "pending_no_exdate": pending_no_exdate,
             "retained": not rows,
+            "reason": None if rows else missing_reason,
         }
+
+    def _has_implemented_a_share_dividend(self, stock_code: str) -> bool:
+        """Delegate to the module-level predicate shared with repair scripts."""
+        return has_implemented_a_share_dividend(self.duck, stock_code)
 
     @staticmethod
     def _dedupe_rows(

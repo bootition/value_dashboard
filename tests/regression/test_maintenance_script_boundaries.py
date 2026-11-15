@@ -9,7 +9,6 @@ WRITER_SCRIPTS = (
     "import_csmar.py",
     "supplement_akshare.py",
     "import_csv_to_db.py",
-    "patch_deducted_profit.py",
 )
 
 

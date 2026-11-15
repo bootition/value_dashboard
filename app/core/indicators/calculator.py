@@ -1505,6 +1505,8 @@ class IndicatorCalculator:
         # ROE = TTM归母净利润 / 平均归母权益
         # V2-3.3修复: |ROE|>1.0 时置NULL
         # P1-24修复: 用(期初+期末)/2而非期末值
+        # 2026-11-15 J5 结论：上一期权益缺失时 ROE 保持 NULL，不把期初按 0
+        # 处理（否则"平均权益"退化成期末的一半，ROE 会被系统性放大）。
         equity = financials.get("total_equity_parent") if financials.get("total_equity_parent") is not None else financials.get("total_equity")
         avg_equity = None
         if prev_equity is not None and equity is not None:
@@ -1517,6 +1519,7 @@ class IndicatorCalculator:
 
         # ROA = TTM净利润 / 平均总资产
         # P1-24修复: 用(期初+期末)/2而非期末值
+        # 2026-11-15 J5 结论：同 ROE——上一期总资产缺失时保持 NULL。
         total_assets = financials.get("total_assets")
         avg_assets = None
         if prev_assets is not None and total_assets is not None:
@@ -1546,6 +1549,12 @@ class IndicatorCalculator:
 
         # ROIC = TTM营业利润 / 投入资本
         # 投入资本 = 总权益 + 有息负债
+        # 2026-11-15 J5 结论：这里保持 NULL，不把缺项按 0 处理。
+        # - 营业利润缺失 → 分子无法计算；
+        # - 归母权益/总权益缺失 → 不能拿 0 代替（会算出无穷大 ROIC）；
+        # - `_calc_interest_bearing_debt` 三项全空时返回 None（fail-closed），
+        #   因为无法区分"没有借款"与"负债明细没采到"；只有任一借款科目有值
+        #   时才按"缺项=0"求和（该口径已在 2026-11-14 修复并钉死）。
         op_profit = ttm.get("operating_profit")
         interest_debt = self._calc_interest_bearing_debt(financials)
         invested_capital = None
@@ -1557,6 +1566,8 @@ class IndicatorCalculator:
             result["roic"] = None
 
         # 经营现金流 / 净利润
+        # 2026-11-15 J5 结论：分母必须是正净利润。净利润 <= 0 时该比率没有
+        # 经济含义（负分母会让"现金流好"看起来像负值），不能按 0 或绝对值兜底。
         if op_cf is not None and net_profit and net_profit > 0:
             result["cf_to_net_profit"] = op_cf / net_profit
         else:
@@ -1643,15 +1654,25 @@ class IndicatorCalculator:
             result["debt_ratio"] = None
 
         # 流动比率 = 流动资产 / 流动负债
+        # 2026-11-15 J5 结论：流动资产/流动负债缺失时保持 NULL，不按 0 兜底：
+        # 缺资产按 0 会把比率压成 0，缺负债则分母为 0；都不能用总资产/总负债替代。
         if total_current_assets is not None and total_current_liabilities and total_current_liabilities > 0:
             result["current_ratio"] = total_current_assets / total_current_liabilities
         else:
             result["current_ratio"] = None
 
         # 速动比率 = (流动资产 - 存货) / 流动负债
-        if (total_current_assets is not None and inventory is not None
+        # 2026-11-15 J5 修复：存货为 NULL 时按 0 计。
+        # 存货是"没有就是 0"的典型科目——银行/保险/互联网/服务业本来就没有
+        # 存货，源里留 NULL 不代表缺失。旧写法要求三项全非空，导致这 53 只
+        # （2026-09-30 实测）速动比率被整项压成 NULL（覆盖率 97.2% → 98.2%）。
+        # 注意：流动资产/流动负债仍必须非空，不能用 0 或其它科目替代。
+        inventory_for_quick = inventory if inventory is not None else 0.0
+        if (total_current_assets is not None
                 and total_current_liabilities and total_current_liabilities > 0):
-            result["quick_ratio"] = (total_current_assets - inventory) / total_current_liabilities
+            result["quick_ratio"] = (
+                total_current_assets - inventory_for_quick
+            ) / total_current_liabilities
         else:
             result["quick_ratio"] = None
 
@@ -1659,6 +1680,9 @@ class IndicatorCalculator:
         result["interest_bearing_debt"] = self._calc_interest_bearing_debt(financials)
 
         # 利息保障倍数 = TTM营业利润 / TTM利息费用
+        # 2026-11-15 J5 结论：保持 NULL。利息费用缺失或为 0 时倍数在数学上是
+        # 无穷大/无定义，不能把利息费用按 0 处理；也不能用 financial_expenses
+        # 兜底（其中混有汇兑损益、手续费，口径不同）。
         op_profit = ttm.get("operating_profit")
         interest_expense = ttm.get("interest_expense")
         if (op_profit is not None and interest_expense is not None
@@ -1684,6 +1708,9 @@ class IndicatorCalculator:
         result: dict[str, Any] = {}
 
         # 分红率 = 已验证的最近年度每股股息 / 每股收益
+        # 2026-11-15 J5 结论：保持 NULL。DPS 无记录、股本缺失、TTM EPS <= 0
+        # 时都无法定义有意义的分红率；EPS 为负更不能按 0 或绝对值兜底。
+        # `latest_dps` 来自"已公告 + 已除权"的年度合计，0 不会作为有效记录返回。
         dps = dividends.get("latest_dps")  # 最新一年DPS
         eps = ttm.get("parent_net_profit")
         shares = total_shares
@@ -1696,7 +1723,8 @@ class IndicatorCalculator:
         else:
             result["payout_ratio"] = None
 
-        # 每股股息 (DPS)
+        # 每股股息 (DPS)：直接取已验证年度合计，没有"多项输入"公式；
+        # 无记录时如实为 NULL（不是 0 元/股，避免把"没采到"显示成"不分红"）。
         result["dps"] = dps
 
         # 连续分红年数（从最近年份往前数连续分红的年数）
@@ -1879,6 +1907,10 @@ class IndicatorCalculator:
 
         正确口径：缺失科目按 0 计，只要**至少一项有值**即可计算；
         三项全空才返回 None（该股确实没有可识别的有息负债明细）。
+
+        2026-11-15 J5 复核：维持该口径。三项全空时无法区分"真无借款"与
+        "借款明细整段没采到"，保持 NULL 是 fail-closed；若将来确认源以 NULL
+        表示零借款，再单独评估是否改成 0.0（需同步 roic 覆盖率与测试）。
         """
         components = [
             value for value in (

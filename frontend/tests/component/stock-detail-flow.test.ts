@@ -170,6 +170,52 @@ const RESEARCH_STATISTICS = {
   disclaimer: '最新重述回看口径',
 }
 
+// 2026-11-14（reports/119 §5 D 类）：详情页新增「当时可见」与「公告时间线」两张卡，
+// 既有流程测试需给出确定响应，避免落到兜底 `{}` 后只渲染空态。
+const AS_REPORTED = {
+  stock_code: '600519',
+  as_of: '2024-06-30',
+  frequency: 'any',
+  report_date: '2024-03-31',
+  announce_date: '2024-04-26',
+  report_type: 'quarterly',
+  source: 'cninfo',
+  days_since_announce: 65,
+  fields: { revenue: 46_000_000_000, parent_net_profit: 24_000_000_000, total_assets: 270_000_000_000, total_equity_parent: 200_000_000_000, cf_from_operating: 12_000_000_000 },
+  missing_fields: [],
+  value_tables: ['income_statement', 'balance_sheet', 'cash_flow'],
+  value_basis: 'latest_restated',
+  value_source: 'financial_report_dates.announce_date 定位报告期 + 三表取数',
+  disclaimer: '数值取自库内该报告期唯一一份记录（今天的最新重述值），不是当年披露时的原始数字。',
+  limitations: ['无公布日记录的报告期不参与判定（不假设未登记即当天可见）'],
+}
+
+const ANNOUNCEMENTS = {
+  stock_code: '600519',
+  days: 365,
+  cutoff_date: '2025-11-15',
+  timezone: 'Asia/Shanghai',
+  limit: 20,
+  offset: 0,
+  count: 1,
+  total: 1,
+  has_more: false,
+  by_category: { financial: 1, dividend: 0, other: 0 },
+  items: [
+    {
+      announcement_id: 'a1',
+      stock_code: '600519',
+      title: '2025年第三季度报告',
+      category: 'financial',
+      announcement_time: '2025-10-30T08:00:00+00:00',
+      announcement_date_cn: '2025-10-30',
+      announcement_datetime_cn: '2025-10-30T16:00:00+08:00',
+    },
+  ],
+  category_source: 'app.core.update.classify_announcement',
+  disclaimer: '只包含已登记进 announcement_registry 的公告，不是全市场全量公告库。',
+}
+
 function setupAxiosMock(
   payload: Record<string, unknown> | null = null,
   businessOverviewPayload: Record<string, unknown> | null = null,
@@ -200,6 +246,12 @@ function setupAxiosMock(
     }
     if (url.includes('/research-statistics')) {
       return Promise.resolve({ data: statisticsPayload ?? RESEARCH_STATISTICS })
+    }
+    if (url.includes('/research/as-reported')) {
+      return Promise.resolve({ data: AS_REPORTED })
+    }
+    if (url.includes('/research/announcements')) {
+      return Promise.resolve({ data: ANNOUNCEMENTS })
     }
     if (url.includes('/source-audit')) {
       return Promise.resolve({ data: { field_audit: [], batch_audit: [] } })
@@ -234,15 +286,19 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
     localStorage.clear()
   })
 
-  it('渲染粘性目录的五个章节', async () => {
+  it('渲染粘性目录的七个章节', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
     const links = wrapper.findAll('.toc-link')
+    // 2026-11-14（reports/119 §5 D 类）：估值与市场之后新增两个锚点
+    // 「当时可见」「公告时间线」，目录从 5 项变为 7 项。
     expect(links.map((n) => n.text())).toEqual([
       '概览',
       '估值与市场',
+      '当时可见',
+      '公告时间线',
       '经营与成长',
       '财务安全',
       '股东回报',

@@ -284,3 +284,40 @@ def test_refresh_treasury_spreads_updates_only_treasury_columns(
     assert snapshot["ttm_dividend_yield"] == 20.0
     assert snapshot["div_yield_spread_10y"] == 17.0
     assert snapshot["pe_ttm"] == 25.0, "非国债字段必须保持不变"
+
+
+def test_quick_ratio_treats_missing_inventory_as_zero(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """J5：存货缺失 = 没有存货，速动比率不应因此整项为 NULL。
+
+    2026-11-15 修复前，`quick_ratio` 要求
+    `total_current_assets` / `inventory` / `total_current_liabilities` 三项
+    全非空；但银行/保险/互联网/服务业本来就没有存货（源里为 NULL）。
+    实测 2026-09-30 有 53 只因此被压成 NULL（覆盖率 97.2% → 98.2%）。
+    """
+    calculator = _calculator(duckdb_store, sqlite_store)
+    financials = {
+        "total_assets": 500.0,
+        "total_liabilities": 200.0,
+        "total_current_assets": 100.0,
+        "total_current_liabilities": 80.0,
+        "inventory": None,
+    }
+
+    safety = calculator._calc_safety(financials, {})
+
+    assert safety["current_ratio"] == 1.25
+    assert safety["quick_ratio"] == 1.25  # 存货按 0 计
+
+    with_inventory = dict(financials, inventory=20.0)
+    assert calculator._calc_safety(with_inventory, {})["quick_ratio"] == 1.0
+
+    # 流动资产/流动负债缺失仍必须保持 NULL：不能把分母或分子按 0 兜底。
+    missing_assets = dict(financials, total_current_assets=None)
+    assert calculator._calc_safety(missing_assets, {})["quick_ratio"] is None
+    assert calculator._calc_safety(missing_assets, {})["current_ratio"] is None
+
+    zero_liabilities = dict(financials, total_current_liabilities=0.0)
+    assert calculator._calc_safety(zero_liabilities, {})["quick_ratio"] is None

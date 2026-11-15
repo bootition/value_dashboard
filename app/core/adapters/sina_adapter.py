@@ -130,7 +130,9 @@ _FIELD_BY_TITLE: dict[str, tuple[str, ...]] = {
     "interest_income": ("利息收入",),
     "asset_impairment_loss": ("资产减值损失",),
     "credit_impairment_loss": ("信用减值损失",),
-    "exchange_gain": ("汇兑收益",),
+    # 2026-11-15（reports/121）：本列语义是「公允价值变动收益」（schema.py B001301000 / import_csmar / supplement_akshare 三处一致，且逐值可核）。
+    # 旧映射写的「汇兑收益」是错的：新浪只在约 194 只上返回该科目，    # 于是把 2026Q1 的 52% 覆盖率打成 3.5%，并在 1,428 行里留下口径污染。
+    "exchange_gain": ("公允价值变动收益",),
     "investment_income": ("投资收益",),
     "operating_profit": ("营业利润",),
     "non_operating_income": ("营业外收入",),

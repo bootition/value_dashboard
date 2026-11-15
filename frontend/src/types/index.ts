@@ -52,3 +52,18 @@ export {
   type AuditBatchRow,
   type AuditResponse,
 } from './stock-detail.ts'
+
+export {
+  // Research (point-in-time / announcements) contracts — reports/119 §5 D 类
+  type ResearchFinancialField,
+  type ResearchReportType,
+  type ResearchFrequency,
+  type AnnouncementCategory,
+  type AsReportedResponse,
+  type VisiblePeriodRow,
+  type VisiblePeriodsResponse,
+  type AnnouncementRow,
+  type AnnouncementsResponse,
+  type AnnouncementSummaryResponse,
+  type ResearchErrorDetail,
+} from './research.ts'

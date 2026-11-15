@@ -63,7 +63,9 @@ income_statement:
   INTEREST_INCOME: interest_income              # 利息收入
   ASSET_IMPAIRMENT_LOSS: asset_impairment_loss  # 资产减值损失
   CREDIT_IMPAIRMENT_LOSS: credit_impairment_loss # 信用减值损失
-  EXCHANGE_GAIN: exchange_gain                  # 公允价值变动收益
+  # 2026-11-15：akshare 利润表实际列名是 FAIRVALUE_CHANGE_INCOME（公允价值变动收益）
+  # 与 EXCHANGE_INCOME（汇兑收益）；旧键 EXCHANGE_GAIN 不存在，是死映射。
+  FAIRVALUE_CHANGE_INCOME: exchange_gain        # 公允价值变动收益（本列历史语义）
   INVESTMENT_INCOME: investment_income          # 投资收益
   OPERATE_PROFIT: operating_profit              # 营业利润
   NON_OPERATE_INCOME: non_operating_income      # 营业外收入

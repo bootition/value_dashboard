@@ -33,7 +33,9 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO / "scripts" / "cold_archive_split.py"
 
-# 与 config/cold_archive.yaml 约定的 17 张表（顺序无关）
+# 与 config/cold_archive.yaml 约定的 16 张表（顺序无关）。
+# financial_sector_items 不在其中：2025Q2+ 有 eastmoney_f10 补采热数据，
+# 必须留在主库物理表（2026-11-15 裁决，见 config/cold_archive.yaml 头部例外登记）。
 _EXPECTED_TABLES = {
     "csmar_fi_t1",
     "csmar_fi_t3",
@@ -51,7 +53,6 @@ _EXPECTED_TABLES = {
     "csmar_financial_items",
     "csmar_per_share_history",
     "csmar_disclosure_metrics",
-    "financial_sector_items",
 }
 
 _ARCHIVE_CROSSCHECK = "app/core/quality/archive_crosscheck.py"
@@ -175,7 +176,7 @@ def _query(db_path: Path, sql: str):
 
 
 def test_config_lists_exactly_the_agreed_tables() -> None:
-    """清单必须正好是约定的 17 张表；对照用的 csmar_risk_factors 不得混入。"""
+    """清单必须正好是约定的 16 张表；对照用的 csmar_risk_factors 不得混入。"""
     module = _load_module()
     config = module.load_config()
     names = {cold.table for cold in config.tables}
@@ -527,15 +528,64 @@ def test_verify_mode_exit_code_is_non_zero_on_failure(cold, tmp_path: Path) -> N
 # ───────────────────────── schema.py 待删清单 ─────────────────────────
 
 
-def test_ddl_checklist_covers_every_cold_table() -> None:
+def _write_schema_with_cold_ddl(tmp_path: Path) -> Path:
+    """造一份"尚未删 DDL"的 schema 片段，专门测扫描器本身。
+
+    2026-11-15 冷热分库物理切换后，真实 ``schema.py`` 里这些 DDL 已全部删除
+    （回归见 ``test_real_schema_has_no_cold_ddl``）。如果继续拿真实文件测扫描器，
+    扫描器一旦坏掉反而"没有 DDL 可扫"而假通过。所以这里自造带 DDL 的样本：
+    每表 1 个 CREATE TABLE + 2 个 CREATE INDEX（DDL 段 + 迁移函数段各一条），
+    ``csmar_balance_items`` 再多 1 条 ALTER（视图不能 ALTER 的那类）。
+    """
+    lines: list[str] = []
+    for table in sorted(_EXPECTED_TABLES):
+        lines.extend(
+            [
+                f"CREATE TABLE IF NOT EXISTS {table} (",
+                "    stock_code VARCHAR NOT NULL,",
+                "    report_date DATE NOT NULL,",
+                "    source VARCHAR NOT NULL",
+                ");",
+                f"CREATE INDEX IF NOT EXISTS idx_{table}_stock",
+                f"    ON {table} (stock_code, report_date);",
+                "",
+            ]
+        )
+    lines.append("def init_duckdb_schema(store):")
+    lines.append("    with store.transaction() as connection:")
+    for table in sorted(_EXPECTED_TABLES):
+        lines.append(
+            f'        connection.execute("CREATE INDEX IF NOT EXISTS idx_{table}_mig '
+            f'ON {table} (stock_code, report_date)")'
+        )
+    alter_sql = (
+        "ALTER TABLE csmar_balance_items ADD COLUMN IF NOT EXISTS "
+        '"A004000000" DOUBLE'
+    )
+    lines.append(f"        connection.execute({alter_sql!r})")
+    path = tmp_path / "schema_fixture.py"
+    path.write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
+    return path
+
+
+def test_ddl_checklist_covers_every_cold_table(tmp_path: Path) -> None:
     """每张冷表都要在清单里出现 CREATE TABLE + CREATE INDEX 两类语句。
 
     索引语句打在视图上会让每次启动的 init_duckdb_schema() 直接 BinderException，
-   所以清单漏一条就等于"重启炸库"（reports/117 R18 同类事故）。
+    所以清单漏一条就等于"重启炸库"（reports/117 R18 同类事故）。
     """
     module = _load_module()
     config = module.load_config()
-    hints = module.schema_ddl_hints([cold.table for cold in config.tables])
+    schema_path = _write_schema_with_cold_ddl(tmp_path)
+    hints = module.schema_ddl_hints(
+        [cold.table for cold in config.tables], schema_path=schema_path
+    )
+    # 每表 1 表 DDL + 2 索引（DDL 段 + 迁移段），csmar_balance_items 再多 1 条 ALTER。
+    # 处数从配置推导（16×3+1=49）：清单再变一次就不该再改断言里的常数。
+    expected_hints = 3 * len(config.tables) + 1
+    assert len(hints) == expected_hints, (
+        f"样本处数应为 3×{len(config.tables)}表+1 ALTER = {expected_hints}，实际 {len(hints)}"
+    )
     by_table: dict[str, set[str]] = {}
     for hint in hints:
         by_table.setdefault(hint.table, set()).add(hint.kind)
@@ -557,11 +607,30 @@ def test_ddl_checklist_covers_every_cold_table() -> None:
     assert row_max == sorted(row_max, reverse=True), f"待删清单未按行号倒序: {row_max}"
 
 
-def test_ddl_checklist_reports_real_line_numbers() -> None:
-    """行号必须真的指到 schema.py 里那行（写死行号一周后就会骗人）。"""
+def test_ddl_checklist_reports_real_line_numbers(tmp_path: Path) -> None:
+    """行号必须真的指到传入的 schema 文件那行（写死行号一周后就会骗人）。"""
     module = _load_module()
-    hints = module.schema_ddl_hints(["csmar_fi_t1"])
+    schema_path = _write_schema_with_cold_ddl(tmp_path)
+    hints = module.schema_ddl_hints(["csmar_fi_t1"], schema_path=schema_path)
     table_hint = next(hint for hint in hints if hint.kind == "table")
-    lines = (_REPO / "app/core/storage/schema.py").read_text(encoding="utf-8").splitlines()
+    lines = schema_path.read_text(encoding="utf-8").splitlines()
     assert "CREATE TABLE IF NOT EXISTS csmar_fi_t1" in lines[table_hint.line - 1]
     assert table_hint.end_line is not None and table_hint.end_line > table_hint.line
+
+
+def test_real_schema_has_no_cold_ddl() -> None:
+    """真实 schema.py 必须已经删干净 16 张冷表的 DDL（49 处）。
+
+    这是物理切换的硬前提：``init_duckdb_schema()`` 每次启动都跑，
+    CREATE INDEX / ALTER TABLE 打在视图上会直接让服务起不来。
+    """
+    module = _load_module()
+    config = module.load_config()
+    hints = module.schema_ddl_hints([cold.table for cold in config.tables])
+    assert hints == [], (
+        "schema.py 仍残留冷库表 DDL："
+        + ", ".join(f"{hint.table}:{hint.kind}@L{hint.line}" for hint in hints)
+    )
+    # 对照表必须留在主库（它不在冷库清单里）
+    schema_text = (_REPO / "app/core/storage/schema.py").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS csmar_risk_factors" in schema_text

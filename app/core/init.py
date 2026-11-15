@@ -534,6 +534,24 @@ class DataInitializer:
                         [(row.get("csrc_l1"), row.get("csrc_l2"), row.get("stock_code"))
                          for row in rows],
                     )
+                # 2026-11-15（reports/121 J3）：同一批记录**同时**写进
+                # `industry_history`。适配器每条都带 `as_of_date`（行业变更日期），
+                # 旧实现只 UPDATE stock_meta 把它压平成"当前值" → 回测里用当前
+                # 行业解释过去 = 未来信息。这里不改变 stock_meta 行为，只补历史。
+                # 失败只记日志，不影响 CSRC 主流程（历史表是增量资产，不是门禁）。
+                try:
+                    from app.core.industry_history import (
+                        csrc_records_to_rows,
+                        table_exists,
+                        upsert_csrc_history,
+                    )
+
+                    if table_exists(self.duck, "industry_history"):
+                        history_rows = csrc_records_to_rows(rows)
+                        if history_rows:
+                            upsert_csrc_history(self.duck, history_rows)
+                except Exception:  # noqa: BLE001 - 历史表写入失败不阻断行业刷新
+                    logger.warning("CSRC 行业历史写 industry_history 失败（不阻断）", exc_info=True)
                 filled += len(rows)
                 self._resolve_csrc_missing([row["stock_code"] for row in rows])
             missing_codes = [code for code in chunk if code not in returned_codes]

@@ -357,6 +357,31 @@ def _refresh_summary_worker(state, key: str) -> None:
             _SUMMARY_REFRESHING.discard(key)
 
 
+def _expensive_health_placeholder(request: Request) -> dict:
+    """状态页占位摘要里的 `asset_health` 片段（保持载荷形状一致）。
+
+    2026-11-14（reports/120 §5 J10）：体检分两档 —— 状态页只跑 cheap
+    （<5s），expensive（归档交叉核验 ~35s）只由 `vd data doctor` 全量或每日
+    定时跑。没有缓存时必须显式标 `not_run`，**不能留空/undefined**：
+    前端无法区分"从未跑过"和"字段还没实现"。
+    """
+    from app.core.quality.asset_health import DEFAULT_SCHEDULE, load_expensive_summary
+
+    # 兼容两种入参：FastAPI Request（.app.state）与裸 app.state。
+    sqlite = None
+    try:
+        sqlite = request.app.state.sqlite
+    except Exception:  # noqa: BLE001 - 占位摘要绝不能被状态库缺失打挂
+        sqlite = getattr(request, "sqlite", None)
+    return {
+        "tier": "cheap",
+        "schedule": dict(DEFAULT_SCHEDULE),
+        "findings": [],
+        "p1_codes": [],
+        "expensive": load_expensive_summary(sqlite),
+    }
+
+
 def _lightweight_summary(request: Request) -> dict:
     """Return a minimal summary when the writer lock is active and no cache exists.
 
@@ -389,6 +414,8 @@ def _lightweight_summary(request: Request) -> dict:
             "code_identity": {},
             "operations": {},
             "warning_codes": [],
+            # 占位摘要同样要带 asset_health（含 expensive 上次运行摘要）
+            "asset_health": _expensive_health_placeholder(request),
         },
         "minimum_data_readiness": readiness,
         "stock_count": 0,
@@ -422,6 +449,7 @@ def _build_summary_from_state(state) -> dict:
                 "code_identity": {},
                 "operations": {},
                 "warning_codes": [],
+                "asset_health": _expensive_health_placeholder(state),
             },
             "minimum_data_readiness": dict(startup_readiness),
             "checking": True,

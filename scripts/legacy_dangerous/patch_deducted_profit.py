@@ -1,3 +1,15 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# ⚠⚠⚠ 危险脚本 —— 已隔离，禁止在正式库执行 ⚠⚠⚠
+#
+# 1. 本脚本会执行：
+#        DELETE FROM income_statement WHERE report_date > '2025-03-31'
+#    然后把 CSV 整段回灌。CSV 只要不完整，就会把利润表（乃至三表）打空。
+# 2. 已被 scripts/fetch_deducted_profit.py 取代：新通道只 UPDATE 既有行里
+#    为 NULL 的 deducted_net_profit，绝不 DELETE / INSERT / 覆盖既有值。
+# 3. 禁止在 data/valuedashboard.duckdb（正式库）上执行，禁止被任何模块 import。
+#    本文件只作为历史审计留档，保留原样，不再维护。
+# 4. 来龙去脉见同目录 README.md 与 docs/reports/120 §5.6。
+# ═══════════════════════════════════════════════════════════════════════════
 """
 补充扣非净利润数据
 
@@ -7,8 +19,11 @@
 3. 更新 CSV 文件
 4. 重新导入数据库
 
-用法：
-    python scripts/patch_deducted_profit.py [--sample N]
+用法（仅历史留档；不要在正式库执行）：
+    python scripts/legacy_dangerous/patch_deducted_profit.py [--sample N]
+
+替代脚本：
+    python scripts/fetch_deducted_profit.py [--limit N] [--yes]
 """
 
 import argparse
@@ -16,15 +31,20 @@ import sys
 import time
 from pathlib import Path
 
-import akshare as ak
-import pandas as pd
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+for _entry in (str(PROJECT_ROOT), str(SCRIPTS_DIR)):
+    if _entry not in sys.path:
+        sys.path.insert(0, _entry)
 
-from app.core.storage.duckdb_store import DuckDBStore
-from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
+import akshare as ak  # noqa: E402
+import pandas as pd  # noqa: E402
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
+from app.core.storage.path_policy import (  # noqa: E402
+    PathIsolationError,
+    require_formal_maintenance_paths,
+)
 
 CSMAR_CUTOFF = "2025-03-31"
 RATE_LIMIT = 0.5

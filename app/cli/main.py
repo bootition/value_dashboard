@@ -1105,6 +1105,95 @@ def data_compute_extended_indicators(
     typer.echo(json.dumps(make_response("data.compute_extended_indicators", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("industry-history")
+def data_industry_history(
+    import_csmar: bool = typer.Option(False, "--import-csmar", help="从 CSMAR C17 原始包导入 2012 证监会口径行业历史"),
+    refresh_csrc: bool = typer.Option(False, "--refresh-csrc", help="从证监会接口增量刷新历史（需先有 stock_meta 分类）"),
+    show: str = typer.Option("", "--show", help="打印某只股票的行业变更时间线，如 --show 600519"),
+    yes: bool = typer.Option(False, "--yes", help="确认写库（默认 dry-run）"),
+    max_rows: int = typer.Option(0, "--max-rows", help="只处理前 N 行（抽样验证用）"),
+) -> None:
+    """行业变更历史（reports/119 P2-2 / reports/121 J3）
+
+    背景：库里此前只有"现在"的行业，回测用当前行业解释过去 = 未来信息。
+    CSMAR 原始包每个报告期带 `Indcd`（2012 证监会标准，止于 2023-03-31），
+    证监会接口每条带 `as_of_date`（变更日期）——旧实现把后者压平成当前值。
+
+    - `--import-csmar`：读 `额外资料/C17 .../原始数据（dta格式）/偿债能力/FI_T1.dta`
+    - `--refresh-csrc`：读 `stock_meta` 里已有分类的股票，重新拉变更历史
+    - `--show`：只读查询，不需要 `--yes`
+    """
+    from app.cli.protocol import make_response
+    from app.core import industry_history as ih
+
+    _paths, duck, _sqlite = _database_context()
+    if show:
+        timeline = ih.read_industry_timeline(duck, show)
+        typer.echo(json.dumps(
+            make_response("data.industry_history", {"stock_code": show, "timeline": timeline}),
+            ensure_ascii=False, indent=2, default=str,
+        ))
+        return
+    reports: dict[str, Any] = {}
+    if import_csmar:
+        reports["csmar"] = ih.import_csmar_industry_history(
+            duck, dry_run=not yes, max_rows=max_rows,
+        )
+    if refresh_csrc:
+        from app.core.adapters.base import FetchRequest
+        from app.core.adapters.manager import AdapterManager
+
+        codes = [
+            row["stock_code"]
+            for row in duck.read_query(
+                "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE AND csrc_l1 IS NOT NULL"
+            )
+        ]
+        records: list[dict[str, Any]] = []
+        manager = AdapterManager()
+        for index in range(0, len(codes), 100):
+            chunk = codes[index:index + 100]
+            result = manager.fetch(FetchRequest(data_type="csrc_industry", stock_codes=chunk))
+            records.extend(result.data or [])
+        reports["csrc"] = {
+            "records": len(records),
+            "written": 0 if not yes else ih.upsert_csrc_history(duck, records)["written"],
+            "dry_run": not yes,
+        }
+    if not reports:
+        typer.echo("请指定 --import-csmar / --refresh-csrc / --show 之一", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(json.dumps(
+        make_response("data.industry_history", reports),
+        ensure_ascii=False, indent=2, default=str,
+    ))
+
+
+@data_app.command("report-metadata")
+def data_report_metadata(
+    import_csmar: bool = typer.Option(False, "--import-csmar", help="从 CSMAR 原始包导入报表类型/更正标记"),
+    yes: bool = typer.Option(False, "--yes", help="确认写库（默认 dry-run）"),
+    max_rows: int = typer.Option(0, "--max-rows", help="只处理前 N 行（抽样验证用）"),
+) -> None:
+    """报告元数据（Typrep 合并/母公司、IfCorrect 更正标记、DeclareDate 更正披露日）
+
+    背景：这三个字段在导入时被整体丢弃，导致 PRD 的 as_reported vs
+    latest_restated 语义无法落地。本命令只存标记，不存数值（数值仍在三表里）。
+    """
+    from app.cli.protocol import make_response
+    from app.core import industry_history as ih
+
+    _paths, duck, _sqlite = _database_context()
+    if not import_csmar:
+        typer.echo("请指定 --import-csmar", err=True)
+        raise typer.Exit(code=2)
+    report = ih.import_csmar_report_metadata(duck, dry_run=not yes, max_rows=max_rows)
+    typer.echo(json.dumps(
+        make_response("data.report_metadata", report),
+        ensure_ascii=False, indent=2, default=str,
+    ))
+
+
 @data_app.command("cross-check-archive")
 def data_cross_check_archive() -> None:
     """用历史归档域的独立实现，核验本项目自算指标（可重复执行的正确性哨兵）

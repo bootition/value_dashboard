@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 39
-SQLITE_SCHEMA_VERSION = 18
+DUCKDB_SCHEMA_VERSION = 40
+SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
 
@@ -795,6 +795,67 @@ CREATE TABLE IF NOT EXISTS field_coverage_history (
 );
 CREATE INDEX IF NOT EXISTS idx_field_coverage_history_field
     ON field_coverage_history (domain, field_name, recorded_at);
+
+-- ─── 2026-11-14 第二批修复新增域（reports/121）─────────────────────────
+
+-- 行业变更历史（reports/119 §5 P2-2 / reports/120 J3）。
+-- 为什么需要：我们只有"现在"的行业，任何回测里用"当前行业"都是未来信息。
+-- 两个来源都是现成的：CSMAR 原始文件每个报告期都带 Indcd/Indnme（2012 证监会
+-- 标准，1990~2025Q1），证监会接口的 `as_of_date` 也已经在适配器里排好序，
+-- 只是写库时被压平成当前值。此表把"从哪天起属于哪个行业"留下来。
+-- 口径纪律：只收 2012 证监会标准（Indcd）；`Indcd1`（上市公司协会口径）
+-- 与 S8「只取证监会口径」冲突，不入库。
+CREATE TABLE IF NOT EXISTS industry_history (
+    stock_code     VARCHAR NOT NULL,
+    effective_date DATE    NOT NULL,
+    level1         VARCHAR,
+    level2         VARCHAR,
+    source         VARCHAR NOT NULL,   -- csmar_indcd | csrc_cninfo
+    fetched_at     TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, effective_date, source)
+);
+CREATE INDEX IF NOT EXISTS idx_industry_history_stock
+    ON industry_history (stock_code, effective_date);
+
+-- 港股日行情（reports/120 J12：A+H 总市值/PE/PB 现在把 H 股按 A 价计价）。
+-- 只覆盖 A+H 映射表里的 H 股代码（约 202 只），日频、体量很小。
+CREATE TABLE IF NOT EXISTS hk_price_daily (
+    stock_code VARCHAR NOT NULL,   -- 港股代码（5 位，如 00941）
+    trade_date DATE    NOT NULL,
+    close      DOUBLE,
+    source     VARCHAR NOT NULL,
+    fetched_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, trade_date)
+);
+CREATE INDEX IF NOT EXISTS idx_hk_price_daily_date
+    ON hk_price_daily (trade_date);
+
+-- 汇率日表（当前只需要 HKDCNY；设计成通用 pair 以便以后加 USDCNY）。
+CREATE TABLE IF NOT EXISTS fx_rate_daily (
+    pair       VARCHAR NOT NULL,   -- HKDCNY
+    trade_date DATE    NOT NULL,
+    rate       DOUBLE  NOT NULL,
+    source     VARCHAR NOT NULL,
+    fetched_at TIMESTAMP NOT NULL,
+    PRIMARY KEY (pair, trade_date)
+);
+
+-- 报告元数据（reports/120 J3 之二）：CSMAR 原始文件的 IfCorrect/DeclareDate/Typrep
+-- 导入时被整体丢弃，导致 PRD 的 as_reported vs latest_restated 语义无法落地。
+-- 只存"这一行是合并还是母公司报表、是否更正过、更正披露日"——
+-- 数值仍在三表里，本表只做标记。
+CREATE TABLE IF NOT EXISTS report_metadata (
+    stock_code   VARCHAR NOT NULL,
+    report_date  DATE    NOT NULL,
+    report_type  VARCHAR,            -- consolidated | parent
+    is_corrected BOOLEAN,
+    declare_date DATE,
+    source       VARCHAR NOT NULL,   -- csmar
+    fetched_at   TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, report_date, source)
+);
+CREATE INDEX IF NOT EXISTS idx_report_metadata_stock
+    ON report_metadata (stock_code, report_date);
 -- 资产负债表补充域（2026-09-19 v27，"榨干数据包" R7）。
 -- 为什么单独建表：这三项是主链 balance_sheet 未映射、但价值投资常用且**无法自算**的科目。
 --   other_payables          其他应付款 —— 计算「大股东占款」（治理红旗）必需；
@@ -854,6 +915,7 @@ CREATE INDEX IF NOT EXISTS idx_company_employee_history_stock
 -- **已知不可得**：6 个监管比率（资本充足率/核心一级/一级/不良贷款率/
 -- 拨备覆盖率/风险覆盖率）**CSMAR C17 不含**，东财 F10 的可及端点也未提供。
 -- 主链 balance_sheet 的这 6 列保持 NULL 并如实披露，不用估算填充。
+-- 2026-11-15：本表**不是静态冷库表**——2025Q2+ 由 FINANCIAL_SECTOR 补采（eastmoney_f10）持续写入，必须留在主库。
 CREATE TABLE IF NOT EXISTS financial_sector_items (
     stock_code                     VARCHAR NOT NULL,
     report_date                    DATE    NOT NULL,
@@ -909,28 +971,8 @@ CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock
 -- **不进筛选界面**：与 indicator_ext 的每股族语义重叠，且数据截止 2025Q1；
 -- 放进字段表会让用户在同一概念上看到两套口径相近却不同的数（伪选择）。
 -- 域纪律：独立历史域，只作核验与专项研究，不参与横截面筛选。
-CREATE TABLE IF NOT EXISTS csmar_per_share_history (
-    stock_code                     VARCHAR NOT NULL,
-    report_date                    DATE    NOT NULL,
-    bps                            DOUBLE,   -- F091001A 每股净资产1
-    bps_parent                     DOUBLE,   -- F091701A 归属母公司每股净资产1
-    revenue_per_share              DOUBLE,   -- F090501B 每股营业总收入1
-    ocf_per_share                  DOUBLE,   -- F091801B 每股经营活动现金流量净额1
-    operating_profit_per_share     DOUBLE,   -- F090901B 每股营业利润1
-    ebit_per_share                 DOUBLE,   -- F090701B 息税前每股收益1
-    tangible_asset_per_share       DOUBLE,   -- F091101A 每股有形资产1
-    liability_per_share            DOUBLE,   -- F091201A 每股负债1
-    capital_reserve_per_share      DOUBLE,   -- F091301A 每股资本公积1
-    surplus_reserve_per_share      DOUBLE,   -- F091401A 每股盈余公积1
-    undistributed_profit_per_share DOUBLE,   -- F091501A 每股未分配利润1
-    retained_earnings_per_share    DOUBLE,   -- F091601A 每股留存收益1
-    source                         VARCHAR NOT NULL,
-    fetch_time                     TIMESTAMP NOT NULL,
-    batch_id                       VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_per_share_history_stock
-    ON csmar_per_share_history (stock_code, report_date);
+-- 冷库表 csmar_per_share_history：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
 
 
 -- CSMAR 披露指标域（2026-09-19 v33）。来源 FI_T2.dta（243,202 行）。
@@ -945,24 +987,9 @@ CREATE INDEX IF NOT EXISTS idx_csmar_per_share_history_stock
 --   bps_parent_disclosed     归属母公司每股净资产
 --   eps_basic / eps_diluted  基本/稀释每股收益
 -- 域纪律：独立域；duplicates 自算指标时只作交叉核验，不替换主链。
-CREATE TABLE IF NOT EXISTS csmar_disclosure_metrics (
-    stock_code                  VARCHAR NOT NULL,
-    report_date                 DATE    NOT NULL,
-    non_recurring_gain_loss     DOUBLE,
-    roe_weighted                DOUBLE,
-    roe_weighted_deducted       DOUBLE,
-    eps_deducted_basic          DOUBLE,
-    ocf_per_share_disclosed     DOUBLE,
-    bps_parent_disclosed        DOUBLE,
-    eps_basic                   DOUBLE,
-    eps_diluted                 DOUBLE,
-    source                      VARCHAR NOT NULL,
-    fetch_time                  TIMESTAMP NOT NULL,
-    batch_id                    VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_disclosure_metrics_stock
-    ON csmar_disclosure_metrics (stock_code, report_date);
+-- 冷库表 csmar_disclosure_metrics：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- CSMAR 风险与治理因子域（2026-09-19 v33）。来源 BDT_FinIndex.dta（67,193 行）。
 -- 这批的核心价值是**需要多年序列才能自算**或**需要我们没有的原始科目**的因子：
@@ -1021,550 +1048,53 @@ CREATE INDEX IF NOT EXISTS idx_csmar_risk_factors_stock
 --   把它们放进全市场字段选择器会制造「同概念多套口径」的伪选择。
 --   定位是：完整归档 + 交叉核验 + 专项研究。
 -- FI_T1（302,959 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t1 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F010101A" DOUBLE,
-    "F010201A" DOUBLE,
-    "F010301A" DOUBLE,
-    "F010401A" DOUBLE,
-    "F010501A" DOUBLE,
-    "F010601A" DOUBLE,
-    "F010701B" DOUBLE,
-    "F010702B" DOUBLE,
-    "F010801B" DOUBLE,
-    "F010901B" DOUBLE,
-    "F011001B" DOUBLE,
-    "F011201A" DOUBLE,
-    "F011301A" DOUBLE,
-    "F011401A" DOUBLE,
-    "F011501A" DOUBLE,
-    "F011601A" DOUBLE,
-    "F011701A" DOUBLE,
-    "F011801A" DOUBLE,
-    "F011901A" DOUBLE,
-    "F012001A" DOUBLE,
-    "F012101A" DOUBLE,
-    "F012201B" DOUBLE,
-    "F012301B" DOUBLE,
-    "F012401B" DOUBLE,
-    "F012501B" DOUBLE,
-    "F012601B" DOUBLE,
-    "F012701B" DOUBLE,
-    "F020502A" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t1_stock ON csmar_fi_t1 (stock_code, report_date);
+-- 冷库表 csmar_fi_t1：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T8（302,716 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t8 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F080101A" DOUBLE,
-    "F080102A" DOUBLE,
-    "F080201A" DOUBLE,
-    "F080301A" DOUBLE,
-    "F080302A" DOUBLE,
-    "F080401A" DOUBLE,
-    "F080501A" DOUBLE,
-    "F080502A" DOUBLE,
-    "F080601A" DOUBLE,
-    "F080602A" DOUBLE,
-    "F080701B" DOUBLE,
-    "F080702B" DOUBLE,
-    "F080801B" DOUBLE,
-    "F080802B" DOUBLE,
-    "F080901B" DOUBLE,
-    "F080902B" DOUBLE,
-    "F081001B" DOUBLE,
-    "F081002B" DOUBLE,
-    "F081101B" DOUBLE,
-    "F081102B" DOUBLE,
-    "F081201B" DOUBLE,
-    "F081202B" DOUBLE,
-    "F081301B" DOUBLE,
-    "F081401B" DOUBLE,
-    "F081501B" DOUBLE,
-    "F081601B" DOUBLE,
-    "F081602C" DOUBLE,
-    "F081701B" DOUBLE,
-    "F081801B" DOUBLE,
-    "F081901B" DOUBLE,
-    "F082001B" DOUBLE,
-    "F082101B" DOUBLE,
-    "F082201B" DOUBLE,
-    "F082202B" DOUBLE,
-    "F082301B" DOUBLE,
-    "F082302B" DOUBLE,
-    "F082401B" DOUBLE,
-    "F082402B" DOUBLE,
-    "F082501B" DOUBLE,
-    "F082502B" DOUBLE,
-    "F082601B" DOUBLE,
-    "F082701A" DOUBLE,
-    "F082702A" DOUBLE,
-    "F082801A" DOUBLE,
-    "F082802A" DOUBLE,
-    "F082703A" DOUBLE,
-    "F082803A" DOUBLE,
-    "F080703B" DOUBLE,
-    "F081003B" DOUBLE,
-    "F081603B" DOUBLE,
-    "F080603A" DOUBLE,
-    "F081103B" DOUBLE,
-    "F080503A" DOUBLE,
-    "F080803B" DOUBLE,
-    "F081203B" DOUBLE,
-    "F082602B" DOUBLE,
-    "F082603B" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t8_stock ON csmar_fi_t8 (stock_code, report_date);
+-- 冷库表 csmar_fi_t8：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T9（303,065 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t9 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F090101B" DOUBLE,
-    "F090101C" DOUBLE,
-    "F090102B" DOUBLE,
-    "F090102C" DOUBLE,
-    "F090103B" DOUBLE,
-    "F090103C" DOUBLE,
-    "F090104B" DOUBLE,
-    "F090104C" DOUBLE,
-    "F090201B" DOUBLE,
-    "F090201C" DOUBLE,
-    "F090202B" DOUBLE,
-    "F090202C" DOUBLE,
-    "F090301B" DOUBLE,
-    "F090301C" DOUBLE,
-    "F090401B" DOUBLE,
-    "F090401C" DOUBLE,
-    "F090501B" DOUBLE,
-    "F090501C" DOUBLE,
-    "F090601B" DOUBLE,
-    "F090601C" DOUBLE,
-    "F090701B" DOUBLE,
-    "F090701C" DOUBLE,
-    "F090801B" DOUBLE,
-    "F090801C" DOUBLE,
-    "F090901B" DOUBLE,
-    "F090901C" DOUBLE,
-    "F091001A" DOUBLE,
-    "F091101A" DOUBLE,
-    "F091201A" DOUBLE,
-    "F091301A" DOUBLE,
-    "F091401A" DOUBLE,
-    "F091501A" DOUBLE,
-    "F091601A" DOUBLE,
-    "F091701A" DOUBLE,
-    "F091801B" DOUBLE,
-    "F091801C" DOUBLE,
-    "F091901B" DOUBLE,
-    "F091901C" DOUBLE,
-    "F092001B" DOUBLE,
-    "F092001C" DOUBLE,
-    "F092101B" DOUBLE,
-    "F092101C" DOUBLE,
-    "F092201B" DOUBLE,
-    "F092201C" DOUBLE,
-    "F092301B" DOUBLE,
-    "F092301C" DOUBLE,
-    "F092401B" DOUBLE,
-    "F092501B" DOUBLE,
-    "F092601B" DOUBLE,
-    "F092601C" DOUBLE,
-    "F092602B" DOUBLE,
-    "F092602C" DOUBLE,
-    "F090302B" DOUBLE,
-    "F090302C" DOUBLE,
-    "F090402B" DOUBLE,
-    "F090402C" DOUBLE,
-    "F090502B" DOUBLE,
-    "F090502C" DOUBLE,
-    "F090602B" DOUBLE,
-    "F090602C" DOUBLE,
-    "F090702B" DOUBLE,
-    "F090702C" DOUBLE,
-    "F090802B" DOUBLE,
-    "F090802C" DOUBLE,
-    "F090902B" DOUBLE,
-    "F090902C" DOUBLE,
-    "F091002A" DOUBLE,
-    "F091102A" DOUBLE,
-    "F091202A" DOUBLE,
-    "F091302A" DOUBLE,
-    "F091402A" DOUBLE,
-    "F091502A" DOUBLE,
-    "F091602A" DOUBLE,
-    "F091702A" DOUBLE,
-    "F091802B" DOUBLE,
-    "F091802C" DOUBLE,
-    "F091902B" DOUBLE,
-    "F091902C" DOUBLE,
-    "F092002B" DOUBLE,
-    "F092002C" DOUBLE,
-    "F092102B" DOUBLE,
-    "F092102C" DOUBLE,
-    "F092202B" DOUBLE,
-    "F092202C" DOUBLE,
-    "F092302B" DOUBLE,
-    "F092302C" DOUBLE,
-    "F092103B" DOUBLE,
-    "F092103C" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t9_stock ON csmar_fi_t9 (stock_code, report_date);
+-- 冷库表 csmar_fi_t9：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T3（302,959 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t3 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F030101A" DOUBLE,
-    "F030201A" DOUBLE,
-    "F030301A" DOUBLE,
-    "F030401A" DOUBLE,
-    "F030501A" DOUBLE,
-    "F030601A" DOUBLE,
-    "F030701A" DOUBLE,
-    "F030801A" DOUBLE,
-    "F030901A" DOUBLE,
-    "F031001A" DOUBLE,
-    "F031101A" DOUBLE,
-    "F031201A" DOUBLE,
-    "F031301A" DOUBLE,
-    "F031401A" DOUBLE,
-    "F031501A" DOUBLE,
-    "F031601A" DOUBLE,
-    "F031701A" DOUBLE,
-    "F031801A" DOUBLE,
-    "F031901A" DOUBLE,
-    "F032001A" DOUBLE,
-    "F032101B" DOUBLE,
-    "F032201B" DOUBLE,
-    "F032301B" DOUBLE,
-    "F032401B" DOUBLE,
-    "F032501B" DOUBLE,
-    "F032601B" DOUBLE,
-    "F032701B" DOUBLE,
-    "F032801B" DOUBLE,
-    "F032901B" DOUBLE,
-    "F033001B" DOUBLE,
-    "F033101B" DOUBLE,
-    "F033201B" DOUBLE,
-    "F033301B" DOUBLE,
-    "F033401B" DOUBLE,
-    "F033501A" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t3_stock ON csmar_fi_t3 (stock_code, report_date);
+-- 冷库表 csmar_fi_t3：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T6（301,294 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t6 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F060101B" DOUBLE,
-    "F060101C" DOUBLE,
-    "F060201B" DOUBLE,
-    "F060201C" DOUBLE,
-    "F060301B" DOUBLE,
-    "F060301C" DOUBLE,
-    "F060401B" DOUBLE,
-    "F060401C" DOUBLE,
-    "F060901B" DOUBLE,
-    "F060901C" DOUBLE,
-    "F061001B" DOUBLE,
-    "F061001C" DOUBLE,
-    "F061201B" DOUBLE,
-    "F061201C" DOUBLE,
-    "F061301B" DOUBLE,
-    "F061302B" DOUBLE,
-    "F061301C" DOUBLE,
-    "F061302C" DOUBLE,
-    "F061401B" DOUBLE,
-    "F061402B" DOUBLE,
-    "F061401C" DOUBLE,
-    "F061402C" DOUBLE,
-    "F061501B" DOUBLE,
-    "F061601B" DOUBLE,
-    "F061701B" DOUBLE,
-    "F061801B" DOUBLE,
-    "F061901B" DOUBLE,
-    "F062001B" DOUBLE,
-    "F062101B" DOUBLE,
-    "F062201B" DOUBLE,
-    "F062301B" DOUBLE,
-    "F062401B" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t6_stock ON csmar_fi_t6 (stock_code, report_date);
+-- 冷库表 csmar_fi_t6：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T5（305,273 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t5 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F050101B" DOUBLE,
-    "F050102B" DOUBLE,
-    "F050103B" DOUBLE,
-    "F050104C" DOUBLE,
-    "F050201B" DOUBLE,
-    "F050202B" DOUBLE,
-    "F050203B" DOUBLE,
-    "F050204C" DOUBLE,
-    "F050301B" DOUBLE,
-    "F050302B" DOUBLE,
-    "F050303B" DOUBLE,
-    "F050304C" DOUBLE,
-    "F050401B" DOUBLE,
-    "F050402B" DOUBLE,
-    "F050403B" DOUBLE,
-    "F050404C" DOUBLE,
-    "F050501B" DOUBLE,
-    "F050502B" DOUBLE,
-    "F050503B" DOUBLE,
-    "F050504C" DOUBLE,
-    "F050601B" DOUBLE,
-    "F050601C" DOUBLE,
-    "F050701B" DOUBLE,
-    "F050801B" DOUBLE,
-    "F050801C" DOUBLE,
-    "F050901B" DOUBLE,
-    "F051001B" DOUBLE,
-    "F051101B" DOUBLE,
-    "F051201B" DOUBLE,
-    "F053201B" DOUBLE,
-    "F053301B" DOUBLE,
-    "F053301C" DOUBLE,
-    "F051301B" DOUBLE,
-    "F051301C" DOUBLE,
-    "F051401B" DOUBLE,
-    "F051401C" DOUBLE,
-    "F051501B" DOUBLE,
-    "F051501C" DOUBLE,
-    "F051601B" DOUBLE,
-    "F051601C" DOUBLE,
-    "F051701B" DOUBLE,
-    "F051701C" DOUBLE,
-    "F051801B" DOUBLE,
-    "F051801C" DOUBLE,
-    "F051901B" DOUBLE,
-    "F051901C" DOUBLE,
-    "F053401B" DOUBLE,
-    "F052001B" DOUBLE,
-    "F052001C" DOUBLE,
-    "F052101B" DOUBLE,
-    "F052101C" DOUBLE,
-    "F052201B" DOUBLE,
-    "F052201C" DOUBLE,
-    "F052301B" DOUBLE,
-    "F052301C" DOUBLE,
-    "F052401B" DOUBLE,
-    "F052401C" DOUBLE,
-    "F052901B" DOUBLE,
-    "F052901C" DOUBLE,
-    "F053001B" DOUBLE,
-    "F053002B" DOUBLE,
-    "F053003B" DOUBLE,
-    "F053004C" DOUBLE,
-    "F053101B" DOUBLE,
-    "F053102B" DOUBLE,
-    "F053103B" DOUBLE,
-    "F053104C" DOUBLE,
-    "F053202B" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t5_stock ON csmar_fi_t5 (stock_code, report_date);
+-- 冷库表 csmar_fi_t5：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T10（264,772 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t10 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F100101B" DOUBLE,
-    "F100102B" DOUBLE,
-    "F100103C" DOUBLE,
-    "F100201B" DOUBLE,
-    "F100202B" DOUBLE,
-    "F100203C" DOUBLE,
-    "F100301B" DOUBLE,
-    "F100302B" DOUBLE,
-    "F100303C" DOUBLE,
-    "F100401A" DOUBLE,
-    "F100501A" DOUBLE,
-    "F100601B" DOUBLE,
-    "F100602B" DOUBLE,
-    "F100603C" DOUBLE,
-    "F100701A" DOUBLE,
-    "F100801A" DOUBLE,
-    "F100802A" DOUBLE,
-    "F100901A" DOUBLE,
-    "F100902A" DOUBLE,
-    "F100903A" DOUBLE,
-    "F100904A" DOUBLE,
-    "F101001A" DOUBLE,
-    "F101002A" DOUBLE,
-    "F101101B" DOUBLE,
-    "F101201B" DOUBLE,
-    "F101202B" DOUBLE,
-    "F101301B" DOUBLE,
-    "F101302C" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t10_stock ON csmar_fi_t10 (stock_code, report_date);
+-- 冷库表 csmar_fi_t10：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T4（304,505 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t4 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F040101B" DOUBLE,
-    "F040201B" DOUBLE,
-    "F040202B" DOUBLE,
-    "F040203B" DOUBLE,
-    "F040204B" DOUBLE,
-    "F040205C" DOUBLE,
-    "F040301B" DOUBLE,
-    "F040302B" DOUBLE,
-    "F040303B" DOUBLE,
-    "F040304C" DOUBLE,
-    "F040401B" DOUBLE,
-    "F040501B" DOUBLE,
-    "F040502B" DOUBLE,
-    "F040503B" DOUBLE,
-    "F040504B" DOUBLE,
-    "F040505C" DOUBLE,
-    "F040601B" DOUBLE,
-    "F040602B" DOUBLE,
-    "F040603B" DOUBLE,
-    "F040604C" DOUBLE,
-    "F040701B" DOUBLE,
-    "F040702B" DOUBLE,
-    "F040703B" DOUBLE,
-    "F040704C" DOUBLE,
-    "F040801B" DOUBLE,
-    "F040802B" DOUBLE,
-    "F040803B" DOUBLE,
-    "F040804B" DOUBLE,
-    "F040805C" DOUBLE,
-    "F040901B" DOUBLE,
-    "F040902B" DOUBLE,
-    "F040903B" DOUBLE,
-    "F040904B" DOUBLE,
-    "F040905C" DOUBLE,
-    "F041001B" DOUBLE,
-    "F041002B" DOUBLE,
-    "F041003B" DOUBLE,
-    "F041004B" DOUBLE,
-    "F041005C" DOUBLE,
-    "F041101B" DOUBLE,
-    "F041201B" DOUBLE,
-    "F041202B" DOUBLE,
-    "F041203B" DOUBLE,
-    "F041204B" DOUBLE,
-    "F041205C" DOUBLE,
-    "F041301B" DOUBLE,
-    "F041401B" DOUBLE,
-    "F041402B" DOUBLE,
-    "F041403B" DOUBLE,
-    "F041404B" DOUBLE,
-    "F041405C" DOUBLE,
-    "F041501B" DOUBLE,
-    "F041502B" DOUBLE,
-    "F041503B" DOUBLE,
-    "F041504B" DOUBLE,
-    "F041505C" DOUBLE,
-    "F041601B" DOUBLE,
-    "F041701B" DOUBLE,
-    "F041702B" DOUBLE,
-    "F041703B" DOUBLE,
-    "F041704B" DOUBLE,
-    "F041705C" DOUBLE,
-    "F041801B" DOUBLE,
-    "F041802B" DOUBLE,
-    "F041803B" DOUBLE,
-    "F041804B" DOUBLE,
-    "F041805C" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t4_stock ON csmar_fi_t4 (stock_code, report_date);
+-- 冷库表 csmar_fi_t4：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FI_T11（260,092 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_fi_t11 (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "F110101B" DOUBLE,
-    "F110201B" DOUBLE,
-    "F110301B" DOUBLE,
-    "F110401B" DOUBLE,
-    "F110501B" DOUBLE,
-    "F110601B" DOUBLE,
-    "F110701B" DOUBLE,
-    "F110801B" DOUBLE,
-    "F110302B" DOUBLE,
-    "F110303B" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_fi_t11_stock ON csmar_fi_t11 (stock_code, report_date);
+-- 冷库表 csmar_fi_t11：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FAR_Finidx（76,262 行）；列名为 CSMAR 原始代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_far_finidx (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "A100000" DOUBLE,
-    "A110601" DOUBLE,
-    "A111201" DOUBLE,
-    "A300000" DOUBLE,
-    "B110101" DOUBLE,
-    "B110303" DOUBLE,
-    "B230403" DOUBLE,
-    "D100000" DOUBLE,
-    "T30100" DOUBLE,
-    "T40100" DOUBLE,
-    "T40401" DOUBLE,
-    "T40402" DOUBLE,
-    "T40403" DOUBLE,
-    "T40700" DOUBLE,
-    "T40801" DOUBLE,
-    "T40802" DOUBLE,
-    "T40803" DOUBLE,
-    "T60200" DOUBLE,
-    "T60300" DOUBLE,
-    "Capexp" DOUBLE,
-    "Etaxrt" DOUBLE,
-    "Speitem" DOUBLE,
-    "Nstaff" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock_code, report_date);
+-- 冷库表 csmar_far_finidx：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
 
 
 -- ── CSMAR 三表剩余科目 + 金融专用科目全量（2026-09-19 v35）─────────────
@@ -1575,257 +1105,23 @@ CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock
 -- 列名保留 CSMAR 代码，中文名见数据包内的字段字典。
 -- 域纪律：归档与专项研究用，不进筛选界面（历史期 + 口径重叠）。
 -- FS_Combas 剩余科目（51 列）；列名为 CSMAR 代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_balance_items (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "A001109000" DOUBLE,
-    "A001127000" DOUBLE,
-    "A001119000" DOUBLE,
-    "A001120000" DOUBLE,
-    "A001123101" DOUBLE,
-    "A001129000" DOUBLE,
-    "A001124000" DOUBLE,
-    "A001125000" DOUBLE,
-    "A001226000" DOUBLE,
-    "A001202000" DOUBLE,
-    "A001227000" DOUBLE,
-    "A001203000" DOUBLE,
-    "A001204000" DOUBLE,
-    "A001228000" DOUBLE,
-    "A001229000" DOUBLE,
-    "A001206000" DOUBLE,
-    "A001207000" DOUBLE,
-    "A001211000" DOUBLE,
-    "A001214000" DOUBLE,
-    "A001215000" DOUBLE,
-    "A001216000" DOUBLE,
-    "A001217000" DOUBLE,
-    "A001218201" DOUBLE,
-    "A001219000" DOUBLE,
-    "A001219101" DOUBLE,
-    "A001221000" DOUBLE,
-    "A001223000" DOUBLE,
-    "A002105000" DOUBLE,
-    "A002114000" DOUBLE,
-    "A002115000" DOUBLE,
-    "A002120000" DOUBLE,
-    "A002129000" DOUBLE,
-    "A002125000" DOUBLE,
-    "A002126000" DOUBLE,
-    "A002127000" DOUBLE,
-    "A002204000" DOUBLE,
-    "A002212000" DOUBLE,
-    "A002205000" DOUBLE,
-    "A002206000" DOUBLE,
-    "A002207000" DOUBLE,
-    "A002208000" DOUBLE,
-    "A002209000" DOUBLE,
-    "A002210000" DOUBLE,
-    "A003112000" DOUBLE,
-    "A003112101" DOUBLE,
-    "A003112201" DOUBLE,
-    "A003112301" DOUBLE,
-    "A003102101" DOUBLE,
-    "A003106000" DOUBLE,
-    "A003107000" DOUBLE,
-    "A003111000" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_balance_items_stock ON csmar_balance_items (stock_code, report_date);
+-- 冷库表 csmar_balance_items：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FS_Comins 剩余科目（25 列）；列名为 CSMAR 代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_income_items (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "Bbd1102000" DOUBLE,
-    "Bbd1102101" DOUBLE,
-    "Bbd1102203" DOUBLE,
-    "B001305000" DOUBLE,
-    "B001302101" DOUBLE,
-    "B001302201" DOUBLE,
-    "B001303000" DOUBLE,
-    "B001306000" DOUBLE,
-    "B001308000" DOUBLE,
-    "B001304000" DOUBLE,
-    "B001400101" DOUBLE,
-    "B001500101" DOUBLE,
-    "B001500201" DOUBLE,
-    "B002200000" DOUBLE,
-    "B002300000" DOUBLE,
-    "B002000401" DOUBLE,
-    "B002000501" DOUBLE,
-    "B002000301" DOUBLE,
-    "B005000000" DOUBLE,
-    "B005000101" DOUBLE,
-    "B005000102" DOUBLE,
-    "B006000000" DOUBLE,
-    "B006000101" DOUBLE,
-    "B006000103" DOUBLE,
-    "B006000102" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_income_items_stock ON csmar_income_items (stock_code, report_date);
+-- 冷库表 csmar_income_items：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- FS_Comscfd 剩余科目（24 列）；列名为 CSMAR 代码，中文名见字段字典
-CREATE TABLE IF NOT EXISTS csmar_cashflow_items (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "C002001000" DOUBLE,
-    "C002002000" DOUBLE,
-    "C002003000" DOUBLE,
-    "C002004000" DOUBLE,
-    "C002005000" DOUBLE,
-    "C002100000" DOUBLE,
-    "C002006000" DOUBLE,
-    "C002007000" DOUBLE,
-    "C002009000" DOUBLE,
-    "C002010000" DOUBLE,
-    "C002200000" DOUBLE,
-    "C003008000" DOUBLE,
-    "C003001000" DOUBLE,
-    "C003001101" DOUBLE,
-    "C003003000" DOUBLE,
-    "C003002000" DOUBLE,
-    "C003004000" DOUBLE,
-    "C003100000" DOUBLE,
-    "C003005000" DOUBLE,
-    "C003006000" DOUBLE,
-    "C003006101" DOUBLE,
-    "C003007000" DOUBLE,
-    "C003200000" DOUBLE,
-    "C007000000" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_cashflow_items_stock ON csmar_cashflow_items (stock_code, report_date);
+-- 冷库表 csmar_cashflow_items：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
+
 
 -- 金融行业专用科目全量（109 列，银行/保险/证券/其他金融前缀）
-CREATE TABLE IF NOT EXISTS csmar_financial_items (
-    stock_code VARCHAR NOT NULL,
-    report_date DATE NOT NULL,
-    "A0D2130000" DOUBLE,
-    "A0F1132000" DOUBLE,
-    "A0F1133000" DOUBLE,
-    "A0F1224000" DOUBLE,
-    "A0F1232000" DOUBLE,
-    "A0F1233000" DOUBLE,
-    "A0F2210000" DOUBLE,
-    "A0F3108000" DOUBLE,
-    "A0F3109000" DOUBLE,
-    "A0b1103000" DOUBLE,
-    "A0b1104000" DOUBLE,
-    "A0b1105000" DOUBLE,
-    "A0b1201000" DOUBLE,
-    "A0b2102000" DOUBLE,
-    "A0b2103000" DOUBLE,
-    "A0b2103101" DOUBLE,
-    "A0b2103201" DOUBLE,
-    "A0d1101101" DOUBLE,
-    "A0d1102000" DOUBLE,
-    "A0d1102101" DOUBLE,
-    "A0d1126000" DOUBLE,
-    "A0d1218101" DOUBLE,
-    "A0d2101101" DOUBLE,
-    "A0d2122000" DOUBLE,
-    "A0d2123000" DOUBLE,
-    "A0d2202000" DOUBLE,
-    "A0f1106000" DOUBLE,
-    "A0f1108000" DOUBLE,
-    "A0f1122000" DOUBLE,
-    "A0f1300000" DOUBLE,
-    "A0f2104000" DOUBLE,
-    "A0f2106000" DOUBLE,
-    "A0f2110000" DOUBLE,
-    "A0f2300000" DOUBLE,
-    "A0f3104000" DOUBLE,
-    "A0i1113000" DOUBLE,
-    "A0i1114000" DOUBLE,
-    "A0i1115000" DOUBLE,
-    "A0i1116000" DOUBLE,
-    "A0i1116101" DOUBLE,
-    "A0i1116201" DOUBLE,
-    "A0i1116301" DOUBLE,
-    "A0i1116401" DOUBLE,
-    "A0i1209000" DOUBLE,
-    "A0i1210000" DOUBLE,
-    "A0i1224000" DOUBLE,
-    "A0i1225000" DOUBLE,
-    "A0i2111000" DOUBLE,
-    "A0i2116000" DOUBLE,
-    "A0i2117000" DOUBLE,
-    "A0i2118000" DOUBLE,
-    "A0i2119000" DOUBLE,
-    "A0i2119101" DOUBLE,
-    "A0i2119201" DOUBLE,
-    "A0i2119301" DOUBLE,
-    "A0i2119401" DOUBLE,
-    "A0i2121000" DOUBLE,
-    "A0i2124000" DOUBLE,
-    "B0I1214000" DOUBLE,
-    "B0d1104000" DOUBLE,
-    "B0d1104101" DOUBLE,
-    "B0d1104201" DOUBLE,
-    "B0d1104301" DOUBLE,
-    "B0d1104401" DOUBLE,
-    "B0d1104501" DOUBLE,
-    "B0f1105000" DOUBLE,
-    "B0f1208000" DOUBLE,
-    "B0f1213000" DOUBLE,
-    "B0i1103000" DOUBLE,
-    "B0i1103101" DOUBLE,
-    "B0i1103111" DOUBLE,
-    "B0i1103203" DOUBLE,
-    "B0i1103303" DOUBLE,
-    "B0i1202000" DOUBLE,
-    "B0i1203000" DOUBLE,
-    "B0i1203101" DOUBLE,
-    "B0i1203203" DOUBLE,
-    "B0i1204000" DOUBLE,
-    "B0i1204101" DOUBLE,
-    "B0i1204203" DOUBLE,
-    "B0i1205000" DOUBLE,
-    "B0i1206000" DOUBLE,
-    "B0i1208103" DOUBLE,
-    "C0F1023000" DOUBLE,
-    "C0F1024000" DOUBLE,
-    "C0F1025000" DOUBLE,
-    "C0F1026000" DOUBLE,
-    "C0F1027000" DOUBLE,
-    "C0F1028000" DOUBLE,
-    "C0F1029000" DOUBLE,
-    "C0F1030000" DOUBLE,
-    "C0F1031000" DOUBLE,
-    "C0F1032000" DOUBLE,
-    "C0b1002000" DOUBLE,
-    "C0b1003000" DOUBLE,
-    "C0b1004000" DOUBLE,
-    "C0b1015000" DOUBLE,
-    "C0b1016000" DOUBLE,
-    "C0d1008000" DOUBLE,
-    "C0d1010000" DOUBLE,
-    "C0d1011000" DOUBLE,
-    "C0f1009000" DOUBLE,
-    "C0f1018000" DOUBLE,
-    "C0i1005000" DOUBLE,
-    "C0i1006000" DOUBLE,
-    "C0i1007000" DOUBLE,
-    "C0i1017000" DOUBLE,
-    "C0i1019000" DOUBLE,
-    "C0i2008000" DOUBLE,
-    source VARCHAR NOT NULL,
-    fetch_time TIMESTAMP NOT NULL,
-    batch_id VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_financial_items_stock ON csmar_financial_items (stock_code, report_date);
+-- 冷库表 csmar_financial_items：已迁至 Parquet 冷库，见 config/cold_archive.yaml +
+-- scripts/cold_archive_split.py / scripts/cold_archive_switch.py；主库仅留同名视图。
 
 
 """
@@ -2649,10 +1945,15 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # v29: 金融行业专用科目域（2026-09-19）。
         # 78 只金融股的行业专用科目；**不进筛选界面**（只对该行业成立，
         # 放进全市场字段表会制造「98% 股票无数据」的伪条件）。
+        # 2026-11-15：本表**不是静态冷库表** —— 2025Q2+ 由 supplement.FINANCIAL_SECTOR
+        # 补采（source='eastmoney_f10'）持续写入，物理表与索引必须留在主库。
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock "
             "ON financial_sector_items (stock_code, report_date)"
         )
+        # 冷库表（csmar_per_share_history / csmar_disclosure_metrics）的索引/列迁移
+        # 语句已删除：它们已转为 read_parquet 视图，CREATE INDEX / ALTER TABLE
+        # 打在视图上会抛错（清单见 config/cold_archive.yaml）。
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2682,10 +1983,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v31: CSMAR 每股指标历史域（2026-09-19）—— 自算每股族的交叉核验源。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_csmar_per_share_history_stock "
-            "ON csmar_per_share_history (stock_code, report_date)"
-        )
+
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2711,10 +2009,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v33: CSMAR 披露指标域 + 风险治理因子域（2026-09-19，"榨干" R12）。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_csmar_disclosure_metrics_stock "
-            "ON csmar_disclosure_metrics (stock_code, report_date)"
-        )
+
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_csmar_risk_factors_stock "
             "ON csmar_risk_factors (stock_code, report_date)"
@@ -2727,16 +2022,8 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v34: CSMAR 剩余指标表全量导入（2026-09-19，{n} 张表 / {c} 列）。
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t1_stock ON csmar_fi_t1 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t8_stock ON csmar_fi_t8 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t9_stock ON csmar_fi_t9 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t3_stock ON csmar_fi_t3 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t6_stock ON csmar_fi_t6 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t5_stock ON csmar_fi_t5 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t10_stock ON csmar_fi_t10 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t4_stock ON csmar_fi_t4 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_fi_t11_stock ON csmar_fi_t11 (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_far_finidx_stock ON csmar_far_finidx (stock_code, report_date)")
+
+
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2745,10 +2032,8 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v35: CSMAR 三表剩余科目 + 金融专用科目全量（2026-09-19）。
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_balance_items_stock ON csmar_balance_items (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_income_items_stock ON csmar_income_items (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_cashflow_items_stock ON csmar_cashflow_items (stock_code, report_date)")
-        connection.execute("CREATE INDEX IF NOT EXISTS idx_csmar_financial_items_stock ON csmar_financial_items (stock_code, report_date)")
+
+
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2759,9 +2044,8 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # v36: AIQ 年度宽表 + 会计恒等式锚点（2026-09-19，"榨干"收尾）。
         # 注：csmar_aiq_annual 已于 v37 清理（54 列全部与 FI_T* 重叠），
         # 表与 DDL 均已移除，此处不再建索引。
-        connection.execute(
-            'ALTER TABLE csmar_balance_items ADD COLUMN IF NOT EXISTS "A004000000" DOUBLE'
-        )
+        # 锚点列的 ALTER 已删除：csmar_balance_items 已转 read_parquet 视图，
+        # ALTER TABLE 打在视图上会抛错（迁移只用 INSERT schema_migrations 记账）。
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2831,6 +2115,14 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (39, 'indicator_null_reason + field_coverage_history (asset health)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v40（2026-11-14, reports/121）：行业变更历史 / 港股日行情 / 汇率 / 报告元数据。
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (40, 'industry_history + hk_price_daily + fx_rate_daily + report_metadata')
             ON CONFLICT (version) DO NOTHING
             """
         )
@@ -3273,6 +2565,29 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 (18, "retry_list.error_kind: legal_empty/source_unsupported settle into missing_list"),
             )
             logger.info("SQLite schema v18 已应用")
+
+        # v19: 公告台账索引（2026-11-14, reports/121）。
+        # 背景：`/api/research/announcements` 按 (stock_code, announcement_time)
+        # 取某股时间窗公告，但表上只有 announcement_id 主键，实测 EXPLAIN 是
+        # `SCAN announcement_registry`（22,179 行全扫）。两个索引分别服务
+        # 「单股时间线」与「全市场 summary」。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 19"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_announcement_registry_stock_time "
+                "ON announcement_registry (stock_code, announcement_time)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_announcement_registry_time "
+                "ON announcement_registry (announcement_time)"
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (19, "announcement_registry: (stock_code, announcement_time) + (announcement_time) indexes"),
+            )
+            logger.info("SQLite schema v19 已应用")
 
 
 def init_all_schema(
