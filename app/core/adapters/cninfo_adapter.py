@@ -17,10 +17,8 @@ Endpoints:
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import re
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -108,24 +106,9 @@ def _column_for_code(code: str) -> str:
     return "szse"
 
 
-# ─── 权益分派标题解析正则 ────────────────────────────────────────────
-# CNINFO 公告标题常见格式：
-#   "2023年年度权益分派实施公告"
-#   "每10股派发现金红利2.50元（含税），每10股转增5股"
-#   "每10股送红股3股"
-_RE_CASH = re.compile(
-    r"每\s*10\s*股.*?派\s*发?\s*(?:现\s*金\s*红\s*利|息)?\s*([\d.]+)\s*元",
-    re.DOTALL,
-)
-_RE_TRANSFER = re.compile(
-    r"每\s*10\s*股.*?转\s*增\s*([\d.]+)\s*股",
-    re.DOTALL,
-)
-_RE_SEND = re.compile(
-    r"每\s*10\s*股.*?送\s*红?\s*股\s*([\d.]+)\s*股",
-    re.DOTALL,
-)
-
+# 2026-11-15（reports/124）：原先这里有一组"从公告标题正则抠每 10 股派息"的
+# `_RE_CASH / _RE_TRANSFER / _RE_SEND`，唯一使用者 `_parse_dividend_from_announcement`
+# 已删除（它拿不到 ex_date，且结构化源已覆盖）。标题正则留着只会诱发"再抠一次"。
 
 # ─── 适配器 ──────────────────────────────────────────────────────────
 
@@ -599,88 +582,24 @@ class CNINFOAdapter(BaseAdapter):
     # ─── dividends 处理器 ─────────────────────────────────────────
 
     def _fetch_dividends(self, request: FetchRequest) -> FetchResult:
-        # CNINFO 权益分派公告不含结构化除权除息日：_normalize_announcement 不
-        # 产 ex_date，而 _parse_dividend_from_announcement 要求 ex_date，因此
-        # 该路径恒空。恒空若以 error=None 返回，会把“源能力缺失”伪装成
-        # “合法无分红”；这里显式返回 unsupported error。默认链已把 cninfo
-        # 从 dividends 优先级移除，仅保留未来 PDF 解析能力就绪的挂载位。
+        """CNINFO 分红由 `akshare_adapter` 走结构化接口提供，本适配器不重复实现。
+
+        2026-11-15（reports/124）厘清：本适配器只处理**公告文本**（标题/PDF），
+        拿不到结构化除权日；而 `akshare.stock_dividend_cninfo` / `stock_fhps_detail_em`
+        直接返回「股权登记日 / 除权日 / 派息日 / 每 10 股派息」，已由
+        `AkShareAdapter._fetch_dividends` 使用（默认链 `dividends: [akshare_eastmoney, baostock]`）。
+        因此这里的 `source_unsupported` 是**能力分工**，不是"等 PDF 就绪"：
+        原注释与 `_parse_dividend_from_announcement`（从标题正则抠分红、无 ex_date）
+        已一并删除，避免下一个人以为"以后要用 PDF 补"。
+
+        恒空必须以 error 返回：否则会把"源能力缺失"伪装成"合法无分红"。
+        """
         return self._make_legal_empty_result(
-            "CNINFO dividends unsupported: ex_date requires PDF parsing "
-            "(not implemented); returning empty rows would fake a legal empty",
+            "CNINFO dividends unsupported: adapter handles announcements only; "
+            "structured dividends come from akshare (stock_dividend_cninfo). "
+            "Use the akshare adapter instead.",
             error_kind="source_unsupported",
         )
-
-    @staticmethod
-    def _parse_dividend_from_announcement(
-        ann: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        """从权益分派公告条目解析分红数据
-
-        CNINFO 不直接提供结构化分红字段，需从公告标题正则提取：
-        - 每10股派发现金红利X元（含税） → dividend_per_share = X/10
-        - 每10股转增X股                  → transfer_share = X/10
-        - 每10股送红股X股                → stock_dividend = X/10
-
-        三项均无匹配（程序性公告如"审议通过"）返回 None。
-        ex_date 需解析公告 PDF 才能获得，留给 M8 阶段。
-
-        P0#2.6修复: 区分"预案"和"实施"——只解析已实施的分红, 跳过预案
-        Announcement dates are not ex-dates.  A row without an authoritative
-        ex-date must not be promoted to the formal dividends table.
-        """
-        title = ann.get("title") or ""
-
-        # P0#2.6修复: 跳过预案/提案类公告, 只保留实施类
-        # 预案标题通常含"预案"、"拟"、"提案"、"审议通过"
-        # 实施标题通常含"实施"、"权益分派"、"派息"、"除权除息"
-        if any(kw in title for kw in ["预案", "拟", "提案", "审议通过", "尚需", "待审"]):
-            return None
-
-        cash_per_10: float | None = None
-        transfer_per_10: float | None = None
-        send_per_10: float | None = None
-
-        m = _RE_CASH.search(title)
-        if m:
-            with contextlib.suppress(ValueError):
-                cash_per_10 = float(m.group(1))
-
-        m = _RE_TRANSFER.search(title)
-        if m:
-            with contextlib.suppress(ValueError):
-                transfer_per_10 = float(m.group(1))
-
-        m = _RE_SEND.search(title)
-        if m:
-            with contextlib.suppress(ValueError):
-                send_per_10 = float(m.group(1))
-
-        if cash_per_10 is None and transfer_per_10 is None and send_per_10 is None:
-            return None
-
-        ex_date = ann.get("ex_date")
-        if ex_date is None:
-            return None
-
-        return {
-            "stock_code": ann.get("stock_code"),
-            "announcement_id": ann.get("announcement_id"),
-            "announcement_date": ann.get("announcement_date"),
-            "announcement_time": ann.get("announcement_time"),
-            "title": title,
-            "pdf_url": ann.get("pdf_url"),
-            # 每10股 → 每股
-            "dividend_per_share": (
-                cash_per_10 / 10.0 if cash_per_10 is not None else None
-            ),
-            "stock_dividend": (
-                send_per_10 / 10.0 if send_per_10 is not None else None
-            ),
-            "transfer_share": (
-                transfer_per_10 / 10.0 if transfer_per_10 is not None else None
-            ),
-            "ex_date": ex_date,
-        }
 
     # ─── 结果构建辅助 ─────────────────────────────────────────────
 

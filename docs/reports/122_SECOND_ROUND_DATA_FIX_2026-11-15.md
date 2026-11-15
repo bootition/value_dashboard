@@ -1,9 +1,19 @@
 ---
 title: 2026-11-15 第二轮数据修复：行业历史与报告元数据入库 / qfq 后到自动重算 / 告警分级与字段级遮蔽 / A+H 分市场口径 / 金融股 exchange_gain 纠偏
-status: approved
+status: superseded
 category: reports
 created: 2026-11-15
 last-reviewed: 2026-11-15
+superseded-by: docs/reports/123_STRUCTURED_DIVIDEND_AND_COLD_ARCHIVE_FINAL_2026-11-15.md
+
+> **部分内容已被 `reports/123` 取代（2026-11-15）**：
+> ① 冷库终态由 16 张改为 **17 张 / 4,619,914 行 / 411.4 MB**；
+> ② "`pypdf` 未进依赖锁、需 `uv add pypdf`" **作废**（PDF 链已删除，不再需要 pypdf）；
+> ③ PDF 除权日"可写 74% / ≈5,900 行"分层外推 **整体作废**（已改结构化源）；
+> ④ `quick_ratio` 应为 **5,475**；
+> ⑤ `hk_price_daily` **无 `upstream` 列**（`source` 全为 `akshare_hk`）；
+> ⑥ `hk_dividends` 的"全量刷新"实为**全量重算值**（12 行新增，2,587 行 `fetch_time` 未变）。
+
 ---
 
 # 2026-11-15 第二轮数据修复报告
@@ -58,7 +68,7 @@ last-reviewed: 2026-11-15
 
 ### 2.6 J5 字段废弃与 `quick_ratio` 口径
 - `dividend_yield` 进 `DEPRECATED_COLUMNS`（建议改用 `ttm_dividend_yield`）：`/api/screening/indicators` 不再列出；**旧规则仍可执行**并返回 `warnings=[field_deprecated:...]`；**列不删、口径不改**（避免打断用户已保存规则）。
-- `quick_ratio`：存货 NULL 时按 0 计（流动资产/流动负债仍必须非空）——2026-09-30 由 **5,422 行 → 5,477 行**（约 97.2% → 98.2%），此前被整体压成 NULL 的约 53 只（多为无存货行业）恢复可算（`app/core/indicators/calculator.py`，本项由 J5 分任务实测，不在 db-ops 日志内）。
+- `quick_ratio`：存货 NULL 时按 0 计（流动资产/流动负债仍必须非空）——2026-09-30 由 **5,422 行 → 5,475 行**（约 97.2% → 98.2%），此前被整体压成 NULL 的约 53 只（多为无存货行业）恢复可算（`app/core/indicators/calculator.py`，本项由 J5 分任务实测，不在 db-ops 日志内）。
 
 ### 2.7 J12 A+H 分市场市值与股息率
 - 新表：`hk_price_daily`（**203 只 A+H / 240,277 行 / 2004-12-09 ~ 2026-11-13**）、`fx_rate_daily`（**HKDCNY 7,125 行 / 2000-01-03 ~ 2026-11-14**；中行折算价 7,114 + 央行中间价 11，中行优先）。
@@ -120,7 +130,7 @@ last-reviewed: 2026-11-15
 | `exchange_gain` @2026-06-30 | **0.2%**（12/5,544） | **67.8%**（3,760/5,544） | 同上 |
 | `exchange_gain` 污染行 | 1,428 行写着"汇兑收益" | 置 NULL 后按公允价值变动收益只填 NULL（+3,922 只 / 7,626 行） | 首跑日志 16:50:57–16:50:58；备份 `maintenance-backup-exchange-gain-20261115_165057/` |
 | `financial_sector_items` | **5,058 行**（全 CSMAR，止于 2025-03-31） | **5,640 行** = CSMAR 5,058 + `eastmoney_f10` **582**（2025-06-30~2026-09-30） | `evidence/financial_sector_20261115_165056.json` + 日志 16:52:25 |
-| `quick_ratio` @2026-09-30 | 5,422 行 | **5,477 行**（存货缺失按 0） | J5 分任务实测（不在 db-ops 日志） |
+| `quick_ratio` @2026-09-30 | 5,422 行 | **5,475 行**（存货缺失按 0） | J5 分任务实测（不在 db-ops 日志） |
 | `roic` | 656（11.8%，`reports/119`） | **4,710 / 5,575（84.5%）**；`doctor` 在快照 5,573 行上测得 **4,708/5,573 = 84.48%** | `reports/120` + 日志 17:06:43 |
 | `annualized_volatility` | 994（17.8%，`reports/119`） | **5,556 / 5,575（99.6%）** | `reports/120`（本轮 J6 让该值可持续，不再靠手动重算） |
 | `indicator_null_reason`（@2026-09-30 单轮） | — | 写入 **97,384 行 / 65 个字段**（snapshot 26,252 / ext 38,428 / balance 32,704） | 日志 17:06:42 汇总行 |

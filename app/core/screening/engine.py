@@ -77,14 +77,32 @@ DEPRECATED_COLUMNS: dict[str, str] = {
     "dividend_yield": "ttm_dividend_yield",
 }
 
+# 换列时的**量纲倍数**（新值 = 旧值 × 本倍数）。2026-11-15（reports/124）实测：
+# `dividend_yield` 存小数（0.025 = 2.5%），`ttm_dividend_yield` 存百分数（2.5），
+# 正式库 3,735 行**全部恰为 100 倍**。若只提示"改用 ttm_dividend_yield"而不说倍数，
+# 用户把 `dividend_yield > 0.03` 直接换成 `ttm_dividend_yield > 0.03` 会命中几乎全市场。
+# 注意：这是**存储量纲差**，不是"时点基准差"——两者同时为空/非空的集合也完全相同。
+DEPRECATED_SCALE: dict[str, float] = {
+    "dividend_yield": 100.0,
+}
+
 
 def deprecated_field_warnings(fields: Any) -> list[str]:
     """把引用到的废弃字段翻译成人话警告（顺序稳定，便于断言与展示）。"""
-    return [
-        f"field_deprecated:{field}, 建议改用 {DEPRECATED_COLUMNS[field]}"
-        for field in sorted({str(item) for item in (fields or ())})
-        if field in DEPRECATED_COLUMNS
-    ]
+    warnings: list[str] = []
+    for field in sorted({str(item) for item in (fields or ())}):
+        replacement = DEPRECATED_COLUMNS.get(field)
+        if replacement is None:
+            continue
+        scale = DEPRECATED_SCALE.get(field)
+        if scale is not None:
+            warnings.append(
+                f"field_deprecated:{field}, 建议改用 {replacement}"
+                f"（注意量纲差 {scale:g} 倍：{replacement} = {field} × {scale:g}）"
+            )
+        else:
+            warnings.append(f"field_deprecated:{field}, 建议改用 {replacement}")
+    return warnings
 
 
 class MaskedFieldError(ValueError):

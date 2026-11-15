@@ -35,10 +35,11 @@ adapters:
     cash_flow: ["sina", "tdx", "akshare_eastmoney"]
     price_daily: ["tencent", "baostock", "tdx"]
     # 分红链：只挂真正能给出 ex_date + 每股数值的源。
-    # cninfo 分红实现恒返回 source_unsupported（权益分派公告不含结构化除权日，
-    # 需解析 PDF，尚未实现），这里**不得**挂进默认链——否则每票每轮必然失败
-    # 一次并污染熔断/retry。代码里保留 CNINFOAdapter._fetch_dividends 作为
-    # 未来 PDF 解析就绪后的显式挂载位（显式配置 cninfo 为 primary 时可见）。
+    # 2026-11-15（reports/124）：CNINFO **不是**"等 PDF 就绪"，而是能力分工——
+    # 该适配器只处理公告文本（拿不到结构化除权日），结构化分红由
+    # `akshare.stock_dividend_cninfo` / `stock_fhps_detail_em` 提供，已由
+    # akshare 适配器使用。cninfo 仍**不得**挂进本链（每票必然 source_unsupported
+    # 并污染熔断/retry）；PDF 解析链已于 reports/123 整体删除，不存在"未来挂载位"。
     dividends: ["akshare_eastmoney", "baostock"]
     xdxr: ["tdx"]
     announcements: ["cninfo"]

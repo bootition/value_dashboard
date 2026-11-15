@@ -741,7 +741,7 @@ def list_available_indicators(request: Request) -> dict:
        让用户以为"全市场都不满足"。
     `unavailable` 过去只构造不返回（前端拿不到原因），这次一并返回。
     """
-    from app.core.screening.engine import (
+    from app.core.screening.engine import (  # noqa: F401
         EXTENDED_SCREENING_READY,
         NORMALIZED_FIELDS,
         RANKABLE_INDICATORS,
@@ -841,17 +841,25 @@ def list_available_indicators(request: Request) -> dict:
     # ── 两条过滤：废弃字段 & 当前不可信字段（字段级遮蔽）─────────────────
     deprecated = _deprecated_indicator_names()
     masked = set(_masked_indicator_fields(request))
+    from app.core.screening.engine import DEPRECATED_SCALE
+
     kept: list[dict] = []
     for entry in indicators:
         name = entry.get("name")
         if name in deprecated:
+            scale = DEPRECATED_SCALE.get(name)
             unavailable.append({
                 "name": name,
                 "domain": entry.get("domain") or "snapshot",
                 "reason": "deprecated",
                 "replaced_by": deprecated[name],
+                # 2026-11-15（reports/124）：两列存储量纲不同（小数 vs 百分数，实测恰
+                # 100 倍）。不给倍数，用户把 >0.03 换成 >0.03 会命中几乎全市场。
+                "scale_factor": scale,
                 "message": (
                     f"字段已废弃（口径不可复现）：请改用 {deprecated[name]}"
+                    + (f"，注意量纲差 {scale:g} 倍（{deprecated[name]} = {name} × {scale:g}）"
+                       if scale else "")
                 ),
             })
             continue

@@ -546,8 +546,12 @@ def test_deprecated_field_still_runs_with_warning(duckdb_store: DuckDBStore) -> 
     )
 
     assert [row["stock_code"] for row in result["results"]] == ["000001"]
+    # 2026-11-15（reports/124）：警告里必须带量纲倍数——两列存储量纲差 100 倍
+    # （dividend_yield 存小数、ttm_dividend_yield 存百分数，正式库 3,735 行实测全为 100×）。
+    # 只提示"改用"会诱导用户把 >0.01 直接换成 >0.01，命中几乎全市场。
     assert result["warnings"] == [
         "field_deprecated:dividend_yield, 建议改用 ttm_dividend_yield"
+        "（注意量纲差 100 倍：ttm_dividend_yield = dividend_yield × 100）"
     ]
 
 

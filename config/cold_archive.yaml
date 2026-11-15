@@ -30,10 +30,9 @@
 # 域纪律：本清单里的表都**不进筛选界面**，冷存对用户可见能力零影响。
 # 2026-11-15 增补：`csmar_risk_factors`（67,193 行）原为"留主库做对照"的例外，
 # 现已补登记进本清单（**16 张 → 17 张**），数据不删除、只换承载方式。
-# 它带 `physical_switch: pending` —— 已登记、照常导出，但仍是主库物理表：
-# 物理切换（export → create-views → drop-tables）由主控在正式库按顺序执行。
-# 切换前 `app/core/storage/schema.py` 里它的 CREATE TABLE / CREATE INDEX 必须先
-# 删干净，否则 `cold_archive_switch.py --create-views` 会因残留 DDL 整体拒绝
+# 它已于 2026-11-15 **完成物理切换**（`physical_switch: switched`）：冷库包
+# `D:/vd-cold-archive-20261115-r17`（17 张 / 4,619,914 行 / 411.4 MB），主库只剩
+# read_parquet 视图、停车表已删、`schema.py` 里 3 处 DDL 已删。
 # （EXIT_REFUSED，这是有意的安全门）；DDL 删完再把本条改成 `physical_switch:
 # switched`（或整行删掉该键，默认即 switched）。
 # 例外登记：`financial_sector_items` 因含热数据（2025Q2+ 东财补采）**不迁冷库** ——

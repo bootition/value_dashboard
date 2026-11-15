@@ -69,10 +69,11 @@ DEFAULT_ADAPTER_PRIORITY: Final[dict[str, list[str]]] = {
     "balance_sheet": ["sina", "tdx", "akshare_eastmoney"],
     "income_statement": ["sina", "tdx", "akshare_eastmoney"],
     "cash_flow": ["sina", "tdx", "akshare_eastmoney"],
-    # cninfo 分红路径恒空（公告不含 ex_date，需解析 PDF 且未实现），链尾会把
-    # 源能力缺失伪装成合法空；故从默认链移除。CNINFOAdapter._fetch_dividends
-    # 保留为显式 unsupported error，防止显式配置 cninfo 为 primary 时静默空。
-    # akshare/baostock 提供完整带 ex_date 与每股数值的分红记录。
+    # cninfo 分红路径只处理公告文本、拿不到结构化除权日（不是"等 PDF"，PDF 链
+    # 已于 reports/123 整体删除），链尾会把源能力缺失伪装成合法空；故从默认链
+    # 移除。CNINFOAdapter._fetch_dividends 保留为显式 unsupported error，防止显式
+    # 配置 cninfo 为 primary 时静默空。结构化分红（含 ex_date 与每 10 股派息）
+    # 由 akshare（stock_dividend_cninfo / stock_fhps_detail_em）与 baostock 提供。
     "dividends": ["akshare_eastmoney", "baostock"],
     "xdxr": ["tdx"],
     "announcements": ["cninfo"],
