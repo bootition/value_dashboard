@@ -730,26 +730,40 @@ class BackupManager:
             with zipfile.ZipFile(zip_path, "r") as zf:
                 members = zf.infolist()
                 if len(members) > _MAX_ARCHIVE_MEMBERS:
+                    # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+                    shutil.rmtree(extract_dir, ignore_errors=True)
                     return {"status": "error", "error": "backup archive has too many members"}
                 total_uncompressed = 0
                 for member in members:
                     total_uncompressed += member.file_size
                     if member.file_size > _MAX_ARCHIVE_MEMBER_SIZE:
+                        # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+                        shutil.rmtree(extract_dir, ignore_errors=True)
                         return {"status": "error", "error": "backup archive member is too large"}
                     if total_uncompressed > _MAX_ARCHIVE_UNCOMPRESSED_SIZE:
+                        # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+                        shutil.rmtree(extract_dir, ignore_errors=True)
                         return {"status": "error", "error": "backup archive is too large"}
                     if member.compress_size and member.file_size / member.compress_size > _MAX_ARCHIVE_COMPRESSION_RATIO:
+                        # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+                        shutil.rmtree(extract_dir, ignore_errors=True)
                         return {"status": "error", "error": "backup archive compression ratio is unsafe"}
                     target = (extract_dir / member.filename).resolve()
                     if not target.is_relative_to(extract_dir.resolve()):
+                        # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+                        shutil.rmtree(extract_dir, ignore_errors=True)
                         return {"status": "error", "error": "unsafe backup archive path"}
                 zf.extractall(extract_dir)
         except (OSError, zipfile.BadZipFile) as error:
+            # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+            shutil.rmtree(extract_dir, ignore_errors=True)
             return {"status": "error", "error": f"invalid backup archive: {error}"}
 
         # 读取 manifest
         manifest_path = extract_dir / "manifest.json"
         if not manifest_path.exists():
+            # 2026-11-15（reports/125）：错误分支也必须清理解压目录，否则 vd-restore-* 会永久留在磁盘
+            shutil.rmtree(extract_dir, ignore_errors=True)
             return {"status": "error", "error": "备份文件缺少 manifest.json"}
 
         try:

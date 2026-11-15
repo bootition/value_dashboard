@@ -9,7 +9,11 @@ param(
     # tests/regression/test_x.py）误绑到 $EvidenceDir，导致证据目录
     # 创建在 tests/regression 下并触发 "Cannot create ... already exists"。
     [Parameter(Position = 0, ValueFromRemainingArguments = $true)]
-    [string[]]$PytestArgs
+    [string[]]$PytestArgs,
+
+    # 2026-11-15（reports/125）：默认**无论成功失败都清理运行根目录**。
+    # 排障需要保留时显式加 -KeepRunRoot（保留路径会打印到 stderr，便于手动清理）。
+    [switch]$KeepRunRoot
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,6 +38,32 @@ else {
 }
 $runDir = Join-Path $evidenceRoot $runId
 $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "vd-s1-$runId"
+
+# 2026-11-15（reports/125）**临时目录泄漏修复**：
+# 原实现只在 pytestExit == 0 时删除 $runRoot，于是"测试失败 / 被中断 / delta-98-99"
+# 都会把整个运行根目录永久留在 %TEMP%（每个测试还各拷一份 10–30MB 的库快照，
+# 单轮可达 20GB+）。C 盘曾因此被 40 多个 vd-s1-* 目录占掉 100GB+。
+# 现在两道保险：① 启动时清扫超过 24h 的 vd-s1-* 残留；② finally 里无条件清理本轮。
+function Remove-StaleS1RunRoots {
+    param([string]$TempRoot, [int]$MaxAgeHours = 24)
+
+    try {
+        if (-not (Test-Path -LiteralPath $TempRoot)) { return }
+        $cutoff = (Get-Date).AddHours(-$MaxAgeHours)
+        $stale = Get-ChildItem -LiteralPath $TempRoot -Directory -Filter "vd-s1-*" -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt $cutoff -and $_.Name -ne (Split-Path -Leaf $runRoot) }
+        foreach ($dir in $stale) {
+            try {
+                Assert-SafeRunTreeForCleanup -Path $dir.FullName -SentinelValue $ownershipSentinel
+                Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
+            }
+            catch {
+                try { [Console]::Error.WriteLine("[WARN] 无法清理残留运行根 ${($dir.FullName)}: $($_.Exception.Message)") } catch {}
+            }
+        }
+    }
+    catch {}
+}
 $savedEnvironment = @{}
 foreach ($name in @(
     "VD_ENV", "VD_TEST_RUN_ROOT", "VD_DUCKDB_PATH", "VD_SQLITE_PATH", "VD_TEST_EVIDENCE_ROOT",
@@ -293,6 +323,9 @@ if ($nativePreferenceWasDefined) {
 }
 
 try {
+    # 2026-11-15（reports/125）：开跑前先清扫 24h 前的 vd-s1-* 残留（硬杀/断电也不会累积）。
+    Remove-StaleS1RunRoots -TempRoot ([System.IO.Path]::GetTempPath()) -MaxAgeHours 24
+
     if (-not (Test-PathEqual -Left (Get-Location).Path -Right $projectRoot)) {
         throw "S1 pytest wrapper must run from repository root: $projectRoot"
     }
@@ -539,6 +572,24 @@ catch {
     }
 }
 finally {
+    # 2026-11-15（reports/125）：**无条件**清理本轮运行根目录（除非 -KeepRunRoot）。
+    # 之前只有 pytestExit -eq 0 才删，失败/中断就会永久留在 %TEMP%。
+    if (-not $KeepRunRoot -and (Test-Path -LiteralPath $runRoot)) {
+        try {
+            Assert-SafeRunTreeForCleanup -Path $runRoot -SentinelValue $ownershipSentinel
+            Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction Stop
+        }
+        catch {
+            try {
+                [Console]::Error.WriteLine(
+                    "[WARN] 运行根目录清理失败（请手动删除）: $runRoot — $($_.Exception.Message)")
+            }
+            catch {}
+        }
+    }
+    elseif ($KeepRunRoot -and (Test-Path -LiteralPath $runRoot)) {
+        try { [Console]::Error.WriteLine("[INFO] -KeepRunRoot：保留运行根目录 $runRoot") } catch {}
+    }
     try {
         Restore-Environment
         if ($nativePreferenceWasDefined) {
