@@ -8,8 +8,9 @@
    它读不到数据时删物理表 = 永久丢数据；
 4. **写前打印确切 SQL + 写锁生效直接拒绝**：DDL 不能与更新事务交错。
 
-隔离：全部用 ``tmp_path`` 下的临时 DuckDB + 临时 Parquet 包（16 张迷你表），
-**绝不触碰** ``data/valuedashboard.duckdb``。
+隔离：全部用 ``tmp_path`` 下的临时 DuckDB + 临时 Parquet 包（16 张已切换的迷你
+表；清单里 ``physical_switch: pending`` 的第 17 张不参与，理由见 ``cold_switch``
+夹具），**绝不触碰** ``data/valuedashboard.duckdb``。
 """
 
 from __future__ import annotations
@@ -18,11 +19,13 @@ import importlib.util
 import json
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import duckdb
 import pytest
+import yaml
 
 from app.core.storage.cold_archive_guard import (
     COLD_ARCHIVE_REMEDY,
@@ -90,10 +93,41 @@ def _parked_names(config) -> list[str]:
 
 @pytest.fixture
 def cold_switch(tmp_path: Path) -> SimpleNamespace:
-    """临时 DuckDB（16 张迷你物理表）+ 临时 Parquet 冷库包。"""
+    """临时 DuckDB + 临时 Parquet 冷库包（16 张**已切换**的迷你表）。
+
+    2026-11-15：清单变成 17 张，其中 ``csmar_risk_factors`` 是
+    ``physical_switch: pending``（已登记、待主控在正式库执行切换），schema.py 里
+    它的 DDL 还在 —— ``cold_archive_switch.py`` 会**有意**因残留 DDL 整体拒绝。
+    本文件演练的是"切换已放行"之后的行为，所以给脚本喂一份只含
+    ``switched_tables()`` 的清单副本（``--config``）；等主控删掉 DDL 并把它改成
+    switched，过滤结果自动变成 17 张，测试代码不用再动。
+    """
     switch = _load_switch()
     split = _load_split()
-    config = split.load_config()
+    full_config = split.load_config()
+    config = replace(full_config, tables=full_config.switched_tables())
+    config_path = tmp_path / "cold_archive.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": config.version,
+                "source_cutoff": config.source_cutoff,
+                "tables": [
+                    {
+                        "table": cold.table,
+                        "reason": cold.reason,
+                        "source_cutoff": cold.source_cutoff,
+                        "consumers": list(cold.consumers),
+                        "physical_switch": cold.physical_switch,
+                    }
+                    for cold in config.tables
+                ],
+            },
+            allow_unicode=True,
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
     db_path = tmp_path / "valuedashboard.duckdb"
 
     connection = duckdb.connect(str(db_path))
@@ -121,6 +155,7 @@ def cold_switch(tmp_path: Path) -> SimpleNamespace:
         switch=switch,
         split=split,
         config=config,
+        config_path=config_path,
         db_path=db_path,
         pkg_dir=pkg_dir,
         expected_rows={
@@ -131,7 +166,15 @@ def cold_switch(tmp_path: Path) -> SimpleNamespace:
 
 def _run(cold: SimpleNamespace, *args: str) -> int:
     return cold.switch.main(
-        [*args, "--pkg", str(cold.pkg_dir), "--db", str(cold.db_path)]
+        [
+            *args,
+            "--config",
+            str(cold.config_path),
+            "--pkg",
+            str(cold.pkg_dir),
+            "--db",
+            str(cold.db_path),
+        ]
     )
 
 
@@ -232,9 +275,11 @@ def test_init_duckdb_schema_is_safe_after_views(cold_switch: SimpleNamespace) ->
     assert all(kind == "VIEW" for kind in kinds.values())
     for name in names:
         assert _query(cold.db_path, f"SELECT COUNT(*) FROM {name}") == [(2,)]
-    # 对照表仍由 schema.py 正常建出来（且带索引）
-    assert _object_kinds(cold.db_path, ["csmar_risk_factors"]) == {
-        "csmar_risk_factors": "BASE TABLE"
+    # 对照热表仍由 schema.py 正常建出来（且带索引）。
+    # 这条断言不能挂在 csmar_risk_factors 上：它 2026-11-15 已登记进冷库清单
+    # （physical_switch: pending），物理切换一执行它就不再是主库物理表。
+    assert _object_kinds(cold.db_path, ["financial_sector_items"]) == {
+        "financial_sector_items": "BASE TABLE"
     }
 
 
@@ -462,7 +507,9 @@ def test_verify_cold_rejects_tampered_parquet(cold_switch: SimpleNamespace) -> N
     parquet = cold.pkg_dir / "csmar_fi_t1.parquet"
     parquet.write_bytes(parquet.read_bytes() + b"tampered")
 
-    code = cold.switch.main(["--verify-cold", "--pkg", str(cold.pkg_dir)])
+    code = cold.switch.main(
+        ["--verify-cold", "--config", str(cold.config_path), "--pkg", str(cold.pkg_dir)]
+    )
 
     assert code == cold.switch.EXIT_VERIFY_FAILED
 

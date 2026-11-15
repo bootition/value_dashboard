@@ -1670,6 +1670,9 @@ def _rule_zero_reference_asset(ctx: HealthContext) -> list[Finding]:
         reason = str(entry.get("reason") or "").strip()
         fulfillment = str(entry.get("fulfillment") or "").strip()
         retirement_candidate = bool(entry.get("retirement_candidate"))
+        # 2026-11-15：退役口径已从「DROP」改成「迁冷库（Parquet，不删数据）」，
+        # 状态与恢复方式登记在 cold_archive_state；有它就别再劝运维"走退役流程"。
+        cold_archive_state = str(entry.get("cold_archive_state") or "").strip()
         reviewed_rows = entry.get("rows_at_review")
         detail_parts = [
             f"运行时引用 {references} 处",
@@ -1679,8 +1682,26 @@ def _rule_zero_reference_asset(ctx: HealthContext) -> list[Finding]:
             detail_parts.append(f"清单登记 {reviewed_rows} 行（行数已变化，记得复核）")
         if reason:
             detail_parts.append(f"理由：{reason}")
+        if cold_archive_state:
+            detail_parts.append(f"冷库退役：{cold_archive_state}")
         if references > 0:
             detail_parts.append("清单已过期：该表已被运行时代码引用，请更新 asset_reference.yaml")
+            suggestion = "更新 config/asset_reference.yaml（该表已不再零引用）"
+        elif cold_archive_state:
+            suggestion = (
+                "已退役到冷库（Parquet），数据未删除；重新需要时先按登记的恢复方式取回"
+                "（cold_archive_switch.py 逆向 或 CREATE TABLE AS SELECT * FROM "
+                "read_parquet(...)），再接 fulfillment 兑现"
+            )
+        elif retirement_candidate:
+            suggestion = (
+                "退役候选：替代路径已就绪，可走退役流程（退役前在 "
+                "ops-knowledge-base 登记依据）"
+            )
+        elif fulfillment:
+            suggestion = f"先兑现：{fulfillment}"
+        else:
+            suggestion = "先完善登记理由"
         findings.append(
             Finding(
                 code="ZERO_REFERENCE_ASSET",
@@ -1690,16 +1711,7 @@ def _rule_zero_reference_asset(ctx: HealthContext) -> list[Finding]:
                 metric=references,
                 threshold=0,
                 detail="；".join(detail_parts),
-                suggestion=(
-                    "更新 config/asset_reference.yaml（该表已不再零引用）"
-                    if references > 0
-                    else (
-                        "退役候选：替代路径已就绪，可走退役流程（退役前在 "
-                        "ops-knowledge-base 登记依据）"
-                        if retirement_candidate
-                        else f"先兑现：{fulfillment}" if fulfillment else "先完善登记理由"
-                    )
-                ),
+                suggestion=suggestion,
                 # 纯清单：看得见，但永远不参与 healthy / 退出码判定。
                 severity=SEVERITY_INVENTORY,
             )

@@ -3,10 +3,11 @@
 
 为什么做这件事
 --------------
-正式库约 28GB / 59 张表，其中 CSMAR 历史归档域 16 张表、约 455 万行是
+正式库约 28GB / 59 张表，其中 CSMAR 历史归档域 **17 张表**（16 张已完成物理
+切换，第 17 张 ``csmar_risk_factors`` 于 2026-11-15 补登记、待切换）都是
 **源截止 2025-03-31 的静态数据**（导入后写路径永久关闭），却与每天变化的
 行情/三表/指标挤在同一个 DuckDB 文件里：备份、哈希核对、离线重建都要为这
-455 万行重复付费，而且每次都要付出。
+几百万行重复付费，而且每次都要付出。
 
 分层依据选**可变性**而不是体积：体积会变，可变性不会。一张 300K 行的静态表
 每天被整库备份一次，成本随时间无限累积；一张每天都要写的热表却不能分出去。
@@ -141,6 +142,16 @@ VERIFIED_NAME = "verified.json"
 # 用前缀无关的后缀，便于 `SHOW TABLES` 一眼认出哪些是待删的冷库残留。
 PARKED_SUFFIX = "__cold_parked"
 
+# 清单条目的物理切换状态（config/cold_archive.yaml 的 ``physical_switch``）：
+#   switched = 已完成 export → create-views → drop，主库只剩 read_parquet 视图；
+#   pending  = 已登记进清单（要导出、要算进清单总数），但 schema.py 里它的 DDL
+#              还在、主库仍是物理表，物理切换由主控按顺序执行。
+# 「登记」与「切换」必须能分开表达：清单是导出/建视图/删表的唯一事实来源，
+# 只认清单的话「先登记、后切换」就只能靠口头约定，而这正是本仓库反复踩的坑。
+SWITCH_SWITCHED = "switched"
+SWITCH_PENDING = "pending"
+_ALLOWED_SWITCH_STATES = frozenset({SWITCH_SWITCHED, SWITCH_PENDING})
+
 FORMAT_VERSION = 1
 PARQUET_COMPRESSION = "ZSTD"
 # SQL 里拼接压缩格式，白名单防注入（值来自常量，但保持防御习惯）
@@ -151,6 +162,9 @@ _ALLOWED_COMPRESSION = frozenset({"ZSTD", "SNAPPY", "GZIP", "UNCOMPRESSED"})
 # csmar_fi_t3 178 B、csmar_fi_t11 10 B —— 后者 13 列几乎全 NULL，压缩后极小。
 # 2026-11-15 起 financial_sector_items（5,058 行）已移出清单：16 张表 /
 # 4,552,721 行 → 约 405.5 MB，均值仍是 93.4 B/行，故本常量不变）。
+# 2026-11-15 补登记 csmar_risk_factors（67,193 行，physical_switch: pending）：
+# 清单 17 张，其中 16 张已切换；该表的实际行数/体积**待导出后实测**，此处仍沿用
+# 标定均值做心算，不当作承诺值。
 # 取 95 作为均值口径，只用于"够不够空间"的心算；要准确数字请用 --measure 实测。
 ESTIMATED_BYTES_PER_ROW = 95
 
@@ -184,6 +198,7 @@ class ColdTable:
     reason: str
     source_cutoff: str
     consumers: tuple[str, ...] = ()
+    physical_switch: str = SWITCH_SWITCHED
 
 
 @dataclass(frozen=True)
@@ -195,6 +210,14 @@ class ColdArchiveConfig:
 
     def by_name(self) -> dict[str, ColdTable]:
         return {item.table: item for item in self.tables}
+
+    def switched_tables(self) -> tuple[ColdTable, ...]:
+        """已完成物理切换的表（主库只剩视图）。切换/删表只对这些表动手。"""
+        return tuple(item for item in self.tables if item.physical_switch == SWITCH_SWITCHED)
+
+    def pending_tables(self) -> tuple[ColdTable, ...]:
+        """已登记、待物理切换的表（主库仍是物理表，schema.py 里 DDL 还在）。"""
+        return tuple(item for item in self.tables if item.physical_switch == SWITCH_PENDING)
 
 
 def load_config(config_path: Path = CONFIG_PATH) -> ColdArchiveConfig:
@@ -239,12 +262,19 @@ def load_config(config_path: Path = CONFIG_PATH) -> ColdArchiveConfig:
             not isinstance(item, str) for item in consumers_raw
         ):
             raise ValueError(f"{name} 的 consumers 必须是字符串列表")
+        switch_state = entry.get("physical_switch", SWITCH_SWITCHED)
+        if switch_state not in _ALLOWED_SWITCH_STATES:
+            raise ValueError(
+                f"{name} 的 physical_switch 只能是 "
+                f"{sorted(_ALLOWED_SWITCH_STATES)}: {switch_state!r}"
+            )
         tables.append(
             ColdTable(
                 table=name,
                 reason=reason.strip(),
                 source_cutoff=cutoff,
                 consumers=tuple(consumers_raw),
+                physical_switch=str(switch_state),
             )
         )
     return ColdArchiveConfig(

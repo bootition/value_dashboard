@@ -8,6 +8,13 @@
 - `_asof` 日期对齐（H 价早于 A 价、FX 缺失）
 - build_ah_snapshot 缺数据时 reason 正确
 
+2026-11-16 追加（模块 docstring §1–§3 的口径裁决）：
+- H 股市值 `h_share_market_cap_cny`（= H 价 × H 股数 × 汇率，单位元）手工算例；
+- `identity_status` 四态（ok / mismatch / not_comparable / insufficient_data）；
+- A 侧缺数据时 H 侧仍出数（各算各的，不得整体返回 None）；
+- 断言 `build_ah_snapshot` 不产出行业口径 `total_market_cap`，也不调用
+  `app/core/indicators/calculator.py` 的市值计算。
+
 全部使用 `duckdb_store` fixture（隔离在 --basetemp 下），不触正式库。
 """
 
@@ -15,6 +22,8 @@ from __future__ import annotations
 
 import math
 from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
+from pathlib import Path
 
 import pytest
 
@@ -280,10 +289,19 @@ def test_ah_dividend_yield_zero_dividend_is_legal() -> None:
     assert result["identity_ok"] is True
 
 
-def test_ah_dividend_yield_missing_dividend() -> None:
+def test_ah_dividend_yield_missing_a_dividend_keeps_h_side() -> None:
+    """A 侧缺分红只让 A 侧为 None，H 侧照常出数（各算各的，模块 docstring §3）。
+
+    2026-11-16 语义变更：旧实现两侧任一缺失即整体返回 None 且
+    ``reason='missing_dividend'``——本用例原先断言的就是那个旧语义。
+    """
     result = ah_dividend_yield(None, 0.5, 10.0, 8.0, 0.9)
-    assert result["reason"] == "missing_dividend"
-    assert result["h_yield"] is None
+    assert result["reason"] == "missing_a_dividend"
+    assert result["a_yield"] is None
+    assert result["h_yield"] == pytest.approx(0.5 / (8.0 * 0.9))
+    assert result["h_yield_after_tax"] == pytest.approx(0.5 / (8.0 * 0.9) * 0.8)
+    assert result["ah_yield_gap"] is None
+    assert result["identity_status"] == "insufficient_data"
 
 
 # ─── _asof 日期对齐 ─────────────────────────────────────────────────
@@ -669,3 +687,243 @@ def test_asof_tolerates_missing_table_as_missing_data(
 ) -> None:
     duckdb_store.write_query("DROP TABLE fx_rate_daily")
     assert _asof(duckdb_store, "fx_rate_daily", "HKDCNY", "2026-01-05") is None
+
+
+# ─── 2026-11-16：H 股市值明确字段 + 恒等式降级为参考值 ──────────────────
+#
+# 三条背景（已核实，见 app/core/ah_metrics.py 模块 docstring §1–§3）：
+# 1. 行业口径「总市值」= A 价 × 总股本，与现有 indicator_snapshot.total_market_cap
+#    一致 → 本模块不读不写、不切换；
+# 2. 要补的是单独一列 H 股市值 h_share_market_cap_cny（元）；
+# 3. AH 股息率各算各的，恒等式仅在两端分红笔数一致时作为参考值，永不当门禁。
+
+
+AH_ROW_EXPLICIT_FIELDS = (
+    "h_share_market_cap_cny",
+    "ah_total_market_cap_cny",
+    "identity_status",
+    "identity_deviation_pct",
+)
+
+
+def test_h_share_market_cap_cny_manual_example_to_the_cent() -> None:
+    """H 股市值 = H 价 × H 股数 × 汇率，单位人民币元，断言到分。
+
+    用工行 601398 真实股本：总 356,406,257,089 − A 流通 269,612,212,539
+    = H 股 86,794,044,550 股；H 价 5.77 港元 × 汇率 0.9153。
+    """
+    result = ah_market_cap(
+        8.85,
+        5.77,
+        0.9153,
+        total_shares=356_406_257_089,
+        circ_shares=269_612_212_539,
+    )
+    assert result["reason"] is None
+    assert result["h_shares"] == 86_794_044_550.0
+    assert result["h_price_cny"] == pytest.approx(5.77 * 0.9153, rel=1e-12)
+    expected = (
+        Decimal("5.77") * Decimal("86794044550") * Decimal("0.9153")
+    ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    value = result["h_share_market_cap_cny"]
+    assert Decimal(str(round(value, 2))) == expected
+    # 单位必须是「元」：≈4,583.84 亿元，不是「亿元/万元」（防 100 倍 / 1 万倍事故）
+    assert 4_500e8 < value < 4_700e8
+
+
+def test_ah_market_cap_ah_total_alias_is_sum_of_two_sides() -> None:
+    result = ah_market_cap(10.0, 8.0, 0.9, total_shares=100, circ_shares=60)
+    assert result["ah_total_market_cap_cny"] == pytest.approx(888.0)
+    # 与历史键 total_market_cap_ah 同值；只是参考量，不是行业口径总市值
+    assert result["ah_total_market_cap_cny"] == result["total_market_cap_ah"]
+    assert result["ah_total_market_cap_cny"] == pytest.approx(
+        result["a_share_market_cap"] + result["h_share_market_cap_cny"]
+    )
+
+
+def test_snapshot_exposes_h_share_market_cap_cny_explicitly(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _seed_standard_inputs(duckdb_store)
+    _seed_a_dividend(duckdb_store, "601398", "2025-06-30", 0.5)
+    _seed_h_dividend(duckdb_store, "01398", "2025-06-25", hkd=0.55, cny=0.5)
+
+    row = build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)[0]
+    for key in AH_ROW_EXPLICIT_FIELDS:
+        assert key in row, key
+    # H 股市值：H 价 8.2 港元 × H 股 40 股 × 汇率 0.9 = 295.20 元
+    assert row["h_share_market_cap_cny"] == pytest.approx(295.2)
+    assert row["h_share_market_cap_cny"] == pytest.approx(
+        row["h_close"] * row["h_shares"] * row["fx_hkd_cny"]
+    )
+    assert row["ah_total_market_cap_cny"] == pytest.approx(
+        row["a_share_market_cap"] + row["h_share_market_cap_cny"]
+    )
+    assert row["ah_total_market_cap_cny"] == row["total_market_cap_ah"]
+
+
+def test_snapshot_rows_never_expose_industry_total_market_cap(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """行业口径 total_market_cap 只属于 indicator_snapshot，本模块不得产出该键。"""
+    _seed_standard_inputs(duckdb_store)
+    ok_row = build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)[0]
+    duckdb_store.write_query("DELETE FROM hk_price_daily")
+    incomplete_row = build_ah_snapshot(
+        duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING,
+    )[0]
+
+    assert ok_row["status"] == "ok"
+    assert incomplete_row["status"] == "incomplete"
+    for row in (ok_row, incomplete_row):
+        assert "total_market_cap" not in row
+        assert "circ_market_cap" not in row
+        # 行结构稳定：缺数据行也有同一套键（便于前端/调用方统一取值）
+        assert set(row) == set(ok_row)
+
+
+def test_build_snapshot_does_not_call_indicator_calculator(
+    duckdb_store: DuckDBStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """build_ah_snapshot 不得调用 indicator calculator 里的市值计算。"""
+    from app.core.indicators import calculator as calculator_module
+
+    calls: list[str] = []
+
+    def _forbidden(name: str):
+        def _stub(*_args: object, **_kwargs: object) -> None:
+            calls.append(name)
+            raise AssertionError(f"{name} 不应被 build_ah_snapshot 调用")
+
+        return _stub
+
+    monkeypatch.setattr(
+        calculator_module.IndicatorCalculator, "_calc_valuation", _forbidden("_calc_valuation"),
+    )
+    monkeypatch.setattr(
+        calculator_module.IndicatorCalculator,
+        "compute_snapshot_for_all",
+        _forbidden("compute_snapshot_for_all"),
+    )
+    _seed_standard_inputs(duckdb_store)
+
+    row = build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)[0]
+    assert row["status"] == "ok", row["reason"]
+    assert row["ah_total_market_cap_cny"] is not None
+    assert calls == []
+
+
+def test_ah_metrics_module_does_not_import_indicator_calculator() -> None:
+    """静态守卫：本模块永远不 import 指标主链（total_market_cap 的产地）。"""
+    import app.core.ah_metrics as ah_metrics_module
+
+    source = Path(ah_metrics_module.__file__).read_text(encoding="utf-8")
+    assert "app.core.indicators" not in source
+    assert "indicator_calculator" not in source
+
+
+def test_identity_status_ok_when_counts_match_and_deviation_within_tolerance() -> None:
+    result = ah_dividend_yield(0.5, 0.5, 10.0, 8.0, 0.9, a_events=1, h_events=1)
+    assert result["identity_status"] == "ok"
+    assert result["identity_ok"] is True
+    assert result["identity_deviation_pct"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_identity_status_mismatch_when_counts_match_but_identity_fails() -> None:
+    result = ah_dividend_yield(0.5, 0.53, 10.0, 8.0, 0.9, a_events=1, h_events=1)
+    assert result["identity_status"] == "mismatch"
+    assert result["identity_ok"] is False
+    assert result["identity_deviation_pct"] > 5.0
+    # 各算各的：两侧股息率照常出数，reason 不得置位（不是错误）
+    assert result["reason"] is None
+    assert result["a_yield"] == pytest.approx(0.05)
+    assert result["h_yield"] == pytest.approx(0.53 / (8.0 * 0.9))
+
+
+def test_identity_status_not_comparable_when_event_counts_differ() -> None:
+    result = ah_dividend_yield(0.5, 0.5, 10.0, 8.0, 0.9, a_events=1, h_events=2)
+    assert result["identity_status"] == "not_comparable"
+    assert result["identity_deviation_pct"] is None
+    assert result["identity_ok"] is None
+    assert result["reason"] is None  # 笔数不一致不是错误
+    assert result["h_yield"] == pytest.approx(0.5 / (8.0 * 0.9))
+
+
+def test_identity_status_insufficient_data_when_h_side_missing() -> None:
+    """H 侧缺分红 → H 侧为 None，A 侧照常出数；恒等式判 insufficient_data。"""
+    result = ah_dividend_yield(0.5, None, 10.0, 8.0, 0.9)
+    assert result["reason"] == "missing_h_dividend"
+    assert result["a_yield"] == pytest.approx(0.05)
+    assert result["h_yield"] is None
+    assert result["h_yield_after_tax"] is None
+    assert result["identity_status"] == "insufficient_data"
+    assert result["identity_deviation_pct"] is None
+    assert result["identity_ok"] is None
+
+
+def test_identity_deviation_pct_only_present_for_ok_and_mismatch() -> None:
+    cases = (
+        (0.5, 1, 1),   # ok
+        (0.53, 1, 1),  # mismatch
+        (0.5, 1, 2),   # not_comparable
+        (0.5, 2, 1),   # not_comparable
+    )
+    for div_h, a_events, h_events in cases:
+        result = ah_dividend_yield(
+            0.5, div_h, 10.0, 8.0, 0.9, a_events=a_events, h_events=h_events,
+        )
+        status = result["identity_status"]
+        assert (result["identity_deviation_pct"] is not None) is (status in {"ok", "mismatch"}), (
+            status,
+            result["identity_deviation_pct"],
+        )
+
+
+def test_snapshot_identity_not_comparable_keeps_row_usable(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """A 1 次 / H 2 次（正常现象）→ not_comparable，但行仍 status=ok 且字段齐全。"""
+    _seed_standard_inputs(duckdb_store)
+    _seed_a_dividend(duckdb_store, "601398", "2025-06-30", 0.5)
+    _seed_h_dividend(duckdb_store, "01398", "2025-06-25", hkd=0.55, cny=0.5)
+    _seed_h_dividend(duckdb_store, "01398", "2025-12-20", hkd=0.55, cny=0.5)
+
+    row = build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)[0]
+    assert row["window"]["a_events"] == 1
+    assert row["window"]["h_events"] == 2
+    assert row["identity_status"] == "not_comparable"
+    assert row["identity_deviation_pct"] is None
+    assert row["identity_ok"] is None
+    assert row["status"] == "ok", row["reason"]  # 绝不因恒等式不可比而丢弃
+    assert row["h_share_market_cap_cny"] is not None
+    assert row["a_yield"] == pytest.approx(0.5 / 10.0)
+    assert row["h_yield"] == pytest.approx(1.0 / (8.2 * 0.9))  # H 自己 2 笔合计 1.0
+
+
+def test_snapshot_identity_mismatch_keeps_row_usable(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _seed_standard_inputs(duckdb_store)
+    _seed_a_dividend(duckdb_store, "601398", "2025-06-30", 0.5)
+    _seed_h_dividend(duckdb_store, "01398", "2025-06-25", hkd=0.59, cny=0.53)
+
+    row = build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)[0]
+    assert row["identity_status"] == "mismatch"
+    assert row["identity_deviation_pct"] > 5.0
+    assert row["status"] == "ok", row["reason"]
+    assert row["ah_total_market_cap_cny"] is not None
+
+
+def test_snapshot_identity_insufficient_on_incomplete_row(
+    duckdb_store: DuckDBStore,
+) -> None:
+    _seed_meta(duckdb_store, "601398", "工商银行", 100, 60)
+    _seed_a_price(duckdb_store, "601398", "2026-01-05", 10.0)
+    _seed_fx(duckdb_store, "2026-01-02", 0.9)
+
+    row = build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)[0]
+    assert row["reason"] == "missing_h_price"
+    assert row["status"] == "incomplete"
+    assert row["identity_status"] == "insufficient_data"
+    assert row["identity_deviation_pct"] is None

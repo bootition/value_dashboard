@@ -1,12 +1,34 @@
 ---
 title: 2026-11-15 权益分派实施公告 PDF 补齐隔离区除权日：可安全批量执行 + 真实抽样命中率
-status: approved
+status: superseded
+superseded-by: docs/reports/123（分红除权日改走结构化源，同日；以实际落盘的 reports/123 文件名为准）
 category: reports
 created: 2026-11-15
 last-reviewed: 2026-11-15
 ---
 
 # 2026-11-15 分红除权日 PDF 补齐链（A 批量安全 / B 命中率 / C 依赖）
+
+> **⚠️ 本报告结论已作废（status: superseded，2026-11-15）** —— 除权日改走结构化源，
+> 不再需要下载公告 PDF；本报告的「PDF 可写 74%」不再是当前依据。作废理由见下节，
+> 现行方案见 `docs/reports/123`。
+
+## 为什么作废
+
+1. **结构化源直接给除权日**：巨潮 `akshare.stock_dividend_cninfo` 与东财
+   `akshare.stock_fhps_detail_em` 都直接返回「股权登记日 / 除权日 / 派息日 /
+   每 10 股派息」等字段，且能追到 1992 年（万科 1992-03-20、方正科技 1993-03-22）。
+   既然字段是结构化的，就**没有任何理由**再下载公告 PDF、从正文里抠日期。
+2. **抽样 5 条隔离记录里 4 条日期本来就是对的**：隔离区里相当一部分行并不缺数据，
+   缺的是「从结构化源核对一遍」这一步——本报告按「解析 PDF 才能写」估算的缺口因此偏大。
+3. **结论已被取代**：本报告的核心结论（正文取回 74%、最终可写 74%、全量预计可写
+   ≈5,900 行，需联网 `uv add pypdf && uv lock` 才能复现）建立在 PDF 解析链上；
+   该链已整体删除（`scripts/resolve_dividend_ex_dates.py`、
+   `app/core/pdf/dividend_parser.py`、`tests/regression/test_dividend_pdf_parser.py`），
+   结论由 `docs/reports/123` 的结构化源方案取代。
+4. 仍然有效的部分：本报告 §2 的「长循环 + DuckDB 连接 + HTTP/sleep 必崩」根因与
+   三段式（只读 → 纯网络 → 短事务）隔离结论继续成立，已登记在
+   `docs/runbooks/ops-knowledge-base.md` D47，后续结构化源脚本同样遵守该纪律。
 
 > 前置：`reports/120`（数据资产修复）、`docs/STATUS.md` §80（`dividends_quarantine` 8,467 行
 > 不可核验如实隔离，PDF 解析当时被降级为"远期"）。

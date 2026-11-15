@@ -754,13 +754,14 @@ def test_schema_ddl_drift_detects_missing_table(
     duckdb_store: DuckDBStore, health_repo: Path
 ) -> None:
     # 2026-11-15：csmar_fi_t6 已迁冷库（schema.py 不再声明），漂移规则再也看不到它；
-    # 用仍在 schema.py 里的对照表 csmar_risk_factors 验"缺表"分支。
-    duckdb_store.execute_script("DROP TABLE csmar_risk_factors")
+    # 用仍在 schema.py 里的热表 financial_sector_items 验"缺表"分支
+    # （2026-11-15：csmar_risk_factors 已迁冷库，不再是 schema 声明的表）。
+    duckdb_store.execute_script("DROP TABLE financial_sector_items")
 
     findings = _findings(_payload(duckdb_store, repo_root=health_repo), "SCHEMA_DDL_DRIFT")
 
     assert len(findings) == 1
-    assert findings[0]["field"] == "csmar_risk_factors"
+    assert findings[0]["field"] == "financial_sector_items"
     assert findings[0]["metric"] == "declared_not_in_db"
     assert findings[0]["level"] == "P1"
 

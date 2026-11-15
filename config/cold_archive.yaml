@@ -1,9 +1,9 @@
-# 冷库清单：CSMAR 历史归档域（16 张表 / 约 455 万行）
+# 冷库清单：CSMAR 历史归档域（17 张表；行数与体积待导出后实测）
 # =============================================================================
 # 登记原则（为什么按"可变性"分层）
 # ---------------------------------
 # 这批表**源截止 2025-03-31、永不再变**，却和每天变化的行情/三表/指标挤在同一个
-# 28GB 正式库里，使备份、哈希核对、离线重建都要为这 455 万行重复付费。
+# 28GB 正式库里，使备份、哈希核对、离线重建都要为这几百万行重复付费。
 # 按可变性把它们移出主库（Parquet + ZSTD 冷库，主库仅留视图）是唯一能一次付清的做法。
 #
 # 为什么不是"按表大小"分层
@@ -19,10 +19,23 @@
 #   source_cutoff  来源数据截止日（冷库内容的时间上界；之后不会再有新行）
 #   consumers      当前读取该表的代码路径（登记消费者，便于以后知道"谁在用"；
 #                  空列表 = 当前无运行时消费者，只有历史导入脚本写过）
+#   domain         域归类（与 config/asset_reference.yaml 的 domain 对齐；仅供人读，
+#                  load_config() 不校验）
+#   rows_at_review 复审时的库内行数（仅供参考；权威行数以导出 manifest 的 count 为准）
+#   physical_switch 物理切换状态（load_config() 校验取值）：
+#                  switched（默认）= 已完成 export/create-views/drop，主库只剩视图；
+#                  pending = 已登记（照常导出、算进清单总数），但 schema.py 里 DDL 还在、
+#                  主库仍是物理表，物理切换由主控按顺序执行。
 #
 # 域纪律：本清单里的表都**不进筛选界面**，冷存对用户可见能力零影响。
-# 例外登记：csmar_risk_factors 同样是静态数据，但本轮**有意保留在主库**做对照，
-# 待本轮冷热分离验证稳定后再单独评估（需要时在 tables 下追加即可）。
+# 2026-11-15 增补：`csmar_risk_factors`（67,193 行）原为"留主库做对照"的例外，
+# 现已补登记进本清单（**16 张 → 17 张**），数据不删除、只换承载方式。
+# 它带 `physical_switch: pending` —— 已登记、照常导出，但仍是主库物理表：
+# 物理切换（export → create-views → drop-tables）由主控在正式库按顺序执行。
+# 切换前 `app/core/storage/schema.py` 里它的 CREATE TABLE / CREATE INDEX 必须先
+# 删干净，否则 `cold_archive_switch.py --create-views` 会因残留 DDL 整体拒绝
+# （EXIT_REFUSED，这是有意的安全门）；DDL 删完再把本条改成 `physical_switch:
+# switched`（或整行删掉该键，默认即 switched）。
 # 例外登记：`financial_sector_items` 因含热数据（2025Q2+ 东财补采）**不迁冷库** ——
 # 2026-11-15 起 `app/core/supplement.py` 的 FINANCIAL_SECTOR 持续向它写
 # source='eastmoney_f10' 的行（2025-06-30~2026-09-30 实测 582 行，之后每季新增），
@@ -126,3 +139,17 @@ tables:
     source_cutoff: "2025-03-31"
     consumers:
       - scripts/export_data_package.py
+
+  # ── CSMAR 风险治理因子域（1 张，2026-11-15 补登记；清单 16 → 17 张）───────
+  # 来源：CSMAR 数据包 `财务指标/BDT_FinIndex.dta`（`scripts/import_csmar_indicator_supplement.py`
+  # 一次性导入，之后无任何写路径）。归入本清单只改**承载方式**（主库物理表 → Parquet
+  # + read_parquet 视图），**不删数据**。
+  - table: csmar_risk_factors
+    domain: csmar_disclosure
+    rows_at_review: 67193
+    physical_switch: switched
+    reason: "风险治理因子域（22 列，源 BDT_FinIndex.dta）：波动率/非债务税盾/银行贷款占比/短贷依赖等**需要多年序列**才能算的因子，本项目不自算也不进筛选界面；运行时零引用（登记于 config/asset_reference.yaml），仅数据包发布要带上。静态归档域，源截止 2025-03-31。"
+    source_cutoff: "2025-03-31"
+    consumers:
+      - scripts/export_data_package.py
+

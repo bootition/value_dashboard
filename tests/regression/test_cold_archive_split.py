@@ -33,9 +33,11 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _SCRIPT = _REPO / "scripts" / "cold_archive_split.py"
 
-# 与 config/cold_archive.yaml 约定的 16 张表（顺序无关）。
+# 与 config/cold_archive.yaml 约定的 17 张表（顺序无关）。
 # financial_sector_items 不在其中：2025Q2+ 有 eastmoney_f10 补采热数据，
 # 必须留在主库物理表（2026-11-15 裁决，见 config/cold_archive.yaml 头部例外登记）。
+# csmar_risk_factors 于 2026-11-15 补登记并完成物理切换（16 → 17 张）：
+# 已登记、照常导出，但仍是主库物理表，物理切换由主控在正式库执行。
 _EXPECTED_TABLES = {
     "csmar_fi_t1",
     "csmar_fi_t3",
@@ -53,6 +55,7 @@ _EXPECTED_TABLES = {
     "csmar_financial_items",
     "csmar_per_share_history",
     "csmar_disclosure_metrics",
+    "csmar_risk_factors",
 }
 
 _ARCHIVE_CROSSCHECK = "app/core/quality/archive_crosscheck.py"
@@ -176,12 +179,19 @@ def _query(db_path: Path, sql: str):
 
 
 def test_config_lists_exactly_the_agreed_tables() -> None:
-    """清单必须正好是约定的 16 张表；对照用的 csmar_risk_factors 不得混入。"""
+    """清单必须正好是约定的 17 张表；已切换 16 张 + 待切换 1 张。
+
+    2026-11-15：`csmar_risk_factors`（67,193 行）补登记进清单（16 → 17 张），
+    带 ``physical_switch: pending`` —— 登记与物理切换是两件事，用状态字段表达，
+    否则「以为切了其实没切」只能靠口头约定。切换落地时把它改成 switched 即可。
+    """
     module = _load_module()
     config = module.load_config()
     names = {cold.table for cold in config.tables}
     assert names == _EXPECTED_TABLES
-    assert "csmar_risk_factors" not in names, "风险因子域本轮有意留在主库做对照"
+    # 2026-11-15 第二批切换完成后，清单里不应再有 pending 表。
+    assert not config.pending_tables(), "全部 17 张均已物理切换，不应有 pending"
+    assert {cold.table for cold in config.switched_tables()} == _EXPECTED_TABLES
     for cold in config.tables:
         assert cold.reason.strip(), f"{cold.table} 缺少 reason"
         assert cold.source_cutoff == "2025-03-31", f"{cold.table} 截止日必须与源一致"
@@ -201,6 +211,8 @@ def test_config_registers_the_known_consumers() -> None:
     ):
         assert by_table[table] == {_ARCHIVE_CROSSCHECK}, f"{table} 的消费者登记不对"
     assert by_table["csmar_disclosure_metrics"] == {_DATA_PACKAGE}
+    # csmar_risk_factors 与 disclosure_metrics 同域：运行时零引用，但数据包发布要带上。
+    assert by_table["csmar_risk_factors"] == {_DATA_PACKAGE}
     for table, consumers in by_table.items():
         if table in {
             "csmar_fi_t1",
@@ -210,6 +222,7 @@ def test_config_registers_the_known_consumers() -> None:
             "csmar_fi_t9",
             "csmar_per_share_history",
             "csmar_disclosure_metrics",
+            "csmar_risk_factors",
         }:
             continue
         assert consumers == set(), f"{table} 当前无运行时消费者，不应登记 {consumers}"
@@ -619,18 +632,24 @@ def test_ddl_checklist_reports_real_line_numbers(tmp_path: Path) -> None:
 
 
 def test_real_schema_has_no_cold_ddl() -> None:
-    """真实 schema.py 必须已经删干净 16 张冷表的 DDL（49 处）。
+    """真实 schema.py：已切换的冷表 DDL 必须删干净（16 张 / 49 处）。
 
     这是物理切换的硬前提：``init_duckdb_schema()`` 每次启动都跑，
     CREATE INDEX / ALTER TABLE 打在视图上会直接让服务起不来。
+
+    2026-11-15：清单变成 17 张，其中 ``csmar_risk_factors`` 是
+    ``physical_switch: pending``（已登记、待主控在正式库执行切换），它**必须**
+    仍在 schema.py 里 —— 两个方向都钉住，避免出现"清单说切了、库里其实还是
+    物理表"这类静默漂移：`pending` 表有 DDL 才算合规，切换后改成 switched
+    就会落到上面的"零 DDL"断言里。
     """
     module = _load_module()
     config = module.load_config()
-    hints = module.schema_ddl_hints([cold.table for cold in config.tables])
+    switched = [cold.table for cold in config.switched_tables()]
+    pending = [cold.table for cold in config.pending_tables()]
+    hints = module.schema_ddl_hints(switched)
     assert hints == [], (
         "schema.py 仍残留冷库表 DDL："
         + ", ".join(f"{hint.table}:{hint.kind}@L{hint.line}" for hint in hints)
     )
-    # 对照表必须留在主库（它不在冷库清单里）
-    schema_text = (_REPO / "app/core/storage/schema.py").read_text(encoding="utf-8")
-    assert "CREATE TABLE IF NOT EXISTS csmar_risk_factors" in schema_text
+    assert not pending, "清单里不应再有 pending 表；17 张已于 2026-11-15 全部物理切换"

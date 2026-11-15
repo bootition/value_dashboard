@@ -23,13 +23,35 @@
 #     并写明兑现路径已打通）。
 #  2. 新增导入域时必须同时登记到这里（哪怕预期马上就会用）。
 #  3. 退役（DROP）之前先看 `retirement_candidate`：只有当**替代路径已存在**才可退役。
+#
+# 退役口径（2026-11-15 补登记，必读）
+# ----------------------------------
+# 本清单里的「退役」= **迁冷库（Parquet + read_parquet 视图），不删除数据**，
+# 不是 `DROP TABLE`。11 张表全部已按可变性分层退役（清单见 `config/cold_archive.yaml`）：
+#   - **11 张全部已物理切换**（2026-11-15 第二批收官，冷库包
+#     `D:/vd-cold-archive-20261115-r17`：17 张 / 4,619,914 行 / 411.4 MB，主库只剩视图）；
+#   - `csmar_risk_factors`（67,193 行）随第二批一起切换，`physical_switch: switched`。
+# 恢复方式（任选其一，都不需要备份）：
+#   - `scripts/cold_archive_switch.py` 逆向操作（`DROP VIEW` + 把
+#     `<表名>__cold_parked` 改名回来；已删停车表时用下一条）；
+#   - `CREATE TABLE <表名> AS SELECT * FROM read_parquet('<冷库包>/<表名>.parquet');`
+# 逐条退役状态记在 `cold_archive_state` 字段（doctor 的 ZERO_REFERENCE_ASSET 不读它，
+# 仅供人读与追溯；`status`/条数口径未改）。
+#
+# 条目字段
+# --------
+#   table / domain / columns / rows_at_review  表身份与复审时的库内规模
+#   reason              为什么它是零引用
+#   fulfillment         兑现路径（把它们接进产品）——与"退役到冷库"是两条互斥路线
+#   retirement_candidate 是否已具备退役条件（替代路径存在）
+#   cold_archive_state  退役到冷库的状态与恢复方式（新增，2026-11-15）
 
 meta:
-  last-reviewed: "2026-11-14"
+  last-reviewed: "2026-11-15"
   source: "docs/reports/119（数据包价值兑现度审查）§2.2 字段级使用率表"
   measure_command: "vd data doctor --json | jq '.result.data.findings[] | select(.code==\"ZERO_REFERENCE_ASSET\")'"
 
-# 表名 / 域 / 为什么它是零引用 / 兑现路径 / 是否退役候选
+# 表名 / 域 / 为什么它是零引用 / 兑现路径 / 是否退役候选 / 冷库退役状态
 zero_reference_tables:
   - table: csmar_balance_items
     domain: csmar_statement_items
@@ -38,6 +60,7 @@ zero_reference_tables:
     reason: "CSMAR 资产负债表未映射科目（58 列）；主链 balance_sheet 只映射了核心科目，其余从未被读"
     fulfillment: "扩 balance_sheet 映射（需先裁决口径，见 config/csmar_field_verdict.json）"
     retirement_candidate: false
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_income_items
     domain: csmar_statement_items
     rows_at_review: 354877
@@ -45,6 +68,7 @@ zero_reference_tables:
     reason: "CSMAR 利润表未映射科目；与主链 income_statement 重叠但未被任何指标读取"
     fulfillment: "扩 income_statement 映射（同上）"
     retirement_candidate: false
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_cashflow_items
     domain: csmar_statement_items
     rows_at_review: 339035
@@ -52,6 +76,7 @@ zero_reference_tables:
     reason: "CSMAR 现金流量表（直接法）未映射科目；自由现金流靠 cash_flow_activity 承接，本表未读"
     fulfillment: "扩 cash_flow 映射，或明确退役（先比对 capex 与 cash_flow_activity）"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_financial_items
     domain: csmar_financial_items
     rows_at_review: 232421
@@ -59,6 +84,7 @@ zero_reference_tables:
     reason: "金融专用科目 109 列 / 23 万行零引用（银行/券商口径）"
     fulfillment: "做金融行业专用指标（配合 financial_sector_items），否则退役"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_disclosure_metrics
     domain: csmar_disclosure
     rows_at_review: 243202
@@ -66,6 +92,7 @@ zero_reference_tables:
     reason: "披露类指标只被导入/导出/测试引用，无运行时读取"
     fulfillment: "接入公司治理/披露质量维度（PRD 未排期）"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_risk_factors
     domain: csmar_disclosure
     rows_at_review: 67193
@@ -73,6 +100,7 @@ zero_reference_tables:
     reason: "风险因子域只被导入/导出引用，无运行时读取"
     fulfillment: "接入财务风险预警维度（PRD 未排期）"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet，2026-11-15 第二批切换，17 张之一），不删除数据；恢复方式：`CREATE TABLE csmar_risk_factors AS SELECT * FROM read_parquet('D:/vd-cold-archive-20261115-r17/csmar_risk_factors.parquet')`"
   # 2026-11-15（reports/121）：`financial_sector_items` 已从零引用清单移除 ——
   # `app/core/supplement.py::FINANCIAL_SECTOR` 现在会写它（6 次引用），
   # 金融股 25 个专用科目已通过东财 F10 补到 2025Q2+。保留本注释用于追溯。
@@ -83,6 +111,7 @@ zero_reference_tables:
     reason: "年报公布日已由 financial_report_dates 承接（76,262 条，97.7% 有效），本表无人读"
     fulfillment: "已兑现：改由 financial_report_dates + app/core/point_in_time.py 提供口径"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_fi_t6
     domain: csmar_indicator_archive
     rows_at_review: 301294
@@ -90,6 +119,7 @@ zero_reference_tables:
     reason: "FI_T6 指标族未被 archive_crosscheck 登记为可核验概念（口径不同，登记会造假失败）"
     fulfillment: "先做口径裁决（csmar_field_verdict.json），再决定是否登记核验对"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_fi_t8
     domain: csmar_indicator_archive
     rows_at_review: 302716
@@ -97,6 +127,7 @@ zero_reference_tables:
     reason: "FI_T8 指标族未被任何核验对使用"
     fulfillment: "同 csmar_fi_t6：先口径裁决"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_fi_t10
     domain: csmar_indicator_archive
     rows_at_review: 264772
@@ -104,6 +135,7 @@ zero_reference_tables:
     reason: "FI_T10 指标族未被任何核验对使用"
     fulfillment: "同 csmar_fi_t6：先口径裁决"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   - table: csmar_fi_t11
     domain: csmar_indicator_archive
     rows_at_review: 260092
@@ -111,3 +143,4 @@ zero_reference_tables:
     reason: "FI_T11 指标族未被任何核验对使用"
     fulfillment: "同 csmar_fi_t6：先口径裁决"
     retirement_candidate: true
+    cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"

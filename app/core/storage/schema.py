@@ -1005,33 +1005,9 @@ CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock
 --   tangible_asset_ratio     有形资产比率 / admin_expense_rate 管理费用率
 --   book_to_market_bdt       账面市值比 / effective_tax_rate 实际税率
 -- 域纪律：独立域，不进筛选界面（数据截止 2025Q1 且部分与自算指标重叠）。
-CREATE TABLE IF NOT EXISTS csmar_risk_factors (
-    stock_code                VARCHAR NOT NULL,
-    report_date               DATE    NOT NULL,
-    financial_liability       DOUBLE,
-    operating_liability       DOUBLE,
-    book_to_market_bdt        DOUBLE,
-    admin_expense_rate        DOUBLE,
-    tangible_asset_ratio      DOUBLE,
-    working_capital_turnover  DOUBLE,
-    cash_equivalents_turnover DOUBLE,
-    revenue_growth_bdt        DOUBLE,
-    non_debt_tax_shield       DOUBLE,
-    effective_tax_rate        DOUBLE,
-    profits_volatility_3y     DOUBLE,
-    cashflow_volatility_3y    DOUBLE,
-    interest_coverage_ratio   DOUBLE,
-    tax_bearing               DOUBLE,
-    bank_loan_ratio           DOUBLE,
-    short_loan_dependence     DOUBLE,
-    shareholders_occupy       DOUBLE,
-    source                    VARCHAR NOT NULL,
-    fetch_time                TIMESTAMP NOT NULL,
-    batch_id                  VARCHAR NOT NULL,
-    PRIMARY KEY (stock_code, report_date)
-);
-CREATE INDEX IF NOT EXISTS idx_csmar_risk_factors_stock
-    ON csmar_risk_factors (stock_code, report_date);
+-- 冷库表 csmar_risk_factors：已迁至 Parquet 冷库（2026-11-15，reports/123），
+-- 见 config/cold_archive.yaml + scripts/cold_archive_split.py / scripts/cold_archive_switch.py；
+-- 主库仅留同名视图。恢复：CREATE TABLE ... AS SELECT * FROM read_parquet(...)。
 
 
 -- ── CSMAR 剩余指标表全量导入域（2026-09-19 v34）──────────────────────
@@ -2010,10 +1986,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         )
         # v33: CSMAR 披露指标域 + 风险治理因子域（2026-09-19，"榨干" R12）。
 
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_csmar_risk_factors_stock "
-            "ON csmar_risk_factors (stock_code, report_date)"
-        )
+        # csmar_risk_factors 已迁冷库（2026-11-15），索引不再在主库创建。
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)

@@ -157,8 +157,8 @@ def test_csmar_per_share_history_table_shape(duckdb_store: DuckDBStore) -> None:
 
 # ─── v33~v36：CSMAR 全量导入域（「榨干」收尾）───────────────────────
 
-# 冷库清单（config/cold_archive.yaml）里的 16 张静态归档表：2026-11-15 起
-# 主库只有 read_parquet 视图，schema.py 不再声明 DDL，测试库也不建物理表。
+# 冷库清单（config/cold_archive.yaml）里**已物理切换**的 16 张静态归档表：2026-11-15
+# 起主库只有 read_parquet 视图，schema.py 不再声明 DDL，测试库也不建物理表。
 CSMAR_COLD_TABLES = (
     "csmar_fi_t1", "csmar_fi_t3", "csmar_fi_t4", "csmar_fi_t5",
     "csmar_fi_t6", "csmar_fi_t8", "csmar_fi_t9",   # fi_t7 已删（杠杆本项目已自算）
@@ -166,9 +166,11 @@ CSMAR_COLD_TABLES = (
     "csmar_balance_items", "csmar_income_items", "csmar_cashflow_items",
     "csmar_financial_items", "csmar_per_share_history",
     "csmar_disclosure_metrics",
+    "csmar_risk_factors",   # 2026-11-15 第二批：风险治理因子域也迁冷库（17 张）
 )
-# 留在主库的对照表（不在冷库清单里）：风险治理因子域。
-CSMAR_HOT_TABLES = ("csmar_risk_factors",)
+# 2026-11-15 第二批：`csmar_risk_factors` 也已完成物理切换（清单 16 → 17 张），
+# DDL 已从 schema.py 删除，因此这里不再有"仍留主库"的 CSMAR 表。
+CSMAR_HOT_TABLES: tuple[str, ...] = ()
 # 注：csmar_aiq_annual（54 列全与 FI_T* 重叠）与 csmar_fi_t7（杠杆已自算）
 # 已在「榨干纠偏」中连同 DDL 一起删除；冷库表于 2026-11-15 物理切换为视图。
 
@@ -182,12 +184,10 @@ def test_csmar_full_import_tables_exist(duckdb_store: DuckDBStore) -> None:
     from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
 
     assert DUCKDB_SCHEMA_VERSION >= 36
-    for table in CSMAR_HOT_TABLES:
-        columns = _columns(duckdb_store, table)
-        assert columns, f"{table} 未创建"
-        assert {"stock_code", "report_date", "source", "fetch_time", "batch_id"} <= columns, (
-            f"{table} 缺溯源列"
-        )
+    # 2026-11-15：CSMAR 归档域（17 张）已全部转为 Parquet 冷库视图，
+    # 验收库里不再由 schema.py 建任何 csmar 物理表，故此处只做版本断言 +
+    # 反向守护（见 test_cold_archive_tables_are_not_declared_in_schema）。
+    assert CSMAR_HOT_TABLES == ()
 
 
 def test_cold_archive_tables_are_not_declared_in_schema() -> None:
@@ -202,7 +202,9 @@ def test_cold_archive_tables_are_not_declared_in_schema() -> None:
         assert f"CREATE TABLE IF NOT EXISTS {table}" not in DUCKDB_SCHEMA_V1, (
             f"{table} 已迁 Parquet 冷库，schema.py 不应再建物理表"
         )
-    assert "CREATE TABLE IF NOT EXISTS csmar_risk_factors" in DUCKDB_SCHEMA_V1
+    assert "CREATE TABLE IF NOT EXISTS csmar_risk_factors" not in DUCKDB_SCHEMA_V1, (
+        "csmar_risk_factors 已于 2026-11-15 迁冷库，schema.py 不应再建物理表"
+    )
     # financial_sector_items 是**热表**（2025Q2+ 东财补采在写），必须留在主库
     # 物理表里 —— 它一旦被误判成冷库表，补采就写不进去、582 行热数据也会消失。
     assert "CREATE TABLE IF NOT EXISTS financial_sector_items" in DUCKDB_SCHEMA_V1, (
@@ -239,12 +241,15 @@ def test_official_weighted_roe_is_imported(duckdb_store: DuckDBStore) -> None:
 
 
 def test_risk_factors_imported(duckdb_store: DuckDBStore) -> None:
-    """需要多年序列才能自算的风险因子已入库。"""
-    columns = _columns(duckdb_store, "csmar_risk_factors")
-    assert {
-        "profits_volatility_3y", "cashflow_volatility_3y", "non_debt_tax_shield",
-        "bank_loan_ratio", "short_loan_dependence", "tax_bearing",
-    } <= columns
+    """风险治理因子域已于 2026-11-15 迁冷库（17 张），验收库不再建该表。
+
+    列口径的守护改在冷库包上做：``test_cold_archive_switch`` 校验
+    manifest 的 rows/columns/sha256；这里只断言主库不再声明它。
+    """
+    from app.core.storage.schema import DUCKDB_SCHEMA_V1
+
+    assert "CREATE TABLE IF NOT EXISTS csmar_risk_factors" not in DUCKDB_SCHEMA_V1
+    assert not _columns(duckdb_store, "csmar_risk_factors")
 
 
 def test_csmar_redundant_cleanup_kept_only_primary_variants() -> None:
@@ -258,8 +263,6 @@ def test_csmar_redundant_cleanup_kept_only_primary_variants() -> None:
 
     assert "csmar_aiq_annual" not in DUCKDB_SCHEMA_V1, "AIQ 表 54 列全部与 FI_T* 重叠，应已删除"
     assert "csmar_fi_t7" not in DUCKDB_SCHEMA_V1, "杠杆表本项目已自算，应已删除"
-    # 冷库表 2026-11-15 起不再建物理表（主库改 read_parquet 视图），
-    # 但对照表 csmar_risk_factors 必须保留。
+    # 冷库表 2026-11-15 起不再建物理表（主库改 read_parquet 视图），17 张全部覆盖。
     for migrated in CSMAR_COLD_TABLES:
         assert f"CREATE TABLE IF NOT EXISTS {migrated}" not in DUCKDB_SCHEMA_V1
-    assert "CREATE TABLE IF NOT EXISTS csmar_risk_factors" in DUCKDB_SCHEMA_V1

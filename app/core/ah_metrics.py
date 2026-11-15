@@ -5,23 +5,41 @@
 
 口径纪律（强制，后续改动不得破坏）
 ==================================
-1. **不得修改现有 `indicator_snapshot.total_market_cap`。** 该字段当前是
-   `A 股收盘价 × 总股本`，而总股本含 H 股，因此 203 只 A+H 的市值/PE/PB/PS
-   系统性偏大（工行 601398 实测：8.85 × 356,406,257,089 = 3,154,195,375,237.65，
-   与库内 total_market_cap 完全一致）。本任务只新增 `total_market_cap_ah`
-   等独立结果，不动主链、不回写快照。修复主链是单独立项，不在本模块范围。
-2. **日期对齐：H 价/FX 必须取「≤ A 股价格日」的最近一条。** 统一走 `_asof`
+1. **行业口径已核实（2026-11-16 实时行情）：`total_market_cap` 不动、不切换。**
+   腾讯/同花顺/东财的 A 股页面「总市值」= **A 股价格 × 总股本**（不按 A/H 分开
+   算）。实测工行 31,541.95 亿、平安 9,741.91 亿、中石油 22,676.30 亿，与库内
+   `indicator_snapshot.total_market_cap` **完全一致**（工行 601398：8.85 ×
+   356,406,257,089 = 3,154,195,375,237.65）。因此该字段**本身就是行业口径**，
+   **谁都不得改它**，本模块也**不得**读写它（`app/core/indicators/calculator.py`
+   同样不许碰）。修复主链是单独立项，不在本模块范围。
+2. **H 股市值单独一列（行业软件也单独显示「港股市值」）。**
+   `h_share_market_cap_cny` = `H 股价格 × H 股股本 × HKD→CNY 汇率`，
+   **单位：人民币元**。它是独立曝光的明确字段，不是 `total_market_cap` 的拆分，
+   也不回写快照。`ah_total_market_cap_cny`（= A 股部分 + H 股部分，与既有
+   `total_market_cap_ah` 同值）**只是参考量，不是行业口径的总市值**——行业口径
+   见 `indicator_snapshot.total_market_cap`。
+3. **AH 股息率「各算各的」，恒等式不是门禁（2026-11-16 裁决，写死在此）。**
+   成熟软件从不用「A 股息率 ×(1+溢价) = H 股息率」做约束：A 用 A 的分红与 A 的
+   股价、H 用 H 的分红与 H 的股价。本模块因此对 A/H **各自独立**计算——任一侧
+   缺数据只让**该侧**为 None，**绝不**因另一侧缺失而整体返回 None，也**绝不**把
+   恒等式失败当成错误或丢弃依据。`identity_ok` / `identity_deviation_pct` 已降级
+   为「**仅当两端分红笔数一致时才计算**」的参考值：笔数不一致 →
+   `identity_status='not_comparable'` 且 `identity_deviation_pct=None`。
+   调用方**不得**因 `identity_status ∈ {'mismatch','not_comparable'}` 丢弃该股票
+   ——实测 203 只里 55 只恒等式不成立，绝大多数是「A 这段窗口分了 1 次、H 分了
+   2 次」这类正常现象，不是数据错误。
+4. **日期对齐：H 价/FX 必须取「≤ A 股价格日」的最近一条。** 统一走 `_asof`
    （DuckDB 子查询，`ORDER BY trade_date DESC LIMIT 1`）。H 股停牌时允许用更早
    收盘价，但结果带 `h_price_staleness_days` 供调用方判断；绝不允许用晚于
    A 股价格日的 H 价或汇率（那会引入未来数据）。
-3. **税只做参数，不内置裁决。** H 股红利税率默认 `tax_rate=0.20`（港股通个人
+5. **税只做参数，不内置裁决。** H 股红利税率默认 `tax_rate=0.20`（港股通个人
    20%），结果同时返回税前 `h_yield` 与税后 `h_yield_after_tax`。本模块不
    叠加公司层面代扣（10%），需要时由调用方传 `tax_rate`。
-4. **除权日不同步（H 比 A 中位数早 24 天）→ 用「近 12 个月已实施」口径。**
+6. **除权日不同步（H 比 A 中位数早 24 天）→ 用「近 12 个月已实施」口径。**
    A、H **各自按自己的 `ex_date`** 在同一个自然窗口 `(A 股价格日 − 1 年,
    A 股价格日]` 内累计，禁止用 A 股 ex_date 代替 H 股。返回的 `window` 字段
    记录窗口起止、两边事件数与口径说明。
-5. **单位（防止第 3 次 100 倍事故）**：市值一律人民币元；`ah_premium_pct`
+7. **单位（防止第 3 次 100 倍事故）**：市值一律人民币元；`ah_premium_pct`
    是百分点（38.9 表示 A 股比 H 股贵 38.9%）；所有 `*_yield` 是**小数比例**
    （0.05 = 5%），与 `indicator_snapshot.dividend_yield` 同口径，不是
    `ttm_dividend_yield` 的百分数口径。返回里的 `units` 字段显式标注。
@@ -46,16 +64,29 @@ from __future__ import annotations
 
 import math
 from datetime import date, datetime
-from typing import Any
+from typing import Any, Literal
 
 __all__ = [
+    "IDENTITY_STATUS_INSUFFICIENT",
+    "IDENTITY_STATUS_MISMATCH",
+    "IDENTITY_STATUS_NOT_COMPARABLE",
+    "IDENTITY_STATUS_OK",
     "ah_dividend_yield",
     "ah_market_cap",
     "build_ah_snapshot",
     "h_share_count",
 ]
 
-# 恒等式容差：|H股息率 − A股息率×(1+溢价率)| / |期望值| > 5% 判定失败
+# 恒等式四态（口径纪律 §3）。`identity_deviation_pct` 只在 ok / mismatch 两态有值。
+IdentityStatus = Literal["ok", "mismatch", "not_comparable", "insufficient_data"]
+IDENTITY_STATUS_OK = "ok"
+IDENTITY_STATUS_MISMATCH = "mismatch"
+IDENTITY_STATUS_NOT_COMPARABLE = "not_comparable"
+IDENTITY_STATUS_INSUFFICIENT = "insufficient_data"
+
+# 恒等式容差（**仅参考值用，不是门禁**）：
+# |H股息率 − A股息率×(1+溢价率)| / |期望值| > 5% 时 identity_status='mismatch'。
+# 判定失败**不得**被调用方当成数据错误或丢弃依据（见模块 docstring §3）。
 IDENTITY_TOLERANCE = 0.05
 # H 股股本推导默认容差（与独立基准比较时）
 H_SHARE_TOLERANCE = 0.02
@@ -195,28 +226,38 @@ def ah_market_cap(
     total_shares: Any,
     circ_shares: Any,
 ) -> dict[str, Any]:
-    """按真实两地价格拆分 A+H 总市值，并计算 A 股相对 H 股的溢价。
+    """按真实两地价格拆分 A+H 市值，并计算 A 股相对 H 股的溢价。
 
-    公式（单位：人民币元）::
+    公式（**全部字段单位：人民币元**）::
 
-        a_share_market_cap   = close_a × circ_shares
-        h_share_market_cap_cny = close_h × h_shares × fx_hkd_cny
-        total_market_cap_ah  = 两者相加
-        ah_premium_pct       = (close_a / (close_h × fx) − 1) × 100
+        a_share_market_cap      = close_a × circ_shares            # A 股部分
+        h_share_market_cap_cny  = close_h × h_shares × fx_hkd_cny   # H 股部分（港股市值）
+        total_market_cap_ah     = 两者相加
+        ah_total_market_cap_cny = 两者相加（与 total_market_cap_ah 同值的显式别名）
+        ah_premium_pct          = (close_a / (close_h × fx) − 1) × 100
 
-    ``circ_shares`` 是 A 股股本；H 股股本由 :func:`h_share_count` 推导。
-    ``ah_premium_pct`` 是**百分点**（与恒生 AH 溢价指数同方向：正数=A 贵）。
-    ``total_market_cap_ah`` 与 ``indicator_snapshot.total_market_cap`` **无关**，
-    不写回、不覆盖。
+    字段口径（**不要混淆**）：
 
-    返回 dict 包含上述 4 个主字段，外加 ``h_shares`` / ``h_price_cny`` /
-    ``units``；输入无法计算时主字段为 None，``reason`` 说明原因
+    - ``h_share_market_cap_cny``：**H 股市值，单位人民币元**（`H 股价格 ×
+      H 股股本 × 汇率`）。行业软件单独显示这一列（「港股市值」），本模块
+      也单独稳定曝光，它是 `ah_market_cap` 的一等输出字段。
+    - ``total_market_cap_ah`` / ``ah_total_market_cap_cny``：A 股部分 + H 股部分
+      的**参考量，不是行业口径的总市值**。行业口径（= A 股价格 × 总股本）见
+      `indicator_snapshot.total_market_cap`——本模块既不读也不写它。
+    - ``ah_premium_pct`` 是**百分点**（与恒生 AH 溢价指数同方向：正数=A 贵）。
+
+    ``circ_shares`` 是 A 股股本；H 股股本由 :func:`h_share_count` 推导
+    （``confidence='derived'``，见模块 docstring 的已知局限）。
+
+    返回 dict 包含上述主字段，外加 ``h_shares``（股）/ ``h_price_cny``
+    （元/股）/ ``units``；输入无法计算时主字段为 None，``reason`` 说明原因
     （``missing_h_shares`` / ``invalid_price`` / ``invalid_fx``）。
     """
     out: dict[str, Any] = {
         "a_share_market_cap": None,
         "h_share_market_cap_cny": None,
         "total_market_cap_ah": None,
+        "ah_total_market_cap_cny": None,
         "ah_premium_pct": None,
         "h_shares": None,
         "h_price_cny": None,
@@ -246,10 +287,14 @@ def ah_market_cap(
     h_price_cny = price_h * fx
     a_cap = price_a * a_shares
     h_cap = h_price_cny * h_shares
+    total_ah = a_cap + h_cap
     out.update({
         "a_share_market_cap": a_cap,
         "h_share_market_cap_cny": h_cap,
-        "total_market_cap_ah": a_cap + h_cap,
+        "total_market_cap_ah": total_ah,
+        # 显式别名：仅作参考，**不是**行业口径总市值（行业口径见
+        # indicator_snapshot.total_market_cap，本模块不读写它）
+        "ah_total_market_cap_cny": total_ah,
         "ah_premium_pct": (price_a / h_price_cny - 1.0) * 100.0,
         "h_shares": h_shares,
         "h_price_cny": h_price_cny,
@@ -257,7 +302,51 @@ def ah_market_cap(
     return out
 
 
-# ─── AH 股息率与恒等式 ──────────────────────────────────────────────
+# ─── AH 股息率（各算各的）与恒等式参考值 ─────────────────────────────
+
+
+def _event_count(value: Any) -> int | None:
+    """把分红事件笔数归一成非负 int；缺失/非法返回 None。"""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if count >= 0 else None
+
+
+def _resolve_event_counts(
+    window: Any, a_events: Any, h_events: Any,
+) -> tuple[int | None, int | None]:
+    """笔数来源：显式参数优先，其次取 ``window`` dict 里的 ``a_events``/``h_events``。"""
+    a_count = _event_count(a_events)
+    h_count = _event_count(h_events)
+    if isinstance(window, dict):
+        if a_count is None:
+            a_count = _event_count(window.get("a_events"))
+        if h_count is None:
+            h_count = _event_count(window.get("h_events"))
+    return a_count, h_count
+
+
+def _insufficient_reason(
+    dps_a: float | None,
+    dps_h_cny: float | None,
+    price_a: float | None,
+    price_h: float | None,
+    fx_rate: float | None,
+) -> str:
+    """恒等式数据不足时说明缺什么（只描述缺口，不否定已算出的单侧结果）。"""
+    if dps_a is None and dps_h_cny is None:
+        return "missing_dividend"
+    if dps_a is None:
+        return "missing_a_dividend"
+    if dps_h_cny is None:
+        return "missing_h_dividend"
+    if price_a is None or price_h is None:
+        return "invalid_price"
+    return "invalid_fx"
 
 
 def ah_dividend_yield(
@@ -270,36 +359,65 @@ def ah_dividend_yield(
     tax_rate: float = DEFAULT_TAX_RATE,
     window: Any = TTM_BASIS,
     div_h_ps_hkd: Any = None,
+    a_events: Any = None,
+    h_events: Any = None,
 ) -> dict[str, Any]:
-    """计算 A/H 股息率、差额、税后口径，并校验恒等式。
+    """A/H 股息率**各自独立计算**，并给出恒等式的参考偏离（不是门禁）。
 
-    恒等式（DPS_A == DPS_H_CNY 且窗口内笔数一致时严格成立）::
+    口径（模块 docstring §3，强制）：成熟软件从不用恒等式做约束——
 
-        h_yield ≈ a_yield × (1 + ah_premium)
+    - A 股息率 ``a_yield = DPS_A / 收盘价_A``（A 的分红 ÷ A 的股价）；
+    - H 股息率 ``h_yield = DPS_H(人民币) / (收盘价_H × 汇率)``
+      （H 的分红 ÷ H 的股价）。
 
-    其中 ``ah_premium`` 是小数（0.389 = A 贵 38.9%）。返回
-    ``identity_ok`` 与 ``identity_deviation_pct``：相对偏差 > 5% 时 False。
+    因此**任一侧缺数据只让该侧为 None**，另一侧照常出数；整体不会因为某一侧
+    缺失而返回全 None。原因（缺什么）写在 ``reason`` 里，供调用方展示，**不**
+    代表整只股票不可用。
+
+    恒等式（**仅参考**，判定失败绝不丢弃股票）::
+
+        expected_h_yield = a_yield × (1 + ah_premium)
+
+    ``identity_status`` 四态（见 :data:`IdentityStatus`）：
+
+    - ``'ok'``：两端分红笔数一致，相对偏离 ≤ :data:`IDENTITY_TOLERANCE`（5%）；
+    - ``'mismatch'``：两端笔数一致但偏离 > 5%（**正常现象，不是错误**）；
+    - ``'not_comparable'``：两端分红笔数**不一致**（如 A 窗口内 1 次、H 2 次）
+      → ``identity_deviation_pct`` / ``identity_ok`` 置 None，不计算恒等式；
+    - ``'insufficient_data'``：任一端的股息率算不出来（缺分红/价格/汇率）。
+
+    ``identity_deviation_pct``（百分点）**只在 ok / mismatch 两态有值**；唯一例外
+    是「期望值恰为 0 而 H 侧不为 0」时偏离无界——此时仍判 ``mismatch``，但不给
+    百分点（``None``）。``identity_ok`` 是为向后兼容保留的布尔便捷值：
+    ok→True / mismatch→False / 其余→None。
 
     Parameters
     ----------
     div_a_ps / div_h_ps_cny:
         近 12 个月**已实施**的每股现金分红合计（元/股）。0 是合法值
-        （不分红），None 被视为缺数据。
+        （不分红），None 被视为该侧缺数据（只影响该侧）。
     close_a / close_h / fx:
         A 股收盘价（元）、H 股收盘价（港元）、HKD→CNY（元/港元）。
     tax_rate:
         H 股红利税率，默认 0.20；只影响 ``h_yield_after_tax``。
     window:
-        原样回传，建议传 :func:`build_ah_snapshot` 构造的窗口 dict。
+        原样回传；若为 dict 且含 ``a_events`` / ``h_events``，则作为笔数的
+        兜底来源（:func:`build_ah_snapshot` 的窗口就是这个形状）。
     div_h_ps_hkd:
         可选：H 股每股股息港币原值。提供时 ``h_yield_hkd`` 用它计算；
         否则由 ``div_h_ps_cny / fx`` 反推（两者在币种一致时数学等价）。
+    a_events / h_events:
+        可选：两端窗口内**已实施分红笔数**，用于判定恒等式是否可比。
+        两者都提供且不相等 → ``identity_status='not_comparable'``。都没提供
+        时按「可比」给出参考值（纯单元调用兼容路径；生产路径
+        ``build_ah_snapshot`` 总是传真实笔数）。
 
     返回：``a_yield`` / ``h_yield`` / ``h_yield_hkd`` / ``h_yield_after_tax``
     / ``ah_yield_gap``（A−H，小数）/ ``ah_yield_ratio`` /
-    ``ah_premium_pct``（百分点）/ ``expected_h_yield`` /
-    ``identity_deviation_pct`` / ``identity_ok`` / ``tax_rate`` / ``window``
-    / ``units`` / ``reason``。所有 ``*_yield`` 均为**小数比例**。
+    ``ah_premium_pct``（百分点）/ ``expected_h_yield``（参考）/
+    ``identity_status`` / ``identity_deviation_pct`` / ``identity_ok`` /
+    ``identity_note`` / ``tax_rate`` / ``window`` / ``units`` / ``reason``。
+    所有 ``*_yield`` 均为**小数比例**。
     """
     out: dict[str, Any] = {
         "a_yield": None,
@@ -310,8 +428,10 @@ def ah_dividend_yield(
         "ah_yield_ratio": None,
         "ah_premium_pct": None,
         "expected_h_yield": None,
+        "identity_status": IDENTITY_STATUS_INSUFFICIENT,
         "identity_deviation_pct": None,
-        "identity_ok": False,
+        "identity_ok": None,
+        "identity_note": None,
         "tax_rate": None,
         "window": window,
         "reason": None,
@@ -330,48 +450,76 @@ def ah_dividend_yield(
     tax = _num(tax_rate)
     if tax is None or tax > 1:
         out["reason"] = "invalid_tax_rate"
+        out["identity_note"] = "税率非法，全部结果不可用"
         return out
-    if price_a is None or price_h is None:
-        out["reason"] = "invalid_price"
-        return out
-    if fx_rate is None:
-        out["reason"] = "invalid_fx"
-        return out
-    if dps_h_cny is None and dps_h_hkd_input is not None:
+    out["tax_rate"] = tax
+    if dps_h_cny is None and dps_h_hkd_input is not None and fx_rate is not None:
         dps_h_cny = dps_h_hkd_input * fx_rate
-    if dps_a is None or dps_h_cny is None:
-        out["reason"] = "missing_dividend"
-        return out
 
-    a_yield = dps_a / price_a
-    h_price_cny = price_h * fx_rate
-    h_yield = dps_h_cny / h_price_cny
-    if dps_h_hkd_input is not None:
-        h_yield_hkd = dps_h_hkd_input / price_h
-    else:
-        h_yield_hkd = (dps_h_cny / fx_rate) / price_h
-    premium = price_a / h_price_cny - 1.0
-    expected_h = a_yield * (1.0 + premium)
-
-    if expected_h == 0:
-        deviation = 0.0 if h_yield == 0 else float("inf")
-    else:
-        deviation = abs(h_yield - expected_h) / abs(expected_h)
-    identity_ok = bool(math.isfinite(deviation) and deviation <= IDENTITY_TOLERANCE)
-
+    # ── 两侧各算各的：任一侧缺数据只让该侧为 None ──────────────────
+    h_price_cny = price_h * fx_rate if price_h is not None and fx_rate is not None else None
+    a_yield = dps_a / price_a if dps_a is not None and price_a is not None else None
+    h_yield = dps_h_cny / h_price_cny if dps_h_cny is not None and h_price_cny is not None else None
+    h_yield_hkd: float | None = None
+    if price_h is not None:
+        if dps_h_hkd_input is not None:
+            h_yield_hkd = dps_h_hkd_input / price_h
+        elif dps_h_cny is not None and fx_rate is not None:
+            h_yield_hkd = (dps_h_cny / fx_rate) / price_h
+    premium = (
+        price_a / h_price_cny - 1.0
+        if price_a is not None and h_price_cny is not None
+        else None
+    )
+    expected_h = a_yield * (1.0 + premium) if a_yield is not None and premium is not None else None
     out.update({
         "a_yield": a_yield,
         "h_yield": h_yield,
         "h_yield_hkd": h_yield_hkd,
-        "h_yield_after_tax": h_yield * (1.0 - tax),
-        "ah_yield_gap": a_yield - h_yield,
-        "ah_yield_ratio": (a_yield / h_yield) if h_yield != 0 else None,
-        "ah_premium_pct": premium * 100.0,
+        "h_yield_after_tax": h_yield * (1.0 - tax) if h_yield is not None else None,
+        "ah_yield_gap": a_yield - h_yield if a_yield is not None and h_yield is not None else None,
+        "ah_yield_ratio": (
+            a_yield / h_yield
+            if a_yield is not None and h_yield is not None and h_yield != 0
+            else None
+        ),
+        "ah_premium_pct": premium * 100.0 if premium is not None else None,
         "expected_h_yield": expected_h,
-        "identity_deviation_pct": deviation * 100.0 if math.isfinite(deviation) else None,
-        "identity_ok": identity_ok,
-        "tax_rate": tax,
     })
+
+    # ── 恒等式：仅当两端笔数一致时才计算，且只作为参考值 ──────────
+    a_count, h_count = _resolve_event_counts(window, a_events, h_events)
+    comparable = None if a_count is None or h_count is None else a_count == h_count
+    if h_yield is None or expected_h is None:
+        # identity_status 保持 insufficient_data；已算出的单侧结果照常返回
+        out["reason"] = _insufficient_reason(dps_a, dps_h_cny, price_a, price_h, fx_rate)
+        out["identity_note"] = "A/H 至少一侧缺数据，恒等式不计算（不影响另一侧出数）"
+        return out
+    if comparable is False:
+        out["identity_status"] = IDENTITY_STATUS_NOT_COMPARABLE
+        out["identity_note"] = (
+            f"两端分红笔数不一致（A {a_count} 次 / H {h_count} 次），"
+            "恒等式不可比：各算各的，仅保留两侧股息率"
+        )
+        return out
+    if expected_h == 0:
+        deviation = 0.0 if h_yield == 0 else math.inf
+    else:
+        deviation = abs(h_yield - expected_h) / abs(expected_h)
+    if not math.isfinite(deviation):
+        out["identity_status"] = IDENTITY_STATUS_MISMATCH
+        out["identity_ok"] = False
+        out["identity_note"] = "期望 H 股息率为 0 而 H 侧不为 0：偏离无界，不给百分点"
+        return out
+    identity_ok = deviation <= IDENTITY_TOLERANCE
+    out["identity_status"] = IDENTITY_STATUS_OK if identity_ok else IDENTITY_STATUS_MISMATCH
+    out["identity_ok"] = identity_ok
+    out["identity_deviation_pct"] = deviation * 100.0
+    out["identity_note"] = (
+        "未提供两端分红笔数，按可比口径给出参考值（仅供展示）"
+        if comparable is None
+        else "两端笔数一致；偏离仅作参考，不是门禁"
+    )
     return out
 
 
@@ -580,7 +728,31 @@ def build_ah_snapshot(
     - ``missing_h_dividend``：A 股近 12 个月有分红，但 H 股窗口内零有效记录
       （PRODUCT_GAPS §1.1②：这更像抓取失败，不能当「H 股不分红」）。
 
-    返回字段见模块 docstring；``units`` 显式标注市值/溢价/股息率单位。
+    每行**稳定暴露**的市值/股息率字段（向后兼容，未改任何既有键名含义）：
+
+    ===========================  ===========================================
+    键                           口径与单位
+    ===========================  ===========================================
+    ``a_share_market_cap``      A 股部分 = A 收盘价 × A 股股本，**元**
+    ``h_share_market_cap_cny``  **H 股市值** = H 收盘价 × H 股股本 × 汇率，
+                                **元**（行业软件单列的「港股市值」）
+    ``ah_total_market_cap_cny`` A 股部分 + H 股部分，**元**。**参考量**，
+                                **不是**行业口径总市值（行业口径见
+                                ``indicator_snapshot.total_market_cap``，本函数
+                                既不读也不写它）
+    ``total_market_cap_ah``     同上，历史键名（保留兼容，勿再新增引用）
+    ``ah_premium_pct``          A 相对 H 的溢价，**百分点**
+    ``a_yield`` / ``h_yield``   A / H 股息率，**小数比例**，两侧独立
+    ``identity_status``         ``ok`` / ``mismatch`` / ``not_comparable`` /
+                                ``insufficient_data``（见模块 docstring §3）
+    ``identity_deviation_pct``  只有 ``ok`` / ``mismatch`` 两态有值，百分点
+    ``identity_ok``             向后兼容布尔便捷值：ok→True、mismatch→False、
+                                其余→None
+    ===========================  ===========================================
+
+    ``identity_status`` 为 ``mismatch`` / ``not_comparable`` **不代表**这行数据
+    有问题：那是「A、H 各自的分红节奏不同」的正常结果，调用方**不得**据此丢弃
+    该股票（模块 docstring §3）。``units`` 字段显式标注市值/溢价/股息率单位。
     """
     anchor = _to_date(as_of) or date.today()
     resolved = _resolve_mapping(duck, mapping)
@@ -638,6 +810,7 @@ def build_ah_snapshot(
             "h_dividend_converted_events": 0,
             "a_share_market_cap": None,
             "h_share_market_cap_cny": None,
+            "ah_total_market_cap_cny": None,
             "total_market_cap_ah": None,
             "ah_premium_pct": None,
             "a_yield": None,
@@ -647,8 +820,10 @@ def build_ah_snapshot(
             "ah_yield_gap": None,
             "ah_yield_ratio": None,
             "expected_h_yield": None,
+            "identity_status": IDENTITY_STATUS_INSUFFICIENT,
             "identity_deviation_pct": None,
             "identity_ok": None,
+            "identity_note": None,
             "tax_rate": tax_rate,
             "units": {
                 "market_cap": "CNY_yuan",
@@ -716,14 +891,15 @@ def build_ah_snapshot(
         yields = ah_dividend_yield(
             div_a, div_h, base["a_close"], base["h_close"], base["fx_hkd_cny"],
             tax_rate=tax_rate, window=window,
+            # 笔数是恒等式「可比性」的唯一依据：不一致 → not_comparable，
+            # 只有一致时才给 identity_deviation_pct（模块 docstring §3）
+            a_events=a_events, h_events=h_events,
         )
-        if yields["reason"] is not None:
-            base["reason"] = yields["reason"]
-            continue
 
         base.update({
             "a_share_market_cap": cap["a_share_market_cap"],
             "h_share_market_cap_cny": cap["h_share_market_cap_cny"],
+            "ah_total_market_cap_cny": cap["ah_total_market_cap_cny"],
             "total_market_cap_ah": cap["total_market_cap_ah"],
             "ah_premium_pct": cap["ah_premium_pct"],
             "a_yield": yields["a_yield"],
@@ -733,8 +909,10 @@ def build_ah_snapshot(
             "ah_yield_gap": yields["ah_yield_gap"],
             "ah_yield_ratio": yields["ah_yield_ratio"],
             "expected_h_yield": yields["expected_h_yield"],
+            "identity_status": yields["identity_status"],
             "identity_deviation_pct": yields["identity_deviation_pct"],
             "identity_ok": yields["identity_ok"],
+            "identity_note": yields["identity_note"],
             "tax_rate": yields["tax_rate"],
             "units": {
                 "market_cap": "CNY_yuan",
@@ -742,6 +920,11 @@ def build_ah_snapshot(
                 "yields": "decimal_fraction",
                 "dividend_per_share": "CNY_yuan_per_share",
             },
-            "status": "ok",
         })
+        # 只有「某一侧股息率算不出来」才降级为 incomplete；恒等式
+        # mismatch / not_comparable **绝不**影响 status（各算各的，§3）。
+        if yields["reason"] is None:
+            base["status"] = "ok"
+        else:
+            base["reason"] = yields["reason"]
     return results
