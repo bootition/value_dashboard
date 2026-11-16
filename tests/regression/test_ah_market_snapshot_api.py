@@ -203,7 +203,8 @@ def test_schema_creates_ah_market_snapshot_and_records_migration_41(
 ) -> None:
     from app.core.storage.schema import DUCKDB_SCHEMA_VERSION
 
-    assert DUCKDB_SCHEMA_VERSION == 41
+    # v42（reports/130）在其后追加了 ROCE 域，本用例只要求"已到 41 或更新"
+    assert DUCKDB_SCHEMA_VERSION >= 41
     tables = {
         row["table_name"]
         for row in duckdb_store.read_query("SELECT table_name FROM duckdb_tables()")

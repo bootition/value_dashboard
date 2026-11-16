@@ -1105,6 +1105,28 @@ def data_compute_extended_indicators(
     typer.echo(json.dumps(make_response("data.compute_extended_indicators", report), ensure_ascii=False, indent=2, default=str))
 
 
+@data_app.command("compute-roce")
+def data_compute_roce() -> None:
+    """构建已动用资本回报率 ROCE 域（schema v42，reports/130）
+
+    口径 C：`已动用资本 = 总资产 − 流动负债`（= 净营运资本 + 全部长期资产），
+    `EBIT = 利润总额 + 财务费用`，只取**年报**，单年 ROCE = EBIT ÷ 平均已动用资本。
+
+    - 写入 `roce_history`（每股每年一行）并刷新 `indicator_snapshot.roce_*` 五列；
+    - 快照值 = 最近 5 / 10 个有效年报 ROCE 的**中位数**（书中「历史 ROCE」用法）；
+    - **不设任何比例护栏**：资本占用 ≤ 0 时 ROCE 无定义（除法不成立），
+      历史表 `status` 如实标注，CE 原值保留可复核；
+    - 口径依据见 `app/core/indicators/roce.py` 模块 docstring。
+    """
+    from app.cli.protocol import make_response
+    from app.core.indicators.roce import RoceBuilder
+
+    paths, duck, _sqlite = _database_context()
+    report = RoceBuilder(duck=duck, paths=paths).build()
+
+    typer.echo(json.dumps(make_response("data.compute_roce", report), ensure_ascii=False, indent=2, default=str))
+
+
 @data_app.command("industry-history")
 def data_industry_history(
     import_csmar: bool = typer.Option(False, "--import-csmar", help="从 CSMAR C17 原始包导入 2012 证监会口径行业历史"),

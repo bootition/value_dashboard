@@ -45,6 +45,7 @@ SNAPSHOT_COLUMNS: set[str] = {
     "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ttm", "dividend_yield",
     "total_market_cap", "circ_market_cap",
     "roe", "roa", "gross_margin", "net_margin", "roic", "cf_to_net_profit",
+    "roce_latest", "roce_5y_median", "roce_10y_median", "roce_5y_years", "roce_10y_years",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     "revenue_cagr3", "revenue_cagr5", "net_profit_cagr3", "net_profit_cagr5",
     "deducted_profit_cagr3", "deducted_profit_cagr5",
@@ -260,6 +261,7 @@ NORMALIZED_FIELDS = {f"{table}.{field}" for table, fields in STATEMENT_FIELDS.it
 RANKABLE_INDICATORS: set[str] = {
     "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ttm", "dividend_yield",
     "roe", "roa", "gross_margin", "net_margin", "roic",
+    "roce_latest", "roce_5y_median", "roce_10y_median",
     "revenue_yoy", "net_profit_yoy",
     "debt_ratio", "current_ratio", "quick_ratio",
     "payout_ratio", "dps", "consecutive_div_years",

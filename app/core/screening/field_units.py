@@ -21,6 +21,8 @@ from __future__ import annotations
 # 小数比例存储（与前端 screening-format.ts PCT_FIELDS 对齐）
 PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     "roe", "roa", "roic",
+    # ROCE（v42）：与 ROE/ROA/ROIC 同族的**小数比例**（0.2034 = 20.34%）
+    "roce_latest", "roce_5y_median", "roce_10y_median",
     "gross_margin", "net_margin", "debt_ratio",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     "revenue_cagr3", "revenue_cagr5", "net_profit_cagr3", "net_profit_cagr5",

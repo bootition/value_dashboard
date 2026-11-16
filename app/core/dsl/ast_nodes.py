@@ -217,6 +217,12 @@ INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     "gross_margin": {"unit": "ratio", "period_type": "ttm", "historical_capable": True},
     "net_margin": {"unit": "ratio", "period_type": "ttm", "historical_capable": True},
     "roic": {"unit": "ratio", "period_type": "ttm", "historical_capable": True},
+    # ROCE（schema v42，reports/130）：口径 C，年报序列中位数，不剔现金、无护栏
+    "roce_latest": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
+    "roce_5y_median": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
+    "roce_10y_median": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
+    "roce_5y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
+    "roce_10y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
     "cf_to_net_profit": {"unit": "ratio", "period_type": "ttm", "historical_capable": True},
     # 成长
     "revenue_yoy": {"unit": "percent", "period_type": "current_only", "historical_capable": True},

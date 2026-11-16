@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 41
+DUCKDB_SCHEMA_VERSION = 42
 SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -273,6 +273,15 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     cumulative_dividend_amount DOUBLE,   -- A股累计现金分红金额（元，按A股流通股本折算，H股不计入）
     cumulative_financing_amount DOUBLE,  -- A股累计股权融资金额（元，IPO+增发+配股，优先募资额/净额）
     dividend_financing_ratio_pct DOUBLE, -- 分红融资比（%，A股口径）：广义分红/股权融资 × 100
+    -- 已动用资本回报率 ROCE（2026-11-16，schema v42，reports/130）
+    -- 小数比例：0.2034 = 20.34%。口径 C：CE = 总资产 − 流动负债，
+    -- 取**年报**序列的中位数（书中「历史 ROCE」用法），不剔现金、不设比例护栏。
+    -- 明细见 app/core/indicators/roce.py 模块 docstring。
+    roce_latest      DOUBLE,            -- 最近一年年报 ROCE
+    roce_5y_median   DOUBLE,            -- 最近 5 个有效年报 ROCE 中位数（主口径）
+    roce_5y_years    INTEGER,           -- 上者实际用到的年数（1 = 只有一年，别当中位数看）
+    roce_10y_median  DOUBLE,            -- 最近 10 个有效年报 ROCE 中位数
+    roce_10y_years   INTEGER,
     -- 行情
     ma5             DOUBLE,
     ma10            DOUBLE,
@@ -932,6 +941,34 @@ CREATE TABLE IF NOT EXISTS balance_sheet_ext (
 );
 CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date
     ON balance_sheet_ext (report_date);
+
+-- 已动用资本回报率 ROCE 的**年度序列**（v42，2026-11-16，reports/130）。
+-- 为什么单独建表：ROCE 的正确用法是「历史 ROCE 的中位数」（书中原文：
+-- 「我们初步筛选出的约150家公司，都在过去5到10年甚至更长时间里，实现了
+-- 超过20%的ROCE」）。单期值会被一次性损益和周期波动污染，而现有
+-- `indicator_snapshot` 只存最新一期、`indicator_ext` 存的是逐报告期累计口径，
+-- 都无法表达「十年序列」。本表每股每年一行，供中位数聚合与详情页画图。
+--
+-- 口径纪律（唯一真源是 `app/core/indicators/roce.py` 的 docstring，此处不复述）：
+--   * CE = 总资产 − 流动负债（= 净营运资本 + 全部长期资产），**不剔现金**；
+--   * EBIT = 利润总额 + 财务费用；只用年报（12-31）；
+--   * 单年 ROCE = 当年 EBIT ÷ (期初CE + 期末CE)/2；
+--   * **不设任何比例护栏**（用户 2026-11-16 裁决：极值不假，假的是数据源）；
+--     唯一的 NULL 来自除法不成立（CE ≤ 0），status 如实标注，CE 原值保留可复核。
+CREATE TABLE IF NOT EXISTS roce_history (
+    stock_code    VARCHAR NOT NULL,
+    report_date   DATE    NOT NULL,   -- 年报期（12-31）
+    ce            DOUBLE,             -- 已动用资本（期末）
+    ce_prev       DOUBLE,             -- 已动用资本（上年同期，作为期初）
+    ebit          DOUBLE,             -- 息税前利润（元）
+    roce          DOUBLE,             -- 小数比例；分母非正时为 NULL
+    status        VARCHAR NOT NULL,   -- OK / INVALID_DENOMINATOR / MISSING_EBIT
+    calculated_at TIMESTAMP NOT NULL,
+    source        VARCHAR NOT NULL,
+    data_version  INTEGER NOT NULL,
+    PRIMARY KEY (stock_code, report_date)
+);
+CREATE INDEX IF NOT EXISTS idx_roce_history_date ON roce_history (report_date);
 
 -- 员工人数历史域（2026-09-19 v28，"榨干数据包" R8）。
 -- 用途：计算「人均创收 / 人均创利」——判断公司是真高效还是靠堆人。
@@ -2160,6 +2197,27 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (41, 'ah_market_snapshot (A+H H-share market cap outlet)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v42（2026-11-16, reports/130）：ROCE 域。新增 roce_history 年度序列表
+        # （上面 DDL 已建；此处只补 indicator_snapshot 的五列）并记账。
+        # 五列全部可空：历史不足、金融股无流动/非流动划分、分母非正时保持 NULL，
+        # 语义见 app/core/indicators/roce.py。
+        for _col, _type in (
+            ("roce_latest", "DOUBLE"),
+            ("roce_5y_median", "DOUBLE"),
+            ("roce_5y_years", "INTEGER"),
+            ("roce_10y_median", "DOUBLE"),
+            ("roce_10y_years", "INTEGER"),
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {_col} {_type}"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (42, 'ROCE domain: roce_history + indicator_snapshot roce_* columns')
             ON CONFLICT (version) DO NOTHING
             """
         )
