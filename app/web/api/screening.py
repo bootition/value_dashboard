@@ -92,8 +92,83 @@ def _csv_export_row(
 
 
 
+def _current_indicator_trust(request: Request) -> dict:
+    """Read the server-authoritative trust decision for snapshot values.
+
+    与详情页/自选同源：`data_quality.indicator_trust(read_warning_codes(...))`。
+    延迟导入保留测试通过 `app.core.data_quality.read_warning_codes` 注入
+    告警码的能力（单测不跑全量质量构建）。
+    """
+    from app.core.data_quality import indicator_trust, read_warning_codes
+
+    return indicator_trust(
+        read_warning_codes(request.app.state.duck, request.app.state.sqlite)
+    )
+
+
+def _indicator_trust_or_empty(request: Request) -> dict:
+    """展示路径专用：可信度读取失败时按"无遮蔽"降级，绝不让指标列表 500。"""
+    try:
+        return _current_indicator_trust(request)
+    except Exception:  # noqa: BLE001 - 遮蔽信息拿不到就不遮，绝不阻断列表
+        logger.warning("读取指标可信度失败（本次不遮蔽）", exc_info=True)
+        return {
+            "warning_codes": [],
+            "untrusted_all": False,
+            "untrusted_fields": [],
+            "masked_fields": [],
+        }
+
+
+def _require_trusted_snapshot(request: Request) -> dict:
+    """Reject screening when every snapshot-derived value is untrusted.
+
+    判定与详情页"整页指标置 null"完全同源：两者都从 `indicator_trust()` 出发，
+    再调用 `data_quality.screenability_block_reason()` 得到唯一原因码，web 层
+    不再各写一遍 `trust["untrusted_all"]`。
+
+    `masked_fields`（字段级遮蔽）不在这里阻断：它是否命中取决于规则是否引用
+    该字段，由筛选引擎的 `MaskedFieldError` 负责（维持现状）。
+    """
+    from app.core.data_quality import screenability_block_reason
+
+    trust = _current_indicator_trust(request)
+    reason = screenability_block_reason(trust)
+    if reason is None:
+        return trust
+    # 没有任何 indicator_snapshot 行时不存在"不可信的快照"：这是基础数据未就绪
+    # （首次部署/空库/快照缺失），交给既有 readiness 门禁返回更具体的
+    # minimum_data_not_ready。有快照但被阻断时才是本门禁的职责。
+    try:
+        has_snapshot = bool(
+            request.app.state.duck.read_query(
+                "SELECT 1 AS present FROM indicator_snapshot LIMIT 1"
+            )
+        )
+    except Exception:  # noqa: BLE001 - schema 损坏时同样交给 readiness 报具体原因
+        has_snapshot = False
+    if not has_snapshot:
+        return trust
+    raise HTTPException(status_code=409, detail={
+        "reason": reason,
+        "reason_code": reason,
+        "message": (
+            "当前指标快照整体不可信（命中数据质量阻断告警），筛选已拒绝执行；"
+            "请先修复数据质量告警后重试"
+        ),
+        "warning_codes": list(trust.get("warning_codes") or []),
+    })
+
+
 def _require_current_screenability(request: Request) -> dict:
     """Enforce the current database gate for screen-derived durable output.
+
+    2026-11-14 统一口径：**快照整体不可信时任何筛选都必须拒绝执行**。
+    有指标快照时该判定先于写窗口/readiness 分支——否则同一份不可信数据
+    会被更早返回的 `minimum_data_not_ready` 掩盖，前端拿不到
+    `snapshot_values_untrusted`，详情页全空与筛选页出排名继续分裂；
+    完全没有 indicator_snapshot 行时不存在"不可信的快照"，仍由下方
+    readiness 分支给出更具体的 minimum_data_not_ready。
 
     reports/79 方案 A（用户决策）：写锁活跃（自动更新中）时不再 409 禁用——
     引擎只读原子替换的 indicator_snapshot 与财务表（不直读 raw 价格），
@@ -102,6 +177,11 @@ def _require_current_screenability(request: Request) -> dict:
 
     Returns: {"lock_active": bool, "data_as_of": str | None}
     """
+    # 数据可信度门禁（唯一实现）：有快照且 untrusted_all=True →
+    # 409 snapshot_values_untrusted。详情页用同一判定把全部指标置 null，
+    # 两页结论必须一致。
+    _require_trusted_snapshot(request)
+
     from app.core.storage.update_lock import any_write_lock_active
 
     try:
@@ -710,16 +790,7 @@ def _masked_indicator_fields(request: Request) -> list[str]:
     （个股详情/自选）同一份判定，避免"筛选说能用、详情说不可信"的分裂。
     任何异常都退化为空清单（宁可少遮一个字段，也不让指标列表整个 500）。
     """
-    from app.core.data_quality import indicator_trust, read_warning_codes
-
-    try:
-        warning_codes = read_warning_codes(
-            request.app.state.duck, request.app.state.sqlite,
-        )
-        return list(indicator_trust(warning_codes)["masked_fields"])
-    except Exception:  # noqa: BLE001 - 遮蔽信息拿不到就不遮，绝不阻断列表
-        logger.warning("读取字段遮蔽清单失败（本次不遮蔽）", exc_info=True)
-        return []
+    return list(_indicator_trust_or_empty(request)["masked_fields"])
 
 
 def _deprecated_indicator_names() -> dict[str, str]:
@@ -840,7 +911,10 @@ def list_available_indicators(request: Request) -> dict:
         })
     # ── 两条过滤：废弃字段 & 当前不可信字段（字段级遮蔽）─────────────────
     deprecated = _deprecated_indicator_names()
-    masked = set(_masked_indicator_fields(request))
+    # 整体可信度必须显式返回：前端不能只看 unavailable 猜"是不是整页都坏了"。
+    # 与 /run 的 409 判定同源（indicator_trust → screenability_block_reason）。
+    trust = _indicator_trust_or_empty(request)
+    masked = set(trust["masked_fields"])
     from app.core.screening.engine import DEPRECATED_SCALE
 
     kept: list[dict] = []
@@ -884,6 +958,11 @@ def list_available_indicators(request: Request) -> dict:
         # reason ∈ {deprecated, masked_untrusted, not_available_for_latest_period}
         "unavailable": unavailable,
         "unavailable_count": len(unavailable),
+        # 整体可信度（与详情页 /indicators 的 trust 同一判定）：
+        # untrusted_all=True 时 /run 必然 409 snapshot_values_untrusted，
+        # warning_codes 供前端解释"为什么不能筛"。
+        "untrusted_all": bool(trust["untrusted_all"]),
+        "warning_codes": list(trust["warning_codes"]),
         "masked_fields": sorted(masked),
         "deprecated_fields": sorted(deprecated),
         # 单位口径说明（与 app/core/screening/field_units.py 对齐）：

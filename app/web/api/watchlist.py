@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.core.screening.defaults import base_pool_defaults
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
@@ -273,9 +274,17 @@ def refresh_watchlist_group(req: RefreshGroupRequest, request: Request) -> dict:
         locked = json.loads(rule_rows[0]["locked_indicators"] or "{}")
         old = old_results[0]
         base_pool = json.loads(old.get("base_pool_config") or "{}")
-        include_st = bool(base_pool.get("include_st", False))
-        include_suspended = bool(base_pool.get("include_suspended", False))
-        min_listing_years = int(base_pool.get("min_listing_years", 1))
+        # 老结果的 base_pool_config 可能缺键：缺键时落到配置
+        # `screening.default_*`，不再用写死的 False/False/1（否则用户改配置
+        # 对"刷新自选"这条路径永远无效）。
+        pool_defaults = base_pool_defaults()
+        include_st = bool(base_pool.get("include_st", not pool_defaults["exclude_st"]))
+        include_suspended = bool(
+            base_pool.get("include_suspended", not pool_defaults["exclude_suspended"])
+        )
+        min_listing_years = int(
+            base_pool.get("min_listing_years", pool_defaults["min_listing_years"])
+        )
 
         engine = ScreeningEngine(duck=duck, sqlite=sqlite)
         try:

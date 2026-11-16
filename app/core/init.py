@@ -534,7 +534,7 @@ class DataInitializer:
                         [(row.get("csrc_l1"), row.get("csrc_l2"), row.get("stock_code"))
                          for row in rows],
                     )
-                # 2026-11-15（reports/121 J3）：同一批记录**同时**写进
+                # 2026-11-15（reports/122 §2.1 J3）：同一批记录**同时**写进
                 # `industry_history`。适配器每条都带 `as_of_date`（行业变更日期），
                 # 旧实现只 UPDATE stock_meta 把它压平成"当前值" → 回测里用当前
                 # 行业解释过去 = 未来信息。这里不改变 stock_meta 行为，只补历史。

@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 
+from app.core.missing_conditions import actionable_missing_condition
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -685,17 +686,14 @@ def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
 def actionable_missing_count(sqlite: SQLiteStore) -> int:
     """Single source of truth for the actionable ``missing_list`` count (§3).
 
-    口径 = ``resolved_at IS NULL`` 且"可行动"（复用 web 层的
-    ``_actionable_missing_condition()``）。2026-11-12 P1：此前 CLI 用
-    ``SELECT COUNT(*) FROM missing_list``（含已解决行）报 11,823，而状态页
-    用可行动口径报 162，同一时刻两个数字。
+    口径 = ``resolved_at IS NULL`` 且"可行动"（复用
+    ``app.core.missing_conditions.actionable_missing_condition()``）。2026-11-12 P1：
+    此前 CLI 用 ``SELECT COUNT(*) FROM missing_list``（含已解决行）报 11,823，而
+    状态页用可行动口径报 162，同一时刻两个数字。
 
     异常向上抛出（不返回 0）：把"查询坏了"伪装成"没有缺口"是假绿。
     """
-    # 惰性导入：app.web.api.data_status 反向依赖本模块，模块级导入会成环。
-    from app.web.api.data_status import _actionable_missing_condition
-
-    condition, disabled = _actionable_missing_condition()
+    condition, disabled = actionable_missing_condition()
     rows = sqlite.query(
         f"SELECT COUNT(*) AS cnt FROM missing_list "
         f"WHERE resolved_at IS NULL AND {condition}",
@@ -1274,6 +1272,9 @@ _SNAPSHOT_BLOCKING_WARNINGS = frozenset({
     "LIVE_SCHEMA_INCOMPATIBLE",
 })
 
+# 详情页"全空"与筛选页 409 共用的机器可读原因码（detail.reason）。
+SNAPSHOT_UNTRUSTED_REASON = "snapshot_values_untrusted"
+
 # Warnings that invalidate only dividend-derived indicator fields.
 _DIVIDEND_BLOCKING_WARNINGS = frozenset({"DIVIDEND_DATES_UNVERIFIED"})
 
@@ -1298,7 +1299,7 @@ DIVIDEND_INDICATOR_FIELDS = (
     "div_yield_spread_30y",
 )
 
-# ─── 字段级遮蔽策略（reports/120 §5 J9）──────────────────────────────────────
+# ─── 字段级遮蔽策略（reports/122 §2.3 J9）──────────────────────────────────────
 # 背景：`vd data doctor` 一次报 32 条 FIELD_COVERAGE_LOW + 54 条
 # NULL_REASON_MISSING，真问题（扩展指标报告期错位、扣非整期空）被噪音淹没；
 # 而这两条真问题本该**字段级遮蔽**，不是全站阻断。此处的策略表是"哪个
@@ -1351,7 +1352,7 @@ def indicator_trust(warning_codes: list[str]) -> dict:
     field. Read-only endpoints mask the affected values instead of serving
     them as normal research data.
 
-    2026-11-14（reports/120 §5 J9）**字段级遮蔽**：还有一个中间档 ——
+    2026-11-14（reports/122 §2.3 J9）**字段级遮蔽**：还有一个中间档 ——
     `masked_fields`。它回答的是"这次坏的是**哪几个字段**"，而不是
     "整站数字能不能信"：
 
@@ -1375,9 +1376,28 @@ def indicator_trust(warning_codes: list[str]) -> dict:
     }
 
 
+def screenability_block_reason(trust: dict) -> str | None:
+    """Return why snapshot-derived numbers cannot be used, else ``None``.
+
+    This is the single translation from a trust decision to a block reason.
+    Both read and screening paths must call it instead of re-checking
+    ``trust["untrusted_all"]`` themselves:
+
+      - 详情页/自选：`mask_untrusted_values` 据此把整页指标置 null；
+      - 筛选页：`_require_current_screenability` 据此返回
+        ``409 {"reason": "snapshot_values_untrusted"}``。
+
+    字段级遮蔽（`masked_fields`）不在这里判：它是否阻断取决于规则是否
+    引用该字段，由筛选引擎的 `MaskedFieldError` 负责。
+    """
+    if trust.get("untrusted_all"):
+        return SNAPSHOT_UNTRUSTED_REASON
+    return None
+
+
 def mask_untrusted_values(values: dict, trust: dict) -> dict:
     """Null the snapshot-derived values the server cannot vouch for (fail closed)."""
-    if trust["untrusted_all"]:
+    if screenability_block_reason(trust) is not None:
         return {key: None for key in values}
     untrusted = set(trust["untrusted_fields"]) | set(trust.get("masked_fields") or ())
     return {
@@ -1761,7 +1781,7 @@ def _asset_health_summary(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
     体检本身坏掉时返回一个显式不可用的摘要，而不是让整个数据状态页 503：
     状态页的主要价值（日期/lineage/warning_codes）不应被新加的披露项拖垮。
 
-    2026-11-14（reports/120 §5 J10）**分层调度**：状态页/每轮只跑 cheap 档
+    2026-11-14（reports/122 §2.4 J10）**分层调度**：状态页/每轮只跑 cheap 档
     （目标 <5s）；expensive 档（归档交叉核验 ~35s）只由 `vd data doctor`
     全量或每日定时跑。这里不跑它，但必须把它的"上次运行时间 + 结果摘要"
     从缓存读出来附在 `asset_health.expensive` 里 —— 否则运维只能靠人记得

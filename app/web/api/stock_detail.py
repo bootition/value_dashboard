@@ -706,9 +706,13 @@ def get_indicators(stock_code: str, request: Request) -> dict:
         indicator_trust,
         mask_untrusted_values,
         read_warning_codes,
+        screenability_block_reason,
     )
 
     trust = indicator_trust(read_warning_codes(duck, request.app.state.sqlite))
+    # 与筛选页 409 同一判定（data_quality.screenability_block_reason），
+    # 本文件不再内联判断 untrusted_all。
+    snapshot_untrusted = screenability_block_reason(trust) is not None
 
     # 按类别组织，附带 historical_capable 标志 (PRD §14 SD7)
     def _with_meta(values: dict) -> dict:
@@ -717,7 +721,7 @@ def get_indicators(stock_code: str, request: Request) -> dict:
             k: {
                 "value": v,
                 "historical_capable": INDICATOR_HISTORICAL_CAPABLE.get(k, True),
-                "untrusted": trust["untrusted_all"] or k in untrusted,
+                "untrusted": snapshot_untrusted or k in untrusted,
             }
             for k, v in mask_untrusted_values(values, trust).items()
         }
@@ -772,7 +776,7 @@ def get_indicators(stock_code: str, request: Request) -> dict:
     return {
         "indicators": summary,
         "report_date": str(indicators.get("report_date", "")) if indicators.get("report_date") else None,
-        "latest_close": None if trust["untrusted_all"] else indicators.get("latest_close"),
+        "latest_close": None if snapshot_untrusted else indicators.get("latest_close"),
         "latest_price_date": str(indicators.get("latest_price_date", "")) if indicators.get("latest_price_date") else None,
         "freshness": freshness,
         "trust": trust,
@@ -1447,6 +1451,211 @@ def get_custom_trend(
 def get_available_fields() -> dict:
     """列出可用于自定义趋势的字段"""
     return {"fields": list(CUSTOM_TREND_FIELDS.keys()) + ["gross_margin", "net_margin", "debt_ratio", "roe"]}
+
+
+# ─── A+H「H 股市值」出口（2026-11-22，DuckDB schema v41） ────────────────
+#
+# 背景：`app/core/ah_metrics.py::build_ah_snapshot()` 早就算出 203 只 A+H 的
+# `h_share_market_cap_cny`（H 价 × H 股本 × 汇率，人民币元）、AH 溢价率、
+# A/H 双侧股息率，但全仓只有它自己引用它——没有 API，用户永远看不到。
+# 这里是只读出口：数据由 scripts/refresh_ah_market_snapshot.py 落到
+# `ah_market_snapshot`，本接口**不重算**任何口径，也不读写
+# `indicator_snapshot`（行业口径总市值只在 total_market_cap 参考块里读取展示）。
+
+AH_MARKET_SNAPSHOT_TABLE = "ah_market_snapshot"
+
+# 返回的全部快照列（= 建表列顺序，source/fetch_time 作为溯源一起返回）
+AH_METRIC_FIELDS: tuple[str, ...] = (
+    "stock_code",
+    "hk_code",
+    "as_of",
+    "a_price_date",
+    "h_price_date",
+    "a_close",
+    "h_close_hkd",
+    "fx_hkd_cny",
+    "fx_date",
+    "a_shares",
+    "h_shares",
+    "total_shares",
+    "a_share_market_cap_cny",
+    "h_share_market_cap_cny",
+    "ah_total_market_cap_cny",
+    "ah_premium_pct",
+    "a_yield_pct",
+    "h_yield_pct",
+    "h_yield_after_tax_pct",
+    "identity_status",
+    "identity_deviation_pct",
+    "h_shares_confidence",
+    "note",
+    "source",
+    "fetch_time",
+)
+
+# 每列单位（口径 §7：不许让前端猜。`*_pct` 是**百分数**，5.2 = 5.2%）
+AH_METRIC_UNITS: dict[str, str] = {
+    "as_of": "date",
+    "a_price_date": "date",
+    "h_price_date": "date",
+    "fx_date": "date",
+    "a_close": "CNY_per_share",
+    "h_close_hkd": "HKD_per_share",
+    "fx_hkd_cny": "CNY_per_HKD",
+    "a_shares": "shares",
+    "h_shares": "shares",
+    "total_shares": "shares",
+    "a_share_market_cap_cny": "CNY_yuan",
+    "h_share_market_cap_cny": "CNY_yuan",
+    "ah_total_market_cap_cny": "CNY_yuan",
+    "ah_premium_pct": "percent_points",
+    "a_yield_pct": "percent",
+    "h_yield_pct": "percent",
+    "h_yield_after_tax_pct": "percent",
+    "identity_deviation_pct": "percent_points",
+    "total_market_cap.value_cny": "CNY_yuan",
+}
+
+AH_METRICS_DISCLAIMER = (
+    "H 股市值 = H 价 × H 股本 × 汇率（人民币元）；总市值口径见 total_market_cap"
+    "（= A 股收盘价 × 总股本，行业口径，读自 indicator_snapshot，本接口不重算）。"
+    "ah_total_market_cap_cny 只是 A 股部分 + H 股部分的参考量，不是行业口径总市值。"
+    "H 股股本由「总股本 − 流通股本」推导（h_shares_confidence=derived；"
+    "中国银行 +33%、建设银行 +4.8% 为已知偏高）。"
+    "所有 *_pct 是百分数（5.2 表示 5.2%），不是小数比例。"
+    "A/H 股息率各算各的（各家分红 ÷ 自家股价，H 侧按汇率折人民币），"
+    "identity_status 为 mismatch / not_comparable 属正常现象，不代表数据错误。"
+)
+
+
+def _ah_table_ready(duck: Any) -> bool:
+    """`ah_market_snapshot` 是否已由 schema 迁移（v41）创建。"""
+    rows = duck.read_query(
+        "SELECT 1 FROM duckdb_tables() WHERE table_name = ?", [AH_MARKET_SNAPSHOT_TABLE],
+    )
+    return bool(rows)
+
+
+def _iso(value: Any) -> Any:
+    """日期/时间统一 ISO 字符串；None 原样返回（前端按 null 处理）。"""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ", timespec="seconds")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _ah_note_parts(note: Any) -> dict[str, str | None]:
+    """拆 `note`：`status=ok` / `status=incomplete; reason=missing_h_price`。"""
+    parts: dict[str, str | None] = {"status": None, "reason": None}
+    if not note:
+        return parts
+    for chunk in str(note).split(";"):
+        key, _, value = chunk.strip().partition("=")
+        key = key.strip()
+        if key in parts:
+            parts[key] = value.strip() or None
+    return parts
+
+
+def _total_market_cap_reference(duck: Any, stock_code: str) -> dict[str, Any] | None:
+    """行业口径总市值（只读 indicator_snapshot.total_market_cap，不重算、不改）。"""
+    rows = duck.read_query(
+        """SELECT report_date, latest_price_date, total_market_cap
+           FROM indicator_snapshot
+           WHERE stock_code = ? AND total_market_cap IS NOT NULL
+           ORDER BY report_date DESC LIMIT 1""",
+        [stock_code],
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    return {
+        "value_cny": row.get("total_market_cap"),
+        "basis": "A 股收盘价 × 总股本（行业口径；含 H 股股本按 A 价计）",
+        "report_date": _iso(row.get("report_date")),
+        "price_date": _iso(row.get("latest_price_date")),
+        "source": "indicator_snapshot.total_market_cap",
+        "note": "AH 拆分合计见 ah_total_market_cap_cny，两者口径不同、不可互相替代",
+    }
+
+
+@router.get("/{stock_code}/ah-metrics")
+def get_ah_metrics(stock_code: str, request: Request) -> dict:
+    """A+H「H 股市值」快照（reports/120 J12 的产品出口）
+
+    - 不在 A+H 名单 → 404 ``reason="not_an_ah_stock"``（前端据此隐藏该区块）；
+    - 是 A+H 但快照表里没有该股 → 404 ``reason="ah_snapshot_missing"``
+      （跑 ``scripts/refresh_ah_market_snapshot.py --yes`` 补数）;
+    - 表未迁移（schema < 41）或读库失败 → 503 ``reason="ah_snapshot_unavailable"``;
+    - 有数据 → 返回 `ah_market_snapshot` 全部列 + ``units``（每列单位）+ ``disclaimer``
+      + ``total_market_cap``（行业口径总市值参考块）。
+
+    只读接口：不重算口径、不写库、不碰 `indicator_snapshot` 的列与算法。
+    """
+    duck = request.app.state.duck
+    try:
+        ready = _ah_table_ready(duck)
+    except Exception as error:  # noqa: BLE001 - 读库失败不该 500 裸抛
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "reason": "ah_snapshot_unavailable",
+                "message": f"DuckDB 读取失败: {error}",
+            },
+        ) from error
+    if not ready:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "reason": "ah_snapshot_unavailable",
+                "message": (
+                    f"{AH_MARKET_SNAPSHOT_TABLE} 尚未创建（DuckDB schema < 41）："
+                    "先建表/迁移，再跑 scripts/refresh_ah_market_snapshot.py --yes"
+                ),
+            },
+        )
+
+    rows = duck.read_query(
+        f"""SELECT {", ".join(AH_METRIC_FIELDS)}
+            FROM {AH_MARKET_SNAPSHOT_TABLE}
+            WHERE stock_code = ?
+            ORDER BY as_of DESC LIMIT 1""",
+        [stock_code],
+    )
+    if not rows:
+        from app.core.ah_hk_mapping import build_ah_hk_mapping
+
+        mapping = build_ah_hk_mapping(duck).get("mapping") or {}
+        if stock_code not in mapping:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "reason": "not_an_ah_stock",
+                    "message": f"{stock_code} 不在 A+H 名单内，无 H 股市值口径",
+                },
+            )
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "reason": "ah_snapshot_missing",
+                "message": (
+                    f"{stock_code} 是 A+H，但 {AH_MARKET_SNAPSHOT_TABLE} 里没有它的行："
+                    "跑 scripts/refresh_ah_market_snapshot.py --yes 生成"
+                ),
+            },
+        )
+
+    payload: dict[str, Any] = {
+        field: _iso(rows[0].get(field)) for field in AH_METRIC_FIELDS
+    }
+    note_parts = _ah_note_parts(rows[0].get("note"))
+    payload["status"] = note_parts["status"]
+    payload["reason"] = note_parts["reason"]
+    payload["units"] = dict(AH_METRIC_UNITS)
+    payload["disclaimer"] = AH_METRICS_DISCLAIMER
+    payload["total_market_cap"] = _total_market_cap_reference(duck, stock_code)
+    return payload
 
 
 # ─── M4-问题3: PDF 浏览器打开（最小实现） ──────────────────────────

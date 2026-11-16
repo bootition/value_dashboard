@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 40
+DUCKDB_SCHEMA_VERSION = 41
 SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -856,6 +856,56 @@ CREATE TABLE IF NOT EXISTS report_metadata (
 );
 CREATE INDEX IF NOT EXISTS idx_report_metadata_stock
     ON report_metadata (stock_code, report_date);
+
+-- A+H「H 股市值」快照（2026-11-22 v41，reports/120 J12 的落地出口）。
+-- 为什么需要：`app/core/ah_metrics.py::build_ah_snapshot()` 早已算出 203 只
+-- A+H 的 `h_share_market_cap_cny`（H 价 × H 股本 × 汇率，人民币元）、AH 溢价、
+-- 双侧股息率，但**没有任何出口**——无落库、无 API、前端零命中，用户永远
+-- 看不到。本表就是它的持久化落点。
+--
+-- 口径纪律（与 ah_metrics 模块 docstring 一致，禁止在此重新解释）：
+--   * 本表**不是** `indicator_snapshot` 的一部分，也**不改**它的任何列/算法；
+--     行业口径的「总市值」仍是 `indicator_snapshot.total_market_cap`
+--     （= A 股价格 × 总股本）。`ah_total_market_cap_cny` 只是 A+H 拆分参考量。
+--   * 市值一律**人民币元**；`*_yield_pct` 是**百分数**（5.2 = 5.2%，注意
+--     `build_ah_snapshot()` 返回 `a_yield`/`h_yield` 是**小数比例**，写入前
+--     ×100，脚本 `scripts/refresh_ah_market_snapshot.py` 负责转换）。
+--   * `h_shares` 由 `total_shares − circ_shares` 推导，`h_shares_confidence`
+--     标注 `derived`（中国银行 +33%、建行 +4.8% 的已知偏差见模块 docstring）。
+--   * 缺数据的股票**也写一行**（计算列为 NULL），原因码记在 `note`
+--     （`status=incomplete; reason=missing_h_price` 这种格式），便于批量定位，
+--     绝不伪造数值。
+CREATE TABLE IF NOT EXISTS ah_market_snapshot (
+    stock_code               VARCHAR   NOT NULL,
+    hk_code                  VARCHAR,
+    as_of                    DATE      NOT NULL,
+    a_price_date             DATE,
+    h_price_date             DATE,
+    a_close                  DOUBLE,            -- A 股收盘价，元/股
+    h_close_hkd              DOUBLE,            -- H 股收盘价，港元/股
+    fx_hkd_cny               DOUBLE,            -- HKD→CNY 汇率，元/港元
+    fx_date                  DATE,
+    a_shares                 DOUBLE,            -- A 股股本，股
+    h_shares                 DOUBLE,            -- H 股股本（推导），股
+    total_shares             DOUBLE,            -- 总股本，股
+    a_share_market_cap_cny   DOUBLE,            -- A 股部分，元
+    h_share_market_cap_cny   DOUBLE,            -- H 股市值 = H 价 × H 股本 × 汇率，元
+    ah_total_market_cap_cny  DOUBLE,            -- A 部分 + H 部分，元（参考量）
+    ah_premium_pct           DOUBLE,            -- A 相对 H 溢价，百分点
+    a_yield_pct              DOUBLE,            -- A 股息率，百分数
+    h_yield_pct              DOUBLE,            -- H 股息率（税前），百分数
+    h_yield_after_tax_pct    DOUBLE,            -- H 股息率（税后），百分数
+    identity_status          VARCHAR,           -- ok/mismatch/not_comparable/insufficient_data
+    identity_deviation_pct   DOUBLE,            -- 仅 ok/mismatch 两态有值，百分点
+    h_shares_confidence      VARCHAR,           -- derived（唯一取值来源）
+    note                     VARCHAR,           -- status=/reason= 机器可读 + 人可读说明
+    source                   VARCHAR   NOT NULL,
+    fetch_time               TIMESTAMP NOT NULL,
+    PRIMARY KEY (stock_code, as_of)
+);
+CREATE INDEX IF NOT EXISTS idx_ah_market_snapshot_asof
+    ON ah_market_snapshot (as_of);
+
 -- 资产负债表补充域（2026-09-19 v27，"榨干数据包" R7）。
 -- 为什么单独建表：这三项是主链 balance_sheet 未映射、但价值投资常用且**无法自算**的科目。
 --   other_payables          其他应付款 —— 计算「大股东占款」（治理红旗）必需；
@@ -2096,6 +2146,20 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (40, 'industry_history + hk_price_daily + fx_rate_daily + report_metadata')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v41（2026-11-22, reports/120 J12）：把 `build_ah_snapshot()` 算好的
+        # 「H 股市值」落到 `ah_market_snapshot`（只建表、不加列、不动
+        # indicator_snapshot）。写入路径是 scripts/refresh_ah_market_snapshot.py，
+        # 读取路径是 GET /api/stock/{code}/ah-metrics。
+        # 版本号必须与 DUCKDB_SCHEMA_VERSION 同步：只建表不记账会让
+        # skip_if_current 快速路径认为"未到最新"而每次启动都跑全量 DDL
+        # （test_redteam_2026_08_13_fixes 的两个用例钉这条契约）。
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (41, 'ah_market_snapshot (A+H H-share market cap outlet)')
             ON CONFLICT (version) DO NOTHING
             """
         )

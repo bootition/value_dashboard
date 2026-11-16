@@ -9,7 +9,9 @@ server:
 database:
   duckdb_path: "data/valuedashboard.duckdb"
   sqlite_path: "data/valuedashboard.sqlite"
-  sqlite_wal_mode: true
+  # 未实现，已移除：曾有的 `sqlite_wal_mode` 开关。`app/core/storage/sqlite_store.py`
+  # `_write_connect()` 无条件执行 `PRAGMA journal_mode=WAL`（WAL 是 CLI/Web 跨进程
+  # 并发写的前提，代码里没有非 WAL 分支），该布尔值改了不会有任何效果。
   # DuckDB 连接统一配置：同一进程内所有连接必须使用同一套配置，
   # 否则并发打开同一数据库文件会报 different configuration 并重试约 28s。
   # 8GB/2线程同时覆盖普通详情查询与后台 summary 全量核对：
@@ -50,12 +52,27 @@ adapters:
     business_breakdown: ["eastmoney_f10"]
 
 screening:
-  default_exclude_st: true
-  default_exclude_suspended: true
-  default_min_listing_years: 1
+  # 基础股票池的默认范围条件。真源 = `app/core/screening/defaults.py`，
+  # 由 `ScreeningEngine.run()`（调用方不传时）与 `app/web/api/watchlist.py`
+  # 读取。⚠️ 筛选页自身仍在前端 `frontend/src/views/ScreeningPage.vue` 里
+  # 写死同值初始状态，改这里不会立刻改变页面初始勾选 —— 需要
+  # `/api/screening/defaults` 一类的下发接口 + 前端接入（未做）。
+  default_exclude_st: true          # 默认剔除 ST/*ST
+  default_exclude_suspended: true   # 默认剔除停牌
+  default_min_listing_years: 1      # 上市满 N 年才入池（0 = 不过滤）
+  # 单条规则的叶子条件数上限（缺省 20）：`ScreeningEngine._enforce_condition_budget()`
+  # 在执行前校验，超限返回 400 并说明上限值。与 SQL 硬保护线 MAX_RULE_LEAVES=100
+  # 取更严者生效。
   max_conditions: 20
+  # 表达式括号嵌套上限：`app/core/dsl/parser.py::_nesting_limit()` 读取本项，
+  # 配置缺失/非法时回退 50（历史硬编码值）。本仓取 3。
+  # 注意：规则树（conditions.rules）自身的嵌套层数另有 PRD SC3 的 3 层限制
+  # （`ScreeningEngine._build_where()` 的 level>3），与本项不是同一个东西。
   max_nesting_levels: 3
-  performance_target_seconds: 5
+  # 未实现，已移除：曾有的 `performance_target_seconds`。运行期没有任何时间
+  # 预算判定；PRD §19.1 的“单次筛选 <5s”只存在于验收脚本
+  # `scripts/screening_performance_acceptance.py`（threshold_ms=5000 硬编码）
+  # 与 `tests/regression/test_screening_performance.py`。
 
 update:
   enabled: true           # 自动更新默认开启（PRD §7.3）
@@ -186,8 +203,14 @@ update:
     stale_after_days: 365
 
 backup:
-  keep_full_backups: 3
-  encrypt_personal_data: true
+  # keep_full_backups: 未实现，已移除 —— `app/core/backup/manager.py` 只写不删，
+  #   全仓没有任何轮转/清理/保留天数逻辑读取这个数字；保留策略属破坏性操作
+  #   （会删用户备份），必须单独设计与裁决，不能靠一个没人读的配置充数。
+  # encrypt_personal_data: 未实现，已移除 —— 个人数据导出恒走
+  #   `Encryptor.encrypt`，且 `create_full_backup()` 在无口令时直接返回
+  #   `status=error`（"a password is required to protect personalized data"），
+  #   不存在“关掉加密”的分支，该布尔值不可能生效。
+  {}
 
 archive:
   root: "parquet"

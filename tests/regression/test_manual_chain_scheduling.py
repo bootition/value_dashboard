@@ -641,3 +641,36 @@ def test_supplement_keeps_draining_while_backlog_remains(
         "WHERE key = 'cashflow_supplement_last_refresh'"
     ), "追平后才推进水位"
     assert updater._refresh_due("cashflow_supplement_last_refresh", 7) is False
+
+
+
+def test_pending_all_in_cooldown_is_not_caught_up(duckdb_store, sqlite_store) -> None:
+    """待补股票**全在失败冷却里**时，不得报成 `no_pending_codes`（reports/126）。
+
+    事故背景：`pending_codes()` 先用 `_filter_cooldown` 把冷却中的股票滤掉，
+    滤完为空 → 上报 `no_pending_codes` → `update.py` 当成"该域已追平"并
+    **推进水位**。于是"水位一直前进、待补数量一动不动"：实测
+    `balance_sheet_ext` 105 只连续多轮不变，体检 `CHAIN_PROGRESS_STALLED`
+    只能永久红着。
+
+    本用例钉死：有冷却挡住的待补 → `reason == "all_pending_in_cooldown"`
+    + `remaining_pending > 0` + `status == "deferred"`（不是 success）。
+    """
+    _seed_stock(duckdb_store, "000001")
+    _seed_trio(duckdb_store, "000001", LATEST_PERIOD)
+    # 没有 cash_flow 补采行 → 该股必然是 pending
+
+    # 冷却态存在 SQLite（data_refresh_state），必须把 sqlite 也注入
+    fetcher = SupplementFetcher(duck=duckdb_store, sqlite=sqlite_store)
+    pending_before = fetcher.pending_codes(CASHFLOW_SUPPLEMENT, [LATEST_PERIOD])
+    assert [code for code, _ in pending_before] == ["000001"]
+
+    # 直接写冷却态（key 由 fetcher 内部约定），再查一次 pending 应为空
+    fetcher._record_attempts(CASHFLOW_SUPPLEMENT, ["000001"])
+    assert fetcher.pending_codes(CASHFLOW_SUPPLEMENT, [LATEST_PERIOD], retry_days=7) == []
+    assert fetcher.last_cooldown_blocked == 1, "被冷却挡住的数量必须被记下来"
+
+    report = fetcher.refresh(CASHFLOW_SUPPLEMENT, periods=[LATEST_PERIOD], retry_days=7)
+    assert report["reason"] == "all_pending_in_cooldown", report
+    assert report["remaining_pending"] == 1
+    assert report["status"] == "deferred"

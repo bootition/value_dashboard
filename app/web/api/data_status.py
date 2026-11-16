@@ -21,6 +21,11 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.core.financial_period import CN_TZ
+from app.core.missing_conditions import (
+    ACTIONABLE_MISSING_SQL,
+    DISABLED_MISSING_FIELDS,
+    actionable_missing_condition,
+)
 from app.core.quality.null_reasons import DOMAINS, reason_distribution
 
 logger = logging.getLogger(__name__)
@@ -33,24 +38,15 @@ router = APIRouter(prefix="/api/data-status", tags=["data-status"])
 # stale”。
 _SUMMARY_TTL_SECONDS = 300
 
-# 当前免费源确实无法补齐的字段：不在缺失列表/计数中继续展示为“待处理”，
-# 保留在库中留档；将来接入公告 PDF 解析或付费源时再从这里移除。
-_DISABLED_MISSING_FIELDS = {
-    "balance.core_tier1_capital_adequacy_ratio",
-    "balance.tier1_capital_adequacy_ratio",
-    "balance.capital_adequacy_ratio",
-    "balance.non_performing_loan_ratio",
-    "balance.provision_coverage_ratio",
-    "balance.risk_coverage_ratio",
-}
+# "可行动缺失"口径（禁用字段清单 + SQL 片段）已下沉到 app/core：
+# core 需要同一口径的 actionable_missing_count()，此前靠
+# `from app.web.api.data_status import _actionable_missing_condition`
+# 惰性导入绕环，是本仓唯一一处 core→web 层反转。现在真源只有一个方向：
+# web → core（`app/core/missing_conditions.py`）。下面两个私有名保留为
+# 向后兼容别名，历史测试/脚本仍可照旧导入。
+_DISABLED_MISSING_FIELDS = DISABLED_MISSING_FIELDS
+_ACTIONABLE_MISSING_SQL = ACTIONABLE_MISSING_SQL
 
-_ACTIONABLE_MISSING_SQL = """(
-    field_name NOT IN ({disabled_placeholders})
-    AND NOT (
-        field_name = 'placement_funding'
-        AND substr(stock_code, 1, 1) IN ('4', '8', '9')
-    )
-)"""
 _SUMMARY_CACHE: dict[str, dict[str, object]] = {}
 _SUMMARY_CACHE_LOCK = threading.Lock()
 _SUMMARY_REFRESH_LOCK = threading.Lock()
@@ -178,12 +174,9 @@ def _store_summary(request: Request, summary: dict) -> None:
         }
 
 
-def _actionable_missing_condition() -> tuple[str, list[str]]:
-    placeholders = ", ".join("?" for _ in _DISABLED_MISSING_FIELDS)
-    return (
-        _ACTIONABLE_MISSING_SQL.replace("{disabled_placeholders}", placeholders),
-        list(_DISABLED_MISSING_FIELDS),
-    )
+# 向后兼容别名：真源在 `app/core/missing_conditions.py`（core 也用它，
+# 不能再反过来 import 本模块）。
+_actionable_missing_condition = actionable_missing_condition
 
 
 def _freshness_ages(duck, *, now: datetime | None = None) -> dict:
@@ -249,8 +242,16 @@ def start_indicator_recompute(request: Request) -> dict:
             raise HTTPException(status_code=409, detail="另一更新任务正在运行，请稍后再重算指标快照")
     except HTTPException:
         raise
-    except Exception:
-        pass
+    except OSError:
+        # 只吞文件系统级探测失败（锁文件不可 stat/不可读），此时"没有锁"
+        # 是无证据的乐观推断，如实记日志后放行。
+        logger.warning(
+            "指标重算前的更新锁探测失败（OSError），按未持锁放行；并发写风险需人工确认",
+            exc_info=True,
+        )
+    # 注意：其余异常**不再**吞掉。此前这里是 `except Exception: pass`，
+    # 锁探测一抛错（导入失败/DB 句柄失效/锁文件格式异常）409 守卫就整体
+    # 失效，重算线程仍会创建并与更新子进程并发写正式库。宁可 500。
     with _INDICATOR_RECOMPUTE_LOCK:
         if _INDICATOR_RECOMPUTE_STATE.get("status") == "running":
             return dict(_INDICATOR_RECOMPUTE_STATE)
@@ -360,7 +361,7 @@ def _refresh_summary_worker(state, key: str) -> None:
 def _expensive_health_placeholder(request: Request) -> dict:
     """状态页占位摘要里的 `asset_health` 片段（保持载荷形状一致）。
 
-    2026-11-14（reports/120 §5 J10）：体检分两档 —— 状态页只跑 cheap
+    2026-11-14（reports/122 §2.4 J10）：体检分两档 —— 状态页只跑 cheap
     （<5s），expensive（归档交叉核验 ~35s）只由 `vd data doctor` 全量或每日
     定时跑。没有缓存时必须显式标 `not_run`，**不能留空/undefined**：
     前端无法区分"从未跑过"和"字段还没实现"。

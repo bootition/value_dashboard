@@ -1113,7 +1113,7 @@ def data_industry_history(
     yes: bool = typer.Option(False, "--yes", help="确认写库（默认 dry-run）"),
     max_rows: int = typer.Option(0, "--max-rows", help="只处理前 N 行（抽样验证用）"),
 ) -> None:
-    """行业变更历史（reports/119 P2-2 / reports/121 J3）
+    """行业变更历史（reports/119 P2-2 / reports/122 §2.1 J3）
 
     背景：库里此前只有"现在"的行业，回测用当前行业解释过去 = 未来信息。
     CSMAR 原始包每个报告期带 `Indcd`（2012 证监会标准，止于 2023-03-31），

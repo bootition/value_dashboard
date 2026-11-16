@@ -796,7 +796,7 @@ class IncrementalUpdater:
         updated_price_codes = price_step.pop("_updated_codes", [])
         price_xdxr_codes = price_step.pop("_xdxr_codes", [])
         price_raw_full_refetch = price_step.pop("_raw_full_refetch", False)
-        # J6：上一轮因 qfq 滞后进入待重算名单的股票，本轮**无条件**并入重算
+        # reports/122 §2.2 J6：上一轮因 qfq 滞后进入待重算名单的股票，本轮**无条件**并入重算
         # 集合（与指纹/价格是否变化无关），重算成功后从名单移除。
         tech_pending_codes = self._load_tech_recompute_pending()
 
@@ -1069,7 +1069,7 @@ class IncrementalUpdater:
             # 完整重算组：财务变化/明细回填/失败重试成功，输入域不确定，保
             # 守整股重算全部指标。价格变化组只重算价格域字段；回购/融资
             # 变化组只重算分红融资比三列（2026-09-08 提速计划）。
-            # J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
+            # reports/122 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
             # 全量重算（波动率/回撤/区间收益读 qfq 历史），而价格域增量路径
             # 会因为"最新价/最新日期没变"直接跳过（见 compute_price_sensitive）。
             full_codes = list(dict.fromkeys([
@@ -1144,7 +1144,7 @@ class IncrementalUpdater:
                     snapshot_step = event_step
                 ran_indicator_step = True
             if ran_indicator_step:
-                # J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
+                # reports/122 §2.2 J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
                 # 里的股票继续保留，下一轮再强制重算。
                 if tech_pending_codes:
                     snapshot_step["tech_recompute_pending_cleared"] = (
@@ -1581,9 +1581,14 @@ class IncrementalUpdater:
             })
             # 只有"这一域已经追平"才推进水位：
             #   · success + remaining_pending=0 → 全部目标期都已补齐；
-            #   · no_pending_codes → 本来就没得补（或都在失败冷却里）。
+            #   · no_pending_codes → 本来就没得补（**不含**"都在失败冷却里"）。
             # 若还有残留（首次 Q3 追补就是这种：全市场 5,575 只一次跑不完），
             # 不推进会 7 天白等，续传进度就会卡死在第一轮。
+            #
+            # 2026-11-16（reports/126）：`all_pending_in_cooldown` **不算追平**。
+            # 旧实现把"待补全在冷却"也报成 `no_pending_codes` 并推进水位，
+            # 于是"水位前进、待补数不降"（balance_sheet_ext 105 只）永远不收敛，
+            # 体检的 CHAIN_PROGRESS_STALLED 只能一直红着。
             caught_up = (
                 step["status"] == "success" and not step.get("remaining_pending")
             )
@@ -2355,7 +2360,7 @@ class IncrementalUpdater:
         logger.info("[增量] %d 只 qfq 已完成全历史重拉，移出待重拉集合", cleared)
         return cleared
 
-    # ─── 技术指标待重算集合（2026-11-14 P0 J6：qfq 补齐后到不触发重算）──────
+    # ─── 技术指标待重算集合（2026-11-14 P0 J6，reports/122 §2.2：qfq 补齐后到不触发重算）──────
     #
     # 背景（reports/120 §3 事实 4）：价格步骤"成功"但该股 qfq 仍停在旧的
     # 交易日（源侧 qfq 索引滞后 / 复权序列补齐晚一天）。此时 raw 已经推进，
@@ -4826,7 +4831,7 @@ class IncrementalUpdater:
                 qfq_lag_threshold,
                 ", ".join(qfq_lag["qfq_lag_codes"]),
             )
-        # 2026-11-14 P0（J6）：qfq 落后自己 raw 的股票必须写进"技术指标待重算
+        # 2026-11-14 P0 J6（reports/122 §2.2）：qfq 落后自己 raw 的股票必须写进"技术指标待重算
         # 名单"。价格步骤"成功"只说明 raw 落库成功；价格域指标读的是 qfq，
         # 而下一轮补 qfq 时 raw 已最新 → 重算集合为空 → 指标永久停在旧值。
         tech_lag_watermarks = self._qfq_lag_watermarks(
@@ -4861,7 +4866,7 @@ class IncrementalUpdater:
             "write_batch_sizes": write_batch_sizes[:50],
             "max_batch_stocks": max(write_batch_sizes) if write_batch_sizes else 0,
             "qfq_refetch_pending_cleared": cleared_qfq_pending,
-            # J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
+            # reports/122 §2.2 J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
             "tech_recompute_lag_count": len(tech_lag_codes),
             "tech_recompute_pending_marked": tech_pending_marked,
             "tech_recompute_lag_codes": tech_lag_codes[:20],

@@ -518,7 +518,15 @@ class SupplementFetcher:
                 if have is not None and str(have)[:10] >= latest:
                     continue
             pending.append((str(row["stock_code"]), str(row.get("exchange") or "")))
+        # 2026-11-16（reports/126）：**冷却过滤不能让"待补"凭空消失**。
+        # 旧行为：把冷却中的股票直接滤掉 → `pending` 变空 → 上层 update.py 把
+        # `no_pending_codes` 当成"已追平" → 水位前进，但待补数一动不动
+        # （实测 `balance_sheet_ext` 105 只连续多轮不变，`CHAIN_PROGRESS_STALLED`
+        # 因此永久红）。这里把"被冷却挡住的数量"单独记下来，供上层区分
+        # 「真的没得补」与「有得补但都在冷却」。
+        before_cooldown = len(pending)
         pending = self._filter_cooldown(key, pending, retry_days)
+        self._last_cooldown_blocked = before_cooldown - len(pending)
         if max_stocks > 0:
             pending = pending[:max_stocks]
         return pending
@@ -625,6 +633,11 @@ class SupplementFetcher:
                 )
         except Exception as error:  # noqa: BLE001
             logger.warning("写入补采失败冷却态失败(%s): %s", key, error)
+
+    @property
+    def last_cooldown_blocked(self) -> int:
+        """上一轮 `pending_codes()` 里被失败冷却挡住的股票数（>0 表示"有得补但没跑"）。"""
+        return int(getattr(self, "_last_cooldown_blocked", 0) or 0)
 
     def _filter_cooldown(self, key: str, pending: list[tuple[str, str]], retry_days: int) -> list[tuple[str, str]]:
         if retry_days <= 0:
@@ -1010,7 +1023,22 @@ class SupplementFetcher:
 
         # `pending_codes` 已经做过失败冷却过滤与每轮上限截断，这里不再重复。
         if not pending:
-            report["reason"] = "no_pending_codes"
+            # 2026-11-16（reports/126）：**必须区分**「真的没得补」与「有得补但都在冷却」。
+            # 旧实现两者都报 `no_pending_codes`，而 `update.py` 把 `no_pending_codes`
+            # 当成"该域已追平"→ 推进水位 → 待补数永远不动（`balance_sheet_ext`
+            # 105 只连续多轮不变就是这么来的），`CHAIN_PROGRESS_STALLED` 因此永久红。
+            blocked = self.last_cooldown_blocked
+            if blocked > 0:
+                report["reason"] = "all_pending_in_cooldown"
+                report["status"] = "deferred"
+                report["remaining_pending"] = blocked
+                report["cooldown_blocked"] = blocked
+                logger.info(
+                    "补采 %s：%d 只待补全部处于失败冷却，本轮跳过（不计为已追平）",
+                    key, blocked,
+                )
+            else:
+                report["reason"] = "no_pending_codes"
             report["elapsed_seconds"] = round(time.time() - started, 2)
             return report
 

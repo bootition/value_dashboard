@@ -23,6 +23,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
+from app.core.market_cap import latest_market_cap, market_cap_from
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -976,6 +977,13 @@ class IndicatorCalculator:
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
+    def read_query(self, sql: str, params: list[Any] | None = None) -> list[dict[str, Any]]:
+        """只读查询（market_cap.resolve_shares_asof 等共享域按 duck 接口调用）。
+
+        与 _read_query 同一条路径：批量重算期间复用同一只读连接，不额外开连接。
+        """
+        return self._read_query(sql, params)
+
     # ─── 数据获取 ──────────────────────────────────────────────────
 
     def _get_latest_financials(self, stock_code: str) -> dict[str, Any]:
@@ -1305,28 +1313,40 @@ class IndicatorCalculator:
         self, stock_code: str, price: dict, total_shares: float | None, circ_shares: float | None,
         ttm: dict, financials: dict, dividends: dict
     ) -> dict[str, Any]:
-        """1. 估值指标"""
+        """1. 估值指标
+
+        2026-11-16 市值口径收敛：总市值不再用「当前股本 × 历史价格」，统一走
+        app/core/market_cap.py——优先取 latest_price_date 当日的
+        share_capital_history 股本，历史缺行才回退 stock_meta（即调用方传入
+        的 total_shares）。历史表无数据时结果与旧实现 `close ×
+        stock_meta.total_shares` 逐位一致（tests/regression/
+        test_market_cap_single_source.py 钉死）。
+        PE/PB/PS/PCF 的口径是「总市值 / X」（见 app/web/api/stock_detail.py
+        公式表），因此共用同一份已解析股本，避免同一行里市值与估值倍数各用
+        一个股本。
+        """
         result: dict[str, Any] = {}
         close = price.get("close")
-        shares = total_shares or 0
+        cap = latest_market_cap(
+            self, stock_code, close=close, price_date=price.get("trade_date"),
+        )
+        # 历史与元数据都取不到股本时，沿用调用方传入的总股本（与旧行为一致）
+        if cap["shares"] is None and total_shares:
+            cap["total_market_cap"] = market_cap_from(close, total_shares)
+        market_cap = cap["total_market_cap"]
+        has_cap = market_cap is not None and market_cap > 0
 
-        # 总市值 = 最新收盘价 × 总股本
-        if close and shares:
-            result["total_market_cap"] = close * shares
-        else:
-            result["total_market_cap"] = None
+        # 总市值 = 最新收盘价 × 总股本（唯一实现，见 market_cap 模块）
+        result["total_market_cap"] = market_cap
 
         # 流通市值 = 最新收盘价 × 流通股本
-        if close and circ_shares:
-            result["circ_market_cap"] = close * circ_shares
-        else:
-            result["circ_market_cap"] = None
+        result["circ_market_cap"] = market_cap_from(close, circ_shares)
 
         # PE-TTM = 总市值 / TTM归母净利润
         # V2-3.4修复: PE>1000 时置NULL（净利润接近0导致PE虚高，业务无意义）
         ttm_profit = ttm.get("parent_net_profit")
-        if close and shares and ttm_profit and ttm_profit > 0:
-            pe = (close * shares) / ttm_profit
+        if has_cap and ttm_profit and ttm_profit > 0:
+            pe = market_cap / ttm_profit
             result["pe_ttm"] = pe if pe <= 1000 else None
         else:
             result["pe_ttm"] = None
@@ -1334,23 +1354,23 @@ class IndicatorCalculator:
         # PB-MRQ = 总市值 / 最新报告期归母权益
         # P0#9修复: PB>200 时置NULL (权益接近0导致PB虚高，业务无意义)
         equity = financials.get("total_equity_parent") if financials.get("total_equity_parent") is not None else financials.get("total_equity")
-        if close and shares and equity is not None and equity > 0:
-            pb = (close * shares) / equity
+        if has_cap and equity is not None and equity > 0:
+            pb = market_cap / equity
             result["pb_mrq"] = pb if pb <= 200 else None
         else:
             result["pb_mrq"] = None
 
         # PS-TTM = 总市值 / TTM营业收入
         ttm_revenue = ttm.get("revenue") or ttm.get("total_operating_revenue")
-        if close and shares and ttm_revenue and ttm_revenue > 0:
-            result["ps_ttm"] = (close * shares) / ttm_revenue
+        if has_cap and ttm_revenue and ttm_revenue > 0:
+            result["ps_ttm"] = market_cap / ttm_revenue
         else:
             result["ps_ttm"] = None
 
         # PCF-TTM = 总市值 / TTM经营现金流净额
         ttm_cf = ttm.get("cf_from_operating")
-        if close and shares and ttm_cf and ttm_cf > 0:
-            result["pcf_ttm"] = (close * shares) / ttm_cf
+        if has_cap and ttm_cf and ttm_cf > 0:
+            result["pcf_ttm"] = market_cap / ttm_cf
         else:
             result["pcf_ttm"] = None
 
@@ -1505,7 +1525,7 @@ class IndicatorCalculator:
         # ROE = TTM归母净利润 / 平均归母权益
         # V2-3.3修复: |ROE|>1.0 时置NULL
         # P1-24修复: 用(期初+期末)/2而非期末值
-        # 2026-11-15 J5 结论：上一期权益缺失时 ROE 保持 NULL，不把期初按 0
+        # 2026-11-15（reports/122 §2.6 J5）结论：上一期权益缺失时 ROE 保持 NULL，不把期初按 0
         # 处理（否则"平均权益"退化成期末的一半，ROE 会被系统性放大）。
         equity = financials.get("total_equity_parent") if financials.get("total_equity_parent") is not None else financials.get("total_equity")
         avg_equity = None
@@ -1519,7 +1539,7 @@ class IndicatorCalculator:
 
         # ROA = TTM净利润 / 平均总资产
         # P1-24修复: 用(期初+期末)/2而非期末值
-        # 2026-11-15 J5 结论：同 ROE——上一期总资产缺失时保持 NULL。
+        # 2026-11-15（reports/122 §2.6 J5）结论：同 ROE——上一期总资产缺失时保持 NULL。
         total_assets = financials.get("total_assets")
         avg_assets = None
         if prev_assets is not None and total_assets is not None:
@@ -1549,7 +1569,7 @@ class IndicatorCalculator:
 
         # ROIC = TTM营业利润 / 投入资本
         # 投入资本 = 总权益 + 有息负债
-        # 2026-11-15 J5 结论：这里保持 NULL，不把缺项按 0 处理。
+        # 2026-11-15（reports/122 §2.6 J5）结论：这里保持 NULL，不把缺项按 0 处理。
         # - 营业利润缺失 → 分子无法计算；
         # - 归母权益/总权益缺失 → 不能拿 0 代替（会算出无穷大 ROIC）；
         # - `_calc_interest_bearing_debt` 三项全空时返回 None（fail-closed），
@@ -1566,7 +1586,7 @@ class IndicatorCalculator:
             result["roic"] = None
 
         # 经营现金流 / 净利润
-        # 2026-11-15 J5 结论：分母必须是正净利润。净利润 <= 0 时该比率没有
+        # 2026-11-15（reports/122 §2.6 J5）结论：分母必须是正净利润。净利润 <= 0 时该比率没有
         # 经济含义（负分母会让"现金流好"看起来像负值），不能按 0 或绝对值兜底。
         if op_cf is not None and net_profit and net_profit > 0:
             result["cf_to_net_profit"] = op_cf / net_profit
@@ -1654,7 +1674,7 @@ class IndicatorCalculator:
             result["debt_ratio"] = None
 
         # 流动比率 = 流动资产 / 流动负债
-        # 2026-11-15 J5 结论：流动资产/流动负债缺失时保持 NULL，不按 0 兜底：
+        # 2026-11-15（reports/122 §2.6 J5）结论：流动资产/流动负债缺失时保持 NULL，不按 0 兜底：
         # 缺资产按 0 会把比率压成 0，缺负债则分母为 0；都不能用总资产/总负债替代。
         if total_current_assets is not None and total_current_liabilities and total_current_liabilities > 0:
             result["current_ratio"] = total_current_assets / total_current_liabilities
@@ -1662,7 +1682,7 @@ class IndicatorCalculator:
             result["current_ratio"] = None
 
         # 速动比率 = (流动资产 - 存货) / 流动负债
-        # 2026-11-15 J5 修复：存货为 NULL 时按 0 计。
+        # 2026-11-15（reports/122 §2.6 J5）修复：存货为 NULL 时按 0 计。
         # 存货是"没有就是 0"的典型科目——银行/保险/互联网/服务业本来就没有
         # 存货，源里留 NULL 不代表缺失。旧写法要求三项全非空，导致这 53 只
         # （2026-09-30 实测）速动比率被整项压成 NULL（覆盖率 97.2% → 98.2%）。
@@ -1680,7 +1700,7 @@ class IndicatorCalculator:
         result["interest_bearing_debt"] = self._calc_interest_bearing_debt(financials)
 
         # 利息保障倍数 = TTM营业利润 / TTM利息费用
-        # 2026-11-15 J5 结论：保持 NULL。利息费用缺失或为 0 时倍数在数学上是
+        # 2026-11-15（reports/122 §2.6 J5）结论：保持 NULL。利息费用缺失或为 0 时倍数在数学上是
         # 无穷大/无定义，不能把利息费用按 0 处理；也不能用 financial_expenses
         # 兜底（其中混有汇兑损益、手续费，口径不同）。
         op_profit = ttm.get("operating_profit")
@@ -1708,7 +1728,7 @@ class IndicatorCalculator:
         result: dict[str, Any] = {}
 
         # 分红率 = 已验证的最近年度每股股息 / 每股收益
-        # 2026-11-15 J5 结论：保持 NULL。DPS 无记录、股本缺失、TTM EPS <= 0
+        # 2026-11-15（reports/122 §2.6 J5）结论：保持 NULL。DPS 无记录、股本缺失、TTM EPS <= 0
         # 时都无法定义有意义的分红率；EPS 为负更不能按 0 或绝对值兜底。
         # `latest_dps` 来自"已公告 + 已除权"的年度合计，0 不会作为有效记录返回。
         dps = dividends.get("latest_dps")  # 最新一年DPS
@@ -1908,7 +1928,7 @@ class IndicatorCalculator:
         正确口径：缺失科目按 0 计，只要**至少一项有值**即可计算；
         三项全空才返回 None（该股确实没有可识别的有息负债明细）。
 
-        2026-11-15 J5 复核：维持该口径。三项全空时无法区分"真无借款"与
+        2026-11-15（reports/122 §2.6 J5）复核：维持该口径。三项全空时无法区分"真无借款"与
         "借款明细整段没采到"，保持 NULL 是 fail-closed；若将来确认源以 NULL
         表示零借款，再单独评估是否改成 0.0（需同步 roic 覆盖率与测试）。
         """

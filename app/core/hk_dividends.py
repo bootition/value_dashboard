@@ -42,7 +42,7 @@ MISSING_MAPPING_FIELD = "hk_dividends_mapping"
 # 源正常返回 0 行、且 A 股侧也没有任何已实施分红 → 合法空。
 SOURCE_EMPTY_REASON = "source_empty"
 # 源返回 0 行、但 A 股侧已有已实施分红 → 港股源不完整，必须可重试。
-# 2026-11-14 J4：一批 A 股有分红记录的股票曾被误标 legal_empty（永不重试；
+# 2026-11-14（reports/122 §2.8 J4）：一批 A 股有分红记录的股票曾被误标 legal_empty（永不重试；
 # 任务书口径 16 只，本轮正式库 open 记录实测 15 只）。
 SOURCE_INCOMPLETE_REASON = "source_incomplete"
 
@@ -228,7 +228,7 @@ class HKDividendUpdater:
             self._resolve_retry(stock_code)
         else:
             # 源当前无该股分红记录。保留既有数据，避免瞬时接口空窗清空历史。
-            # 2026-11-14 J4：不能一律判"合法空"——若 A 股侧已经有已实施分红，
+            # 2026-11-14（reports/122 §2.8 J4）：不能一律判"合法空"——若 A 股侧已经有已实施分红，
             # 说明这家公司确实分红过，港股侧却 0 行属于源不完整，必须可重试。
             # `update_all()` 的 pending 判据是"该港股代码在 hk_dividends 无行"，
             # 所以 source_incomplete 的股票下一轮仍会被重新抓取；不写 retry_list

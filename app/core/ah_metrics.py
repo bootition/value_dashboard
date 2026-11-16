@@ -66,6 +66,8 @@ import math
 from datetime import date, datetime
 from typing import Any, Literal
 
+from app.core.market_cap import market_cap_from
+
 __all__ = [
     "IDENTITY_STATUS_INSUFFICIENT",
     "IDENTITY_STATUS_MISMATCH",
@@ -285,7 +287,10 @@ def ah_market_cap(
     a_shares = _num(circ_shares)
     assert a_shares is not None  # h_share_count 已校验
     h_price_cny = price_h * fx
-    a_cap = price_a * a_shares
+    # A 股部分走总市值唯一实现（app/core/market_cap.py）；H 股部分口径不变。
+    # circ_shares == 0 表示纯 H 股公司，A 股部分按旧口径给 0.0（是「没有
+    # A 股」，不是「缺数据」），因此不能落到 market_cap_from 的 None 分支。
+    a_cap = market_cap_from(price_a, a_shares) if a_shares else 0.0
     h_cap = h_price_cny * h_shares
     total_ah = a_cap + h_cap
     out.update({

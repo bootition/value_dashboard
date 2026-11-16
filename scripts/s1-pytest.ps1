@@ -577,7 +577,17 @@ finally {
     if (-not $KeepRunRoot -and (Test-Path -LiteralPath $runRoot)) {
         try {
             Assert-SafeRunTreeForCleanup -Path $runRoot -SentinelValue $ownershipSentinel
-            Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction Stop
+            # 2026-11-16（reports/126）：Windows 上 pytest 刚退出时子进程句柄可能还没
+            # 释放，`Remove-Item -Recurse` 会删掉全部内容但**留下空目录**（实测残留
+            # 一个 0 字节目录）。这里重试 3 次，每次间隔 2 秒。
+            for ($attempt = 1; $attempt -le 3; $attempt++) {
+                Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction SilentlyContinue
+                if (-not (Test-Path -LiteralPath $runRoot)) { break }
+                Start-Sleep -Seconds 2
+            }
+            if (Test-Path -LiteralPath $runRoot) {
+                Remove-Item -LiteralPath $runRoot -Recurse -Force -ErrorAction Stop
+            }
         }
         catch {
             try {

@@ -18,6 +18,7 @@ from typing import Any
 
 from app.core.dsl.codegen import quote_identifier
 from app.core.dsl.registry import validate_expression_identifier
+from app.core.screening import defaults as screening_defaults
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -63,7 +64,7 @@ SNAPSHOT_COLUMNS: set[str] = {
 }
 
 # ─── 废弃字段（仍可执行，但不再出现在指标列表里）─────────────────────────────
-# 2026-11-14（reports/120 §5 J5）：`dividend_yield` 与 `ttm_dividend_yield` 在
+# 2026-11-14（reports/122 §2.6 J5）：`dividend_yield` 与 `ttm_dividend_yield` 在
 # 正式库实测 **3,605 只精确 100 倍关系** —— 同一口径、只是时点基准不同：
 #   dividend_yield     分母用 `now()`（今天）→ 分子分母跨期，非 TTM 口径；
 #   ttm_dividend_yield 分母用 `latest_price_date`（快照价日）→ 自洽可复现。
@@ -353,9 +354,9 @@ class ScreeningEngine:
     def run(
         self,
         rule: dict[str, Any],
-        include_st: bool = False,
-        include_suspended: bool = False,
-        min_listing_years: int = 1,
+        include_st: bool | None = None,
+        include_suspended: bool | None = None,
+        min_listing_years: int | None = None,
         strict_only: bool = False,
         locked_indicators: dict[str, dict[str, Any]] | None = None,
         masked_fields: Any = None,
@@ -364,9 +365,12 @@ class ScreeningEngine:
 
         Args:
             rule: 规则 JSON (conditions + sort + columns)
-            include_st: 是否包含 ST/*ST 股票
-            include_suspended: 是否包含停牌股票
-            min_listing_years: 最低上市年限
+            include_st: 是否包含 ST/*ST 股票；None = 取
+                `config.screening.default_exclude_st`（缺省 True → 不含 ST）
+            include_suspended: 是否包含停牌股票；None = 取
+                `config.screening.default_exclude_suspended`（缺省 True → 不含停牌）
+            min_listing_years: 最低上市年限；None = 取
+                `config.screening.default_min_listing_years`（缺省 1 年）
             masked_fields: "当前不可信"的字段清单（字段级遮蔽）。传 None 时
                 由 `asset_health.masked_fields_for_database()` 现算（2 条聚合
                 查询）；命中即抛 :class:`MaskedFieldError`（HTTP 409），
@@ -383,6 +387,17 @@ class ScreeningEngine:
             }
         """
         start_time = time.monotonic()
+
+        # 基础池默认值的唯一真源是配置（`screening.default_*`）；调用方不传
+        # 就落到配置值，传了就尊重调用方 —— 绝不静默覆盖用户的显式选择。
+        if include_st is None or include_suspended is None or min_listing_years is None:
+            pool_defaults = screening_defaults.base_pool_defaults()
+            if include_st is None:
+                include_st = not pool_defaults["exclude_st"]
+            if include_suspended is None:
+                include_suspended = not pool_defaults["exclude_suspended"]
+            if min_listing_years is None:
+                min_listing_years = int(pool_defaults["min_listing_years"])
 
         # min_listing_years 只参与 INTERVAL 字面量拼接，必须先做整数边界校验
         # （前端已传 int，这里兜底防负值/超大值/非整数输入）。
@@ -409,6 +424,9 @@ class ScreeningEngine:
             not isinstance(item, dict) for item in sort_spec
         ):
             raise ValueError("排序项必须是对象")
+        # 条件数量上限（`screening.max_conditions`，缺省 20）。此前只有
+        # `_build_where` 里一个 100 条的 SQL 保护上限，配置项无人读取。
+        self._enforce_condition_budget(conditions)
 
         compiled_indicators = self._compile_published_indicators(locked_indicators or {})
         self._custom_fields = set(compiled_indicators)
@@ -428,12 +446,12 @@ class ScreeningEngine:
             if base in SNAPSHOT_COLUMNS or base in NORMALIZED_FIELDS or base in self._custom_fields
         }
 
-        # 2.1 字段级遮蔽（reports/120 §5 J9）：字段当前不可信 → 拒绝执行。
+        # 2.1 字段级遮蔽（reports/122 §2.3 J9）：字段当前不可信 → 拒绝执行。
         #     检查 rank 基名（`free_cash_flow_market_rank` 引用的是
         #     `free_cash_flow`），否则遮蔽会被排名列绕过。
         self._reject_masked_fields(referenced_fields, masked_fields)
 
-        # 2.2 废弃字段（reports/120 §5 J5）：仍可执行，但结果必须自带警告，
+        # 2.2 废弃字段（reports/122 §2.6 J5）：仍可执行，但结果必须自带警告，
         #     否则用户不知道自己在用一个会随"今天"漂移的旧口径列。
         deprecation_warnings = deprecated_field_warnings(referenced_fields)
 
@@ -852,6 +870,30 @@ LIMIT {MAX_RESULT_ROWS}
             ScreeningEngine._count_rule_leaves(child) if isinstance(child, dict) and "logic" in child else 1
             for child in node.get("rules", [])
         )
+
+    @staticmethod
+    def _enforce_condition_budget(conditions: Any) -> None:
+        """拒绝条件数超过 `screening.max_conditions` 的规则（缺省 20）。
+
+        为什么要有上限：条件树会直接展开成 SQL，前端编辑器把上限写成 20
+        （`ScreeningRuleEditor` 的 max-conditions），后端却完全没有对应校验 ——
+        绕过前端（直接 POST /api/screening/run 或保存规则）就能塞进上百条，
+        单条规则的编译/执行成本无界。这里在**执行前**用明确错误挡住，而不是
+        等 SQL 变慢。
+
+        与 `MAX_RULE_LEAVES=100` 的关系：那个是 SQL 生成/内存的硬保护线，
+        本项是产品口径（可配置）的上限；两者取更严者生效。
+        """
+        if not isinstance(conditions, dict):
+            # 结构错误交给 `_build_where` 报"规则节点必须是对象"
+            return
+        limit = screening_defaults.max_conditions()
+        leaves = ScreeningEngine._count_rule_leaves(conditions)
+        if leaves > limit:
+            raise ValueError(
+                f"筛选条件 {leaves} 项超过上限 {limit} 项"
+                f"（配置项 screening.max_conditions）"
+            )
 
     def _build_order(self, sort_spec: list[dict]) -> str:
         """构建 ORDER BY。

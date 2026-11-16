@@ -30,6 +30,9 @@ _GRAMMAR_PATH = Path(__file__).parent / "grammar.lark"
 _parser: Lark | None = None
 MAX_EXPRESSION_BYTES = 10_000
 MAX_EXPRESSION_TOKENS = 500
+# 括号嵌套上限的**缺省回退值**：实际取值优先读 config `screening.max_nesting_levels`
+# （见 `app/core/screening/defaults.py::max_nesting_levels`）。此前该常量既是
+# 缺省值也是唯一真源，配置里的 `max_nesting_levels` 于是成了永不生效的假配置。
 MAX_NESTING_DEPTH = 50
 MAX_FUNCTION_ARGS = 10
 _TOKEN_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|-?\d+(?:\.\d+)?|[()@.,+*/<>=!-]")
@@ -235,6 +238,15 @@ def parse(expression: str) -> ASTNode:
     return ast
 
 
+def _nesting_limit() -> int:
+    """Effective parenthesis-nesting limit (config wins, default falls back to 50)."""
+    # 惰性导入：parser 被 screening/engine 间接依赖，模块级导入会把
+    # 「配置 → 筛选默认值」这条链提前拉进 DSL 的导入路径。
+    from app.core.screening.defaults import max_nesting_levels
+
+    return max_nesting_levels()
+
+
 def _validate_expression_budget(expression: str) -> None:
     """Reject oversized input before Earley parsing consumes unbounded resources."""
     if len(expression.encode("utf-8")) > MAX_EXPRESSION_BYTES:
@@ -242,12 +254,16 @@ def _validate_expression_budget(expression: str) -> None:
     tokens = _TOKEN_PATTERN.findall(expression)
     if len(tokens) > MAX_EXPRESSION_TOKENS:
         raise ValueError(f"expression exceeds {MAX_EXPRESSION_TOKENS} tokens")
+    nesting_limit = _nesting_limit()
     depth = 0
     for character in expression:
         if character == "(":
             depth += 1
-            if depth > MAX_NESTING_DEPTH:
-                raise ValueError(f"expression exceeds {MAX_NESTING_DEPTH} nesting depth")
+            if depth > nesting_limit:
+                raise ValueError(
+                    f"expression exceeds {nesting_limit} nesting depth "
+                    f"(screening.max_nesting_levels)"
+                )
         elif character == ")":
             depth -= 1
             if depth < 0:

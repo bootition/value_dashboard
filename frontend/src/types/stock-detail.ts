@@ -318,3 +318,96 @@ export interface ResearchStatisticsResponse {
   readonly coverage_threshold_pct: number
   readonly disclaimer: string
 }
+
+// ─── A+H「H 股市值」（DuckDB schema v41，reports/120 J12）────────────────────
+//
+// Source endpoint: GET /api/stock/{code}/ah-metrics（只读）
+//
+// 口径（后端 disclaimer 是唯一权威，这里只做类型）：
+// - `h_share_market_cap_cny` = H 价 × H 股本 × 汇率，**人民币元**（港股市值）；
+// - 行业口径总市值不在本接口重算，只在 `total_market_cap` 参考块里透出
+//   `indicator_snapshot.total_market_cap`（= A 股收盘价 × 总股本）；
+// - 所有 `*_pct` 是**百分数**（5.2 表示 5.2%），不是小数比例；
+// - 单位以后端 `units` 为准，前端不得自己猜。
+
+/** 后端 `units` 里的单位词表（每列一个）。 */
+export type AhMetricUnit =
+  | 'date'
+  | 'CNY_per_share'
+  | 'HKD_per_share'
+  | 'CNY_per_HKD'
+  | 'shares'
+  | 'CNY_yuan'
+  | 'percent_points'
+  | 'percent'
+
+/** 逐列单位表（键 = 响应字段名；`total_market_cap.value_cny` 用点号路径）。 */
+export type AhMetricUnits = Readonly<Record<string, AhMetricUnit>>
+
+/** 恒等式四态（mismatch / not_comparable 是正常现象，不是数据错误）。 */
+export type AhIdentityStatus = 'ok' | 'mismatch' | 'not_comparable' | 'insufficient_data'
+
+/** 该行计算是否完整：`ok` 全算出来；`incomplete` 计算列为 null 且 `reason` 说明原因。 */
+export type AhSnapshotStatus = 'ok' | 'incomplete' | 'unknown'
+
+/** 行业口径总市值参考块（只读 indicator_snapshot，不重算）。 */
+export interface AhTotalMarketCapReference {
+  readonly value_cny: number | null
+  readonly basis: string
+  readonly report_date: string | null
+  readonly price_date: string | null
+  readonly source: string
+  readonly note: string
+}
+
+export interface AhMetricsResponse {
+  readonly stock_code: string
+  readonly hk_code: string | null
+  readonly as_of: string
+  readonly a_price_date: string | null
+  readonly h_price_date: string | null
+  readonly a_close: number | null
+  readonly h_close_hkd: number | null
+  readonly fx_hkd_cny: number | null
+  readonly fx_date: string | null
+  readonly a_shares: number | null
+  readonly h_shares: number | null
+  readonly total_shares: number | null
+  readonly a_share_market_cap_cny: number | null
+  /** H 股市值 = H 价 × H 股本 × 汇率（人民币元） */
+  readonly h_share_market_cap_cny: number | null
+  /** A 股部分 + H 股部分（参考量，**不是**行业口径总市值） */
+  readonly ah_total_market_cap_cny: number | null
+  /** A 相对 H 溢价，百分点（正数 = A 贵） */
+  readonly ah_premium_pct: number | null
+  readonly a_yield_pct: number | null
+  readonly h_yield_pct: number | null
+  readonly h_yield_after_tax_pct: number | null
+  readonly identity_status: AhIdentityStatus | null
+  readonly identity_deviation_pct: number | null
+  /** H 股股本来源，恒为 `derived`（总股本 − 流通股本，见后端说明） */
+  readonly h_shares_confidence: string | null
+  /** 机器可读：`status=ok` / `status=incomplete; reason=missing_h_price` */
+  readonly note: string | null
+  readonly source: string
+  readonly fetch_time: string | null
+  readonly status: AhSnapshotStatus | null
+  readonly reason: string | null
+  readonly units: AhMetricUnits
+  readonly disclaimer: string
+  readonly total_market_cap: AhTotalMarketCapReference | null
+}
+
+/** 404 / 503 的 `detail.reason`（稳定契约，前端据此分支）。 */
+export type AhMetricsUnavailableReason =
+  /** 不在 A+H 名单：详情页应隐藏 AH 区块 */
+  | 'not_an_ah_stock'
+  /** 是 A+H 但快照表暂无该股行：显示「待刷新」而非错误 */
+  | 'ah_snapshot_missing'
+  /** 表未迁移 / 读库失败：显示「暂不可用」，不要判成"非 A+H" */
+  | 'ah_snapshot_unavailable'
+
+export interface AhMetricsErrorDetail {
+  readonly reason: AhMetricsUnavailableReason
+  readonly message: string
+}

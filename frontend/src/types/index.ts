@@ -51,6 +51,15 @@ export {
   type AuditFieldRow,
   type AuditBatchRow,
   type AuditResponse,
+  // A+H「H 股市值」（GET /api/stock/{code}/ah-metrics，DuckDB schema v41）
+  type AhMetricUnit,
+  type AhMetricUnits,
+  type AhIdentityStatus,
+  type AhSnapshotStatus,
+  type AhTotalMarketCapReference,
+  type AhMetricsResponse,
+  type AhMetricsUnavailableReason,
+  type AhMetricsErrorDetail,
 } from './stock-detail.ts'
 
 export {

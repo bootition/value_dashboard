@@ -19,7 +19,13 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from typing import Any
 
+from app.core.market_cap import asof_shares_join_sql, asof_shares_value_sql
 from app.core.storage.duckdb_store import DuckDBReadLockedError
+
+# 总市值口径的唯一实现（app/core/market_cap.py）的 SQL 形态：
+# ASOF 取交易日**当时**股本，缺行回退 stock_meta；不要在查询里再手写一份。
+_ASOF_SHARES_EXPR = asof_shares_value_sql()
+_ASOF_SHARES_JOIN = asof_shares_join_sql("p")
 
 # 指数目录：宽基/红利 12 个（乐咕） + 申万一级行业 31 个（sws）
 BROAD_INDEX_NAMES: dict[str, str] = {
@@ -327,7 +333,7 @@ def _all_a_valuation_series(duck: object) -> list[dict[str, Any]]:
     # 最新一期"财报计算 TTM 与净资产，避免按统一报告期对齐时覆盖率随
     # 披露节奏抖动（旧实现 PB 与当前概览差约 10%）。
     cap_rows = duck.read_query(
-        """WITH me AS (
+        f"""WITH me AS (
                SELECT trade_date FROM price_daily_qfq
                WHERE trade_date >= ?
                GROUP BY trade_date
@@ -337,15 +343,14 @@ def _all_a_valuation_series(duck: object) -> list[dict[str, Any]]:
            ),
            px AS (
                SELECT me.trade_date, p.stock_code,
-                      p.close * COALESCE(sh.total_shares, s.total_shares) AS cap
+                      p.close * {_ASOF_SHARES_EXPR} AS cap
                FROM me
                JOIN price_daily_qfq p ON p.trade_date = me.trade_date
-               -- D23 修复：用交易日**当时**股本，不用当前股本
-               ASOF LEFT JOIN share_capital_history sh
-                 ON p.stock_code = sh.stock_code AND p.trade_date >= sh.effective_date
-               LEFT JOIN stock_meta s ON s.stock_code = p.stock_code
+               -- D23 修复：用交易日**当时**股本，不用当前股本。
+               -- 口径唯一实现见 app/core/market_cap.py，此处复用同一 SQL 片段。
+               {_ASOF_SHARES_JOIN}
                WHERE p.close IS NOT NULL
-                 AND COALESCE(sh.total_shares, s.total_shares) > 0
+                 AND {_ASOF_SHARES_EXPR} > 0
            ),
            prof AS (
                SELECT stock_code, report_date, SUM(parent_net_profit) AS profit
@@ -427,18 +432,17 @@ def _all_a_market_snapshot(duck: object) -> dict[str, Any]:
     # 数月），导致全A合成 PE/PB 的市值端"不更新"。改用 price_daily_qfq
     # 最新收盘价 × stock_meta.total_shares 逐股取最新，与 ETF 基本面口径一致。
     cap_rows = duck.read_query(
-        """SELECT SUM(latest_cap) AS total_cap, MAX(trade_date) AS cap_date
+        f"""SELECT SUM(latest_cap) AS total_cap, MAX(trade_date) AS cap_date
            FROM (
                SELECT p.stock_code,
-                      p.close * COALESCE(sh.total_shares, s.total_shares) AS latest_cap, p.trade_date,
+                      p.close * {_ASOF_SHARES_EXPR} AS latest_cap, p.trade_date,
                       ROW_NUMBER() OVER (PARTITION BY p.stock_code ORDER BY p.trade_date DESC) AS rn
                FROM price_daily_qfq p
-               -- D23 修复：用交易日**当时**股本，不用当前股本
-               ASOF LEFT JOIN share_capital_history sh
-                 ON p.stock_code = sh.stock_code AND p.trade_date >= sh.effective_date
-               LEFT JOIN stock_meta s ON s.stock_code = p.stock_code
+               -- D23 修复：用交易日**当时**股本，不用当前股本。
+               -- 口径唯一实现见 app/core/market_cap.py，此处复用同一 SQL 片段。
+               {_ASOF_SHARES_JOIN}
                WHERE p.close IS NOT NULL
-                 AND COALESCE(sh.total_shares, s.total_shares) > 0
+                 AND {_ASOF_SHARES_EXPR} > 0
            )
            WHERE rn = 1"""
     )
