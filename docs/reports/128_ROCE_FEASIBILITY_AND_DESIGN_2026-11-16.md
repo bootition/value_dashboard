@@ -1,9 +1,10 @@
 ---
 title: ROCE（已动用资本回报率）数据可行性审查与构建口径设计
-status: approved
+status: superseded
 category: reports
 created: 2026-11-16
 last-reviewed: 2026-11-16
+superseded-by: reports/129_ROCE_CORRECTED_DEFINITION_2026-11-16.md
 ---
 
 # ROCE（已动用资本回报率）可行性审查与构建口径设计

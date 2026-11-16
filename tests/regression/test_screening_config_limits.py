@@ -50,7 +50,7 @@ def test_max_nesting_levels_defaults_to_50_when_config_missing(
     _install_config(monkeypatch, {})
     assert max_nesting_levels() == DEFAULT_MAX_NESTING_LEVELS == 50
     # 4 层括号在缺省回退下必须能解析（旧硬编码 50 的行为不变）。
-    # 2026-11-16（reports/128）：断言真正返回 AST 而不是 lark ParseTree ——
+    # 2026-11-16（reports/129 §6.2）：断言真正返回 AST 而不是 lark ParseTree ——
     # 旧写法 `is not None` 在"括号解析成 Tree"的缺陷下一直是绿的。
     assert isinstance(parse("((((" "1" "))))"), ASTNode)
 

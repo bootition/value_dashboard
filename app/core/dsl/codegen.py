@@ -173,7 +173,7 @@ class CodeGen:
             return template.replace("{arg}", arg_str)
 
         # fail-closed：走到这里说明 AST 里混进了非 ASTNode 的节点（典型来源是
-        # 解析器漏掉的 ParseTree，见 reports/128 的括号缺陷）。旧实现在这里
+        # 解析器漏掉的 ParseTree，见 reports/129 §6.2 的括号缺陷）。旧实现在这里
         # `return "NULL"`，会把整段表达式悄悄编译成字面量 NULL —— 规则能保存、
         # 能运行、永远命中 0 只，且没有任何报错。校验器与解析器都已修好，这里
         # 再拦一道，保证"编译不出来"一定表现为显式失败。

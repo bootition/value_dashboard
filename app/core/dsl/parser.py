@@ -113,7 +113,7 @@ class DSLTransformer(Transformer):
     def primary(self, items):
         """解括号 `( expr )` —— 丢弃括号 Token，把内部表达式原样返回。
 
-        为什么必须有这个方法（2026-11-16，reports/128）：`_get_parser()` 用的是
+        为什么必须有这个方法（2026-11-16，reports/129 §6.2）：`_get_parser()` 用的是
         `keep_all_tokens=True`，而 grammar 里括号是 `primary` 的一个**未命名分支**
         `"(" expr ")"`。该分支的解析树带 `(`、`)` 两个 Token、共 3 个孩子，于是
         语法里的 `?primary`（单孩子内联）**失效**，`Tree('primary')` 原样漏到上层：
