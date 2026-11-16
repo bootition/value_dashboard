@@ -798,7 +798,7 @@ CREATE INDEX IF NOT EXISTS idx_field_coverage_history_field
 
 -- ─── 2026-11-14 第二批修复新增域（reports/121）─────────────────────────
 
--- 行业变更历史（reports/119 §5 P2-2 / reports/120 J3）。
+-- 行业变更历史（reports/119 §5 P2-2 / reports/122 §2.1 J3）。
 -- 为什么需要：我们只有"现在"的行业，任何回测里用"当前行业"都是未来信息。
 -- 两个来源都是现成的：CSMAR 原始文件每个报告期都带 Indcd/Indnme（2012 证监会
 -- 标准，1990~2025Q1），证监会接口的 `as_of_date` 也已经在适配器里排好序，
@@ -817,7 +817,7 @@ CREATE TABLE IF NOT EXISTS industry_history (
 CREATE INDEX IF NOT EXISTS idx_industry_history_stock
     ON industry_history (stock_code, effective_date);
 
--- 港股日行情（reports/120 J12：A+H 总市值/PE/PB 现在把 H 股按 A 价计价）。
+-- 港股日行情（reports/122 §2.7 J12；行业口径总市值 = A 价 × 总股本，H 股按 A 价计）。
 -- 只覆盖 A+H 映射表里的 H 股代码（约 202 只），日频、体量很小。
 CREATE TABLE IF NOT EXISTS hk_price_daily (
     stock_code VARCHAR NOT NULL,   -- 港股代码（5 位，如 00941）
@@ -840,7 +840,7 @@ CREATE TABLE IF NOT EXISTS fx_rate_daily (
     PRIMARY KEY (pair, trade_date)
 );
 
--- 报告元数据（reports/120 J3 之二）：CSMAR 原始文件的 IfCorrect/DeclareDate/Typrep
+-- 报告元数据（reports/122 §2.1 J3）：CSMAR 原始文件的 IfCorrect/DeclareDate/Typrep
 -- 导入时被整体丢弃，导致 PRD 的 as_reported vs latest_restated 语义无法落地。
 -- 只存"这一行是合并还是母公司报表、是否更正过、更正披露日"——
 -- 数值仍在三表里，本表只做标记。
@@ -857,7 +857,7 @@ CREATE TABLE IF NOT EXISTS report_metadata (
 CREATE INDEX IF NOT EXISTS idx_report_metadata_stock
     ON report_metadata (stock_code, report_date);
 
--- A+H「H 股市值」快照（2026-11-22 v41，reports/120 J12 的落地出口）。
+-- A+H「H 股市值」快照（v41，reports/122 §2.7 J12 的落地出口；reports/127 补 API）。
 -- 为什么需要：`app/core/ah_metrics.py::build_ah_snapshot()` 早已算出 203 只
 -- A+H 的 `h_share_market_cap_cny`（H 价 × H 股本 × 汇率，人民币元）、AH 溢价、
 -- 双侧股息率，但**没有任何出口**——无落库、无 API、前端零命中，用户永远
@@ -2149,7 +2149,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v41（2026-11-22, reports/120 J12）：把 `build_ah_snapshot()` 算好的
+        # v41（v41, reports/122 §2.7 J12）：把 `build_ah_snapshot()` 算好的
         # 「H 股市值」落到 `ah_market_snapshot`（只建表、不加列、不动
         # indicator_snapshot）。写入路径是 scripts/refresh_ah_market_snapshot.py，
         # 读取路径是 GET /api/stock/{code}/ah-metrics。

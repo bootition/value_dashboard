@@ -1,4 +1,4 @@
-"""A+H 双市场估值/股息率计算（reports/120 J12）。
+"""A+H 双市场估值/股息率计算（reports/122 §2.7 J12）。
 
 本模块只做**新增计算**，是 `indicator_snapshot` 之外的独立口径。全部函数
 尽量保持纯函数（除 `build_ah_snapshot` 只读 DuckDB），便于用临时库回归。

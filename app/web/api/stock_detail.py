@@ -1582,7 +1582,7 @@ def _total_market_cap_reference(duck: Any, stock_code: str) -> dict[str, Any] | 
 
 @router.get("/{stock_code}/ah-metrics")
 def get_ah_metrics(stock_code: str, request: Request) -> dict:
-    """A+H「H 股市值」快照（reports/120 J12 的产品出口）
+    """A+H「H 股市值」快照（reports/122 §2.7 J12 的产品出口；reports/127 接入）
 
     - 不在 A+H 名单 → 404 ``reason="not_an_ah_stock"``（前端据此隐藏该区块）；
     - 是 A+H 但快照表里没有该股 → 404 ``reason="ah_snapshot_missing"``

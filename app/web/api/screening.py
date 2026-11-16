@@ -327,7 +327,7 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
             min_listing_years=req.min_listing_years,
             strict_only=req.strict_only,
             locked_indicators=locked_indicators,
-            # 字段级遮蔽（reports/120 §5 J9）：显式传入与 /indicators 同源的
+            # 字段级遮蔽（reports/122 §2.3 J9）：显式传入与 /indicators 同源的
             # 不可信字段清单，命中即 409 —— 绝不静默返回空结果集。
             masked_fields=_masked_indicator_fields(request),
         )
@@ -784,7 +784,7 @@ def _extended_field_coverage(request: Request) -> dict[str, float]:
 
 
 def _masked_indicator_fields(request: Request) -> list[str]:
-    """当前"不可信"字段清单（字段级遮蔽，reports/120 §5 J9）。
+    """当前"不可信"字段清单（字段级遮蔽，reports/122 §2.3 J9）。
 
     来源是 `data_quality.indicator_trust()["masked_fields"]` —— 与只读端点
     （个股详情/自选）同一份判定，避免"筛选说能用、详情说不可信"的分裂。
@@ -794,7 +794,7 @@ def _masked_indicator_fields(request: Request) -> list[str]:
 
 
 def _deprecated_indicator_names() -> dict[str, str]:
-    """废弃字段 → 替代字段（reports/120 §5 J5，dividend_yield）。"""
+    """废弃字段 → 替代字段（reports/122 §2.6 J5，dividend_yield）。"""
     from app.core.screening.engine import DEPRECATED_COLUMNS
 
     return dict(DEPRECATED_COLUMNS)
@@ -804,7 +804,7 @@ def _deprecated_indicator_names() -> dict[str, str]:
 def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标
 
-    2026-11-14（reports/120 §5 J5/J9）两条过滤规则：
+    2026-11-14（reports/122 §2.6 J5 / §2.3 J9）两条过滤规则：
     1. **废弃字段不再列出**（`dividend_yield` → `ttm_dividend_yield`）：
        旧列分母用 `now()`，同一天不同时刻结果不同，不可复现；
     2. **当前不可信字段移到 `unavailable`**（reason=`masked_untrusted`）：

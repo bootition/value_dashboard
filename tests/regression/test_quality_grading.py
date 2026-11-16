@@ -572,3 +572,40 @@ def test_non_deprecated_rule_has_no_warnings(duckdb_store: DuckDBStore) -> None:
 
     assert result["warnings"] == []
     assert engine_module.DEPRECATED_COLUMNS == {"dividend_yield": "ttm_dividend_yield"}
+
+
+def test_low_coverage_extended_field_is_hidden_as_not_available(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """覆盖率低于阈值的字段必须进 `unavailable(reason=not_available_for_latest_period)`。
+
+    背景（reports/122 §2.5 J7）：三季报不披露现金流量表补充资料，折旧摊销/EBITDA/
+    EV-EBITDA/经营杠杆 在 2026-09-30 的覆盖率全部 <1%，若不隐藏，用户会在筛选里
+    选到一堆永远为空的字段。**这条"隐藏"分支此前没有任何回归用例**
+    （`grep not_available_for_latest_period tests/` = 0），审计把它列为 J7 的唯一缺口。
+
+    本用例构造"扩展域 3 行里只有 1 行有值"（覆盖率 33% < 50% 阈值），断言：
+    ① 该字段出现在 `unavailable` 且 reason 明确；② 不出现在可选 `indicators` 里。
+    """
+    from app.web.api.screening import _EXTENDED_MIN_COVERAGE_PCT
+
+    assert _EXTENDED_MIN_COVERAGE_PCT == 50.0, "阈值变了就要同步本用例的构造比例"
+
+    _seed_screenable(duckdb_store)
+    _patch_warning_codes(monkeypatch, [])
+    # 扩展域：3 只票，只有 1 只有 free_cash_flow → 覆盖率 33%
+    for index, code in enumerate(("000001", "000002", "000003")):
+        duckdb_store.write_query(
+            """INSERT INTO indicator_ext
+                   (stock_code, report_date, free_cash_flow, source, calculated_at, data_version)
+               VALUES (?, CAST('2026-09-30' AS DATE), ?, 'test', CURRENT_TIMESTAMP, 1)""",
+            [code, 1.0 if index == 0 else None],
+        )
+
+    payload = _indicators_payload(duckdb_store, sqlite_store)
+
+    names = {item["name"] for item in payload["indicators"]}
+    unavailable = {item["name"]: item for item in payload["unavailable"]}
+    assert "free_cash_flow" not in names, "覆盖率 33% 的字段不该出现在可选列表"
+    assert "free_cash_flow" in unavailable, "必须进 unavailable 并说明原因"
+    assert unavailable["free_cash_flow"]["reason"] == "not_available_for_latest_period"
