@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from app.core.config import Config
+from app.core.dsl.ast_nodes import ASTNode
 from app.core.dsl.parser import parse
 from app.core.screening.defaults import (
     DEFAULT_MAX_CONDITIONS,
@@ -49,14 +50,16 @@ def test_max_nesting_levels_defaults_to_50_when_config_missing(
     _install_config(monkeypatch, {})
     assert max_nesting_levels() == DEFAULT_MAX_NESTING_LEVELS == 50
     # 4 层括号在缺省回退下必须能解析（旧硬编码 50 的行为不变）。
-    assert parse("((((" "1" "))))") is not None
+    # 2026-11-16（reports/128）：断言真正返回 AST 而不是 lark ParseTree ——
+    # 旧写法 `is not None` 在"括号解析成 Tree"的缺陷下一直是绿的。
+    assert isinstance(parse("((((" "1" "))))"), ASTNode)
 
 
 def test_parser_honours_configured_nesting_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """配置 2 → 2 层可以解析，3 层必须报错并点明配置项。"""
     _install_config(monkeypatch, {"max_nesting_levels": 2})
     assert max_nesting_levels() == 2
-    assert parse("((1))") is not None
+    assert isinstance(parse("((1))"), ASTNode)
 
     with pytest.raises(ValueError, match="screening.max_nesting_levels"):
         parse("(((1)))")
@@ -80,7 +83,7 @@ def test_parser_rejects_nesting_three_when_repo_config_says_three() -> None:
     try:
         Config._instance = Config({"screening": shipped["screening"]})
         assert screening_defaults.max_nesting_levels() == 3
-        assert parse("(((1)))") is not None
+        assert isinstance(parse("(((1)))"), ASTNode)
         with pytest.raises(ValueError, match="nesting depth"):
             parse("((((1))))")
     finally:

@@ -172,7 +172,14 @@ class CodeGen:
             arg_str = args_sql[0] if args_sql else "1"
             return template.replace("{arg}", arg_str)
 
-        return "NULL"
+        # fail-closed：走到这里说明 AST 里混进了非 ASTNode 的节点（典型来源是
+        # 解析器漏掉的 ParseTree，见 reports/128 的括号缺陷）。旧实现在这里
+        # `return "NULL"`，会把整段表达式悄悄编译成字面量 NULL —— 规则能保存、
+        # 能运行、永远命中 0 只，且没有任何报错。校验器与解析器都已修好，这里
+        # 再拦一道，保证"编译不出来"一定表现为显式失败。
+        raise UnsupportedPeriodFunctionError(
+            f"unsupported AST node in code generation: {type(node).__name__}"
+        )
 
     def _gen_field(self, field: FieldRef, period: str) -> str:
         """Generate a field expression relative to the snapshot report date.

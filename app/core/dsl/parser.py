@@ -110,6 +110,30 @@ class DSLTransformer(Transformer):
             historical_capable=meta.get("historical_capable", False),
         )
 
+    def primary(self, items):
+        """解括号 `( expr )` —— 丢弃括号 Token，把内部表达式原样返回。
+
+        为什么必须有这个方法（2026-11-16，reports/128）：`_get_parser()` 用的是
+        `keep_all_tokens=True`，而 grammar 里括号是 `primary` 的一个**未命名分支**
+        `"(" expr ")"`。该分支的解析树带 `(`、`)` 两个 Token、共 3 个孩子，于是
+        语法里的 `?primary`（单孩子内联）**失效**，`Tree('primary')` 原样漏到上层：
+
+        - 出现在四则运算里 → `multiplicative`/`additive` 取 `.unit` 时抛
+          `AttributeError: 'Tree' object has no attribute 'unit'`（HTTP 500，
+          用户写不出任何带括号的复合表达式，例如
+          `a / (b - c + d)`）；
+        - 出现在比较运算里 → `Validator._check_dimensions` 同样在 `.unit` 上崩；
+        - 若绕过校验直接 codegen，`_gen_expr` 的兜底会把整段括号表达式编译成
+          字面量 `NULL`，规则**永远筛出 0 只且不报错**。
+
+        括号只影响优先级，不改变语义，所以这里直接返回内部节点。
+        """
+        for item in items:
+            if isinstance(item, Token):  # "(" / ")"
+                continue
+            return item
+        return Literal(unit="unknown")
+
     def func_call(self, items):
         # P0#11修复: keep_all_tokens=True 导致 items 含 "(" ")" 等标点 Token
         # 原: items[1] 是 "(" Token 而非 arg_list, 导致所有 FUNC(field) 失败
