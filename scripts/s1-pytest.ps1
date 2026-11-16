@@ -54,11 +54,15 @@ function Remove-StaleS1RunRoots {
             Where-Object { $_.LastWriteTime -lt $cutoff -and $_.Name -ne (Split-Path -Leaf $runRoot) }
         foreach ($dir in $stale) {
             try {
-                Assert-SafeRunTreeForCleanup -Path $dir.FullName -SentinelValue $ownershipSentinel
+                # 2026-11-16（reports/127）：陈旧目录里的哨兵是**上一轮**的随机 token，不可能
+                # 等于本轮的 $ownershipSentinel；套用 Assert-SafeRunTreeForCleanup 的精确相等
+                # 校验会 100% 抛 "sentinel does not match" 并被下面的 catch 吞掉 —— 清扫永久空转，
+                # 硬杀/断电遗留的目录照样无限累积。改用结构校验（仍要求哨兵文件存在且非空）。
+                Assert-OwnedStaleS1RunRoot -Path $dir.FullName
                 Remove-Item -LiteralPath $dir.FullName -Recurse -Force -ErrorAction Stop
             }
             catch {
-                try { [Console]::Error.WriteLine("[WARN] 无法清理残留运行根 ${($dir.FullName)}: $($_.Exception.Message)") } catch {}
+                try { [Console]::Error.WriteLine("[WARN] 无法清理残留运行根 $($dir.FullName): $($_.Exception.Message)") } catch {}
             }
         }
     }
@@ -121,6 +125,36 @@ function Assert-SafeRunTreeForCleanup {
     }
     if ((Get-Content -LiteralPath $sentinelPath -Raw) -ne $SentinelValue) {
         throw "Refusing cleanup because the ownership sentinel does not match: $Path"
+    }
+}
+
+function Assert-OwnedStaleS1RunRoot {
+    # 2026-11-16（reports/127）：校验"这是本 wrapper 之前某轮遗留的运行根"。
+    # 与 Assert-SafeRunTreeForCleanup 的唯一差别：不要求哨兵内容等于**本轮**的随机 token
+    # （陈旧目录不可能持有本轮的 token），只要求哨兵文件存在且非空，其余防误删约束全保留：
+    # 必须是 %TEMP% 直接子项、名字必须匹配 ^vd-s1-[0-9a-f]{32}$、整棵树不得含重解析点。
+    param([string]$Path)
+
+    $expectedParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+    if (-not (Test-PathEqual -Left ([System.IO.Path]::GetDirectoryName($Path)) -Right $expectedParent)) {
+        throw "Refusing cleanup outside the system temp directory: $Path"
+    }
+    if ([System.IO.Path]::GetFileName($Path) -notmatch "^vd-s1-[0-9a-f]{32}$") {
+        throw "Refusing cleanup of an unowned run-root name: $Path"
+    }
+    Assert-NoReparsePoint -Path $Path
+    foreach ($item in (Get-ChildItem -LiteralPath $Path -Force -Recurse -ErrorAction Stop)) {
+        if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Refusing cleanup because the run tree contains a reparse point: $($item.FullName)"
+        }
+    }
+    $sentinelPath = Join-Path $Path ".vd-s1-owned"
+    if (-not (Test-Path -LiteralPath $sentinelPath -PathType Leaf)) {
+        throw "Refusing cleanup because the ownership sentinel is missing: $Path"
+    }
+    $sentinelValue = Get-Content -LiteralPath $sentinelPath -Raw -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($sentinelValue)) {
+        throw "Refusing cleanup because the ownership sentinel is empty: $Path"
     }
 }
 
