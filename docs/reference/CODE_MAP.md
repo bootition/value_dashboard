@@ -76,7 +76,7 @@ last-reviewed: 2026-11-17
 | 顺序 | 文件 | 看什么 |
 |---|---|---|
 | 1 | `app/core/data_quality.py` | 告警码 → `indicator_trust()` → 遮蔽哪些字段；发布门禁阈值 |
-| 2 | `app/core/quality/asset_health.py` | 15 条体检规则 + `severity(block/disclose/inventory)` + `tier(cheap/expensive)` |
+| 2 | `app/core/quality/asset_health.py` | 14 条体检规则 + `severity(block/disclose/inventory)` + `tier(cheap/expensive)` |
 | 3 | `app/core/quality/null_reasons.py` | NULL 的 6 种含义（**先看这个再看 null_reason_sweeper**） |
 | 4 | `app/web/api/stock_detail.py` | 详情页如何应用遮蔽、如何拼历史 |
 
@@ -96,7 +96,7 @@ last-reviewed: 2026-11-17
 | 改口径/单位 | `screening/field_units.py` | `frontend/src/utils/screening-format.ts`（RG3 门禁会拦） |
 | 改 A+H 相关 | `core/ah_metrics.py`（算）+ `scripts/refresh_ah_market_snapshot.py`（落库） | `ah_market_snapshot` 表、`/api/stock/{code}/ah-metrics` |
 | 改库结构 | `storage/schema.py`（DDL + `schema_migrations`） | `docs/STATUS.md` 的 schema 版本、`data_quality` 的 `SCHEMA_DDL_DRIFT` |
-| 改前端页面 | `frontend/src/pages/*.vue` + `api/*.ts` | `npm run build` 会同步到 `app/web/static/`（`sync-static.mjs`），**不要手改 static/** |
+| 改前端页面 | `frontend/src/views/*.vue` + `frontend/src/types/*.ts` + `frontend/src/http.ts` | `npm run build` 会同步到 `app/web/static/`（`sync-static.mjs`），**不要手改 static/** |
 | 加 CLI 命令 | `app/cli/main.py`（Typer 子 app） | 命名风格：现有 65 个 snake_case 与 24 个 kebab-case 混用，**新增一律 kebab-case** |
 | 跑/修数据 | `scripts/` 下的 `repair_*`（16 个）/ `fetch_*`（11 个）/ `import_*`（12 个），默认 dry-run、`--yes` 落库 | 危险脚本规范见 `scripts/verify_no_dangerous_maintenance.py` |
 
@@ -158,7 +158,7 @@ last-reviewed: 2026-11-17
 **第 2–3 天（建立"为什么这么多门禁"的直觉）**
 5. `docs/reports/133`（7 类返工根因）+ `docs/reports/117`/`118`（一次真实事故的完整链条）
 6. `core/data_quality.py` 的 `indicator_trust()` 与 `gate_hard_block_threshold()`
-7. `quality/asset_health.py` 的 severity/tier 注释块（不用读 15 条规则实现）
+7. `quality/asset_health.py` 的 severity/tier 注释块（不用读 14 条规则实现）
 
 **第 1 周（按任务深入）**
 8. `screening/engine.py` + `dsl/`（如果要做指标/筛选）

@@ -76,7 +76,7 @@ python scripts/onboarding_metrics.py --compare docs/reference/onboarding-baselin
 | 2 | `update.py::_run_incremental_update_flow` | 492 行 / 25 个 `report_step` | 步骤顺序只存在于**代码执行顺序**里，没有清单；插入新步骤最容易放错位置 | 同上：`STEP_PLAN` 一张表，`for step in STEP_PLAN: report_step(step.run(ctx))` |
 | 3 | `core/storage/schema.py::init_duckdb_schema` | 912 行 | 60 张表的 DDL + 迁移 + 注释全在一个函数；想查"这列谁加的"只能全文搜 | 按域拆 `schema/domains/<domain>.py` + 有序 migration 列表（S2） |
 | 4 | `core/indicators/calculator.py` | 2,707 行 / 55 方法 | 指标计算 + 快照发布 + 派生列守卫 + lineage 混在一起；"加指标"必须读懂发布 | 拆 `calculator/`（calc / publish / lineage 三个模块）（S3） |
-| 5 | `core/quality/asset_health.py` | 2,382 行 | 15 条规则 + severity + tier + 结构性可空白名单 + 前端码表映射 | 规则声明与引擎分离：`rules/<code>.py` 返回 `Finding`（S4） |
+| 5 | `core/quality/asset_health.py` | 2,382 行 | 14 条规则 + severity + tier + 结构性可空白名单 + 前端码表映射 | 规则声明与引擎分离：`rules/<code>.py` 返回 `Finding`（S4） |
 | 6 | `core/data_quality.py` | 2,017 行 | 门禁阈值、告警码、可信判定、缓存、missing 口径全在里面；与 `quality/` 并行存在 | 拆 `quality/gates.py` + `quality/trust.py`，`data_quality.py` 只留 re-export（S4） |
 | 7 | `web/api/stock_detail.py` | 1,749 行 / 34 个函数 | 详情页聚合、欺骗判定、AH、时间线、历史序列全在一个路由文件 | 按 section 拆 router（S6，低优先） |
 | 8 | `cli/main.py` | 2,968 行 / 92 条命令 | 命令注册散在 2 千行里；命名 65 snake_case vs 24 kebab-case 混用 | 拆 `cli/commands/<group>.py`；新命令统一 kebab-case（S6） |
