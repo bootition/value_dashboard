@@ -12,14 +12,13 @@ datacenter.eastmoney.com/securities/api/data/v1/get（不是 push2/push2his）�
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import os
 import re
 import time
 from datetime import date
 from typing import Any
 
+from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
 logger = logging.getLogger(__name__)
@@ -60,25 +59,6 @@ _EQUIV_CNY_RE = re.compile(r"相当于\s*人民币\s*([0-9]+(?:\.[0-9]+)?)\s*元
 # 汇率里的「港币1.00元」，把**汇率**当成股息写进 dividend_per_share_hkd
 # （实测 89 行受影响，港币股息最多虚高 100 倍）。先剥掉汇率注记再匹配。
 _FX_NOTE_RE = re.compile(r"[（(]?\s*汇率[^）)]*[）)]?")
-
-
-@contextlib.contextmanager
-def _domestic_direct() -> Any:
-    """临时禁用 HTTP(S) 代理（国内源直连），退出时恢复。"""
-    saved = {
-        key: os.environ.get(key)
-        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    }
-    for key in saved:
-        os.environ.pop(key, None)
-    try:
-        yield
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def _to_float(value: Any) -> float | None:

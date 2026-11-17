@@ -21,6 +21,7 @@ import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
 logger = logging.getLogger(__name__)
@@ -32,21 +33,6 @@ THS_API_KEY_ENV = "HITHINK_FINANCE_API_KEY"
 
 # 业务 code 3004：标的叶子类型不支持该端点（合法无数据，不熔断）
 _LEGAL_EMPTY_CODES = frozenset({3004})
-
-
-@contextlib.contextmanager
-def _domestic_direct() -> Any:
-    saved = {k: os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")}
-    for k in saved:
-        os.environ.pop(k, None)
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def normalize_thscode(code: str) -> str:

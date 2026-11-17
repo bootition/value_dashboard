@@ -12,13 +12,12 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import os
 import re
 import unicodedata
 from typing import Any
 
+from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
@@ -595,24 +594,6 @@ def _stock_meta_name_index(duck: DuckDBStore) -> dict[str, str]:
         index.pop(normalized, None)
         logger.warning("stock_meta 名称归一化后重名，跳过自动匹配: %s", normalized)
     return index
-
-
-@contextlib.contextmanager
-def _domestic_direct() -> Any:
-    saved = {
-        key: os.environ.get(key)
-        for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    }
-    for key in saved:
-        os.environ.pop(key, None)
-    try:
-        yield
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def refresh_ah_spot_snapshot() -> list[dict[str, str]]:

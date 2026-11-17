@@ -1,3 +1,4 @@
+
 """港股日行情 + HKD/CNY 汇率适配器（reports/122 §2.7 J12 数据层）。
 
 为什么需要这个模块
@@ -44,16 +45,16 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import math
 import numbers
-import os
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
+
+from app.core.adapters._net import domestic_direct as _domestic_direct
 
 logger = logging.getLogger(__name__)
 
@@ -104,23 +105,6 @@ class FxHistoryFetch:
     error: str | None = None
     note: str | None = None
     mid_source_counts: dict[str, int] = field(default_factory=dict)
-
-
-@contextlib.contextmanager
-def _domestic_direct() -> Any:
-    """临时禁用 HTTP(S) 代理（国内源直连），退出时恢复。"""
-    keys = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    saved = {key: os.environ.get(key) for key in keys}
-    for key in keys:
-        os.environ.pop(key, None)
-    try:
-        yield
-    finally:
-        for key, value in saved.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 def _import_akshare() -> Any:

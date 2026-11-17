@@ -13,12 +13,11 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import os
 from datetime import date
 from typing import Any
 
+from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
 logger = logging.getLogger(__name__)
@@ -32,24 +31,6 @@ try:
 except ImportError:  # pragma: no cover
     ak = None  # type: ignore[assignment]
     _AKSHARE_AVAILABLE = False
-
-
-@contextlib.contextmanager
-def _domestic_direct() -> Any:
-    saved = {
-        k: os.environ.get(k)
-        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
-    }
-    for k in saved:
-        os.environ.pop(k, None)
-    try:
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
 
 
 def _to_float(value: Any) -> float | None:
