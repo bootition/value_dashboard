@@ -55,6 +55,8 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 scripts/s1-pytest.ps1 tests/regression
 # 静态检查
 uv run --locked ruff check app tests/regression
+# 反返工护栏（RG1–RG4：时区单源/状态合并/单位一致/派生域登记）
+uv run --locked python scripts/check_rework_guards.py
 # 前端门禁
 cd frontend; npm run lint; npm run test; npm run build
 # 锁文件
@@ -95,6 +97,70 @@ uv lock --locked
 3. ✅ 按"文档规则 §5"提炼本会话确认的知识到 `docs/runbooks/ops-knowledge-base.md`（或更新其 `last-reviewed`）
 4. ✅ 删除实验产物：数据库副本（`.duckdb` 拷贝）、临时 CSV、调试脚本等（先确认无保留价值，有保留期限的登记后保留）
 5. ✅ 清理 `.planning/<本会话>/` 中不再需要的中间文件（保留 findings/progress/task_plan 与最终交付物）
+
+## 反返工硬规则（强制，2026-11-17 复盘 `reports/133`）
+
+**背景教训（2026-10-18 ~ 11-17）：** 46 次提交里 23 次是 `fix`；25 次 `fix`+`chore` 中
+**15 次（60%）在 96 小时内又改到上一份提交改过的同一批文件**；19 份报告里 5 份在同日/次日
+被 `superseded`；ROCE 一个指标 40 小时内返工四次（4,322 行），PDF 除权日方案 26 小时建成
+又被整体删除（1,769 行）。根因不是能力，是 7 类**固定生成机制**（详见 `reports/133` §4）。
+
+> **总判据（先问这一句）**：这次修复有没有改变"下一次同类事故的生成条件"？
+> 只改出口表现 = 延期付款，不算修完。
+
+### R1 一个事实，只能有一个实现
+
+- ❌ 禁止把同一语义（缺口数、市值、可信判定、时区、单位口径）在第二处再写一遍
+- ✅ 发现第二份实现时，**先合并成单一函数**，再改调用方（`reports/117`/`126` 的教训）
+- ✅ 单位/百分比口径必须同时登记 `app/core/screening/field_units.py` **与** `frontend/src/utils/screening-format.ts`
+- 🔒 门禁：`scripts/check_rework_guards.py` RG3（跨语言单位一致）、RG1（时区单源）
+
+### R2 状态必须由事实派生，不得由"最后一个写它的人"决定
+
+- ❌ 禁止 `{**子步骤, "status": ...}` 这类覆盖式合并；状态一律走 `job_status.merge_step_status()`（`rejected` 最高、永不被覆盖）
+- ❌ 禁止用"刷新时间戳"掩盖陈旧（`calculated_at` 刷成当天 ≠ 数据是新的）
+- ✅ 证据必须带**真实读数**：写"批量写入 N 只/M 行"而不是"批量写入"；报告里的关键数字必须能追到日志/evidence
+- ✅ 新增探针/门禁时，必须同时写"它会失败"的反向用例（`reports/125` 的守卫空转 24 小时的教训）
+- 🔒 门禁：RG2、`tests/regression/test_rework_guards.py` §2（检查器必须抓得到）
+
+### R3 派生列三件套：保全 + 重建 + 校验（缺一不可）
+
+- ✅ 任何"不由指标计算器 staging 产出、但住在 `indicator_snapshot` 里"的列，必须在
+  `app/core/indicators/calculator.py::derived_snapshot_domains()` 登记（列名 + 重建函数）
+- ✅ 两条发布路径（`_publish_snapshot` / `_publish_snapshot_delta`）都走 `_derived_columns_guard()`：
+  删除前按 `(stock_code, report_date)` 保全 → 重建 → 校验没有列从"有值"掉到"全空"
+- ❌ 禁止只给某一条发布路径打补丁（`reports/131 §9` 只补了整表路径，增量路径当天仍在清空）
+- ❌ 禁止用"名单式补丁"（`*_pending` 集合）代替重建触发；名单只能做兜底
+- 🔒 门禁：RG4、`tests/regression/test_snapshot_derived_columns.py`
+
+### R4 每一次除法都要过四问（比率类指标的最高风险在分母）
+
+1. 分母到底是什么（精确字段路径，不是中文术语直译）？
+2. 它会不会趋零或变负？≤ 0 时**只标 `status`**，不截断、不设上限、不置空；
+3. 量级对得上外部标杆吗（ROCE 16%–52%、PEG<1、F-Score 0–9、Z-Score 1.8/3.0）？
+4. 空值是"数学不成立"还是"数据没抓到"（写进 `indicator_null_reason`）？
+
+- ❌ 禁止用护栏（`if abs(x) > 1: None`）掩盖看不懂的数字 —— 48 只真实 ROE > 100% 曾被静默置空
+- ✅ 新复合指标一律走 `docs/skills/composite-indicator/SKILL.md` 的 10 步清单
+
+### R5 "今天"永远是北京时间
+
+- ✅ 只用 `app.core.financial_period.cn_today()` / `cn_now()`；跨日比较必须先 `astimezone(CN_TZ)`
+- ❌ 禁止 `date.today()`、`datetime.now(UTC).date()` 参与"距今几天 / 是否到期 / 同一交易日"判断
+- 🔒 门禁：RG1
+
+### R6 不得一票否决：逐股隔离 + 阈值硬阻断
+
+- ✅ 单只股票的数据问题只能隔离该股票（`max(50, 1%)` 或占比 ≥1/3 才整批拒绝），并在响应里如实披露 `quarantined_codes`
+- ✅ 熔断桶必须是 `(adapter, data_type)`，只计"源不可用"；`legal_empty` / `per_symbol_data_error` 不增不减
+- ✅ 空适配器链是**环境问题**（`source_unavailable`），不是"该票没数据"
+- ❌ 禁止把"某只股票缺失"升级成"全站不可用"（`reports/117` 的全市场快照被拒）
+
+### R7 口径变更必须走 Skill 清单，且必须在报告里写"为什么不选另一个口径"
+
+- ✅ 报告必须有一节"外部核验 + 反例"（书里的标杆、手算 1 家、行业常识）
+- ✅ 口径被推翻时，新报告 `supersedes` 旧报告并把旧报告 front-matter 标 `superseded`
+- ✅ 结论必须附依据路径 + `last-reviewed` 日期（见文档规则 §4）
 
 ## 工作区边界
 

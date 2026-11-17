@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-11-15
+last-reviewed: 2026-11-17
 supersedes: null
 ---
 
@@ -266,4 +266,28 @@ supersedes: null
 
 ---
 
+## 18. 2026-11-17 返工复盘新增约束（reports/133）
+
+这 7 条不是「规范建议」，而是**最近一个月 7 类真实返工机制**的收敛结果
+（窗口内 46 commit / 23 次 fix / 60% 的修复在 96 小时内又改同一批文件）。
+
+| # | 硬约束/事实 | 出处 |
+|---|---|---|
+| E-SSOT | **一个事实只能有一个实现**。任何「缺口数 / 市值 / 可信判定 / 时区 / 单位口径」在第二处再写一遍，就一定会分叉且不报错。实测：`missing_count` 三处（11,823 vs 162）、股本缺口两份 SQL（5 只 vs 26 只）、总市值三套算法（185 只差 >1%，最差 −90%）。发现第二份实现时**先合并成单一函数再改调用方** | `reports/133` §4 R1、`reports/117`/`126` |
+| E-STATUS | **状态必须由事实派生，不得由「最后一个写它的人」决定**。禁止 `{**子步骤, status: ...}` 覆盖式合并；`rejected` 必须吸收（`merge_step_status`）。禁止用刷新 `calculated_at` 掩盖陈旧。证据必须带真实读数（「批量写入 N 只/M 行」而非「批量写入」） | `reports/133` §4 R2、`reports/117` P0-2、`reports/118` P1-1 |
+| E-DERIVED | **派生列三件套：保全 + 重建 + 校验**。凡不由计算器 staging 产出却住在 `indicator_snapshot` 的列，必须登记 `calculator.derived_snapshot_domains()`（列名 + 重建函数），两条发布路径都走 `_derived_columns_guard()`。**只给一条发布路径打补丁 = 另一条继续清空**（2026-11-17 实测：增量路径仍在清空 ROCE 六列） | `reports/133` §4 R3、`reports/131` K5、D28 |
+| E-DENOM | **每次除法过四问**：分母是什么精确字段 / 会不会 ≤0（≤0 只标 `status`，不截断不置空）/ 量级对得上外部标杆吗 / 空值是「数学不成立」还是「没抓到」。禁止用护栏（`if abs(x)>1: None`）掩盖看不懂的数字 | `reports/133` §4 R4、`docs/skills/composite-indicator/SKILL.md` |
+| E-TZ | **「今天」永远是北京时间**：只用 `app.core.financial_period.cn_today()` / `cn_now()`。禁止 `date.today()`、`datetime.now(UTC).date()` 参与「距今几天 / 是否到期 / 同一交易日」。本项目已有 4 处私有 UTC+8 实现（其中一处退化成 `date.today()`），并产出过两次事故 | `reports/133` §4 R5、`reports/117` §7、`reports/118` §3 P2 |
+| E-ISOLATE | **不得一票否决**：单只股票的问题只能隔离该股票（`max(50,1%)` 或占比 ≥1/3 才整批拒绝），并在响应里披露 `quarantined_codes`。熔断桶 `(adapter, data_type)`，只计「源不可用」；空适配器链是环境问题（`source_unavailable`）不是「该票没数据」 | `reports/133` §4 R6、`reports/117` P0-1/P0-4、`reports/118` P1-5 |
+| E-GUARDSELF | **守卫必须自证**。新增探针/门禁/清扫逻辑时，必须同时写「它会失败」的反向用例，否则会得到 `reports/125` 那种「写了但从未生效」的守卫（哨兵精确匹配恒假 + `catch` 吞异常，空转 24 小时）。判据：一条经验没有变成脚本/测试/规则/ADR 之一，就只是文档 | `reports/133` §5、`reports/127` |
+
+**门禁落点**（随 S1 一起跑）：`scripts/check_rework_guards.py`
+（RG1 时区单源 / RG2 状态合并 / RG3 前后端单位一致 / RG4 派生域登记），
+测试 `tests/regression/test_rework_guards.py`、`tests/regression/test_snapshot_derived_columns.py`。
+
+
+---
+
 *变更记录：2026-09-01 创建（从 reports/61/75/77/81/84/86/92/96/97/98/99/100/101/102、STATUS、config、代码核验聚合）。2026-09-01 体检修复：T3 关闭、E6 补充直连回退。2026-09-02 技术债补全：T1 评估、T2 冷归档恢复 CLI、T4 隔离分红审计 CLI、T5 东财单次探测 CLI、T6 旧单位规则审计 CLI、T7/T8/T9 核验关闭；按窗口删除重建回滚快照并清理约 70GB 旧产物。2026-09-03 性能修复：E7 更新为统一 8GB/2线程/preserve=false 且 Web 进程禁止 memory_limit()；新增 D10（auto-update status 只读 + CLI skip_if_current）、D11（重量摘要 TTL 300s）。2026-09-04 冷归档分区复审：新增 D17（外部 Parquet 按年分区规范，reports/109）。2026-09-04 港股分红域：新增 S10（datacenter ≤2 req/s、禁 push2）、D18（hk_dividends schema v20/映射与写纪律/融资仍缺失）、D19（executemany date 参数内存病理与向量化写入范式）、D20（轮转记账失控与修复），D5 schema 版本更新为 20。2026-09-05 多指数 ERP + ETF 工作台：新增 S11-S16（乐咕月度与限流、申万 50000/页并发、THS httpx/QDII null、向量化批量泛化、S1 进程冻结），schema 版本 D5 更新为 23。2026-10-20 自动更新变慢事故：新增 S18（陈旧不整段重拉）、D24（全量替换 DELETE 约 10s+/股与正式库高水位）、C-LOG（长任务 CLI 必须配置 INFO 日志）；见 reports/114。2026-10-20 分红批量/S1 提速：新增 S19（TDX 逐股建连 5s 必须批量）、D25（读锁属主判定）、C-S1（S1 固定开销来源与最小成本）；见 reports/115。2026-10-30 自动更新原生崩溃恢复：新增 R1-R5（WER/faulthandler 取证、running 标记结算、scheduler 前置、retry due、活进程卡死残留）；二次复查追加 R6-R10（301677 股本门禁、价格 raw+qfq 成对 retry、archive 视图无 storage、readiness/快照/summary 三态区分、CNINFO 100 页递归进度盲区）；UI 复查追加 R11-R12（历史股本 done/total、就绪与更新中可并存）；见 reports/116。*。2026-11-12 自动更新日志复盘修复：R6 升级为分级门禁+自动补股本通道；新增 R13-R16（lineage 形态判据、遮蔽语义、missing 口径、发布门禁分流）、S20-S22（适配器错误分类、沪市股本腾讯回填、公告截断语义）、C-RETRY、P-PRICE、D26、O-READY、D27；见 reports/117。*。2026-11-13 复审二轮：新增 O-READY2、P-QFQ、P-BATCH、P-STATS、C-STATUS2、C-READY-T（探针三道闸、qfq 写入事实触发、攒批空闲判据、统计域逐股指纹、general 截断不算 partial、readiness/门禁阈值对齐）；见 reports/118。2026-11-14 数据包价值兑现审查：新增 D28-D33（派生表必须有重建触发、手工链清单、技术指标 qfq 连续依赖、有息负债口径、数据包文档硬编码、CSMAR 原始元数据未导入）；见 reports/119。2026-11-15 第二轮数据修复（reports/122）：新增 D40-D47（金融股必须用 companyType、`exchange_gain`=公允价值变动收益、qfq 后到强制重算、告警三级 block/disclose/inventory + 字段级遮蔽、冷库 Parquet 读写纪律、AH 只用腾讯 qfq 末根算"当前"、pypdf 依赖与季度不可用字段、GIL 崩溃环境事实与分块+抓写分离规避；D44 按 2026-11-15 清单收缩为 16 张、正式库尚未执行，D46 补 pypdf 仅在 .venv 与 `uv add pypdf && uv lock`，PDF 抽样结论见 reports/121）。。2026-11-15 PDF 方案作废：D46 改写为「除权日必须走结构化源（巨潮 stock_dividend_cninfo / 东财 stock_fhps_detail_em），禁止 PDF 解析；两家派息比例都是每 10 股，落库要 ÷10」，`app/core/pdf/dividend_parser.py`、`scripts/resolve_dividend_ex_dates.py`、`tests/regression/test_dividend_pdf_parser.py` 已删除，reports/121 标 superseded，现行方案见 reports/123。冷库清单同日由 16 张增至 17 张（`csmar_risk_factors` 补登记，`physical_switch: pending`，正式库切换待主控执行），见 D44。**2026-11-15 结构化分红源与冷库收官（reports/123）：新增 D48（除权日只走结构化源——巨潮 `stock_dividend_cninfo` / 东财 `stock_fhps_detail_em`；两家派息比例都是「每 10 股」，落库必须 ÷10；退市股 `is_listed=FALSE` 不删只保留，删除类分支执行前必须查 `is_listed`）、D49（现金金额未知绝不写 0，插入按 NULL；200541 2007-06-08 实况）、D50（冷库退役 ≠ 删除：`cold_archive_state` + 两条恢复命令；17 张清单唯一事实来源是 `config/cold_archive.yaml`）；D44 的「16 张 / pending」由 D50 覆盖（**17 张全部 `switched`**，包 `D:/vd-cold-archive-20261115-r17` = 17 张 / 4,619,914 行 / 411.4 MB、`--verify-cold` 通过、库内 17 视图 + 0 停车表）；D46 引用的 `reports/121` 已标 `superseded`，`pypdf` 依赖待办随之关闭。**2026-11-16 ROCE 可研 + DSL 括号缺陷（reports/128）：新增 C-DSL-PAREN（DSL 括号解析漏成 ParseTree → 抛 AttributeError 或被编译成字面量 NULL；`primary()` 解括号 + codegen fail-closed + `assert parse(...) is not None` 属假绿断言）、D51（ROCE 口径：EBIT=利润总额+财务费用、CE=流动资产−流动负债+固定资产净值、平均取期末与去年同期、(1)(2)(3) 三条护栏与已知局限）、O-DSLEXPR（期末口径 ROCE 的临时 DSL 表达式）、O-S1-LOCK（服务在跑时正式库无法被普通 open() 读，定向 pytest 的隔离跑法与官方 S1 的区别）。**2026-11-16 晚 更正（reports/129）：D51 全面改写** —— ROCE 的已动用资本是「总资产 − 流动负债」（= 净营运资本 + **非流动资产**），`reports/128` 把「固定资产」直译成 `balance_sheet.fixed_assets`(PPE) 是错的，该报告已标 `superseded`；新增 D52（字段名直译陷阱 + 加总类公式必须先跑恒等式自查 + 分布形状是口径正确性的一阶检验）；O-DSLEXPR 的表达式同步改为 `(…total_profit@TTM + …financial_expenses@TTM) / (…total_assets@LATEST - …total_current_liabilities@LATEST)`。**2026-11-16 ROCE 落地（reports/130）：D51 定稿为「CE = 总资产 − 流动负债、不剔现金、年报中位数、无护栏」，并补三条实测判据（PPE 漏油气资产 / 剔现金分母穿零 / 三口径对照只有 C 对得上原书标尺）；O-DSLEXPR 的临时 DSL 写法（`总资产−流动负债`，不剔现金）与正式口径一致，可继续作为无落库时的对照。**2026-11-16 投资大师指标调研（reports/131）：新增 I-ROCE5（分母五问）、I-NULLSEM（NULL 两种语义分野）、I-FINEXCL（金融股剔除必须进 SQL，用 sw_level1）、I-MCSTALE（689009 市值小 10 倍 = 派生表未随股本链重建）、I-GAPS（GDP/维持性capex/信用利差/beta·WACC/gross PPE 五个缺口）。**2026-11-16 ROCE 定稿（reports/132）：新增 I-ROCE6（术语≠列名）、I-CASHX（修正项在样本外变误差项）、I-ROCE7（筛选用有效年数不用上市年限）、I-CALIB（三列位并列）、I-GAP-CASH（缺拆出资金）。四次返工的教训：比例指标要用外部标杆校验量级，看到怪数先查数据缺口不要改公式。**2026-11-16 金融股排除依据 + ROCE 复盘（reports/131 §10-§11）：新增 I-FINEFF（金融股不能用营运资本型指标，只数占2.1%但市值占21.1%，该用 ROE/PB/净息差）与 I-KLIST（复合指标构建10步检查清单）。*
+
+**2026-11-17 返工复盘（reports/133）：新增 E-SSOT / E-STATUS / E-DERIVED / E-DENOM / E-TZ / E-ISOLATE / E-GUARDSELF 七条反返工硬约束，并落成 `scripts/check_rework_guards.py`（RG1–RG4 静态门禁）+ 快照发布期派生列守卫 + `docs/skills/composite-indicator` Skill；同日修复 4 处私有 UTC+8 实现、4 处 `datetime.now(UTC).date()` 冒充「今天」、前端 2 处单位口径漂移。*

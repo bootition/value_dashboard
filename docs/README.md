@@ -3,7 +3,7 @@ title: 文档地图（Documentation Map）
 status: approved
 category: decisions
 created: 2026-07-31
-last-reviewed: 2026-09-01
+last-reviewed: 2026-11-17
 ---
 
 # 文档地图（Documentation Map）
@@ -20,6 +20,7 @@ last-reviewed: 2026-09-01
 | `reports/` | 报告 | 审计/验收/审查等事件型快照 | 当前结论以 `STATUS.md` 所列报告为准；其余仅为发现/修复事实 |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
+| `skills/` | 技能 | 可加载的操作流程（如 `composite-indicator`：复合指标 10 步清单） | ✅ 是（新增/改口径前必读） |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
 | `archive/` | 归档 | 已废弃/完成的研究快照、执行计划（含 superpowers/） | ❌ 否（只读） |
 

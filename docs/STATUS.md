@@ -3,7 +3,7 @@ title: 项目当前状态（Single Source of Truth）
 status: approved
 category: decisions
 created: 2026-07-31
-last-reviewed: 2026-11-16
+last-reviewed: 2026-11-17
 ---
 
 # 项目当前状态（单一真相源 / Single Source of Truth）
@@ -11,8 +11,8 @@ last-reviewed: 2026-11-16
 > **本文件是项目当前状态的唯一权威来源。** 任何建议、结论、验收判断必须以此为准；
 > `reports/`、`archive/` 中的历史报告只作为追溯证据，不构成当前结论。
 > 修改任何代码/数据/文档后，如影响状态，必须同步更新本文件。
-- **最后更新**：2026-11-16
-- **更新人**：2026-11-16 ROCE 定稿（`reports/132`）、投资大师指标调研（`reports/131`）、DSL 括号缺陷修复（`reports/129` §6.2）；2026-11-15 第二轮数据修复（J1–J12：CSMAR 行业历史/报告元数据入库 schema v40、qfq 后到自动重算、告警分级 + 字段级遮蔽、体检 cheap/expensive 分层、第 13 条规则 `CHAIN_PROGRESS_STALLED`、A+H 分市场口径、金融股 `exchange_gain` 纠偏、时点可见/公告时间线 API、危险脚本隔离；正式库流水线 `ALL DONE`；`reports/122`，前置 `reports/119`/`reports/120`，同轮并行 `reports/121` 见 PDF 除权日补齐（该报告已 superseded：除权日改走结构化源，PDF 链已删除）；同日收尾 `reports/123`（结构化分红源落地 + 冷库 17 张全部切换 + A+H 口径按行业惯例定稿））；前序 2026-11-14（`reports/120`）、2026-11-13（`reports/118`）、2026-11-12（`reports/117`）
+- **最后更新**：2026-11-17
+- **更新人**：2026-11-17 返工复盘与控制项落地（`reports/133`）；2026-11-16 ROCE 定稿（`reports/132`）、投资大师指标调研（`reports/131`）、DSL 括号缺陷修复（`reports/129` §6.2）；2026-11-15 第二轮数据修复（J1–J12：CSMAR 行业历史/报告元数据入库 schema v40、qfq 后到自动重算、告警分级 + 字段级遮蔽、体检 cheap/expensive 分层、第 13 条规则 `CHAIN_PROGRESS_STALLED`、A+H 分市场口径、金融股 `exchange_gain` 纠偏、时点可见/公告时间线 API、危险脚本隔离；正式库流水线 `ALL DONE`；`reports/122`，前置 `reports/119`/`reports/120`，同轮并行 `reports/121` 见 PDF 除权日补齐（该报告已 superseded：除权日改走结构化源，PDF 链已删除）；同日收尾 `reports/123`（结构化分红源落地 + 冷库 17 张全部切换 + A+H 口径按行业惯例定稿））；前序 2026-11-14（`reports/120`）、2026-11-13（`reports/118`）、2026-11-12（`reports/117`）
 ## 当前裁决（Verdict）
 | 层面 | 状态 | 依据 |
 |---|---|---|
@@ -24,6 +24,7 @@ last-reviewed: 2026-11-16
 | 国债曲线与利差 P3 | ✅ **PASS（修复完成）**：reports/73 全部 P2/P3 修复（双线图、导出对齐、信任遮蔽、日门控、retry 消费、批量对齐、NaN 拒绝等）并经 S1 562 全绿；正式库 9 期限全历史回填完成（2006-03-01~2026-08-11） | `reports/74`（2026-08-12）；发现基线 `reports/73` |
 | 历史股本链与统计 P4 | ✅ **PASS（修复完成，续传中）**：P4-1 日期截断等 3 项 P1 + 4 项 P2 + 6 项 P3 全部修复；统计域 version 1 构建完成；股本链 822 只完成、CNINFO 风控冷却后自动续传（约 4,700 只） | `reports/74`（2026-08-12）；发现基线 `reports/73` |
 | 个股详情信息架构 | ✅ PRD 已定义：研究驾驶舱、业务概览、纵向研究章节、粘性目录和研究型K线；按 P1-P4 分阶段开发 | `reports/68`；`.planning/2026-08-09-stock-detail-and-treasury-discovery/task_plan.md` |
+| 工程返工控制（2026-11-17） | ✅ **7 类共同根因已收敛并落成门禁**：46 commit/23 fix、15/25 修复在 96h 内又改同一批文件、5/19 报告被自己人取代（复盘基线见 `reports/133`）。新增 `scripts/check_rework_guards.py`（RG1 时区单源 / RG2 状态合并单出口 / RG3 前后端单位一致 / RG4 派生域登记）+ `calculator._derived_columns_guard()`（发布期派生列保全/重建/校验，两条发布路径统一）+ `docs/skills/composite-indicator`（10 步清单）+ `AGENTS.md` §6 七条硬规则。**上线当天抓出 3 个存量缺陷**：增量发布路径仍在清空 ROCE 六列、`cash_content_of_revenue` 前后端口径矛盾（100 倍）、`balance.advance_from_customers_ratio` 前端缺登记。验证：定向 pytest 624 passed、Ruff、前端 lint/67 vitest/build 全绿；**官方全量 S1 待服务冻结窗口补跑** | `reports/133`（2026-11-17） |
 | 代码层门禁 | ✅ 红队 P2 修复后 Ruff、前端 lint/55 node + 20 组件测试/build 全通过；隔离回归 481 passed | `reports/64` §2 |
 | 安全控制 | ✅ 无 P0 安全项（注入/穿越/代码执行/空值覆盖/并发写入/Web 写面均有防护与测试） | `reports/34` §3 |
 | 数据层 P0-1（股本单位混用） | ✅ 已关闭（5,534 只重建，`circ_shares > total_shares` 1,215 → 0） | `reports/29` |
