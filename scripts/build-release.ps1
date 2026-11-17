@@ -23,6 +23,21 @@ if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "uv.lock") -PathType Le
     throw "A locked Python dependency graph is required: uv.lock"
 }
 
+# reports/135 + reports/136 §6.1：wheel/安装版的兜底副本
+# app/resources/config/default.yaml 是生成物，源只能是 config/default.yaml。
+# 它曾经漂移到 93 行——缺 51 个 update.* 键、把 cninfo 塞回分红链、DuckDB 内存
+# 8GB→2GB——而源码形态根本不读副本，症状是"测试全绿、发布即事故"。所以这里在
+# **任何构建输出之前**（早于 S1 门禁、npm build 与 PyInstaller）强制重新生成：
+# 同步失败（源缺失 / 写回校验不一致）必须中止构建，不能带漂移配置发版。
+Push-Location $projectRoot
+try {
+    & uv run --locked python scripts/sync_packaged_config.py
+    if ($LASTEXITCODE -ne 0) { throw "Packaged config sync failed: config/default.yaml -> app/resources/config/default.yaml" }
+}
+finally {
+    Pop-Location
+}
+
 # Release artifacts are only meaningful after the same isolated gates that
 # protect the formal profile have passed. Run this before any build output.
 Push-Location $projectRoot

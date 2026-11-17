@@ -19,11 +19,25 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import yaml
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
+# 构建期同步脚本（reports/136 §6.1）：把"手工 cp"换成一条命令。
+# `--check` 的退出码语义与目录布局由下面的测试钉住。
+from scripts.sync_packaged_config import (  # noqa: E402
+    PACKAGED_CONFIG_RELATIVE,
+    REPO_CONFIG_RELATIVE,
+    compare_and_sync,
+)
+from scripts.sync_packaged_config import main as sync_main  # noqa: E402
+
 _DEFAULT_CONFIG = _PROJECT_ROOT / "config" / "default.yaml"
 
 #: 已在本次处置中删除的键（不得回来）。
@@ -156,6 +170,105 @@ def test_packaged_config_matches_repo_config() -> None:
     assert packaged_config.exists(), f"打包兜底配置缺失: {packaged_config}"
     assert repo_config.read_bytes() == packaged_config.read_bytes(), (
         "app/resources/config/default.yaml 已与 config/default.yaml 漂移；"
-        "请用 `cp config/default.yaml app/resources/config/default.yaml` 同步，"
+        "请运行 `uv run --locked python scripts/sync_packaged_config.py` 同步（构建时会自动执行），"
         "否则安装版会用到过期/被禁止的配置（例如 cninfo 分红源、2GB 内存上限）"
     )
+
+
+# ---------------------------------------------------------------------------
+# 同步脚本本体（reports/136 §6.1）：把"手工 cp"变成"构建时同步 + 一条命令可修"。
+# 上面那条断言只能"抓到漂移"，抓到之后还得人肉修；这里钉住修复工具本身的
+# 行为——`--check` 一致时退出 0、漂移时退出 1，同步模式必须逐字节还原（含 CRLF）。
+# ---------------------------------------------------------------------------
+
+#: 造临时仓库用的源配置。故意用 CRLF：换行风格也是"逐字节相等"的一部分，
+#: 同步若走了文本模式（换行会被平台转换），这里的断言会当场抓到。
+_SYNC_SOURCE_BYTES = (
+    b"server:\r\n"
+    b"  host: 127.0.0.1\r\n"
+    b"update:\r\n"
+    b"  check_interval_minutes: 30\r\n"
+    b"  sources:\r\n"
+    b"    - eastmoney\r\n"
+)
+
+#: 事故形态的漂移副本：缺 `update.*` 段 + 换行风格被改成 LF（reports/135）。
+_SYNC_DRIFTED_BYTES = b"server:\n  host: 127.0.0.1\n"
+
+
+def _make_fake_repo(tmp_path: Path, packaged: bytes | None) -> Path:
+    """在 `tmp_path` 下造一个最小"仓库"：源配置 + 可选兜底副本。"""
+    root = tmp_path / "repo"
+    source = root / REPO_CONFIG_RELATIVE
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(_SYNC_SOURCE_BYTES)
+    if packaged is not None:
+        target = root / PACKAGED_CONFIG_RELATIVE
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(packaged)
+    return root
+
+
+def test_sync_check_mode_exits_zero_when_copies_are_identical(tmp_path: Path) -> None:
+    root = _make_fake_repo(tmp_path, _SYNC_SOURCE_BYTES)
+    assert sync_main(["--check", "--root", str(root)]) == 0
+
+
+def test_sync_check_mode_exits_one_on_drift_and_never_writes(
+    tmp_path: Path, capsys
+) -> None:
+    root = _make_fake_repo(tmp_path, _SYNC_DRIFTED_BYTES)
+
+    assert sync_main(["--check", "--root", str(root)]) == 1
+
+    target = root / PACKAGED_CONFIG_RELATIVE
+    assert target.read_bytes() == _SYNC_DRIFTED_BYTES, "--check 只能比较，绝不能改文件"
+    captured = capsys.readouterr()
+    assert "sync_packaged_config.py" in captured.err, "漂移时必须给出可执行的修复命令"
+    assert "config/default.yaml" in captured.err
+    assert "CRLF=" in captured.err, "换行风格差异必须在摘要里可见"
+
+
+def test_sync_mode_restores_packaged_copy_byte_for_byte(tmp_path: Path) -> None:
+    root = _make_fake_repo(tmp_path, _SYNC_DRIFTED_BYTES)
+
+    assert sync_main(["--root", str(root)]) == 0
+
+    target = root / PACKAGED_CONFIG_RELATIVE
+    assert target.read_bytes() == (root / REPO_CONFIG_RELATIVE).read_bytes()
+    assert b"\r\n" in target.read_bytes(), "二进制复制不得把 CRLF 转成 LF"
+    assert sync_main(["--check", "--root", str(root)]) == 0
+
+
+def test_sync_recreates_a_missing_packaged_copy(tmp_path: Path) -> None:
+    root = _make_fake_repo(tmp_path, None)
+    target = root / PACKAGED_CONFIG_RELATIVE
+
+    assert sync_main(["--check", "--root", str(root)]) == 1, "副本缺失也算漂移"
+    assert not target.exists()
+
+    assert sync_main(["--root", str(root)]) == 0
+    assert target.read_bytes() == _SYNC_SOURCE_BYTES
+
+
+def test_compare_and_sync_core_reports_drift_then_repairs(tmp_path: Path) -> None:
+    root = _make_fake_repo(tmp_path, _SYNC_DRIFTED_BYTES)
+
+    assert compare_and_sync(root, check=True) == 1
+    assert compare_and_sync(root, check=False) == 0
+    assert compare_and_sync(root, check=True) == 0
+
+
+def test_compare_and_sync_refuses_to_run_without_the_single_source(tmp_path: Path) -> None:
+    """源缺失时不允许"反向同步"（否则事故值会被写回正式配置）。"""
+    empty_root = tmp_path / "empty"
+    empty_root.mkdir()
+    assert compare_and_sync(empty_root, check=False) == 2
+    assert not (empty_root / PACKAGED_CONFIG_RELATIVE).exists()
+
+
+def test_sync_script_check_mode_passes_on_this_repository() -> None:
+    """脚本默认路径必须真的指向这两份配置（路径改名时当场失败）。"""
+    assert (_PROJECT_ROOT / REPO_CONFIG_RELATIVE).is_file()
+    assert (_PROJECT_ROOT / PACKAGED_CONFIG_RELATIVE).is_file()
+    assert sync_main(["--check"]) == 0
