@@ -1337,7 +1337,12 @@ def _extended_indicator_fields() -> tuple[str, ...]:
 
 
 def masked_fields_for_codes(warning_codes: list[str] | tuple[str, ...]) -> list[str]:
-    """把 warning codes 翻译成"不可信字段"清单（字段级遮蔽的唯一入口）。"""
+    """把 warning codes 翻译成"不可信字段"清单（字段级遮蔽的唯一公开入口）。
+
+    2026-11-17（reports/136 §6.2）：这里**只保留一个名字**。曾有一个指向同一
+    实现的别名函数，两处都能跑 → grep 失效、改一处漏一处；已删除，新增调用
+    一律走本函数（回归护栏：`tests/regression/test_trust_gate_single_entry.py`）。
+    """
     codes = set(warning_codes)
     masked: set[str] = set()
     if "EXT_PERIOD_MISMATCH" in codes:
@@ -1347,11 +1352,6 @@ def masked_fields_for_codes(warning_codes: list[str] | tuple[str, ...]) -> list[
     if "DEDUCTED_PROFIT_GAP" in codes:
         masked.update(DEDUCTED_PROFIT_INDICATOR_FIELDS)
     return sorted(masked)
-
-
-def masked_indicator_fields(warning_codes: list[str] | tuple[str, ...]) -> list[str]:
-    """`indicator_trust()["masked_fields"]` 的函数式别名（调用方读起来更直白）。"""
-    return masked_fields_for_codes(warning_codes)
 
 
 def indicator_trust(warning_codes: list[str]) -> dict:

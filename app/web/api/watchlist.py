@@ -183,7 +183,12 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
 
 @router.post("/add")
 def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
-    """添加股票到自选 (PRD §13: 手动保留)"""
+    """手动添加单只股票到自选（无筛选门禁，纯手动保留）。
+
+    与 `screening.add_to_watchlist`（`POST /api/screening/add_to_watchlist`）
+    **不是重复实现**：那个端点从已保存的筛选结果批量入自选并先校验可筛选性；
+    本端点只校验 6 位代码在股票池内（PRD §13）。
+    """
     sqlite = request.app.state.sqlite
     duck = request.app.state.duck
     # L0-6（报告42）: 前后端双重校验——6 位数字代码且存在于股票列表中，

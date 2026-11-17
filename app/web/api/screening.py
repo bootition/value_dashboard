@@ -551,7 +551,12 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
 
 @router.post("/add_to_watchlist")
 def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
-    """将筛选结果加入自选列表 (PRD §12.5 SC17)"""
+    """筛选结果入自选（批量，先校验可筛选性）。
+
+    与 `watchlist.add_to_watchlist`（`POST /api/watchlist/add`，用户手动加单只）
+    **不是重复实现**：本端点先过 `_require_current_screenability`，且只接受
+    `screening_results` 里已保存的代码（PRD §12.5 SC17）。
+    """
     _require_current_screenability(request)
     sqlite = request.app.state.sqlite
     stock_codes = req.stock_codes
