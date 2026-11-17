@@ -11,6 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from app.core.dsl.derived_fields import field_metadata as _derived_field_metadata
+from app.core.dsl.derived_fields import series_break_metadata as _series_break_metadata
+
 Unit = Literal["CNY", "ratio", "percent", "count", "mixed", "unknown"]
 PeriodType = Literal["cumulative", "single_quarter", "ttm", "point_in_time", "current_only"]
 
@@ -201,6 +204,23 @@ for _field in (
         "unit": "percent", "period_type": "point_in_time", "historical_capable": True,
     }
 
+# ─── 跨年口径断点：派生字段 + 原始列断点登记（reports/131 §9.2 P0-7 / P0-8）──
+# 派生字段（SQL 真源在 app/core/dsl/derived_fields.py，DSL 代码生成与筛选引擎共用）：
+#   income.impairment_loss_positive           资产减值损失（损失为正，跨 2018 可比）
+#   income.credit_impairment_loss_positive    信用减值损失（损失为正，跨 2018 可比）
+#   balance.advance_from_customers            预收款项 + 合同负债（合并口径，跨 2020 连续）
+#   balance.advance_from_customers_ratio      客户占款率 =(预收+合同负债)/总资产
+# 原始列（income.asset_impairment_loss / credit_impairment_loss /
+# balance.prepayments_received / contract_liabilities）**不删不改**，只加
+# `series_break` 元数据：校验器据此给出"跨断点不可直接比较"的 warning，
+# 并指向对应的派生字段。整列标 deprecated 会让断点另一侧的历史查询全部失效。
+for _derived_key, _derived_meta in _derived_field_metadata().items():
+    FIELD_METADATA[_derived_key] = _derived_meta
+for _break_key, _break_meta in _series_break_metadata().items():
+    _break_entry = FIELD_METADATA.get(_break_key)
+    if _break_entry is not None:  # 原始列必须已在上面登记过
+        _break_entry["series_break"] = _break_meta
+
 # 内建指标维度元数据
 INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     # 估值 (current_only, 依赖最新收盘价)
@@ -223,11 +243,16 @@ INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     "roce_10y_median": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
     "roce_5y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
     "roce_10y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
+    "roce_eligible": {"unit": "count", "period_type": "current_only", "historical_capable": False},
     "cf_to_net_profit": {"unit": "ratio", "period_type": "ttm", "historical_capable": True},
     # 成长
-    "revenue_yoy": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "net_profit_yoy": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "deducted_profit_yoy": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
+    # 成长（2026-11-16 reports/131 §9.2 P0-4）：同比字段改 TTM 口径写入，
+    # 与详情页 metric-history 的 ttm 分支同源；年报口径另存 `*_yoy_fy`（快照列，
+    # 暂不作为可筛 DSL 指标暴露）。period_type 必须同步声明为 ttm，否则
+    # 校验层会把它当成"仅当前值"而拒绝合法的 TTM 组合。
+    "revenue_yoy": {"unit": "percent", "period_type": "ttm", "historical_capable": True},
+    "net_profit_yoy": {"unit": "percent", "period_type": "ttm", "historical_capable": True},
+    "deducted_profit_yoy": {"unit": "percent", "period_type": "ttm", "historical_capable": True},
     "revenue_cagr3": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
     "revenue_cagr5": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
     "net_profit_cagr3": {"unit": "percent", "period_type": "current_only", "historical_capable": True},

@@ -1,24 +1,27 @@
-"""ROCE（已动用资本回报率）域回归（schema v42，2026-11-16，reports/130）。
+"""ROCE（已动用资本回报率）域回归（schema v45，2026-11-16，reports/132）。
 
-口径来源：《我从达尔文那里学到的投资知识》第 2 章 + 用户 2026-11-16 裁决。
+口径来源：《我从达尔文那里学到的投资知识》第 2 章 + 用户 2026-11-16 三次裁决。
 
     已动用资本 CE = 总资产 − 流动负债        （= 净营运资本 + 全部长期资产）
     EBIT         = 利润总额 + 财务费用
     单年 ROCE    = 当年 EBIT ÷ ((上年 CE + 本年 CE) / 2)
-    快照值       = 最近 5 / 10 个**有效年报** ROCE 的中位数
+    主指标        = 最近 10 / 5 个**有效年报** ROCE 的中位数
+    **现金计入分母，不剔除。**
 
-本文件钉死四件事，每一条都对应一次真实的口径事故：
+本文件钉死五件事，每一条都对应一次真实的口径事故：
 
-1. **分母必须是「总资产 − 流动负债」，不是「净营运资本 + fixed_assets」**。
-   只取 `fixed_assets`(PPE) 会漏掉油气资产/长期应收款/在建工程等长期资产，
-   实测把中国海油算成 119% 高于贵州茅台（reports/130 §4）。
-2. **不剔现金**。按 `现金 − 债务` 全额剔除会把白酒/家电的分母掏空：格力已动用资本
-   在 −204 亿到 +26 亿之间穿过零点，ROCE 从 −81% 跳到 4,405%；五粮液 2024 年分母
-   −54 亿直接算出 −7,194%。书里那句「如果你存疑，也可以将部分现金计入投入资本」
-   就是给这种情况的授权。
-3. **不设任何比例护栏**（用户裁决：极值不假，假的是数据源）。唯一的 NULL 来自
-   除法不成立（CE ≤ 0），`status` 如实标注，CE 原值保留可复核。
+1. **分母必须是「总资产 − 流动负债」**，不是「净营运资本 + fixed_assets」。
+   只取 PPE 会漏掉油气资产/无形资产/在建工程：中国海油非流动资产 8,003 亿、
+   `fixed_assets` 仅 85 亿 → 算出 119% 压过茅台；海天 90.5%、公牛 80.6%。
+2. **不剔现金**（reports/132 裁定二）。书里那句「剔除超额现金」是向上修正，
+   机械执行会把分母削到零：同花顺现金占总资产 89%，剔完资本只剩 2 亿、EBIT 35 亿
+   → **444%**；重庆啤酒分母为负；海天 90.5%、公牛 80.6%。
+   判据是书里的标杆（蒂芙尼 16%、好市多 22%、组合中位 42%、Havell 52%）——
+   不剔现金时全市场中位 10.3%、p90 19.7%、最高 68.4%、≥20% 仅 9.2%，量级吻合。
+3. **不设任何比例护栏**。唯一的 NULL 来自除法不成立（CE ≤ 0），CE 原值必须保留。
 4. **只吃年报**。季报累计值直接除年平均资本会系统性低估。
+5. **筛选口径**固化为 `roce_eligible`：非金融 + 市值 ≥ 100 亿 + 有效 ROCE 年数 ≥ 8。
+   用「有效年数」而不是「上市满 N 年」：算单年 ROCE 需要上一年的资本。
 """
 
 from __future__ import annotations
@@ -363,7 +366,11 @@ def test_snapshot_republish_preserves_roce_columns(duckdb_store: DuckDBStore) ->
     `_publish_snapshot` 必须在 INSERT 之后重新聚合一次，否则每次快照重发
     都会把全市场 ROCE 静默清空（D28 同型事故）。
     """
-    from app.core.indicators.roce import SNAPSHOT_UPDATE_SQL
+    from app.core.indicators.roce import (
+        ELIGIBLE_MIN_MARKET_CAP,
+        ELIGIBLE_MIN_YEARS,
+        SNAPSHOT_UPDATE_SQL,
+    )
 
     _seed_snapshot_row(duckdb_store, "000011")
     _seed_balance(
@@ -389,8 +396,91 @@ def test_snapshot_republish_preserves_roce_columns(duckdb_store: DuckDBStore) ->
 
     # publish 末尾的重新聚合必须把它们恢复
     with duckdb_store.write_connection() as conn:
-        conn.execute(SNAPSHOT_UPDATE_SQL)
+        conn.execute(SNAPSHOT_UPDATE_SQL, [ELIGIBLE_MIN_YEARS, ELIGIBLE_MIN_MARKET_CAP])
 
     after = _snapshot(duckdb_store, "000011")
     assert after["roce_5y_median"] == pytest.approx(before["roce_5y_median"])
     assert after["roce_5y_years"] == before["roce_5y_years"]
+
+
+# ─── 筛选口径 roce_eligible（reports/132）────────────────────────────────
+
+
+def _seed_eligibility(
+    duck: DuckDBStore, code: str, *, years: int, mcap: float, industry: str,
+) -> None:
+    """构造 n 年连续年报 + 快照行（市值/行业可控）。"""
+    import datetime as _dt
+
+    duck.write_query(
+        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed, sw_level1, listing_date) "
+        "VALUES (?, ?, 'SZSE', true, ?, CAST('2000-01-01' AS DATE))",
+        [code, code, industry],
+    )
+    for i in range(years + 1):  # +1：第一条没有期初资本
+        report_date = f"{2010 + i}-12-31"
+        duck.write_query(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
+               VALUES (?, CAST(? AS DATE), 1000, 400)""",
+            [code, report_date],
+        )
+        duck.write_query(
+            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
+               VALUES (?, CAST(? AS DATE), 100, 0)""",
+            [code, report_date],
+        )
+    duck.write_query(
+        """INSERT INTO indicator_snapshot
+               (stock_code, report_date, calculated_at, data_version, total_market_cap)
+           VALUES (?, CAST(? AS DATE), now(), 'fixture', ?)""",
+        [code, f"{2010 + years}-12-31", mcap],
+    )
+    _ = _dt  # 保持导入可读性
+
+
+def _eligible(duck: DuckDBStore, code: str) -> Any:
+    rows = duck.read_query(
+        "SELECT roce_eligible, roce_10y_years FROM indicator_snapshot WHERE stock_code = ?",
+        [code],
+    )
+    return rows[0]
+
+
+def test_eligible_when_all_three_conditions_met(duckdb_store: DuckDBStore) -> None:
+    """非金融 + 市值 ≥ 100 亿 + 有效年数 ≥ 8 → 可筛选。"""
+    _seed_eligibility(duckdb_store, "100001", years=9, mcap=2e10, industry="食品饮料")
+    RoceBuilder(duck=duckdb_store).build()
+    row = _eligible(duckdb_store, "100001")
+    assert row["roce_10y_years"] == 9
+    assert row["roce_eligible"] is True
+
+
+def test_ineligible_when_market_cap_below_100_yi(duckdb_store: DuckDBStore) -> None:
+    """市值 < 100 亿 → 不可筛选（微盘分母噪音）。"""
+    _seed_eligibility(duckdb_store, "100002", years=9, mcap=5e9, industry="食品饮料")
+    RoceBuilder(duck=duckdb_store).build()
+    assert _eligible(duckdb_store, "100002")["roce_eligible"] is False
+
+
+def test_ineligible_when_history_shorter_than_8_years(duckdb_store: DuckDBStore) -> None:
+    """有效 ROCE 年数 < 8 → 不可筛选。
+
+    用「有效年数」而不是「上市满 N 年」：算单年 ROCE 需要上一年的资本，
+    上市满 5 年实际只够算出 4 个值（书里要求「过去 5 到 10 年」的历史）。
+    """
+    _seed_eligibility(duckdb_store, "100003", years=7, mcap=2e10, industry="食品饮料")
+    RoceBuilder(duck=duckdb_store).build()
+    row = _eligible(duckdb_store, "100003")
+    assert row["roce_10y_years"] == 7
+    assert row["roce_eligible"] is False
+
+
+def test_ineligible_for_financial_sector(duckdb_store: DuckDBStore) -> None:
+    """金融股 → 不可筛选。
+
+    银行/保险/券商没有流动-非流动划分、利润表无「财务费用」行，
+    ROCE 在会计上不适用（书里也明写「非金融企业的 ROCE」）。
+    """
+    _seed_eligibility(duckdb_store, "100004", years=9, mcap=5e10, industry="银行")
+    RoceBuilder(duck=duckdb_store).build()
+    assert _eligible(duckdb_store, "100004")["roce_eligible"] is False

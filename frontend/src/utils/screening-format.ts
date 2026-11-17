@@ -105,6 +105,7 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   roce_10y_median: '已动用资本回报率（ROCE·10年中位）',
   roce_5y_years: 'ROCE·5年有效年数',
   roce_10y_years: 'ROCE·10年有效年数',
+  roce_eligible: 'ROCE 可筛选（非金融·市值≥100亿·有效年数≥8）',
   cf_to_net_profit: '经营现金流/净利润',
   revenue_yoy: '营业收入同比',
   net_profit_yoy: '净利润同比',

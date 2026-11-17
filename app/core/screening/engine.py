@@ -17,6 +17,10 @@ import time
 from typing import Any
 
 from app.core.dsl.codegen import quote_identifier
+from app.core.dsl.derived_fields import (
+    DERIVED_FIELDS,
+    series_break_warnings,
+)
 from app.core.dsl.registry import validate_expression_identifier
 from app.core.screening import defaults as screening_defaults
 from app.core.storage.duckdb_store import DuckDBStore
@@ -46,6 +50,7 @@ SNAPSHOT_COLUMNS: set[str] = {
     "total_market_cap", "circ_market_cap",
     "roe", "roa", "gross_margin", "net_margin", "roic", "cf_to_net_profit",
     "roce_latest", "roce_5y_median", "roce_10y_median", "roce_5y_years", "roce_10y_years",
+    "roce_eligible",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     "revenue_cagr3", "revenue_cagr5", "net_profit_cagr3", "net_profit_cagr5",
     "deducted_profit_cagr3", "deducted_profit_cagr5",
@@ -105,6 +110,21 @@ def deprecated_field_warnings(fields: Any) -> list[str]:
         else:
             warnings.append(f"field_deprecated:{field}, 建议改用 {replacement}")
     return warnings
+
+
+def series_break_field_warnings(fields: Any) -> list[str]:
+    """引用"跨年口径断点原始列"时的警告（reports/131 §9.2 P0-7 / P0-8）。
+
+    与 :func:`deprecated_field_warnings` **刻意分开**：
+    - ``field_deprecated:*`` 表示整列口径不可复现（分母用 today、量纲漂移）；
+    - ``field_semantics_break:*`` 表示列在各自区间内仍然正确，只是**跨断点
+      不可直接比较**（2018 减值的符号翻转、2020 预收的重分类）。
+    两者混在一起会让用户以为历史数据全废，于是不敢用任何时段的数据。
+
+    规则仍然**可执行**（原始列保留可查），只是结果必须自带警告 —— 静默给出
+    跨断点汇总值（尤其"正负相消的假低减值"）正是 P0-7 要消灭的东西。
+    """
+    return series_break_warnings(fields)
 
 
 class MaskedFieldError(ValueError):
@@ -257,6 +277,22 @@ STATEMENT_FIELDS: dict[str, set[str]] = {
 }
 NORMALIZED_FIELDS = {f"{table}.{field}" for table, fields in STATEMENT_FIELDS.items() for field in fields}
 
+# ─── 跨年口径断点派生字段（reports/131 §9.2 P0-7 / P0-8，2026-11-16）──────────
+# 原始列一行不改，断点归一只发生在派生层。SQL 模板的唯一真源在
+# `app/core/dsl/derived_fields.py`，DSL 代码生成与这里共用同一份：
+#   income.impairment_loss_positive            资产减值损失（损失为正）
+#   income.credit_impairment_loss_positive     信用减值损失（损失为正）
+#   balance.advance_from_customers             预收款项 + 合同负债（跨 2020 连续）
+#   balance.advance_from_customers_ratio       客户占款率 =(预收+合同负债)/总资产
+#
+# 为什么登记进 NORMALIZED_FIELDS 而不是 EXTENDED_COLUMNS：
+#   - 它们的物理来源是 balance_sheet / income_statement，与快照期严格对齐
+#     （`ic.report_date = s.report_date`），不是 indicator_ext 的列；
+#   - EXTENDED_COLUMNS 被 indicator_null_reason 清扫器当成"表里的物理列"
+#     （`COUNT(col) FROM indicator_ext`），塞进去会让清扫器整域报错。
+DERIVED_FIELDS_BY_KEY: dict[str, Any] = dict(DERIVED_FIELDS)
+NORMALIZED_FIELDS |= set(DERIVED_FIELDS_BY_KEY)
+
 # 排名指标（需要计算横截面排名的指标）
 RANKABLE_INDICATORS: set[str] = {
     "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ttm", "dividend_yield",
@@ -351,6 +387,9 @@ class ScreeningEngine:
         self.duck = duck
         self.sqlite = sqlite
         self._custom_fields: set[str] = set()
+        # 已发布 DSL 指标内部引用过的标准化字段（用于把"口径断点原始列"的
+        # 警告一并冒泡 —— 用户看到的是指标名，看不到它内部用了哪一列）。
+        self._compiled_field_refs: set[str] = set()
         self._mixed_report_date_codes: list[str] = []
 
     def run(
@@ -430,6 +469,7 @@ class ScreeningEngine:
         # `_build_where` 里一个 100 条的 SQL 保护上限，配置项无人读取。
         self._enforce_condition_budget(conditions)
 
+        self._compiled_field_refs = set()
         compiled_indicators = self._compile_published_indicators(locked_indicators or {})
         self._custom_fields = set(compiled_indicators)
 
@@ -455,7 +495,13 @@ class ScreeningEngine:
 
         # 2.2 废弃字段（reports/122 §2.6 J5）：仍可执行，但结果必须自带警告，
         #     否则用户不知道自己在用一个会随"今天"漂移的旧口径列。
+        # 2.2b 跨年口径断点原始列（reports/131 §9.2 P0-7 / P0-8）：同样仍可执行，
+        #     但必须提示"跨断点不可直接比较"并指向归一化派生字段。
         deprecation_warnings = deprecated_field_warnings(referenced_fields)
+        # 已发布 DSL 指标内部的原始列引用也要冒泡（指标名本身看不出用了哪一列）
+        break_warnings = series_break_field_warnings(
+            referenced_fields | self._compiled_field_refs
+        )
 
         # 2026-08-27：不再因个别股票存在快照/完整期不一致而阻断全市场筛选。
         # 改为把这类股票从本次基础池中排除，其他正常股票照常筛选/导出。
@@ -540,7 +586,8 @@ class ScreeningEngine:
             "strict_mode_warning": strict_mode_warning,
             "locked_indicators": locked_indicators or {},
             # 废弃字段警告（例如 dividend_yield → ttm_dividend_yield）
-            "warnings": deprecation_warnings,
+            # + 跨年口径断点警告（例如 income.asset_impairment_loss 跨 2018）
+            "warnings": deprecation_warnings + break_warnings,
         }
 
     def _build_sql(
@@ -595,6 +642,12 @@ class ScreeningEngine:
             for table, fields in STATEMENT_FIELDS.items()
             for field in sorted(fields)
         ]
+        # 跨年口径断点派生列（P0-7 / P0-8）：与快照报告期严格对齐，断点判定用
+        # 快照行的 report_date（整行都被钉在该期，避免"值取当期、断点判到期"）。
+        derived_selects = [
+            self._derived_field_select(key, derived, aliases[derived.table], bool(overrides))
+            for key, derived in sorted(DERIVED_FIELDS_BY_KEY.items())
+        ]
         # 扩展指标域列：与快照报告期严格对齐（ex.report_date = s.report_date），
         # 不取「各自最近一期」，避免与主链快照产生跨期拼接。
         extended_selects = [f"ex.{column}" for column in sorted(EXTENDED_COLUMNS)]
@@ -618,7 +671,8 @@ base_pool AS (
         m.csrc_l1, m.csrc_l2,
         m.is_st, m.is_suspended, m.listing_date,
         m.total_shares, m.circ_shares,
-        s.*, {', '.join(extended_selects)}, {', '.join(normalized_selects)}
+        s.*, {', '.join(extended_selects)}, {', '.join(normalized_selects)},
+        {', '.join(derived_selects)}
     FROM stock_meta m
     LEFT JOIN LATERAL (
         SELECT * FROM indicator_snapshot s
@@ -1151,18 +1205,42 @@ LIMIT {MAX_RESULT_ROWS}
                     )
         return rows
 
-    def _override_aware_field_sql(
+    def _raw_field_expr(
         self, table: str, field: str, alias: str, has_overrides: bool,
     ) -> str:
+        """某物理列的取值表达式（已发布手工覆写优先，回退到原始列）。"""
         if has_overrides:
-            expression = (
+            return (
                 f"COALESCE((SELECT override_value FROM overrides "
                 f"WHERE stock_code = m.stock_code AND report_date = s.report_date "
                 f"AND field_name = '{field}' LIMIT 1), {alias}.{field})"
             )
-        else:
-            expression = f"{alias}.{field}"
+        return f"{alias}.{field}"
+
+    def _override_aware_field_sql(
+        self, table: str, field: str, alias: str, has_overrides: bool,
+    ) -> str:
+        expression = self._raw_field_expr(table, field, alias, has_overrides)
         return f"{expression} AS {self._field_sql_name(f'{table}.{field}')}"
+
+    def _derived_field_select(
+        self,
+        key: str,
+        derived: Any,
+        alias: str,
+        has_overrides: bool,
+    ) -> str:
+        """跨年口径断点派生列 → ``<派生 SQL> AS income__impairment_loss_positive``。
+
+        - 断点判定用 ``s.report_date``（base_pool 每行被钉在快照报告期）；
+        - 原始列取值走 :meth:`_raw_field_expr`，因此**手工覆写也会被归一化**，
+          不会出现"覆写值按旧口径、底表值按新口径"的混算。
+        """
+        raw = lambda column: self._raw_field_expr(  # noqa: E731 - 单表达式取值器
+            derived.table, column, alias, has_overrides,
+        )
+        expression = derived.sql(alias=alias, date_expr="s.report_date", raw=raw)
+        return f"{expression} AS {self._field_sql_name(key)}"
 
     def _compile_published_indicators(
         self, locked_indicators: dict[str, dict[str, Any]],
@@ -1225,6 +1303,7 @@ LIMIT {MAX_RESULT_ROWS}
                     field = f"{node.table}.{node.field}"
                     if field not in NORMALIZED_FIELDS:
                         raise ValueError(f"unknown normalized DSL field: {field}")
+                    self._compiled_field_refs.add(field)
                     return self._field_sql_name(field)
                 if isinstance(node, IndicatorRef):
                     if node.name in SNAPSHOT_COLUMNS:

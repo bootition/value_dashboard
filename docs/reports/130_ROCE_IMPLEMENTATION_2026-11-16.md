@@ -1,6 +1,6 @@
 ---
 title: ROCE（已动用资本回报率）落地：口径 C = 总资产 − 流动负债，历史 5/10 年中位数
-status: approved
+status: superseded
 category: reports
 created: 2026-11-16
 last-reviewed: 2026-11-16

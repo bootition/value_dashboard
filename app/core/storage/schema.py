@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 42
+DUCKDB_SCHEMA_VERSION = 45
 SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -103,8 +103,17 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
     short_term_loans           DOUBLE,   -- 短期借款
     notes_payable              DOUBLE,   -- 应付票据
     accounts_payable           DOUBLE,   -- 应付账款
-    prepayments_received       DOUBLE,   -- 预收款项
-    contract_liabilities       DOUBLE,   -- 合同负债
+    prepayments_received       DOUBLE,   -- 预收款项。**FY2020 起语义已变（reports/131 §9.2 P0-8）**：
+    --   新收入准则 CAS14（境内上市 2020-01-01 起施行）把「与客户合同相关的预收款」
+    --   重分类为 contract_liabilities，本列一夜掉 96.6%（37,379.8 亿 → 1,284.3 亿，
+    --   非空率 94.9% → 28.2%），残留只有租金等非合同类。
+    --   跨 2020 不得单列使用，须用合并口径 advance_from_customers
+    --   = COALESCE(prepayments_received,0) + COALESCE(contract_liabilities,0)
+    --   （派生字段的唯一 SQL 真源：app/core/dsl/derived_fields.py；DSL 字段
+    --   balance.advance_from_customers；两列都缺失时返回 NULL 而不是 0）。
+    contract_liabilities       DOUBLE,   -- 合同负债。CAS14 2020-01-01 起施行，2019 及以前基本不存在
+    --   （仅个别提前执行准则的公司有值）→ 与 prepayments_received 同属「预收+合同负债」
+    --   合并口径的一半，跨 2019/2020 单列不可比。见上一条注释的合并口径。
     employee_benefits_payable  DOUBLE,   -- 应付职工薪酬
     taxes_payable              DOUBLE,   -- 应交税费
     total_current_liabilities  DOUBLE,   -- 流动负债合计
@@ -152,8 +161,19 @@ CREATE TABLE IF NOT EXISTS income_statement (
     -- 其中: 利息费用/利息收入
     interest_expense         DOUBLE,        -- 利息费用
     interest_income          DOUBLE,        -- 利息收入
-    asset_impairment_loss    DOUBLE,        -- 资产减值损失
-    credit_impairment_loss   DOUBLE,        -- 信用减值损失
+    asset_impairment_loss    DOUBLE,        -- 资产减值损失。**符号在 FY2018 翻转（reports/131 §9.2 P0-7）**：
+    --   财会〔2018〕15 号起「资产减值损失/信用减值损失」按**损失以负号列示**；
+    --   2017 及以前按**损失为正**。库内两段直接透传、未做符号归一，2018 年为混合年
+    --   （同年不同公司混用两种约定），逐年汇总会正负相消成「假低值」。
+    --   ⇒ 本列保持原始值不动（断点两侧各自正确）；跨 2018 的减值率/EBIT 修正/扣非还原
+    --     必须改用派生字段 income.impairment_loss_positive（损失恒为正）：
+    --     CASE WHEN report_date >= DATE '2018-12-31' THEN ABS(x) ELSE x END
+    --     唯一 SQL 真源 app/core/dsl/derived_fields.py；DSL/筛选引用本原始列会收到
+    --     field_semantics_break 警告（不整列标废弃，否则断点另一侧的历史查询全废）。
+    credit_impairment_loss   DOUBLE,        -- 信用减值损失。符号分段规则同 asset_impairment_loss
+    --   （2018-12-31 起以负号列示）；另注意该科目自 2019 年新金融工具准则起才成建制出现
+    --   （2018 及以前覆盖率仅 5.5%）。派生字段：
+    --   income.credit_impairment_loss_positive。
     exchange_gain            DOUBLE,        -- 公允价值变动收益
     investment_income        DOUBLE,        -- 投资收益
     -- 其中: 对联营/合营企业投资收益
@@ -248,10 +268,19 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     net_margin   DOUBLE,
     roic         DOUBLE,
     cf_to_net_profit DOUBLE,
-    -- 成长
-    revenue_yoy       DOUBLE,
-    net_profit_yoy    DOUBLE,
-    deducted_profit_yoy DOUBLE,
+    -- 成长：同比双口径（2026-11-16，reports/131 §9.2 P0-4，schema v43）
+    --   *_yoy    = TTM 口径：最新报告期 TTM ÷ 上年最后一个报告期 TTM − 1，
+    --              与详情页 /api/stock/{code}/metric-history?metric=*_yoy 同源；
+    --   *_yoy_fy = 年报口径：最近两个完整年报的同比（旧算法保留列）。
+    -- 快照 report_date 是季报期（如 2026-09-30）时，两列本来就应当不同：
+    -- TTM 是"截至该季度的滚动 12 个月"，FY 是"上一个完整财年"。
+    -- 两列单位均为小数比例（0.25 = +25%），绝不可混用或互相回填。
+    revenue_yoy       DOUBLE,           -- TTM 同比
+    revenue_yoy_fy    DOUBLE,           -- 年报同比
+    net_profit_yoy    DOUBLE,           -- TTM 同比（归母净利润）
+    net_profit_yoy_fy DOUBLE,           -- 年报同比（归母净利润）
+    deducted_profit_yoy      DOUBLE,    -- TTM 同比（扣非归母净利润）
+    deducted_profit_yoy_fy   DOUBLE,    -- 年报同比（扣非归母净利润）
     revenue_cagr3     DOUBLE,
     revenue_cagr5     DOUBLE,
     net_profit_cagr3  DOUBLE,
@@ -282,6 +311,8 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     roce_5y_years    INTEGER,           -- 上者实际用到的年数（1 = 只有一年，别当中位数看）
     roce_10y_median  DOUBLE,            -- 最近 10 个有效年报 ROCE 中位数
     roce_10y_years   INTEGER,
+    -- 筛选口径标志（reports/132）：非金融 且 市值>=100亿 且 有效ROCE年数>=8
+    roce_eligible    BOOLEAN,
     -- 行情
     ma5             DOUBLE,
     ma10            DOUBLE,
@@ -2218,6 +2249,55 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (42, 'ROCE domain: roce_history + indicator_snapshot roce_* columns')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v43（2026-11-16, reports/131 §9.2 P0-4）：同比双口径。
+        # `_calc_growth()` 改按 TTM 口径写 `*_yoy`（与详情页 metric-history 同源），
+        # 旧的"最新两个年报"口径另存 `*_yoy_fy`。存量行由
+        # `scripts/backfill_yoy_calibers.py` 一次性回填（本迁移只建列，不猜值）。
+        # 版本号必须与 DUCKDB_SCHEMA_VERSION 同步（skip_if_current 快速路径据此判定）。
+        for _col in (
+            "revenue_yoy_fy", "net_profit_yoy_fy", "deducted_profit_yoy_fy",
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {_col} DOUBLE"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (43, 'YoY dual caliber: indicator_snapshot *_yoy_fy columns (TTM vs annual)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+
+        # v44（2026-11-17, reports/131 P0-6）：保险股「保险合同负债」原先被误映射进
+        # 通用科目 `contract_liabilities`（5 只险企占全市场合同负债 42%–68%）。
+        # 守卫已禁止再写入通用列，这里给金融专用表补一个正确的落点；
+        # `supplement.py` 每轮查 information_schema，列一存在就自动启用映射。
+        connection.execute(
+            "ALTER TABLE financial_sector_items "
+            "ADD COLUMN IF NOT EXISTS insurance_contract_liability DOUBLE"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (44, 'financial_sector_items.insurance_contract_liability (P0-6 outlet)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+
+        # v45（2026-11-16, reports/132）：ROCE 筛选标志。
+        # 把用户定稿的三条筛选固化成快照列，避免每次筛选都要手写三段条件：
+        #   非金融（sw_level1 不含银行/非银金融）+ 总市值 >= 100 亿 + 有效 ROCE 年数 >= 8。
+        # 只加列不猜值：`vd data compute-roce` 会在同一事务里回填。
+        connection.execute(
+            "ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS roce_eligible BOOLEAN"
+        )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (45, 'ROCE eligibility flag: indicator_snapshot.roce_eligible')
             ON CONFLICT (version) DO NOTHING
             """
         )

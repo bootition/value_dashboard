@@ -887,6 +887,71 @@ class IndicatorCalculator:
         "dividend_financing_ratio_pct",
     )
 
+    # 一次性补偿脚本写库的字段子集（scripts/backfill_technical_indicators.py /
+    # scripts/backfill_yoy_calibers.py）。放在这里是为了让"计算 → 落库"只有一处实现。
+    _TECHNICAL_SNAPSHOT_FIELDS: tuple[str, ...] = (
+        "period_return",
+        "annualized_volatility",
+        "max_drawdown",
+    )
+    _YOY_SNAPSHOT_FIELDS: tuple[str, ...] = (
+        "revenue_yoy", "revenue_yoy_fy",
+        "net_profit_yoy", "net_profit_yoy_fy",
+        "deducted_profit_yoy", "deducted_profit_yoy_fy",
+    )
+
+    def update_technical_snapshot_fields(self, records: list[dict[str, Any]]) -> None:
+        """只更新快照中的技术三列（`scripts/backfill_technical_indicators.py`）。"""
+        self._update_snapshot_field_subset(records, self._TECHNICAL_SNAPSHOT_FIELDS)
+
+    def update_yoy_snapshot_fields(self, records: list[dict[str, Any]]) -> None:
+        """只更新快照中的同比六列（`scripts/backfill_yoy_calibers.py`）。"""
+        self._update_snapshot_field_subset(records, self._YOY_SNAPSHOT_FIELDS)
+
+    def _update_snapshot_field_subset(
+        self,
+        records: list[dict[str, Any]],
+        fields: Sequence[str],
+    ) -> None:
+        """按 (stock_code, report_date) 原地更新指定列，并校验行数不变。
+
+        与 `_update_snapshot_price_fields` 同一套原子性/行数校验纪律：matched
+        必须恰好 1 行（DuckDB cursor.rowcount 对 UPDATE 返回 -1，不能用）。
+        """
+        if not records:
+            return
+        assignments = ", ".join(f"{field} = ?" for field in fields)
+        with self.duck.transaction() as connection:
+            before = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            for row in records:
+                values = [row.get(field) for field in fields]
+                connection.execute(
+                    f"""UPDATE indicator_snapshot
+                        SET {assignments}, calculated_at = ?
+                        WHERE stock_code = ? AND report_date = ?""",
+                    [*values, row["calculated_at"], row["stock_code"], row["report_date"]],
+                )
+                matched = connection.execute(
+                    """SELECT COUNT(*) AS c FROM indicator_snapshot
+                       WHERE stock_code = ? AND report_date = ?""",
+                    [row["stock_code"], row["report_date"]],
+                ).fetchone()[0]
+                if matched != 1:
+                    raise RuntimeError(
+                        f"snapshot field-subset update matched {matched} rows "
+                        f"for {row['stock_code']}"
+                    )
+            after = connection.execute(
+                "SELECT COUNT(*) FROM indicator_snapshot"
+            ).fetchone()[0]
+            if after != before:
+                raise RuntimeError(
+                    f"snapshot field-subset update changed row count: {before} -> {after}"
+                )
+            self._record_derived_lineage_in_connection(connection, records)
+
     def _update_snapshot_price_fields(self, records: list[dict[str, Any]]) -> None:
         """价格域 UPDATE：既有行原地更新，不动基本面字段与报告期。"""
         if not records:
@@ -1595,11 +1660,40 @@ class IndicatorCalculator:
 
         return result
 
-    def _calc_growth(self, stock_code: str) -> dict[str, Any]:
-        """3. 成长指标"""
-        result: dict[str, Any] = {}
+    # 同比双口径（2026-11-16，reports/131 §9.2 P0-4，schema v43）。
+    # key = 快照列名；value = TTM 序列里的净利润字段名。
+    _TTM_YOY_METRICS: tuple[tuple[str, str], ...] = (
+        ("revenue_yoy", "revenue"),
+        ("net_profit_yoy", "net_profit"),
+        ("deducted_profit_yoy", "deducted_net_profit"),
+    )
 
-        # 获取历史年度数据用于 YoY 和 CAGR
+    def _calc_growth(self, stock_code: str) -> dict[str, Any]:
+        """3. 成长指标（同比双口径）
+
+        口径纪律（reports/131 §9.2 P0-4，**不允许**在别处再写一套）：
+
+        - ``*_yoy``    = **TTM 口径**：最新报告期 TTM ÷ 上年最后一个报告期 TTM − 1。
+          必须与详情页 ``stock_detail._metric_history_rows(..., base_period='ttm')``
+          逐值同源（两侧公式一致；回归用例
+          ``test_yoy_caliber_and_technical_coverage.py`` 直接对比两个来源）。
+        - ``*_yoy_fy`` = **年报口径**：最近两个完整年报的同比（旧 ``_calc_growth``
+          行为原样保留到新列）。快照 ``report_date`` 是季报期时，这两个口径本来
+          就应当不同，绝不可互相回填。
+
+        CAGR 仍按年报序列计算（口径未变）。
+        """
+        result: dict[str, Any] = {
+            "revenue_yoy": None, "revenue_yoy_fy": None,
+            "net_profit_yoy": None, "net_profit_yoy_fy": None,
+            "deducted_profit_yoy": None, "deducted_profit_yoy_fy": None,
+            "revenue_cagr3": None, "revenue_cagr5": None,
+            "net_profit_cagr3": None, "net_profit_cagr5": None,
+            "deducted_profit_cagr3": None, "deducted_profit_cagr5": None,
+        }
+        result.update(self._calc_ttm_yoy(stock_code))
+
+        # 年报口径：获取历史年度数据用于 FY YoY 和 CAGR
         rows = self._read_query("""
             SELECT report_date, revenue, parent_net_profit, deducted_net_profit
             FROM income_statement
@@ -1611,13 +1705,6 @@ class IndicatorCalculator:
         """, [stock_code])
 
         if not rows:
-            result.update({
-                "revenue_yoy": None, "net_profit_yoy": None,
-                "deducted_profit_yoy": None,
-                "revenue_cagr3": None, "revenue_cagr5": None,
-                "net_profit_cagr3": None, "net_profit_cagr5": None,
-                "deducted_profit_cagr3": None, "deducted_profit_cagr5": None,
-            })
             return result
 
         rows = self._apply_published_overrides(stock_code, rows)
@@ -1626,18 +1713,15 @@ class IndicatorCalculator:
         current_year = max(years)
         current = years[current_year]
 
-        # YoY requires an exact prior annual report.
+        # FY YoY requires an exact prior annual report.
         if current_year - 1 in years:
             curr, prev = current, years[current_year - 1]
-            result["revenue_yoy"] = self._yoy(curr.get("revenue"), prev.get("revenue"))
-            result["net_profit_yoy"] = self._yoy(
+            result["revenue_yoy_fy"] = self._yoy(
+                curr.get("revenue"), prev.get("revenue"))
+            result["net_profit_yoy_fy"] = self._yoy(
                 curr.get("parent_net_profit"), prev.get("parent_net_profit"))
-            result["deducted_profit_yoy"] = self._yoy(
+            result["deducted_profit_yoy_fy"] = self._yoy(
                 curr.get("deducted_net_profit"), prev.get("deducted_net_profit"))
-        else:
-            result["revenue_yoy"] = None
-            result["net_profit_yoy"] = None
-            result["deducted_profit_yoy"] = None
 
         # CAGR = (末值/初值)^(1/n) - 1
         def cagr(field: str, years_back: int) -> float | None:
@@ -1653,6 +1737,121 @@ class IndicatorCalculator:
         result["deducted_profit_cagr3"] = cagr("deducted_net_profit", 3)
         result["deducted_profit_cagr5"] = cagr("deducted_net_profit", 5)
 
+        return result
+
+    def _calc_ttm_yoy(self, stock_code: str) -> dict[str, Any]:
+        """TTM 同比（与详情页 metric-history 的 'ttm' 分支同源）。
+
+        复刻 ``app/web/api/stock_detail.py`` 的两步口径：
+
+        1. ``calculate_ttm_trend``：年报期直接取年报值；季报期
+           ``TTM = 上年年报 + 本期累计 − 去年同期累计``，缺任一项则该期不出行；
+        2. ``_metric_history_yoy``：每期与**上一年最后一个 TTM 行**相除 − 1，
+           取最后一个非空值为"当前值"。
+
+        为什么在 core 里复刻而不是 import：``app/core`` 不得反向依赖
+        ``app/web``（tests/regression/test_core_web_layering.py 钉死）。
+        两边公式必须同步修改；一致性由
+        ``test_yoy_caliber_and_technical_coverage.py`` 直接对比两个来源。
+        """
+        result: dict[str, Any] = {
+            "revenue_yoy": None,
+            "net_profit_yoy": None,
+            "deducted_profit_yoy": None,
+        }
+        # 16 个季度覆盖"最新期 + 上年最后一期 + 再上一年"的构造需求；
+        # 快照只关心当前一期，更早的 TTM 行不参与当前值判定。
+        # 行集必须从 `balance_sheet` 出发（与 stock_detail._metric_history_rows
+        # 的 FROM 子句一致）：只有利润表、没有资产负债表的新期不能提前进入 TTM，
+        # 否则快照会用"下一期"信息而详情页不会 —— 一致性用例会立刻抓到。
+        rows = self._read_query("""
+            SELECT bs.report_date,
+                   ic.revenue, ic.parent_net_profit, ic.net_profit,
+                   ic.deducted_net_profit
+            FROM balance_sheet bs
+            LEFT JOIN income_statement ic
+              ON bs.stock_code = ic.stock_code
+             AND bs.report_date = ic.report_date
+            WHERE bs.stock_code = ?
+            ORDER BY bs.report_date DESC
+            LIMIT 16
+        """, [stock_code])
+        if not rows:
+            # 合成夹具/极端残缺库可能只有利润表。生产路径不会走到这里
+            # （`_get_latest_financials` 要求三表核心字段齐备），但保留
+            # income-only 退化可让单测与历史数据修复脚本仍能算 TTM。
+            rows = self._read_query("""
+                SELECT report_date, revenue, parent_net_profit, net_profit,
+                       deducted_net_profit
+                FROM income_statement
+                WHERE stock_code = ?
+                ORDER BY report_date DESC
+                LIMIT 16
+            """, [stock_code])
+        if not rows:
+            return result
+        rows = self._apply_published_overrides(stock_code, rows)
+        rows.reverse()
+
+        flow_fields = (
+            "revenue", "parent_net_profit", "net_profit", "deducted_net_profit",
+        )
+        # 关键：上年年报/去年同期取的是**原始累计报表行**，不是"上年 TTM 行"。
+        # 与 stock_detail.calculate_ttm_trend 的 dated_rows.get(...) 完全一致。
+        raw_by_date: dict[date, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                report_date = date.fromisoformat(str(row.get("report_date"))[:10])
+            except (TypeError, ValueError):
+                continue
+            raw_by_date[report_date] = row
+        ttm_by_date: dict[date, dict[str, Any]] = {}
+        for report_date in sorted(raw_by_date):
+            row = raw_by_date[report_date]
+            if report_date.month == 12 and report_date.day == 31:
+                item = {field: row.get(field) for field in flow_fields}
+            else:
+                annual = raw_by_date.get(date(report_date.year - 1, 12, 31))
+                prior_period = raw_by_date.get(
+                    date(report_date.year - 1, report_date.month, report_date.day)
+                )
+                if annual is None or prior_period is None:
+                    continue
+                item = {}
+                for field in flow_fields:
+                    annual_value = annual.get(field)
+                    current_value = row.get(field)
+                    prior_value = prior_period.get(field)
+                    item[field] = (
+                        annual_value + current_value - prior_value
+                        if annual_value is not None
+                        and current_value is not None
+                        and prior_value is not None
+                        else None
+                    )
+            # 与详情页一致：net_profit 优先取归母净利润。
+            item["net_profit"] = (
+                item.get("parent_net_profit")
+                if item.get("parent_net_profit") is not None
+                else item.get("net_profit")
+            )
+            ttm_by_date[report_date] = item
+
+        ordered = sorted(ttm_by_date)
+        # 上一年"最后一个 TTM 行"——与 _metric_history_yoy 的 by_year 覆盖语义一致。
+        by_year = {report_date.year: ttm_by_date[report_date] for report_date in ordered}
+        for column, field in self._TTM_YOY_METRICS:
+            latest: float | None = None
+            for report_date in ordered:
+                prior = by_year.get(report_date.year - 1)
+                if prior is None:
+                    continue
+                current_value = ttm_by_date[report_date].get(field)
+                base_value = prior.get(field)
+                if current_value is None or base_value in (None, 0):
+                    continue
+                latest = current_value / base_value - 1.0
+            result[column] = latest
         return result
 
     def _calc_safety(self, financials: dict, ttm: dict) -> dict[str, Any]:
@@ -2189,9 +2388,16 @@ class IndicatorCalculator:
             # 聚合本身是 5,575 行 over 105k 行的单条 UPDATE，毫秒级；
             # 失败只告警、不阻断主链发布（派生域不该拖垮 readiness）。
             try:
-                from app.core.indicators.roce import SNAPSHOT_UPDATE_SQL
+                from app.core.indicators.roce import (
+                    ELIGIBLE_MIN_MARKET_CAP,
+                    ELIGIBLE_MIN_YEARS,
+                    SNAPSHOT_UPDATE_SQL,
+                )
 
-                connection.execute(SNAPSHOT_UPDATE_SQL)
+                connection.execute(
+                    SNAPSHOT_UPDATE_SQL,
+                    [ELIGIBLE_MIN_YEARS, ELIGIBLE_MIN_MARKET_CAP],
+                )
             except Exception:  # noqa: BLE001 - roce_history 缺失/未建时不应阻断主链
                 logger.warning(
                     "ROCE 聚合回填失败（roce_history 可能尚未构建），本次快照的 roce_* 将为 NULL",
