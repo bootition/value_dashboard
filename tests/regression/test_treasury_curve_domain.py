@@ -864,16 +864,34 @@ def test_treasury_comparison_masks_dividend_when_unverified(
     assert day["curve_yield"] == pytest.approx(1.5)
 
 
-def test_adapter_rejects_non_finite_yields(
+def test_non_finite_yields_rejected_at_both_layers(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    """P3-10 修复（reports/73）：NaN/±Infinity 收益率不得入库。"""
-    from app.core.adapters.czb_mof_adapter import _to_float
+    """P3-10 修复（reports/73）：NaN/±Infinity 收益率不得入库。
+
+    2026-11-17（reports/137）：`_to_float` 已收口到 `app.core.numbers.to_float`
+    （默认 `allow_inf=False`），所以这里**分两层断言**，避免"只测共享函数、适配器
+    悄悄改回宽松口径也照样绿"：
+      ① 共享工具本身：nan/±inf → None；
+      ② 适配器**不再自带第二份实现**：czb_mof 模块里不得再有 `_to_float`，
+         否则说明有人把口径分叉又抄回来了。
+    """
+    from app.core.numbers import to_float as _to_float
 
     assert _to_float("nan") is None
     assert _to_float("inf") is None
     assert _to_float("-inf") is None
     assert _to_float(1.7) == pytest.approx(1.7)
+
+    import app.core.adapters.czb_mof_adapter as _czb
+    from app.core.numbers import to_float_strict
+
+    # 适配器里的 `_to_float` 必须是**共享实现本身**（同一对象），不是又抄一份。
+    # 一旦有人写回本地 def，这里的 identity 断言立刻红。
+    assert _czb._to_float is to_float_strict, (
+        "czb_mof_adapter 里的 _to_float 不是 app.core.numbers.to_float_strict："
+        "请改回 `from app.core.numbers import to_float_strict as _to_float`（reports/137 §2.3）"
+    )
 
     payload = [{
         "ycDefName": "10年", "worktime": "2026-08-07",

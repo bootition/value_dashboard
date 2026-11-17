@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import logging
-import math
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -33,6 +32,7 @@ from app.core.adapters.base import (
 )
 from app.core.financial_period import CN_TZ as _CN_TZ
 from app.core.financial_period import cn_today as _cn_today
+from app.core.numbers import to_float_strict as _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -63,19 +63,6 @@ _DEFAULT_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    # P3-10 修复（reports/73）：拒绝 NaN/±Infinity，收益率必须为有限正数
-    if not math.isfinite(number):
-        return None
-    return number
 
 
 class TreasuryMofAdapter(BaseAdapter):
@@ -169,6 +156,8 @@ class TreasuryMofAdapter(BaseAdapter):
         if self._owned_client is None:
             self._owned_client = httpx.Client(
                 timeout=httpx.Timeout(self._timeout),
+                # 代理路由**刻意保持 httpx 默认**（trust_env=True）：是否让国债曲线直连
+                # 需真机探针验证后单独上线，见 reports/137 §3.3。不要在这里顺手加 trust_env=False。
                 headers={
                     "User-Agent": _DEFAULT_USER_AGENT,
                     "Accept": "application/json, text/plain, */*",

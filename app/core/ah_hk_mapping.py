@@ -17,7 +17,6 @@ import re
 import unicodedata
 from typing import Any
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
@@ -604,8 +603,7 @@ def refresh_ah_spot_snapshot() -> list[dict[str, str]]:
     """
     import akshare as ak
 
-    with _domestic_direct():
-        df = ak.stock_zh_ah_spot()
+    df = ak.stock_zh_ah_spot()
     return _dedupe_spot_rows(df)
 
 

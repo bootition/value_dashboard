@@ -9,8 +9,9 @@
 - 募集资金净额缺失时如实 null，不推算、不伪造。
 - 单位归一化：发行数量 万股→股（×1e4），金额 万元→元（×1e4）。
 - 北交所股票若 CNINFO 无记录 → 合法空（missing），不触发熔断。
-- 国内源直连：调用前临时禁用 HTTP(S)_PROXY（本机代理常指向不可达的
-  127.0.0.1:10808，直连才是正确路径；限速器保证本域串行，竞态可接受）。
+- 代理：akshare 内部走 requests（会回退读系统代理设置），本适配器不改进程环境；
+  历史上的"临时清空 HTTP(S)_PROXY"从未生效，已于 2026-11-17 删除
+  （`reports/136` §5.1 实测）。
 """
 
 from __future__ import annotations
@@ -18,8 +19,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+from app.core.numbers import to_float_keep_inf_reject_nan as _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +66,7 @@ class CNINFOFundingAdapter(BaseAdapter):
 
         for code in codes:
             try:
-                with _domestic_direct():
-                    df = ak.stock_ipo_summary_cninfo(symbol=code)
+                df = ak.stock_ipo_summary_cninfo(symbol=code)
             except IndexError:
                 # akshare 自身缺陷：源无记录（如部分北交所）时 records[0] 越界。
                 # 这是"源无记录"的确定性信号 → 合法缺失，不触发熔断、不登记 retry。
@@ -122,15 +122,6 @@ class CNINFOFundingAdapter(BaseAdapter):
                 if errors else None
             ),
         )
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "" or value != value:  # NaN
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _to_date(value: Any) -> str | None:

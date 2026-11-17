@@ -54,8 +54,6 @@ from typing import Any
 
 import httpx
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
-
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -247,6 +245,9 @@ def _fetch_tencent_hk_daily(
         params={"param": f"hk{code},day,,,{_TENCENT_MAX_BARS},qfq"},
         timeout=30.0,
         headers={"User-Agent": "Mozilla/5.0"},
+        # 代理路由**刻意保持 httpx 默认**（trust_env=True）：原先靠临时清空进程环境变量
+        # （`_domestic_direct`）实现直连，reports/136 §5.1 实测它从未生效，该包装器已删除；
+        # 是否改为 trust_env=False 属独立决策，需真机探针验证，见 reports/137 §3.3。
     )
     response.raise_for_status()
     payload = response.json()
@@ -311,8 +312,7 @@ def fetch_hk_daily(
     tencent_error: str | None = None
     if prefer in {"auto", "tencent"}:
         try:
-            with _domestic_direct():
-                rows = _fetch_tencent_hk_daily(code, start=start, end=end)
+            rows = _fetch_tencent_hk_daily(code, start=start, end=end)
         except Exception as error:  # noqa: BLE001
             tencent_error = f"{type(error).__name__}: {error}"
             rows = []
@@ -330,14 +330,13 @@ def fetch_hk_daily(
     primary_error: str | None = None
     if prefer in {"auto", "eastmoney"}:
         try:
-            with _domestic_direct():
-                frame = ak.stock_hk_hist(
-                    symbol=code,
-                    period="daily",
-                    start_date=(start or date(1990, 1, 1)).strftime("%Y%m%d"),
-                    end_date=(end or date.today()).strftime("%Y%m%d"),
-                    adjust="",
-                )
+            frame = ak.stock_hk_hist(
+                symbol=code,
+                period="daily",
+                start_date=(start or date(1990, 1, 1)).strftime("%Y%m%d"),
+                end_date=(end or date.today()).strftime("%Y%m%d"),
+                adjust="",
+            )
             rows = _normalize_daily_frame(
                 frame, start=start, end=end, upstream="eastmoney_stock_hk_hist",
             )
@@ -359,8 +358,7 @@ def fetch_hk_daily(
 
     sina_error: str | None = None
     try:
-        with _domestic_direct():
-            frame = ak.stock_hk_daily(symbol=code, adjust="")
+        frame = ak.stock_hk_daily(symbol=code, adjust="")
         rows = _normalize_daily_frame(
             frame, start=start, end=end, upstream="sina_stock_hk_daily",
         )
@@ -466,12 +464,11 @@ def fetch_hkd_cny_history(
         )
     try:
         ak = ak_module or _import_akshare()
-        with _domestic_direct():
-            frame = ak.currency_boc_sina(
-                symbol="港币",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-            )
+        frame = ak.currency_boc_sina(
+            symbol="港币",
+            start_date=start.strftime("%Y%m%d"),
+            end_date=end.strftime("%Y%m%d"),
+        )
         rows, counts = _normalize_fx_frame(frame, start=start, end=end)
     except Exception as error:  # noqa: BLE001
         return FxHistoryFetch(

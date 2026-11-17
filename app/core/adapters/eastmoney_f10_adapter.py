@@ -28,6 +28,7 @@ from app.core.adapters.base import (
     FetchRequest,
     FetchResult,
 )
+from app.core.numbers import to_float_keep_inf as _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +67,6 @@ def _f10_code(stock_code: str) -> str | None:
     if first in ("4", "8", "9"):
         return "BJ" + code
     return None
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _to_int(value: Any) -> int | None:

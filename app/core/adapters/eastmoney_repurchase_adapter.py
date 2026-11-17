@@ -17,8 +17,8 @@ import logging
 from datetime import date
 from typing import Any
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+from app.core.numbers import to_float_keep_inf_reject_nan as _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -31,15 +31,6 @@ try:
 except ImportError:  # pragma: no cover
     ak = None  # type: ignore[assignment]
     _AKSHARE_AVAILABLE = False
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "" or value != value:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _to_date(value: Any) -> str | None:
@@ -71,8 +62,7 @@ class EastMoneyRepurchaseAdapter(BaseAdapter):
             return self._make_empty_result("akshare 未安装")
 
         try:
-            with _domestic_direct():
-                df = ak.stock_repurchase_em()
+            df = ak.stock_repurchase_em()
         except Exception as exc:  # noqa: BLE001
             logger.warning("东财回购列表抓取失败: %s", exc)
             return self._make_empty_result(f"{type(exc).__name__}: {exc}")

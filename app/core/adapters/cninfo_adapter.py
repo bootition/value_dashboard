@@ -170,6 +170,9 @@ class CNINFOAdapter(BaseAdapter):
         if self._client is None:
             self._client = httpx.Client(
                 timeout=httpx.Timeout(self._timeout),
+                # 代理路由**刻意保持 httpx 默认**（trust_env=True）：本机系统代理指向
+                # 127.0.0.1:10808，是否让国内源直连是独立决策，需真机探针验证后单独上线，
+                # 见 reports/137 §3.3。不要在这里顺手加 trust_env=False。
                 headers={
                     "User-Agent": _DEFAULT_USER_AGENT,
                     "X-Requested-With": "XMLHttpRequest",

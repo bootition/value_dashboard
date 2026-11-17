@@ -6,7 +6,9 @@ datacenter.eastmoney.com/securities/api/data/v1/get（不是 push2/push2his）�
 约束：
 - 单股接口，输入 5 位港股代码（如 00941）；
 - 源侧硬限速 ≤2 req/s：BaseAdapter rate_limit=0.5s/请求；
-- 国内源直连，调用前临时禁用 HTTP(S)_PROXY；
+- 代理：akshare 内部走 requests（会回退读系统代理设置），本适配器不改进程环境；
+  历史上的"临时清空 HTTP(S)_PROXY"从未生效，已于 2026-11-17 删除
+  （`reports/136` §5.1 实测）；
 - 港股 IPO/配股/供股等融资事件不在本适配器范围，未采集部分绝不伪造。
 """
 
@@ -18,8 +20,8 @@ import time
 from datetime import date
 from typing import Any
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+from app.core.numbers import to_float_keep_inf_reject_nan as _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -59,15 +61,6 @@ _EQUIV_CNY_RE = re.compile(r"相当于\s*人民币\s*([0-9]+(?:\.[0-9]+)?)\s*元
 # 汇率里的「港币1.00元」，把**汇率**当成股息写进 dividend_per_share_hkd
 # （实测 89 行受影响，港币股息最多虚高 100 倍）。先剥掉汇率注记再匹配。
 _FX_NOTE_RE = re.compile(r"[（(]?\s*汇率[^）)]*[）)]?")
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "" or value != value:  # NaN
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _to_date(value: Any) -> str | None:
@@ -172,8 +165,7 @@ class EastMoneyHKDividendAdapter(BaseAdapter):
         self._wait_rate_limit()
         started = time.monotonic()
         try:
-            with _domestic_direct():
-                df = ak.stock_hk_dividend_payout_em(symbol=hk_code)
+            df = ak.stock_hk_dividend_payout_em(symbol=hk_code)
         except Exception as exc:  # noqa: BLE001
             logger.warning("港股分红 %s 抓取失败: %s", hk_code, exc)
             return self._make_empty_result(f"{type(exc).__name__}: {exc}")

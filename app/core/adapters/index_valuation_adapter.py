@@ -12,7 +12,9 @@
 语义边界：
 - 同指数同日期按 source 多行并存（index_valuation PK 含 source）。
 - 均为低频源：乐咕单指数 2 次请求 / 申万单窗口 1 次请求，无风控风险。
-- 国内源直连（_domestic_direct：本机 10808 代理常不可达，reports/61 纪律）。
+- 国内源直连：httpx 请求显式 `trust_env=False`（忽略 HTTP(S)_PROXY 与系统代理）。
+  历史上"临时清空进程环境变量以免走代理"的包装器从未生效，已于 2026-11-17 删除
+  （`reports/136` §5.1 实测）；akshare 内部走 requests，本适配器不改进程环境。
 - 指数代码归一：宽基用 6 位数字（000300）；申万行业用 SW+6 位（SW801010）。
 """
 
@@ -24,9 +26,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from typing import Any
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 from app.core.financial_period import cn_today as _cn_today
+from app.core.numbers import to_float_keep_inf_reject_nan as _to_float
 
 logger = logging.getLogger(__name__)
 
@@ -74,15 +76,6 @@ CSINDEX_COVERED_CODES: frozenset[str] = frozenset({
 
 
 
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "" or value != value:  # NaN
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def _to_date(value: Any) -> str | None:
     if value is None or value == "" or value != value:  # NaN
         return None
@@ -128,8 +121,7 @@ class LeguleguIndexAdapter(BaseAdapter):
 
         self._wait_rate_limit()
         try:
-            with _domestic_direct():
-                pe_df = ak.stock_index_pe_lg(symbol=symbol)
+            pe_df = ak.stock_index_pe_lg(symbol=symbol)
         except Exception as e:  # noqa: BLE001
             logger.warning("legulegu 指数 %s PE 抓取失败: %s", index_code, e)
             message = f"{type(e).__name__}: {e}"
@@ -151,8 +143,7 @@ class LeguleguIndexAdapter(BaseAdapter):
         pb_raw: str | None = None
         try:
             self._wait_rate_limit()
-            with _domestic_direct():
-                pb_df = ak.stock_index_pb_lg(symbol=symbol)
+            pb_df = ak.stock_index_pb_lg(symbol=symbol)
             if pb_df is not None and len(pb_df) > 0:
                 pb_raw = pb_df.to_json(orient="records", force_ascii=False)
                 for _, row in pb_df.iterrows():
@@ -227,20 +218,19 @@ class SwsIndexAdapter(BaseAdapter):
         """单页请求（独立方法便于测试 monkeypatch）。"""
         import httpx
 
-        with _domestic_direct():
-            response = httpx.get(
-                self._URL,
-                params=params,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-                    )
-                },
-                timeout=self._timeout,
-                trust_env=False,
-                verify=False,  # swsresearch 证书链不完整，akshare 原实现同样 verify=False
-            )
+        response = httpx.get(
+            self._URL,
+            params=params,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+                )
+            },
+            timeout=self._timeout,
+            trust_env=False,
+            verify=False,  # swsresearch 证书链不完整，akshare 原实现同样 verify=False
+        )
         response.raise_for_status()
         return response.json()
 
@@ -350,8 +340,7 @@ class CSIndexIndexAdapter(BaseAdapter):
 
         self._wait_rate_limit()
         try:
-            with _domestic_direct():
-                df = ak.stock_zh_index_value_csindex(symbol=csindex_symbol)
+            df = ak.stock_zh_index_value_csindex(symbol=csindex_symbol)
         except Exception as e:  # noqa: BLE001
             logger.warning("csindex 指数 %s 抓取失败: %s", index_code, e)
             return self._make_empty_result(f"{type(e).__name__}: {e}")

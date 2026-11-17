@@ -21,7 +21,6 @@ import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
-from app.core.adapters._net import domestic_direct as _domestic_direct
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
 
 logger = logging.getLogger(__name__)
@@ -103,15 +102,14 @@ class ThsAdapter(BaseAdapter):
         # 导致 trust_env 等关键字不被接受（2026-09-05 实测）。
         import httpx
 
-        with _domestic_direct():
-            response = httpx.get(
-                THS_BASE_URL + path,
-                params=params,
-                headers={"X-api-key": api_key},
-                timeout=self._timeout,
-                trust_env=False,
-                follow_redirects=True,
-            )
+        response = httpx.get(
+            THS_BASE_URL + path,
+            params=params,
+            headers={"X-api-key": api_key},
+            timeout=self._timeout,
+            trust_env=False,
+            follow_redirects=True,
+        )
         response.raise_for_status()
         return response.json()
 
