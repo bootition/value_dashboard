@@ -324,7 +324,7 @@ return fallback || field
 /** 小数比例存储的百分比字段（条件输入 ÷100、展示 ×100+%）。 */
 const PCT_FIELDS = new Set([
   'fcf_margin',  // 扩展指标域：自由现金流率按小数比例存储
-  'shareholder_occupation', 'book_to_market', 'accruals', 'cash_content_of_revenue',
+  'shareholder_occupation', 'book_to_market', 'accruals',
   'selling_expense_ratio', 'admin_expense_ratio', 'rd_expense_ratio',
   'finance_expense_ratio', 'current_asset_ratio', 'fixed_asset_ratio',
   'roe', 'roa', 'roic', 'roce_latest', 'roce_5y_median', 'roce_10y_median',
@@ -370,6 +370,11 @@ const RATIO_FIELDS = new Set([
   'equity_multiplier', 'tobin_q', 'ev_ebitda',
   'dilution_3y', 'buyback_ratio_3y', 'bonus_share_ratio_3y', 'top_segment_share',
   'cash_ratio', 'conservative_quick_ratio', 'debt_to_equity',
+  // 2026-11-17（reports/133 RG3）：后端 field_units.py 把这两个登记为倍数，
+  // 前端此前一个漏登记（退回默认口径）、一个错登记成小数比例（100 倍误差）。
+  // `cash_content_of_revenue` = 销售商品收到的现金 / 营业收入 ≈ 1.0；
+  // `balance.advance_from_customers_ratio` = (预收+合同负债) / 负债合计。
+  'cash_content_of_revenue', 'balance.advance_from_customers_ratio',
   'tangible_net_debt_ratio', 'ocf_to_liabilities', 'ebitda_to_liabilities',
   'ocf_to_operating_profit',
 ])

@@ -16,12 +16,14 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.czb_mof_adapter import KEY_TENORS, TreasuryMofAdapter
 from app.core.adapters.manager import AdapterManager
+from app.core.financial_period import CN_TZ as _CN_TZ
+from app.core.financial_period import cn_today as _cn_today
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -35,11 +37,6 @@ RETRY_DATA_TYPE = "treasury_yield_curve"
 MAX_STALENESS_DAYS = 5  # reports/68 §4.3：最大陈旧 5 个自然日
 HISTORY_START = "2006-01-01"  # 曲线自 2006-03-01 起（阶段0 实测）
 
-_CN_TZ = timezone(timedelta(hours=8))
-
-
-def _cn_today() -> date:
-    return datetime.now(_CN_TZ).date()
 
 
 class TreasuryCurveUpdater:

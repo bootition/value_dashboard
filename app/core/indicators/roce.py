@@ -191,6 +191,25 @@ SNAPSHOT_UPDATE_SQL = """
 """
 
 
+# 住在 `indicator_snapshot` 里、由本域（而不是指标计算器 staging）生产的列。
+# 登记到 `app/core/indicators/calculator.py::derived_snapshot_domains()` 后，
+# 两条发布路径都会先保全、再调用 `rebuild_snapshot_columns()`、最后校验没有列
+# 被清空（`reports/133` R3；事故来源 `reports/131` K5/D28）。
+SNAPSHOT_DERIVED_COLUMNS: tuple[str, ...] = (
+    "roce_latest",
+    "roce_5y_median",
+    "roce_5y_years",
+    "roce_10y_median",
+    "roce_10y_years",
+    "roce_eligible",
+)
+
+
+def rebuild_snapshot_columns(connection: Any) -> None:
+    """用 `roce_history` 重算 `indicator_snapshot` 的 ROCE 六列（幂等，毫秒级）。"""
+    connection.execute(SNAPSHOT_UPDATE_SQL, [ELIGIBLE_MIN_YEARS, ELIGIBLE_MIN_MARKET_CAP])
+
+
 class RoceBuilder:
     """构建 roce_history 并用它刷新 indicator_snapshot 的五列。
 

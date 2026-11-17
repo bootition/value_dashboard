@@ -640,7 +640,7 @@ class DataInitializer:
                         json.dumps({
                             "processed": processed,
                             "total": total,
-                            "as_of": datetime.now(UTC).date().isoformat(),
+                            "as_of": datetime.now(UTC).isoformat(),
                         }, ensure_ascii=False),
                         datetime.now(UTC).isoformat(),
                     ],

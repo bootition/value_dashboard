@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import httpx
@@ -31,6 +31,8 @@ from app.core.adapters.base import (
     FetchRequest,
     FetchResult,
 )
+from app.core.financial_period import CN_TZ as _CN_TZ
+from app.core.financial_period import cn_today as _cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +63,6 @@ _DEFAULT_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-_CN_TZ = timezone(timedelta(hours=8))
-
-
-def _cn_today() -> date:
-    return datetime.now(_CN_TZ).date()
 
 
 def _to_float(value: Any) -> float | None:

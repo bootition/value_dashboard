@@ -13,16 +13,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import math
 import uuid
 from bisect import bisect_right
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
+from app.core.financial_period import cn_today
 from app.core.market_cap import latest_market_cap, market_cap_from
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -30,6 +33,48 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.core.treasury import MAX_STALENESS_DAYS
 
 logger = logging.getLogger(__name__)
+
+SNAPSHOT_TABLE = "indicator_snapshot"
+
+
+@dataclass(frozen=True)
+class DerivedSnapshotDomain:
+    """一个"不由本计算器生产、但住在 indicator_snapshot 里"的派生域。
+
+    背景（`reports/133` R3 / `reports/131` K5 / D28）
+    ------------------------------------------------
+    `indicator_snapshot` 的发布是"整表/整批 DELETE + INSERT"。凡是**不由本
+    计算器 staging 产出**的列（ROCE 六列、H 股市值几列、任何以后新增的
+    外部派生列），INSERT 时都不会被写入 → 静默变 NULL。这不是某一次的 bug，
+    而是"派生列没有重建触发、也没有保全契约"这一类事故的固定生产机制：
+
+    * 2026-11-16 `reports/130` ROCE 落地当晚，每次快照重发把全市场 5,575 行
+      `roce_*` 清成 NULL（`reports/131` K5）；
+    * 同型事故 D28（`capital_history` 域冻结）；
+    * 同一个补丁只补了整表发布路径，**增量发布路径 `_publish_snapshot_delta`
+      仍在清空**——本守卫上线当天就会把它照出来。
+
+    因此每个派生域必须显式登记：列名（用于保全 + 校验）+ 重建函数（用于
+    保持数值新鲜）。登记后由 `_derived_columns_guard()` 在两条发布路径上
+    统一执行"先保全、再重建、最后校验没有列被清空"。
+    """
+
+    name: str
+    columns: tuple[str, ...]
+    rebuild: Callable[[Any], None]
+
+
+def derived_snapshot_domains() -> tuple[DerivedSnapshotDomain, ...]:
+    """indicator_snapshot 派生域注册表（新增派生列必须在这里登记）。"""
+    from app.core.indicators import roce
+
+    return (
+        DerivedSnapshotDomain(
+            name="roce",
+            columns=roce.SNAPSHOT_DERIVED_COLUMNS,
+            rebuild=roce.rebuild_snapshot_columns,
+        ),
+    )
 
 
 class IndicatorCalculator:
@@ -1243,7 +1288,7 @@ class IndicatorCalculator:
 
     def _get_dividend_summary(self, stock_code: str, as_of_date: Any | None = None) -> dict[str, Any]:
         """Return only dividends known on the snapshot's reporting date."""
-        as_of_date = as_of_date or datetime.now(UTC).date()
+        as_of_date = as_of_date or cn_today()
         rows = self._read_query("""
             WITH valid_dividends AS (
                 SELECT ex_date, dividend_per_share
@@ -1457,7 +1502,7 @@ class IndicatorCalculator:
         Only distributions in the trailing twelve months are relevant. Older
         data is a missing-data condition, not a reason to inflate the yield.
         """
-        as_of_date = as_of_date or datetime.now(UTC).date()
+        as_of_date = as_of_date or cn_today()
         rows = self._read_query("""
             SELECT SUM(dividend_per_share) as dps
             FROM dividends
@@ -2149,7 +2194,7 @@ class IndicatorCalculator:
         例如：公司2018/2019/2021/2022年分红 → 返回2（2021-2022连续）
         如果2023也分红 → 返回3（2021-2023连续）
         """
-        as_of_date = as_of_date or datetime.now(UTC).date()
+        as_of_date = as_of_date or cn_today()
         rows = self._read_query("""
             SELECT DISTINCT EXTRACT(YEAR FROM ex_date) as yr
             FROM dividends
@@ -2279,10 +2324,15 @@ class IndicatorCalculator:
         2026-08-28 提速计划：增量重算不再构建"全市场副本 staging"。
         单事务内完成受影响行 DELETE、新行 INSERT、行数与键校验、衍生 lineage，
         任一步失败都整体回滚，上一代已发布快照保持原样。
+
+        2026-11-17（`reports/133` R3）：补上派生域保全/重建/校验。此前本路径
+        不跑 ROCE 聚合，增量重算过的股票（=每天价格变动的全体）ROCE 六列会被
+        静默置空——整表路径的补丁没覆盖到这里。
         """
         if not records:
             return
         placeholders = ", ".join("?" for _ in stock_codes)
+        scope_where = f" WHERE stock_code IN ({placeholders})"
         with self.duck.transaction() as connection:
             previous_total = connection.execute(
                 "SELECT COUNT(*) FROM indicator_snapshot"
@@ -2307,20 +2357,27 @@ class IndicatorCalculator:
                     "snapshot delta validation failed: "
                     f"missing_keys={missing_keys}, duplicates={duplicate_count}"
                 )
-            connection.execute(
-                f"DELETE FROM indicator_snapshot WHERE stock_code IN ({placeholders})",
-                stock_codes,
-            )
-            self._insert_records_in_connection(connection, records, "indicator_snapshot")
-            row_count = connection.execute(
-                "SELECT COUNT(*) FROM indicator_snapshot"
-            ).fetchone()[0]
-            expected_count = previous_total - affected_count + len(records)
-            if row_count != expected_count:
-                raise RuntimeError(
-                    "snapshot delta validation failed: "
-                    f"rows={row_count}, expected={expected_count}"
+            owned_columns = self._record_owned_column_names(connection, records)
+            with self._derived_columns_guard(
+                connection,
+                owned_columns=owned_columns,
+                scope_where=scope_where,
+                scope_params=list(stock_codes),
+            ):
+                connection.execute(
+                    f"DELETE FROM indicator_snapshot WHERE stock_code IN ({placeholders})",
+                    stock_codes,
                 )
+                self._insert_records_in_connection(connection, records, "indicator_snapshot")
+                row_count = connection.execute(
+                    "SELECT COUNT(*) FROM indicator_snapshot"
+                ).fetchone()[0]
+                expected_count = previous_total - affected_count + len(records)
+                if row_count != expected_count:
+                    raise RuntimeError(
+                        "snapshot delta validation failed: "
+                        f"rows={row_count}, expected={expected_count}"
+                    )
             self._record_derived_lineage_in_connection(connection, records)
 
     def _publish_snapshot(
@@ -2363,6 +2420,7 @@ class IndicatorCalculator:
                     f"duplicates={duplicate_count}, missing_keys={missing_key_count}"
                 )
             preserved_count = 0
+            placeholders = ""
             if preserved:
                 placeholders = ", ".join("?" for _ in preserved)
                 preserved_count = connection.execute(
@@ -2370,38 +2428,28 @@ class IndicatorCalculator:
                     f"WHERE stock_code IN ({placeholders})",
                     preserved,
                 ).fetchone()[0]
-                connection.execute(
-                    f"DELETE FROM indicator_snapshot WHERE stock_code NOT IN ({placeholders})",
-                    preserved,
-                )
-            else:
-                connection.execute("DELETE FROM indicator_snapshot")
-            connection.execute(
-                f'INSERT INTO indicator_snapshot BY NAME SELECT * FROM "{staging_table}"'
+            staging_columns = {
+                str(row[1])
+                for row in connection.execute(f'PRAGMA table_info("{staging_table}")').fetchall()
+            }
+            scope_where = (
+                f" WHERE stock_code NOT IN ({placeholders})" if preserved else ""
             )
-            # ROCE 派生列保全（2026-11-16，reports/131 §4.3）。
-            # `roce_latest / roce_5y_median / roce_5y_years / roce_10y_median /
-            # roce_10y_years` 五列由 `roce_history` 聚合成，**不在本计算器的
-            # staging 表里**；而这里是 DELETE + INSERT BY NAME，缺列会被静默写回 NULL。
-            # 不做这一步，每次快照重发都会把全市场 5,575 只的 ROCE 清空
-            # （D28「派生域没有重建触发就会冻结/丢失」的同型事故）。
-            # 聚合本身是 5,575 行 over 105k 行的单条 UPDATE，毫秒级；
-            # 失败只告警、不阻断主链发布（派生域不该拖垮 readiness）。
-            try:
-                from app.core.indicators.roce import (
-                    ELIGIBLE_MIN_MARKET_CAP,
-                    ELIGIBLE_MIN_YEARS,
-                    SNAPSHOT_UPDATE_SQL,
-                )
-
+            with self._derived_columns_guard(
+                connection,
+                owned_columns=staging_columns,
+                scope_where=scope_where,
+                scope_params=list(preserved),
+            ):
+                if preserved:
+                    connection.execute(
+                        f"DELETE FROM indicator_snapshot WHERE stock_code NOT IN ({placeholders})",
+                        preserved,
+                    )
+                else:
+                    connection.execute("DELETE FROM indicator_snapshot")
                 connection.execute(
-                    SNAPSHOT_UPDATE_SQL,
-                    [ELIGIBLE_MIN_YEARS, ELIGIBLE_MIN_MARKET_CAP],
-                )
-            except Exception:  # noqa: BLE001 - roce_history 缺失/未建时不应阻断主链
-                logger.warning(
-                    "ROCE 聚合回填失败（roce_history 可能尚未构建），本次快照的 roce_* 将为 NULL",
-                    exc_info=True,
+                    f'INSERT INTO indicator_snapshot BY NAME SELECT * FROM "{staging_table}"'
                 )
             final_count = connection.execute(
                 "SELECT COUNT(*) FROM indicator_snapshot"
@@ -2413,6 +2461,126 @@ class IndicatorCalculator:
                     f"(published={expected_count}, preserved={preserved_count})"
                 )
             self._record_derived_lineage_in_connection(connection, records)
+
+    def _record_owned_column_names(
+        self, connection: Any, records: list[dict[str, Any]],
+    ) -> set[str]:
+        """本事务"写了"的列 = 记录里出现过的列（与 `_insert_records_in_connection` 同判据）。
+
+        只有**完全没出现在任何记录里**的列才算"派生列"：记录里出现但值为 None
+        的列仍由计算器负责（那是"算出来是空"，不是"没写"）。
+        """
+        column_names = [
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info('{SNAPSHOT_TABLE}')").fetchall()
+        ]
+        return {name for name in column_names if any(name in record for record in records)}
+
+    def _non_null_column_counts(
+        self,
+        connection: Any,
+        columns: Sequence[str],
+        scope_where: str,
+        scope_params: Sequence[Any],
+    ) -> dict[str, int]:
+        """统计给定列在"本事务将被替换的行"上的非空行数（一次查询拿全部列）。"""
+        if not columns:
+            return {}
+        selects = ", ".join(
+            f'SUM(CASE WHEN "{column}" IS NOT NULL THEN 1 ELSE 0 END)' for column in columns
+        )
+        row = connection.execute(
+            f"SELECT {selects} FROM {SNAPSHOT_TABLE}{scope_where}",
+            list(scope_params),
+        ).fetchone()
+        return {
+            column: int(value or 0)
+            for column, value in zip(columns, row or (), strict=False)
+        }
+
+    @contextlib.contextmanager
+    def _derived_columns_guard(
+        self,
+        connection: Any,
+        *,
+        owned_columns: Collection[str],
+        scope_where: str,
+        scope_params: Sequence[Any],
+    ) -> Iterator[None]:
+        """派生列守卫：**先保全、再重建、最后校验没有列被清空**。
+
+        `owned_columns` 之外的一切 `indicator_snapshot` 列都被视为"派生列"
+        （ROCE 六列、H 股市值几列、以及以后新增的外部派生列）。三步：
+
+        1. **保全**：删除前把非空派生列按 `(stock_code, report_date)` 备份到临时表，
+           插入后 `COALESCE(新值, 旧值)` 回填——这样即便该域没有重建钩子，
+           "整表重发把派生列清成 NULL"（K5/D28）也不可能再发生。
+        2. **重建**：跑 `derived_snapshot_domains()` 里登记的钩子，让依赖行情/市值
+           派生值保持新鲜（ROCE 的 `eligible` 就依赖当日市值与行业）。
+        3. **校验**：重建后若某列"删除前有值、插入后全空"→ 抛错回滚整批发布，
+           宁可发布失败也不允许静默把已发布数据抹成 NULL。
+        """
+        snapshot_columns = [
+            str(row[1])
+            for row in connection.execute(f"PRAGMA table_info('{SNAPSHOT_TABLE}')").fetchall()
+        ]
+        untouched = [column for column in snapshot_columns if column not in owned_columns]
+        before = self._non_null_column_counts(
+            connection, untouched, scope_where, scope_params
+        )
+        carried = [column for column in untouched if before.get(column, 0) > 0]
+        backup_table = f"_vd_derived_backup_{uuid.uuid4().hex[:12]}"
+        if carried:
+            column_list = ", ".join(f'"{column}"' for column in carried)
+            connection.execute(
+                f'CREATE TEMP TABLE "{backup_table}" AS '
+                f"SELECT stock_code, report_date, {column_list} "
+                f"FROM {SNAPSHOT_TABLE}{scope_where}",
+                list(scope_params),
+            )
+        try:
+            yield
+            if carried:
+                assignments = ", ".join(
+                    f'"{column}" = COALESCE(s."{column}", backup."{column}")'
+                    for column in carried
+                )
+                connection.execute(
+                    f'UPDATE {SNAPSHOT_TABLE} AS s SET {assignments} '
+                    f'FROM "{backup_table}" AS backup '
+                    "WHERE s.stock_code = backup.stock_code "
+                    "AND s.report_date = backup.report_date"
+                )
+            for domain in derived_snapshot_domains():
+                try:
+                    domain.rebuild(connection)
+                except Exception as error:  # noqa: BLE001 - 单域失败不连坐其它域
+                    logger.warning(
+                        "派生域 %s 重建失败（列 %s 将沿用上一代值）：%s",
+                        domain.name,
+                        ",".join(domain.columns),
+                        error,
+                        exc_info=True,
+                    )
+            after = self._non_null_column_counts(
+                connection, untouched, scope_where, scope_params
+            )
+            wiped = [
+                column
+                for column in carried
+                if after.get(column, 0) == 0
+            ]
+            if wiped:
+                raise RuntimeError(
+                    "snapshot publish would wipe derived columns: "
+                    f"{', '.join(wiped)}（发布前有值、发布后全空）。"
+                    "该列不由指标计算器生产，必须登记到 "
+                    "calculator.derived_snapshot_domains()，"
+                    "或确认它已退役后从 schema/注册表同时删除。"
+                )
+        finally:
+            if carried:
+                connection.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
 
     def _insert_records_in_connection(
         self, connection: Any, records: list[dict[str, Any]], table_name: str,

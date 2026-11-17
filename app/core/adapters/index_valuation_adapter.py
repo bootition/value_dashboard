@@ -27,6 +27,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+from app.core.financial_period import cn_today as _cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +89,6 @@ def _domestic_direct() -> Any:
                 os.environ[k] = v
 
 
-def _cn_today() -> date:
-    return date.today()
 
 
 def _to_float(value: Any) -> float | None:

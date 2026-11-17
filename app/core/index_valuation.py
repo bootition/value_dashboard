@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC, date, datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.adapters.base import FetchRequest
@@ -27,6 +27,8 @@ from app.core.adapters.index_valuation_adapter import (
     LeguleguIndexAdapter,
     SwsIndexAdapter,
 )
+from app.core.financial_period import CN_TZ as _CN_TZ
+from app.core.financial_period import cn_today as _cn_today
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -49,12 +51,6 @@ SW_INDUSTRY_GROUP = "SW_ALL"
 
 REFRESH_MARKER_KEY = "index_valuation_last_refresh"
 
-_CN_TZ = timezone(timedelta(hours=8))
-
-
-def _cn_today() -> date:
-    """本地（UTC+8）今天。"""
-    return datetime.now(_CN_TZ).date()
 
 
 class IndexValuationUpdater:
