@@ -1035,6 +1035,12 @@ class IncrementalUpdater:
         #     （界面 55 个扩展筛选字段全 NULL）。该步骤失败只让自己 failed，
         #     不动 indicator_snapshot，也不影响 readiness。
         report_step("indicator_ext", self._refresh_indicator_ext())
+        # 5.4 ROCE 域重建（2026-11-16，reports/130/131）。
+        #     与 indicator_ext 同样的 D28 约束：派生域没有重建触发就会冻结，
+        #     而 indicator_snapshot 的 roce_* 五列在每次快照重发时会被重算
+        #     （见 calculator._publish_snapshot），前提是 roce_history 是最新的。
+        #     失败只让本步骤 failed，不影响主链与 readiness。
+        report_step("roce", self._refresh_roce())
 
         if share_capital_changed:
             # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
@@ -1731,6 +1737,58 @@ class IncrementalUpdater:
             "监管指标步骤: status=%s targeted=%s updated=%s failed=%s elapsed_seconds=%s",
             step["status"], step.get("targeted", 0), step["updated"],
             step["failed"], step["elapsed_seconds"],
+        )
+        return step
+
+    def _refresh_roce(self) -> dict[str, Any]:
+        """ROCE 域重建（reports/130/131）。
+
+        门控：`roce_history` 的最新年报期 < 三表最新年报期，或 `roce_history` 为空
+        （从未构建）时重建。ROCE 只吃年报，季报更新不触发，一年最多重建一次。
+
+        为什么必须有这一步：`indicator_snapshot.roce_*` 五列由 `roce_history`
+        聚合而来（聚合发生在 `calculator._publish_snapshot` 里），
+        若 `roce_history` 冻结在旧年份，聚合出来的就是旧值——D28 同型。
+
+        失败只让本步骤 failed，`roce_history` 保留旧值，主链与 readiness 不受影响。
+        """
+        started = time.time()
+        step = self._new_domain_step(400)
+        try:
+            from app.core.indicators.roce import RoceBuilder
+
+            latest_annual = self.duck.read_query(
+                "SELECT MAX(report_date) AS d FROM balance_sheet "
+                "WHERE strftime(report_date, '%m-%d') = '12-31'"
+            )
+            latest_annual = latest_annual[0]["d"] if latest_annual else None
+            built = None
+            try:
+                rows = self.duck.read_query(
+                    "SELECT MAX(report_date) AS d FROM roce_history"
+                )
+                built = rows[0]["d"] if rows else None
+            except Exception:  # noqa: BLE001 - 表不存在等价于「从未构建」
+                built = None
+            if built is not None and latest_annual is not None and built >= latest_annual:
+                step["reason"] = "up_to_date"
+                step["roce_history_max"] = str(built)
+                return step
+            report = RoceBuilder(duck=self.duck).build()
+            step["status"] = "success"
+            step["roce_history_rows"] = report.get("history_rows")
+            step["roce_5y_median"] = report.get("snapshot", {}).get("roce_5y_median")
+            step["roce_history_max"] = str(latest_annual)
+        except Exception as error:  # noqa: BLE001
+            step["status"] = "failed"
+            step["reason"] = f"exception: {type(error).__name__}: {error}"
+            logger.warning("ROCE 域重建失败", exc_info=True)
+        finally:
+            step["elapsed_seconds"] = round(time.time() - started, 2)
+        logger.info(
+            "ROCE 步骤: status=%s reason=%s rows=%s elapsed=%ss",
+            step["status"], step.get("reason"), step.get("roce_history_rows"),
+            step["elapsed_seconds"],
         )
         return step
 

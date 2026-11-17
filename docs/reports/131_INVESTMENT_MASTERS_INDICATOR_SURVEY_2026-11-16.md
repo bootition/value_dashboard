@@ -1145,3 +1145,160 @@ python .planning/2026-11-16-masters-survey/dbq.py "SELECT ..."
 2. **第二档 9 个**要不要按上述顺序逐个改造后加入？
 3. **689009 的 10 倍市值 bug** 是否本轮就修（它会污染任何用到 `market_cap_at_report` 的新指标）？
 4. **G1–G5 五个数据缺口**：是否需要另立项目补数据（GDP / 维持性 capex / 信用利差 / beta / gross PPE），还是接受「用到时如实标注缺失」？
+## 9. 数据库数据问题专项调查报告（补充调查）
+
+> 本节是应要求追加的**独立补充调查**：在做大师指标可行性映射的过程中反复撞到数据本身的问题。
+> 由 5 个专项审计 Agent 分别从「派生表陈旧 / 单位量纲 / 跨年口径断点 / NULL 语义 / 勾稽完整性」五个角度全库扫描，
+> 共 **60 条问题，其中 P0 9 条**。每条都带可复现 SQL 与实测数字，原始 JSON 在 `.planning/2026-11-16-masters-survey/dbquality/`。
+
+### 9.1 总览
+
+| 专项 | 条数 | P0 | 一句话总评 |
+|---|---|---|---|
+| 派生表陈旧 | 11 | 2 | 派生表的「报告期陈旧」这个老病已经治好（indicator_ext 追到 2026-09-30、fixed_assets/扣非等补采已补齐），但「输入变化不触发重建」这个更隐蔽的同型病仍在：68900 |
+| 单位量纲 | 6 | 1 | 五类量纲（市值元/亿、股本单位、每股份额、分红每股价、报表金额）的主路径已核验自洽，但科创板成交量量纲在 2026-07-31 整体断裂 100 倍（P0，612 只 / 45,067 行 × 2 表 |
+| 跨年口径断点 | 16 | 4 | 扫描 5 张财务主表 × 100 个字段 × 2005-2025，用固定面板同股同比 + 覆盖断崖 + 恒等式残差三法定位到 16 个口径台阶/语义漂移（4 个 P0），最严重的是 FY2025 明细 |
+| NULL 语义 | 14 | 1 | 查出 1 个 P0（技术三指标 47% 覆盖率 + 无门禁 → 动量类筛选静默丢 52.6% 股票）与 8 个 P1；三类 NULL 已可稳定区分：金融股结构性不适用（银行 42 只 8 年全 0%） |
+| 勾稽完整性 | 13 | 1 | 主键与三大会计恒等式本身是干净的（声明 PK 的表零重复、资产/权益拆分违反 0.07%、权益=归母+少数违反 0.06%），真正的风险全在派生层：indicator_snapshot 的同比字段用了 |
+
+**最该先修的 9 个 P0（按危害排序）**：
+
+| # | 问题 | 影响面 | 状态 |
+|---|---|---|---|
+| P0-1 | **科创板成交量放大 100 倍** | 612 只 × 45,067 行 × 2 张价格表；已污染 533 只股票的快照 `avg_volume` | 待修 |
+| P0-2 | **`indicator_snapshot` 每次重发把 `roce_*` 五列清成 NULL** | 全市场 5,575 行 × 5 列；任意一次快照发布即触发 | ✅ **本会话已修复** |
+| P0-3 | **FY2025 年报明细两表「半空壳」** | `cash_flow_activity` 19/21 列、`cash_flow_indirect` 18/35 列全空，约 10.7 万个空单元格 | 待修 |
+| P0-4 | **营收/净利同比两套口径** | `indicator_snapshot` 全表；27.8% 的股票在详情页与快照里方向相反 | 待修 |
+| P0-5 | **技术三指标只有 47% 覆盖** | 2,931 只股票的动量/波动筛选静默丢股，且无覆盖率门禁 | 待修 |
+| P0-6 | **保险股「保险合同负债」写进 `contract_liabilities`** | 5 只保险股占全市场合同负债合计的 **42%–68%** | 待修 |
+| P0-7 | **`asset_impairment_loss` 符号在 FY2018 翻转** | 2015–2025 约 6.4 万行；跨年减值率序列符号相反 | 待修 |
+| P0-8 | **FY2020 预收款项→合同负债重分类** | `prepayments_received` 单列一夜 −96.6% | 待修 |
+| P0-9 | **689009 九号公司市值/每股族错 10 倍** | 1 只 × 24 期 × 14 个派生列；全库仅此 1 只 | 待修 |
+
+### 9.2 P0 逐条：证据、根因、修法
+
+#### P0-1　科创板（688/689）成交量被腾讯适配器放大 100 倍
+
+**证据**（本人独立复现）：
+- 688111 金山办公 2026-07-30 成交量 12,675,928 股（换手 2.7%）；**2026-07-31 变成 2,873,692,500 股**（换手 **619%**），单日跳约 227 倍。
+- 2026-11-13 全市场横向：科创板 `volume/circ_shares` 中位 **1.9396**（194%），其他板块 **0.0169**（1.7%），相差约 115 倍。
+
+**影响面**：`price_daily_raw` / `price_daily_qfq` 各 45,067 行、612 只；下游 `indicator_snapshot.avg_volume` 533 只偏大 100 倍。所有以成交量为输入的使用方（流动性、换手、量价筛选）全部失真。
+
+**根因**：`app/core/adapters/tencent_adapter.py:214-216` 无条件 `float(bar[5]) * 100`（注释假定腾讯 K 线为「手」）。主板/创业板确实返回手数，**但腾讯对科创板返回的已是股数**，再乘 100 即放大一百倍。断点落在 2026-07-31，因为当天价格主链整体切到腾讯适配器。
+
+**修法**：
+1. 适配器加守卫：科创板不乘 100，并把注释改成「科创板腾讯 day/qfqday 的 bar[5] 已是股数，主板/创业板为手数」。
+2. 回归用例：同批返回 688xxx 与 600xxx 各一根 bar，断言 688 不乘 100、600 乘 100。
+3. 存量修复：`scripts/repair_star_volume_x100.py` 把 2026-07-31 起 688/689 的 `volume` 除以 100（两张表各 45,067 行），再重算受影响 533 只的 `avg_volume`。
+4. 验收：修复后科创板 `volume/circ_shares` 中位应回到 1%–10%。
+
+#### P0-2　`indicator_snapshot` 每次重发把 `roce_*` 五列清成 NULL
+
+**证据**：`calculator._publish_snapshot()` 走 `DELETE FROM indicator_snapshot` + `INSERT ... BY NAME SELECT * FROM staging`；staging 表列齐但只写计算器的已知键，`roce_*` 五列不在其中 → 被写回 NULL。而全流程只有 `vd data compute-roce` 会写这五列，主更新流里没有这一步。
+
+**这是我在实现 ROCE 时引入的缺陷**（`reports/130`），属于 D28「派生域没有重建触发」的同型事故。
+
+**状态：✅ 本会话已修复**
+1. `calculator._publish_snapshot()` 在 INSERT 之后、同事务内追加执行 `roce.SNAPSHOT_UPDATE_SQL`（毫秒级；失败只告警、不阻断主链发布）；
+2. `update.py` 新增 `_refresh_roce()` 步骤，门控 = `max(roce_history.report_date) < 最新年报期` 或首次构建；
+3. 新增回归用例 `test_snapshot_republish_preserves_roce_columns`：模拟 republish 清空后再聚合，断言五列被恢复。
+
+#### P0-3　FY2025 年报明细两表「半空壳」
+
+**证据**：`cash_flow_activity` 2025 年报 5,576 行中 19/21 个数值列全空；`cash_flow_indirect` 5,579 行中 18/35 列全空。行存在、`source`/`capex` 有值 ⇒ 不是「没采到公司」，而是**只采了几列**。
+
+**根因**：`app/core/supplement.py` 的 `CSMAR_CUTOFF = date(2025,3,31)`——此后的报告期全部改走东财 F10 补充管线，而该管线只按 `INDIRECT_FIELD_MAP`（9 字段）与 `ACTIVITY_FIELD_MAP`（1 字段 capex）写列，其余一律 NULL。
+
+**影响**：任何依赖「折旧摊销 + 营运资本变动」的指标（EBITDA、EV/EBITDA、经营杠杆、自由现金流质量检验，以及本次调研里的 Owner Earnings）在 2025 年全部失去加项。
+
+**修法**：扩两张 FIELD_MAP，补齐东财 `cfAjaxNew` 的其余同名列；补不上的在 `indicator_null_reason` 登记 `SOURCE_EMPTY`，不要留成「无声的 NULL」。
+
+#### P0-4　营收/净利同比存在「年报口径」与「TTM 口径」两套算法
+
+**证据**：`indicator_snapshot.revenue_yoy` 由 `calculator._calc_growth()` 用**最新两个年报**算；而 `stock_detail._metric_history_rows()` 对同一字段用 `base_period='ttm'` 重算。**27.8%（1,527/5,485）的股票两处方向相反**。
+
+**根因**：同一业务概念在两个模块各写一套公式；且快照行 `report_date` 是 2026-09-30（季报期），却挂着一个「年报口径」的增速。
+
+**修法**：`_calc_growth()` 改为 TTM 口径写入 `revenue_yoy`；年报口径另存 `revenue_yoy_fy` 等新列并登记单位；DSL `period_type` 由 `current_only` 改 `ttm`。
+
+#### P0-5　技术三指标只有 47% 覆盖，且无覆盖率门禁
+
+**证据**：`period_return / annualized_volatility / max_drawdown` 在 5,575 行中 2,931 行（52.6%）为空，而 `price_daily_qfq` 对 5,585 只是完整的。
+
+**根因**：三列由 `_trailing_contiguous_closes()` 从 qfq 收盘序列算，而 qfq 是**事后补齐**的——这些股票的快照行在 qfq 落库前就算过一次并写死 NULL，补齐后没有机制触发重算（`reports/119` D30 已裁决、至今未落地）。且 `_EXTENDED_MIN_COVERAGE_PCT` 门禁只对 `indicator_ext` 生效，不管快照列。
+
+**修法**：qfq 写入成功后打 `technical_pending` 标记 → 下一轮强制重算；一次性补偿脚本重算 `period_return IS NULL` 且有 ≥2 条 qfq 收盘的股票；`asset_health` 新增 `TECHNICAL_COVERAGE_GAP`（覆盖率 <95% 即 P1）。
+
+#### P0-6　保险股「保险合同负债」写进 `contract_liabilities`
+
+**证据**：601318 中国平安 / 601319 中国人保 / 601336 新华保险 / 601601 中国太保 / 601628 中国人寿，FY2022–FY2025 共 19 行有值，却占**全市场合同负债合计的 42%–68%**。
+
+**根因**：上游金融专用科目「保险合同负债」被按序号/名称匹配到了通用科目 `contract_liabilities`。出现年份恰是新保险合同准则 CAS25 的实施年（A+H 险企 2022、其余 2023）——只有实施新准则的公司才有这一行，可反证。
+
+**修法**：映射层加守卫（`sw_level2='保险Ⅱ'` 时拒绝写入），保险合同负债落到 `financial_sector_items` 新列；一次性把 5 只保险股该列置 NULL；「合同负债/总资产」类排名加保险股剔除。
+
+#### P0-7　`asset_impairment_loss` 符号在 FY2018 翻转
+
+**证据**：财会〔2018〕15 号起，「资产减值损失/信用减值损失」按**损失以负号列示**，2017 及以前按损失为正。库内两段直接透传、未做符号归一；2018 年为混合年（同一年度内不同公司混用两种约定），逐年汇总时正负相消成「假低值」。影响 2015–2025 约 6.4 万行。
+
+**影响**：`income.asset_impairment_loss` / `income.credit_impairment_loss` 都在 DSL 与 screening 白名单里，任何跨 2018 的减值率、EBIT 修正、扣非还原都会算错。
+
+**修法**：不擅改原始值，在派生层提供 `impairment_loss_positive = CASE WHEN report_date >= '2018-12-31' THEN ABS(x) ELSE x END` 并让 DSL 使用；schema 列注释写明分段；禁止跨 2018 的 raw SUM/AVG。
+
+#### P0-8　FY2020 预收款项→合同负债重分类
+
+**证据**：新收入准则 CAS14（境内上市 2020-01-01 起施行）把与客户合同相关的预收款重分类为合同负债，`prepayments_received` 单列一夜掉 **96.6%**，残留的 1,284 亿只剩非合同类（租金等），语义已漂移。
+
+**影响**：任何「预收账款」单列时间序列，以及依赖它的净营运资本/占款类指标，在跨 2020 时断裂。
+
+**修法**：建合并口径视图 `v_advance_from_customers = COALESCE(prepayments_received,0)+COALESCE(contract_liabilities,0)`，营运资本/占款类指标改用它；DSL 给 `balance.prepayments_received` 加 `deprecated_after='2020-01-01'` 并在报错文案提示。
+
+#### P0-9　689009 九号公司市值/每股族错 10 倍
+
+**证据**（本人独立复现）：`indicator_ext.market_cap_at_report` 在 2024-12-31 起 8 个报告期全部是应有值的 0.1 倍（2025-12-31：应有 400.4 亿，表内 40.04 亿）；全库 43,478 个观测中**仅此 1 只**。连带 `bps / bps_parent / revenue_per_share / ocf_per_share / ...` 等 14 个派生列错 10 倍。
+
+**根因**：`share_capital_history` 该股全链带 `change_reason='unit_rescale:10'`（股本链后续被 ×10 校正），但 `indicator_ext` 是校正**之前**构建的——`_INPUT_TABLES` 输入指纹不含 `share_capital_history`，`_refresh_indicator_ext()` 也完全不看 `share_capital_changed`。
+
+**修法**：① `extended.py` 输入指纹增补 `share_capital_history`（尾段 400 天的 `stock_code:total_shares:effective_date` 摘要）；② `_refresh_indicator_ext()` 增加 `force_codes`，股本变化时按变更股重建；③ 立即重跑 `vd data compute-extended-indicators` 消除存量。
+
+### 9.3 P1 问题汇总（按专项）
+
+| 专项 | P1 问题 |
+|---|---|
+| 派生表陈旧 | 1. roce_history 没有任何自动重建触发，且 roce_latest 不披露取自哪一年：43 行展示的是 2025 年以前的 ROCE<br>2. 折旧摊销族在三季报/一季报结构性缺失：indicator_ext 的 ebitda/杠杆/EV-EBITDA 在最新期只剩 0.09%，而门禁只判报告期是否推进<br>3. 金融股专用三表链条没进自动更新：121 只金融股里 24 只最新期无任何专用科目（其中 21 只从来没有一行）<br>4. etf_daily 有 7 只 ETF 冻结 58 天：更新器只遍历 etf_meta，而这 7 只在 etf_daily 里却不在 etf_meta<br>5. price_daily_qfq 与 price_daily_raw 行集不一致（313 只缺 35,077 行 / 289 只多 11,599 行），技术指标在残缺序列上静默出 |
+| 单位量纲 | 1. 689009（九号公司 CDR）indicator_ext 全部 24 期市值小 10 倍、每股份额大 10 倍（股本链 ×10 校正后未重建派生表）<br>2. 量纲声明与库内实际存储不符：13 个指标声明 unit='percent' 实存小数，basic_eps 声明 'ratio'、diluted_eps 声明 'CNY'（二者都 |
+| 跨年口径断点 | 1. report_type 标签在 FY2025 断崖：'annual' 从 4,807 行归零，5,226 行变 NULL，WHERE report_type='annual' <br>2. 全库 0/NULL 约定在 FY2016 切换：同一个稀疏科目 2015 年写「字面 0」、2016 年起写 NULL，覆盖率先假高后断崖<br>3. 营业总成本口径在 FY2018 变更：资产减值损失/信用减值损失移出 total_operating_cost，EBIT=营收−营业总成本 的序列出现台阶<br>4. FY2017 研发费用单列：管理费用/营收 中位一年掉 3.10pp（−33%）且永不回补，2016 及以前的 rd_expenses 只有 12.3% 覆盖<br>5. FY2020 新收入准则把运费搬进营业成本：销售费用率中位 −1.41pp、毛利率中位 −1.03pp，同年 Δ销售费用率与 Δ毛利率 1:1 对应<br>6. FY2019 新金融工具准则：27.9% 的股票应收票据归零，而库内根本没有「应收款项融资」列，应收票据合计一年掉 48%<br>7. 使用权资产折旧 FY2021-2023 采集缺失、FY2024 才补全：间接法该科目合计从 13.2亿 跳到 3,705.3亿，把 depreciation_amortizat |
+| NULL 语义 | 1. cash_flow_activity 自 2025-06-30 起 21 个数值列只剩 capex 有值，其余 20 列全市场恒 NULL（行存在、值不存在）<br>2. cash_flow_indirect 自 2025-09-30 起 29 个数值列中 19 列恒 NULL：net_profit、营运资本三项、financial_expens<br>3. 「0 与 NULL」在 2016 年报整体切换写法：goodwill/bonds_payable/trading_financial_assets/notes_receivab<br>4. cash_flow_indirect / cash_flow_activity 的表级覆盖率在 2010-2019 只有 60-70%，且缺失系统性偏向小盘股（FY2018 中<br>5. 2025 中报（2025-06-30）现金流量表补充域整期空洞：cash_flow_indirect 与 cash_flow_activity 各只有 5 行（正常应约 5,4<br>6. FY2025 有 247 只股票（LEFT JOIN 口径 248 只）的 interest_expense + cash_paid_taxes 等 6 个字段整批为空，自有历<br>7. 派生列 indicator_ext.shareholder_occupation 只从 2025-09-30 起有值，2024-06-30～2025-06-30 全空：新增派生<br>8. 库里没有『应收款项融资 / 应收票据及应收账款』类科目：notes_receivable 2019 年从 79.8% 断崖到 62.3%，000651 进 2019 年后恒为  |
+| 勾稽完整性 | 1. 2006 年前的「净利润=利润总额-所得税」在 5,049 行不成立，导致 EBIT 两套公式在 1,801 行分歧 >5%<br>2. indicator_ext 极端值穿透：资产周转率最大 5,311、权益周转率 18,053、流动资产占比 4,985%、EV/EBITDA 996<br>3. 财报公布日缺口：最新一期 5,575 行财务数据 0 条公布日，历史各季缺 3.5%-4.2%，24.0% 记录公布日滞后 >365 天<br>4. funding_events 无唯一键，334 组同一增发事件重复入库且股数互不相同，dilution_3y 在 4,016 行上多计<br>5. 现金流三处勾稽失败：期末-期初≠净增加额 4,923 行、直接法≠间接法 7,617 行、利润表净利润≠间接法净利润 16,446 行 |
+
+### 9.4 P2 问题清单
+
+| 专项 | P2 问题 |
+|---|---|
+| 派生表陈旧 | 1. index_valuation 结构性落后 1 个交易日：_refreshed_today 按日历日判重，盘前那轮把当天额度用掉了<br>2. 派生表 calculated_at 时区口径不一致（带 tz 的 UTC 落成本地 +8，裸 UTC 落成 UTC），陈旧度比较系统性差 8 小时<br>3. indicator_null_reason 落后快照一代且没有任何重建触发（诊断表与事实脱节）<br>4. 三条静态/CSMAR 域停在旧期（financial_report_dates 2026-06-30、report_metadata 2025-03-31、industry_h |
+| 单位量纲 | 1. 金融股流动/非流动小计被零填充（0 而非 NULL），导致 indicator_ext.current_asset_ratio 静默为 0<br>2. payout_ratio 无上界：77 只 >5 倍、最大 1,938.7 倍（TTM 每股收益趋零导致分母塌缩）<br>3. 1993-2002 年少数股东损益/少数股东权益被填成合计值（净利润与归母净利差达 3,000 倍） |
+| 跨年口径断点 | 1. interest_expense / interest_income 的 FY2017 覆盖台阶：2016 年 interest_expense 仅 12.64% 有值，负值只<br>2. income_statement.exchange_gain 是「公允价值变动收益」而非汇兑损益（与间接法 fair_value_change_loss 严格反号相等 92.6<br>3. FY2019 交易性金融资产口径扩大（覆盖 +28.3pp）：新金融工具准则把理财并进来，跨 2019 的「持有金融资产」口径不可比<br>4. indicator_ext.shareholder_occupation 只有 FY2025 有值（5,261/5,625），因为它的原料表 balance_sheet_ext<br>5. FY2007 新会计准则断点：每股收益/扣非/商誉/资产减值/公允价值变动等科目 2007 才成建制出现，2006 及以前不可与之混算 |
+| NULL 语义 | 1. 结构性断点年表缺失登记：rd_expenses / interest_expense / credit_impairment_loss / lease_liabilities <br>2. report_type 元数据大面积为空：全库 114,812 行 NULL（31.8%），FY2025 年报 92.9% 为空，且同一列混着英文枚举与中文标签；任何 repo<br>3. balance_sheet 的 6 个银行监管比率列在年报口径**全历史 0 行**，只有 2026-06-30 与 2026-09-30 两个季报期有值（38 只 / 34-<br>4. minority_interest 为 NULL 但少数股东损益≠0：FY2025 有 78 只（损益>0 的 32 只），『NULL=无少数股东』不成立，COALESCE 0<br>5. indicator_null_reason 未覆盖 2.1% 的 NULL 单元（840/39,268），集中在 bonus_share_ratio_3y 与 sharehol |
+| 勾稽完整性 | 1. EBITDA 族在季报期整列不可用（已登记 SOURCE_EMPTY，非静默错误），但快照期恰为季报，EV/EBITDA 等 4 个筛选字段在「当前期」全空<br>2. report_type 大面积 NULL 且中英两套词表，任何按报告期类型过滤的 SQL 都会静默丢行<br>3. 伪零值：total_liabilities=0 而总资产>0（98 行）、revenue=0 而营业总收入>0（14 行）、revenue 为 NULL 而营业总收入>0（44<br>4. 27 只金融股的流动/非流动资产存 0 而非 NULL（361 行），与 context.md「金融股为 NULL」的记载不符，导致流动资产占比被算成 0%<br>5. report_date_close 取「报告期当日或之前最近交易日」的不复权价：116 行滞后 >30 天，最长 2,169 天<br>6. buyback_events.raw_hash 全部 5,484 行同一个值，血缘哈希完全失效<br>7. 累计口径微违规：年报营收 < 前三季营收 438 行，Q1→H1、H1→9M 反向 188 行 |
+
+### 9.5 修复优先级建议
+
+| 批次 | 内容 | 理由 |
+|---|---|---|
+| **第 0 批（立即）** | P0-1 科创板成交量、P0-9 九号公司市值、P0-2 ROCE 清空（已修） | 都是**静默产出错误数值**，且已经污染对外展示的排名 |
+| **第 1 批（做新指标前必须完成）** | P0-4 同比双口径、P0-5 技术指标覆盖、P0-7 减值符号、P0-8 预收/合同负债合并 | 大师指标里有一半要用同比、减值、营运资本——不先修就会把老 bug 复制进新指标 |
+| **第 2 批（数据完整性）** | P0-3 FY2025 明细半空壳、P0-6 保险合同负债错映射 | 影响面大但可标 NULL 降级，不阻塞新指标 |
+| **第 3 批（口径登记）** | 所有 P1 / P2 | 主要是补元数据、加门禁、写注释；工作量小，但能防住下一个 ROCE 事故 |
+
+### 9.6 已核验确认无问题的项
+
+为避免只报坏消息造成误判，各专项也明确核验了以下项是**干净的**：
+
+| 专项 | 已核验无问题 |
+|---|---|
+| 派生表陈旧 | indicator_ext 的报告期门禁已生效：361,393 行、MAX(report_date)=2026-09-30 恰等于 latest_complete_trio_perio<br>indicator_ext 除 689009 外全部可由源表重算：281,214 个 market_cap_at_report 观测里 281,190 个与 report_date_c<br>indicator_snapshot.report_date 与各股三表最新期一致：5,573 只为 2026-09-30；仅 688613、920533 停在 2026-06-30，<br>indicator_snapshot.total_market_cap 可由源表重算：5,575 只中 5,574 只等于 latest_close × stock_meta.tota<br>新报告期字段覆盖率已修复：balance_sheet.fixed_assets 在 2026-09-30 为 5,575/5,575（reports/119 记 1.8%），incom<br>price_daily_qfq 的「最新交易日」维度无陈旧：5,585 只股票的 MAX(trade_date) 全部等于 price_daily_raw（0 只滞后、0 只缺失），r<br>company_employee_history 整体 MAX(report_date) 只到 2026-09-17，但 indicator_ext 为 2026-09-30 选中的员<br>同步型行情域都在最新交易日：treasury_yield_curve MAX(curve_date)=2026-11-16、etf_meta 的 34 只 ETF 全部到 2026-1<br>indicator_ext.free_cash_flow 在最新期覆盖 5,564/5,575，FCF 族不受「三季报无间接法」影响（capex 来自直接法现金流量表，季度可得），所以<br>roce_history 只含年报期（COUNT(DISTINCT report_date)=37，1989-12-31 至 2025-12-31），与「年报口径 + 5/10 年中位 |
+| 单位量纲 | C1【股本单位：股 vs 千股 vs CDR 份】stock_meta.total_shares 与 share_capital_history 最新一笔逐股比对，5,551/5,55<br>C2【快照市值量纲：元 vs 亿元】indicator_snapshot.total_market_cap 与「最新收盘价 × stock_meta.total_shares」逐股比对<br>C3【每股份额族内部一致】indicator_ext 的 bps（287,514 行）、bps_parent（285,955）、revenue_per_share（287,125）、o<br>C4【分红 per share：每 10 股陷阱】dividends 53,398 条「除权日单次股息率 = dividend_per_share ÷ 除权日收盘价」中位 0.96%，<br>C5【累计分红金额：元 vs 亿元】cumulative_dividend_amount 与「历史 Σdividend_per_share × 当前股本」交叉验证，5,429 只中位比<br>C6【资产负债表金额量纲自洽】total_assets = total_liabilities + total_equity：360,962 行中仅 387 行相对残差 >1%（集中于<br>C7【利润表恒等式】net_profit = parent_net_profit + minority_shareholder_profit（少数股东损益非空子集）286,865 行中<br>C8【实收资本 vs 股本（面值）】paid_in_capital / total_shares 在 5,474/5,520 只上落在 [0.5, 2]（面值 1 元）；偏离者为 0.<br>C9【EPS 量纲：元/股】basic_eps 与「归母净利 ÷ 时点股本」逐期比对，422,600 行中只有 689009 呈系统性 10.05 倍（CDR 1 份 = 0.1 股，<br>C10【快照百分数字段对照】turnover_rate（中位 2.03）、ttm_dividend_yield（1.19）、div_yield_spread_10y（−0.44）、di |
+| 跨年口径断点 | FY2025 数据源从 csmar 切到 eastmoney_f10 后，**数值量纲与语义未坏**：固定面板 4,156 只 2024→2025 的营业总收入同比中位 1.04、P5<br>利润总额恒等式 `total_profit = operating_profit + non_operating_income − non_operating_expenses` 在 <br>`revenue` 与 `total_operating_revenue` 基本恒等：2010-2025 每年只有 130-227 只（≤3.9%）不相等，平均相对差 ≤0.7%（最大<br>三表主键无重复：`(stock_code, report_date)` 在 income_statement / balance_sheet / cash_flow 各 0 条重复，不<br>**线索「credit_impairment_loss 2025 年整列为空」不成立**：income_statement.credit_impairment_loss 在 2025-<br>**线索「interest_expense 2016 存在负值」不成立**：2013-2016 年负值样本数均为 0；负值只在 FY2017 之后出现且占比 0.1%-0.4%。201<br>cash_flow 主表未受 FY2025 源切换影响：2025-12-31 共 5,624 行，cf_from_operating 5,624 有值、cash_received_sa<br>`cash_flow_indirect.asset_impairment_provision`（计提额）符号在 FY2013-2025 始终「计提为正」（正值占比 91%-95%），可<br>直接法与间接法经营现金流交叉一致：`cash_flow.cf_from_operating` 与 `cash_flow_indirect.cf_from_operating_indir |
+| NULL 语义 | 主键唯一性（已核验无问题）：balance_sheet 361,484 行 / income_statement 371,252 / cash_flow 358,862 / cash_<br>折旧摊销的 COALESCE 0 是安全的（已核验无问题）：FY2025 年报 fixed_assets>0 却无 fixed_asset_depreciation 的 92 只中，8<br>EBITDA / EV-EBITDA 的空值都有解释（已核验无问题）：2026-09-30 期 depreciation_amortization / ebitda / ebitda_<br>total_current_assets 的 NULL ≈ 金融股（已核验无问题）：2018-2025 年报每年 97-100 个 NULL 中 95-100 个属 sw_level1<br>商誉 NULL ≈ 无商誉（已核验无问题）：FY2024 有商誉（>0）的 2,567 只中，FY2025 转为 NULL 的仅 107 只（4.2%），其中 100 只当年有资产减值<br>合并权益恒等式（已核验无问题）：total_equity ≡ total_equity_parent + COALESCE(minority_interest,0)，FY2023-20<br>银行监管比率缺口的处置（已核验无问题）：6 列在年报口径全历史 0 行（仅 2026-06-30 的 38 只与 2026-09-30 的 34-37 只季报有值），但 app/cor<br>有息负债口径（已核验无问题）：_calc_interest_bearing_debt 已按 D31 改为『缺项按 0、三项全空才返回 None』，不再要求三项全非空（旧口径曾把 roi<br>interest_expense 的『语义不稳定』影响面比传闻小（已核验）：2018 年后负值只有 12-24 只/年（0.2-0.5%），且 interest_coverage 已用<br>价格域完整性（已核验无问题）：5,585 只股票的 price_daily_qfq 末根收盘价 NULL/≤0 记录数 = 0；raw 与 qfq 末交易日期错配 = 0；qfq 有效 |
+| 勾稽完整性 | 主键重复：duckdb_constraints() 中声明 PRIMARY KEY 的 33 张表，按声明键 GROUP BY ... HAVING count(*)>1 全部为 0 <br>无主键表的真重复：buyback_events 按 (stock_code, announce_date, buyback_shares) 0 组（37 组同股同日是不同回购方案，正常<br>恒等式①「总资产 = 流动资产 + 非流动资产」：扣除金融股 0/0 的 361 行后，353,292 行可评估中仅 34 行（0.010%）偏差 >5%，其余 352,692 行完全<br>恒等式②「总资产 = 负债合计 + 所有者权益合计」：360,950 行可评估中 261 行（0.072%）偏差 >5%，其中 241 行在 2006 年前，2021 年后仅 4 行（<br>恒等式③「所有者权益合计 = 归母权益 + 少数股东权益」：290,380 行可评估中 180 行（0.062%）超标。另有 13,038 行出现「归母权益 > 所有者权益合计」，逐一<br>恒等式④「净利润 = 归母净利润 + 少数股东损益」：286,438 行可评估中 285,871 行成立（99.80%）；恒等式⑤「负债合计 = 流动负债 + 非流动负债」：351,0<br>负资产与零资产：total_assets < 0 共 0 行、total_assets = 0 仅 12 行；total_current_assets < 0 共 0 行、total_<br>indicator_snapshot 与源表期次对齐：5,575 行中 report_date 与 balance_sheet、income_statement 各自的 max(rep<br>indicator_snapshot 价格对齐：5,575 行 latest_price_date 与 price_daily_qfq 的 max(trade_date) 完全一致（0<br>indicator_snapshot 估值勾稽：pb_mrq 与 total_market_cap / total_equity_parent 在 5,456 行可评估中 100% 一 |

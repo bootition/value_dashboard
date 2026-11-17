@@ -351,3 +351,46 @@ def test_source_constant_is_recorded(duckdb_store: DuckDBStore) -> None:
     assert all(r["data_version"] == DATA_VERSION for r in rows)
     assert rows[0]["status"] == STATUS_NO_PRIOR_PERIOD
     assert all(r["status"] == STATUS_OK for r in rows[1:])
+
+
+# ─── 快照重发不得清空 ROCE 列（reports/131 §4.3，P0 定时炸弹）──────────────
+
+
+def test_snapshot_republish_preserves_roce_columns(duckdb_store: DuckDBStore) -> None:
+    """`indicator_snapshot` 的 DELETE+INSERT BY NAME 会把 roce_* 写回 NULL。
+
+    `roce_*` 五列由 `roce_history` 聚合成，**不在计算器 staging 表里**；
+    `_publish_snapshot` 必须在 INSERT 之后重新聚合一次，否则每次快照重发
+    都会把全市场 ROCE 静默清空（D28 同型事故）。
+    """
+    from app.core.indicators.roce import SNAPSHOT_UPDATE_SQL
+
+    _seed_snapshot_row(duckdb_store, "000011")
+    _seed_balance(
+        duckdb_store, "000011",
+        total_assets=[1000.0] * 5, total_current_liabilities=[0.0] * 5,
+    )
+    _seed_income(
+        duckdb_store, "000011",
+        total_profit=[100.0] * 5, financial_expenses=[0.0] * 5,
+    )
+    RoceBuilder(duck=duckdb_store).build()
+    before = _snapshot(duckdb_store, "000011")
+    assert before["roce_5y_median"] is not None
+
+    # 模拟计算器 republish：先清空这五列（等价于 staging 表缺列时的 BY NAME 行为）
+    duckdb_store.write_query(
+        """UPDATE indicator_snapshot
+           SET roce_latest=NULL, roce_5y_median=NULL, roce_5y_years=NULL,
+               roce_10y_median=NULL, roce_10y_years=NULL
+           WHERE stock_code='000011'"""
+    )
+    assert _snapshot(duckdb_store, "000011")["roce_5y_median"] is None
+
+    # publish 末尾的重新聚合必须把它们恢复
+    with duckdb_store.write_connection() as conn:
+        conn.execute(SNAPSHOT_UPDATE_SQL)
+
+    after = _snapshot(duckdb_store, "000011")
+    assert after["roce_5y_median"] == pytest.approx(before["roce_5y_median"])
+    assert after["roce_5y_years"] == before["roce_5y_years"]

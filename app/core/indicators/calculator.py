@@ -2180,6 +2180,23 @@ class IndicatorCalculator:
             connection.execute(
                 f'INSERT INTO indicator_snapshot BY NAME SELECT * FROM "{staging_table}"'
             )
+            # ROCE 派生列保全（2026-11-16，reports/131 §4.3）。
+            # `roce_latest / roce_5y_median / roce_5y_years / roce_10y_median /
+            # roce_10y_years` 五列由 `roce_history` 聚合成，**不在本计算器的
+            # staging 表里**；而这里是 DELETE + INSERT BY NAME，缺列会被静默写回 NULL。
+            # 不做这一步，每次快照重发都会把全市场 5,575 只的 ROCE 清空
+            # （D28「派生域没有重建触发就会冻结/丢失」的同型事故）。
+            # 聚合本身是 5,575 行 over 105k 行的单条 UPDATE，毫秒级；
+            # 失败只告警、不阻断主链发布（派生域不该拖垮 readiness）。
+            try:
+                from app.core.indicators.roce import SNAPSHOT_UPDATE_SQL
+
+                connection.execute(SNAPSHOT_UPDATE_SQL)
+            except Exception:  # noqa: BLE001 - roce_history 缺失/未建时不应阻断主链
+                logger.warning(
+                    "ROCE 聚合回填失败（roce_history 可能尚未构建），本次快照的 roce_* 将为 NULL",
+                    exc_info=True,
+                )
             final_count = connection.execute(
                 "SELECT COUNT(*) FROM indicator_snapshot"
             ).fetchone()[0]
