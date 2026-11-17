@@ -1,4 +1,6 @@
-"""2026-11-12 T1 回归：适配器错误分类（akshare 分红 / cninfo 截断 / baostock / F10）。
+"""事故出处：reports/117 / 2026-11-12。
+
+2026-11-12 T1 回归：适配器错误分类（akshare 分红 / cninfo 截断 / baostock / F10）。
 
 契约：.planning/2026-11-12-update-log-review/contracts.md §1。
 全部离线（akshare 用假模块、CNINFO 用 httpx.MockTransport、baostock 用假 bs）。

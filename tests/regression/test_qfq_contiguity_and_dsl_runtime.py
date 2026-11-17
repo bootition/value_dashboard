@@ -1,3 +1,11 @@
+"""事故出处：reports/23 / 2026-07-29。
+
+P0-3 回归：QFQ 收益/波动/回撤必须只认连续交易日（缺行/NULL/断档 fail-closed），
+分红按快照 as-of 日期而非墙上时钟；P0-4 回归：DSL 标识符白名单与布尔/多参数解析、
+严格模式拒绝未证 `right_field`、拒绝混合 snapshot/statement 时点。
+全部用例使用隔离临时库（duckdb_store / sqlite_store fixture），不联网。
+"""
+
 from __future__ import annotations
 
 import pytest

@@ -1,4 +1,6 @@
-"""2026-11-12 T1 回归：tencent 预算/超时 + akshare listing_info 股本回填。
+"""事故出处：reports/117 / 2026-11-12。
+
+2026-11-12 T1 回归：tencent 预算/超时 + akshare listing_info 股本回填。
 
 对应契约 §1 与 Lead 追加的 P0（上交所清单无股本列 → 腾讯回填）。
 全部 monkeypatch，不联网。

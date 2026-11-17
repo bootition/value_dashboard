@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from app.core.csmar_formulas import (
+from tests.support.csmar_field_verdicts import (
     CsmarVerdictError,
     adoption_policy,
     families,

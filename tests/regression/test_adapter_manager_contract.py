@@ -1,4 +1,6 @@
-"""2026-11-12 T1 回归：manager 熔断桶隔离 / 错误分类 / deadline / 可诊断日志。
+"""事故出处：reports/117 / 2026-11-12。
+
+2026-11-12 T1 回归：manager 熔断桶隔离 / 错误分类 / deadline / 可诊断日志。
 
 契约：.planning/2026-11-12-update-log-review/contracts.md §1。
 全部使用脚本化假适配器，不联网、不访问数据库。

@@ -1,4 +1,6 @@
-"""Regression: 重试路径必须尊重 error_kind，不得把"合法空/源不支持"当失败。
+"""事故出处：reports/117 / 2026-11-12。
+
+Regression: 重试路径必须尊重 error_kind，不得把"合法空/源不支持"当失败。
 
 2026-11-12 生产验证发现的最后一环：适配器已能标注 `error_kind=legal_empty`
 （新股无已实施分红）与 `source_unsupported`（北交所/B 股无该源），但

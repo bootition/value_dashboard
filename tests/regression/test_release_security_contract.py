@@ -1,4 +1,6 @@
-"""Isolated P0-6/P0-7 release and local-security regression contracts."""
+"""事故出处：reports/23 / 2026-07-29。
+
+Isolated P0-6/P0-7 release and local-security regression contracts."""
 
 from __future__ import annotations
 

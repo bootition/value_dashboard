@@ -304,7 +304,7 @@ def test_snapshot_hard_blocks_when_the_whole_small_library_is_broken(
         "SELECT stock_code FROM indicator_snapshot ORDER BY stock_code"
     ) == [{"stock_code": "OLD001"}]
     # 逐股隔离路径（partial + publish_gate_quarantined）由
-    # test_fix20261112_gate_contract.py 的非系统性规模用例覆盖。
+    # test_publish_gate_contract.py 的非系统性规模用例覆盖。
 
 
 def test_snapshot_hard_blocks_when_the_gate_reports_a_systemic_violation(

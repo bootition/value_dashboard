@@ -1,4 +1,6 @@
-"""Regression: legacy-record quarantine must tolerate quarantine-table column drift.
+"""事故出处：reports/117 / 2026-11-12。
+
+Regression: legacy-record quarantine must tolerate quarantine-table column drift.
 
 2026-11-12 production finding: `vd.bat data quarantine_legacy_records_execute`
 crashed with

@@ -1,5 +1,9 @@
 """CSMAR 字段采用裁定（三色灯）读取器。
 
+**测试专用支撑模块**（历史：本文件原位于 ``app/core/csmar_formulas.py``，
+2026-11-17 按 `reports/136` §7 L0 迁入 `tests/support/`）。运行时（``app/``）
+不再引用它，唯一的调用方是 ``tests/regression/test_csmar_field_verdict.py``。
+
 背景与目的
 ----------
 2026-09-17 对 CSMAR C17 外来数据包做资源化调研时发现，该包与本项目存在
@@ -27,7 +31,7 @@
 
 用法
 ----
-    from app.core.csmar_formulas import is_adoptable, verdict_for, families
+    from tests.support.csmar_field_verdicts import is_adoptable, verdict_for, families
 
     if is_adoptable("total_market_cap"):   # -> False（red）
         ...

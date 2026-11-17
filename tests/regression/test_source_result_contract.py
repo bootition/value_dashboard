@@ -1,4 +1,6 @@
-"""2026-11-13 修复：公告 general 截断口径（C）、空适配器链（D）、baostock 空记录（F）。
+"""事故出处：reports/118 / 2026-11-13。
+
+2026-11-13 修复：公告 general 截断口径（C）、空适配器链（D）、baostock 空记录（F）。
 
 C（P1）：general 全文列表只用于"非财务公告登记"（可选簿记）。它截断时不得把
 整轮 job 打成 partial —— 生产 `last_full_success_at` 因此冻结在 2026-10-30。

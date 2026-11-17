@@ -1,4 +1,6 @@
-"""Regression: 指标全量发布不得被单只"输入缺口"股票一票否决。
+"""事故出处：reports/117 / 2026-11-12。
+
+Regression: 指标全量发布不得被单只"输入缺口"股票一票否决。
 
 2026-11-12 生产发现（与 `share_capital_integrity` 门禁同一类缺陷）：全量发布前
 `compute_snapshot_for_all` 只要发现**任何**一只非新股的上市股票缺核心三表或

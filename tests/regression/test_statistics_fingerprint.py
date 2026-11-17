@@ -1,4 +1,6 @@
-"""Regression: 逐股统计指纹不得包含全库聚合量。
+"""事故出处：reports/118 / 2026-11-13。
+
+Regression: 逐股统计指纹不得包含全库聚合量。
 
 2026-11-13 生产发现：`StatisticsBuilder._stock_fingerprints()` 把
 `SELECT COUNT(*) FROM share_capital_history WHERE verified`（**全库**计数）

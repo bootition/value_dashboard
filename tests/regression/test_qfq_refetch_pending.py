@@ -1,4 +1,6 @@
-"""2026-11-13 P0（B）/ P1（E）：qfq 死角与 B 股假 retry_exhausted。
+"""事故出处：reports/118 / 2026-11-13。
+
+2026-11-13 P0（B）/ P1（E）：qfq 死角与 B 股假 retry_exhausted。
 
 B（P0）：按股票的除权窗口是"event_date >= min(本地 raw 最新, 本地 qfq 最新)"。
 若除权事件 D 晚于该股价格推进才写进 xdxr（上一轮 market_actions 失败/公告被

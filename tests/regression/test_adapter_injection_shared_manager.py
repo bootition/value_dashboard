@@ -1,4 +1,6 @@
-"""2026-11-13 P1（3）：自建 `AdapterManager()` 让熔断隔离失效。
+"""事故出处：reports/118 / 2026-11-13。
+
+2026-11-13 P1（3）：自建 `AdapterManager()` 让熔断隔离失效。
 
 `buyback.py` / `index_valuation.py` / `treasury.py` / `funding.py` / `capital.py` /
 `business.py` / `hk_dividends.py` / `pdf/manager.py` 各自在构造时 `AdapterManager()`
