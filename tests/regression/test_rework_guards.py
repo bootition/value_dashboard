@@ -24,11 +24,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.check_rework_guards import (  # noqa: E402
     check_derived_domain_registry,
+    check_rules_single_source,
     check_status_merge_single_exit,
     check_timezone_single_source,
     check_unit_registry_consistency,
     compare_domain_columns,
     compare_unit_sets,
+    parse_rule_blocks,
     parse_snapshot_columns,
     parse_sql_set_columns,
     run_all,
@@ -40,7 +42,7 @@ from scripts.check_rework_guards import (  # noqa: E402
 def test_repository_passes_all_rework_guards() -> None:
     report = run_all(PROJECT_ROOT)
     assert report.ok, "\n".join(finding.render() for finding in report.findings)
-    assert len(report.checked) == 4
+    assert len(report.checked) == 5
 
 
 def test_every_roce_snapshot_column_is_registered() -> None:
@@ -212,3 +214,62 @@ def test_rg4_repository_registry_is_consistent() -> None:
 
 if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(pytest.main([__file__]))
+
+
+# ─── 6. RG5 规则单一来源：规则散落 = 规则不存在（reports/138）──────────────
+
+
+def test_rg5_repository_rules_are_single_sourced() -> None:
+    assert check_rules_single_source(PROJECT_ROOT) == []
+
+
+def test_rg5_requires_agents_md(tmp_path: Path) -> None:
+    findings = check_rules_single_source(tmp_path)
+    assert findings and "缺少 AGENTS.md" in findings[0].message
+
+
+def test_rg5_flags_missing_evidence_in_rule_block(tmp_path: Path) -> None:
+    _write(tmp_path, "AGENTS.md", "# 规则\n\n### W1 做事\n- 规则：好好做\n")
+    findings = check_rules_single_source(tmp_path)
+    assert any("没有引用证据" in f.message for f in findings), [f.message for f in findings]
+
+
+def test_rg5_flags_duplicate_rule_id(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "AGENTS.md",
+        "### W1 甲\n- 规则：x\n- 为什么：reports/1\n\n"
+        "### W1 乙\n- 规则：y\n- 为什么：reports/2\n",
+    )
+    findings = check_rules_single_source(tmp_path)
+    assert any("重复定义" in f.message for f in findings)
+
+
+def test_rg5_flags_new_lessons_document(tmp_path: Path) -> None:
+    _write(tmp_path, "AGENTS.md", "### W1 甲\n- 规则：x\n- 为什么：reports/1\n")
+    _write(tmp_path, "docs/runbooks/agent-workflow-lessons.md", "# 教训\n")
+    findings = check_rules_single_source(tmp_path)
+    assert any("lesson/规则 命名的文档" in f.message for f in findings), [
+        f.message for f in findings
+    ]
+
+
+def test_rg5_flags_undefined_rule_reference(tmp_path: Path) -> None:
+    _write(tmp_path, "AGENTS.md", "### W1 甲\n- 规则：x\n- 为什么：reports/1\n")
+    _write(tmp_path, "docs/STATUS.md", "按 W9 执行\n")
+    findings = check_rules_single_source(tmp_path)
+    assert any("未定义的规则编号" in f.message and "W9" in f.message for f in findings)
+
+
+def test_rg5_flags_oversized_agents_file(tmp_path: Path) -> None:
+    body = "### W1 甲\n- 规则：x\n- 为什么：reports/1\n" + ("\n" * 400)
+    _write(tmp_path, "AGENTS.md", body)
+    findings = check_rules_single_source(tmp_path)
+    assert any("超过上限" in f.message for f in findings)
+
+
+def test_rg5_parser_reads_real_agents_file() -> None:
+    blocks = parse_rule_blocks((PROJECT_ROOT / "AGENTS.md").read_text(encoding="utf-8"))
+    ids = {rule_id for rule_id, _, _ in blocks}
+    assert {"R1", "R7"} <= ids, "反返工规则编号应保持 R1–R7（历史报告按编号引用）"
+    assert {"W1", "W7"} <= ids, "工作流规则 W1–W7 必须定义在 AGENTS.md"

@@ -67,7 +67,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 
 ## 新文档流程（Checklist）
 
-1. 判断类型：合同/PRD → `decisions/`；事件报告 → `reports/`；操作手册 → `runbooks/`；证据 → `evidence/`；其余 → 会话产物放 `.planning/`
+1. 判断类型：**AI 行为规则 → 仓库根 `AGENTS.md`（唯一，禁止在 docs/ 下新建规则/教训文档）**；合同/PRD → `decisions/`；事件报告 → `reports/`；操作手册 → `runbooks/`；可复用流程 → `skills/`；证据 → `evidence/`；其余 → 会话产物放 `.planning/`
 2. 加 front-matter（status/category/last-reviewed，必要时 supersedes/superseded-by）
 3. 若产生或取代结论 → 更新 `STATUS.md`
 4. 若旧文档被取代 → 改其 `status: superseded` + `superseded-by`（永不删除）

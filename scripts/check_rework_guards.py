@@ -59,6 +59,7 @@ STATUS_MODULES = (
     "app/core/update.py",
     "app/core/auto_update.py",
 )
+AGENTS_FILE = "AGENTS.md"
 SCHEMA_FILE = "app/core/storage/schema.py"
 FIELD_UNITS_FILE = "app/core/screening/field_units.py"
 FRONTEND_UNITS_FILE = "frontend/src/utils/screening-format.ts"
@@ -70,6 +71,12 @@ _UTC_TODAY_RE = re.compile(
 _CN_TODAY_DEF_RE = re.compile(r"^\s*def\s+(?:_?cn_today)\s*\(", re.MULTILINE)
 _TS_SET_RE = r"const {name} = new Set\(\[(.*?)\]\s*\)"
 _PY_SET_RE = r"^{name}:?[^=]*=\s*frozenset\(\s*\{{(.*?)\}}\s*\)"
+
+#: AGENTS.md 的容量上限：规则越多越没人读，超限必须按「规则维护」降级（reports/138）。
+MAX_AGENTS_LINES = 300
+#: 只有 AGENTS.md 能定义 AI 行为规则；docs/ 下出现这类文件名说明规则又被分散了。
+_FORBIDDEN_RULE_DOC = re.compile(r"(?:lessons?|教训|规则|rules)", re.IGNORECASE)
+_RULE_HEADING = re.compile(r"^###\s+([WR]\d{1,2})\s+(.+)$", re.MULTILINE)
 
 UNIT_PAIRS = (
     ("PCT_DECIMAL_FIELDS", "PCT_FIELDS"),
@@ -352,6 +359,84 @@ def check_derived_domain_registry(root: Path) -> list[Finding]:
     return findings
 
 
+# --------------------------------------------------------------------------- RG5
+
+
+def parse_rule_blocks(text: str) -> list[tuple[str, str, str]]:
+    """把 AGENTS.md 里的 ``### W1 标题`` / ``### R1 标题`` 切成 (编号, 标题, 正文块)。"""
+    headings = list(_RULE_HEADING.finditer(text))
+    blocks: list[tuple[str, str, str]] = []
+    for index, match in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(text)
+        blocks.append((match.group(1), match.group(2).strip(), text[match.end():end]))
+    return blocks
+
+
+def check_rules_single_source(root: Path) -> list[Finding]:
+    """RG5：AI 行为规则必须只有一个落点（`AGENTS.md`），且每条规则都带证据。
+
+    背景（`reports/138`）：一个会话把 5 条工作流教训写进了
+    `docs/runbooks/agent-workflow-lessons.md`，而 AGENTS.md 里一条都没有——**下一个 AI 根本读不到**。
+    规则散落 = 规则不存在。本检查钉住四件事：
+
+    1. `AGENTS.md` 存在且 ≤ `MAX_AGENTS_LINES` 行（超限必须降级，不许无限追加）；
+    2. `W*` / `R*` 编号唯一，且**每块至少引用一处证据**（`reports/NNN` / `tests/` / `scripts/`）——
+       没有证据的规则下一轮就会被当成"想当然"删掉；
+    3. `docs/**` 下不得出现 lesson / 教训 / 规则 / rules 命名的文档（规则不许再分家）；
+    4. 全仓文档里被引用的 `W<n>` 必须在 `AGENTS.md` 里定义（防止引用已降级/改号的规则）。
+    """
+    findings: list[Finding] = []
+    agents_path = root / AGENTS_FILE
+    if not agents_path.exists():
+        return [Finding("RG5", AGENTS_FILE, 0, "缺少 AGENTS.md（AI 规则的唯一来源）")]
+
+    text = agents_path.read_text(encoding="utf-8")
+    line_count = len(text.splitlines())
+    if line_count > MAX_AGENTS_LINES:
+        findings.append(Finding(
+            "RG5", AGENTS_FILE, line_count,
+            f"规则文件 {line_count} 行，超过上限 {MAX_AGENTS_LINES}：请按「规则维护」降级旧规则，"
+            "不要继续追加",
+        ))
+
+    blocks = parse_rule_blocks(text)
+    if not blocks:
+        findings.append(Finding("RG5", AGENTS_FILE, 0, "解析不到任何 `### W<n>` / `### R<n>` 规则块"))
+        return findings
+
+    seen: dict[str, int] = {}
+    for rule_id, title, body in blocks:
+        if rule_id in seen:
+            findings.append(Finding("RG5", AGENTS_FILE, 0, f"规则编号 {rule_id} 重复定义"))
+        seen[rule_id] = 1
+        if not re.search(r"reports/\d+|tests/|scripts/", body):
+            findings.append(Finding(
+                "RG5", AGENTS_FILE, 0, f"{rule_id}（{title}）没有引用证据（reports/NNN / tests/ / scripts/）",
+            ))
+
+    for path in sorted((root / "docs").rglob("*.md")):
+        if _FORBIDDEN_RULE_DOC.search(path.stem):
+            findings.append(Finding(
+                "RG5", _rel(root, path), 0,
+                "docs/ 下出现 lesson/规则 命名的文档：AI 规则只能写在 AGENTS.md；"
+                "事件证据请写 docs/reports/",
+            ))
+
+    referenced: set[str] = set()
+    for source in [agents_path, *sorted((root / "docs").rglob("*.md"))]:
+        try:
+            referenced.update(re.findall(r"\bW\d{1,2}\b", source.read_text(encoding="utf-8", errors="replace")))
+        except OSError:
+            continue
+    undefined = sorted(referenced - set(seen))
+    if undefined:
+        findings.append(Finding(
+            "RG5", AGENTS_FILE, 0,
+            f"文档里引用了未定义的规则编号：{', '.join(undefined)}（可能已降级或改号）",
+        ))
+    return findings
+
+
 # --------------------------------------------------------------------------- main
 
 
@@ -369,6 +454,7 @@ def run_all(root: Path = PROJECT_ROOT) -> Report:
         ("RG2 状态合并单出口", check_status_merge_single_exit),
         ("RG3 单位注册表跨语言一致", check_unit_registry_consistency),
         ("RG4 派生域注册表自洽", check_derived_domain_registry),
+        ("RG5 规则单一来源", check_rules_single_source),
     ):
         findings = check(root)
         report.checked.append(name)
@@ -377,7 +463,7 @@ def run_all(root: Path = PROJECT_ROOT) -> Report:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="反返工护栏静态检查（reports/133）")
+    parser = argparse.ArgumentParser(description="反返工护栏静态检查（reports/133 / reports/138）")
     parser.add_argument("--root", default=str(PROJECT_ROOT), help="仓库根目录")
     parser.add_argument("--json", action="store_true", help="输出 JSON")
     args = parser.parse_args(argv)
