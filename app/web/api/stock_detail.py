@@ -165,7 +165,14 @@ def _metric_history_yoy(rows: list[dict], metric: str) -> list[dict]:
             item["value"] = None
             out.append(item)
             continue
-        item["value"] = (cur / base - 1) if cur is not None and base not in (None, 0) else None
+        # 2026-11-17（reports/135）：与 `calculator._calc_ttm_yoy()` / `_yoy()` 同一公式。
+        # `cur / base - 1` 在基期为负时方向反了（亏损收窄被显示成负增长），
+        # 且会让快照与详情页在负基数股票上给出相反结论。
+        item["value"] = (
+            (cur - base) / abs(base)
+            if cur is not None and base not in (None, 0)
+            else None
+        )
         out.append(item)
     return out
 
@@ -413,7 +420,9 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
     # ROCE（v42，reports/130）：年报序列中位数，历史序列来自 roce_history
     "roce_latest": True, "roce_5y_median": True, "roce_10y_median": True,
     # 成长: 需要多期数据 → historical_capable
-    "revenue_yoy": True, "net_profit_yoy": True, "deducted_profit_yoy": True,
+    "revenue_yoy": True, "revenue_yoy_fy": True,
+    "net_profit_yoy": True, "net_profit_yoy_fy": True,
+    "deducted_profit_yoy": True, "deducted_profit_yoy_fy": True,
     "revenue_cagr3": True, "revenue_cagr5": True,
     "net_profit_cagr3": True, "net_profit_cagr5": True,
     "deducted_profit_cagr3": True, "deducted_profit_cagr5": True,
@@ -751,8 +760,13 @@ def get_indicators(stock_code: str, request: Request) -> dict:
         }),
         "growth": _with_meta({
             "revenue_yoy": indicators.get("revenue_yoy"),
+            # reports/131 P0-4 同比双口径：`*_yoy` 是 TTM 口径，`*_yoy_fy`
+            # 是年报口径。两者必须同时下发，否则用户永远看不到差别。
+            "revenue_yoy_fy": indicators.get("revenue_yoy_fy"),
             "net_profit_yoy": indicators.get("net_profit_yoy"),
+            "net_profit_yoy_fy": indicators.get("net_profit_yoy_fy"),
             "deducted_profit_yoy": indicators.get("deducted_profit_yoy"),
+            "deducted_profit_yoy_fy": indicators.get("deducted_profit_yoy_fy"),
             "revenue_cagr3": indicators.get("revenue_cagr3"),
             "revenue_cagr5": indicators.get("revenue_cagr5"),
             "net_profit_cagr3": indicators.get("net_profit_cagr3"),

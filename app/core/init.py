@@ -26,6 +26,12 @@ from app.core.adapters.manager import AdapterManager
 
 # 契约 §3：股本完整性只有一份 SQL，init 侧不得复制第二份口径。
 from app.core.data_quality import listed_share_capital_gap_codes
+from app.core.financial_guards import (
+    BALANCE_SHEET_TABLE,
+    CONTRACT_LIABILITIES_COLUMN,
+    guard_caches,
+    guard_contract_liabilities_write,
+)
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -1110,6 +1116,12 @@ class DataInitializer:
 
         将 Eastmoney 返回的字段映射到 schema 中已定义的列，
         同时将完整原始数据存入 raw_data JSON 列（审查问题6修订）。
+
+        **P0-6 守卫（2026-11-17）**：`balance_sheet.contract_liabilities` 落库前
+        必经 `financial_guards.guard_contract_liabilities_write()` —— 保险股的
+        「保险合同负债」在这里被拦下并改道 `financial_sector_items
+        .insurance_contract_liability`。旧实现（reports/131）只清了存量数据，
+        写入路径没有守卫，下一期财报必然复发。
         """
         import json
 
@@ -1298,6 +1310,21 @@ class DataInitializer:
                 mapped[mapped_name] = v
             else:
                 unmapped[k] = v
+
+        # P0-6（reports/131 §9.2 / reports/135）：保险股的 CAS25「保险合同负债」
+        # 绝不能再进通用科目 `contract_liabilities`。守卫按**行业+量级**判定
+        # （源字段名在这条数据上就是"合同负债"，字段名判据完全不触发）：
+        # 拒绝时从本行摘除该列、显式清空库里已有的脏值、并把金额改道写入
+        # `financial_sector_items.insurance_contract_liability`。
+        if table == BALANCE_SHEET_TABLE and CONTRACT_LIABILITIES_COLUMN in mapped:
+            column_cache, industry_cache = guard_caches(self)
+            guard_contract_liabilities_write(
+                conn,
+                stock_code=stock_code,
+                values=mapped,
+                column_cache=column_cache,
+                industry_cache=industry_cache,
+            )
 
         # 确保 stock_code 存在
         if "stock_code" not in mapped:

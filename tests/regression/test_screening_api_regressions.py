@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import resolve_rule_indicator_locks, router
+from app.web.api.stock_detail import router as stock_detail_router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
 
 
@@ -265,3 +266,118 @@ def test_indicators_derive_dsl_units_and_explain_plain_semantics(
     # sw1 后缀不暴露（历史别名只保留在引擎侧兼容旧规则）；sw2 仍暴露。
     assert not any(name.endswith("_sw1_rank") or name.endswith("_sw1_percentile") for name in by_name)
     assert any(name.endswith("_sw2_rank") for name in by_name)
+
+
+# ─── 技术覆盖阈值单一真源（2026-11-17 独立审计问题 2）─────────────────────
+
+
+def test_technical_coverage_threshold_is_single_source_for_both_consumers(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch,
+) -> None:
+    """把 config 的 technical_coverage_pct 改成 98：
+
+    体检 `TECHNICAL_COVERAGE_GAP` 与 `/api/screening/indicators` 门禁必须同时
+    读到 98。旧实现里 screening.py 硬编码 95.0，96% 覆盖率的字段仍可选中。
+    """
+    from app.core.config import Config
+    from app.core.quality import asset_health
+    from app.web.api import screening as screening_api
+
+    monkeypatch.setattr(
+        Config,
+        "_instance",
+        Config({"asset_health": {"technical_coverage_pct": 98.0}}),
+    )
+    assert asset_health.technical_coverage_threshold() == 98.0
+    # 本地硬编码必须彻底删除，字段集必须是同一对象/同一元组（R1 单一真源）。
+    assert not hasattr(screening_api, "_TECHNICAL_MIN_COVERAGE_PCT")
+    assert not hasattr(screening_api, "_TECHNICAL_COVERAGE_FIELDS")
+    assert screening_api.TECHNICAL_COVERAGE_FIELDS == asset_health.TECHNICAL_COVERAGE_FIELDS
+
+    # 100 行快照，技术三列各 96 行有值 = 96%：默认 95 下可用，98 下必须隐藏。
+    rows = [
+        (f"{index:06d}", 0.1 if index < 96 else None,
+         0.2 if index < 96 else None, -0.3 if index < 96 else None)
+        for index in range(100)
+    ]
+    with duckdb_store.transaction() as connection:
+        connection.executemany(
+            """INSERT INTO indicator_snapshot
+                   (stock_code, report_date, calculated_at, period_return,
+                    annualized_volatility, max_drawdown)
+               VALUES (?, DATE '2026-09-30', CURRENT_TIMESTAMP, ?, ?, ?)""",
+            rows,
+        )
+
+    client = _make_client(duckdb_store, sqlite_store)
+    body = client.get("/api/screening/indicators").json()
+    unavailable = {item["name"]: item for item in body["unavailable"]}
+    for field in asset_health.TECHNICAL_COVERAGE_FIELDS:
+        assert field in unavailable, f"{field} 在 98% 门槛下覆盖率 96% 必须隐藏"
+        assert unavailable[field]["coverage_pct"] == 96.0
+        assert "98%" in unavailable[field]["message"]
+
+    payload = asset_health.run_asset_health(
+        duckdb_store, sqlite_store, allow_expensive=False,
+    )
+    findings = [
+        finding for finding in payload["findings"]
+        if finding["code"] == "TECHNICAL_COVERAGE_GAP"
+    ]
+    assert {finding["field"] for finding in findings} == set(
+        asset_health.TECHNICAL_COVERAGE_FIELDS
+    )
+    assert all(finding["threshold"] == 98.0 for finding in findings)
+
+
+# ─── 同比双口径读路径（2026-11-17 独立审计问题 3）──────────────────────────
+
+
+def test_yoy_fy_fields_share_pct_unit_with_ttm_yoy() -> None:
+    from app.core.screening.field_units import field_unit
+
+    for ttm, fy in (
+        ("revenue_yoy", "revenue_yoy_fy"),
+        ("net_profit_yoy", "net_profit_yoy_fy"),
+        ("deducted_profit_yoy", "deducted_profit_yoy_fy"),
+    ):
+        assert field_unit(ttm) == "pct"
+        assert field_unit(fy) == "pct", f"{fy} 与 {ttm} 同为小数比例，单位必须一致"
+
+
+def test_stock_detail_indicators_expose_annual_yoy_caliber(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch,
+) -> None:
+    """`/api/stock/{code}/indicators` 必须同时下发 TTM 与年报两个同比口径。"""
+    import app.core.data_quality as data_quality_module
+
+    monkeypatch.setattr(data_quality_module, "read_warning_codes", lambda *a, **k: [])
+    duckdb_store.write_query(
+        """INSERT INTO indicator_snapshot
+               (stock_code, report_date, calculated_at,
+                revenue_yoy, revenue_yoy_fy,
+                net_profit_yoy, net_profit_yoy_fy,
+                deducted_profit_yoy, deducted_profit_yoy_fy)
+           VALUES ('600519', DATE '2025-12-31', CURRENT_TIMESTAMP,
+                   0.25, -0.5, 0.10, -0.40, 0.05, -0.30)"""
+    )
+    app = FastAPI()
+    app.state.duck = duckdb_store
+    app.state.sqlite = sqlite_store
+    app.include_router(stock_detail_router)
+    client = TestClient(app)
+
+    response = client.get("/api/stock/600519/indicators")
+
+    assert response.status_code == 200
+    growth = response.json()["indicators"]["growth"]
+    assert growth["revenue_yoy"]["value"] == 0.25
+    assert growth["revenue_yoy_fy"]["value"] == -0.5
+    assert growth["net_profit_yoy"]["value"] == 0.10
+    assert growth["net_profit_yoy_fy"]["value"] == -0.40
+    assert growth["deducted_profit_yoy"]["value"] == 0.05
+    assert growth["deducted_profit_yoy_fy"]["value"] == -0.30

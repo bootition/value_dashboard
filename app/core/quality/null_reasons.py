@@ -55,6 +55,14 @@ SOURCE_DOMAIN_TABLES: dict[str, str] = {
     "income": "income_statement",
     "balance": "balance_sheet",
     "cashflow": "cash_flow",
+    # 2026-11-17（reports/135）：现金流量表**补充资料**两张表单独成域。
+    # 为什么不能用 `cashflow` 域：`cash_flow`（直接法主表，16 列）与
+    # `cash_flow_indirect`（补充资料间接法，29 列）/ `cash_flow_activity`
+    # （投资筹资活动，21 列）是**不同的表、不同的字段集**，
+    # 混在一个前缀下会让 `domain_fields` 回查到不存在的列。
+    # 字段名前缀 `cash_flow_indirect.unconfirmed_investment_loss` 与源表列同名。
+    "cash_flow_indirect": "cash_flow_indirect",
+    "cash_flow_activity": "cash_flow_activity",
 }
 SOURCE_DOMAINS: tuple[str, ...] = tuple(SOURCE_DOMAIN_TABLES)
 DOMAINS: tuple[str, ...] = (DOMAIN_SNAPSHOT, DOMAIN_EXT, *SOURCE_DOMAINS)
@@ -149,12 +157,24 @@ def _domain_fields() -> dict[str, frozenset[str]]:
         STATEMENT_FIELDS,
     )
 
+    # 现金流量补充域的两张表不在 `STATEMENT_FIELDS`（那张注册表只覆盖主链三表），
+    # 数值列清单由 `supplement.py` 的 spec 列声明提供 —— 单一真相，不另抄一份。
+    from app.core.supplement import (
+        ACTIVITY_VALUE_COLUMNS,
+        INDIRECT_VALUE_COLUMNS,
+    )
+
     fields: dict[str, frozenset[str]] = {
         DOMAIN_SNAPSHOT: frozenset(SNAPSHOT_COLUMNS),
         DOMAIN_EXT: frozenset(EXTENDED_COLUMNS),
     }
     for prefix in SOURCE_DOMAINS:
-        columns = STATEMENT_FIELDS.get(prefix, set())
+        if prefix == "cash_flow_indirect":
+            columns = INDIRECT_VALUE_COLUMNS
+        elif prefix == "cash_flow_activity":
+            columns = ACTIVITY_VALUE_COLUMNS
+        else:
+            columns = STATEMENT_FIELDS.get(prefix, set())
         fields[prefix] = frozenset(f"{prefix}.{column}" for column in columns)
     return fields
 

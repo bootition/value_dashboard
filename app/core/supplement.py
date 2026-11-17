@@ -57,11 +57,16 @@ from app.core.storage.sqlite_store import SQLiteStore
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "ACTIVITY_COLUMNS",
+    "ACTIVITY_VALUE_COLUMNS",
     "BALANCE_SHEET_EXT",
     "CASHFLOW_SUPPLEMENT",
     "CASH_FLOW_STRUCTURAL_MISSING",
+    "CASH_FLOW_UNMAPPED_BY_DECISION",
     "CASHFLOW_ORG_FIELD_MAPS",
     "CONTRACT_LIABILITIES_COLUMN",
+    "INDIRECT_COLUMNS",
+    "INDIRECT_VALUE_COLUMNS",
     "CSMAR_CUTOFF",
     "ContractLiabilityGuardResult",
     "DEDUCTED_PROFIT",
@@ -96,6 +101,14 @@ MAX_RETRY = 3
 # 失败冷却：抓过但仍无该期数据的股票在 N 天内不再进队（防止饿死队尾）。
 ATTEMPT_STATE_PREFIX = "supplement_attempted:"
 ATTEMPT_STATE_KEEP_DAYS = 30
+
+#: 落库行里的**非数值列**（元数据）。`_persist_rows` 判"这一行是不是全空"时
+#: 只看其余列 —— `fetch_time`/`batch_id` 这些永远非空，算进来会让空行变成"有值"。
+#: 2026-11-17（reports/135）：这里必须是**单一真相**，解析层与落库层共用。
+_ROW_META_COLUMNS: frozenset[str] = frozenset({
+    "stock_code", "report_date", "report_type", "source", "fetch_time",
+    "raw_response_hash", "confidence", "batch_id", "raw_data",
+})
 
 # ─── 数据集标识（update.py / CLI 共用）───────────────────────────────────
 CASHFLOW_SUPPLEMENT = "cash_flow_supplement"
@@ -249,12 +262,21 @@ CASH_FLOW_STRUCTURAL_MISSING: dict[str, dict[str, str]] = {
     },
     "cash_flow_activity": {
         "other_cash_effect": (
-            "东财对应字段是 RATE_CHANGE_EFFECT（汇率变动对现金的影响），但口径与本列"
-            "不一致：600382 2021 年报两值完全相等（−962,944,449.95），而 601169 "
-            "2018 年报不等（CSMAR −749,000,000 vs 东财 486,000,000）⇒ 拒绝映射。"
+            "东财**有**对应字段 RATE_CHANGE_EFFECT（汇率变动对现金的影响），但团队判定"
+            "它与 CSMAR `other_cash_effect` 的口径不完全相等（600382 2021 年报两值相等"
+            " −962,944,449.95；601169 2018 年报不等：CSMAR −749,000,000 vs 东财"
+            " 486,000,000）⇒ **主动不映射**（semantic mismatch），不是「源没有该字段」。"
+            "NullReason 枚举没有 SEMANTIC_MISMATCH / NOT_MAPPED，原因写 detail 供主控裁决。"
         ),
     },
 }
+
+#: `CASH_FLOW_STRUCTURAL_MISSING` 里**不是**「源没有这个字段」、而是「源有该字段但
+#: 口径不符 / 团队主动不映射」的列（`表名.列名`）。清扫器据此改写 detail：
+#: 枚举新增取值会破坏既有契约，因此原因码仍用 `SOURCE_EMPTY`，语义靠 detail 说清。
+CASH_FLOW_UNMAPPED_BY_DECISION: frozenset[str] = frozenset({
+    "cash_flow_activity.other_cash_effect",
+})
 
 
 #: 金融专用模板（银行/保险）**有**对应科目、因此不算结构性缺失的列。
@@ -381,6 +403,11 @@ ACTIVITY_COLUMNS: tuple[str, ...] = (
     *_ACTIVITY_VALUE_COLUMNS,
     "source", "fetch_time", "raw_response_hash", "confidence", "batch_id",
 )
+#: 公开别名（2026-11-17，reports/135）：空值原因清扫器要把这两张表的**数值列**
+#: 登记成 `cash_flow_indirect.<列>` / `cash_flow_activity.<列>` 字段。
+#: 单一真相仍是上面的私有元组，清扫器只读这里，绝不另抄一份列名。
+INDIRECT_VALUE_COLUMNS = _INDIRECT_VALUE_COLUMNS
+ACTIVITY_VALUE_COLUMNS = _ACTIVITY_VALUE_COLUMNS
 BALANCE_EXT_COLUMNS: tuple[str, ...] = (
     "stock_code", "report_date", "report_type",
     *BALANCE_EXT_FIELD_MAP.values(),
@@ -1025,6 +1052,21 @@ class SupplementFetcher:
         """上一轮 `pending_codes()` 里被失败冷却挡住的股票数（>0 表示"有得补但没跑"）。"""
         return int(getattr(self, "_last_cooldown_blocked", 0) or 0)
 
+    @property
+    def last_skipped_empty_rows(self) -> int:
+        """上一轮落库时因「全列 NULL」被跳过的行数（旧行保留、不插空行）。
+
+        2026-11-17（reports/135）：这个计数就是"本轮覆盖到的期次里，有几行
+        (表, 股票, 报告期) 源侧没给任何有效数据"。它必须可见 —— 事故当时的
+        症状正是"删了但没人知道没补回来"。
+        """
+        return int(getattr(self, "_skipped_empty_rows", 0) or 0)
+
+    @property
+    def skipped_empty_sample(self) -> list[dict[str, Any]]:
+        """上一轮被跳过的空行样本（最多 10 条，供 CLI/报告核对）。"""
+        return list(getattr(self, "_skipped_empty_sample", []) or [])
+
     def _filter_cooldown(self, key: str, pending: list[tuple[str, str]], retry_days: int) -> list[tuple[str, str]]:
         if retry_days <= 0:
             return pending
@@ -1325,7 +1367,14 @@ class SupplementFetcher:
                 if present:
                     values[column] = sum(present)
                     hit_sources[column] = "+".join(parts)
-            if not any(value is not None for value in values.values()):
+            if (
+                not any(value is not None for value in values.values())
+                and spec.key != CASHFLOW_SUPPLEMENT
+            ):
+                # 2026-11-17（reports/135）：现金流量补充域**必须**把「源返回了该期
+                # 但一个科目都没给」的行也交给落库层 —— 只有落库层知道哪些
+                # (stock_code, report_date) 是本轮"覆盖到但无有效数据"，从而
+                # 既不删旧行也不插空行（`skipped_empty_rows`）。其余域维持原样。
                 continue
             # P0-6 写库前守卫：保险股的「保险合同负债」绝不再进通用科目。
             guard = guard_contract_liabilities(
@@ -1372,8 +1421,11 @@ class SupplementFetcher:
                     "source": SOURCE,
                     "raw_data": "{}",
                 }
-                if any(indirect[column] is not None for column in indirect_columns):
-                    parsed["cash_flow_indirect"].append(indirect)
+                # 2026-11-17（reports/135）：**全 NULL 的行也要交给落库层**，由
+                # `_persist_rows` 统一决定"不删旧行、不插空行、只计数"。
+                # 旧实现在这里 `if any(...)` 直接把空行丢掉，落库层看不到它们，
+                # 于是 replace 模式照删不误 —— 2025-06-30 的 4 行真实数据就是这么没的。
+                parsed["cash_flow_indirect"].append(indirect)
                 activity_columns = [
                     column for column in spec.columns["cash_flow_activity"]
                     if column not in ("stock_code", "report_date", "report_type",
@@ -1386,8 +1438,7 @@ class SupplementFetcher:
                     "source": SOURCE,
                 }
                 # 旧实现只在 capex 有值时才写活动表 → 没有资本支出的股票整行丢失。
-                if any(activity[column] is not None for column in activity_columns):
-                    parsed["cash_flow_activity"].append(activity)
+                parsed["cash_flow_activity"].append(activity)
             elif spec.write_mode == "replace_source_rows":
                 # 通用 replace 模式（balance_sheet_ext / 金融股专用三表）：
                 # 同报告期的多端点行合并，非空值优先。
@@ -1467,10 +1518,24 @@ class SupplementFetcher:
         periods: Sequence[str],
         lineage_payload: bytes | None = None,
     ) -> dict[str, int]:
-        """按数据集写入模式落库，返回 {table: 写入/更新行数}。
+        """按数据集写入模式落库，返回 {table: 真正写入的行数}。
 
         `lineage_payload`：本轮请求描述（JSON 字节），会用 `src_hash` 归档进
         `raw_response_archive`，使 `fetch_batch` 的摘要与归档一一对应。
+
+        `replace_source_rows` 的删除纪律（2026-11-17，reports/135 事故修复）
+        -----------------------------------------------------------------
+        旧实现按 `report_date IN (batch_periods)`（或整股票）删，然后只插"至少一个
+        非空值"的行 —— 一支股票在 A 期有值、B 期全空时，B 期的**旧真实数据**会被
+        删掉且补不回来（2025-06-30 的 4 行就是这样没的）。现在的规则：
+
+        1. **只删本轮真的写入了行的组合**：`batch_periods` 按
+           `(stock_code, report_date)` 精确匹配；`all` 按"本轮有新数据的股票"整体
+           覆盖（保留原有"清掉窗口外旧本源行"的语义），但会**排除**本轮明确
+           返回全空的那几期。
+        2. **空值保护**：任一 `(stock_code, report_date)` 的新行如果所有数值列都是
+           NULL，则**不删旧行、也不插入**，只计入 `skipped_empty_rows`
+           （见 `last_skipped_empty_rows`）。
 
         写库前最后一道 P0-6 守卫：目标表若含 `contract_liabilities` 列，则按
         `stock_meta` 行业口径把**保险股**的那一列强制置空 —— 即使上游解析漏判
@@ -1478,6 +1543,10 @@ class SupplementFetcher:
         也绝不可能把保险股的保险合同负债写进合同负债。
         """
         written: dict[str, int] = {}
+        skipped_total = 0
+        skipped_sample: list[dict[str, Any]] = []
+        self._skipped_empty_rows = 0
+        self._skipped_empty_sample = []
         with self.duck.transaction() as conn:
             for table, columns in spec.columns.items():
                 rows = list(rows_by_table.get(table) or [])
@@ -1489,23 +1558,69 @@ class SupplementFetcher:
                     frame["report_date"] = pd.to_datetime(frame["report_date"])
                 if CONTRACT_LIABILITIES_COLUMN in frame.columns:
                     self._strip_insurer_contract_liabilities(frame, table=table)
+                empty_frame = frame.iloc[0:0]
+                if spec.write_mode == "replace_source_rows":
+                    # 只把「至少一个数值列非空」的行拿去覆盖；全 NULL 行是"本轮
+                    # 覆盖到但无有效数据"的证据，用来**保护**旧行，绝不写库。
+                    value_columns = [
+                        column for column in columns if column not in _ROW_META_COLUMNS
+                    ]
+                    if value_columns:
+                        has_value = frame[value_columns].notna().any(axis=1)
+                    else:  # 防御：没有数值列的 spec 不应走到 replace 模式
+                        has_value = pd.Series(False, index=frame.index)
+                    empty_frame = frame.loc[~has_value]
+                    frame = frame.loc[has_value]
+                    if not empty_frame.empty:
+                        skipped_total += len(empty_frame)
+                        if len(skipped_sample) < 10:
+                            for _, row in empty_frame.head(
+                                10 - len(skipped_sample)
+                            ).iterrows():
+                                skipped_sample.append({
+                                    "table": table,
+                                    "stock_code": str(row.get("stock_code")),
+                                    "report_date": str(row.get("report_date"))[:10],
+                                })
+                    if frame.empty:
+                        # 本轮这一张表全是空行：一行不删、一行不插。
+                        written[table] = 0
+                        continue
+                # `_supp_empty` 始终注册（空表也要存在），`all` 模式的
+                # NOT EXISTS 子句依赖它把"本轮明确返回全空"的期次排除在删除范围外。
+                conn.register("_supp_empty", empty_frame[["stock_code", "report_date"]])
                 conn.register("_supp_rows", frame)
                 try:
                     if spec.write_mode == "replace_source_rows":
                         if spec.delete_scope == "batch_periods":
-                            # 只删本批要重写的报告期：抓取窗口前移后，早期
-                            # （2025-06-30…）的同源行不会被后续轮次误删。
+                            # 只删本轮**真的写入**的 (stock_code, report_date)：
+                            # 同一批里某期返回空时，该期的旧行原样保留。
                             conn.execute(
-                                f"DELETE FROM {table} WHERE source = ? AND stock_code IN "
-                                "(SELECT DISTINCT stock_code FROM _supp_rows) "
-                                "AND report_date IN "
-                                "(SELECT DISTINCT report_date FROM _supp_rows)",
+                                f"""DELETE FROM {table} AS t
+                                    WHERE t.source = ?
+                                      AND EXISTS (
+                                          SELECT 1 FROM _supp_rows AS r
+                                          WHERE r.stock_code = t.stock_code
+                                            AND r.report_date = t.report_date
+                                      )""",
                                 [SOURCE],
                             )
                         else:
+                            # all：按"本轮有新数据的股票"整体覆盖同源行（清掉窗口外
+                            # 的旧本源行），但**排除**本轮明确返回全空的那几期 ——
+                            # 空值保护在两种 delete_scope 下都必须成立。
                             conn.execute(
-                                f"DELETE FROM {table} WHERE source = ? AND stock_code IN "
-                                "(SELECT DISTINCT stock_code FROM _supp_rows)",
+                                f"""DELETE FROM {table} AS t
+                                    WHERE t.source = ?
+                                      AND EXISTS (
+                                          SELECT 1 FROM _supp_rows AS r
+                                          WHERE r.stock_code = t.stock_code
+                                      )
+                                      AND NOT EXISTS (
+                                          SELECT 1 FROM _supp_empty AS e
+                                          WHERE e.stock_code = t.stock_code
+                                            AND e.report_date = t.report_date
+                                      )""",
                                 [SOURCE],
                             )
                         conn.execute(f"INSERT INTO {table} BY NAME SELECT * FROM _supp_rows")
@@ -1527,6 +1642,7 @@ class SupplementFetcher:
                             )
                 finally:
                     conn.unregister("_supp_rows")
+                    conn.unregister("_supp_empty")
                 written[table] = len(frame)
             # 先归档 lineage payload，再登记批次：否则 batch_hash 侧会判
             # "有摘要、无归档" = 真断裂（正是本轮事故的形态）。
@@ -1550,6 +1666,8 @@ class SupplementFetcher:
                     f"{str(periods[-1])[:10]}~{str(periods[0])[:10]}", CONFIDENCE,
                 ],
             )
+        self._skipped_empty_rows = skipped_total
+        self._skipped_empty_sample = skipped_sample
         return written
 
     # ─── 主入口 ───────────────────────────────────────────────────
@@ -1581,7 +1699,11 @@ class SupplementFetcher:
 
         Returns:
             {status, reason, periods, targeted, updated, skipped, failed,
-             deferred, rows_written, failed_codes, elapsed_seconds}
+             deferred, rows_written, skipped_empty_rows, failed_codes,
+             elapsed_seconds}
+
+            `skipped_empty_rows`：本轮"覆盖到但全列 NULL"的行数（每张表各计一行）。
+            这些 (股票, 报告期) 的旧行**原样保留**，不会被删除。
         """
         started = time.time()
         spec = SPECS[key]
@@ -1606,6 +1728,8 @@ class SupplementFetcher:
             "no_data": 0,
             "deferred": 0,
             "rows_written": {},
+            "skipped_empty_rows": 0,
+            "skipped_empty_sample": [],
             "failed_codes": [],
             "remaining_pending": 0,
             "elapsed_seconds": 0.0,
@@ -1728,11 +1852,22 @@ class SupplementFetcher:
                         batch_id=batch_id, fetched_at=fetched_at, src_hash=src_hash,
                         available_columns=available_columns,
                     )
-                    if any(parsed.values()):
+                    # 2026-11-17（reports/135）：解析层现在会把"全 NULL 行"也留下
+                    # （作为空值保护的证据），所以不能再用 `any(parsed.values())`
+                    # 判"有没有数据"——那会把空行算成有数据。改为看**数值列**。
+                    if any(
+                        any(
+                            value is not None
+                            for key, value in row.items()
+                            if key not in _ROW_META_COLUMNS
+                        )
+                        for items in parsed.values()
+                        for row in items
+                    ):
                         fetched_codes.append(code)
                     else:
-                        # 取数成功但该行业在本表没有适用科目（信托/金控/期货走
-                        # 通用模板）：这是"无适用字段"而不是取数失败，分开计数，
+                        # 取数成功但源侧一个有效值都没给（无适用科目 / 本期全空）：
+                        # 这是"无有效字段"而不是取数失败，分开计数，
                         # 避免金融股补采每轮都报 partial。
                         no_data_codes.append(code)
                     for table, items in parsed.items():
@@ -1757,7 +1892,7 @@ class SupplementFetcher:
                 spec, rows_by_table,
                 batch_id=batch_id, fetched_at=fetched_at, src_hash=src_hash,
                 periods=resolved_periods, lineage_payload=lineage_payload,
-            ) if fetched_codes else {}
+            ) if any(rows_by_table.values()) else {}
         except Exception as error:  # noqa: BLE001 - 落库失败整批回滚，旧值保留
             logger.warning("补采落库失败(%s): %s", key, error)
             report.update({
@@ -1805,6 +1940,9 @@ class SupplementFetcher:
                 - len(deferred),
             ),
             "rows_written": written,
+            # 空值保护的可核对读数：本轮有几行源侧全空（旧行保留、未插入）。
+            "skipped_empty_rows": self.last_skipped_empty_rows,
+            "skipped_empty_sample": self.skipped_empty_sample,
             "failed_codes": failed_codes[:20],
             "no_data_codes": no_data_codes[:20],
             # 本轮之后还剩多少只待补（含本轮 deferred）。调用方据此决定

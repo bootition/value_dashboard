@@ -5,8 +5,9 @@
 2026-11-14 的数据包价值兑现度审查找出的每一个问题（扩展指标冻结在旧报告期、
 扣非净利润归零、字段覆盖率塌陷、手工链不跑、数据包过期、schema 漂移、
 零引用资产……），当时**全部只能靠人去库上手工查**。人工审完就散会，问题
-下个季度原样回潮。本模块把这些判定写成 14 条可复跑的规则（编号即报告编号），
-由 `vd data doctor` 与数据状态页自动执行。
+下个季度原样回潮。本模块把这些判定写成可复跑的规则（编号即报告编号；
+规则条数以 :data:`RULE_CODES` 为准，当前 14 条），由 `vd data doctor`
+与数据状态页自动执行。
 
 规则清单（code → 判定 → 级别 → severity → tier）
 -------------------------------------------------
@@ -510,6 +511,21 @@ def load_settings() -> dict[str, Any]:
     except Exception:  # 配置未加载/测试环境 → 用默认阈值，绝不因配置问题让体检失败
         raw = {}
     return raw if isinstance(raw, dict) else {}
+
+
+def technical_coverage_threshold(settings: dict[str, Any] | None = None) -> float:
+    """技术三列覆盖率门槛（**唯一真相**）。
+
+    `TECHNICAL_COVERAGE_GAP` 规则与 `/api/screening/indicators` 门禁都必须
+    从这里取阈值，禁止在任何调用方再写一份常量 —— reports/131 之后的审计
+    发现 screening.py 曾硬编码 95.0，运维把 config 调成 98 后出现"体检说
+    不可信、指标列表仍可选中"的分裂。`settings` 只给已持有配置快照的调用方
+    （如 HealthContext）复用，其余调用方一律读 `config/default.yaml`
+    的 `asset_health.technical_coverage_pct`。
+    """
+    if settings is None:
+        settings = load_settings()
+    return _setting_number(settings, "technical_coverage_pct", DEFAULT_TECHNICAL_COVERAGE_PCT)
 
 
 def _chain_config(chain: ManualChain) -> dict[str, Any]:
@@ -1748,9 +1764,7 @@ def _rule_technical_coverage_gap(ctx: HealthContext) -> list[Finding]:
             f"最新报告期仅 {measurement['total']} 行（< {ctx.min_domain_rows}），"
             "覆盖率不具判定意义"
         )
-    limit = _setting_number(
-        ctx.settings, "technical_coverage_pct", DEFAULT_TECHNICAL_COVERAGE_PCT,
-    )
+    limit = technical_coverage_threshold(ctx.settings)
     report_date = measurement["report_date"].isoformat()
     findings: list[Finding] = []
     for column in TECHNICAL_COVERAGE_FIELDS:

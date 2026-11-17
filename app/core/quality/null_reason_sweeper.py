@@ -12,7 +12,10 @@
 2. `ext`      → `indicator_ext` 的 55 个可筛选字段；
 3. `income` / `balance` / `cashflow` → 源三表字段，**带前缀**写入同一张稀疏表
    （`income.deducted_net_profit`、`balance.fixed_assets`、…，与 `missing_list`
-   既有命名一致，不另建表）。
+   既有命名一致，不另建表）；
+4. `cash_flow_indirect` / `cash_flow_activity` → 现金流量表补充资料两张表
+   （2026-11-17，reports/135）。域内结构性缺失的列（`CASH_FLOW_STRUCTURAL_MISSING`）
+   一律登记 `SOURCE_EMPTY` + 依据 detail，按 `report_date` 落库。
    为什么必须扩到源表：审计抓到的"有源、没调度"重灾区（扣非、固定资产、6 个银行
    监管指标）都发生在源表；只清扫指标表的话它们永远归因不到。
    源表同一 (股票, 报告期) 可能有多条 `report_type`，按 `any_value` 聚合——
@@ -80,6 +83,12 @@ from app.core.quality.null_reasons import (
     upsert_reasons,
 )
 from app.core.storage.duckdb_store import DuckDBStore
+from app.core.supplement import (
+    CASH_FLOW_STRUCTURAL_MISSING,
+    CASH_FLOW_UNMAPPED_BY_DECISION,
+    INSURANCE_SW_LEVEL2,
+    cash_flow_structural_missing_columns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -592,6 +601,56 @@ EXT_SOURCE_MISSING: dict[str, RuleGroup] = {
     for field_name in _DEPRECIATION_FIELDS
 }
 
+# 现金流量补充域（2026-11-17，reports/135）：`CASH_FLOW_STRUCTURAL_MISSING` 是
+# 「东财四套模板都拿不到哪些列」的事实清单，这里把它变成**可落库的规则**。
+#
+# 为什么这件事必须在清扫器里做：事实清单一直只被 `supplement.py` 和测试引用，
+# `indicator_null_reason` 里连一个 `cash_flow*` 字段名都没有 —— FY2025 的
+# `other_cash_effect` / `unconfirmed_investment_loss` 就是"无声 NULL"（报告点名
+# 要消灭的形态）。规则按域装配，落库时 `upsert_reasons(replace_scope=(report_date, domain))`
+# 天然按报告期存，不是只存最新一期。
+#
+# 两族例外的处理（与 `cash_flow_structural_missing_columns(org_type=...)` 同源）：
+# - `investment_property_depreciation` 只在银行/保险模板下结构性缺失；
+#   通用/证券模板有 `IR_DEPR` 独立行，NULL 可能只是公司没有投资性房地产 —— 判不出就不写
+#   （用 `src_is_eastmoney_bank_insurer` 精确到银行/保险，不把券商/多元金融算进来）；
+# - `credit_impairment_loss` 在通用/证券模板结构性缺失；银行/保险模板虽已映射，但
+#   有行没值同样是"源没提供"，故对全部行登记 SOURCE_EMPTY。
+def _cashflow_structural_source_empty_rules() -> dict[str, dict[str, RuleGroup]]:
+    """`{domain: {带前缀字段: RuleGroup}}`，detail 直接引用事实清单里的依据。"""
+    rules: dict[str, dict[str, RuleGroup]] = {
+        domain: {} for domain in CASH_FLOW_STRUCTURAL_MISSING
+    }
+    for table, reasons in CASH_FLOW_STRUCTURAL_MISSING.items():
+        general = set(cash_flow_structural_missing_columns(table, org_type="通用"))
+        financial = set(cash_flow_structural_missing_columns(table, org_type="银行"))
+        financial_only = financial - general
+        for column, reason in reasons.items():
+            field_name = f"{table}.{column}"
+            if column in financial_only:
+                predicates = (
+                    _eq("src_is_eastmoney_bank_insurer", "东财本源行·银行/保险模板", 1),
+                )
+            else:
+                predicates = (_eq("src_is_eastmoney", "东财本源行", 1),)
+            if field_name in CASH_FLOW_UNMAPPED_BY_DECISION:
+                # 语义纠正（reports/135）：这**不是**"源没有字段"，而是源有字段、
+                # 口径与 CSMAR 不完全相等，团队主动不映射。NullReason 枚举没有
+                # SEMANTIC_MISMATCH / NOT_MAPPED（新增会破坏既有契约），
+                # 因此原因码仍用 SOURCE_EMPTY，语义写进 detail 供主控裁决。
+                detail = (
+                    "【口径不符·主动不映射，非「源无此字段」】" + reason
+                )
+            else:
+                detail = "【源侧结构性缺失（东财模板无此科目）】" + reason
+            rules[table][field_name] = RuleGroup(predicates=predicates, detail=detail)
+    return rules
+
+
+_CASHFLOW_STRUCTURAL_SOURCE_EMPTY: dict[str, dict[str, RuleGroup]] = (
+    _cashflow_structural_source_empty_rules()
+)
+
 # 源表域：6 个银行监管指标只对金融股成立，非金融公司的 NULL 是**不适用**而不是缺失。
 # 实测（2026-09-30）：6 个字段非空数均为 0，不满足"上期/再上期 >50%"的调度条件，
 # 若不按行业分流，这 3.3 万个单元格会全部落进 unclassified。
@@ -688,19 +747,48 @@ def _cell_frame_sql(domain: str, fields: Sequence[str]) -> str:
         aggregated = ", ".join(
             f"any_value({_quote(_plain_field(domain, name))}) AS {_quote(name)}" for name in fields
         )
-        financial_flag = (
+        financial_expr = (
             "CASE WHEN meta.stock_code IS NULL THEN NULL "
             "WHEN COALESCE(meta.sw_level1, '') IN ('银行', '非银金融', '保险') "
             "OR COALESCE(meta.csrc_l1, '') LIKE '%金融%' "
             "OR COALESCE(meta.name, '') LIKE '%银行%' "
             "OR COALESCE(meta.name, '') LIKE '%证券%' "
             "OR COALESCE(meta.name, '') LIKE '%保险%' "
-            "THEN 1 ELSE 0 END AS src_is_financial"
+            "THEN 1 ELSE 0 END"
         )
+        extra_flags = ""
+        if domain in CASH_FLOW_STRUCTURAL_MISSING:
+            # 源表域里的"结构性缺失"是**东财模板**的事实；CSMAR 行不能用同一句话
+            # 归因（那边是"导入没映射"，属于 NOT_DISPATCHED）。把来源与
+            # "东财 + 金融模板"两个组合证据算好，规则里直接用单谓词匹配。
+            aggregated += (
+                ", any_value(CASE WHEN source = 'eastmoney_f10' THEN 1 ELSE 0 END) "
+                "AS src_is_eastmoney"
+            )
+            # `investment_property_depreciation` 的结构性缺失只发生在**银行/保险**
+            # 专用模板（通用/证券模板有 IR_DEPR 独立行）。stock_meta 的行业口径里
+            # 券商/多元金融也算"非银金融"，直接用 `src_is_financial` 会把它们的
+            # NULL 误标成"模板缺列" —— 所以这里单独按 银行（sw_level1）/保险
+            # （`sw_level2=保险Ⅱ`）/公司名 判定，与 supplement 的 ORG_TYPE 口径对齐。
+            bank_insurer_expr = (
+                "CASE WHEN COALESCE(meta.sw_level1, '') = '银行' "
+                f"OR COALESCE(meta.sw_level2, '') = '{INSURANCE_SW_LEVEL2}' "
+                "OR COALESCE(meta.name, '') LIKE '%银行%' "
+                "OR COALESCE(meta.name, '') LIKE '%保险%' "
+                "THEN 1 ELSE 0 END"
+            )
+            extra_flags = (
+                ", aggregated.src_is_eastmoney"
+                ", CASE WHEN aggregated.src_is_eastmoney = 1"
+                f" AND ({bank_insurer_expr}) = 1 THEN 1 ELSE 0 END"
+                " AS src_is_eastmoney_bank_insurer"
+            )
         return (
             f"WITH aggregated AS (SELECT stock_code, {aggregated} FROM {table} "
             f"WHERE report_date = ? GROUP BY stock_code) "
-            f"SELECT aggregated.*, {financial_flag} FROM aggregated "
+            # `src_row_present`：该股该期在本表**有行**（1=抓到了）。
+            f"SELECT aggregated.*, 1 AS src_row_present, "
+            f"{financial_expr} AS src_is_financial{extra_flags} FROM aggregated "
             f"LEFT JOIN stock_meta meta USING (stock_code)"
         )
     return f"SELECT * FROM {table} WHERE report_date = ?"
@@ -1114,6 +1202,12 @@ def _rules_for_domain(domain: str) -> _DomainRules:
             not_computed=EXT_NOT_COMPUTED,
             source_missing=EXT_SOURCE_MISSING,
         )
+    # 现金流量补充域：结构性缺失是**确定事实**（东财模板里就没有这个科目），
+    # 东财行 + 该列为 NULL ⇒ SOURCE_EMPTY。其余字段不套用覆盖率规则（见 sweep），
+    # 判不出的保持 unclassified。
+    structural = _CASHFLOW_STRUCTURAL_SOURCE_EMPTY.get(domain)
+    if structural is not None:
+        return _DomainRules(not_applicable={}, source_empty=structural)
     # 源表域：目前只登记了"非金融公司不适用银行监管指标"这一条确定规则；
     # 其余源字段的原因主要来自覆盖率（整期级/个股级 NOT_DISPATCHED）。
     return _DomainRules(
@@ -1163,14 +1257,29 @@ def sweep(
         for previous_date, previous_rows in history_frames
     ]
 
-    not_dispatched = _not_dispatched_fields(
-        fields=fields,
-        report_date=resolved_date,
-        total_rows=len(rows),
-        current=current,
-        history=history,
-        excluded=frozenset(_DEPRECIATION_FIELDS) if domain == DOMAIN_EXT else frozenset(),
-    )
+    # 现金流量补充资料两表**不套用整期级覆盖率规则**（2026-11-17，reports/135）。
+    # 理由（正式库实测）：`cash_flow_indirect` @2025-09-30 有 5,580 行、
+    # `cf_from_operating_indirect` 基本全有值，但补充资料族（折旧摊销/营运资本）
+    # 三季报普遍不披露 → 整期级规则会把 13+ 个字段判成"没去抓"（77,345 格），
+    # 真实原因却是"源没披露"。这两张表的行**已经抓到了**，"有没有值"是源侧事实，
+    # 不需要用覆盖率反推。故这里只保留逐行可证明的原因（结构性缺失 SOURCE_EMPTY）；
+    # 判不出的保持 unclassified，绝不批量编 NOT_DISPATCHED。
+    # （指标域 `ext` 的折旧摊销族用 EXT_SOURCE_EMPTY/EXT_SOURCE_MISSING 区分，
+    #  那条链不受影响。）
+    if domain in _CASHFLOW_STRUCTURAL_SOURCE_EMPTY:
+        not_dispatched: dict[str, str] = {}
+    else:
+        excluded_fields = (
+            frozenset(_DEPRECIATION_FIELDS) if domain == DOMAIN_EXT else frozenset()
+        )
+        not_dispatched = _not_dispatched_fields(
+            fields=fields,
+            report_date=resolved_date,
+            total_rows=len(rows),
+            current=current,
+            history=history,
+            excluded=excluded_fields,
+        )
     result.not_dispatched_fields = tuple(sorted(not_dispatched))
 
     # 个股级证据：**只对 6 个银行监管指标**成立（"这只股票上期有值、本期空了"）。

@@ -132,3 +132,30 @@ def test_wired_keys_are_present_and_reachable() -> None:
     for key in WIRED_KEYS:
         leaf = key.rsplit(".", 1)[-1]
         assert leaf in corpus, f"{key} 没有任何读取点"
+
+
+def test_packaged_config_matches_repo_config() -> None:
+    """打包兜底配置必须与仓库配置**完全一致**（reports/135）。
+
+    事故背景：`app/resources/config/default.yaml`（wheel/安装版没有仓库 `config/`
+    时的兜底副本）在 2026-11 已漂移到 93 行，而仓库版是 269 行——它缺了 51 个
+    `update.*` 键与整个 `asset_health:` 段，还把 `adapters.primary.dividends`
+    写成了 `[..., "cninfo"]`（仓库版有硬注释明令禁止），并把 DuckDB 内存从
+    8GB 砍到 2GB/4GB。
+
+    这些差异在源码运行形态下**完全不生效**，只在 wheel/安装版生效 —— 典型的
+    "测试全绿、发布即事故"。因此这里直接把两份文件钉成必须逐字节相等。
+    """
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    repo_config = repo_root / "config" / "default.yaml"
+    packaged_config = repo_root / "app" / "resources" / "config" / "default.yaml"
+
+    assert repo_config.exists(), f"仓库配置缺失: {repo_config}"
+    assert packaged_config.exists(), f"打包兜底配置缺失: {packaged_config}"
+    assert repo_config.read_bytes() == packaged_config.read_bytes(), (
+        "app/resources/config/default.yaml 已与 config/default.yaml 漂移；"
+        "请用 `cp config/default.yaml app/resources/config/default.yaml` 同步，"
+        "否则安装版会用到过期/被禁止的配置（例如 cninfo 分红源、2GB 内存上限）"
+    )

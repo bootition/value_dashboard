@@ -1895,7 +1895,13 @@ class IndicatorCalculator:
                 base_value = prior.get(field)
                 if current_value is None or base_value in (None, 0):
                     continue
-                latest = current_value / base_value - 1.0
+                # 2026-11-17（reports/135）**负基数必须用 abs 分母**：
+                # 旧写法 `curr/base - 1` 在基期为负时方向反了——亏损从 −88.6 亿收窄到
+                # −84.5 亿（变好）会算成 −4.6%（变差），亏损扩大反而算成正增长。
+                # 全量实测：`net_profit_yoy` 负基期 1,455 只（763 只亏损收窄被报成负增长、
+                # 692 只亏损扩大被报成正增长）、`deducted_profit_yoy` 负基期 1,697 只。
+                # 与 `_yoy()`（FY 口径，calculator.py::_yoy）统一成同一公式。
+                latest = (current_value - base_value) / abs(base_value)
             result[column] = latest
         return result
 
@@ -2428,16 +2434,22 @@ class IndicatorCalculator:
                     f"WHERE stock_code IN ({placeholders})",
                     preserved,
                 ).fetchone()[0]
-            staging_columns = {
-                str(row[1])
-                for row in connection.execute(f'PRAGMA table_info("{staging_table}")').fetchall()
-            }
+            # 2026-11-17（reports/135）：**不能用 staging 的列集合当 owned_columns**。
+            # 生产路径的 staging 是 `CREATE TABLE ... AS SELECT * FROM indicator_snapshot
+            # WHERE FALSE`（全 70 列），于是 `untouched = 全列 - 全列 = 空`：
+            #   ① 派生列保全（COALESCE 回填）不执行；
+            #   ② "某列从有值掉到全空就抛错回滚"这条不变量**永不触发**。
+            # 结果 ROCE 只靠 `roce_history` 覆盖 100% 侥幸活着——一旦某股没进 history，
+            # 重发就会静默把它清成 NULL 并返回成功（与 K5 原事故同一形态）。
+            # 增量路径用的是 `_record_owned_column_names`（"记录里出现过的列"），
+            # 这里统一成同一判据：只有计算器**完全没写**的列才算派生列。
+            owned_columns = self._record_owned_column_names(connection, records)
             scope_where = (
                 f" WHERE stock_code NOT IN ({placeholders})" if preserved else ""
             )
             with self._derived_columns_guard(
                 connection,
-                owned_columns=staging_columns,
+                owned_columns=owned_columns,
                 scope_where=scope_where,
                 scope_params=list(preserved),
             ):

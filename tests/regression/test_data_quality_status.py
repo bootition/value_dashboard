@@ -94,9 +94,13 @@ def test_quality_status_flags_missing_inputs_for_a_currently_listed_stock(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 2026-11-17（reports/135）：必须显式给一个**很久以前**的 listing_date。
+    # 本用例的语义是"一只老股完全没有数据 → 必须被标记"；而 readiness 现在把
+    # `listing_date IS NULL` 当作"上市日期未知 = 按新股豁免"（否则一只新股就能
+    # 让 /api/ready 永久 503，实测 920309）。留空会让本用例变成"新股豁免"场景。
     duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'incomplete', 'SZSE', TRUE)"""
+        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, listing_date)
+           VALUES ('000001', 'incomplete', 'SZSE', TRUE, DATE '2010-01-04')"""
     )
 
     status = build_data_quality_status(duckdb_store, sqlite_store)

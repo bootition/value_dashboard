@@ -407,3 +407,53 @@ def test_technical_pending_roundtrip_and_source_wiring(
     assert "_mark_technical_pending" in price_source
     assert "_load_technical_pending" in flow_source
     assert "_finalize_technical_pending" in flow_source
+
+
+def test_ttm_yoy_uses_abs_denominator_on_negative_base(
+    duckdb_store, sqlite_store,
+) -> None:
+    """TTM 同比在**基期为负**时必须用 abs 分母（reports/135 回归）。
+
+    事故：`_calc_ttm_yoy` 原来写 `latest = curr / base - 1`，而 FY 口径用
+    `(curr - prev) / abs(prev)`。基期为负时两个公式方向相反：
+
+    - 亏损从 −100 收窄到 −50（**变好**）→ `curr/base-1` = −0.5（显示变差）
+    - 亏损从 −100 扩大到 −200（**变差**）→ `curr/base-1` = +1.0（显示变好）
+
+    正式库实测受影响：`net_profit_yoy` 负基期 1,455 只（763 亏损收窄被报成负增长、
+    692 亏损扩大被报成正增长）；`deducted_profit_yoy` 1,697 只。
+    """
+    from app.core.indicators.calculator import IndicatorCalculator
+
+    code = "000901"
+    _seed_stock(duckdb_store, code)
+    # 全部为年报期，避免季度 TTM 复合：TTM(2024)=−100、TTM(2025)=−50（亏损收窄）
+    periods = [
+        ("2023-12-31", 100.0, -20.0, -20.0),
+        ("2024-12-31", 100.0, -100.0, -100.0),
+        ("2025-12-31", 100.0, -50.0, -50.0),
+    ]
+    with duckdb_store.write_connection() as connection:
+        connection.executemany(
+            """INSERT INTO income_statement
+                   (stock_code, report_date, revenue, parent_net_profit,
+                    deducted_net_profit)
+               VALUES (?, ?, ?, ?, ?)""",
+            [(code, d, rev, profit, ded) for d, rev, profit, ded in periods],
+        )
+        connection.executemany(
+            """INSERT INTO balance_sheet
+                   (stock_code, report_date, total_assets, total_liabilities,
+                    total_equity, total_equity_parent,
+                    total_current_assets, total_current_liabilities, inventory)
+               VALUES (?, ?, 1000, 400, 600, 600, 500, 250, 50)""",
+            [(code, d) for d, *_ in periods],
+        )
+
+    calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
+    growth = calc._calc_ttm_yoy(code)
+
+    # 亏损从 −100 收窄到 −50 = 变好 → 同比必须是**正数**
+    assert growth["net_profit_yoy"] == pytest.approx(0.5), (
+        f"负基数用了 curr/base-1 会得到 −0.5（把亏损收窄报成负增长），实测 {growth['net_profit_yoy']}"
+    )

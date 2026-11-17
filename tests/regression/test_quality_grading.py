@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -169,7 +170,7 @@ def _seed_screenable(duck: DuckDBStore, values: dict[str, Any] | None = None) ->
 
 
 def test_every_rule_declares_tier_and_severity() -> None:
-    """13 条规则一条都不能漏登记 —— 漏一条就等于少一个调度/分级依据。"""
+    """每条规则（当前 14 条，以 RULE_CODES 为准）都不能漏登记调度/分级。"""
     assert set(RULE_SEVERITIES) == set(RULE_CODES)
     assert set(RULE_TIERS) == set(RULE_CODES)
     assert set(RULE_SEVERITIES.values()) <= {
@@ -609,3 +610,74 @@ def test_low_coverage_extended_field_is_hidden_as_not_available(
     assert "free_cash_flow" not in names, "覆盖率 33% 的字段不该出现在可选列表"
     assert "free_cash_flow" in unavailable, "必须进 unavailable 并说明原因"
     assert unavailable["free_cash_flow"]["reason"] == "not_available_for_latest_period"
+
+
+# ─── 前端契约（2026-11-17 独立审计问题 3 / 4）────────────────────────────
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DATA_QUALITY_TS = _REPO_ROOT / "frontend" / "src" / "types" / "data-quality.ts"
+_SCREENING_FORMAT_TS = _REPO_ROOT / "frontend" / "src" / "utils" / "screening-format.ts"
+
+
+def _ts_section(text: str, start_marker: str, end_marker: str) -> str:
+    start = text.index(start_marker)
+    end = text.index(end_marker, start + len(start_marker))
+    return text[start:end]
+
+
+def test_frontend_warning_contract_covers_every_asset_health_rule() -> None:
+    """`data-quality.ts` 四处必须与后端 RULE_CODES 同步（含第 14 条）。
+
+    该文件没有编译期穷尽护栏（union 不写新 code 时 Record 仍能通过），
+    所以只能靠本契约测试守住。漏一处的现实后果：状态页显示裸英文码。
+    """
+    text = _DATA_QUALITY_TS.read_text(encoding="utf-8")
+    union = _ts_section(text, "export type KnownWarningCode =", "export type WarningCode =")
+    known = _ts_section(text, "export const KNOWN_WARNING_CODES = [", "] as const")
+    affected = _ts_section(text, "const WARNING_TO_AFFECTED_FIELDS", "// 中文文案")
+    labels = _ts_section(text, "export const WARNING_CODE_LABELS", "export function warningCodeLabel")
+
+    missing: list[str] = []
+    for code in RULE_CODES:
+        if f"'{code}'" not in union:
+            missing.append(f"KnownWarningCode 缺少 {code}")
+        if f"'{code}'" not in known:
+            missing.append(f"KNOWN_WARNING_CODES 缺少 {code}")
+        if not re.search(rf"^\s*{re.escape(code)}\s*:", affected, flags=re.MULTILINE):
+            missing.append(f"WARNING_TO_AFFECTED_FIELDS 缺少 {code}")
+        if not re.search(rf"^\s*{re.escape(code)}\s*:", labels, flags=re.MULTILINE):
+            missing.append(f"WARNING_CODE_LABELS 缺少 {code}")
+    assert not missing, "前端 warning code 契约不完整: " + "；".join(missing)
+
+    technical_fields = _ts_section(
+        text, "export const TECHNICAL_INDICATOR_FIELDS = [", "] as const",
+    )
+    for field in ("period_return", "annualized_volatility", "max_drawdown"):
+        assert f"'{field}'" in technical_fields
+    assert re.search(
+        r"TECHNICAL_COVERAGE_GAP:\s*TECHNICAL_INDICATOR_FIELDS", affected,
+    )
+    assert "技术指标覆盖率不足" in labels
+
+
+def test_frontend_yoy_labels_distinguish_ttm_and_annual_calibers() -> None:
+    """`*_yoy` / `*_yoy_fy` 必须分别标成 TTM 口径 / 年报口径，不能同名。"""
+    text = _SCREENING_FORMAT_TS.read_text(encoding="utf-8")
+    expected = {
+        "revenue_yoy": "营业收入同比(TTM口径)",
+        "net_profit_yoy": "净利润同比(TTM口径)",
+        "deducted_profit_yoy": "扣非净利润同比(TTM口径)",
+        "revenue_yoy_fy": "营业收入同比(年报口径)",
+        "net_profit_yoy_fy": "净利润同比(年报口径)",
+        "deducted_profit_yoy_fy": "扣非净利润同比(年报口径)",
+    }
+    missing = [
+        f"{field} → {label}"
+        for field, label in expected.items()
+        if f"{field}: '{label}'" not in text
+    ]
+    assert not missing, "缺少同比口径中文名: " + "；".join(missing)
+
+    pct_fields = _ts_section(text, "const PCT_FIELDS = new Set([", "])")
+    for field in ("revenue_yoy_fy", "net_profit_yoy_fy", "deducted_profit_yoy_fy"):
+        assert f"'{field}'" in pct_fields, f"{field} 必须登记为 pct（小数比例）"

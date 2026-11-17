@@ -1052,6 +1052,9 @@ CREATE TABLE IF NOT EXISTS financial_sector_items (
     -- 保险
     premiums_receivable            DOUBLE,   -- 应收保费净额
     insurance_contract_reserve     DOUBLE,   -- 保险合同准备金
+    -- v44（reports/131 P0-6）：保险股「保险合同负债」专用落点。此前被误映射进
+    -- 通用 `contract_liabilities`；ALTER 迁移也声明本列，两处必须保持同步。
+    insurance_contract_liability   DOUBLE,   -- 保险合同负债
     policyholder_deposits          DOUBLE,   -- 保户储金及投资款
     earned_premiums                DOUBLE,   -- 已赚保费
     claim_payments_net             DOUBLE,   -- 赔付支出净额
@@ -2275,6 +2278,8 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # 通用科目 `contract_liabilities`（5 只险企占全市场合同负债 42%–68%）。
         # 守卫已禁止再写入通用列，这里给金融专用表补一个正确的落点；
         # `supplement.py` 每轮查 information_schema，列一存在就自动启用映射。
+        # 本列同时已在 DUCKDB_SCHEMA_V1 的 financial_sector_items DDL 中声明：
+        # schema 只能有一个声明面，单独使用 V1 的路径（测试/重建）也必须建出该列。
         connection.execute(
             "ALTER TABLE financial_sector_items "
             "ADD COLUMN IF NOT EXISTS insurance_contract_liability DOUBLE"

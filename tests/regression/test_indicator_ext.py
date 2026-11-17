@@ -167,6 +167,98 @@ def test_scoped_rebuild_only_touches_given_codes(
     assert codes == {STOCK, "000003"}
 
 
+# ─── rows_written 的真实读数（2026-11-17 独立审计问题 1）───────────────
+# 旧写法 `after - before if not target else after` 是**假读数**：
+#   · 全量重建后 before == after → 报 0（实际重写整表）；
+#   · 按股重建 → 报整表行数（正式库一次 force_codes=[689009] 报 361393）。
+# 下列用例把"实际写入语义"钉死：全量 = rows_after；按股 = 目标股票的行数
+# （每期一行，不是股票数）；空目标清单 = 0 且 skipped。
+
+
+def _seed_financial_pair(store: DuckDBStore, code: str, report_date: str) -> None:
+    """只为扩展指标构建所需的最小 income × balance 组合。"""
+    with store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO income_statement (stock_code, report_date, revenue, net_profit) "
+            "VALUES (?, ?, ?, ?)",
+            [code, report_date, 1000.0, 100.0],
+        )
+        conn.execute(
+            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_equity) "
+            "VALUES (?, ?, ?, ?)",
+            [code, report_date, 2000.0, 1200.0],
+        )
+
+
+def _seed_two_codes_two_periods(store: DuckDBStore) -> None:
+    for code in ("600519", "000003"):
+        for report_date in ("2024-12-31", "2023-12-31"):
+            _seed_financial_pair(store, code, report_date)
+
+
+def test_full_rebuild_reports_rows_after_as_rows_written(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    _seed_two_codes_two_periods(duckdb_store)
+    builder = ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths)
+
+    initial = builder.build()
+    assert initial["rows_before"] == 0
+    assert initial["rows_written"] == 4
+
+    # **已填充表上的全量重建**才是正式库形态：before == after == 4，
+    # 旧写法 after-before 会报 0（审计实测正是 rows_before=2 rows_after=2 → 0）。
+    report = builder.build()
+
+    assert report["status"] == "success"
+    assert report["rows_before"] == 4
+    assert report["rows_after"] == 4
+    assert report["rows_written"] == 4, (
+        "全量重写了 4 行就必须报 4；after-before 在重建场景恒为 0"
+    )
+
+
+def test_scoped_rebuild_reports_target_rows_not_stock_or_table_count(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    _seed_two_codes_two_periods(duckdb_store)
+    builder = ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths)
+    builder.build()
+
+    force_report = builder.build(force_codes=["600519"])
+    codes_report = builder.build(codes=["000003"])
+
+    for report in (force_report, codes_report):
+        assert report["status"] == "success"
+        assert report["rows_before"] == 4
+        assert report["rows_after"] == 4
+        # 1 只股票 × 2 期 = 2 行；旧写法会报整表 4 行。
+        assert report["rows_written"] == 2, (
+            f"按股重建必须报目标股票的实际行数，实际报告: {report['rows_written']}"
+        )
+
+    # 目标清单非空但库里没有该股 → 实际写入 0 行，不是 skipped、也不是全表行数。
+    absent_report = builder.build(codes=["999999"])
+    assert absent_report["status"] == "success"
+    assert absent_report["rows_after"] == 4
+    assert absent_report["rows_written"] == 0
+
+
+def test_empty_target_skipped_reports_zero_rows_written(
+    duckdb_store: DuckDBStore, database_paths: DatabasePathSet
+) -> None:
+    _seed_two_codes_two_periods(duckdb_store)
+    builder = ExtendedIndicatorBuilder(duck=duckdb_store, paths=database_paths)
+    builder.build()
+
+    report = builder.build(force_codes=[])
+
+    assert report["status"] == "skipped"
+    assert report["reason"] == "no_target_codes"
+    assert report["rows_before"] == report["rows_after"] == 4
+    assert report["rows_written"] == 0
+
+
 # ─── 业务无意义护栏（2026-09-19 补齐折旧摊销后新增）────────────────────
 # 与 calculator.py 的 pe<=1000 / pb<=200 / |roe|<=1 同思路：触发护栏写 NULL，
 # 宁可如实缺失也不展示会误导人的数字。

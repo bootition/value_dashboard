@@ -28,6 +28,12 @@ from app.core.adapters.manager import AdapterManager
 
 # 契约 §3：股本完整性与 missing 口径的单一真相，禁止在本文件复制第二份 SQL。
 from app.core.data_quality import actionable_missing_count, listed_share_capital_gap_codes
+from app.core.financial_guards import (
+    BALANCE_SHEET_TABLE,
+    CONTRACT_LIABILITIES_COLUMN,
+    guard_caches,
+    guard_contract_liabilities_write,
+)
 from app.core.financial_period import CN_TZ as _CN_TZ
 from app.core.financial_period import expected_financial_period
 
@@ -3938,7 +3944,16 @@ class IncrementalUpdater:
         与逐行 legacy merge 等价：源返回的非 NULL 字段覆盖旧值，源未返回
         的字段保留旧值，新报告期直接插入。每表只执行一次 UPDATE 和一次
         INSERT，避免逐行 DELETE+INSERT 在宽表上反复重写 row group。
+
+        **P0-6 守卫（2026-11-17）**：这条路径是保险股
+        `contract_liabilities` 的**实际来源**（`source_audit` 记
+        `sina-getFinanceReport2022-1`）。合并前逐行过
+        `financial_guards.guard_contract_liabilities_write()`：保险股的
+        「保险合同负债」被摘出本批、显式置 NULL 并改道
+        `financial_sector_items.insurance_contract_liability`。旧实现只有
+        `supplement.eastmoney_f10` 那条管线有守卫，Sina 这条路完全裸奔。
         """
+        column_cache, industry_cache = guard_caches(initializer)
         available = initializer._financial_cols_cache.get(data_type)
         if available is None:
             available = {
@@ -3957,6 +3972,16 @@ class IncrementalUpdater:
                 if key in available and value is not None
             }
             mapped.setdefault("stock_code", stock_code)
+            # 守卫必须作用在"即将进入 TEMP TABLE 的映射"上：被拒的行整列
+            # 不出现在本批，插入/更新时该列即 NULL（脏值另由守卫显式清空）。
+            if data_type == BALANCE_SHEET_TABLE and CONTRACT_LIABILITIES_COLUMN in mapped:
+                guard_contract_liabilities_write(
+                    conn,
+                    stock_code=stock_code,
+                    values=mapped,
+                    column_cache=column_cache,
+                    industry_cache=industry_cache,
+                )
             if "raw_data" in available:
                 mapped["raw_data"] = json.dumps(
                     row, ensure_ascii=False, default=str,

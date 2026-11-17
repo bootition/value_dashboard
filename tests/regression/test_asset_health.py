@@ -1,4 +1,4 @@
-"""资产健康检查（asset health）回归测试 —— reports/119 的 12 条规则逐条正/反例。
+"""资产健康检查（asset health）回归测试 —— 规则逐条正/反例（以 RULE_CODES 为准）。
 
 为什么这样组织
 --------------
@@ -294,6 +294,38 @@ def test_engine_covers_every_documented_rule(duckdb_store: DuckDBStore) -> None:
         "CROSSCHECK_BELOW_THRESHOLD"
     }
     assert payload["schedule"] == {"cheap": "every_update", "expensive": "daily"}
+
+
+def test_technical_coverage_threshold_reads_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """技术覆盖阈值只能从 config 的 asset_health.technical_coverage_pct 读。"""
+    monkeypatch.setattr(
+        asset_health, "load_settings",
+        lambda: {"technical_coverage_pct": 98.0},
+    )
+    assert asset_health.technical_coverage_threshold() == 98.0
+    # 显式 settings 快照（HealthContext）复用同一解析，不再各写一份常量。
+    assert asset_health.technical_coverage_threshold(
+        {"technical_coverage_pct": "97.5"}
+    ) == 97.5
+
+
+def test_rule_count_comments_point_at_rule_codes() -> None:
+    """规则条数注释不得再写死过期数字（审计问题 6）。
+
+    `data_quality.py` 的同类注释由另一路 agent 负责，本文件只守住
+    asset_health 与 config/default.yaml 两个允许改动的声明面。
+    """
+    config_text = (PROJECT_ROOT / "config" / "default.yaml").read_text(encoding="utf-8")
+    source_text = Path(asset_health.__file__).read_text(encoding="utf-8")
+    for stale in ("12 条规则", "13 条规则"):
+        assert stale not in config_text, f"config/default.yaml 仍写过期的 {stale}"
+    # asset_health 文档字符串允许提到历史“第 13 条规则”，但不得把总数写死成 12/13。
+    assert "12 条可复跑的规则" not in source_text
+    assert "13 条可复跑的规则" not in source_text
+    assert "RULE_CODES" in config_text or "14 条" in config_text
+    assert len(RULE_CODES) == 14
 
 
 def test_single_rule_failure_is_reported_not_raised(

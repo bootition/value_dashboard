@@ -223,7 +223,8 @@ logging:
   format: '%(asctime)s %(levelname)s %(name)s: %(message)s'
 
 # 资产健康检查（reports/119 / reports/120 §5）——`app/core/quality/asset_health.py` + `vd data doctor`
-# 14 条规则、两个档位。每条规则带 severity（block | disclose | inventory）：
+# 规则条数以 app/core/quality/asset_health.py 的 RULE_CODES 为准（当前 14 条）、
+# 两个档位。每条规则带 severity（block | disclose | inventory）：
 #   block     = 屏幕上的数字可能不可信 / 该域已失效 → 进 level_counts 与
 #               p1_codes（→ data_quality.warning_codes、doctor 退出码 1）；
 #   disclose  = 如实披露的待办/维护项（链路停摆、数据包过期、结构性可空字段

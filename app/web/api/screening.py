@@ -23,6 +23,14 @@ from app.core.data_quality import (
     store_screening_readiness_cache,
 )
 
+# 技术三列阈值/字段集的唯一真源在 asset_health（reports/131 P0-5）。
+# 这里只允许 import，禁止再定义第二份常量：曾有 `_TECHNICAL_MIN_COVERAGE_PCT = 95.0`
+# 硬编码，运维把 config 调到 98 后体检说"不可信"而筛选仍可选中。
+from app.core.quality.asset_health import (
+    TECHNICAL_COVERAGE_FIELDS,
+    technical_coverage_threshold,
+)
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/screening", tags=["screening"])
@@ -744,15 +752,10 @@ def _dsl_indicator_unit(expression: dict[str, Any]) -> str:
 # 无分红公司股息率）实测仍在 73%~85%，真正的"整族缺失"是 0.1%~2% 这种量级。
 _EXTENDED_MIN_COVERAGE_PCT = 50.0
 
-# 技术三列门禁（2026-11-16，reports/131 §9.2 P0-5）。与 asset_health
-# `TECHNICAL_COVERAGE_GAP` 同一阈值/同一字段集：体检说不可信，指标列表就必须
-# 以 unavailable(reason=not_available_for_latest_period) 隐藏，不能一边报警一边让用户选。
-_TECHNICAL_MIN_COVERAGE_PCT = 95.0
-_TECHNICAL_COVERAGE_FIELDS: tuple[str, ...] = (
-    "period_return",
-    "annualized_volatility",
-    "max_drawdown",
-)
+# 技术三列门禁（2026-11-16，reports/131 §9.2 P0-5）：阈值与字段集直接复用
+# asset_health 的 `technical_coverage_threshold()` / `TECHNICAL_COVERAGE_FIELDS`。
+# 体检说不可信，指标列表就必须以 unavailable(reason=not_available_for_latest_period)
+# 隐藏，不能一边报警一边让用户选；也不能再保留本地副本（R1 单一真源）。
 
 
 def _technical_field_coverage(request: Request) -> dict[str, float]:
@@ -764,7 +767,7 @@ def _technical_field_coverage(request: Request) -> dict[str, float]:
     指标列表整个打挂。
     """
     counts = ", ".join(
-        f'COUNT("{column}") AS "{column}"' for column in _TECHNICAL_COVERAGE_FIELDS
+        f'COUNT("{column}") AS "{column}"' for column in TECHNICAL_COVERAGE_FIELDS
     )
     try:
         rows = request.app.state.duck.read_query(
@@ -787,7 +790,7 @@ def _technical_field_coverage(request: Request) -> dict[str, float]:
         return {}
     return {
         column: float(row.get(column) or 0) / total * 100.0
-        for column in _TECHNICAL_COVERAGE_FIELDS
+        for column in TECHNICAL_COVERAGE_FIELDS
     }
 
 
@@ -874,12 +877,13 @@ def list_available_indicators(request: Request) -> dict:
     # reports/131 §9.2 P0-5：技术三列最新期覆盖率 < 95% → 进 unavailable。
     # 只影响这三个字段，绝不触碰下面的信任门禁（masked_untrusted/deprecated）。
     technical_coverage = _technical_field_coverage(request)
+    technical_limit = technical_coverage_threshold()
     for col in sorted(SNAPSHOT_COLUMNS):
         coverage = technical_coverage.get(col)
         if (
-            col in _TECHNICAL_COVERAGE_FIELDS
+            col in TECHNICAL_COVERAGE_FIELDS
             and coverage is not None
-            and coverage < _TECHNICAL_MIN_COVERAGE_PCT
+            and coverage < technical_limit
         ):
             unavailable.append({
                 "name": col,
@@ -888,7 +892,7 @@ def list_available_indicators(request: Request) -> dict:
                 "reason": "not_available_for_latest_period",
                 "message": (
                     "该技术指标在最新报告期覆盖率 "
-                    f"{coverage:.2f}% < {_TECHNICAL_MIN_COVERAGE_PCT:.0f}%，"
+                    f"{coverage:.2f}% < {technical_limit:.0f}%，"
                     "qfq 有待重算；为避免筛出 0 只的假结论，暂不暴露"
                 ),
             })

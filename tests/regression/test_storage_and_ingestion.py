@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
+import re
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,7 +16,7 @@ from app.core.backfill import PriceBackfiller
 from app.core.init import DataInitializer
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
-from app.core.storage.schema import init_duckdb_schema
+from app.core.storage.schema import DUCKDB_SCHEMA_V1, init_duckdb_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.update import IncrementalUpdater
 from app.web.api.stock_detail import get_kline
@@ -520,3 +523,90 @@ def test_initializer_rejects_financial_shell_rows(
     assert report["complete_stocks"] == 0
     assert rows == []
     assert missing == [{"field_name": "balance_sheet", "reason_code": "shell_row"}]
+
+
+# ─── Schema 单一声明面（2026-11-17 独立审计问题 5）────────────────────────
+
+
+def _v1_table_columns(table: str) -> set[str]:
+    """从 `DUCKDB_SCHEMA_V1` 的 CREATE TABLE 块解析列名。"""
+    match = re.search(
+        rf"CREATE TABLE IF NOT EXISTS\s+{re.escape(table)}\s*\((.*?)\n\);",
+        DUCKDB_SCHEMA_V1,
+        flags=re.DOTALL,
+    )
+    assert match is not None, f"DUCKDB_SCHEMA_V1 缺少 {table} 的 DDL"
+    columns: set[str] = set()
+    for raw_line in match.group(1).splitlines():
+        line = raw_line.split("--", 1)[0].strip().rstrip(",")
+        if not line:
+            continue
+        name = line.split()[0]
+        if name.upper() in {"PRIMARY", "FOREIGN", "UNIQUE", "CONSTRAINT", "CHECK"}:
+            continue
+        columns.add(name)
+    return columns
+
+
+def _schema_alter_added_columns(table: str) -> set[str]:
+    """从 schema.py 的 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 解析列名。"""
+    import app.core.storage.schema as schema_module
+
+    source = Path(schema_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    pattern = re.compile(
+        rf"ALTER TABLE\s+{re.escape(table)}\s+ADD COLUMN IF NOT EXISTS\s+(\w+)",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    columns: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if not isinstance(node.func, ast.Attribute) or node.func.attr != "execute":
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Constant):
+            continue
+        sql = node.args[0].value
+        if not isinstance(sql, str):
+            continue
+        columns.update(match.group(1) for match in pattern.finditer(sql))
+    return columns
+
+
+def _information_schema_columns(store: DuckDBStore, table: str) -> set[str]:
+    return {
+        row["column_name"]
+        for row in store.read_query(
+            """SELECT column_name FROM information_schema.columns
+               WHERE table_name = ?""",
+            [table],
+        )
+    }
+
+
+def test_v1_ddl_declares_every_financial_sector_alter_column(
+    database_paths: DatabasePathSet,
+) -> None:
+    """`DUCKDB_SCHEMA_V1` 与实际迁移 ALTER 不得各说各话。
+
+    审计发现的形态：`insurance_contract_liability` 只在 v44 ALTER 里，
+    V1 的 `financial_sector_items` DDL 没有它。现网新建库因为 init 无条件跑
+    ALTER 才碰巧有列，但任何"只用 V1"的重建/测试路径都会缺列。
+    """
+    v1_columns = _v1_table_columns("financial_sector_items")
+    alter_columns = _schema_alter_added_columns("financial_sector_items")
+
+    assert alter_columns, "解析器没找到 financial_sector_items 的 ALTER 列，测试自身失效"
+    assert alter_columns <= v1_columns, (
+        "以下列只写在 ALTER 里、V1 DDL 未声明: "
+        f"{sorted(alter_columns - v1_columns)}"
+    )
+
+    # 只用 V1 建库：列集合必须与 V1 声明完全一致（证明解析可信）。
+    store = DuckDBStore(paths=database_paths)
+    store.execute_script(DUCKDB_SCHEMA_V1)
+    assert _information_schema_columns(store, "financial_sector_items") == v1_columns
+
+    # 正常 init 后也不得冒出 V1 未声明的列（两份真源已合并）。
+    init_duckdb_schema(store)
+    assert _information_schema_columns(store, "financial_sector_items") == v1_columns

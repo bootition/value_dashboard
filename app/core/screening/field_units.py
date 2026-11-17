@@ -25,6 +25,9 @@ PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     "roce_latest", "roce_5y_median", "roce_10y_median",
     "gross_margin", "net_margin", "debt_ratio",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
+    # reports/131 P0-4 同比双口径：`*_yoy_fy` 与 `*_yoy` 同为小数比例
+    # （0.0529 = 5.29%），只是口径不同（TTM vs 年报），单位必须一致。
+    "revenue_yoy_fy", "net_profit_yoy_fy", "deducted_profit_yoy_fy",
     "revenue_cagr3", "revenue_cagr5", "net_profit_cagr3", "net_profit_cagr5",
     "deducted_profit_cagr3", "deducted_profit_cagr5",
     "dividend_yield", "goodwill_ratio", "payout_ratio",

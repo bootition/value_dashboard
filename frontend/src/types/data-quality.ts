@@ -30,9 +30,9 @@ export type KnownWarningCode =
   | 'CODE_IDENTITY_ALIAS'
   | 'LIVE_SCHEMA_INCOMPATIBLE'
   // 2026-11-14 资产健康检查（reports/119）：`app/core/quality/asset_health.py`
-  // 的 12 条规则。全部是**披露型**：默认不进任何阻断集合（不遮蔽指标、
-  // 不让筛选 409），P1 只出现在 warning_codes 供状态页展示。
-  // 升级为阻断型必须另开裁决（reports/119 §5）。
+  // 的规则（条数以该模块 `RULE_CODES` 为准，当前 14 条）。这些 code 默认
+  // 不进 data_quality 的阻断集合（不遮蔽指标、不让筛选 409），P1 只出现在
+  // warning_codes 供状态页展示。升级为阻断型必须另开裁决（reports/119 §5）。
   | 'EXT_PERIOD_MISMATCH'
   | 'FIELD_COVERAGE_LOW'
   | 'FIELD_COVERAGE_DROP'
@@ -46,6 +46,8 @@ export type KnownWarningCode =
   | 'ZERO_REFERENCE_ASSET'
   | 'DEDUCTED_PROFIT_GAP'
   | 'CHAIN_PROGRESS_STALLED'
+  // reports/131 §9.2 P0-5：技术三列最新期覆盖率 < 95%（阈值见 config）
+  | 'TECHNICAL_COVERAGE_GAP'
 
 /**
  * Warning code type. Accepts known codes with autocomplete, but also accepts
@@ -86,6 +88,8 @@ export const KNOWN_WARNING_CODES = [
   'DEDUCTED_PROFIT_GAP',
   // 2026-11-14 reports/120 §5 J1：补采链"跑也白跑"（水位停滞）
   'CHAIN_PROGRESS_STALLED',
+  // 2026-11-16 reports/131 §9.2 P0-5：技术三列覆盖率不足
+  'TECHNICAL_COVERAGE_GAP',
 ] as const
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -198,6 +202,17 @@ export const DEDUCTED_PROFIT_INDICATOR_FIELDS = [
 ] as const
 
 /**
+ * 技术三列（与后端 `asset_health.TECHNICAL_COVERAGE_FIELDS` 一一对应）。
+ *
+ * `TECHNICAL_COVERAGE_GAP` 只影响这三列；不能写成 '*'（PE/PB/ROE 与该规则无关）。
+ */
+export const TECHNICAL_INDICATOR_FIELDS = [
+  'period_return',
+  'annualized_volatility',
+  'max_drawdown',
+] as const
+
+/**
  * Sentinel representing all indicators that depend on indicator_snapshot.
  *
  * The '*' wildcard means "any indicator field". This avoids enumerating
@@ -232,13 +247,15 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   MINIMUM_DATA_NOT_READY: [],
   CODE_IDENTITY_ALIAS: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
   LIVE_SCHEMA_INCOMPATIBLE: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
-  // 2026-11-14 资产健康 13 条规则（reports/120 §5 J9）：
+  // 2026-11-14 资产健康规则（reports/120 §5 J9；条数以
+  // asset_health.RULE_CODES 为准，当前 14 条）：
   // - 绝大多数是披露型 → []：它们是"数据资产该维护了"，不是"这些数字不可信"；
-  // - 两条是**字段级遮蔽**（EXT_PERIOD_MISMATCH / DEDUCTED_PROFIT_GAP）→
-  //   只遮各自域，与后端 data_quality.masked_fields_for_codes() 同源。
+  // - 三条是**字段级遮蔽**（EXT_PERIOD_MISMATCH / DEDUCTED_PROFIT_GAP /
+  //   TECHNICAL_COVERAGE_GAP）→ 只遮各自域。前两条与后端
+  //   data_quality.masked_fields_for_codes() 同源，技术三列由筛选门禁隐藏。
   // 前后端口径必须一致，否则会出现页面一片"—"而 API 仍返回数值的自相矛盾。
-  // 2026-11-14（reports/120 §5 J9）字段级遮蔽：这两条**只**让各自域不可信，
-  // 不能写成 '*'（那会把 PE/PB/ROE 一起打成"—"，用户分不清局部坏还是全站坏）。
+  // 字段级遮蔽**只**让各自域不可信，绝不能写成 '*'（那会把 PE/PB/ROE
+  // 一起打成"—"，用户分不清局部坏还是全站坏）。
   EXT_PERIOD_MISMATCH: EXTENDED_INDICATOR_FIELDS,
   FIELD_COVERAGE_LOW: [],
   FIELD_COVERAGE_DROP: [],
@@ -252,6 +269,7 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   ZERO_REFERENCE_ASSET: [],
   DEDUCTED_PROFIT_GAP: DEDUCTED_PROFIT_INDICATOR_FIELDS,
   CHAIN_PROGRESS_STALLED: [],
+  TECHNICAL_COVERAGE_GAP: TECHNICAL_INDICATOR_FIELDS,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -262,8 +280,11 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
  * 每个 warning code 的中文文案（状态页/结果面板直接渲染，不再显示裸英文码）。
  *
  * 文案原则：先说"哪里不对"，再说"会有什么后果"。用户看不懂 code 不是他的问题。
- * 资产健康 12 条（reports/119）与后端 `asset_health.RULE_CODES` 一一对应；
- * 新增 code 时两边必须同时改，否则 Record 的穷尽性检查会直接编译失败。
+ * 资产健康规则与后端 `asset_health.RULE_CODES` 一一对应（条数以该常量为准，
+ * 当前 14 条）。这里**没有编译期穷尽护栏**：新增 code 必须手工同步本文件
+ * 四处 —— `KnownWarningCode` / `KNOWN_WARNING_CODES` /
+ * `WARNING_TO_AFFECTED_FIELDS` / `WARNING_CODE_LABELS`，漏一处就会在运行时
+ * 回落成裸英文码。
  */
 export const WARNING_CODE_LABELS: Readonly<Record<KnownWarningCode, string>> = {
   FINANCIAL_SHELL_ROWS: '财务三表存在只有空壳的报告期',
@@ -288,6 +309,7 @@ export const WARNING_CODE_LABELS: Readonly<Record<KnownWarningCode, string>> = {
   ZERO_REFERENCE_ASSET: '零引用资产（导入了但没人读）',
   DEDUCTED_PROFIT_GAP: '扣非净利润最新报告期覆盖率塌陷',
   CHAIN_PROGRESS_STALLED: '补采链在跑但待补数量没有下降（跑也白跑）',
+  TECHNICAL_COVERAGE_GAP: '技术指标覆盖率不足',
 }
 
 /**

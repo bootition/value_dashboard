@@ -825,7 +825,11 @@ def minimum_data_readiness(
             m.listing_date,
             m.total_shares,
             m.circ_shares,
-            m.listing_date >= CURRENT_DATE - INTERVAL '90 days' AS is_recent_listing,
+            -- 2026-11-17（reports/135）：listing_date IS NULL = 上市日期未知（新股尚未被
+            -- 元数据管线回填）。此时无法证明它是老股，按近期上市豁免深度检查；
+            -- 否则一只新股就会让 /api/ready 永久 503（实测 920309 N菊乐）。
+            (m.listing_date IS NULL
+             OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days') AS is_recent_listing,
             raw.last_date AS raw_last_date,
             qfq.last_date AS qfq_last_date,
             complete_financials.report_date AS financial_report_date,
@@ -833,14 +837,14 @@ def minimum_data_readiness(
                 AS has_pool_metadata,
             -- 新股（上市不足 90 天）仍在积累历史与成交量，属于市场真实状态，
             -- 不阻断筛选（披露项），因此对这些检查豁免。
-            (m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+            (m.listing_date IS NULL OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
              OR (raw.first_date IS NOT NULL
                  AND raw.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
                  AND raw.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
                      date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
                  ) AS INTEGER)))))
                 AS has_raw_history,
-            (m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+            (m.listing_date IS NULL OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
              OR (qfq.first_date IS NOT NULL
                  AND qfq.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
                  AND qfq.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
@@ -855,7 +859,7 @@ def minimum_data_readiness(
                   OR raw.last_date >= CURRENT_DATE - INTERVAL '7 days'
                      AND qfq.last_date >= CURRENT_DATE - INTERVAL '7 days'))
                 AS has_fresh_prices,
-            (m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+            (m.listing_date IS NULL OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
              OR raw.volume_count >= LEAST(?, GREATEST(1, CAST(CEIL(
                  date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
              ) AS INTEGER)))) AS has_meaningful_volume,
@@ -1001,10 +1005,17 @@ def minimum_data_readiness(
         "financial_period",
         "snapshot_input_freshness",
         "snapshot_price_coherence",
+        # 2026-11-17（reports/135）：新股上市首日必然没有行业/指数归属（pool_metadata）
+        # 与除权/分红历史（lineage_coverage）。这两项对老股是真缺口，对新股是**必然状态**，
+        # 属于披露而非阻断——否则每只新股上市第一天都会让 /api/ready 503。
+        "pool_metadata",
+        "lineage_coverage",
     }
     recent_codes = {
         row["stock_code"] for row in rows
-        if row.get("listing_date") is not None and row.get("is_recent_listing")
+        # 2026-11-17：不再要求 listing_date 非空——它为空时 is_recent_listing 已为 True
+        # （见上面的 SQL），这里若还要求非空，新股会绕过豁免、把 readiness 打成 False。
+        if row.get("is_recent_listing")
     }
     missing = {key: codes[:20] for key, codes in issues.items() if codes}
     blocking: dict[str, list[str]] = {}
@@ -1624,6 +1635,17 @@ def build_data_quality_status(
                        LENGTH(b.raw_response_hash) = 32
                        AND regexp_matches(lower(b.raw_response_hash), '^[0-9a-f]{32}$'),
                        FALSE
+                   )
+                   -- 2026-11-17（reports/135）：还有一类**同性质的已披露历史缺口**——
+                   -- 补采管线在 2026-11-14~15 曾把摘要写成
+                   -- `f"{endpoint}:{batch_id}"[:32]`（形如 `xjllbAjaxNew:451ef0…`），
+                   -- 既非内容寻址、原始响应也从未归档。生成侧已在 reports/124 改为
+                   -- `sha256(请求描述)` + 先归档后登记；这 13 个历史批次不可回溯，
+                   -- 与 32 位 MD5 时代那批同类：**如实计入 legacy 披露，不算今天的数据损坏**。
+                   -- 判据只看形态（endpoint 名 + 冒号 + 十六进制串），与来源无关。
+                   OR COALESCE(
+                       regexp_matches(b.raw_response_hash, '^[A-Za-z_]+:[0-9a-f]{16,32}$'),
+                       FALSE
                    ) AS is_legacy_digest,
                    NOT EXISTS (
                        SELECT 1 FROM valid_hashes archive
@@ -1750,7 +1772,7 @@ def build_data_quality_status(
     if not readiness["ready"]:
         warning_codes.append("MINIMUM_DATA_NOT_READY")
 
-    # 2026-11-14（reports/119）：把人工审查结论固化成的 12 条资产健康规则挂进
+    # 2026-11-14（reports/119）：把人工审查结论固化成的 14 条资产健康规则（见 asset_health.RULE_CODES）挂进
     # 同一个状态载荷。这里只跑**廉价规则**（正式库实测 <2s），贵重规则（归档
     # 交叉核验 ~31s）留给 `vd data doctor`；预算耗尽/未启用的规则在 asset_health
     # 里如实标 skipped，不会被静默丢弃。

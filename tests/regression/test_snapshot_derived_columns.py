@@ -212,3 +212,54 @@ def test_registered_domains_declare_existing_columns(duckdb_store: DuckDBStore) 
     }
     for domain in derived_snapshot_domains():
         assert set(domain.columns) <= columns, domain.name
+
+
+# ─── 2b. 生产形态的 staging（全列）也必须保全（reports/135 回归）─────────
+#
+# 上面第 2 条用例用 5 列 staging，而**生产路径的 staging 是全 70 列**
+# （`CREATE TABLE staging AS SELECT * FROM indicator_snapshot WHERE FALSE`）。
+# 旧实现把 "staging 的列集合" 当成 `owned_columns` → `untouched = 全列 - 全列 = 空`
+# → 派生列保全与"被清空就回滚"两段**都空转**。生产库里 ROCE 只靠
+# `roce_history` 覆盖 100% 侥幸活着。本用例用生产形态 staging 钉死这条路径。
+
+
+def test_full_publish_with_production_shaped_staging_preserves_derived_columns(
+    duckdb_store: DuckDBStore, calculator: IndicatorCalculator,
+) -> None:
+    """staging 含**全部**列时，派生列仍必须被保全。
+
+    这是 `reports/135` 复现的形态：审计用全列 staging 跑真实 `_publish_snapshot`，
+    发现 probe 列被清成 NULL 且**不报错**（而 5 列 staging 的用例是绿的）。
+    """
+    _add_probe_column(duckdb_store)
+    code = "000006"
+    report_date = date(2025, 12, 31)
+    _seed_snapshot(duckdb_store, code, report_date=report_date, probe=3.25)
+
+    staging = "indicator_snapshot_staging_fullshape_test"
+    # 生产形态：staging 复制 indicator_snapshot 的**全列**
+    duckdb_store.write_query(
+        f"""CREATE TABLE "{staging}" AS
+            SELECT * FROM indicator_snapshot WHERE FALSE"""
+    )
+    # 只按计算器真正负责的列填值（与生产 staging 被 `_insert_records_in_connection`
+    # 按同样方式填充一致）
+    duckdb_store.write_query(
+        f"""INSERT INTO "{staging}" BY NAME
+            SELECT stock_code, report_date, calculated_at, data_version, pe_ttm
+            FROM (SELECT ? AS stock_code, CAST(? AS DATE) AS report_date,
+                         now() AS calculated_at, 'fixture' AS data_version,
+                         9.9 AS pe_ttm)""",
+        [code, report_date.isoformat()],
+    )
+    try:
+        calculator._publish_snapshot(staging, expected_count=1, records=[
+            _record(code, report_date),
+        ])
+    finally:
+        duckdb_store.write_query(f'DROP TABLE IF EXISTS "{staging}"')
+
+    assert _probe(duckdb_store, code) == pytest.approx(3.25), (
+        "生产形态 staging（全列）下派生列被清空了 —— 说明 owned_columns 又退回到"
+        "'staging 的列集合'，守卫重新空转"
+    )

@@ -520,6 +520,17 @@ class ExtendedIndicatorBuilder:
                 conn.execute("DELETE FROM indicator_ext")
             conn.execute(sql, [calculated_at, SOURCE, DATA_VERSION])
             after = conn.execute("SELECT COUNT(*) FROM indicator_ext").fetchone()[0]
+            # rows_written 必须报**本次实际写入的行数**，不是全表 diff 也不是股票数：
+            #   · 全量重建：整表都是本次写的 → rows_after；
+            #   · 按股重建：只数目标股票的行（一只股票每期一行，可能是多行）。
+            # 旧写法 `after - before if not target else after` 在正式库上会把
+            # force_codes=[689009] 报成 361393 行、把全量重建报成 0 行。
+            if target:
+                rows_written = conn.execute(
+                    f"SELECT COUNT(*) FROM indicator_ext WHERE stock_code IN ({quoted})"
+                ).fetchone()[0]
+            else:
+                rows_written = after
             filled = conn.execute(
                 """SELECT COUNT(*) FILTER (WHERE free_cash_flow IS NOT NULL) AS fcf,
                           COUNT(*) FILTER (WHERE total_asset_turnover IS NOT NULL) AS turnover,
@@ -531,7 +542,7 @@ class ExtendedIndicatorBuilder:
             "status": "success",
             "rows_before": int(before),
             "rows_after": int(after),
-            "rows_written": int(after - before) if not target else int(after),
+            "rows_written": int(rows_written),
             "scope": scope,
             "codes": target,
             "filled": {

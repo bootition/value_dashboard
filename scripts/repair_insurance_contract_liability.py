@@ -29,6 +29,20 @@
 判据 4 单独用时对非保险股不成立（有 14,359 行 ≥0.25），所以必须与判据 1 合用；
 两条合起来在 2026-11-16 正式库上正好命中 74 行、且**零**非保险行。
 
+⚠️ 2026-11-17 更正（reports/135 第 5 项）：本脚本当时打印的
+`scope_breach_rows=0` **不能**当作"零误伤"的证据 —— 那条查询把
+`sw_level2 <> '保险Ⅱ'` 与 `sw_level2 = '保险Ⅱ'` 同时写进 WHERE，恒为假。
+现已改成真正能检出"非保险股被误改"的反事实探针（去掉矛盾行后正式库 8,546 行）。
+真正证明零误伤的是逐行对比（74 行全部来自 5 只险企），不是那条 SQL。
+
+写入路径的根治
+--------------
+本脚本只处理**存量**。写入路径的守卫（下一期不再复发）在
+`app/core/financial_guards.py`，已接入 `init._upsert_financial_row` 与
+`update._write_sina_financial_table`；被清掉的金额由
+`scripts/backfill_insurance_contract_liability.py` 回填到
+`financial_sector_items.insurance_contract_liability`。
+
 用法
 ----
     python scripts/repair_insurance_contract_liability.py            # dry-run（默认）
@@ -156,10 +170,15 @@ def build_update_sql(codes: list[str] | None = None) -> str:
     in_list = ", ".join(f"'{code}'" for code in normalized)
     return UPDATE_REPAIR_SQL.rstrip().rstrip(";") + f"\n   AND b.stock_code IN ({in_list})"
 
-#: 误伤复核：UPDATE 会触及但**行业不是** 保险Ⅱ 的行数。恒为 0 才放行写库。
-#: 说明：`contract_liabilities/total_liabilities >= 0.25` 这条量级判据**单独**用时
-#: 会命中上万行非保险股（2026-11-16 实测 8,546 行），所以行业判据是硬门槛，
-#: 本查询就是用来证明硬门槛没被写错的。
+#: 行业门槛**承重**证据（反事实探针）：把 UPDATE 的行业判据换成它的补集后，
+#: 会命中多少行。这不是"误伤行数"，而是"如果没有行业门槛就会误伤多少行" ——
+#: 数字必须 > 0，否则说明行业判据根本不起作用。
+#:
+#: ⚠️ 2026-11-17 修正（reports/135）：本查询原先把
+#: `COALESCE(m.sw_level2,'') <> '保险Ⅱ'` 和 `m.sw_level2 = '保险Ⅱ'` **同时**写在
+#: WHERE 里（自相矛盾），恒返回 0；并且脚本把它当成了"零误伤"的证据打印。
+#: 去掉矛盾行后正式库实测 8,546 行（非保险股中 `合同负债/负债合计 >= 0.25` 的行数），
+#: 证明量级判据单独用时完全不可用，行业判据是唯一的防误伤机制。
 SELECT_SCOPE_BREACH_SQL = f"""
 SELECT COUNT(*) AS n
 FROM balance_sheet b
@@ -170,7 +189,6 @@ WHERE COALESCE(m.sw_level2, '') <> '{INSURANCE_SW_LEVEL2}'
   AND b.total_liabilities IS NOT NULL
   AND b.total_liabilities > 0
   AND b.contract_liabilities / b.total_liabilities >= {MIN_LIABILITY_SHARE}
-  AND m.sw_level2 = '{INSURANCE_SW_LEVEL2}'
 """
 
 
@@ -321,7 +339,11 @@ def main() -> None:
 
     logger.info("[BACKUP] %s", report["backup_dir"])
     logger.info("已清空 %d 行；复核剩余 %d 行", report["written"], report.get("remaining_after", 0))
-    logger.info("误伤复核：被触及的非保险股行数 = %s（应为 0）", report["scope_breach_rows"])
+    logger.info(
+        "行业门槛承重证据：去掉 sw_level2='%s' 后会被同一量级判据命中的非保险股行数 = %s"
+        "（必须 > 0；= 0 说明行业判据没在起作用的范围内，见 reports/135 第 5 项）",
+        INSURANCE_SW_LEVEL2, report["scope_breach_rows"],
+    )
     logger.info(
         "下一步：重跑 `vd data update` 让 indicator_ext 的合同负债相关派生列（若有）随之为 NULL；"
         "保险合同负债的正式归宿需主控给 financial_sector_items 加列 "

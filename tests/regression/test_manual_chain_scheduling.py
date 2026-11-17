@@ -402,10 +402,13 @@ def test_indicator_ext_rebuilds_when_ext_period_behind_trio(
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     builds: list[int] = []
 
-    def fake_build(self, codes=None):  # noqa: ANN001
+    # 2026-11-17（reports/135）：`update.py::_refresh_indicator_ext` 现在会传
+    # `force_codes=`（股本链变化时按变更股重建，P0-9）。测试桩必须接受该 kwarg，
+    # 否则 TypeError 会让整步失败、重建根本没发生。
+    def fake_build(self, codes=None, force_codes=None):  # noqa: ANN001
         builds.append(1)
         return {"status": "success", "rows_before": 3, "rows_after": 3,
-                "rows_written": 0, "filled": {}, "report_date_range": []}
+                "rows_written": 3, "filled": {}, "report_date_range": []}
 
     monkeypatch.setattr(ExtendedIndicatorBuilder, "build", fake_build)
 
