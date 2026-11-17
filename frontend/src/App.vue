@@ -20,7 +20,6 @@ const autoUpdateRunning = ref(false)
 let autoUpdateTimer: number | undefined
 
 async function refreshAutoUpdateStatus() {
-  if (route.meta.staticPreview) return
   try {
     const resp = await axios.get<AutoUpdateStatus>(
       '/api/data-status/auto-update',
@@ -34,7 +33,6 @@ async function refreshAutoUpdateStatus() {
 }
 
 onMounted(async () => {
-  if (route.meta.staticPreview) return
   try {
     const resp = await axios.get<Summary>('/api/data-status/summary')
     quality.value = resp.data.data_quality
@@ -120,9 +118,8 @@ const themeOverrides = {
       <n-dialog-provider>
         <n-layout position="absolute">
           <!-- L1-6: 键盘用户跳过导航直达内容 -->
-          <a v-if="!route.meta.staticPreview" href="#main-content" class="skip-link">跳到主要内容</a>
-          <router-view v-if="route.meta.staticPreview" />
-          <n-layout v-else has-sider class="app-shell">
+          <a href="#main-content" class="skip-link">跳到主要内容</a>
+          <n-layout has-sider class="app-shell">
             <n-layout-sider bordered :width="226" class="app-sidebar">
               <router-link to="/screening" class="app-brand"><span>V</span>value</router-link>
               <p class="app-nav-label">研究工具</p>
