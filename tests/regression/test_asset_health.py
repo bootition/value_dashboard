@@ -273,16 +273,18 @@ def _write_manifest(repo_root: Path, price_latest: str) -> Path:
 
 
 def test_engine_covers_every_documented_rule(duckdb_store: DuckDBStore) -> None:
-    """13 条规则一条都不能少——少一条就是少一条自动检查。
+    """14 条规则一条都不能少——少一条就是少一条自动检查。
 
     2026-11-14 第二轮（reports/120 §5 J1/J9/J10）新增第 13 条
-    CHAIN_PROGRESS_STALLED；同时每条规则都带 tier（cheap/expensive）与
+    CHAIN_PROGRESS_STALLED；2026-11-16（reports/131 §9.2 P0-5）新增第 14 条
+    TECHNICAL_COVERAGE_GAP（技术三列最新期覆盖率 < 95% → P1/block）。
+    同时每条规则都带 tier（cheap/expensive）与
     severity（block/disclose/inventory）—— 两者是**独立**维度，
     分级/调度都从这里取，不允许在别处再写一份。
     """
     payload = _payload(duckdb_store, repo_root=PROJECT_ROOT)
     assert [rule["code"] for rule in payload["rules"]] == list(RULE_CODES)
-    assert len(RULE_CODES) == 13
+    assert len(RULE_CODES) == 14
     assert set(payload["level_counts"]) == {"P1", "P2", "P3"}
     assert set(payload["severity_counts"]) == {"block", "disclose", "inventory"}
     for rule in payload["rules"]:
@@ -314,7 +316,7 @@ def test_single_rule_failure_is_reported_not_raised(
     payload = _payload(duckdb_store, repo_root=PROJECT_ROOT)
     assert _rule(payload, "DEDUCTED_PROFIT_GAP")["status"] == "error"
     assert payload["errors"][0]["code"] == "DEDUCTED_PROFIT_GAP"
-    assert len(payload["rules"]) == 13
+    assert len(payload["rules"]) == 14
 
 
 def test_expensive_rule_is_skipped_when_not_allowed(duckdb_store: DuckDBStore) -> None:

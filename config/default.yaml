@@ -223,7 +223,7 @@ logging:
   format: '%(asctime)s %(levelname)s %(name)s: %(message)s'
 
 # 资产健康检查（reports/119 / reports/120 §5）——`app/core/quality/asset_health.py` + `vd data doctor`
-# 13 条规则、两个档位。每条规则带 severity（block | disclose | inventory）：
+# 14 条规则、两个档位。每条规则带 severity（block | disclose | inventory）：
 #   block     = 屏幕上的数字可能不可信 / 该域已失效 → 进 level_counts 与
 #               p1_codes（→ data_quality.warning_codes、doctor 退出码 1）；
 #   disclose  = 如实披露的待办/维护项（链路停摆、数据包过期、结构性可空字段
@@ -246,6 +246,7 @@ asset_health:
   # 允许跑贵重规则（归档交叉核验，正式库实测 ~31s）时的总预算。
   expensive_max_seconds: 180.0
   # 判定阈值（改这里不用改代码）
+  technical_coverage_pct: 95.0    # TECHNICAL_COVERAGE_GAP（reports/131 P0-5）
   coverage_low_pct: 90.0          # FIELD_COVERAGE_LOW
   coverage_drop_pp: 10.0          # FIELD_COVERAGE_DROP：绝对跌幅
   coverage_drop_ratio: 0.5        # FIELD_COVERAGE_DROP：相对跌幅

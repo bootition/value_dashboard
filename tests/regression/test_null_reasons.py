@@ -120,11 +120,20 @@ def test_every_reason_has_label_and_description() -> None:
 
 
 def test_screening_fields_map_to_disjoint_domains() -> None:
+    """域划分的结构性断言（**不写魔法数字**）。
+
+    2026-11-17（`reports/133` R1）：这里原来是 `== 61 / == 55` 两个硬编码计数，
+    ROCE 落地加列后立刻变成 HEAD 上的假失败——"字段清单来自 engine 不硬编码"
+    这句话在注释里写了，断言里却硬编码了。现在改成：
+    ① 两域都非空；② 已知锚点字段各自归域；③ 两域不相交；④ 反查自洽。
+    这样新增指标列不会再把测试打红，而"域划分被破坏"仍然会红。
+    """
     snapshot_fields = domain_fields(DOMAIN_SNAPSHOT)
     ext_fields = domain_fields(DOMAIN_EXT)
-    # 字段清单必须来自 screening.engine（不硬编码），数量是 reports/119 的口径
-    assert len(snapshot_fields) == 56
-    assert len(ext_fields) == 55
+    assert snapshot_fields and ext_fields
+    # 锚点：主快照域的 ROCE 六列 + 扩展域的自由现金流（两域各一个代表）
+    assert {"roce_5y_median", "roce_10y_median", "roce_eligible"} <= snapshot_fields
+    assert {"free_cash_flow", "total_asset_turnover"} & ext_fields
     assert not snapshot_fields & ext_fields, "同一字段名不许跨域，否则稀疏表无法反查域"
     for name in snapshot_fields | ext_fields:
         assert field_domain(name) in {DOMAIN_SNAPSHOT, DOMAIN_EXT}

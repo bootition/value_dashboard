@@ -744,6 +744,52 @@ def _dsl_indicator_unit(expression: dict[str, Any]) -> str:
 # 无分红公司股息率）实测仍在 73%~85%，真正的"整族缺失"是 0.1%~2% 这种量级。
 _EXTENDED_MIN_COVERAGE_PCT = 50.0
 
+# 技术三列门禁（2026-11-16，reports/131 §9.2 P0-5）。与 asset_health
+# `TECHNICAL_COVERAGE_GAP` 同一阈值/同一字段集：体检说不可信，指标列表就必须
+# 以 unavailable(reason=not_available_for_latest_period) 隐藏，不能一边报警一边让用户选。
+_TECHNICAL_MIN_COVERAGE_PCT = 95.0
+_TECHNICAL_COVERAGE_FIELDS: tuple[str, ...] = (
+    "period_return",
+    "annualized_volatility",
+    "max_drawdown",
+)
+
+
+def _technical_field_coverage(request: Request) -> dict[str, float]:
+    """按"最新快照报告期覆盖率%"实测技术三列。
+
+    复用 `_EXTENDED_MIN_COVERAGE_PCT` 同一条门禁语义：覆盖率不足的字段进
+    `unavailable`，而不是让用户选中一个"永远筛出 0 只"的死条件。
+    任何异常返回空字典（调用方按"无数据不拦"处理）——体检失败不能把
+    指标列表整个打挂。
+    """
+    counts = ", ".join(
+        f'COUNT("{column}") AS "{column}"' for column in _TECHNICAL_COVERAGE_FIELDS
+    )
+    try:
+        rows = request.app.state.duck.read_query(
+            f"""
+            WITH latest AS (
+                SELECT MAX(report_date) AS report_date FROM indicator_snapshot
+            )
+            SELECT COUNT(*) AS total, {counts}
+            FROM indicator_snapshot s, latest
+            WHERE s.report_date = latest.report_date
+            """
+        )
+    except Exception:  # noqa: BLE001 - 覆盖率探针失败不影响指标列表
+        return {}
+    if not rows:
+        return {}
+    row = rows[0]
+    total = int(row.get("total") or 0)
+    if total <= 0:
+        return {}
+    return {
+        column: float(row.get(column) or 0) / total * 100.0
+        for column in _TECHNICAL_COVERAGE_FIELDS
+    }
+
 
 def _extended_field_coverage(request: Request) -> dict[str, float]:
     """按 (字段 → 最新报告期覆盖率%) 实测 indicator_ext。
@@ -825,12 +871,34 @@ def list_available_indicators(request: Request) -> dict:
 
     indicators: list[dict] = []
     unavailable: list[dict] = []
+    # reports/131 §9.2 P0-5：技术三列最新期覆盖率 < 95% → 进 unavailable。
+    # 只影响这三个字段，绝不触碰下面的信任门禁（masked_untrusted/deprecated）。
+    technical_coverage = _technical_field_coverage(request)
     for col in sorted(SNAPSHOT_COLUMNS):
+        coverage = technical_coverage.get(col)
+        if (
+            col in _TECHNICAL_COVERAGE_FIELDS
+            and coverage is not None
+            and coverage < _TECHNICAL_MIN_COVERAGE_PCT
+        ):
+            unavailable.append({
+                "name": col,
+                "domain": "snapshot",
+                "coverage_pct": round(coverage, 2),
+                "reason": "not_available_for_latest_period",
+                "message": (
+                    "该技术指标在最新报告期覆盖率 "
+                    f"{coverage:.2f}% < {_TECHNICAL_MIN_COVERAGE_PCT:.0f}%，"
+                    "qfq 有待重算；为避免筛出 0 只的假结论，暂不暴露"
+                ),
+            })
+            continue
         indicators.append({
             "name": col,
             "rankable": col in RANKABLE_INDICATORS,
             # 2026-08-14 红队 F3：单位元数据单一来源，前端据此做输入换算与展示
             "unit": field_unit(col),
+            **({"coverage_pct": round(coverage, 2)} if coverage is not None else {}),
         })
     for field in sorted(NORMALIZED_FIELDS):
         indicators.append({

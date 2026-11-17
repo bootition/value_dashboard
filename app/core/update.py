@@ -799,17 +799,35 @@ class IncrementalUpdater:
         # reports/122 §2.2 J6：上一轮因 qfq 滞后进入待重算名单的股票，本轮**无条件**并入重算
         # 集合（与指纹/价格是否变化无关），重算成功后从名单移除。
         tech_pending_codes = self._load_tech_recompute_pending()
+        # reports/131 §9.2 P0-5：价格步骤刚写入 qfq 的股票（含上一轮失败残留）
+        # 必须强制重算技术三列。走价格域增量即可，不升级为整股全量重算。
+        technical_pending_codes = self._load_technical_pending()
 
         if max_stocks > 0:
-            if price_step["status"] == "success" and price_step.get("success", 0) > 0:
+            if (
+                price_step["status"] == "success"
+                and (
+                    price_step.get("success", 0) > 0
+                    or tech_pending_codes
+                    or technical_pending_codes
+                )
+            ):
                 from app.core.indicators.calculator import IndicatorCalculator
 
                 calculator = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite)
-                price_force_codes = set(price_xdxr_codes) | set(tech_pending_codes)
+                price_force_codes = (
+                    set(price_xdxr_codes)
+                    | set(tech_pending_codes)
+                    | set(technical_pending_codes)
+                )
                 if price_raw_full_refetch:
                     price_force_codes.update(updated_price_codes)
                 bounded_codes = list(
-                    dict.fromkeys([*updated_price_codes, *tech_pending_codes])
+                    dict.fromkeys([
+                        *updated_price_codes,
+                        *tech_pending_codes,
+                        *technical_pending_codes,
+                    ])
                 )
                 price_method = getattr(
                     calculator, "compute_price_sensitive_for_codes", None,
@@ -828,6 +846,12 @@ class IncrementalUpdater:
                 if tech_pending_codes:
                     snapshot_step["tech_recompute_pending_cleared"] = (
                         self._finalize_tech_recompute(snapshot_step, tech_pending_codes)
+                    )
+                if technical_pending_codes:
+                    snapshot_step["technical_pending_cleared"] = (
+                        self._finalize_technical_pending(
+                            snapshot_step, technical_pending_codes,
+                        )
                     )
                 report_step("indicators", snapshot_step)
             # 2026-11-14 清理：早先这里有一个"blocked 时先写 partial"的兜底，
@@ -1055,6 +1079,13 @@ class IncrementalUpdater:
                 snapshot_step["tech_recompute_pending_cleared"] = (
                     self._finalize_tech_recompute(snapshot_step, tech_pending_codes)
                 )
+            if technical_pending_codes:
+                # 全量重算同样覆盖技术三列 → 成功即清空。
+                snapshot_step["technical_pending_cleared"] = (
+                    self._finalize_technical_pending(
+                        snapshot_step, technical_pending_codes,
+                    )
+                )
             report_step("indicators", snapshot_step)
             if snapshot_step["status"] != "success":
                 snapshot_step["reason"] = "price update retained; snapshot publication not ready"
@@ -1062,6 +1093,7 @@ class IncrementalUpdater:
             financial_step["status"] in {"success", "partial"}
             or retry_recompute_codes
             or tech_pending_codes
+            or technical_pending_codes
         ):
             from app.core.indicators.calculator import IndicatorCalculator
 
@@ -1089,6 +1121,10 @@ class IncrementalUpdater:
                 code for code in list(dict.fromkeys([
                     *updated_price_codes,
                     *price_stale_codes,
+                    # 2026-11-16 reports/131 §9.2 P0-5：qfq 写入成功但最新价未变
+                    # 的股票也要进价格域重算（force 绕过 skip），否则技术三列
+                    # 永远停在补齐前写死的 NULL。
+                    *technical_pending_codes,
                 ]))
                 if code not in full_codes
             ]
@@ -1099,7 +1135,9 @@ class IncrementalUpdater:
                 ]))
                 if code not in full_codes
             ]
-            price_force_codes = set(full_codes) | set(price_xdxr_codes)
+            price_force_codes = (
+                set(full_codes) | set(price_xdxr_codes) | set(technical_pending_codes)
+            )
             if price_raw_full_refetch:
                 price_force_codes.update(updated_price_codes)
 
@@ -1155,6 +1193,12 @@ class IncrementalUpdater:
                 if tech_pending_codes:
                     snapshot_step["tech_recompute_pending_cleared"] = (
                         self._finalize_tech_recompute(snapshot_step, tech_pending_codes)
+                    )
+                if technical_pending_codes:
+                    snapshot_step["technical_pending_cleared"] = (
+                        self._finalize_technical_pending(
+                            snapshot_step, technical_pending_codes,
+                        )
                     )
                 report_step("indicators", snapshot_step)
 
@@ -1823,6 +1867,12 @@ class IncrementalUpdater:
                 "ext_max_period": decision.get("ext_max_period"),
                 "complete_trio_period": decision.get("complete_period"),
                 "ext_rows": decision.get("ext_rows", 0),
+                # 2026-11-17（reports/131 P0-9）：指纹新增 `share_capital_history` 段后，
+                # 归因能分清"全量重建"与"只有股本变了"。后者只重建受影响的少数股票
+                # （689009 的 unit_rescale:10 就是这一类），避免 36 万行整表重写。
+                "ext_scope": decision.get("scope"),
+                "ext_changed_inputs": decision.get("changed_inputs", []),
+                "ext_force_codes": decision.get("force_codes", []),
             })
             if not decision["required"] and not self._refresh_due(
                 self._INDICATOR_EXT_STATE_KEY, self.indicator_ext_max_age_days,
@@ -1833,7 +1883,10 @@ class IncrementalUpdater:
             build_reason = (
                 decision["reason"] if decision["required"] else "max_age_exceeded"
             )
-            report = ExtendedIndicatorBuilder(duck=self.duck, paths=None).build()
+            force_codes = decision.get("force_codes") or []
+            report = ExtendedIndicatorBuilder(duck=self.duck, paths=None).build(
+                force_codes=force_codes if decision.get("scope") == "codes" else None,
+            )
             step.update({
                 "status": "success" if report.get("status") == "success" else "failed",
                 "reason": build_reason,
@@ -2439,6 +2492,21 @@ class IncrementalUpdater:
     _TECH_RECOMPUTE_PENDING_LIMIT = 2000
     _TECH_RECOMPUTE_PENDING_TTL_DAYS = 3
 
+    # ─── 技术指标强制重算集合（2026-11-16，reports/131 §9.2 P0-5）──────────────
+    #
+    # `tech_recompute_pending` 只覆盖"qfq 最新日 < raw 最新日"的**滞后**形态；
+    # 还有一种形态它永远抓不到：qfq 在历史上是事后补齐的（例如某轮只补到旧日期，
+    # 或手工补采/重放），补齐后 qfq 最新日已经和 raw 齐平 → 滞后判据为假，但
+    # 快照里的技术三列还停在补齐前写死的 NULL（正式库实测 2,931/5,575 = 52.6%）。
+    #
+    # 因此本标记的语义是"**qfq 写入成功**"而不是"qfq 落后"：价格步骤每成功落盘
+    # 一只股票，就把它连同 qfq 水位写进 `technical_pending`；指标步骤把这些股票
+    # **强制**并入价格域重算（force_codes 绕过"最新价没变就跳过"），成功后移出。
+    # 结构复用 tech_recompute_pending 的 {"code","status","marked_at","qfq_latest"}，
+    # 上限 6,000（覆盖全市场一轮写入）/ TTL 3 天，防止异常轮次无限堆积。
+    _TECHNICAL_PENDING_KEY = "technical_pending"
+    _TECHNICAL_PENDING_LIMIT = 6000
+
     @staticmethod
     def _parse_state_timestamp(value: Any) -> datetime | None:
         """解析 data_refresh_state 里的 ISO 时间戳（naive 按 UTC 处理）。"""
@@ -2455,8 +2523,13 @@ class IncrementalUpdater:
             return None
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
-    def _read_tech_recompute_state(self) -> list[dict[str, Any]]:
+    def _read_tech_recompute_state(
+        self, key: str | None = None,
+    ) -> list[dict[str, Any]]:
         """读取待重算名单原始记录（只读解析，兼容三种历史形态）。
+
+        `key` 缺省为 `tech_recompute_pending`；`technical_pending` 复用同一个
+        JSON 结构（{"code","status","marked_at","qfq_latest"}）。
 
         记录形态（同一 key 下的 JSON 数组）::
 
@@ -2473,7 +2546,7 @@ class IncrementalUpdater:
         try:
             rows = self.sqlite.query(
                 "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
-                [self._TECH_RECOMPUTE_PENDING_KEY],
+                [key or self._TECH_RECOMPUTE_PENDING_KEY],
             )
         except Exception as error:  # noqa: BLE001 - 读失败不得炸掉价格步骤
             logger.warning("读取技术指标待重算名单失败: %s", error)
@@ -2554,7 +2627,9 @@ class IncrementalUpdater:
             kept.append(record)
         return kept
 
-    def _write_tech_recompute_entries(self, records: list[dict[str, Any]]) -> bool:
+    def _write_tech_recompute_entries(
+        self, records: list[dict[str, Any]], *, key: str | None = None,
+    ) -> bool:
         try:
             now = datetime.now(UTC).isoformat()
             with self.sqlite.transaction() as conn:
@@ -2564,7 +2639,7 @@ class IncrementalUpdater:
                        ON CONFLICT(key) DO UPDATE SET
                          value=excluded.value, updated_at=excluded.updated_at""",
                     [
-                        self._TECH_RECOMPUTE_PENDING_KEY,
+                        key or self._TECH_RECOMPUTE_PENDING_KEY,
                         json.dumps(
                             [self._tech_record_payload(record) for record in records],
                             ensure_ascii=False,
@@ -2577,7 +2652,9 @@ class IncrementalUpdater:
             return False
         return True
 
-    def _load_tech_recompute_pending(self, *, now: datetime | None = None) -> list[str]:
+    def _load_tech_recompute_pending(
+        self, *, now: datetime | None = None, key: str | None = None,
+    ) -> list[str]:
         """读取**待重算**股票代码（自动丢弃过期记录，按标记顺序返回）。
 
         只读诊断 SQL（运维事后核对）::
@@ -2595,7 +2672,7 @@ class IncrementalUpdater:
             ORDER BY r.stock_code;
         """
         records = self._prune_expired_tech_entries(
-            self._read_tech_recompute_state(), now=now,
+            self._read_tech_recompute_state(key), now=now,
         )
         return [record["code"] for record in records if record["status"] == "pending"]
 
@@ -2604,6 +2681,8 @@ class IncrementalUpdater:
         watermarks: dict[str, str | None] | Iterable[str],
         *,
         now: datetime | None = None,
+        key: str | None = None,
+        limit: int | None = None,
     ) -> int:
         """把 qfq 滞后的股票写进待重算名单（幂等；同水位算过的不重复入列）。
 
@@ -2628,7 +2707,7 @@ class IncrementalUpdater:
         moment = now or datetime.now(UTC)
         stamp = moment.isoformat()
         records = self._prune_expired_tech_entries(
-            self._read_tech_recompute_state(), now=moment,
+            self._read_tech_recompute_state(key), now=moment,
         )
         by_code = {record["code"]: record for record in records}
         added = 0
@@ -2659,31 +2738,35 @@ class IncrementalUpdater:
             added += 1
         ordered = list(by_code.values())
         pending = [record for record in ordered if record["status"] == "pending"]
-        if len(pending) > self._TECH_RECOMPUTE_PENDING_LIMIT:
-            overflow = len(pending) - self._TECH_RECOMPUTE_PENDING_LIMIT
+        entry_limit = limit if limit is not None else self._TECH_RECOMPUTE_PENDING_LIMIT
+        if len(pending) > entry_limit:
+            overflow = len(pending) - entry_limit
             logger.warning(
                 "技术指标待重算名单超过上限 %d，丢弃最早的 %d 只（请检查 qfq 源滞后）",
-                self._TECH_RECOMPUTE_PENDING_LIMIT, overflow,
+                entry_limit, overflow,
             )
             dropped = {record["code"] for record in pending[:overflow]}
             ordered = [record for record in ordered if record["code"] not in dropped]
-        if not self._write_tech_recompute_entries(ordered):
+        if not self._write_tech_recompute_entries(ordered, key=key):
             return 0
         logger.info(
-            "[增量] qfq 滞后 %d 只 → 待重算名单新增 %d（同水位已算过 %d，累计待重算 %d）: %s",
+            "[增量] %s %d 只 → 待重算名单新增 %d（同水位已算过 %d，累计待重算 %d）: %s",
+            "qfq 滞后" if key is None else "qfq 已写入",
             len(fresh), added, skipped_same_watermark,
-            min(len(pending), self._TECH_RECOMPUTE_PENDING_LIMIT),
+            min(len(pending), entry_limit),
             ", ".join(list(fresh)[:20]),
         )
         return added
 
-    def _clear_tech_recompute_pending(self, codes: Iterable[str]) -> int:
+    def _clear_tech_recompute_pending(
+        self, codes: Iterable[str], *, key: str | None = None,
+    ) -> int:
         """把已完成重算的股票标记为 done（记下 qfq 水位，失败/被拒的保留）。"""
         done_codes = {str(code) for code in codes if code}
         if not done_codes:
             return 0
         stamp = datetime.now(UTC).isoformat()
-        records = self._read_tech_recompute_state()
+        records = self._read_tech_recompute_state(key)
         cleared = 0
         for record in records:
             if record["code"] in done_codes and record["status"] == "pending":
@@ -2692,7 +2775,7 @@ class IncrementalUpdater:
                 cleared += 1
         if not cleared:
             return 0
-        if not self._write_tech_recompute_entries(records):
+        if not self._write_tech_recompute_entries(records, key=key):
             return 0
         logger.info("[增量] %d 只技术指标已完成重算，移出待重算名单", cleared)
         return cleared
@@ -2741,9 +2824,76 @@ class IncrementalUpdater:
             for row in rows
         }
 
+    def _qfq_watermarks(self, codes: Iterable[str]) -> dict[str, str | None]:
+        """读取一批股票**落库后**的 qfq 最新日（technical_pending 的水位）。
+
+        与 `_qfq_lag_watermarks` 的区别：这里不比较 raw，只回答"这只股票
+        当前 qfq 写到哪一天"，供 `_mark_technical_pending` 做同水位去重。
+        """
+        requested = [str(code) for code in dict.fromkeys(codes) if code]
+        if not requested:
+            return {}
+        try:
+            rows = self.duck.read_query(
+                """SELECT stock_code, CAST(MAX(trade_date) AS VARCHAR) AS latest_qfq
+                   FROM price_daily_qfq
+                   WHERE stock_code IN (SELECT unnest(?::VARCHAR[]))
+                   GROUP BY stock_code""",
+                [requested],
+            )
+        except Exception as error:  # noqa: BLE001 - 水位探针失败不改变价格步骤状态
+            logger.warning("读取 qfq 水位失败（technical_pending 不写入）: %s", error)
+            return {}
+        found = {
+            str(row["stock_code"]): (
+                None if row.get("latest_qfq") is None else str(row["latest_qfq"])[:10]
+            )
+            for row in rows
+        }
+        # 没有 qfq 行的股票也入列（水位 None），确保下一轮会尝试重算。
+        return {code: found.get(code) for code in requested}
+
     def _qfq_lag_codes_vs_raw(self, target_codes: Iterable[str]) -> list[str]:
         """`_qfq_lag_watermarks` 的代码清单形态（只关心"有没有滞后"时用）。"""
         return sorted(self._qfq_lag_watermarks(target_codes))
+
+    # ─── technical_pending（qfq 写入成功 → 强制重算技术三列）───────────────
+    def _load_technical_pending(self, *, now: datetime | None = None) -> list[str]:
+        """读取"qfq 已写入、待强制重算技术指标"的股票代码。
+
+        运维事后核对::
+
+            SELECT value FROM data_refresh_state WHERE key = 'technical_pending';
+        """
+        return self._load_tech_recompute_pending(
+            now=now, key=self._TECHNICAL_PENDING_KEY,
+        )
+
+    def _mark_technical_pending(
+        self,
+        watermarks: dict[str, str | None] | Iterable[str],
+        *,
+        now: datetime | None = None,
+    ) -> int:
+        """把 qfq 写入成功的股票写进 `technical_pending`（幂等、同水位去重）。"""
+        return self._mark_tech_recompute_pending(
+            watermarks,
+            now=now,
+            key=self._TECHNICAL_PENDING_KEY,
+            limit=self._TECHNICAL_PENDING_LIMIT,
+        )
+
+    def _clear_technical_pending(self, codes: Iterable[str]) -> int:
+        """把技术指标已重算成功的股票移出 `technical_pending`。"""
+        return self._clear_tech_recompute_pending(
+            codes, key=self._TECHNICAL_PENDING_KEY,
+        )
+
+    def _finalize_technical_pending(
+        self, step: dict[str, Any] | None, pending: Iterable[str],
+    ) -> int:
+        """`technical_pending` 的重算收尾（失败/隔离保留给下一轮）。"""
+        return self._finalize_pending(step, pending, key=self._TECHNICAL_PENDING_KEY)
 
     def _finalize_tech_recompute(
         self, step: dict[str, Any] | None, pending: Iterable[str],
@@ -2754,6 +2904,16 @@ class IncrementalUpdater:
         `skipped`（无重算需求）不清 —— 名单里的股票本来就"必须被重算"，
         skipped 意味着这一轮根本没算，清掉就等于把 P0 触发信号吃了。
         """
+        return self._finalize_pending(step, pending)
+
+    def _finalize_pending(
+        self,
+        step: dict[str, Any] | None,
+        pending: Iterable[str],
+        *,
+        key: str | None = None,
+    ) -> int:
+        """通用收尾：成功重算的移出待重算名单，失败/被拒的保留给下一轮。"""
         codes = [str(code) for code in pending if code]
         if not codes:
             return 0
@@ -2780,7 +2940,7 @@ class IncrementalUpdater:
             logger.warning("指标重算有失败但无可定位代码，保留整份待重算名单")
             return 0
         return self._clear_tech_recompute_pending(
-            [code for code in codes if code not in keep]
+            [code for code in codes if code not in keep], key=key,
         )
 
     def _qfq_lag_summary(
@@ -4897,6 +5057,12 @@ class IncrementalUpdater:
         )
         tech_lag_codes = sorted(tech_lag_watermarks)
         tech_pending_marked = self._mark_tech_recompute_pending(tech_lag_watermarks)
+        # 2026-11-16（reports/131 §9.2 P0-5）：**qfq 写入成功**的每一只都打上
+        # technical_pending 标记。这覆盖 tech_recompute_pending 抓不到的形态：
+        # qfq 事后补齐后与 raw 齐平（滞后判据为假），但快照技术三列仍停在
+        # 补齐前算出的 NULL。下一阶段（或下一轮）强制重算，成功后移出。
+        technical_watermarks = self._qfq_watermarks(updated_codes)
+        technical_pending_marked = self._mark_technical_pending(technical_watermarks)
         elapsed_seconds = max(time.monotonic() - update_started, 0.001)
         return {
             "status": step_status,
@@ -4928,6 +5094,9 @@ class IncrementalUpdater:
             "tech_recompute_lag_count": len(tech_lag_codes),
             "tech_recompute_pending_marked": tech_pending_marked,
             "tech_recompute_lag_codes": tech_lag_codes[:20],
+            # reports/131 §9.2 P0-5：qfq 写入成功 → technical_pending（技术三列强制重算）
+            "technical_pending_marked": technical_pending_marked,
+            "technical_pending_codes": sorted(technical_watermarks)[:20],
             "_updated_codes": updated_codes,
             "_xdxr_codes": sorted(xdxr_codes),
             "_raw_full_refetch": raw_full_refetch,

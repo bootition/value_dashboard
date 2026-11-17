@@ -62,6 +62,10 @@ def main() -> None:
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 只（0=全部）")
     ap.add_argument("--concurrency", type=int, default=4, help="并发数（源侧限速，建议 ≤6）")
     ap.add_argument("--sample", type=int, default=5, help="dry-run 时抽样只数")
+    ap.add_argument("--stale-null", action="store_true",
+                    help="强制重抓「最新期行存在但多数列是 NULL」的股票（reports/131 P0-3 存量修复）")
+    ap.add_argument("--stale-max-columns-filled", type=int, default=5,
+                    help="配合 --stale-null：该期非空列数 <= 此值即视为半空壳（默认 5）")
     args = ap.parse_args()
 
     try:
@@ -77,6 +81,48 @@ def main() -> None:
     fetcher = SupplementFetcher(duck=duck)
     periods = fetcher.resolve_periods(CASHFLOW_SUPPLEMENT)
     logger.info("目标报告期（最近 %d 期）: %s", len(periods), periods)
+    force_codes: list[str] = []
+    if args.stale_null:
+        # 2026-11-17（reports/131 P0-3）：`pending_codes` 只看"有没有该期的行"，
+        # 不看"行里的列填没填"。FY2025 就是"行在、21 列里 20 列是 NULL"的半空壳，
+        # 判据认为已追平 → 永远不会重抓。这里显式挑出来强制重抓。
+        # 只针对**年报期**：季报本来就没有间接法补充资料，2026-09-30 那期
+        # 本来就该是空的（判它"半空壳"会把全市场 5,500 只都拉进来重抓）。
+        # FY2025 年报才是"行在、列全空"的真事故现场（reports/131 §9.2 P0-3）。
+        latest = str(
+            duck.read_query(
+                "SELECT MAX(report_date) AS d FROM cash_flow_indirect "
+                "WHERE CAST(report_date AS VARCHAR) LIKE '%-12-31'"
+            )[0]["d"]
+        )[:10]
+        logger.info("半空壳检测目标期：%s（最近一个年报期）", latest)
+        force_codes = [
+            str(row["stock_code"])
+            for row in duck.read_query(
+                """
+                SELECT * FROM (
+                SELECT i.stock_code,
+                       (CASE WHEN i.net_profit IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.fixed_asset_depreciation IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.intangible_asset_amortization IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.inventory_decrease IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.operating_receivable_decrease IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.operating_payable_increase IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.financial_expense IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.fair_value_change_loss IS NOT NULL THEN 1 ELSE 0 END
+                      + CASE WHEN i.cf_from_operating_indirect IS NOT NULL THEN 1 ELSE 0 END) AS filled
+                FROM cash_flow_indirect i
+                WHERE i.report_date = CAST(? AS DATE)
+                ) WHERE filled <= ?
+                """,
+                [latest, args.stale_max_columns_filled],
+            )
+        ]
+        logger.info(
+            "半空壳股票（%s 期非空列 <= %d）：%d 只，将强制重抓",
+            latest, args.stale_max_columns_filled, len(force_codes),
+        )
+
     pending_all = fetcher.pending_codes(CASHFLOW_SUPPLEMENT, periods)
     logger.info("待补股票 %d 只（判据：本源最新报告期 < %s）", len(pending_all), periods[0])
 
@@ -120,6 +166,7 @@ def main() -> None:
         max_stocks=args.limit,
         concurrency=args.concurrency,
         deadline_seconds=0,   # CLI 手动执行不设截止时间，语义与旧脚本一致
+        force_codes=force_codes or None,
     )
     logger.info(
         "取数完成：updated=%d failed=%d rows=%s status=%s",

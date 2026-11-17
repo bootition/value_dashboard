@@ -467,14 +467,54 @@ class ExtendedIndicatorBuilder:
         """
         return self._paths.duckdb_path if self._paths is not None else self._duck.db_path
 
-    def build(self, *, codes: list[str] | None = None) -> dict[str, Any]:
-        """全量（或按指定股票）重建 indicator_ext。"""
+    def build(
+        self,
+        *,
+        codes: list[str] | None = None,
+        force_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """重建 indicator_ext（全量 / 指定股票 / 仅股本变更股）。
+
+        Args:
+            codes: 显式指定的股票清单（``vd data compute-extended-indicators --codes``）。
+            force_codes: 「股本链变了但派生值还是旧的」股票清单（reports/131
+                §9.2 P0-9 修法②），由 :func:`rebuild_decision` 或
+                :func:`share_capital_drift_codes` 给出。与 ``codes`` 互斥：
+                ``codes`` 优先。传**空列表**表示"没有要重建的股票"，直接返回
+                ``skipped``，绝不退化成全量重建（那会把一次 140 ms 的探针变成
+                40 万行整表重写）。
+
+        两者都为 None（默认）→ 全量重建，行为与 2026-11-16 之前完全一致。
+        """
+        target: list[str] | None = None
+        scope = "all"
+        if codes is not None:
+            target = list(dict.fromkeys(str(code) for code in codes if str(code).strip()))
+            scope = "codes"
+        elif force_codes is not None:
+            target = list(dict.fromkeys(str(code) for code in force_codes if str(code).strip()))
+            scope = "force_codes"
+        if target is not None and not target:
+            report = {
+                "status": "skipped",
+                "reason": "no_target_codes",
+                "rows_before": int(self._duck.read_query("SELECT COUNT(*) AS n FROM indicator_ext")[0]["n"]),
+                "rows_after": int(self._duck.read_query("SELECT COUNT(*) AS n FROM indicator_ext")[0]["n"]),
+                "rows_written": 0,
+                "scope": scope,
+                "filled": {},
+                "report_date_range": [],
+                "data_version": DATA_VERSION,
+            }
+            logger.info("indicator_ext 构建跳过（目标清单为空）: %s", report)
+            return report
+
         calculated_at = datetime.now(UTC).replace(tzinfo=None)
-        sql = build_select_sql(codes)
+        sql = build_select_sql(target)
         with exclusive_update(self._lock_path()), self._duck.write_connection() as conn:
             before = conn.execute("SELECT COUNT(*) FROM indicator_ext").fetchone()[0]
-            if codes:
-                quoted = ", ".join("'" + c.replace("'", "''") + "'" for c in codes)
+            if target:
+                quoted = ", ".join("'" + c.replace("'", "''") + "'" for c in target)
                 conn.execute(f"DELETE FROM indicator_ext WHERE stock_code IN ({quoted})")
             else:
                 conn.execute("DELETE FROM indicator_ext")
@@ -491,8 +531,9 @@ class ExtendedIndicatorBuilder:
             "status": "success",
             "rows_before": int(before),
             "rows_after": int(after),
-            "rows_written": int(after - before) if not codes else int(after),
-            "scope": "codes" if codes else "all",
+            "rows_written": int(after - before) if not target else int(after),
+            "scope": scope,
+            "codes": target,
             "filled": {
                 "free_cash_flow": int(filled[0]),
                 "total_asset_turnover": int(filled[1]),
@@ -511,7 +552,9 @@ class ExtendedIndicatorBuilder:
 # 变成死条件（ext 停在 2026-06-30，55 项扩展筛选字段全为 NULL）。
 # 这里把判据收敛为**两个明确条件**：
 #   1) `max(indicator_ext.report_date) < 最新完整三表报告期` → 必须重建；
-#   2) 否则只在输入指纹变化时重建（三表/补采表的最新报告期或行数变化）。
+#   2) 否则只在输入指纹变化时重建（三表/补采表的最新报告期或行数变化，
+#      **外加** `share_capital_history` 的 400 天尾段摘要 —— 见下方
+#      `share_capital_state`，这是 P0-9 事故的直接修法）。
 # 指纹**不含**日线价格：`report_date_close` 依赖行情，但日线每天变化，
 # 若纳入指纹会让 35 万行整表每晚重建一次；报告期推进时自然会重建一次。
 
@@ -522,6 +565,14 @@ TRIO_COMPLETE_RATIO = 0.5
 
 #: 参与输入指纹的表：只放**报表期粒度**的输入。事件表（分红/融资/回购）
 #: 与日线价格不参与——它们的变化不该按日触发整表重建。
+#:
+#: **2026-11-16（reports/131 §9.2 P0-9）**：`share_capital_history` 必须进指纹。
+#: 它没有 report_date，走 :func:`share_capital_state` 的**尾段 400 天摘要**，
+#: 不按整表（24.5 万行）算指纹。事故现场：689009（九号公司 CDR）全链带
+#: `change_reason='unit_rescale:10'`（股本链后来被 ×10 校正），但 indicator_ext
+#: 是校正**之前**构建的 —— 旧指纹里没有股本链，`_refresh_indicator_ext()` 于是
+#: 判"输入没变、不必重建"，24 期 `market_cap_at_report` 与 14 个每股族派生列
+#: 静默错 10 倍（2025-12-31 应 400.4 亿、表内 40.04 亿）。
 _INPUT_TABLES: tuple[str, ...] = (
     "income_statement",
     "balance_sheet",
@@ -530,6 +581,20 @@ _INPUT_TABLES: tuple[str, ...] = (
     "cash_flow_activity",
     "balance_sheet_ext",
 )
+
+#: 股本链指纹窗口（天）。取 400 天而不是整表：一是"最近一年多有没有人动过
+#: 股本链"已足以回答"派生表是不是旧的"，二是整表 24.5 万行做摘要会随历史
+#: 增长线性变慢，而 400 天窗口恒定（正式库实测 13,933 行 / 11–25 ms）。
+SHARE_CAPITAL_WINDOW_DAYS = 400
+
+#: 股本链输入表。**故意不放进 `_INPUT_TABLES`**：那个循环假设表有 `report_date`
+#: 列（`SELECT COUNT(*), MAX(report_date)`），而 `share_capital_history` 用
+#: `effective_date`，只能走 :func:`share_capital_state` 的窗口摘要。
+SHARE_CAPITAL_TABLE = "share_capital_history"
+
+#: `market_cap_at_report` 与「重算值」的相对偏差容忍度。1e-9 = 仅浮点噪声；
+#: 任何真实股本变更（哪怕是 0.4% 的股权激励）都会超过它。
+SHARE_CAPITAL_DRIFT_TOLERANCE = 1e-9
 
 
 def latest_complete_trio_period(duck: DuckDBStore) -> str | None:
@@ -559,10 +624,145 @@ def latest_complete_trio_period(duck: DuckDBStore) -> str | None:
     return None
 
 
+def share_capital_state(
+    duck: DuckDBStore,
+    *,
+    window_days: int = SHARE_CAPITAL_WINDOW_DAYS,
+) -> dict[str, Any]:
+    """`share_capital_history` 的**尾段窗口摘要**（P0-9 输入指纹用）。
+
+    以表内最新 `effective_date` 为锚点，只对 `[anchor - window_days, anchor]`
+    的行做 `stock_code:total_shares:effective_date` 摘要（MD5）。这样：
+
+    - 摘要**随任何股本变更而变化**（新增/修改一行都会进 STRING_AGG）；
+    - 成本恒定：正式库 400 天窗口 ≈ 13,933 行 / 11–25 ms，不随 24.5 万行
+      历史增长；整表摘要会随历史线性变慢；
+    - 只覆盖"近期股本"：2016 年的历史股本不会被后人重抓，不需要进指纹。
+
+    摘要 SQL（`STRING_AGG ... ORDER BY` 保证顺序稳定，否则同一份数据会算出
+    不同 MD5，指纹就永久"变化"、每轮都全量重建）::
+
+        WITH anchor AS (SELECT MAX(effective_date) AS d FROM share_capital_history)
+        SELECT COUNT(*) AS rows,
+               MAX(h.effective_date) AS latest,
+               COUNT(DISTINCT h.stock_code) AS stocks,
+               MD5(STRING_AGG(
+                   h.stock_code || ':' || CAST(h.total_shares AS VARCHAR)
+                                || ':' || CAST(h.effective_date AS VARCHAR),
+                   '|' ORDER BY h.stock_code, h.effective_date, h.total_shares
+               )) AS digest
+        FROM share_capital_history h, anchor
+        WHERE h.effective_date >= anchor.d - INTERVAL '<window_days>' DAY
+
+    任何异常（表缺失/损坏）都退化为空摘要，绝不因为指纹探针失败阻断主链。
+    """
+    days = max(int(window_days), 0)
+    try:
+        row = duck.read_query(
+            f"""
+            WITH anchor AS (SELECT MAX(effective_date) AS d FROM share_capital_history)
+            SELECT COUNT(*) AS rows,
+                   MAX(h.effective_date) AS latest,
+                   COUNT(DISTINCT h.stock_code) AS stocks,
+                   COALESCE(MD5(STRING_AGG(
+                       h.stock_code || ':' || CAST(h.total_shares AS VARCHAR)
+                       || ':' || CAST(h.effective_date AS VARCHAR),
+                       '|' ORDER BY h.stock_code, h.effective_date, h.total_shares
+                   )), '') AS digest
+            FROM share_capital_history h, anchor
+            WHERE h.effective_date >= anchor.d - INTERVAL '{days}' DAY
+            """
+        )[0]
+    except Exception as error:  # noqa: BLE001 - 指纹探针失败按"无股本输入"处理
+        logger.debug("读取 share_capital_history 状态失败: %s", error)
+        return {"window_days": days, "rows": 0, "latest": None, "stocks": 0, "digest": ""}
+    return {
+        "window_days": days,
+        "rows": int(row["rows"] or 0),
+        "latest": str(row["latest"])[:10] if row.get("latest") else None,
+        "stocks": int(row["stocks"] or 0),
+        "digest": str(row["digest"] or ""),
+    }
+
+
+def share_capital_drift_codes(
+    duck: DuckDBStore,
+    *,
+    window_days: int = SHARE_CAPITAL_WINDOW_DAYS,
+    tolerance: float = SHARE_CAPITAL_DRIFT_TOLERANCE,
+) -> list[str]:
+    """「股本链变了但派生表还是旧的」的股票清单（= 按变更股重建的 force_codes）。
+
+    为什么不用"外部状态表记录每股票股本摘要"：那需要新建表/新列（本轮硬约束
+    禁止改结构），且状态一旦丢失就永久漏检。这里改成**自证式探针**：
+
+    只对"股本链在窗口内动过"的股票（正式库 5,549 只）取它在 `indicator_ext`
+    的**最新一行**，用与 ``build_select_sql`` 完全相同的口径重算
+    ``market_cap_at_report``（ASOF 收盘价 × ASOF 时点股本），与表内值比较；
+    相对偏差 > ``tolerance`` 即为陈旧。
+
+    实测（2026-11-16 正式库）：命中 13 只，其中 689009 比值恰为 0.1
+    （10 倍单位错），其余 12 只为 0.1%–0.6% 的股本链尾对齐差异；耗时 ~140 ms。
+
+    探针是"有无陈旧"的充分判据而不是充分必要条件：它同时能抓住"价格链事后
+    被修复"造成的陈旧，两者都该重建 —— 而它永远**不会**因为派生表新而误报。
+    """
+    days = max(int(window_days), 0)
+    try:
+        rows = duck.read_query(
+            f"""
+            WITH win AS (
+                SELECT DISTINCT stock_code FROM share_capital_history
+                WHERE effective_date >= (SELECT MAX(effective_date) FROM share_capital_history)
+                                     - INTERVAL '{days}' DAY
+            ),
+            last_ext AS (
+                SELECT stock_code, report_date, market_cap_at_report,
+                       ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY report_date DESC) AS rn
+                FROM indicator_ext
+                WHERE stock_code IN (SELECT stock_code FROM win)
+            )
+            SELECT l.stock_code
+            FROM last_ext l
+            LEFT JOIN LATERAL (
+                SELECT p.close FROM price_daily_raw p
+                WHERE p.stock_code = l.stock_code AND p.trade_date <= l.report_date
+                ORDER BY p.trade_date DESC LIMIT 1
+            ) px ON true
+            LEFT JOIN LATERAL (
+                SELECT s.total_shares FROM share_capital_history s
+                WHERE s.stock_code = l.stock_code AND s.effective_date <= l.report_date
+                ORDER BY s.effective_date DESC LIMIT 1
+            ) sh ON true
+            WHERE l.rn = 1
+              AND l.market_cap_at_report IS NOT NULL
+              AND px.close IS NOT NULL
+              AND sh.total_shares > 0
+              AND ABS(l.market_cap_at_report / (px.close * sh.total_shares) - 1) > ?
+            ORDER BY l.stock_code
+            """,
+            [float(tolerance)],
+        )
+    except Exception as error:  # noqa: BLE001 - 探针失败按"无陈旧"处理，不阻断
+        logger.debug("股本链陈旧探针失败: %s", error)
+        return []
+    return [str(row["stock_code"]) for row in rows]
+
+
+def _fingerprint_parts(fingerprint: str | None) -> dict[str, str]:
+    """把 ``表:值`` 形式的指纹串拆成 dict（``|`` 分隔，值里不含 ``|``）。"""
+    parts: dict[str, str] = {}
+    for chunk in str(fingerprint or "").split("|"):
+        key, separator, value = chunk.partition(":")
+        if separator:
+            parts[key.strip()] = value.strip()
+    return parts
+
+
 def input_state(duck: DuckDBStore) -> dict[str, Any]:
     """采集 indicator_ext 的输入状态（指纹 + 报告期 + 行数），供门控判断。
 
-    只做聚合查询（COUNT/MAX），在正式库为亚秒级；不做任何写入。
+    只做聚合查询（COUNT/MAX + 400 天股本摘要），在正式库为亚秒级；不做任何写入。
     """
     tables: dict[str, dict[str, Any]] = {}
     for table in _INPUT_TABLES:
@@ -577,6 +777,7 @@ def input_state(duck: DuckDBStore) -> dict[str, Any]:
             "rows": int(row["rows"] or 0),
             "latest": str(row["latest"])[:10] if row.get("latest") else None,
         }
+    share_capital = share_capital_state(duck)
     try:
         ext = duck.read_query(
             """SELECT COUNT(*) AS rows, MAX(report_date) AS latest,
@@ -586,13 +787,20 @@ def input_state(duck: DuckDBStore) -> dict[str, Any]:
     except Exception as error:  # noqa: BLE001
         logger.debug("读取 indicator_ext 状态失败: %s", error)
         ext = {"rows": 0, "latest": None, "calculated_at": None}
-    fingerprint = "|".join(
+    fingerprint_parts = [
         f"{table}:{state['rows']}:{state['latest']}"
         for table, state in sorted(tables.items())
+    ]
+    # 股本链摘要进指纹（P0-9）：它是**报表期粒度之外**的唯一输入，
+    # 用窗口摘要而不是整表 COUNT/MAX，否则"改了一行股本"这种事件永远看不见。
+    fingerprint_parts.append(
+        f"{SHARE_CAPITAL_TABLE}:"
+        f"{share_capital['rows']}:{share_capital['latest']}:{share_capital['digest']}"
     )
     return {
-        "fingerprint": fingerprint,
+        "fingerprint": "|".join(fingerprint_parts),
         "tables": tables,
+        "share_capital": share_capital,
         "complete_period": latest_complete_trio_period(duck),
         "ext_rows": int(ext["rows"] or 0),
         "ext_max_period": str(ext["latest"])[:10] if ext.get("latest") else None,
@@ -610,10 +818,18 @@ def rebuild_decision(
     """判断本轮是否需要重建 indicator_ext。
 
     Returns:
-        {"required": bool, "reason": str, **input_state}
+        {"required": bool, "reason": str, "force_codes": list[str],
+         "scope": "all" | "codes", **input_state}
 
         reason ∈ {indicator_ext_empty, ext_period_behind_trio,
                   input_fingerprint_changed, up_to_date}
+
+    ``force_codes``（P0-9 修法②）：当指纹差异**只**来自 ``share_capital_history``
+    时，说明报表期没推进、只是有人改了股本链 → 只需按变更股重建。清单来自
+    :func:`share_capital_drift_codes` 的自证式探针（重算市值与表内值不符），
+    ``scope="codes"`` 时调用方应执行
+    ``ExtendedIndicatorBuilder().build(force_codes=decision["force_codes"])``；
+    ``scope="all"`` 时仍走全量 ``build()``（report_period 推进、空表等情形）。
     """
     state = input_state(duck)
     complete = state["complete_period"]
@@ -627,4 +843,28 @@ def rebuild_decision(
         required, reason = True, "input_fingerprint_changed"
     else:
         required, reason = False, "up_to_date"
-    return {"required": required, "reason": reason, **state}
+
+    # 指纹差异归因：只差股本链 → 最小重建。首次运行（无基线指纹）不做归因，
+    # 否则会把"从没见过任何输入"误判成"股本变了"。
+    force_codes: list[str] = []
+    changed_inputs: list[str] = []
+    if stored_fingerprint is not None:
+        before = _fingerprint_parts(stored_fingerprint)
+        after = _fingerprint_parts(state["fingerprint"])
+        changed_inputs = sorted(
+            key
+            for key in set(before) | set(after)
+            if before.get(key) != after.get(key)
+        )
+        if changed_inputs == [SHARE_CAPITAL_TABLE]:
+            force_codes = share_capital_drift_codes(duck)
+    share_capital_only = changed_inputs == [SHARE_CAPITAL_TABLE]
+    scope = "codes" if (required and force_codes and share_capital_only) else "all"
+    return {
+        "required": required,
+        "reason": reason,
+        "force_codes": force_codes,
+        "changed_inputs": changed_inputs,
+        "scope": scope,
+        **state,
+    }

@@ -155,7 +155,12 @@ def test_financial_sector_spec_registered(duckdb_store) -> None:
     assert spec.org_field_maps is not None
     assert set(spec.org_field_maps) == {"银行", "证券", "保险"}
 
-    # 列集合必须与真实表结构逐列一致（不许加列，也不许漏列）
+    # 列集合必须与真实表结构逐列一致（不许加列，也不许漏列）。
+    # 2026-11-17（reports/133 R1）：schema v44 新增
+    # `financial_sector_items.insurance_contract_liability` 后，**裸 spec** 只描述
+    # 源侧默认列（33 列），专用列由 `_adapt_spec_to_schema()` 在运行期按真实表结构
+    # 自动接线。所以这里必须断言"适配后的 spec"与表结构一致，而不是断言裸 spec——
+    # 后者会把"设计上的自动适配"误判成"漏列"，也是原先写死 `== 33` 变成假失败的原因。
     table_columns = {
         str(row["column_name"])
         for row in duckdb_store.read_query(
@@ -163,11 +168,14 @@ def test_financial_sector_spec_registered(duckdb_store) -> None:
                WHERE table_name = 'financial_sector_items'"""
         )
     }
-    assert set(spec.columns["financial_sector_items"]) == table_columns
-    # 25 个业务列（工行/中信实测能对上的那批）全在列集合里
+    fetcher = SupplementFetcher(duck=duckdb_store)
+    available = fetcher._available_columns(spec.columns)
+    adapted = fetcher._adapt_spec_to_schema(spec, available)
+    assert set(adapted.columns["financial_sector_items"]) == table_columns
+    # 业务列（工行/中信实测能对上的那批）与 CAS25 专用列都在
     assert "deposits_and_interbank" in table_columns
     assert "fee_commission_income_net" in table_columns
-    assert len(spec.columns["financial_sector_items"]) == 33
+    assert "insurance_contract_liability" in table_columns
 
 
 def test_period_floor_excludes_csmar_coverage() -> None:

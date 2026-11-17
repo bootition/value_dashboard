@@ -18,6 +18,7 @@ from app.core.dsl.ast_nodes import (
     Literal,
     UnaryOp,
 )
+from app.core.dsl.derived_fields import DERIVED_FIELDS
 
 logger = logging.getLogger(__name__)
 _IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
@@ -187,6 +188,11 @@ class CodeGen:
         Snapshot rows provide the current reporting period. Historical periods
         are correlated by stock code and exact report dates, so missing reports
         produce NULL rather than an order-dependent approximation.
+
+        跨年口径断点派生字段（reports/131 §9.2 P0-7 / P0-8）在**每个历史行**上
+        展开：断点判定用的是该行自己的 ``report_date``，所以 TTM/YoY/QoQ 里
+        的每个加项都被单独归一，而不是只归一最新一期（否则 TTM 会把正值损失
+        和负值损失相加，正是 P0-7 要修的那个"假低值"）。
         """
         aliases = {"balance": "bs", "income": "ic", "cashflow": "cf"}
         tables = {
@@ -196,7 +202,7 @@ class CodeGen:
         }
         alias = aliases.get(field.table, "s")
         table = tables.get(field.table)
-        current = f"{alias}.{field.field}"
+        current = self._column_sql(field.table, field.field, alias, f"{alias}.report_date")
         if table is None:
             return current
         is_cumulative = FIELD_METADATA.get(
@@ -205,30 +211,50 @@ class CodeGen:
         if period == "LATEST":
             return current
         if period == "MRQ":
-            return self._quarter_value_sql(table, field.field, alias) if is_cumulative else current
+            return (
+                self._quarter_value_sql(table, field.table, field.field, alias, "s.report_date")
+                if is_cumulative else current
+            )
         if period == "TTM":
             if field.table == "balance":
                 raise UnsupportedPeriodFunctionError("TTM requires a cumulative flow field")
-            return self._ttm_sql(table, field.field, current)
+            return self._ttm_sql(table, field.table, field.field, current)
         if period == "YoY":
             if is_cumulative:
-                current_quarter = self._quarter_value_sql(table, field.field, alias)
-                prior_quarter = self._prior_year_same_quarter_value_sql(table, field.field)
+                current_quarter = self._quarter_value_sql(
+                    table, field.table, field.field, alias, "s.report_date",
+                )
+                prior_quarter = self._prior_year_same_quarter_value_sql(table, field.table, field.field)
                 return f"(({current_quarter} - ({prior_quarter})) / NULLIF(ABS(({prior_quarter})), 0))"
-            prior = self._prior_year_same_period_sql(table, field.field)
+            prior = self._prior_year_same_period_sql(table, field.table, field.field)
             return f"(({current} - ({prior})) / NULLIF(ABS(({prior})), 0))"
         if period == "QoQ":
             if field.table == "balance":
                 raise UnsupportedPeriodFunctionError("QoQ requires a cumulative flow field")
-            current_quarter = self._quarter_value_sql(table, field.field, alias)
-            prior_quarter = self._prior_quarter_value_sql(table, field.field)
+            current_quarter = self._quarter_value_sql(
+                table, field.table, field.field, alias, "s.report_date",
+            )
+            prior_quarter = self._prior_quarter_value_sql(table, field.table, field.field)
             return f"(({current_quarter} - ({prior_quarter})) / NULLIF(ABS(({prior_quarter})), 0))"
         raise UnsupportedPeriodFunctionError(f"unsupported field period: {period}")
 
     @staticmethod
-    def _prior_year_same_period_sql(table: str, field: str) -> str:
+    def _column_sql(table: str, field: str, alias: str, date_expr: str) -> str:
+        """某一**行**上的字段 SQL 表达式（派生字段在此展开，物理列直通）。
+
+        ``date_expr`` 必须是该行自己的报告期（``prior.report_date`` /
+        ``q1.report_date`` …）：口径断点是按年份分段的，用错行就会把
+        2017 的正值损失当成 2018 的负值损失取 ABS。
+        """
+        derived = DERIVED_FIELDS.get(f"{table}.{field}")
+        if derived is not None:
+            return derived.sql(alias=alias, date_expr=date_expr)
+        return f"{alias}.{field}"
+
+    def _prior_year_same_period_sql(self, table: str, field_table: str, field: str) -> str:
+        prior_value = self._column_sql(field_table, field, "prior", "prior.report_date")
         return (
-            f"SELECT prior.{field} FROM {table} prior "
+            f"SELECT {prior_value} FROM {table} prior "
             "WHERE prior.stock_code = s.stock_code "
             "AND prior.report_date = MAKE_DATE("
             "CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER) - 1, "
@@ -236,10 +262,10 @@ class CodeGen:
             "CAST(EXTRACT(DAY FROM s.report_date) AS INTEGER))"
         )
 
-    @staticmethod
-    def _prior_exact_quarter_sql(table: str, field: str) -> str:
+    def _prior_exact_quarter_sql(self, table: str, field_table: str, field: str) -> str:
+        prior_value = self._column_sql(field_table, field, "prior", "prior.report_date")
         return (
-            f"SELECT prior.{field} FROM {table} prior "
+            f"SELECT {prior_value} FROM {table} prior "
             "WHERE prior.stock_code = s.stock_code "
             f"AND prior.report_date = {CodeGen._prior_quarter_end_sql('s.report_date')}"
         )
@@ -256,35 +282,43 @@ class CodeGen:
             "ELSE NULL END"
         )
 
-    @staticmethod
-    def _quarter_value_sql(table: str, field: str, alias: str) -> str:
+    def _quarter_value_sql(
+        self, table: str, field_table: str, field: str, alias: str, date_expr: str,
+    ) -> str:
+        current = self._column_sql(field_table, field, alias, f"{alias}.report_date")
+        q1 = self._column_sql(field_table, field, "q1", "q1.report_date")
+        q2 = self._column_sql(field_table, field, "q2", "q2.report_date")
+        q3 = self._column_sql(field_table, field, "q3", "q3.report_date")
         return (
-            f"CASE EXTRACT(MONTH FROM s.report_date) "
-            f"WHEN 3 THEN {alias}.{field} "
-            f"WHEN 6 THEN {alias}.{field} - (SELECT q1.{field} FROM {table} q1 "
+            f"CASE EXTRACT(MONTH FROM {date_expr}) "
+            f"WHEN 3 THEN {current} "
+            f"WHEN 6 THEN {current} - (SELECT {q1} FROM {table} q1 "
             "WHERE q1.stock_code = s.stock_code "
             "AND q1.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER), 3, 31)) "
-            f"WHEN 9 THEN {alias}.{field} - (SELECT q2.{field} FROM {table} q2 "
+            f"WHEN 9 THEN {current} - (SELECT {q2} FROM {table} q2 "
             "WHERE q2.stock_code = s.stock_code "
             "AND q2.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER), 6, 30)) "
-            f"WHEN 12 THEN {alias}.{field} - (SELECT q3.{field} FROM {table} q3 "
+            f"WHEN 12 THEN {current} - (SELECT {q3} FROM {table} q3 "
             "WHERE q3.stock_code = s.stock_code "
             "AND q3.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM s.report_date) AS INTEGER), 9, 30)) "
             "ELSE NULL END"
         )
 
-    @staticmethod
-    def _prior_quarter_value_sql(table: str, field: str) -> str:
+    def _prior_quarter_value_sql(self, table: str, field_table: str, field: str) -> str:
+        prior_value = self._column_sql(field_table, field, "prior", "prior.report_date")
+        q1 = self._column_sql(field_table, field, "q1", "q1.report_date")
+        q2 = self._column_sql(field_table, field, "q2", "q2.report_date")
+        q3 = self._column_sql(field_table, field, "q3", "q3.report_date")
         return (
             "SELECT CASE EXTRACT(MONTH FROM prior.report_date) "
-            f"WHEN 3 THEN prior.{field} "
-            f"WHEN 6 THEN prior.{field} - (SELECT q1.{field} FROM {table} q1 "
+            f"WHEN 3 THEN {prior_value} "
+            f"WHEN 6 THEN {prior_value} - (SELECT {q1} FROM {table} q1 "
             "WHERE q1.stock_code = prior.stock_code "
             "AND q1.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 3, 31)) "
-            f"WHEN 9 THEN prior.{field} - (SELECT q2.{field} FROM {table} q2 "
+            f"WHEN 9 THEN {prior_value} - (SELECT {q2} FROM {table} q2 "
             "WHERE q2.stock_code = prior.stock_code "
             "AND q2.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 6, 30)) "
-            f"WHEN 12 THEN prior.{field} - (SELECT q3.{field} FROM {table} q3 "
+            f"WHEN 12 THEN {prior_value} - (SELECT {q3} FROM {table} q3 "
             "WHERE q3.stock_code = prior.stock_code "
             "AND q3.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 9, 30)) "
             "ELSE NULL END "
@@ -292,19 +326,22 @@ class CodeGen:
             f"AND prior.report_date = {CodeGen._prior_quarter_end_sql('s.report_date')}"
         )
 
-    @staticmethod
-    def _prior_year_same_quarter_value_sql(table: str, field: str) -> str:
+    def _prior_year_same_quarter_value_sql(self, table: str, field_table: str, field: str) -> str:
         """Return last year's same-quarter flow, preserving cumulative semantics."""
+        prior_value = self._column_sql(field_table, field, "prior", "prior.report_date")
+        q1 = self._column_sql(field_table, field, "q1", "q1.report_date")
+        q2 = self._column_sql(field_table, field, "q2", "q2.report_date")
+        q3 = self._column_sql(field_table, field, "q3", "q3.report_date")
         return (
             "SELECT CASE EXTRACT(MONTH FROM prior.report_date) "
-            f"WHEN 3 THEN prior.{field} "
-            f"WHEN 6 THEN prior.{field} - (SELECT q1.{field} FROM {table} q1 "
+            f"WHEN 3 THEN {prior_value} "
+            f"WHEN 6 THEN {prior_value} - (SELECT {q1} FROM {table} q1 "
             "WHERE q1.stock_code = prior.stock_code "
             "AND q1.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 3, 31)) "
-            f"WHEN 9 THEN prior.{field} - (SELECT q2.{field} FROM {table} q2 "
+            f"WHEN 9 THEN {prior_value} - (SELECT {q2} FROM {table} q2 "
             "WHERE q2.stock_code = prior.stock_code "
             "AND q2.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 6, 30)) "
-            f"WHEN 12 THEN prior.{field} - (SELECT q3.{field} FROM {table} q3 "
+            f"WHEN 12 THEN {prior_value} - (SELECT {q3} FROM {table} q3 "
             "WHERE q3.stock_code = prior.stock_code "
             "AND q3.report_date = MAKE_DATE(CAST(EXTRACT(YEAR FROM prior.report_date) AS INTEGER), 9, 30)) "
             "ELSE NULL END "
@@ -315,13 +352,17 @@ class CodeGen:
             "CAST(EXTRACT(DAY FROM s.report_date) AS INTEGER))"
         )
 
-    @staticmethod
-    def _ttm_sql(table: str, field: str, current: str) -> str:
+    def _ttm_sql(self, table: str, field_table: str, field: str, current: str) -> str:
+        annual_value = self._column_sql(field_table, field, "annual", "annual.report_date")
+        current_value = self._column_sql(
+            field_table, field, "current_row", "current_row.report_date",
+        )
+        prior_value = self._column_sql(field_table, field, "prior", "prior.report_date")
         return (
             "CASE WHEN EXTRACT(MONTH FROM s.report_date) = 12 "
             "AND EXTRACT(DAY FROM s.report_date) = 31 "
             f"THEN {current} ELSE ("
-            f"SELECT annual.{field} + current_row.{field} - prior.{field} "
+            f"SELECT {annual_value} + {current_value} - {prior_value} "
             f"FROM {table} current_row "
             f"JOIN {table} annual ON annual.stock_code = current_row.stock_code "
             "AND annual.report_date = MAKE_DATE("

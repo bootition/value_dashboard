@@ -5,7 +5,7 @@
 2026-11-14 的数据包价值兑现度审查找出的每一个问题（扩展指标冻结在旧报告期、
 扣非净利润归零、字段覆盖率塌陷、手工链不跑、数据包过期、schema 漂移、
 零引用资产……），当时**全部只能靠人去库上手工查**。人工审完就散会，问题
-下个季度原样回潮。本模块把这些判定写成 13 条可复跑的规则（编号即报告编号），
+下个季度原样回潮。本模块把这些判定写成 14 条可复跑的规则（编号即报告编号），
 由 `vd data doctor` 与数据状态页自动执行。
 
 规则清单（code → 判定 → 级别 → severity → tier）
@@ -23,6 +23,7 @@
 11 ZERO_REFERENCE_ASSET      P3  inventory   cheap      零引用资产清单（config/asset_reference.yaml）如实披露
 12 DEDUCTED_PROFIT_GAP        P1  block       cheap      income_statement 最新报告期 deducted_net_profit 覆盖率 < 50%（→ 扣非四兄弟遮蔽）
 13 CHAIN_PROGRESS_STALLED     P1  block       cheap      补采链在跑但待补数量不降（"跑也白跑"，reports/122 §2.5 J1 防复发）
+14 TECHNICAL_COVERAGE_GAP     P1  block       cheap      技术三列（period_return/波动率/最大回撤）最新期覆盖率 < 95%（reports/131 §9.2 P0-5）
 
 severity 语义：只有 **block** 进 `level_counts` / `p1_codes` / `warning_codes` /
 `vd data doctor` 退出码；disclose 看得见但不阻断；inventory 是纯清单。
@@ -117,6 +118,16 @@ DEFAULT_COVERAGE_DROP_RATIO = 0.5
 DEFAULT_NULL_REASON_RATIO_PCT = 80.0
 DEFAULT_CROSSCHECK_PCT = 85.0
 DEFAULT_DEDUCTED_COVERAGE_PCT = 50.0
+# 技术三列（period_return / annualized_volatility / max_drawdown）的最新期覆盖率门槛。
+# 为什么是 95%：这三列只需要 ≥2 条连续 qfq 收盘就能算，唯一合法为空的场景是
+# 新股/长期停牌/退市前最后一段；正式库 2026-11-16 实测只有 47.4%，属于
+# "qfq 事后补齐但快照没重算"的陈旧形态，必须作为 P1 门禁而不是披露项。
+DEFAULT_TECHNICAL_COVERAGE_PCT = 95.0
+TECHNICAL_COVERAGE_FIELDS: tuple[str, ...] = (
+    "period_return",
+    "annualized_volatility",
+    "max_drawdown",
+)
 DEFAULT_PACKAGE_LAG_TRADING_DAYS = 5
 DEFAULT_STATIC_LAG_PERIODS = 1
 # 覆盖率类判定的最小样本量。为什么必须有：1~2 行的验收库/临时库上覆盖率只能是
@@ -1719,6 +1730,62 @@ def _rule_zero_reference_asset(ctx: HealthContext) -> list[Finding]:
     return findings
 
 
+def _rule_technical_coverage_gap(ctx: HealthContext) -> list[Finding]:
+    """技术三列覆盖率门禁（reports/131 §9.2 P0-5）。
+
+    为什么单独一条规则：`FIELD_COVERAGE_LOW` 的阈值是 90% 且把技术三列
+    当作普通"上界面字段"；但技术列只需要 ≥2 条连续 qfq 收盘，95% 以下
+    几乎必然是"qfq 事后补齐、快照没重算"的陈旧形态（正式库实测 47.4%，
+    而 `price_daily_qfq` 对 5,585 只是完整的）。这条规则把该形态升为
+    **P1/block**，让 `vd data doctor` 退出码和 `warning_codes` 都能看到，
+    直到补偿脚本/自动重算把覆盖率拉回 95% 以上。
+    """
+    measurement = _domain_coverage(ctx, SNAPSHOT_DOMAIN)
+    if not measurement or not measurement["total"]:
+        raise _RuleSkipped("indicator_snapshot 无数据")
+    if not ctx.sample_is_judgeable(measurement["total"]):
+        raise _RuleSkipped(
+            f"最新报告期仅 {measurement['total']} 行（< {ctx.min_domain_rows}），"
+            "覆盖率不具判定意义"
+        )
+    limit = _setting_number(
+        ctx.settings, "technical_coverage_pct", DEFAULT_TECHNICAL_COVERAGE_PCT,
+    )
+    report_date = measurement["report_date"].isoformat()
+    findings: list[Finding] = []
+    for column in TECHNICAL_COVERAGE_FIELDS:
+        stats = measurement["fields"].get(column)
+        if stats is None:
+            # 列还没迁移到本库（schema < v43 前的极端场景）——不猜、不告警。
+            continue
+        pct = float(stats["coverage_pct"])
+        if pct >= limit:
+            continue
+        findings.append(
+            Finding(
+                code="TECHNICAL_COVERAGE_GAP",
+                level=P1,
+                domain=SNAPSHOT_DOMAIN,
+                field=column,
+                metric=pct,
+                threshold=limit,
+                detail=(
+                    f"{report_date} 期 {stats['non_null']}/{measurement['total']} 行非空"
+                    f"（{pct:.2f}% < {limit:.0f}%）；该列只需要 ≥2 条连续 qfq 收盘，"
+                    "当前缺口属于 qfq 事后补齐后快照未重算的陈旧形态"
+                ),
+                suggestion=(
+                    "先跑一次性补偿：`python scripts/backfill_technical_indicators.py`"
+                    "（默认 dry-run，确认后加 --yes）；"
+                    "随后自动更新会通过 data_refresh_state['technical_pending'] "
+                    "在 qfq 写入后强制重算并移出名单"
+                ),
+                severity=SEVERITY_BLOCK,
+            )
+        )
+    return findings
+
+
 def _rule_deducted_profit_gap(ctx: HealthContext) -> list[Finding]:
     """扣非净利润是价值判断的核心字段，最新报告期塌陷即为 P1。
 
@@ -1847,6 +1914,10 @@ _RULES: tuple[tuple[str, str, str, str, str, Any], ...] = (
     (
         "CHAIN_PROGRESS_STALLED", P1, "补采链在跑但待补水位不降（跑也白跑）",
         TIER_CHEAP, SEVERITY_BLOCK, _rule_chain_progress_stalled,
+    ),
+    (
+        "TECHNICAL_COVERAGE_GAP", P1, "技术三列最新期覆盖率过低（qfq 补齐未重算）",
+        TIER_CHEAP, SEVERITY_BLOCK, _rule_technical_coverage_gap,
     ),
 )
 

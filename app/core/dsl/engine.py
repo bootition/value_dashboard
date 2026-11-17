@@ -18,6 +18,7 @@ from typing import Any
 
 from app.core.dsl.ast_nodes import FIELD_METADATA, INDICATOR_METADATA, ASTNode
 from app.core.dsl.codegen import CodeGen
+from app.core.dsl.derived_fields import bare_name_defaults
 from app.core.dsl.parser import parse
 from app.core.dsl.registry import STATUS_PUBLISHED, ExpressionRegistry
 from app.core.dsl.validator import Validator
@@ -40,6 +41,12 @@ for full_key, meta in FIELD_METADATA.items():
             _SHORTHAND_MAP[field] = f"{table}.{field}@LATEST"
         else:
             _SHORTHAND_MAP[field] = f"{table}.{field}"
+# 跨年口径断点字段"默认用派生口径"（reports/131 §9.2 P0-7 / P0-8）：
+# 裸名 asset_impairment_loss / credit_impairment_loss / prepayments_received
+# 落到归一化派生字段；要原始值必须写全路径（income.asset_impairment_loss@LATEST），
+# 并会在校验结果里收到 field_semantics_break 警告。**只**改裸名简写，
+# 全路径引用的语义一行不动（原始列保留可查）。
+_SHORTHAND_MAP.update(bare_name_defaults())
 
 
 def _prev_non_space(tokens: list[str], before_index: int) -> str:
@@ -416,6 +423,28 @@ class DSLEngine:
         """发现可用字段 (PRD §16.1 CL4: discover fields)"""
         from app.core.dsl.ast_nodes import FIELD_METADATA
         return sorted(FIELD_METADATA.keys())
+
+    def discover_derived_fields(self) -> dict[str, dict[str, Any]]:
+        """发现跨年口径断点派生字段（reports/131 §9.2 P0-7 / P0-8）。
+
+        返回 ``{字段: 元数据}``，元数据含 ``derived_from``（物理列）、``doc``
+        （为什么必须有这一层）与断点日期 —— 让"默认用派生口径"成为可查事实，
+        而不是只写在注释里。
+        """
+        from app.core.dsl.derived_fields import DERIVED_FIELDS, SERIES_BREAKS
+
+        payload: dict[str, dict[str, Any]] = {
+            key: {**field.metadata(), "series_break": None}
+            for key, field in DERIVED_FIELDS.items()
+        }
+        for key, brk in SERIES_BREAKS.items():
+            payload[key] = {
+                "unit": FIELD_METADATA.get(key, {}).get("unit", "CNY"),
+                "derived": False,
+                "series_break": brk.metadata(),
+                "doc": brk.reason,
+            }
+        return payload
 
     def discover_indicators(self) -> list[str]:
         """发现可用内建指标"""

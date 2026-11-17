@@ -22,6 +22,7 @@ from app.core.dsl.ast_nodes import (
     Literal,
     UnaryOp,
 )
+from app.core.dsl.derived_fields import SERIES_BREAKS
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -199,6 +200,12 @@ class Validator:
                 self._errors.append(
                     f"{node.period} 仅适用于累计流量字段 (period_type={source_meta['period_type']})"
                 )
+            # 跨年口径断点（reports/131 §9.2 P0-7 / P0-8）：原始列在各自区间内
+            # 仍然正确，但跨断点直接相加/相比会得到错误结论 —— 只发 warning，
+            # 指向归一化派生字段。不标废弃（那会让断点另一侧的历史查询全废）。
+            series_break = SERIES_BREAKS.get(f"{node.table}.{node.field}")
+            if series_break is not None:
+                self._warnings.append(series_break.warning())
 
         elif isinstance(node, IndicatorRef):
             if node.name not in INDICATOR_METADATA and not self._published_indicator_exists(node.name):

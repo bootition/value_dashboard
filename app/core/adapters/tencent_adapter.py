@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
 import requests
 
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+
+logger = logging.getLogger(__name__)
 
 _API_VERSION = "tencent-fqkline-2"
 # newfqkline/get is the current endpoint; the legacy fqkline/get returns empty
@@ -25,6 +29,59 @@ _MAX_BARS_PER_REQUEST = 640
 _MIN_REQUEST_BUDGET_SECONDS = 0.5
 _MIN_HTTP_TIMEOUT_SECONDS = 1.0
 _MAX_HTTP_TIMEOUT_SECONDS = 30.0
+
+# ─── 成交量单位（reports/131 §9.2 P0-1）─────────────────────────────────
+# 腾讯 `day`/`qfqday` 的 bar[5]：主板/创业板为**手数**（×100 得股），
+# 科创板（688/689）**已经是股数**（不可再乘）。旧实现无条件 ×100，导致
+# 2026-07-31 价格主链切到腾讯后科创板成交量被放大 100 倍（688111 金山办公
+# 07-30 12,675,928 股 → 07-31 2,873,692,500 股、换手 619%）。
+_VOLUME_LOTS_TO_SHARES = 100.0
+#: 科创板（含 CDR 689）前缀：腾讯对这两个板块直接返回股数。
+_STAR_PREFIXES: tuple[str, ...] = ("688", "689")
+#: 换手率上限护栏：bar 成交量 / 流通股本 > 5（即换手 > 500%）在物理上不可能。
+#: 触发即说明"源单位与假设不符"，一律按**未乘 100**兜底（宁可少算，不可放大
+#: 100 倍污染下游指标），并记 warning 供后续定位。
+_MAX_PLAUSIBLE_TURNOVER = 5.0
+
+#: 流通股本解析器：传入股票代码，返回流通股本（股）或 None。
+CircSharesProvider = Callable[[str], float | None]
+
+#: 进程内缓存的 `stock_meta.circ_shares` 快照（键 = DuckDB 绝对路径）。
+#: 只在成功读取后写入；失败不缓存，避免"库晚于首次抓取创建"时永久失效。
+_CIRC_SHARES_CACHE: dict[str, dict[str, float]] = {}
+_CIRC_SHARES_CACHE_LOCK = threading.Lock()
+
+
+def _is_star_market(stock_code: str) -> bool:
+    """科创板（688）与科创板 CDR（689）。"""
+    return stock_code.startswith(_STAR_PREFIXES)
+
+
+def _load_circ_shares_from_store() -> dict[str, float]:
+    """一次性读取当前档位 `stock_meta.circ_shares`（只读，best-effort）。
+
+    量级自检需要流通股本，但适配器不持有数据库句柄：这里按需打开一次只读
+    连接把全市场流通股本读进内存（约 5.5k 行，微秒级查询），之后按库路径
+    进程内缓存。任何异常（库文件不存在 / 测试档未建表 / 写锁竞争）都退化
+    为"无股本信息"，绝不能因为护栏打断抓取。
+    """
+    from app.core.storage.duckdb_store import DuckDBStore
+    from app.core.storage.path_policy import resolve_and_validate_paths
+
+    paths = resolve_and_validate_paths()
+    key = str(paths.duckdb_path)
+    with _CIRC_SHARES_CACHE_LOCK:
+        cached = _CIRC_SHARES_CACHE.get(key)
+    if cached is not None:
+        return cached
+    rows = DuckDBStore(paths=paths).read_query(
+        "SELECT stock_code, circ_shares FROM stock_meta "
+        "WHERE circ_shares IS NOT NULL AND circ_shares > 0"
+    )
+    mapping = {str(row["stock_code"]): float(row["circ_shares"]) for row in rows}
+    with _CIRC_SHARES_CACHE_LOCK:
+        _CIRC_SHARES_CACHE[key] = mapping
+    return mapping
 
 
 def _symbol(stock_code: str) -> str | None:
@@ -53,7 +110,11 @@ def _symbol(stock_code: str) -> str | None:
 class TencentAdapter(BaseAdapter):
     """Normalized Tencent daily bars with source bytes retained for lineage."""
 
-    def __init__(self, rate_limit: float = 0.2) -> None:
+    def __init__(
+        self,
+        rate_limit: float = 0.2,
+        circ_shares_provider: CircSharesProvider | None = None,
+    ) -> None:
         super().__init__("tencent", {"price_daily"}, rate_limit)
         # Tencent is an HTTP source. Reusing per-thread sessions keeps TLS
         # connections alive across the thousands of raw+qfq requests of a
@@ -62,6 +123,57 @@ class TencentAdapter(BaseAdapter):
         self._session_local = threading.local()
         self._sessions: list[requests.Session] = []
         self._sessions_lock = threading.Lock()
+        # 量级自检用的流通股本：可注入（测试），默认从当前档位 DuckDB 懒加载。
+        self._circ_shares_provider = circ_shares_provider
+        self._circ_shares_map: dict[str, float] | None = None
+        self._circ_shares_lock = threading.Lock()
+
+    def _circ_shares(self, stock_code: str) -> float | None:
+        """流通股本（股）；未知返回 None（护栏自动退化为只看代码前缀）。"""
+        if self._circ_shares_provider is not None:
+            try:
+                value = self._circ_shares_provider(stock_code)
+            except Exception:  # noqa: BLE001 - 护栏不得打断抓取
+                logger.debug("circulating-share provider failed for %s", stock_code, exc_info=True)
+                return None
+            return float(value) if value else None
+        if self._circ_shares_map is None:
+            with self._circ_shares_lock:
+                if self._circ_shares_map is None:
+                    try:
+                        self._circ_shares_map = _load_circ_shares_from_store()
+                    except Exception:  # noqa: BLE001 - 护栏不得打断抓取
+                        logger.debug("circulating-share lookup unavailable", exc_info=True)
+                        self._circ_shares_map = {}
+        return self._circ_shares_map.get(stock_code)
+
+    def _bar_volume(self, stock_code: str, trade_date: str, raw_volume: float) -> float:
+        """腾讯 bar[5] → 股（单位归一 + 量级自检）。
+
+        判据两层：
+        1. 代码前缀：688/689（科创板）腾讯已是股数，不乘；其余板块按手数 ×100。
+        2. 量级自检：若归一后的成交量 / 流通股本 > 5（换手 > 500%，物理上不可能），
+           说明源单位与假设不符（例如主板/创业板未来也改成股数），记 warning 并
+           按**未乘 100**兜底。流通股本未知时跳过第 2 层。
+        """
+        volume = raw_volume if _is_star_market(stock_code) else raw_volume * _VOLUME_LOTS_TO_SHARES
+        circ = self._circ_shares(stock_code)
+        if circ is not None and circ > 0 and volume / circ > _MAX_PLAUSIBLE_TURNOVER:
+            logger.warning(
+                "tencent volume unit guard: %s %s bar[5]=%.4f → 归一后 %s 股，"
+                "流通股本 %s 股（换手 %.1f%% > %.0f%% 物理上限），按未乘 100 兜底"
+                "（源很可能已直接返回股数）；请核对腾讯 %s 的单位口径",
+                stock_code,
+                trade_date,
+                raw_volume,
+                f"{volume:,.0f}",
+                f"{circ:,.0f}",
+                volume / circ * 100,
+                _MAX_PLAUSIBLE_TURNOVER * 100,
+                "day/qfqday",
+            )
+            return raw_volume
+        return volume
 
     def _session(self) -> requests.Session:
         session = getattr(self._session_local, "session", None)
@@ -211,8 +323,10 @@ class TencentAdapter(BaseAdapter):
                             "close": float(bar[2]),
                             "high": float(bar[3]),
                             "low": float(bar[4]),
-                            # Tencent publishes volume in lots; storage uses shares.
-                            "volume": float(bar[5]) * 100,
+                            # 腾讯 day/qfqday 的 bar[5]：主板/创业板为手数
+                            # （×100 得股），科创板 688/689 已是股数（不再乘）。
+                            # 另带量级自检兜底，详见 _bar_volume()。
+                            "volume": self._bar_volume(stock_code, bar[0], float(bar[5])),
                             "turnover": None,
                             "turnover_rate": None,
                         })

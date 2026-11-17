@@ -42,9 +42,9 @@ import re
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -59,16 +59,28 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BALANCE_SHEET_EXT",
     "CASHFLOW_SUPPLEMENT",
+    "CASH_FLOW_STRUCTURAL_MISSING",
+    "CASHFLOW_ORG_FIELD_MAPS",
+    "CONTRACT_LIABILITIES_COLUMN",
     "CSMAR_CUTOFF",
+    "ContractLiabilityGuardResult",
     "DEDUCTED_PROFIT",
     "EXCHANGE_GAIN",
     "FINANCIAL_SECTOR",
+    "INDIRECT_FIELD_MAP_FINANCIAL",
+    "INSURANCE_CONTRACT_LIABILITY_COLUMN",
+    "INSURANCE_CONTRACT_LIABILITY_REJECT_REASON",
+    "INSURANCE_SW_LEVEL2",
     "REGULATORY_METRICS",
     "SPECS",
     "RegulatoryMetricsUpdater",
     "SupplementFetcher",
     "SupplementSpec",
+    "cash_flow_structural_missing_columns",
     "em_symbol",
+    "guard_contract_liabilities",
+    "is_insurance_contract_liability_source",
+    "is_insurance_stock",
     "recent_quarter_ends",
 ]
 
@@ -95,8 +107,31 @@ REGULATORY_METRICS = "regulatory_metrics"
 FINANCIAL_SECTOR = "financial_sector_items"
 EXCHANGE_GAIN = "exchange_gain_supplement"
 
-# 折旧摊销族 → cash_flow_indirect 列名（实测确认，见旧脚本 docstring）
+# ─── 东财 F10 `xjllbAjaxNew` 现金流量表全量字段映射（2026-11-16，reports/131 §9.2 P0-3）
+#
+# 事故：`CSMAR_CUTOFF = 2025-03-31` 之后的报告期全走东财补充管线，而该管线只按
+# 10 个字段（间接法）+ 1 个字段（capex）写列 —— 实测 FY2025 年报：
+#   `cash_flow_activity` 5,576 行里 20/21 个数值列全空（只有 capex 有值）；
+#   `cash_flow_indirect` 5,579 行里 19/29 个数值列全空。
+# 后果：EBITDA / EV-EBITDA / 经营杠杆 / FCF 质量 / Owner Earnings 在 2025 年
+# 全部失去「折旧摊销 + 营运资本变动」加项。
+#
+# 列名来源（**不是猜的**）：2026-11-16 实测东财 `xjllbAjaxNew` 响应，用 CSMAR
+# 覆盖期内的 2024-12-31 行做**逐值反查**（40 只股票 × 三套模板 ORG_TYPE
+# 通用/证券/银行/保险），每个目标列只认「值完全相等」的源字段：
+#   例：600519 2024-12-31 `cash_ending_balance` = 164,297,949,257.83
+#       东财 `END_CASH` 同值（`END_CCE` 是「现金及现金等价物」合计，不等于本列）。
+# 三套模板（companyType=4 通用 254 列 / =1 证券 252 列 / =3 银行 316 列 /
+# =2 保险 256 列）字段名并不相同，同名不同义也有：保险模板的 `FA_IR_DEPR`
+# 是「固定资产折旧+投资性房地产折旧」合计，而 CSMAR `fixed_asset_depreciation`
+# 对应的是更细的 `FIXED_ASSET_DEPR`（601318 实测 4,555,000,000 vs 合计 9,860,000,000）。
+# 因此**通用模板**用本表，金融专用模板用下面的 `INDIRECT_FIELD_MAP_FINANCIAL` 覆盖。
+#
+# 纪律：两张表都只在「源有值」时写入，且 `cash_flow_*` 走 replace_source_rows
+# （按股票先删同源再插），绝不覆盖 CSMAR 行；解析时同一目标列**先到先得**，
+# 行业覆盖表排在前，通用表只在该目标列仍为空时生效。
 INDIRECT_FIELD_MAP: dict[str, str] = {
+    # 折旧摊销族（既有，2026-11-14 实测确认）
     "FA_IR_DEPR": "fixed_asset_depreciation",
     "IR_DEPR": "investment_property_depreciation",
     "USERIGHT_ASSET_AMORTIZE": "right_of_use_asset_depreciation",
@@ -107,11 +142,152 @@ INDIRECT_FIELD_MAP: dict[str, str] = {
     "INVEST_LOSS": "investment_loss",
     "DISPOSAL_LONGASSET_LOSS": "disposal_long_term_asset_loss",
     "NETCASH_OPERATE": "cf_from_operating_indirect",
+    # 2026-11-16 补齐（reports/131 P0-3）：净利润 / 减值 / 财务费用 / 递延所得税 /
+    # 营运资本三项 / 其他调整 / 债务与租赁 / 现金及现金等价物期初期末
+    "NETPROFIT": "net_profit",
+    "FA_SCRAP_LOSS": "fixed_asset_scrap_loss",
+    "FINANCE_EXPENSE": "financial_expense",
+    "DT_ASSET_REDUCE": "deferred_tax_asset_decrease",
+    "DT_LIAB_ADD": "deferred_tax_liability_increase",
+    "INVENTORY_REDUCE": "inventory_decrease",
+    "OPERATE_RECE_REDUCE": "operating_receivable_decrease",
+    "OPERATE_PAYABLE_ADD": "operating_payable_increase",
+    "OTHER": "other_adjustment",
+    "DEBT_TRANSFER_CAPITAL": "debt_to_capital",
+    "CONVERT_BOND_1YEAR": "convertible_bond_due_within_1y",
+    "FINLEASE_OBTAIN_FA": "finance_lease_fixed_assets",
+    "END_CASH": "cash_ending_balance",
+    "BEGIN_CASH": "cash_beginning_balance",
+    "END_CASH_EQUIVALENTS": "cash_equivalent_ending",
+    "BEGIN_CASH_EQUIVALENTS": "cash_equivalent_beginning",
+    "CCE_ADD": "cash_equivalent_net_increase",
 }
-# 资本支出 → cash_flow_activity 列名
+# 金融专用模板（ORG_TYPE 银行 / 保险）的覆盖项：**优先于** `INDIRECT_FIELD_MAP`。
+# 逐值核对（2026-11-16，CSMAR 2024-12-31）：
+# - 601318 中国平安 `fixed_asset_depreciation` = 4,555,000,000 = `FIXED_ASSET_DEPR`
+#   （同响应的 `FA_IR_DEPR` = 9,860,000,000 = 固定资产折旧 + 投资性房地产折旧合计）；
+# - 601318 `deferred_tax_asset_decrease` = −1,535,000,000 = `DEFER_TAX`
+#   （金融模板不给 `DT_ASSET_REDUCE`/`DT_LIAB_ADD` 两项拆分，CSMAR 也整笔记在借方）；
+# - 600036 招商银行 `asset_impairment_provision` = −2,789,000,000 =
+#   `OTHER_ASSET_IMPAIRMENT`（同响应的 `ASSET_IMPAIRMENT` 是 40,819,000,000，不是本列）。
+INDIRECT_FIELD_MAP_FINANCIAL: dict[str, str] = {
+    "FIXED_ASSET_DEPR": "fixed_asset_depreciation",
+    "OTHER_ASSET_IMPAIRMENT": "asset_impairment_provision",
+    # 信用减值损失：仅银行/保险模板有独立行（通用/证券模板把它并进资产减值准备）
+    "CREDIT_IMPAIRMENT_INCOME": "credit_impairment_loss",
+    "DEFER_TAX": "deferred_tax_asset_decrease",
+}
+# 资本支出 + 投资/筹资活动现金流量净额与明细 → cash_flow_activity 列名。
+# 2026-11-16 同法逐值反查（40 只股票，命中率均在 26–39/40）。
 ACTIVITY_FIELD_MAP: dict[str, str] = {
     "CONSTRUCT_LONG_ASSET": "capex",
+    "WITHDRAW_INVEST": "investment_recovered",
+    "RECEIVE_INVEST_INCOME": "investment_income_cash",
+    "DISPOSAL_LONG_ASSET": "disposal_long_asset_cash",
+    "DISPOSAL_SUBSIDIARY_OTHER": "disposal_subsidiary_cash",
+    "RECEIVE_OTHER_INVEST": "other_investing_inflow",
+    "TOTAL_INVEST_INFLOW": "investing_inflow_total",
+    "INVEST_PAY_CASH": "investment_paid",
+    "OBTAIN_SUBSIDIARY_OTHER": "acquire_subsidiary_cash",
+    "PAY_OTHER_INVEST": "other_investing_outflow",
+    "TOTAL_INVEST_OUTFLOW": "investing_outflow_total",
+    "ACCEPT_INVEST_CASH": "equity_investment_received",
+    "RECEIVE_LOAN_CASH": "borrow_received",
+    "ISSUE_BOND": "bond_issued",
+    "RECEIVE_OTHER_FINANCE": "other_financing_inflow",
+    "TOTAL_FINANCE_INFLOW": "financing_inflow_total",
+    "PAY_DEBT_CASH": "debt_repaid",
+    "ASSIGN_DIVIDEND_PORFIT": "dividend_interest_paid",
+    "PAY_OTHER_FINANCE": "other_financing_outflow",
+    "TOTAL_FINANCE_OUTFLOW": "financing_outflow_total",
 }
+#: 按源行 `ORG_TYPE` 选择行业覆盖表。未列出的行业（通用/证券/信托/金控…）
+#: 一律回落到 `INDIRECT_FIELD_MAP` —— 证券模板（companyType=1，252 列）与通用
+#: 模板字段名一致（2026-11-16 实测 600030/002736：`FA_IR_DEPR`、`DT_ASSET_REDUCE`
+#: 都在，`FIXED_ASSET_DEPR`/`IR_DEPR` 都不在）。
+CASHFLOW_ORG_FIELD_MAPS: dict[str, dict[str, str]] = {
+    "银行": INDIRECT_FIELD_MAP_FINANCIAL,
+    "保险": INDIRECT_FIELD_MAP_FINANCIAL,
+}
+# 保险模板把直接法现金流量表的三个「其他」科目拆/并成了不同名字，用**非空项求和**
+# 表达「两套名字互斥、取到哪个算哪个」。逐值核对（2026-11-16，CSMAR 2024-12-31）：
+# - 601628 中国人寿：TOTAL_INVEST_OUTFLOW 2,777,049,000,000 =
+#   INVEST_PAY_CASH 2,750,929 + CONSTRUCT_LONG_ASSET 3,979 +
+#   PURCHASE_SUBSIDIARY_OTHER 13,724 + PAY_BUY_RESALE 8,417（亿元，完全闭合），
+#   而 CSMAR 把后两项分别记在 acquire_subsidiary_cash / other_investing_outflow；
+# - 601628：TOTAL_FINANCE_OUTFLOW 129,002,000,000 = PAY_DEBT_CASH 35,138 +
+#   ASSIGN_DIVIDEND_PORFIT 26,915 + PAY_SELL_REPO 65,875 + PAY_OTHER_FINANCE 1,074，
+#   CSMAR 的 other_financing_outflow = 66,949,000,000 = 后两项之和。
+CASHFLOW_ORG_DERIVED_SUMS: dict[str, dict[str, tuple[str, ...]]] = {
+    "保险": {
+        "acquire_subsidiary_cash": ("PURCHASE_SUBSIDIARY_OTHER", "OBTAIN_SUBSIDIARY_OTHER"),
+        "other_investing_outflow": ("PAY_BUY_RESALE", "PAY_OTHER_INVEST"),
+        "other_financing_outflow": ("PAY_SELL_REPO", "PAY_OTHER_FINANCE"),
+    },
+}
+
+#: 东财三套模板都**没有**对应科目的列（结构性命中不了，不是"没抓到"）。
+#: 登记责任：`app/core/quality/null_reason_sweeper.py`（`NullReason.SOURCE_EMPTY`）。
+#: 本模块只负责给出「哪些列是结构性缺失」这一事实清单 + 原因，**不写**
+#: `indicator_null_reason`（那张表的唯一写入者是清扫器，见 null_reasons.py 约束 2）。
+CASH_FLOW_STRUCTURAL_MISSING: dict[str, dict[str, str]] = {
+    "cash_flow_indirect": {
+        "unconfirmed_investment_loss": (
+            "东财 xjllbAjaxNew 四套模板（通用/证券/银行/保险）都没有"
+            "「未确认的投资损失」科目；CSMAR 该列本身也只有 2010–2016 有值"
+            "（2016 年后源即停披露），属公认的结构性空列。"
+        ),
+        "credit_impairment_loss": (
+            "通用/证券模板的补充资料只有合并的「资产减值准备」"
+            "（ASSET_IMPAIRMENT→asset_impairment_provision），没有单独的"
+            "「信用减值损失」行；只有银行/保险模板的 CREDIT_IMPAIRMENT_INCOME 可映射。"
+        ),
+        "investment_property_depreciation": (
+            "银行/保险模板没有 IR_DEPR 独立行（已并入 FA_IR_DEPR 合计），"
+            "因此该列对金融股结构性缺失；通用/证券模板不受影响。"
+        ),
+    },
+    "cash_flow_activity": {
+        "other_cash_effect": (
+            "东财对应字段是 RATE_CHANGE_EFFECT（汇率变动对现金的影响），但口径与本列"
+            "不一致：600382 2021 年报两值完全相等（−962,944,449.95），而 601169 "
+            "2018 年报不等（CSMAR −749,000,000 vs 东财 486,000,000）⇒ 拒绝映射。"
+        ),
+    },
+}
+
+
+#: 金融专用模板（银行/保险）**有**对应科目、因此不算结构性缺失的列。
+#: `credit_impairment_loss` ← 银行/保险模板的 `CREDIT_IMPAIRMENT_INCOME`（已映射）。
+_STRUCTURAL_MISSING_FINANCIAL_EXEMPT: frozenset[str] = frozenset({"credit_impairment_loss"})
+#: 只在金融专用模板下才结构性缺失的列（通用/证券模板有独立行）。
+_STRUCTURAL_MISSING_FINANCIAL_ONLY: frozenset[str] = frozenset(
+    {"investment_property_depreciation"}
+)
+
+
+def cash_flow_structural_missing_columns(
+    table: str, *, org_type: str | None = None,
+) -> tuple[str, ...]:
+    """该表「源侧结构性拿不到」的列清单（供 null_reason 清扫器登记 SOURCE_EMPTY）。
+
+    Args:
+        table: `cash_flow_indirect` / `cash_flow_activity`。
+        org_type: 源行 `ORG_TYPE`（银行/保险/证券/通用）。三套模板的科目集不同，
+            `org_type` 决定两族例外：
+            - `credit_impairment_loss` 只有银行/保险模板拿得到（`CREDIT_IMPAIRMENT_INCOME`）；
+            - `investment_property_depreciation` 只有通用/证券模板有 `IR_DEPR` 独立行。
+    """
+    reasons = CASH_FLOW_STRUCTURAL_MISSING.get(table, {})
+    financial = org_type in {"银行", "保险"}
+    columns = []
+    for column in reasons:
+        if column in _STRUCTURAL_MISSING_FINANCIAL_ONLY and not financial:
+            continue
+        if column in _STRUCTURAL_MISSING_FINANCIAL_EXEMPT and financial:
+            continue
+        columns.append(column)
+    return tuple(columns)
 # 资产负债表补充科目 → balance_sheet_ext 列名
 BALANCE_EXT_FIELD_MAP: dict[str, str] = {
     "TOTAL_OTHER_PAYABLE": "other_payables",
@@ -136,16 +312,73 @@ EXCHANGE_GAIN_FIELD_MAP: dict[str, str] = {
 }
 EXCHANGE_GAIN_COLUMNS: tuple[str, ...] = ("stock_code", "report_date", "exchange_gain")
 
+# 两张现金流量明细表的**全部数值列**（顺序与 schema 物理列序一致）。
+# 2026-11-16（reports/131 P0-3）：原实现只列了已映射的 10 列 / 1 列，
+# 于是未映射的列永远写 NULL 且没有任何显式声明。现在按整表列集合落库，
+# 源侧拿不到的列由 `CASH_FLOW_STRUCTURAL_MISSING` 显式登记。
+_INDIRECT_VALUE_COLUMNS: tuple[str, ...] = (
+    "net_profit",
+    "credit_impairment_loss",
+    "unconfirmed_investment_loss",
+    "asset_impairment_provision",
+    "fixed_asset_depreciation",
+    "investment_property_depreciation",
+    "right_of_use_asset_depreciation",
+    "intangible_asset_amortization",
+    "long_term_prepaid_amortization",
+    "disposal_long_term_asset_loss",
+    "fixed_asset_scrap_loss",
+    "fair_value_change_loss",
+    "financial_expense",
+    "investment_loss",
+    "deferred_tax_asset_decrease",
+    "deferred_tax_liability_increase",
+    "inventory_decrease",
+    "operating_receivable_decrease",
+    "operating_payable_increase",
+    "other_adjustment",
+    "cf_from_operating_indirect",
+    "debt_to_capital",
+    "convertible_bond_due_within_1y",
+    "finance_lease_fixed_assets",
+    "cash_ending_balance",
+    "cash_beginning_balance",
+    "cash_equivalent_ending",
+    "cash_equivalent_beginning",
+    "cash_equivalent_net_increase",
+)
+_ACTIVITY_VALUE_COLUMNS: tuple[str, ...] = (
+    "capex",
+    "investment_recovered",
+    "investment_income_cash",
+    "disposal_long_asset_cash",
+    "disposal_subsidiary_cash",
+    "other_investing_inflow",
+    "investing_inflow_total",
+    "investment_paid",
+    "acquire_subsidiary_cash",
+    "other_investing_outflow",
+    "investing_outflow_total",
+    "equity_investment_received",
+    "borrow_received",
+    "bond_issued",
+    "other_financing_inflow",
+    "financing_inflow_total",
+    "debt_repaid",
+    "dividend_interest_paid",
+    "other_financing_outflow",
+    "financing_outflow_total",
+    "other_cash_effect",
+)
+
 INDIRECT_COLUMNS: tuple[str, ...] = (
-    "stock_code", "report_date", "report_type", "fixed_asset_depreciation",
-    "investment_property_depreciation", "right_of_use_asset_depreciation",
-    "intangible_asset_amortization", "long_term_prepaid_amortization",
-    "asset_impairment_provision", "fair_value_change_loss", "investment_loss",
-    "disposal_long_term_asset_loss", "cf_from_operating_indirect",
+    "stock_code", "report_date", "report_type",
+    *_INDIRECT_VALUE_COLUMNS,
     "source", "fetch_time", "raw_response_hash", "confidence", "batch_id", "raw_data",
 )
 ACTIVITY_COLUMNS: tuple[str, ...] = (
-    "stock_code", "report_date", "report_type", "capex",
+    "stock_code", "report_date", "report_type",
+    *_ACTIVITY_VALUE_COLUMNS,
     "source", "fetch_time", "raw_response_hash", "confidence", "batch_id",
 )
 BALANCE_EXT_COLUMNS: tuple[str, ...] = (
@@ -248,6 +481,149 @@ FINANCIAL_SECTOR_UNIVERSE_PREDICATE = (
     " OR (m.sw_level1 IS NULL AND m.csrc_l1 = '金融业')"
 )
 
+# ─── P0-6：保险股的「保险合同负债」不得写进通用科目 contract_liabilities ────
+#
+# 事故（reports/131 §9.2 P0-6）：601318 中国平安 / 601319 中国人保 /
+# 601336 新华保险 / 601601 中国太保 / 601628 中国人寿 五只保险股，
+# FY2022–FY2025 共 19 行 `balance_sheet.contract_liabilities` 有值，
+# 却占**全市场合同负债合计的 42%–68%**（2026-11-16 复核已达 50%–78%）。
+# 根因：上游金融专用科目「保险合同负债」被按名称/序号匹配到通用科目
+# `contract_liabilities`。出现年份恰是新保险合同准则 CAS25 的实施年
+#（A+H 险企 2022、其余 2023）—— 只有实施新准则的公司才有这一行，可反证。
+#
+# 本模块提供**写库前守卫**：只要股票被判定为保险股（`sw_level2='保险Ⅱ'`
+# 或源行 ORG_TYPE 为「保险」），「保险合同负债」这个科目就
+#  ① 绝不进 `contract_liabilities`；
+#  ② 若 `financial_sector_items.insurance_contract_liability` 列存在，改写进去；
+#  ③ 列不存在（2026-11-16 现状）→ 值不落库，并显式登记原因（不留无声 NULL）。
+INSURANCE_SW_LEVEL1 = "非银金融"
+#: 申万二级行业名（DB 实测字符串，注意是全角罗马数字 Ⅱ）
+INSURANCE_SW_LEVEL2 = "保险Ⅱ"
+#: 上游用来指代「保险合同负债」的字段名/中文标签（大小写不敏感匹配）
+INSURANCE_CONTRACT_LIABILITY_SOURCES: tuple[str, ...] = (
+    "保险合同负债",
+    "保险合同负债合计",
+    "INSURANCE_CONTRACT_LIAB",
+    "INSURANCE_CONTRACT_LIABILITY",
+    "INSURANCE_CONTRACT_RESERVE_LIAB",
+)
+#: 被禁止承接该科目的通用列
+CONTRACT_LIABILITIES_COLUMN = "contract_liabilities"
+#: 该科目真正该落的专用列（`financial_sector_items`）。
+#: ⚠️ 2026-11-16 实测正式库**没有**这一列 —— 按 reports/131 裁决「不改 schema」，
+#: 这里只登记常量；主控加列后 `_adapt_spec_to_schema()` 会自动启用映射。
+INSURANCE_CONTRACT_LIABILITY_COLUMN = "insurance_contract_liability"
+INSURANCE_CONTRACT_LIABILITY_TABLE = "financial_sector_items"
+#: 守卫拒绝写入时登记到 `indicator_null_reason.reason_code` 的原因码。
+#: 复用既有枚举里的 `SOURCE_EMPTY`（语义：源侧这个值没有可写的合法归宿）。
+INSURANCE_CONTRACT_LIABILITY_REJECT_REASON = "SOURCE_EMPTY"
+#: CAS25「保险合同负债」→ 专用列。列不存在时**不得**并入
+#: `FINANCIAL_SECTOR_FIELD_MAP_INSURER`，否则 INSERT BY NAME 会直接报列不存在。
+FINANCIAL_SECTOR_FIELD_MAP_INSURER_CAS25: dict[str, str] = {
+    "保险合同负债": INSURANCE_CONTRACT_LIABILITY_COLUMN,
+    "INSURANCE_CONTRACT_LIAB": INSURANCE_CONTRACT_LIABILITY_COLUMN,
+}
+
+
+def is_insurance_contract_liability_source(field_name: Any) -> bool:
+    """该上游字段名/中文标签是否指代「保险合同负债」。"""
+    text = str(field_name or "").strip().upper().replace(" ", "")
+    if not text:
+        return False
+    return any(token.upper().replace(" ", "") in text for token in INSURANCE_CONTRACT_LIABILITY_SOURCES)
+
+
+def is_insurance_stock(
+    *,
+    sw_level1: str | None = None,
+    sw_level2: str | None = None,
+    org_type: str | None = None,
+    name: str | None = None,
+) -> bool:
+    """保险股判定（任一命中即算，宁可多拦不可漏拦）。
+
+    判据优先级：申万二级 `保险Ⅱ` → 源行 `ORG_TYPE='保险'` → 公司名含「保险」。
+    `sw_level1='非银金融'` 单独**不**足以判定（券商/多元金融也是非银金融）。
+    """
+    if (sw_level2 or "").strip() == INSURANCE_SW_LEVEL2:
+        return True
+    if "保险" in str(org_type or ""):
+        return True
+    if sw_level1 is not None and str(sw_level1).strip() == "保险":
+        return True
+    return "保险" in str(name or "")
+
+
+@dataclass(frozen=True)
+class ContractLiabilityGuardResult:
+    """写库前守卫的判定结果。"""
+
+    #: 放行后可写的列 → 值（被拒的列已从中摘除）
+    values: dict[str, float | None]
+    #: 被拒绝写入的列（目前只会是 `contract_liabilities`）
+    rejected_columns: tuple[str, ...] = ()
+    #: 应当改写到专用列的值（专用列不存在时为空）
+    rerouted: Mapping[str, float] = field(default_factory=dict)
+    #: 列 → 登记 `indicator_null_reason` 用的原因文案
+    reasons: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def rejected(self) -> bool:
+        return bool(self.rejected_columns)
+
+
+def guard_contract_liabilities(
+    values: Mapping[str, float | None],
+    *,
+    source_fields: Mapping[str, str] | None = None,
+    is_insurance: bool,
+    available_columns: Collection[str] | None = None,
+) -> ContractLiabilityGuardResult:
+    """写库前守卫：保险股的「保险合同负债」绝不落 `contract_liabilities`。
+
+    Args:
+        values: 目标列 → 待写值。
+        source_fields: 目标列 → 该值实际来自的上游字段名（用于识别科目来源）。
+        is_insurance: 该股是否为保险股（调用方按 sw_level2/ORG_TYPE 判定）。
+        available_columns: 目标表真实列集合；含 `insurance_contract_liability`
+            时把值改写到该专用列，否则只拒绝并登记原因。
+
+    Returns:
+        `ContractLiabilityGuardResult`；非保险股原样放行。
+    """
+    guarded = dict(values)
+    if not is_insurance:
+        return ContractLiabilityGuardResult(values=guarded)
+    if CONTRACT_LIABILITIES_COLUMN not in guarded:
+        return ContractLiabilityGuardResult(values=guarded)
+    hit_source = str((source_fields or {}).get(CONTRACT_LIABILITIES_COLUMN) or "").strip()
+    if not is_insurance_contract_liability_source(hit_source):
+        # 值不是从「保险合同负债」来的（保险股也可能真有合同负债）：放行。
+        return ContractLiabilityGuardResult(values=guarded)
+    rejected_value = guarded.pop(CONTRACT_LIABILITIES_COLUMN)
+    rerouted: dict[str, float] = {}
+    target = INSURANCE_CONTRACT_LIABILITY_COLUMN
+    if available_columns is not None and target in available_columns and rejected_value is not None:
+        rerouted[target] = rejected_value
+        guarded[target] = rejected_value
+        detail = (
+            f"「{hit_source}」是 CAS25 保险合同负债，已按保险股口径改写"
+            f" {INSURANCE_CONTRACT_LIABILITY_TABLE}.{target}（不是合同负债）"
+        )
+    else:
+        detail = (
+            f"「{hit_source}」是 CAS25 保险合同负债，禁止写入 "
+            f"{CONTRACT_LIABILITIES_COLUMN}（保险股口径）；"
+            f"专用列 {INSURANCE_CONTRACT_LIABILITY_TABLE}.{target} 尚未建列，"
+            "需主控加列后由补充管线改写（reports/131 §9.2 P0-6）"
+        )
+    return ContractLiabilityGuardResult(
+        values=guarded,
+        rejected_columns=(CONTRACT_LIABILITIES_COLUMN,),
+        rerouted=rerouted,
+        reasons={CONTRACT_LIABILITIES_COLUMN: detail},
+    )
+
 
 @dataclass(frozen=True)
 class SupplementSpec:
@@ -271,6 +647,11 @@ class SupplementSpec:
     #: 按行业（源行 `ORG_TYPE`：银行/证券/保险…）覆盖 `field_map`。
     #: 同名不同义（券商 `CUSTOMER_DEPOSIT` 是客户资金存款）必须在这里分开映射。
     org_field_maps: Mapping[str, Mapping[str, str]] | None = None
+    #: 行业映射是「覆盖层」还是「整体替换」：
+    #: - False（默认，金融股专用三表）：命中行业的表只写该行业科目，未命中即 no_data；
+    #: - True（现金流量表补充域）：行业表只列**与通用模板不同名/不同义**的字段，
+    #:   其余仍走 `field_map`。命中项排在前面，按「先到先得」优先取胜。
+    org_field_maps_merge: bool = False
     #: 按行业派生科目：{行业: {目标列: (源字段1, 源字段2, …)}}，取非空项求和。
     org_derived_sums: Mapping[str, Mapping[str, tuple[str, ...]]] | None = None
     #: 待补股票池 SQL 谓词（用 `m.` 前缀引用 stock_meta）；None=全市场。
@@ -300,6 +681,11 @@ SPECS: dict[str, SupplementSpec] = {
         write_mode="replace_source_rows",
         pending_mode="latest_period",
         judge_table="cash_flow_activity",
+        # 2026-11-16（reports/131 P0-3）：金融专用模板（ORG_TYPE 银行/保险）
+        # 的折旧/减值/递延所得税字段名与通用模板不同，按行业覆盖解析。
+        org_field_maps=CASHFLOW_ORG_FIELD_MAPS,
+        org_field_maps_merge=True,
+        org_derived_sums=CASHFLOW_ORG_DERIVED_SUMS,
     ),
     BALANCE_SHEET_EXT: SupplementSpec(
         key=BALANCE_SHEET_EXT,
@@ -745,6 +1131,120 @@ class SupplementFetcher:
 
     # ─── 解析 ─────────────────────────────────────────────────────
 
+    #: P0-6 守卫本轮拒绝写入的明细（供 CLI/报告展示，不落库）
+    def _record_guard_rejection(
+        self, *, stock_code: str, report_date: date, source_field: str, detail: str,
+    ) -> None:
+        rejections = getattr(self, "_guard_rejections", None)
+        if rejections is None:
+            rejections = []
+            self._guard_rejections = rejections
+        rejections.append({
+            "stock_code": stock_code,
+            "report_date": report_date.isoformat(),
+            "column": CONTRACT_LIABILITIES_COLUMN,
+            "source_field": source_field,
+            "reason_code": INSURANCE_CONTRACT_LIABILITY_REJECT_REASON,
+            "detail": detail,
+        })
+        logger.warning(
+            "守卫拦截：保险股 %s %s 的「%s」不得写入 %s（%s）",
+            stock_code, report_date, source_field, CONTRACT_LIABILITIES_COLUMN,
+            INSURANCE_CONTRACT_LIABILITY_REJECT_REASON,
+        )
+
+    @property
+    def guard_rejections(self) -> list[dict[str, Any]]:
+        """P0-6 守卫累计拦截明细（本轮进程内，供报告/CLI 摘要）。"""
+        return list(getattr(self, "_guard_rejections", []) or [])
+
+    def _insurer_codes(self, codes: Sequence[str]) -> set[str]:
+        """按 `stock_meta` 的行业口径解析保险股代码集合。
+
+        判据（reports/131 §9.2 P0-6）：`sw_level2='保险Ⅱ'` 优先，其次
+        `sw_level1='保险'`、公司名含「保险」。查询失败返回空集（守卫仍由
+        源行 `ORG_TYPE` 在解析层兜底，不会因为查不到行业就放行）。
+        """
+        unique = sorted({str(code) for code in codes if str(code).strip()})
+        if not unique:
+            return set()
+        placeholders = ", ".join("?" for _ in unique)
+        try:
+            rows = self.duck.read_query(
+                f"""SELECT stock_code, sw_level1, sw_level2, name
+                    FROM stock_meta WHERE stock_code IN ({placeholders})""",
+                unique,
+            )
+        except Exception as error:  # noqa: BLE001 - 行业查不到不得阻断写库
+            logger.warning("守卫读取 stock_meta 行业失败: %s", error)
+            return set()
+        insurers: set[str] = set()
+        for row in rows:
+            if is_insurance_stock(
+                sw_level1=row.get("sw_level1"),
+                sw_level2=row.get("sw_level2"),
+                name=row.get("name"),
+            ):
+                insurers.add(str(row["stock_code"]))
+        return insurers
+
+    def _available_columns(self, tables: Collection[str]) -> dict[str, set[str]]:
+        """目标表的真实列集合（`information_schema.columns`）。
+
+        查询失败返回 `{}`（= 未知）：调用方必须把"未知"当成"没有该列"处理，
+        绝不能凭 spec 里的声明往库里写不存在的列。
+        """
+        wanted = sorted({str(table) for table in tables})
+        if not wanted:
+            return {}
+        placeholders = ", ".join("?" for _ in wanted)
+        try:
+            rows = self.duck.read_query(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                f"WHERE table_name IN ({placeholders})",
+                wanted,
+            )
+        except Exception as error:  # noqa: BLE001 - 列探测失败保持当前行为
+            logger.debug("读取目标表列集合失败: %s", error)
+            return {}
+        available: dict[str, set[str]] = {table: set() for table in wanted}
+        for row in rows:
+            available.setdefault(str(row["table_name"]), set()).add(str(row["column_name"]))
+        return available
+
+    def _adapt_spec_to_schema(
+        self, spec: SupplementSpec, available: Mapping[str, Collection[str]],
+    ) -> SupplementSpec:
+        """按目标表**真实**列集合裁剪 spec（主控未加的列绝不写）。
+
+        目前只作用于 P0-6 的 `insurance_contract_liability`：
+        - 列不存在（2026-11-16 正式库现状）→ 原样返回，CAS25 映射不启用；
+        - 列已由主控加上 → 自动启用 `保险合同负债 → insurance_contract_liability`
+          映射并把该列补进 `spec.columns`，无需再改代码。
+        """
+        if spec.key != FINANCIAL_SECTOR:
+            return spec
+        table = INSURANCE_CONTRACT_LIABILITY_TABLE
+        columns = available.get(table) or set()
+        if INSURANCE_CONTRACT_LIABILITY_COLUMN not in columns:
+            return spec
+        org_maps = spec.org_field_maps or {}
+        insurer_map = dict(org_maps.get("保险") or {})
+        if any(
+            column == INSURANCE_CONTRACT_LIABILITY_COLUMN
+            for column in insurer_map.values()
+        ):
+            return spec  # 幂等：已经适配过
+        insurer_map.update(FINANCIAL_SECTOR_FIELD_MAP_INSURER_CAS25)
+        target_columns = spec.columns[table]
+        if INSURANCE_CONTRACT_LIABILITY_COLUMN not in target_columns:
+            target_columns = (*target_columns, INSURANCE_CONTRACT_LIABILITY_COLUMN)
+        return replace(
+            spec,
+            columns={**dict(spec.columns), table: target_columns},
+            org_field_maps={**dict(org_maps), "保险": insurer_map},
+        )
+
     def _parse_rows(
         self,
         spec: SupplementSpec,
@@ -754,11 +1254,16 @@ class SupplementFetcher:
         batch_id: str,
         fetched_at: datetime,
         src_hash: str,
+        available_columns: Mapping[str, Collection[str]] | None = None,
     ) -> dict[str, list[dict[str, Any]]]:
         """把源返回的原始行解析成按表分组的落库行（列名显式，不依赖列序）。
 
         多端点 spec（金融股）会把同一报告期的资产负债表行与利润表行**合并**
         成一行；否则两行同主键会在 INSERT 时撞 PK。
+
+        `available_columns`：目标表真实列集合（`{table: {column, …}}`）。仅用于
+        P0-6 守卫判断「专用列 insurance_contract_liability 是否已由主控加上」；
+        缺省（None）= 未知 = 按"列不存在"处理，绝不写出不存在的列。
         """
         parsed: dict[str, list[dict[str, Any]]] = {table: [] for table in spec.columns}
         floor = spec.period_floor if spec.period_floor is not None else CSMAR_CUTOFF
@@ -772,6 +1277,9 @@ class SupplementFetcher:
             ),
             "",
         )
+        # 2026-11-16（reports/131 P0-6）：保险股判定。源响应自带 ORG_TYPE，
+        # 缺该键时由 `refresh()` 用 stock_meta.sw_level2 兜底（见 `_insurer_codes`）。
+        stock_is_insurer = is_insurance_stock(org_type=stock_org)
         merged: dict[date, dict[str, Any]] = {}
         for row in rows:
             raw_date = str(row.get("REPORT_DATE") or "")[:10]
@@ -785,13 +1293,29 @@ class SupplementFetcher:
             em_map: Mapping[str, str] = spec.field_map
             derived: Mapping[str, tuple[str, ...]] = {}
             if spec.org_field_maps is not None:
-                em_map = spec.org_field_maps.get(stock_org, spec.field_map)
+                org_map = spec.org_field_maps.get(stock_org)
+                if org_map is not None and spec.org_field_maps_merge:
+                    # 覆盖层：行业专用字段排在前（先到先得），通用字段兜底。
+                    em_map = {**dict(org_map), **dict(spec.field_map)}
+                elif org_map is not None:
+                    em_map = org_map
                 if spec.org_derived_sums is not None:
                     derived = spec.org_derived_sums.get(stock_org, {})
-            values: dict[str, float | None] = {
-                column: _to_float(row.get(em_field))
-                for em_field, column in em_map.items()
-            }
+            # 2026-11-16（reports/131 P0-3）：同一目标列可能有多条候选源字段
+            #（通用模板 vs 金融专用模板）。解析规则改为**先到先得**：
+            # spec.field_map 里靠前的键优先，取到第一个非空值后不再覆盖。
+            # 旧实现是 `{column: _to_float(row.get(em_field))}` 的 dict 推导式，
+            # 后写的键会静默覆盖先写的键 —— 在"同名列不同义"场景下会写错值。
+            values: dict[str, float | None] = {}
+            hit_sources: dict[str, str] = {}
+            for em_field, column in em_map.items():
+                if values.get(column) is not None:
+                    continue
+                value = _to_float(row.get(em_field))
+                if value is None:
+                    continue
+                values[column] = value
+                hit_sources[column] = em_field
             for column, parts in derived.items():
                 present = [
                     value
@@ -800,8 +1324,28 @@ class SupplementFetcher:
                 ]
                 if present:
                     values[column] = sum(present)
+                    hit_sources[column] = "+".join(parts)
             if not any(value is not None for value in values.values()):
                 continue
+            # P0-6 写库前守卫：保险股的「保险合同负债」绝不再进通用科目。
+            guard = guard_contract_liabilities(
+                values,
+                source_fields=hit_sources,
+                is_insurance=stock_is_insurer,
+                available_columns=(
+                    available_columns.get(INSURANCE_CONTRACT_LIABILITY_TABLE)
+                    if available_columns
+                    else None
+                ),
+            )
+            if guard.rejected and CONTRACT_LIABILITIES_COLUMN in hit_sources:
+                self._record_guard_rejection(
+                    stock_code=code,
+                    report_date=report_date,
+                    source_field=hit_sources[CONTRACT_LIABILITIES_COLUMN],
+                    detail=guard.reasons.get(CONTRACT_LIABILITIES_COLUMN, ""),
+                )
+            values = guard.values
             base = {
                 "stock_code": code,
                 "report_date": report_date,
@@ -812,24 +1356,38 @@ class SupplementFetcher:
                 "batch_id": batch_id,
             }
             if spec.key == CASHFLOW_SUPPLEMENT:
+                # 2026-11-16（reports/131 P0-3）：按**整表**列集合落库，不再是
+                # 只写 field_map 里那几个已映射的列。两张表的数值列清单来自
+                # `spec.columns`，源侧没有的列保持 NULL（并已在
+                # `CASH_FLOW_STRUCTURAL_MISSING` 里显式登记原因）。
+                indirect_columns = [
+                    column for column in spec.columns["cash_flow_indirect"]
+                    if column not in ("stock_code", "report_date", "report_type",
+                                      "source", "fetch_time", "raw_response_hash",
+                                      "confidence", "batch_id", "raw_data")
+                ]
                 indirect = {
                     **base,
-                    **{
-                        column: values.get(column)
-                        for column in INDIRECT_FIELD_MAP.values()
-                    },
+                    **{column: values.get(column) for column in indirect_columns},
                     "source": SOURCE,
                     "raw_data": "{}",
                 }
-                if any(
-                    indirect[column] is not None
-                    for column in INDIRECT_FIELD_MAP.values()
-                ):
+                if any(indirect[column] is not None for column in indirect_columns):
                     parsed["cash_flow_indirect"].append(indirect)
-                if values.get("capex") is not None:
-                    parsed["cash_flow_activity"].append({
-                        **base, "capex": values["capex"], "source": SOURCE,
-                    })
+                activity_columns = [
+                    column for column in spec.columns["cash_flow_activity"]
+                    if column not in ("stock_code", "report_date", "report_type",
+                                      "source", "fetch_time", "raw_response_hash",
+                                      "confidence", "batch_id")
+                ]
+                activity = {
+                    **base,
+                    **{column: values.get(column) for column in activity_columns},
+                    "source": SOURCE,
+                }
+                # 旧实现只在 capex 有值时才写活动表 → 没有资本支出的股票整行丢失。
+                if any(activity[column] is not None for column in activity_columns):
+                    parsed["cash_flow_activity"].append(activity)
             elif spec.write_mode == "replace_source_rows":
                 # 通用 replace 模式（balance_sheet_ext / 金融股专用三表）：
                 # 同报告期的多端点行合并，非空值优先。
@@ -863,6 +1421,41 @@ class SupplementFetcher:
 
     # ─── 落库 ─────────────────────────────────────────────────────
 
+    def _strip_insurer_contract_liabilities(
+        self, frame: pd.DataFrame, *, table: str,
+    ) -> int:
+        """把保险股行的 `contract_liabilities` 置 NULL（P0-6 写库前守卫）。
+
+        Returns:
+            被置空的行数（0 = 没有保险股，或本来就没有值）。
+        """
+        if frame.empty:
+            return 0
+        codes = frame["stock_code"].astype(str).tolist()
+        insurers = self._insurer_codes(codes)
+        if not insurers:
+            return 0
+        mask = frame["stock_code"].astype(str).isin(insurers) & frame[
+            CONTRACT_LIABILITIES_COLUMN
+        ].notna()
+        affected = int(mask.sum())
+        if affected == 0:
+            return 0
+        for _, row in frame.loc[mask].iterrows():
+            self._record_guard_rejection(
+                stock_code=str(row["stock_code"]),
+                report_date=pd.Timestamp(row["report_date"]).date()
+                if "report_date" in frame.columns else date.today(),
+                source_field=str(CONTRACT_LIABILITIES_COLUMN),
+                detail=(
+                    "写库前守卫：保险股的 "
+                    f"{table}.{CONTRACT_LIABILITIES_COLUMN} 被强制置空"
+                    "（reports/131 §9.2 P0-6）"
+                ),
+            )
+        frame.loc[mask, CONTRACT_LIABILITIES_COLUMN] = float("nan")
+        return affected
+
     def _persist_rows(
         self,
         spec: SupplementSpec,
@@ -878,6 +1471,11 @@ class SupplementFetcher:
 
         `lineage_payload`：本轮请求描述（JSON 字节），会用 `src_hash` 归档进
         `raw_response_archive`，使 `fetch_batch` 的摘要与归档一一对应。
+
+        写库前最后一道 P0-6 守卫：目标表若含 `contract_liabilities` 列，则按
+        `stock_meta` 行业口径把**保险股**的那一列强制置空 —— 即使上游解析漏判
+        （源行缺 `ORG_TYPE`、或未来的新 spec 误把「保险合同负债」映射到通用列），
+        也绝不可能把保险股的保险合同负债写进合同负债。
         """
         written: dict[str, int] = {}
         with self.duck.transaction() as conn:
@@ -889,6 +1487,8 @@ class SupplementFetcher:
                 frame = pd.DataFrame(rows, columns=list(columns))
                 if "report_date" in frame.columns:
                     frame["report_date"] = pd.to_datetime(frame["report_date"])
+                if CONTRACT_LIABILITIES_COLUMN in frame.columns:
+                    self._strip_insurer_contract_liabilities(frame, table=table)
                 conn.register("_supp_rows", frame)
                 try:
                     if spec.write_mode == "replace_source_rows":
@@ -966,6 +1566,7 @@ class SupplementFetcher:
         retry_days: int = 0,
         progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
         field_map: Mapping[str, str] | None = None,
+        force_codes: Sequence[str] | None = None,
     ) -> dict[str, Any]:
         """有界补采一轮：到期由调用方判断，本方法只管"本轮抓哪些、抓多少"。
 
@@ -986,6 +1587,12 @@ class SupplementFetcher:
         spec = SPECS[key]
         if field_map is not None:
             spec = replace(spec, field_map=dict(field_map))
+        # 2026-11-16（reports/131 P0-6）：按目标表**真实**列集合裁剪 spec。
+        # 主控还没加的列（`financial_sector_items.insurance_contract_liability`）
+        # 绝不能出现在 INSERT 里，否则整批 `INSERT ... BY NAME` 直接失败。
+        self._guard_rejections = []
+        available_columns = self._available_columns(spec.columns)
+        spec = self._adapt_spec_to_schema(spec, available_columns)
         resolved_periods = self.resolve_periods(key, periods=periods)
         report: dict[str, Any] = {
             "dataset": key,
@@ -1014,6 +1621,26 @@ class SupplementFetcher:
                 key, resolved_periods, retry_days=retry_days,
             )
             pending = all_pending[:max_stocks] if max_stocks > 0 else all_pending
+            # 2026-11-17（reports/131 P0-3）：`force_codes` 用于"判据认为已追平、
+            # 但库里该期只有半空壳"的存量修复——pending 判据只看"有没有行"、
+            # 不看"行里的列填没填"。显式点名时绕过判据。
+            if force_codes:
+                known = {code for code, _ in pending}
+                wanted = [str(c) for c in force_codes if str(c) not in known]
+                if wanted:
+                    slots = ", ".join("?" for _ in wanted)
+                    rows = self.duck.read_query(
+                        f"SELECT stock_code, exchange FROM stock_meta "
+                        f"WHERE stock_code IN ({slots})",
+                        wanted,
+                    )
+                    extra = [
+                        (str(row["stock_code"]), str(row.get("exchange") or ""))
+                        for row in rows
+                    ]
+                    if extra:
+                        pending = list(pending) + extra
+                        all_pending = pending
         except Exception as error:  # noqa: BLE001 - 判据查询失败只影响本数据集
             logger.warning("补采待补查询失败(%s): %s", key, error)
             report["status"] = "failed"
@@ -1099,6 +1726,7 @@ class SupplementFetcher:
                     parsed = self._parse_rows(
                         spec, code, rows,
                         batch_id=batch_id, fetched_at=fetched_at, src_hash=src_hash,
+                        available_columns=available_columns,
                     )
                     if any(parsed.values()):
                         fetched_codes.append(code)
@@ -1182,6 +1810,8 @@ class SupplementFetcher:
             # 本轮之后还剩多少只待补（含本轮 deferred）。调用方据此决定
             # 是否推进水位：还有残留就下一轮继续，否则会被间隔白挡 7 天。
             "remaining_pending": max(0, len(all_pending) - updated),
+            "guard_rejections": len(self.guard_rejections),
+            "guard_rejection_sample": self.guard_rejections[:10],
             "elapsed_seconds": round(time.time() - started, 2),
         })
         logger.info(
