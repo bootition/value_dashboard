@@ -42,6 +42,7 @@ from app.core.job_status import aggregate_job_status, merge_step_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.update_steps import STEP_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -784,6 +785,9 @@ class IncrementalUpdater:
         }
 
         def report_step(name: str, step: dict[str, Any]) -> dict[str, Any]:
+            # 步骤名必须登记在 update_steps.STEP_ORDER（更新步骤的唯一可读索引）；只告警不改行为。
+            if name not in STEP_NAMES:
+                logger.warning("步骤 %r 未登记在 app/core/update_steps.py::STEP_ORDER", name)
             report["steps"][name] = step
             if progress_cb is not None:
                 progress_cb(name, step)
