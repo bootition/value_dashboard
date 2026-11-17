@@ -21,7 +21,7 @@ last-reviewed: 2026-11-17
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `skills/` | 技能 | 可加载的操作流程（如 `composite-indicator`：复合指标 10 步清单） | ✅ 是（新增/改口径前必读） |
-| `reference/` | 索引 | 代码地图（`CODE_MAP.md`：想改 X 就读 Y）、认知成本基线 JSON | ✅ 是（**新人第一天先读 CODE_MAP**） |
+| `reference/` | 索引 | 代码地图（`CODE_MAP.md`：想改 X 就读 Y）、认知成本基线 JSON | ✅ 是（**新人第一天先读 CODE_MAP**）；`reports/136` 的可移除清单是删除动作的唯一依据 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
 | `archive/` | 归档 | 已废弃/完成的研究快照、执行计划（含 superpowers/） | ❌ 否（只读） |
 
@@ -62,7 +62,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 | 产品需求 | `decisions/01_PRODUCT_REQUIREMENTS_V1.md`（活文档） |
 | 技术约束 | `decisions/02_TECH_CONSTRAINTS.md` |
 | 报告（事件型） | `reports/` — **以 STATUS 表为准**；当前已登记至 102（2026-09-01 数据库治理执行状态），82–102 为 2026-08-25 以后的当前进展 |
-| 运行手册 | `runbooks/` — user-first-use、s0-evidence-preservation、ops-backup-restore、ops-auto-update-retry、ops-data-rebuild、ops-build-release-s1、ops-duckdb-rebuild、ops-knowledge-base |
+| 运行手册 | `runbooks/` — user-first-use、ops-backup-restore、ops-auto-update-retry、ops-data-rebuild、ops-build-release-s1、ops-duckdb-rebuild、ops-knowledge-base（`s0-evidence-preservation` 已 `historical`，仅作 07-22 事故证据口径留档） |
 | 合同 | `contracts/path-isolation-contract.md` |
 
 ## 新文档流程（Checklist）

@@ -69,4 +69,4 @@ scripts/build-release.ps1 -OutputDirectory D:\release\vd-20260803
 ## 6. 参考
 
 - `docs/reports/40`（正式启用独立复审 PASS 的完整门禁清单）
-- `docs/runbooks/s0-evidence-preservation.md`（证据保全）
+- `docs/runbooks/s0-evidence-preservation.md`（证据保全；**已 historical**，S0 流程由本文件的 S1 包装器取代）

@@ -28,6 +28,9 @@
 - `report_refs_in_code`：`app/` 里 `reports/NNN` 引用次数（"必须读报告才能懂代码"）
 - `day1_docs_chars`：AGENTS/STATUS/README/知识库/PRD/合同的字符数（必读入口）
 - `superseded_reports`：`docs/reports/` 中已被取代的报告数（新人必须先判断哪些别读）
+- `stale_approved_docs`：`docs/**/*.md` 中 `status: approved` 但 `last-reviewed` 早于
+  "北京时间今天 − 60 天" 的份数（`approved` = "可作建议依据"，过期 = 会读到旧结论；
+  口径来源 `reports/136` §6.9）
 - `incident_named_tests`：以 `test_fix<日期>_` / `test_p<数字>_` 命名（按事故而非行为命名）
 - `import_cycles`：`app/` 内部循环导入组数
 - `closure_<entry>`：从入口模块出发的可达 app 模块数 / LOC（"读懂这条链要读多少"）
@@ -41,10 +44,23 @@ import collections
 import json
 import pathlib
 import re
+import sys
 from dataclasses import asdict, dataclass, field
+from datetime import date, timedelta
 
+# 允许 `python scripts/onboarding_metrics.py` 直接跑（脚本目录在 sys.path[0]，
+# 仓库根不在；AGENTS.md 与 CODE_MAP 给的都是这种调用方式）。
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from app.core.financial_period import cn_today  # noqa: E402  （必须在 sys.path 之后）
+
 SKIP_PARTS = {"__pycache__"}
+# `approved` 的有效期：超过这个天数没复核就视为"会误导新人的旧结论"（reports/136 §6.9）
+STALE_APPROVED_DAYS = 60
+_STATUS_APPROVED = re.compile(r"^status:\s*approved\b", re.M)
+_LAST_REVIEWED = re.compile(r"^last-reviewed:\s*(\d{4}-\d{2}-\d{2})", re.M)
 
 ENTRY_POINTS = (
     "app.core.update",
@@ -75,11 +91,13 @@ class Metrics:
     widest_class_methods: int = 0
     god_modules: int = 0
     duplicate_helper_names: int = 0
+    duplicate_helper_defs: int = 0
     duplicate_helper_examples: list[str] = field(default_factory=list)
     report_refs_in_code: int = 0
     day1_docs_chars: int = 0
     superseded_reports: int = 0
     total_reports: int = 0
+    stale_approved_docs: int = 0
     incident_named_tests: int = 0
     total_test_files: int = 0
     import_cycles: int = 0
@@ -103,6 +121,34 @@ def _loc(path: pathlib.Path) -> int:
 
 def _module_name(root: pathlib.Path, path: pathlib.Path) -> str:
     return ".".join(path.relative_to(root).with_suffix("").parts)
+
+
+def _stale_approved_docs(root: pathlib.Path, today: date | None = None) -> int:
+    """`status: approved` 且 `last-reviewed` 早于"今天 − 60 天"的文档份数。
+
+    口径来源 `reports/136` §6.9：`approved` 在 AGENTS.md 里等于"可作建议依据"，
+    所以一份两个月没复核的 approved 文档就是"新人会当成现状的旧结论"。
+    与 `superseded_reports` 一致，用 front-matter 正则判断；缺 `last-reviewed`
+    的文档不计入（无法判断新旧，另行治理）。
+    """
+    cutoff = (today or cn_today()) - timedelta(days=STALE_APPROVED_DAYS)
+    count = 0
+    for path in (root / "docs").rglob("*.md"):
+        if SKIP_PARTS & set(path.parts):
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if not _STATUS_APPROVED.search(text):
+            continue
+        match = _LAST_REVIEWED.search(text)
+        if match is None:
+            continue
+        try:
+            reviewed = date.fromisoformat(match.group(1))
+        except ValueError:
+            continue
+        if reviewed < cutoff:
+            count += 1
+    return count
 
 
 def _import_graph(root: pathlib.Path, modules: dict[str, pathlib.Path]) -> dict[str, set[str]]:
@@ -183,6 +229,9 @@ def collect(root: pathlib.Path = PROJECT_ROOT) -> Metrics:
         if len(set(files)) > 1
     }
     metrics.duplicate_helper_names = len(duplicates)
+    # 冗余定义个数（每组多出来的份数之和）：组数不变时它仍能反映真实收敛，
+    # 例如 _to_float 从 x8 收到 x2，组数仍算 1 组但冗余定义 7 -> 1。
+    metrics.duplicate_helper_defs = sum(len(set(files)) - 1 for files in duplicates.values())
     metrics.duplicate_helper_examples = [
         f"{name} ×{len(set(files))}"
         for name, files in sorted(duplicates.items(), key=lambda kv: -len(set(kv[1])))[:5]
@@ -206,6 +255,7 @@ def collect(root: pathlib.Path = PROJECT_ROOT) -> Metrics:
         1 for path in reports
         if re.search(r"^status:\s*superseded", path.read_text(encoding="utf-8", errors="replace"), re.M)
     )
+    metrics.stale_approved_docs = _stale_approved_docs(root)
 
     tests = sorted((root / "tests/regression").glob("*.py"))
     metrics.total_test_files = len(tests)
@@ -267,6 +317,9 @@ def main(argv: list[str] | None = None) -> int:
             elif delta < 0:
                 flag = "  ← 改善"
             print(f"{key:38s} {old:12d} {value:12d}  {delta:+d}{flag}")
+        missing = [key for key in current if key not in baseline]
+        if missing:
+            print(f"\n基线缺失（本版新增指标，不参与 delta / 回归判定）: {', '.join(missing)}")
         if worse and args.fail_on_regression:
             print("\n认知成本回归：\n  " + "\n  ".join(worse))
             return 1
@@ -285,10 +338,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"函数 >150 LOC: {metrics.functions_gt_150}   >80 LOC: {metrics.functions_gt_80}")
         print(f"方法最多的类: {metrics.widest_class} ({metrics.widest_class_methods} methods)")
         print(f">1000 行模块: {metrics.god_modules}")
-        print(f"同名顶层函数(跨模块): {metrics.duplicate_helper_names}  {metrics.duplicate_helper_examples}")
+        print(f"同名顶层函数(跨模块): {metrics.duplicate_helper_names} 组 / 冗余定义 {metrics.duplicate_helper_defs} 份  {metrics.duplicate_helper_examples}")
         print(f"代码里 reports/NNN 引用: {metrics.report_refs_in_code}")
         print(f"Day-1 必读文档: {metrics.day1_docs_chars} chars")
         print(f"报告: {metrics.superseded_reports}/{metrics.total_reports} superseded")
+        print(f"过期 approved 文档: {metrics.stale_approved_docs} 份"
+              f"（last-reviewed 早于 {STALE_APPROVED_DAYS} 天前，status 应改 historical 或补复核）")
         print(f"测试: {metrics.incident_named_tests}/{metrics.total_test_files} 按事故命名")
         print(f"循环导入: {metrics.import_cycles}")
         for entry, value in metrics.closures.items():

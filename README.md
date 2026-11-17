@@ -176,7 +176,7 @@ Get-FileHash -LiteralPath `
   "data\valuedashboard.sqlite" -Algorithm SHA256
 ```
 
-**冻结说明（历史）：** 2026-07-21/22 的两次验证运行曾改变正式数据库文件，此后建立了 S1 路径隔离（`scripts/s1-pytest.ps1`）并在 2026-07-31 完成全市场数据重建。正式库写操作必须经 CLI/维护脚本且单写者串行，详见 [docs/runbooks/s0-evidence-preservation.md](docs/runbooks/s0-evidence-preservation.md) 与 [docs/STATUS.md](docs/STATUS.md)。
+**冻结说明（历史）：** 2026-07-21/22 的两次验证运行曾改变正式数据库文件，此后建立了 S1 路径隔离（`scripts/s1-pytest.ps1`）并在 2026-07-31 完成全市场数据重建。正式库写操作必须经 CLI/维护脚本且单写者串行，详见 [docs/runbooks/ops-build-release-s1.md](docs/runbooks/ops-build-release-s1.md)（S1 现行做法）与 [docs/STATUS.md](docs/STATUS.md)；S0 版证据保全手册已标 `historical`，仅作事故留档。
 
 ---
 
@@ -209,7 +209,7 @@ Get-FileHash -LiteralPath `
 历史（2026-07-21/22 两次验证运行曾改变正式库文件）已通过 S1 路径隔离
 （`scripts/s1-pytest.ps1`）与单写者串行纪律修复；事故基线详见
 `docs/reports/13`。正式库写操作必须经 CLI/维护脚本且单写者串行，见
-`docs/runbooks/s0-evidence-preservation.md` 与 `docs/STATUS.md`。
+`docs/runbooks/ops-build-release-s1.md`（S0 版 `s0-evidence-preservation.md` 已 `historical`）与 `docs/STATUS.md`。
 
 ---
 

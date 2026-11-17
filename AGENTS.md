@@ -165,6 +165,28 @@ uv lock --locked
 - ✅ 口径被推翻时，新报告 `supersedes` 旧报告并把旧报告 front-matter 标 `superseded`
 - ✅ 结论必须附依据路径 + `last-reviewed` 日期（见文档规则 §4）
 
+## 不要删清单（reports/136 §8，强制）
+
+**用法**：要删任何"看起来多余"的结构前，先在这张表里查一遍。判据是
+**"能指出它防的是哪次事故，就不算过度设计"**——10 项里每一项都对应一次已发生的事故。
+清理历史包袱只按 `docs/reports/136` §7 的**可移除清单**执行；§8 这 10 项永久保留。
+
+| 项 | 看起来可删的理由 | 删了会重演的事故 |
+|---|---|---|
+| `storage/path_policy.py` + `scripts/s1-pytest.ps1` + 证据捕获 | "本地工具，路径校验太重" | 2026-07-22 测试写坏正式库（`incident-2026-07-22`）——这是唯一的结构性防线 |
+| `storage/update_lock.py` / `exclusive_update` | "单人工具，不会并发" | 自动更新子进程 + CLI + Web 三方并发写库 → DuckDB 损坏 |
+| `adapters/base.py::ErrorKind` 七分类 | "错误就是错误，分类这么细干嘛" | `reports/117` 熔断放大：5 只股票让 3 个源同时熔断、假 `retry_exhausted`、永久 missing |
+| `job_status.merge_step_status()` | "合并一个 dict 而已" | `reports/117` P0-2：success 覆盖 rejected → 14 天对外假绿 |
+| 门禁阈值 `max(50,1%)` / 1/3 占比 | "为什么不能全放行或全拦" | 全拦 = 26 只新股拖死全市场发布；全放行 = 系统性单位错乱无人拦（`reports/117`/`118`） |
+| `field_units.py` + 前端 `screening-format.ts` 双份 | "前端不用管单位" | `reports/80` 簇 A/B/C：显示与筛选口径分叉 → 100 倍误差 |
+| `DerivedSnapshotDomain` 注册表 + `_derived_columns_guard` | "又一个概念税" | `reports/133`：ROCE 六列被快照重发清空、静默变 NULL（增量路径仍有坑） |
+| `cold_archive` 17 表 Parquet 视图 | "为什么不放回主库" | 19GB 主库继续膨胀、重建变慢（`reports/109`/`123`） |
+| `cli/protocol.py` 的 plan→confirm 机制 | "单人工具要什么审批令牌" | `backup restore` / 冷库归档等**不可逆**操作一条命令就能执行 |
+| `dividend_yield` 废弃列 + `DEPRECATED_SCALE=100` shim | "直接删列更干净" | `reports/124`：旧筛选草稿静默变成"全市场命中"（差 100 倍） |
+| `scripts/legacy_dangerous/` | "隔离目录用不上了" | `test_maintenance_scripts_safety.py` 把它当**固定 fixture**（存在性 + 内容双重断言），删了 2 条门禁直接红（`reports/137` §3.1） |
+| `app/web/static/index.html`（保留跟踪） | "构建产物不该进 git" | 它让 **fresh clone 立刻可服务 SPA 根路径**；`.gitignore` 有意只忽略 `assets/`。wheel 测试要求的是"构建后产物"，不能拿它当"必须跟踪"的唯一理由（`reports/137` §3.2） |
+| 国内源适配器的代理路由（`trust_env`） | "国内源就该直连" | 改成 `trust_env=False` 会真实改变路由，且失败**静默返回空结果**，离线测试覆盖不到；必须单独做真机探针验证（`reports/137` §3.3） |
+
 ## 工作区边界
 
 - `data/` — 正式数据库（只读！所有写操作必须经 CLI/维护脚本 + 单写者串行）

@@ -99,6 +99,7 @@ last-reviewed: 2026-11-17
 | 改前端页面 | `frontend/src/views/*.vue` + `frontend/src/types/*.ts` + `frontend/src/http.ts` | `npm run build` 会同步到 `app/web/static/`（`sync-static.mjs`），**不要手改 static/** |
 | 加 CLI 命令 | `app/cli/main.py`（Typer 子 app） | 命名风格：现有 65 个 snake_case 与 24 个 kebab-case 混用，**新增一律 kebab-case** |
 | 跑/修数据 | `scripts/` 下的 `repair_*`（16 个）/ `fetch_*`（11 个）/ `import_*`（12 个），默认 dry-run、`--yes` 落库 | 危险脚本规范见 `scripts/verify_no_dangerous_maintenance.py` |
+| **删任何"看起来多余"的东西** | `docs/reports/136` §7（可移除清单）/ §8（不要删清单）→ 本文件 §9 | 先确认它防的是哪次事故；`AGENTS.md` §8 的 10 项永久保留 |
 
 ---
 
@@ -124,7 +125,7 @@ last-reviewed: 2026-11-17
 | 现象 | 事实 |
 |---|---|
 | `data_quality.py` vs `quality/` | 前者是**门禁/告警/可信判定**（2,017 行）；后者是**体检规则 + 空值原因 + 归档核验**（4,275 行）。两者不是父子关系，是两套并行的"质量"概念 |
-| `masked_fields_for_codes()` vs `masked_indicator_fields()` | **同一个函数**，后者只是别名（`data_quality.py`）。调用方随便用哪个都能跑，但会让 grep 失效 |
+| `masked_fields_for_codes()` vs `masked_indicator_fields()` | 曾**同一个函数两个名字**（别名）。2026-11-17 已删除别名（`reports/137`），现在只有 `masked_fields_for_codes()` 一个公开入口，由 `test_trust_gate_single_entry.py` 守护 |
 | `app/core/pdf/` | `reports/123` 说"PDF 方案已删除"——删的是**分红除权日 PDF 解析链**；`pdf/manager.py` 是**公告 PDF 下载/归档**，仍然活着（CLI `vd data download_pdf`） |
 | `scripts/` vs `app/core/` 里的同名能力 | 75 个脚本里有 66 个**直接连 DuckDB**；它们承载了"一次性/维护"逻辑，不在运行时主链上。改运行时要看 `app/`，改历史数据要看 `scripts/`，两者**没有共享的仓储层** |
 | `update.py` vs `init.py` vs `backfill.py` | 三个都能写行情/财务：`init`=首次全量、`backfill`=补历史缺口、`update`=日常增量。**同一个数据可能有三条写入路径**，改口径要三处一起看 |
@@ -140,8 +141,8 @@ last-reviewed: 2026-11-17
 - **维护面**（只被 `scripts/` 或测试调用）：**17 模块 / 3,055 行**
   - `quality/null_reason_sweeper.py` 1,279 行（只由 `scripts/classify_null_reasons.py` 使用）
   - `ah_metrics.py` 935 行（只由 `scripts/refresh_ah_market_snapshot.py` 使用）
-  - `adapters/hk_price_adapter.py` 496 行、`csmar_formulas.py` 198 行（**只有测试调用**）、
-    `storage/cold_archive_guard.py` 115 行
+  - `adapters/hk_price_adapter.py` 496 行、`storage/cold_archive_guard.py` 115 行
+  - （`csmar_formulas.py` 198 行已于 2026-11-17 迁到 `tests/support/csmar_field_verdicts.py`，见 `reports/137`）
 
 > 新人第一周**不要读维护面**。等你要跑数据修复时再按 §3 最后一行进。
 
@@ -163,7 +164,8 @@ last-reviewed: 2026-11-17
 **第 1 周（按任务深入）**
 8. `screening/engine.py` + `dsl/`（如果要做指标/筛选）
 9. `codegraph`/import 图：`uv run python scripts/onboarding_metrics.py --compare <baseline>`
-10. 需要历史时再按 §3 查 `docs/reports/NNN`（**注意 59/132 已 superseded（45%），先看 front-matter**）
+10. 需要历史时再按 §3 查 `docs/reports/NNN`（**注意 59/134 已 superseded（44%），先看 front-matter**）；
+    要找某个测试测什么，先看 `tests/regression/README.md` 的旧名→新名映射表
 
 ---
 
@@ -175,4 +177,17 @@ last-reviewed: 2026-11-17
 | 为什么有的函数 500 行不分拆？ | 多数是"事故修复时把 5 个分支塞进同一事务"的历史产物（`_update_prices_incremental` 501 行）。拆分方案见 `reports/134` §5 S1 |
 | 为什么判空/判可信要跨 8 个文件？ | 可信判定只有 `indicator_trust()` 一个出口，但那 8 个文件都在**调用**它；改判据只改 `data_quality.py` |
 | 为什么有 19 个 adapter 又有 19 个 `_to_float`？ | `_to_float` 在 7 个模块各有一份，**语义还不一样**（有的拒 inf、有的不拒）——这是已知债务，见 `reports/134` §5 S5 |
-| 为什么测试文件叫 `test_fix20261112_*`？ | 按事故日期命名（25/156）。改名方案见 `reports/134` §5 S7，新测试请按行为命名 |
+| 为什么测试文件叫 `test_fix20261112_*`？ | 以前按事故日期命名；2026-11-17 已全部改为按行为命名（`incident_named_tests` 25 → 0），旧名→新名映射见 `tests/regression/README.md`；新测试请按 `test_<域>_<行为>.py` 命名 |
+
+---
+
+## 9. 已确认可移除 / 不要删（`reports/136` §7 / §8）
+
+**要删东西之前只读两处**：`docs/reports/136` **§7 可移除清单**（按 L0→L3 风险排序，可直接执行）
+与 **§8 不要删清单**（每一条都对应一次已发生的事故）。
+
+- **已执行（2026-11-17，见 `reports/137`）**：`/design-preview` 路由 + `ResearchWorkbenchPreviewPage.vue`（123 行假数据）+ `App.vue` 里 4 处 `staticPreview` 死分支、`masked_indicator_fields()` 纯别名、`csmar_formulas.py` 迁入 `tests/support/`、S0 runbook 改 `historical`、`_domestic_direct` 全套（`adapters/_net.py` 已删）、25 个事故命名测试改为行为命名、打包配置改为构建期自动同步。
+- **已撤回（复核后发现不能删/不能改）**：① `scripts/legacy_dangerous/` 不能删——`test_maintenance_scripts_safety.py` 把它当固定 fixture（存在性 + 内容断言）；② `app/web/static/index.html` 保留跟踪——不是为了过 wheel 测试（那测试本来就要求构建后产物），而是为了让 fresh clone 直接能服务 SPA 根路径；③ 3 处 `trust_env=False` 从清理提交撤回——它会真实改变代理路由且失败静默，属需真机验证的独立决策。理由与证据见 `reports/137` §3。
+- **待实测/下一轮**：`screening_readiness_cache`（先测干净库冷启动耗时）、schema 迁移折叠、`null_reason_sweeper` 迁出、`_to_float` 剩余 8 份（`supplement`/`financial_guards` 等）、`_to_date` ×6、`data_quality` 与 `quality/` 合并、`update.py` 完整拆分（见 `reports/137` §5）。
+- **不要删**：`path_policy`/S1 包装器、`update_lock`、`ErrorKind` 七分类、`merge_step_status`、门禁阈值 `max(50,1%)`、`field_units` 双份、`DerivedSnapshotDomain`、`cold_archive` 视图、`cli/protocol` 的 plan→confirm、`dividend_yield` shim —— 逐条理由与对应事故见 `AGENTS.md` §8。
+- **L3 需实测**：`screening_readiness_cache`（`reports/136` §6.5）先测干净库冷启动耗时再决定，未实测前不动。

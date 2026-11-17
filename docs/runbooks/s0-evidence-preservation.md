@@ -1,9 +1,17 @@
 ---
 title: S0 证据保全运行手册
-status: approved
+status: historical
 category: runbooks
-last-reviewed: 2026-07-26
+last-reviewed: 2026-11-17
+superseded-by: runbooks/ops-build-release-s1.md
 ---
+
+> ⚠️ **本文件已降级为历史存档（`status: historical`），不再作为操作依据。**
+> S0 证据保全流程已被 **S1 包装器**取代：`scripts/s1-pytest.ps1`（每轮在 `%TEMP%\vd-s1-<run-id>` 隔离运行根，
+> 并在跑测试前后对 `data/` 正式库做 SHA-256 比对取证 → `docs/evidence/evidence-s1/<run-id>/`）
+> + `tests/conftest.py`（`DatabasePathSet(env=VdEnv.TEST)`，测试永远不碰正式库）。
+> 当前做法见 [ops-build-release-s1.md](./ops-build-release-s1.md) 与 [ops-knowledge-base.md](./ops-knowledge-base.md)。
+> 本文件仅作 **2026-07-22 事故**（正式库被测试污染）的证据口径留档（判据见 `docs/reports/136` §5.4）。
 
 # S0 证据保全运行手册
 
