@@ -10,9 +10,10 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 
 ### 1. 必读顺序（任何任务开始时）
 
-1. `docs/STATUS.md` — **当前状态唯一权威**，含当前裁决、剩余缺口、进行中工作
-2. `docs/README.md` — 文档地图与生命周期规则
-3. 任务相关代码/文档
+1. `docs/reference/CODE_MAP.md` — **代码地图**：想改 X 就读 Y（含 7 本词汇表 + 同名陷阱）
+2. `docs/STATUS.md` — **当前状态唯一权威**，含当前裁决、剩余缺口、进行中工作
+3. `docs/README.md` — 文档地图与生命周期规则
+4. 任务相关代码/文档
 
 ### 2. 文档状态语义（front-matter `status` 字段）
 
@@ -57,6 +58,8 @@ scripts/s1-pytest.ps1 tests/regression
 uv run --locked ruff check app tests/regression
 # 反返工护栏（RG1–RG4：时区单源/状态合并/单位一致/派生域登记）
 uv run --locked python scripts/check_rework_guards.py
+# 认知成本度量（不做门禁；改结构/拆文件后用它证明"真的变简单了"）
+uv run --locked python scripts/onboarding_metrics.py --compare docs/reference/onboarding-baseline-2026-11-17.json
 # 前端门禁
 cd frontend; npm run lint; npm run test; npm run build
 # 锁文件

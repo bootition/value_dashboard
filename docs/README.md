@@ -21,6 +21,7 @@ last-reviewed: 2026-11-17
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
 | `skills/` | 技能 | 可加载的操作流程（如 `composite-indicator`：复合指标 10 步清单） | ✅ 是（新增/改口径前必读） |
+| `reference/` | 索引 | 代码地图（`CODE_MAP.md`：想改 X 就读 Y）、认知成本基线 JSON | ✅ 是（**新人第一天先读 CODE_MAP**） |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
 | `archive/` | 归档 | 已废弃/完成的研究快照、执行计划（含 superpowers/） | ❌ 否（只读） |
 

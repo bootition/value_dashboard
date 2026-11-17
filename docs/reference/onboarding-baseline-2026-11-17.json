@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "metrics": {
+    "app_files": 105,
+    "app_loc": 63185,
+    "top_file_loc": 6575,
+    "functions_gt_150": 35,
+    "functions_gt_80": 112,
+    "widest_class": "app/core/update.py::IncrementalUpdater",
+    "widest_class_methods": 136,
+    "god_modules": 17,
+    "duplicate_helper_names": 19,
+    "report_refs_in_code": 325,
+    "day1_docs_chars": 182422,
+    "superseded_reports": 59,
+    "total_reports": 132,
+    "incident_named_tests": 25,
+    "total_test_files": 156,
+    "import_cycles": 4,
+    "closure::app.core.update": "58 modules / 39897 LOC",
+    "closure::app.cli.main": "88 modules / 60130 LOC",
+    "closure::app.web.main": "81 modules / 54919 LOC",
+    "closure::app.core.indicators.calculator": "42 modules / 21871 LOC"
+  },
+  "top_files": [
+    "6575 app/core/update.py",
+    "2968 app/cli/main.py",
+    "2827 app/core/storage/schema.py",
+    "2707 app/core/indicators/calculator.py",
+    "2382 app/core/quality/asset_health.py"
+  ],
+  "duplicate_helpers": [
+    "_to_float ×7",
+    "_to_date ×6",
+    "_parse_date ×3",
+    "_as_datetime ×2",
+    "_trade_exists ×2"
+  ]
+}
