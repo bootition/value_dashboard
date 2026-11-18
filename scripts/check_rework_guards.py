@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import fnmatch
 import json
 import re
 import sys
@@ -53,22 +54,24 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 TIMEZONE_OWNER = "app/core/financial_period.py"
-# 只扫"聚合步骤状态"的调用方。`job_status.py` 是 merge_step_status 的**实现方**，
-# 它内部按严重度构造 `{**merged, "status": worst}` 是合法的单出口写法，不在此列。
-STATUS_MODULES = (
-    "app/core/update.py",
-    "app/core/auto_update.py",
+# RG2 扫描范围：`app/core/**` 下所有"含步骤聚合语义"的模块（下面按 AST 判定，不再手写清单）。
+STATUS_SCAN_ROOT = "app/core"
+# `job_status.py` 是 merge_step_status 的**实现方**：它内部按严重度构造
+# `{**merged, "status": worst}` 是合法的单出口写法，必须豁免（否则门禁要求它
+# 不要用自己）。
+RG2_EXCLUDED: dict[str, str] = {
+    "app/core/job_status.py": "merge_step_status() 的实现方本身：单出口就在这个函数里",
+}
+#: 一个模块要"含步骤聚合语义"才会被 RG2 视为调用方：必须出现这些 tokens 之一。
+_RG2_STEP_SEMANTICS = re.compile(
+    r"report_step|merge_step_status|STEP_NAMES|STEP_ORDER|STEP_LABELS"
+    r"|\bsteps?\b|\bstep_name\b|sub_step",
 )
 AGENTS_FILE = "AGENTS.md"
 SCHEMA_FILE = "app/core/storage/schema.py"
 FIELD_UNITS_FILE = "app/core/screening/field_units.py"
 FRONTEND_UNITS_FILE = "frontend/src/utils/screening-format.ts"
 
-_TZ_LITERAL_RE = re.compile(r"timezone\s*\(\s*timedelta\s*\(\s*hours\s*=\s*8\s*\)")
-_UTC_TODAY_RE = re.compile(
-    r"datetime\.now\s*\(\s*(?:UTC|timezone\.utc)\s*\)\s*\.date\s*\(\s*\)"
-)
-_CN_TODAY_DEF_RE = re.compile(r"^\s*def\s+(?:_?cn_today)\s*\(", re.MULTILINE)
 _TS_SET_RE = r"const {name} = new Set\(\[(.*?)\]\s*\)"
 _PY_SET_RE = r"^{name}:?[^=]*=\s*frozenset\(\s*\{{(.*?)\}}\s*\)"
 
@@ -118,33 +121,354 @@ def _iter_python_files(root: Path, relative: str) -> list[Path]:
 
 # --------------------------------------------------------------------------- RG1
 
+#: 北京时间区 ID：出现即说明有人在自己拼一份 UTC+8（唯一所有者除外）。
+_CN_ZONE_IDS = frozenset({
+    "Asia/Shanghai", "Asia/Hong_Kong", "Asia/Macau", "Asia/Taipei",
+    "Asia/Chongqing", "PRC", "Etc/GMT-8",
+})
+
+#: RG1 显式白名单：**只豁免"时刻语义"的 naive 时钟**（路径 glob + 理由）。
+#:
+#: 白名单**不豁免**任何"今天"语义——`today()`、日期粒度使用（`.date()` / `.year` /
+#: 日期格式 `strftime`）、`utcnow()`、时区字面量一律按硬规则报。这条边界是 RG1
+#: 曾经 0% 拦截率的教训：白名单只要能让整类写法闭嘴，下一个违规写进被豁免的文件就永远绿。
+RG1_INSTANT_ALLOWLIST: tuple[tuple[str, str], ...] = (
+    (
+        "scripts/**",
+        "scripts/ 下是一次性运维/考古脚本：datetime.now() 只用于备份目录名、证据文件名与"
+        "日志时间戳，不参与任何'今天'/交易日判断；改成北京时区会让历史产物命名与既有证据"
+        "不可复现，故只豁免时刻语义（today() 与日期格式仍按硬规则报）。",
+    ),
+    (
+        "app/cli/main.py",
+        "manual_overrides.rolled_back_at 是审计'时刻'（naive 本地），不参与'今天'/交易日判断。"
+        "⚠️ 已知口径不一致：同表 created_at 是 `DEFAULT CURRENT_TIMESTAMP`（UTC 基准），"
+        "两者差 8 小时。这里**只豁免时区**、不认可这个不一致——要不要把 rolled_back_at "
+        "统一成 UTC 是独立的口径变更（需改表+迁移历史行），不在 RG1 范围内。",
+    ),
+    (
+        "app/core/auto_update.py",
+        "进度日志里的 HH:MM:SS 是给人看的展示时间（前端原样显示），不参与日期/交易日判断。",
+    ),
+    (
+        "app/core/backup/manager.py",
+        "① 备份 ID（`full_YYYYmmdd_HHMMSS_<hex>`）是**目录/文件名**，用本地 naive 时间属命名惯例，"
+        "改北京时区会让历史备份产物对不上号；② backup_registry/manifest 的 created_at 用 "
+        "`datetime.now(UTC)`，与本条无关。两者口径本来就不同，故分开说明，不合并成一句。"
+        "备份保留策略按**条数**（最近 3 套）而非时间，因此该差异不影响正确性。",
+    ),
+)
+
+
+def rg1_allowlist_reason(relative: str) -> str | None:
+    """命中 RG1 时刻白名单时返回理由（``scripts/**`` 表示整棵子树）。"""
+    for pattern, reason in RG1_INSTANT_ALLOWLIST:
+        if pattern.endswith("/**"):
+            if relative.startswith(pattern[:-2]):
+                return reason
+        elif fnmatch.fnmatchcase(relative, pattern):
+            return reason
+    return None
+
+
+@dataclass(frozen=True)
+class _ClockAliases:
+    """一个模块里 `datetime` 家族的绑定名（`import datetime as dt` / `from datetime import date as _date`）。
+
+    RG1 必须按**调用点**判断，就必须知道 `dt.datetime.now()` / `_date.today()` 这些别名
+    指向谁；纯文本匹配会在注释、字符串、同名自有函数（如 `etf_strategy._now()`）上误报。
+    """
+
+    datetime_modules: frozenset[str] = frozenset()
+    zoneinfo_modules: frozenset[str] = frozenset()
+    pandas_modules: frozenset[str] = frozenset()
+    date_classes: frozenset[str] = frozenset()
+    datetime_classes: frozenset[str] = frozenset()
+    timestamp_classes: frozenset[str] = frozenset()
+    timezone_names: frozenset[str] = frozenset()
+    timedelta_names: frozenset[str] = frozenset()
+    zoneinfo_names: frozenset[str] = frozenset()
+
+
+_CLOCK_ATTR_KIND = {"today": "today", "now": "now", "utcnow": "utcnow"}
+
+
+def _collect_clock_aliases(tree: ast.AST) -> _ClockAliases:
+    buckets: dict[str, set[str]] = {
+        "datetime_modules": set(), "zoneinfo_modules": set(), "pandas_modules": set(),
+        "date_classes": set(), "datetime_classes": set(), "timestamp_classes": set(),
+        "timezone_names": set(), "timedelta_names": set(), "zoneinfo_names": set(),
+    }
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bound = alias.asname or alias.name.split(".")[0]
+                if alias.name == "datetime":
+                    buckets["datetime_modules"].add(bound)
+                elif alias.name == "zoneinfo":
+                    buckets["zoneinfo_modules"].add(bound)
+                elif alias.name == "pandas":
+                    buckets["pandas_modules"].add(bound)
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if node.module == "datetime":
+                    key = {
+                        "date": "date_classes",
+                        "datetime": "datetime_classes",
+                        "timezone": "timezone_names",
+                        "timedelta": "timedelta_names",
+                    }.get(alias.name)
+                elif node.module == "zoneinfo" and alias.name == "ZoneInfo":
+                    key = "zoneinfo_names"
+                elif node.module == "pandas" and alias.name == "Timestamp":
+                    key = "timestamp_classes"
+                else:
+                    key = None
+                if key:
+                    buckets[key].add(bound)
+    return _ClockAliases(**{name: frozenset(values) for name, values in buckets.items()})
+
+
+def _dotted_name(node: ast.AST) -> list[str] | None:
+    """`a.b.c` → ``["a", "b", "c"]``（不是纯名字/属性链则 None）。"""
+    parts: list[str] = []
+    current: ast.AST = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        return None
+    parts.append(current.id)
+    return list(reversed(parts))
+
+
+def _classify_clock_call(node: ast.Call, aliases: _ClockAliases) -> str | None:
+    """把调用点归类成 ``today`` / ``now`` / ``utcnow``；不是时钟调用返回 None。"""
+    dotted = _dotted_name(node.func)
+    if not dotted:
+        return None
+    head, tail = dotted[0], dotted[1:]
+    if head in aliases.datetime_modules:
+        if tail == ["date", "today"]:
+            return "today"
+        if len(tail) == 2 and tail[0] == "datetime":
+            return _CLOCK_ATTR_KIND.get(tail[1])
+        if len(tail) == 1:
+            return _CLOCK_ATTR_KIND.get(tail[0])
+        return None
+    if head in aliases.datetime_classes:
+        return _CLOCK_ATTR_KIND.get(tail[0]) if len(tail) == 1 else None
+    if head in aliases.date_classes:
+        return "today" if tail == ["today"] else None
+    if head in aliases.pandas_modules:
+        if tail in (["Timestamp", "now"], ["Timestamp", "utcnow"]):
+            return tail[1]
+        return None
+    if head in aliases.timestamp_classes:
+        return tail[0] if len(tail) == 1 and tail[0] in {"now", "utcnow"} else None
+    return None
+
+
+def _first_positional_or_keyword(
+    node: ast.Call, position: int, keyword: str
+) -> ast.AST | None:
+    if len(node.args) > position and not isinstance(node.args[position], ast.Starred):
+        return node.args[position]
+    for item in node.keywords:
+        if item.arg == keyword:
+            return item.value
+    return None
+
+
+def _is_eight_hour_timedelta(node: ast.AST | None, aliases: _ClockAliases) -> bool:
+    """`timedelta(hours=8)`。"""
+    if not isinstance(node, ast.Call):
+        return False
+    dotted = _dotted_name(node.func)
+    if not dotted or dotted[-1] not in aliases.timedelta_names:
+        return False
+    hours = _first_positional_or_keyword(node, 1, "hours")
+    return isinstance(hours, ast.Constant) and hours.value == 8
+
+
+def _timezone_literal(node: ast.Call, aliases: _ClockAliases) -> str | None:
+    """识别私拼 UTC+8 的调用点：`ZoneInfo("Asia/Shanghai")` / `timezone(timedelta(hours=8))`。"""
+    dotted = _dotted_name(node.func)
+    if not dotted:
+        return None
+    is_zoneinfo = (
+        (len(dotted) == 1 and dotted[0] in aliases.zoneinfo_names)
+        or (len(dotted) == 2 and dotted[0] in aliases.zoneinfo_modules and dotted[1] == "ZoneInfo")
+    )
+    if is_zoneinfo:
+        zone = _first_positional_or_keyword(node, 0, "key")
+        if isinstance(zone, ast.Constant) and zone.value in _CN_ZONE_IDS:
+            return f'ZoneInfo("{zone.value}")'
+        return None
+    if (
+        len(dotted) == 1
+        and dotted[0] in aliases.timezone_names
+        and _is_eight_hour_timedelta(_first_positional_or_keyword(node, 0, "offset"), aliases)
+    ):
+        return "timezone(timedelta(hours=8))"
+    return None
+
+
+def _build_parent_map(tree: ast.AST) -> dict[int, ast.AST]:
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+    return parents
+
+
+_DATE_FORMAT_TOKEN = re.compile(r"%[YymjdeFGgUV]|%[DFx]")
+_TIME_FORMAT_TOKEN = re.compile(r"%[HIJMSXTLpRrZz]|%[TDR]")
+
+
+def _format_is_date_only(fmt: str) -> bool:
+    """`"%Y-%m-%d"` / `"%Y%m%d"` 是"今天"；`"%Y%m%d_%H%M%S"` 是时间戳。"""
+    return bool(_DATE_FORMAT_TOKEN.search(fmt)) and not _TIME_FORMAT_TOKEN.search(fmt)
+
+
+def _is_date_granularity_use(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """`now()` 的结果是否被当成"某一天的日期"使用。
+
+    看穿 `(now - timedelta(days=30)).strftime("%Y-%m-%d")` 这类算术包装，
+    但 `now().isoformat()`（时刻入库）、`now().astimezone()`（补时区）不算日期语义。
+    """
+    current: ast.AST = node
+    for _ in range(5):
+        parent = parents.get(id(current))
+        if parent is None:
+            return False
+        if (
+            isinstance(parent, ast.Attribute)
+            and parent.value is current
+            and isinstance(parent.ctx, ast.Load)
+        ):
+            if parent.attr == "date":
+                return True
+            if parent.attr in {
+                "year", "month", "day", "weekday", "isoweekday", "timetuple", "toordinal",
+            }:
+                return True
+            current = parent
+            continue
+        if isinstance(parent, ast.Call) and isinstance(current, ast.Attribute) and parent.func is current:
+            if current.attr == "astimezone":
+                current = parent
+                continue
+            if current.attr == "replace":
+                keywords = {item.arg for item in parent.keywords}
+                return bool(keywords & {"year", "month", "day"}) or len(parent.args) >= 3
+            if current.attr == "strftime":
+                fmt = _first_positional_or_keyword(parent, 0, "format")
+                if isinstance(fmt, ast.Constant) and isinstance(fmt.value, str):
+                    return _format_is_date_only(fmt.value)
+            return False
+        if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Sub | ast.Add):
+            current = parent
+            continue
+        return False
+    return False
+
+
+def _becomes_aware(node: ast.AST, parents: dict[int, ast.AST]) -> bool:
+    """`datetime.now().astimezone()`：naive 只活一瞬，按机器时区转 aware，不算时区歧义。
+
+    **刻意不再放行 `.replace(tzinfo=...)`**（2026-11-18 审查 F5）：`now().replace(tzinfo=CN_TZ)`
+    不是"变成 aware"，而是**把本地墙钟时间直接断言成北京时间**——在东八区外的机器上这是错的，
+    而且它看起来比 `cn_now()` 还"规范"，最容易被后人复制。当前仓库无此写法，一旦出现必须报红。
+    """
+    attribute = parents.get(id(node))
+    if not (isinstance(attribute, ast.Attribute) and attribute.value is node):
+        return False
+    call = parents.get(id(attribute))
+    if not (isinstance(call, ast.Call) and call.func is attribute):
+        return False
+    return attribute.attr == "astimezone"
+
+
+def _naive_now(node: ast.Call) -> bool:
+    """`now()` 没给 tzinfo（或显式 None）→ 跟机器时区走。"""
+    tz = _first_positional_or_keyword(node, 0, "tz")
+    return tz is None or (isinstance(tz, ast.Constant) and tz.value is None)
+
+
+def _duplicate_clock_defs(tree: ast.AST, relative: str) -> list[Finding]:
+    """别处不许再定义 `cn_today` / `cn_now` 家族（语义单源）。"""
+    findings: list[Finding] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and re.fullmatch(
+            r"_?cn_(?:today|now)", node.name
+        ):
+            findings.append(Finding(
+                "RG1", relative, node.lineno,
+                "重复定义 cn_today/cn_now 家族函数；请 from app.core.financial_period "
+                "import cn_today",
+            ))
+    return findings
+
 
 def check_timezone_single_source(root: Path) -> list[Finding]:
-    """UTC+8 时区与"北京时间今天"只能有一个实现（`app/core/financial_period.py`）。"""
+    """UTC+8 时区与"北京时间今天"只能有一个实现（`app/core/financial_period.py`）。
+
+    按 **AST 调用点**判断（不看文本），因此注释/字符串里出现 `date.today()` 不误报；
+    同时 `dt.datetime.now()` / `_date.today()` 这类别名写法照样抓得到。
+    判定顺序：时区字面量 → `today()` → `utcnow()` → `now()` 的日期粒度使用 → naive `now()`。
+    """
     findings: list[Finding] = []
     owner = (root / TIMEZONE_OWNER).resolve()
     for path in _iter_python_files(root, "app") + _iter_python_files(root, "scripts"):
-        text = path.read_text(encoding="utf-8")
-        is_owner = path.resolve() == owner
-        for number, line in enumerate(text.splitlines(), start=1):
-            if is_owner or line.lstrip().startswith("#"):
+        relative = _rel(root, path)
+        if path.resolve() == owner:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError as exc:  # 解析不了就不能假装合规
+            findings.append(Finding(
+                "RG1", relative, exc.lineno or 0, f"无法解析，RG1 无法判断时区单源：{exc.msg}",
+            ))
+            continue
+        aliases = _collect_clock_aliases(tree)
+        allow_reason = rg1_allowlist_reason(relative)
+        parents = _build_parent_map(tree)
+        findings.extend(_duplicate_clock_defs(tree, relative))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
                 continue
-            if _TZ_LITERAL_RE.search(line):
+            literal = _timezone_literal(node, aliases)
+            if literal is not None:
                 findings.append(Finding(
-                    "RG1", _rel(root, path), number,
-                    "重复定义 UTC+8 时区；请 from app.core.financial_period import CN_TZ",
+                    "RG1", relative, node.lineno,
+                    f"重复定义 UTC+8 时区 {literal}；请 from app.core.financial_period import CN_TZ",
                 ))
-            elif _UTC_TODAY_RE.search(line):
+                continue
+            kind = _classify_clock_call(node, aliases)
+            if kind is None:
+                continue
+            if kind == "today":
                 findings.append(Finding(
-                    "RG1", _rel(root, path), number,
-                    "用 UTC 日期冒充'今天'；请改用 cn_today()（北京时间）",
+                    "RG1", relative, node.lineno,
+                    "用系统本地日期冒充'今天'；请改用 cn_today()（北京时间）",
                 ))
-        if not is_owner:
-            for match in _CN_TODAY_DEF_RE.finditer(text):
-                line = text[: match.start()].count("\n") + 1
+            elif kind == "utcnow":
                 findings.append(Finding(
-                    "RG1", _rel(root, path), line,
-                    "重复定义 cn_today 家族函数；请 from app.core.financial_period import cn_today",
+                    "RG1", relative, node.lineno,
+                    "utcnow() 是 naive UTC 且已废弃：日期语义用 cn_today()，时刻语义用 datetime.now(UTC)",
+                ))
+            elif _is_date_granularity_use(node, parents):
+                findings.append(Finding(
+                    "RG1", relative, node.lineno,
+                    "用某个时区的日期冒充'今天'（.date()/.year/日期格式 strftime）；请改用 cn_today()",
+                ))
+            elif _naive_now(node) and not _becomes_aware(node, parents) and allow_reason is None:
+                findings.append(Finding(
+                    "RG1", relative, node.lineno,
+                    "naive datetime.now() 跟机器时区走：日期语义用 cn_today()，时刻语义用 "
+                    "datetime.now(UTC)；确为日志/展示时刻请登记 RG1_INSTANT_ALLOWLIST",
                 ))
     return findings
 
@@ -152,37 +476,163 @@ def check_timezone_single_source(root: Path) -> list[Finding]:
 # --------------------------------------------------------------------------- RG2
 
 
-def _dict_literal_overrides_status(node: ast.Dict) -> bool:
-    """`"status"` 键出现在 `**` 解包**之后** → 后写的值覆盖了被解包的 status。
+def _dict_has_literal_status(node: ast.Dict) -> bool:
+    return any(
+        isinstance(key, ast.Constant) and key.value == "status" for key in node.keys
+    )
 
-    注意顺序：`{"status": x, **optional}` 是"我先定状态、再追加字段"，不违规；
-    `{**后一个子步骤, "status": 前一个}` 才是 reports/117 P0-2 那个假绿机制。
+
+def _dict_status_override_indexes(node: ast.Dict) -> list[int]:
+    """`**` 解包**之后**仍写入字面量 status 的元素下标。
+
+    覆盖两种写法（同一个假绿机制）：
+    * ``{**后一个子步骤, "status": 前一个}`` —— 直接写字面量键（`reports/117` P0-2）；
+    * ``{**a, **{"status": 前一个}}`` —— **第二层解包**：解包的还是一个字面量 dict，
+      结果一样是"后写覆盖前面解包进来的 status"。
+
+    顺序仍然敏感：``{"status": x, **optional}`` 是"先定状态、再追加字段"，不违规。
     """
-    unpack_positions = [index for index, key in enumerate(node.keys) if key is None]
-    if not unpack_positions:
-        return False
-    first_unpack = min(unpack_positions)
+    first_unpack: int | None = None
+    hits: list[int] = []
     for index, key in enumerate(node.keys):
-        if isinstance(key, ast.Constant) and key.value == "status" and index > first_unpack:
-            return True
+        if key is None:
+            if first_unpack is None:
+                first_unpack = index
+            elif isinstance(node.values[index], ast.Dict) and _dict_has_literal_status(
+                node.values[index]
+            ):
+                hits.append(index)
+        elif isinstance(key, ast.Constant) and key.value == "status" and first_unpack is not None:
+            hits.append(index)
+    return hits
+
+
+def _dict_literal_overrides_status(node: ast.Dict) -> bool:
+    """兼容入口：该 dict 是否用解包之后的字面量 status 覆盖了被解包的状态。"""
+    return bool(_dict_status_override_indexes(node))
+
+
+def _enclosing_function(node: ast.AST, parents: dict[int, ast.AST]) -> ast.AST | None:
+    current = parents.get(id(node))
+    while current is not None:
+        if isinstance(current, ast.FunctionDef | ast.AsyncFunctionDef | ast.Module):
+            return current
+        current = parents.get(id(current))
+    return None
+
+
+def _receiver_is_fresh_step_skeleton(
+    node: ast.Call, parents: dict[int, ast.AST], receiver: ast.Name
+) -> bool:
+    """`step.update({"status": ...})` 的目标是不是"刚建好、还没状态的步骤骨架"。
+
+    `update.py` 里有 5 处合法写法：`step = self._new_domain_step(...)` 造出该步的骨架，
+    跑完再把结果整块写回——这是"填写本步结果"，不是 reports/117 P0-2 那个
+    "把两个步骤状态合并、后写覆盖前写"。判据：同函数内**最近的** ``step = ...``
+    赋值来自 dict 字面量或名字里带 ``step`` 的工厂调用（骨架）；取不到赋值
+    （例如把外部传进来的 dict 就地改状态）就按违规处理——宁可报，不可漏。
+    """
+    function = _enclosing_function(node, parents)
+    if function is None:
+        return False
+    latest: ast.Assign | ast.AnnAssign | None = None
+    for candidate in ast.walk(function):
+        if not isinstance(candidate, ast.Assign | ast.AnnAssign):
+            continue
+        if candidate.lineno >= node.lineno:
+            continue
+        targets = candidate.targets if isinstance(candidate, ast.Assign) else [candidate.target]
+        if not any(
+            isinstance(target, ast.Name) and target.id == receiver.id for target in targets
+        ):
+            continue
+        if latest is None or candidate.lineno > latest.lineno:
+            latest = candidate
+    if latest is None:
+        return False
+    value = latest.value
+    if isinstance(value, ast.Dict):
+        return True
+    if isinstance(value, ast.Call):
+        dotted = _dotted_name(value.func) or []
+        return any("step" in part.lower() for part in dotted)
     return False
 
 
-def check_status_merge_single_exit(root: Path) -> list[Finding]:
-    """步骤状态不得用字典解包覆盖，必须走 `merge_step_status()`。"""
-    findings: list[Finding] = []
-    for relative in STATUS_MODULES:
-        path = root / relative
-        if not path.exists():
+def _status_update_shape(
+    node: ast.Call, parents: dict[int, ast.AST] | None = None
+) -> str | None:
+    """`step.update({"status": ...})` / `step.update(status=...)` / `dict(step, status=...)`。"""
+    func = node.func
+    if isinstance(func, ast.Attribute) and func.attr == "update":
+        receiver = func.value
+        overrides = any(
+            isinstance(argument, ast.Dict) and _dict_has_literal_status(argument)
+            for argument in node.args[:1]
+        ) or any(keyword.arg == "status" for keyword in node.keywords)
+        if not overrides:
+            return None
+        if (
+            parents is not None
+            and isinstance(receiver, ast.Name)
+            and _receiver_is_fresh_step_skeleton(node, parents, receiver)
+        ):
+            return None
+        shape = 'step.update({"status": ...})' if node.args else "step.update(status=...)"
+        return shape
+    if isinstance(func, ast.Name) and func.id == "dict":
+        for keyword in node.keywords:
+            if keyword.arg == "status":
+                return "dict(..., status=...)"
+    return None
+
+
+def _iter_step_aggregator_modules(root: Path) -> list[tuple[Path, str]]:
+    """`app/core/**` 下"含步骤聚合语义"的模块（不是手写清单，按内容判定）。
+
+    RG2 原来只扫 2 个文件：任何新写的聚合点（或把状态合并挪到第三处）都能绕过。
+    现在范围是整棵 `app/core`，只排除 :data:`RG2_EXCLUDED` 里写明理由的实现方；
+    "有没有步骤语义"用 ``report_step`` / ``merge_step_status`` / ``steps`` 等 token 判定，
+    纯数据模块（例如 `index_dashboard` 的汇总行 status）不会被卷进来。
+    """
+    modules: list[tuple[Path, str]] = []
+    for path in _iter_python_files(root, STATUS_SCAN_ROOT):
+        relative = _rel(root, path)
+        if relative in RG2_EXCLUDED:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        source = path.read_text(encoding="utf-8")
+        if _RG2_STEP_SEMANTICS.search(source):
+            modules.append((path, relative))
+    return modules
+
+
+def check_status_merge_single_exit(root: Path) -> list[Finding]:
+    """步骤状态不得用字典解包/`dict.update` 覆盖，必须走 `merge_step_status()`。"""
+    findings: list[Finding] = []
+    for path, relative in _iter_step_aggregator_modules(root):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except SyntaxError as exc:
+            findings.append(Finding(
+                "RG2", relative, exc.lineno or 0, f"无法解析，RG2 无法检查状态合并：{exc.msg}",
+            ))
+            continue
+        parents = _build_parent_map(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.Dict) and _dict_literal_overrides_status(node):
+            if isinstance(node, ast.Dict) and _dict_status_override_indexes(node):
                 findings.append(Finding(
                     "RG2", relative, node.lineno,
-                    '字典解包后又覆盖 "status"；状态必须交给 '
+                    '字典解包后又覆盖 "status"（含 `**{"status": ...}` 第二层解包）；状态必须交给 '
                     "app.core.job_status.merge_step_status()",
                 ))
+            elif isinstance(node, ast.Call):
+                shape = _status_update_shape(node, parents)
+                if shape:
+                    findings.append(Finding(
+                        "RG2", relative, node.lineno,
+                        f"用 {shape} 原地覆盖步骤状态；状态必须交给 "
+                        "app.core.job_status.merge_step_status()",
+                    ))
     return findings
 
 
@@ -347,14 +797,24 @@ def check_derived_domain_registry(root: Path) -> list[Finding]:
         sys.path.pop(0)
     findings: list[Finding] = []
     for domain in derived_snapshot_domains():
-        sql_columns: set[str] | None = None
-        module = sys.modules.get(getattr(domain.rebuild, "__module__", ""), None)
+        module_name = getattr(domain.rebuild, "__module__", "") or "<unknown>"
+        module = sys.modules.get(module_name)
         sql = getattr(module, "SNAPSHOT_UPDATE_SQL", None) if module else None
-        if isinstance(sql, str):
-            sql_columns = parse_sql_set_columns(sql)
+        if not isinstance(sql, str) or not sql.strip():
+            # fail-open 曾经在这里：取不到常量就 `sql_columns = None` 然后静默跳过，
+            # 于是"把 SNAPSHOT_UPDATE_SQL 改名/删掉"就能让 RG4 永远绿。
+            findings.append(Finding(
+                "RG4", SCHEMA_FILE, 0,
+                f"无法解析派生域 {domain.name} 的重建 SQL（{module_name}.SNAPSHOT_UPDATE_SQL "
+                "常量缺失/改名/为空）→ 门禁 fail-open：登记列与重建 SQL 是否一致未被核对",
+            ))
+            continue
         findings.extend(
             compare_domain_columns(
-                domain.name, set(domain.columns), snapshot_columns, sql_columns
+                domain.name,
+                set(domain.columns),
+                snapshot_columns,
+                parse_sql_set_columns(sql),
             )
         )
     return findings

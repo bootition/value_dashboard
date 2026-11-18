@@ -46,6 +46,7 @@ from app.core.adapters.hk_price_adapter import (  # noqa: E402
     fetch_hkd_cny_history,
     to_date,
 )
+from app.core.financial_period import cn_today  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     DatabasePathSet,
@@ -132,7 +133,7 @@ def main() -> None:
     ap.add_argument("--sample", type=int, default=5, help="dry-run 打印样本行数")
     args = ap.parse_args()
 
-    end_date = args.end_date or date.today()
+    end_date = args.end_date or cn_today()
     if args.start_date > end_date:
         ap.error("--start-date 不能晚于 --end-date")
 

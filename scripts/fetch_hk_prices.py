@@ -48,6 +48,7 @@ from app.core.adapters.hk_price_adapter import (  # noqa: E402
     to_date,
 )
 from app.core.ah_hk_mapping import build_ah_hk_mapping  # noqa: E402
+from app.core.financial_period import cn_today  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     DatabasePathSet,
@@ -244,7 +245,7 @@ def main() -> None:
 
     if args.max_stocks < 0 or args.batch_size <= 0 or args.sample < 0 or args.sleep < 0:
         ap.error("--max-stocks/--batch-size/--sample/--sleep 参数非法")
-    end_date = args.end_date or date.today()
+    end_date = args.end_date or cn_today()
     if args.start_date > end_date:
         ap.error("--start-date 不能晚于 --end-date")
 

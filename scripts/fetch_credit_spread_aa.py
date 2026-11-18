@@ -91,7 +91,7 @@ def fetch_series() -> tuple[pd.DataFrame, dict[str, int]]:
     long = long[long["yield_pct"].notna()].copy()
     batch = f"aa-curve-{cn_today():%Y%m%d}"
     long["batch_id"] = batch
-    long["fetch_time"] = pd.Timestamp.utcnow().tz_localize(None)
+    long["fetch_time"] = pd.Timestamp.now(tz="UTC").tz_localize(None)
     long["raw_hash"] = [
         sha256(f"{row.curve_name}|{row.curve_date}|{row.yield_pct}".encode()).hexdigest()[:32]
         for row in long.itertuples()

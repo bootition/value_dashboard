@@ -20,12 +20,13 @@ from datetime import datetime, timedelta
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
+from app.core.financial_period import cn_today
 
 SOURCES = ["akshare_eastmoney", "tdx", "tencent", "sina", "baostock"]
 DEFAULT_COUNT = 8
 SAMPLE_CODE = "600519"
-SAMPLE_START = (datetime.now() - timedelta(days=20)).strftime("%Y-%m-%d")
-SAMPLE_END = datetime.now().strftime("%Y-%m-%d")
+SAMPLE_START = (cn_today() - timedelta(days=20)).strftime("%Y-%m-%d")
+SAMPLE_END = cn_today().strftime("%Y-%m-%d")
 REQUEST_TIMEOUT_S = 150.0
 
 

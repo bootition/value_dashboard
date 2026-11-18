@@ -33,7 +33,7 @@ import logging
 import sys
 import time
 from collections import Counter
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +43,7 @@ from app.core.adapters.baostock_adapter import BaoStockAdapter
 from app.core.adapters.base import FetchRequest, FetchResult
 from app.core.adapters.tdx_adapter import TDXAdapter
 from app.core.adapters.tencent_adapter import TencentAdapter
+from app.core.financial_period import cn_today
 from app.core.init import DataInitializer
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import resolve_and_validate_paths
@@ -56,7 +57,7 @@ PROGRESS_INTERVAL = 25  # persist resume state every N stocks
 
 
 def _today() -> str:
-    return date.today().strftime("%Y-%m-%d")
+    return cn_today().strftime("%Y-%m-%d")
 
 
 def _is_bse(code: str) -> bool:

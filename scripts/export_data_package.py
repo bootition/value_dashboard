@@ -62,6 +62,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from app.core.financial_period import cn_today  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     DatabasePathSet,
@@ -1224,7 +1225,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    stamp = datetime.now().strftime("%Y%m%d")
+    # 口径登记（`reports/140` 落实阶段，审查 F2）：目录名里的"导出日"是**北京日期**。
+    # 2026-11-18 前用的是 `date.today()`（跟机器时区）——在本机 +08 下两者相同，
+    # 但换时区会得到不同目录名。发现机制按文件 mtime（`quality/asset_health.py`），
+    # 不按目录名解析日期，所以历史包不会因此断链。
+    stamp = cn_today().strftime("%Y%m%d")
     root = args.out or (PROJECT_ROOT / ".planning" / f"vd-datapackage-{PACKAGE_VERSION}-{stamp}")
     try:
         build_package(paths, root, todo=todo)

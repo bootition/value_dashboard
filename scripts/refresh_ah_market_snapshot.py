@@ -68,6 +68,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.core.ah_metrics import build_ah_snapshot  # noqa: E402
+from app.core.financial_period import cn_today  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 from app.core.storage.path_policy import (  # noqa: E402
     DatabasePathSet,
@@ -313,7 +314,7 @@ def _backup_table(duck: DuckDBStore, backup_dir: Path) -> Path:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     try:
-        as_of = date.fromisoformat(args.as_of) if args.as_of else date.today()
+        as_of = date.fromisoformat(args.as_of) if args.as_of else cn_today()
     except ValueError:
         print(f"[ABORT] --as-of 需为 YYYY-MM-DD：{args.as_of!r}", file=sys.stderr)
         return 2
