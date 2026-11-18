@@ -180,15 +180,35 @@ class ExpressionRegistry:
         return rows[0] if rows else None
 
     def list_expressions(self, status: str | None = None) -> list[dict[str, Any]]:
-        """列出表达式"""
+        """列出表达式（附 ``is_latest_published``）。
+
+        管理页需要看到全部版本，但同名多版本**同时**标成「已发布」会让人误以为
+        重复建了两个指标（见 2026-11-16 用户反馈：分红融资比 v1/v2 并列）。
+        `is_latest_published` 让前端能把旧版标成「已被 vN 取代」。
+        """
         if status:
-            return self.sqlite.query(
+            rows = self.sqlite.query(
                 "SELECT * FROM dsl_expressions WHERE status=? ORDER BY name, version",
                 [status],
             )
-        return self.sqlite.query(
-            "SELECT * FROM dsl_expressions ORDER BY name, version"
-        )
+        else:
+            rows = self.sqlite.query(
+                "SELECT * FROM dsl_expressions ORDER BY name, version"
+            )
+        latest: dict[str, int] = {}
+        for row in rows:
+            if row.get("status") != STATUS_PUBLISHED:
+                continue
+            name = str(row.get("name") or "")
+            version = int(row.get("version") or 0)
+            if version > latest.get(name, 0):
+                latest[name] = version
+        for row in rows:
+            row["is_latest_published"] = (
+                row.get("status") == STATUS_PUBLISHED
+                and int(row.get("version") or 0) == latest.get(str(row.get("name") or ""), 0)
+            )
+        return rows
 
     def list_published(self) -> list[dict[str, Any]]:
         """列出已发布的表达式 (最新版本)"""

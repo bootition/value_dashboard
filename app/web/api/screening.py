@@ -847,6 +847,12 @@ def _masked_indicator_fields(request: Request) -> list[str]:
     return list(_indicator_trust_or_empty(request)["masked_fields"])
 
 
+#: 废弃字段替代者的中文名（只用于提示文案，避免让用户看到纯英文列名）。
+DEPRECATED_LABELS: dict[str, str] = {
+    "ttm_dividend_yield": "股息率（TTM）",
+}
+
+
 def _deprecated_indicator_names() -> dict[str, str]:
     """废弃字段 → 替代字段（reports/122 §2.6 J5，dividend_yield）。"""
     from app.core.screening.engine import DEPRECATED_COLUMNS
@@ -1007,10 +1013,16 @@ def list_available_indicators(request: Request) -> dict:
                 # 2026-11-15（reports/124）：两列存储量纲不同（小数 vs 百分数，实测恰
                 # 100 倍）。不给倍数，用户把 >0.03 换成 >0.03 会命中几乎全市场。
                 "scale_factor": scale,
+                # 2026-11-16：这里原本写「字段已废弃（口径不可复现）」，措辞是错的——
+                # `dividend_yield` 与 `ttm_dividend_yield` 是**同一个指标**（实测 3,735 行
+                # 中位绝对差 0.0000），差别只是存储单位（小数 0.0121 vs 百分数 1.2118）。
+                # 说成"废弃"会让用户以为数算错了；真相是单位口径统一（reports/80 簇 A/B/C）。
                 "message": (
-                    f"字段已废弃（口径不可复现）：请改用 {deprecated[name]}"
-                    + (f"，注意量纲差 {scale:g} 倍（{deprecated[name]} = {name} × {scale:g}）"
-                       if scale else "")
+                    f"同一指标的单位已统一，请改用「{DEPRECATED_LABELS.get(deprecated[name], deprecated[name])}」"
+                    + (f"（字段 {deprecated[name]}）：旧列存小数（0.0121 = 1.21%），"
+                       f"新列存百分数（1.21），量纲差 {scale:g} 倍，"
+                       f"写成条件时旧列的 >0.03 要改成新列的 >3"
+                       if scale else f"（字段 {deprecated[name]}）")
                 ),
             })
             continue

@@ -16,6 +16,7 @@ interface DslExpression {
   expression: string
   description: string
   status: 'draft' | 'validated' | 'single_previewed' | 'previewed' | 'published'
+  is_latest_published?: boolean
   created_at: string
 }
 
@@ -75,7 +76,12 @@ const columns: DataTableColumns<DslExpression> = [
     width: 170,
     render: (row: DslExpression) =>
       h('div', { class: 'dsl-name-cell' }, [
-        h('b', null, fieldDisplayName(row.name, row.name)),
+        // 同名多版本必须一眼分得清（2026-11-16：分红融资比 v1/v2 并列，
+        // 两条都显示「已发布」，用户以为重复建了两个指标）。
+        h('b', null, [
+          fieldDisplayName(row.name, row.name),
+          h('span', { class: 'dsl-version-badge' }, ` v${row.version}`),
+        ]),
         h('small', null, row.name),
       ]),
   },
@@ -85,9 +91,17 @@ const columns: DataTableColumns<DslExpression> = [
     title: '状态',
     key: 'status',
     width: 110,
-    render: (row: DslExpression) =>
-      h(NTag, { type: statusTagType(row.status), size: 'small' }, () => STATUS_LABELS[row.status] || row.status),
+    render: (row: DslExpression) => {
+      // 旧版本即使仍是 published 也要标注，避免"同名两条已发布"的歧义
+      const superseded = row.status === 'published' && row.is_latest_published === false
+      return h(
+        NTag,
+        { type: superseded ? 'default' : statusTagType(row.status), size: 'small' },
+        () => (superseded ? '已被新版取代' : STATUS_LABELS[row.status] || row.status),
+      )
+    },
   },
+  { title: '版本', key: 'version', width: 70 },
   { title: '创建时间', key: 'created_at', width: 160 },
   {
     title: '操作',
@@ -306,5 +320,5 @@ loadExpressions()
 </template>
 
 <style scoped>
-.dsl-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.dsl-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }.dsl-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.dsl-heading h2 { margin: 7px 0 5px; font-size: 18px; }.dsl-heading span, .dsl-summary, .dsl-tools span { color: #829087; font-size: 11px; }.dsl-summary { margin: 18px 0 0; }.dsl-tools { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; padding: 12px; border-radius: 8px; background: #fafcf9; }.dsl-tools :deep(.n-input) { width: 150px; }.dsl-empty { padding: 30px; }.dsl-name-cell b,.dsl-name-cell small{display:block;}.dsl-name-cell small{color:#97a29a;font-size:10px;}.dsl-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
+.dsl-workbench { padding: 25px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.dsl-heading { display: flex; justify-content: space-between; align-items: start; gap: 16px; }.dsl-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.dsl-heading h2 { margin: 7px 0 5px; font-size: 18px; }.dsl-heading span, .dsl-summary, .dsl-tools span { color: #829087; font-size: 11px; }.dsl-summary { margin: 18px 0 0; }.dsl-tools { display: flex; align-items: center; gap: 10px; margin: 20px 0 12px; padding: 12px; border-radius: 8px; background: #fafcf9; }.dsl-tools :deep(.n-input) { width: 150px; }.dsl-empty { padding: 30px; }.dsl-name-cell b,.dsl-name-cell small{display:block;}.dsl-version-badge{display:inline-block;margin-left:6px;padding:0 5px;border-radius:4px;background:#eef4ef;color:#5c7a63;font-size:10px;font-weight:700;vertical-align:1px;}.dsl-name-cell small{color:#97a29a;font-size:10px;}.dsl-workbench :deep(.n-data-table) { border: 1px solid #edf1ee; border-radius: 9px; }
 </style>

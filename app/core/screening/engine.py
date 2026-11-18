@@ -49,8 +49,11 @@ SNAPSHOT_COLUMNS: set[str] = {
     "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ttm", "dividend_yield",
     "total_market_cap", "circ_market_cap",
     "roe", "roa", "gross_margin", "net_margin", "roic", "cf_to_net_profit",
-    "roce_latest", "roce_5y_median", "roce_10y_median", "roce_5y_years", "roce_10y_years",
-    "roce_eligible",
+    # ROCE 只暴露一个筛选指标（reports/132 §2.1 收敛裁定）：
+    # 10 年中位数是主口径；`roce_latest` / `roce_5y_median` 是详情页的对照值，
+    # `roce_5y_years` / `roce_10y_years` / `roce_eligible` 是口径内部的门禁，
+    # 都不是用户要选的"指标"，塞进同一个下拉只会让人分不清该选哪个。
+    "roce_10y_median",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     "revenue_cagr3", "revenue_cagr5", "net_profit_cagr3", "net_profit_cagr5",
     "deducted_profit_cagr3", "deducted_profit_cagr5",
@@ -297,7 +300,7 @@ NORMALIZED_FIELDS |= set(DERIVED_FIELDS_BY_KEY)
 RANKABLE_INDICATORS: set[str] = {
     "pe_ttm", "pb_mrq", "ps_ttm", "pcf_ttm", "dividend_yield",
     "roe", "roa", "gross_margin", "net_margin", "roic",
-    "roce_latest", "roce_5y_median", "roce_10y_median",
+    "roce_10y_median",
     "revenue_yoy", "net_profit_yoy",
     "debt_ratio", "current_ratio", "quick_ratio",
     "payout_ratio", "dps", "consecutive_div_years",

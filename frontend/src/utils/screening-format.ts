@@ -143,7 +143,7 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   period_return: '区间收益率',
   annualized_volatility: '年化波动率',
   max_drawdown: '最大回撤',
-  ttm_dividend_yield: 'TTM已实施股息率',
+  ttm_dividend_yield: '股息率（TTM）',
   div_yield_spread_0p25y: '股息率-国债0.25年利差',
   div_yield_spread_0p5y: '股息率-国债0.5年利差',
   div_yield_spread_1y: '股息率-国债1年利差',
@@ -169,7 +169,7 @@ const RANK_SUFFIX_LABELS: Readonly<Record<string, string>> = {
 const STAT_METRIC_LABELS: Readonly<Record<string, string>> = {
   pe_ttm: 'PE-TTM',
   pb_mrq: 'PB-MRQ',
-  ttm_dividend_yield: 'TTM已实施股息率',
+  ttm_dividend_yield: '股息率（TTM）',
   spread_10y: '股息率-国债10年利差',
 }
 const STAT_WINDOW_LABELS: Readonly<Record<string, string>> = {
