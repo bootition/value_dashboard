@@ -6,11 +6,19 @@
  *   输入需 ÷100、展示 ×100+%
  * - 百分数存储（percent）：ttm_dividend_yield=5.1724、
  *   div_yield_spread_10y=-1.3435、turnover_rate=0.3598 → 输入原样、展示直接加 %
+ *
+ * 2026-11-18 retro 追加「前后端单位表**双向**对拍」段落：RG3 只校验后端→前端单向，
+ * 前端多出来的死键（`dividend_financing_ratio`）它永远看不见，所以这里直接读后端
+ * `app/core/screening/field_units.py` 文本解析 frozenset，与前端运行时集合 `FIELD_UNIT_SETS`
+ * 断言**严格相等**——多一个（死键）或少一个（缺登记）都必须红。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import {
+  FIELD_UNIT_SETS,
   fieldFormat,
   fieldInputUnit,
   fieldOptionLabel,
@@ -116,4 +124,161 @@ test('fieldInputUnit：标准化财务表中的监管率也按百分数识别', 
   assert.equal(fieldInputUnit('balance.capital_adequacy_ratio').label, '%')
   assert.equal(formatFieldValue('balance.capital_adequacy_ratio', 12), '12.00%')
   assert.equal(formatFieldValue('balance.non_performing_loan_ratio', 1.5), '1.50%')
+})
+
+// ─── 前后端单位表双向对拍（2026-11-18 retro） ──────────────────────────────
+//
+// 事故：`PERCENT_FIELDS` 里挂着一个后端根本不存在的键 `dividend_financing_ratio`
+// （后端唯一权威是 `dividend_financing_ratio_pct`：field_units.py 的
+// PERCENT_STORED_FIELDS、schema.py 的列名、dsl/ast_nodes.py 的 AST 登记）。
+// 门禁 RG3 只做「后端有 → 前端必须有」的单向校验，死键永远不触发它。
+// 下面这条测试补反方向：**前端集合必须与后端注册表完全相等**。
+
+/** 仓库根相对路径：frontend/tests/ → ../../ = 仓库根。 */
+const BACKEND_UNITS_PATH = fileURLToPath(
+  new URL('../../app/core/screening/field_units.py', import.meta.url),
+)
+
+/** 口径类别 → 后端 frozenset 名。 */
+const BACKEND_SETS = {
+  pct: 'PCT_DECIMAL_FIELDS',
+  percent: 'PERCENT_STORED_FIELDS',
+  ratio: 'RATIO_FIELDS',
+  price: 'PRICE_FIELDS',
+} as const
+
+type UnitKind = keyof typeof BACKEND_SETS
+
+/**
+ * 允许「只在前端登记」的字段（口径类别 → 字段名）。
+ *
+ * 目前为空：前后端单位表必须逐字段相等。要加条目必须写明后端依据，否则就是
+ * 给漂移开后门。
+ */
+const FRONTEND_ONLY_BY_DESIGN: Readonly<Record<UnitKind, readonly string[]>> = {
+  pct: [],
+  percent: [],
+  ratio: [],
+  price: [],
+}
+
+const backendUnitsSource = readFileSync(BACKEND_UNITS_PATH, 'utf-8')
+
+/** 从后端源码解析 `<NAME>: frozenset[str] = frozenset({...})` 里的字段名。 */
+function parseBackendUnitSet(source: string, name: string): Set<string> {
+  const header = `${name}: frozenset[str] = frozenset({`
+  const start = source.indexOf(header)
+  assert.ok(start >= 0, `后端 field_units.py 里找不到集合 ${name}（改名后必须同步本测试）`)
+  const bodyStart = start + header.length
+  const bodyEnd = source.indexOf('})', bodyStart)
+  assert.ok(bodyEnd > bodyStart, `后端集合 ${name} 的花括号未闭合`)
+  const body = source
+    .slice(bodyStart, bodyEnd)
+    .split('\n')
+    .map((line) => line.split('#')[0]) // 行尾注释里的名字不算登记
+    .join('\n')
+  return new Set([...body.matchAll(/"([^"]+)"/g)].map((item) => item[1]))
+}
+
+function missingFromSection(left: Iterable<string>, right: Iterable<string>): string[] {
+  const rightSet = new Set(right)
+  return [...left].filter((item) => !rightSet.has(item)).sort()
+}
+
+for (const kind of Object.keys(BACKEND_SETS) as UnitKind[]) {
+  const backendName = BACKEND_SETS[kind]
+  test(`单位表双向对拍：前端 ${kind} 集合 == 后端 ${backendName}`, () => {
+    const backend = parseBackendUnitSet(backendUnitsSource, backendName)
+    const frontend = new Set(FIELD_UNIT_SETS[kind])
+
+    const frontendOnly = missingFromSection(frontend, backend).filter(
+      (field) => !FRONTEND_ONLY_BY_DESIGN[kind].includes(field),
+    )
+    assert.deepEqual(
+      frontendOnly,
+      [],
+      `前端 ${kind} 集合有后端 ${backendName} 不存在的死键（后端是唯一权威）：${frontendOnly.join(', ')}`,
+    )
+
+    const backendOnly = missingFromSection(backend, frontend)
+    assert.deepEqual(
+      backendOnly,
+      [],
+      `后端 ${backendName} 有字段前端 ${kind} 集合未登记（会退回 plain / 漏 ×100）：${backendOnly.join(', ')}`,
+    )
+  })
+}
+
+test('单位表双向对拍：前端四类集合互不重叠（一个字段只能有一个口径）', () => {
+  const seen = new Map<string, UnitKind>()
+  const conflicts: string[] = []
+  for (const kind of Object.keys(BACKEND_SETS) as UnitKind[]) {
+    for (const field of FIELD_UNIT_SETS[kind]) {
+      const previous = seen.get(field)
+      if (previous && previous !== kind) conflicts.push(`${field}: ${previous} + ${kind}`)
+      else seen.set(field, kind)
+    }
+  }
+  assert.deepEqual(conflicts, [], `前端同一字段被登记进多个口径：${conflicts.join('; ')}`)
+})
+
+test('单位表双向对拍：后端四类集合互不重叠', () => {
+  const seen = new Map<string, string>()
+  const conflicts: string[] = []
+  for (const backendName of Object.values(BACKEND_SETS)) {
+    for (const field of parseBackendUnitSet(backendUnitsSource, backendName)) {
+      const previous = seen.get(field)
+      if (previous && previous !== backendName) conflicts.push(`${field}: ${previous} + ${backendName}`)
+      else seen.set(field, backendName)
+    }
+  }
+  assert.deepEqual(conflicts, [], `后端同一字段被登记进多个口径：${conflicts.join('; ')}`)
+})
+
+test('单位表双向对拍：静态集合真的驱动 fieldFormat（文本与行为不许分叉）', () => {
+  for (const kind of Object.keys(BACKEND_SETS) as UnitKind[]) {
+    for (const field of FIELD_UNIT_SETS[kind]) {
+      assert.equal(fieldFormat(field), kind, `${field} 应在 ${kind} 集合里被识别为 ${kind}`)
+    }
+  }
+})
+
+test('事故钉死：分红融资比的后端权威名只有 dividend_financing_ratio_pct', () => {
+  // 裸名 `dividend_financing_ratio` 不是后端快照列：它只是历史发布型 DSL 指标名
+  // （app/web/api/screening.py:719），单位由 /api/screening/indicators 运行时下发。
+  assert.equal(
+    FIELD_UNIT_SETS.percent.has('dividend_financing_ratio'),
+    false,
+    'dividend_financing_ratio 不是后端列，不得静态登记为 percent（2026-11-18 死键）',
+  )
+  assert.equal(FIELD_UNIT_SETS.percent.has('dividend_financing_ratio_pct'), true)
+  assert.equal(fieldFormat('dividend_financing_ratio_pct'), 'percent')
+  assert.equal(fieldInputUnit('dividend_financing_ratio_pct').scale, 1)
+  assert.equal(formatFieldValue('dividend_financing_ratio_pct', 5.29), '5.29%')
+})
+
+test('监管率集合由 PERCENT_FIELDS 派生，不存在第二份手抄', () => {
+  const balanceColumns = [...FIELD_UNIT_SETS.percent]
+    .filter((field) => field.startsWith('balance.'))
+    .map((field) => field.slice('balance.'.length))
+    .sort()
+  assert.deepEqual(balanceColumns, [
+    'capital_adequacy_ratio',
+    'core_tier1_capital_adequacy_ratio',
+    'non_performing_loan_ratio',
+    'provision_coverage_ratio',
+    'risk_coverage_ratio',
+    'tier1_capital_adequacy_ratio',
+  ])
+  for (const column of balanceColumns) {
+    const unit = fieldInputUnit(`balance.${column}`)
+    assert.equal(unit.label, '%', `balance.${column} 应按百分数输入`)
+    assert.equal(unit.scale, 1, `balance.${column} 存储即百分数，输入不应 ÷100`)
+  }
+})
+
+test('百分比展示只有一处实现：小数比例 ×100、百分数原值不 ×100', () => {
+  assert.equal(formatFieldValue('roe', 0.0529), '5.29%')
+  assert.equal(formatFieldValue('turnover_rate', 5.29), '5.29%')
+  assert.equal(formatFieldValue('dividend_financing_ratio_pct', 5.29), '5.29%')
 })

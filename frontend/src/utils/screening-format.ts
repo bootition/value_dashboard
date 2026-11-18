@@ -18,7 +18,7 @@
  * unit 字段，优先级高于下方静态集合——静态集合只是无后端元数据时的回退。
  */
 
-import { fmtPct } from './formatters.ts'
+import { fmtPct, fmtStoredPercent } from './formatters.ts'
 
 export type FieldFormat = 'pct' | 'percent' | 'ratio' | 'price' | 'plain'
 
@@ -132,6 +132,9 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   consecutive_div_years: '连续分红年数',
   cumulative_dividend_amount: 'A股累计现金分红（含回购注销）',
   cumulative_financing_amount: 'A股累计股权融资',
+  // 两个名字同指一个中文名，但只有 `_pct` 是后端快照列（唯一权威）。裸名是历史
+  // 发布型 DSL 指标名（app/web/api/screening.py:719），只保留显示名，
+  // **不得**再把它登记进 PERCENT_FIELDS —— 那正是 2026-11-18 修掉的死键漂移。
   dividend_financing_ratio: '分红融资比（A股）',
   dividend_financing_ratio_pct: '分红融资比（A股）',
   turnover_rate: '换手率',
@@ -343,9 +346,19 @@ const PCT_FIELDS = new Set([
   'period_return', 'annualized_volatility', 'max_drawdown',
 ])
 
-/** 百分数存储的百分比字段（输入原样比较、展示直接加 %）。 */
+/**
+ * 百分数存储的百分比字段（输入原样比较、展示直接加 %）。
+ *
+ * 2026-11-18 retro（RG3 缺口）：这里曾多挂一个裸名 `dividend_financing_ratio`，
+ * 后端根本没有这个快照列 —— 唯一权威是 `_pct`：
+ * `app/core/screening/field_units.py:45`（PERCENT_STORED_FIELDS）、
+ * `app/core/storage/schema.py:317`（列名）、
+ * `app/core/dsl/ast_nodes.py:287`（AST 指标登记）。
+ * 裸名只是历史发布型 DSL 指标的名字（`app/web/api/screening.py:719`），
+ * 它的单位由 /api/screening/indicators 的运行时元数据下发，不在此静态登记。
+ * 双向一致性由 `frontend/tests/screening-format.test.ts` 的「单位表双向对拍」段落钉死。
+ */
 const PERCENT_FIELDS = new Set([
-  'dividend_financing_ratio',
   'dividend_financing_ratio_pct',
   'ttm_dividend_yield',
   'div_yield_spread_0p25y', 'div_yield_spread_0p5y', 'div_yield_spread_1y',
@@ -385,6 +398,25 @@ const RATIO_FIELDS = new Set([
   'ocf_to_operating_profit',
 ])
 
+/**
+ * 四张静态单位表（**运行时实际使用的同一批 Set 对象**，非副本）。
+ *
+ * 用途只有一个：给 `frontend/tests/screening-format.test.ts` 的「单位表双向对拍」段落做
+ * 「前端集合 == 后端 app/core/screening/field_units.py」的**双向**对拍。
+ * RG3 只校验后端→前端单向（前端多出来的键它看不见），死键就是那样漏的。
+ */
+export const FIELD_UNIT_SETS: Readonly<{
+  readonly pct: ReadonlySet<string>
+  readonly percent: ReadonlySet<string>
+  readonly ratio: ReadonlySet<string>
+  readonly price: ReadonlySet<string>
+}> = {
+  pct: PCT_FIELDS,
+  percent: PERCENT_FIELDS,
+  ratio: RATIO_FIELDS,
+  price: PRICE_FIELDS,
+}
+
 /** 使用“倍”作为输入/展示单位的估值倍数类指标。 */
 const MULTIPLE_FIELDS = new Set([
   'pe_ttm', 'pb_mrq', 'ps_ttm', 'pcf_ttm',
@@ -406,15 +438,17 @@ const YEAR_FIELDS = new Set(['consecutive_div_years'])
 /** 平均成交量底层单位为股；筛选输入按万股，展示更符合日常阅读。 */
 const VOLUME_FIELDS = new Set(['avg_volume'])
 
-/** 标准化资产负债表中以百分数表达的银行类监管指标。 */
-const STATEMENT_PERCENT_FIELDS = new Set([
-  'core_tier1_capital_adequacy_ratio',
-  'tier1_capital_adequacy_ratio',
-  'capital_adequacy_ratio',
-  'non_performing_loan_ratio',
-  'provision_coverage_ratio',
-  'risk_coverage_ratio',
-])
+/**
+ * 标准化资产负债表中以百分数表达的银行类监管指标（裸列名，仅用于 `balance.<col>` 前缀判定）。
+ *
+ * 事实只存一份：`PERCENT_FIELDS` 里的 `balance.*` 全名。这里按前缀派生，
+ * 不再手抄第二份"哪些监管比率按百分数存"（AGENTS R1：一个事实一个实现）。
+ */
+const STATEMENT_PERCENT_FIELDS = new Set(
+  [...PERCENT_FIELDS]
+    .filter((field) => field.startsWith('balance.'))
+    .map((field) => field.slice('balance.'.length)),
+)
 
 /** 条件输入框的单位与换算元数据。 */
 export interface FieldInputUnit {
@@ -519,7 +553,7 @@ export function formatFieldValue(field: string, value: unknown): string {
       return fmtPct(value)
     case 'percent':
       // 百分数存储：直接展示（5.29 = 5.29%），不再 ×100
-      return `${value.toFixed(2)}%`
+      return fmtStoredPercent(value)
     case 'price':
     case 'ratio':
       return value.toFixed(2)
