@@ -42,7 +42,21 @@ from scripts.check_rework_guards import (  # noqa: E402
 def test_repository_passes_all_rework_guards() -> None:
     report = run_all(PROJECT_ROOT)
     assert report.ok, "\n".join(finding.render() for finding in report.findings)
-    assert len(report.checked) == 5
+    # RG1–RG5（reports/133）+ RG6–RG9 仓库完整性（reports/140）
+    expected = {
+        "RG1 时区单源",
+        "RG2 状态合并单出口",
+        "RG3 单位注册表跨语言一致",
+        "RG4 派生域注册表自洽",
+        "RG5 规则单一来源",
+        "RG6 报告编号唯一 + front-matter 合法",
+        "RG7 supersede 双向闭合",
+        "RG8 真相源不引用作废结论",
+        "RG9 测试资产必须入库",
+    }
+    assert set(report.checked) == expected, (
+        "门禁集合变了：新增/删减必须同步更新本断言与 AGENTS.md 的规则索引"
+    )
 
 
 def test_every_roce_snapshot_column_is_registered() -> None:

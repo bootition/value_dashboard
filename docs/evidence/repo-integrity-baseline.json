@@ -1,0 +1,24 @@
+{
+  "note": "RG6–RG9 存量违规基线（棘轮）。只允许减少：修好一条就删一行。新增违规不受基线保护，门禁会红。生成：--update-baseline",
+  "known": [
+    "RG6|docs/reports/127_*|dup-127",
+    "RG6|docs/reports/133_*|dup-133",
+    "RG6|docs/reports/139_*|dup-139",
+    "RG6|docs/reports/59_*|dup-59",
+    "RG8|docs/STATUS.md|cites-superseded-r100",
+    "RG8|docs/STATUS.md|cites-superseded-r101",
+    "RG8|docs/STATUS.md|cites-superseded-r121",
+    "RG8|docs/STATUS.md|cites-superseded-r122",
+    "RG8|docs/STATUS.md|cites-superseded-r128",
+    "RG8|docs/STATUS.md|cites-superseded-r129",
+    "RG8|docs/STATUS.md|cites-superseded-r130",
+    "RG8|docs/STATUS.md|cites-superseded-r132",
+    "RG8|docs/STATUS.md|cites-superseded-r34",
+    "RG8|docs/STATUS.md|cites-superseded-r56",
+    "RG8|docs/STATUS.md|cites-superseded-r59",
+    "RG8|docs/STATUS.md|cites-superseded-r60",
+    "RG8|docs/STATUS.md|cites-superseded-r73",
+    "RG8|docs/STATUS.md|cites-superseded-r80",
+    "RG8|docs/STATUS.md|cites-superseded-r99"
+  ]
+}

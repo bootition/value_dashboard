@@ -102,6 +102,7 @@ class Finding:
 class Report:
     findings: list[Finding] = field(default_factory=list)
     checked: list[str] = field(default_factory=list)
+    baselined: int = 0
 
     @property
     def ok(self) -> bool:
@@ -459,7 +460,26 @@ def run_all(root: Path = PROJECT_ROOT) -> Report:
         findings = check(root)
         report.checked.append(name)
         report.findings.extend(findings)
+
+    # RG6–RG9 仓库完整性（`reports/140`）：编号唯一 / supersede 闭环 /
+    # 真相源不引用作废结论 / 测试资产必须入库。实现放在独立模块，
+    # 避免本文件继续膨胀；挂在这里保证"一条命令跑全部门禁"，
+    # 否则两个脚本必然有一个被人忘掉（本项目没有 CI，见 reports/140）。
+    report.checked.extend(_run_repo_integrity(root, report))
     return report
+
+
+def _run_repo_integrity(root: Path, report: Report) -> list[str]:
+    try:
+        from scripts import repo_integrity_guards as rig
+    except ImportError:  # 允许以 `python scripts/xxx.py` 直接执行（无包上下文）
+        import repo_integrity_guards as rig  # type: ignore[no-redef]
+    integrity = rig.run_all(root)
+    for finding in integrity.findings:
+        report.findings.append(Finding(finding.rule, finding.path, 0, finding.message))
+    if integrity.notes:
+        report.baselined = len(integrity.notes)
+    return integrity.checked
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -482,7 +502,8 @@ def main(argv: list[str] | None = None) -> int:
         for finding in report.findings:
             print(finding.render())
         if report.ok:
-            print(f"反返工护栏通过（{len(report.checked)} 组规则）")
+            suffix = f"，基线内 {report.baselined} 条未计红" if report.baselined else ""
+            print(f"反返工护栏通过（{len(report.checked)} 组规则{suffix}）")
     return 0 if report.ok else 1
 
 
