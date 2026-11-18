@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-11-17
+last-reviewed: 2026-11-18
 supersedes: null
 ---
 
@@ -285,6 +285,23 @@ supersedes: null
 （RG1 时区单源 / RG2 状态合并 / RG3 前后端单位一致 / RG4 派生域登记），
 测试 `tests/regression/test_rework_guards.py`、`tests/regression/test_snapshot_derived_columns.py`。
 
+
+---
+
+---
+
+## 19. 2026-11-18 大师指标科目复审新增约束（`reports/139`）
+
+> 来源：把 `reports/131` 的 42 个指标逐个对到 `information_schema`（65 表 / 1,306 列）+ 4 轮只读探针。
+> 这 5 条都是「不报错但会算错」型的域事实，做任何一个新指标前先看。
+
+| # | 硬约束/事实 | 出处 |
+|---|---|---|
+| D53 | **`xdxr.songzhuangu` 存的是「每股送转比例」，不是「每 10 股送转 X 股」。** 用 1,056 个真实事件把 `share_capital_history` 的实际股本跳变与 `songzhuangu` 对照，分 6 档全部满足 `股本跳变 / (1 + songzhuangu) = 1.000`（按 `/10` 解释则 1.09–4.26）。因此 `app/core/indicators/extended.py:401` 的 `SUM(songzhuangu)/10.0` 是错的（实测 `bonus_share_ratio_3y` 三年累计最大只有 0.353，口径对的话 10 送 10 三年应为 3.53）；凡是「送转还原」（一美元测试的 ΔRE、Akre 腿 2 的稀释判定）都必须直接用 `1 + songzhuangu` | `reports/139` §2.4/§5.3；`.planning/2026-11-18-indicator-feasibility-audit/out/db_evidence_round2.md`（songzhuangu_unit_test）与 round3（songzhuangu_buckets） |
+| D54 | **指数收盘价在 `index_valuation.extra` 的 JSON 里，不在价格表。** `price_daily_qfq`/`price_daily_raw` 只有 6 位股票代码、**0 行指数**；指数点位在 `index_valuation.extra->>'index_close'`（实测 128,074 行 / 43 个指数 / 122,695 行有值 / 2005-01-31 → 2026-11-17，由 `index_valuation_adapter.py:174/302` 写入）。任何「相对强度基准 / 市场温度计」类公式写成 `price_daily_qfq` 都是**语义空壳**（不报错、恒空） | `reports/139` §2.4；probe round2 `index_close_available` |
+| D55 | **`market_cap_at_report` 的逐年覆盖率决定了「历史分位」能不能当结论**：2013 **52.7%** / 2014 **51.4%** / 2015 54.0% / 2017 59.4% / 2020 66.1% / 2022 82.1% / 2025 **96.8%**（`indicator_ext` 年报口径）。缺失不是随机的——缺失组中位总资产 5.04 亿 vs 有值组 36.62 亿（系统性漏掉小盘股）。所以**任何用市值做 10 年历史中位数/分位的指标，必须同时披露逐年覆盖率并标注「偏大盘」**；个股层面只有 689009 曾错 10 倍（已于 2026-11-17 修好，全库 `bad_rows=0`） | `reports/139` §6；probe round1 `market_cap_coverage_by_year` / `p0_9_scan` |
+| D56 | **金融股判据目前有三份手写实现，且集合不一致**——`indicators/roce.py:183`（`COALESCE(sw_level1,'') NOT IN ('银行','非银金融')`）、`supplement.py:507`（`sw_level1 IN (...)`，无 COALESCE → NULL 行掉出）、`quality/null_reason_sweeper.py:752`（多一个 `'保险'` + `csrc_l1 LIKE '%金融%'` + 股票名 LIKE 兜底）。实测 `stock_meta` 里 `sw_level1` 只有 `银行`(42)/`非银金融`(79)/`NULL`(751，其中仅 52 只仍在市)，**没有 `保险` 这个 level-1 值**（保险是 `sw_level2`）。新增指标一律抄 `roce.py:183` 的写法（带 COALESCE），禁止裸 `NOT IN` | `reports/139` §2.3/§5.1；probe round1 `sector_mix`、round2 `financial_sector_counts` |
+| D57 | **「空值是数学不成立还是没抓到」的落点只有 5 个 reason code**：`indicator_null_reason` 现存 129,934 行 / 69 字段，但只有 **5** 个 `reason_code`，而 `docs/skills/composite-indicator` 定义 6 类。新指标（尤其把「分母 ≤0」改成 `*_status` 而不是置空的那些）**必须同时把 status/reason 落库**，否则下游无法区分「这家公司数学不成立」与「这条数没采到」——这正是 R4-4 的判据 | `reports/139` §2.3/§6；probe round2 `null_reason_v2`；D37 |
 
 ---
 
