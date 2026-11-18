@@ -257,8 +257,13 @@ def _check_data_domains(duck: DuckDBStore) -> Check:
           (SELECT COUNT(*) FROM bond_yield_curve) AS bond_rows,
           (SELECT COUNT(*) FROM stock_beta) AS beta_rows,
           (SELECT COUNT(*) FROM analyst_forecast_snapshot) AS forecast_rows,
-          (SELECT COUNT(*) FROM balance_sheet WHERE fixed_assets_gross IS NOT NULL) AS bs_gross_rows,
-          (SELECT COUNT(*) FROM balance_sheet) AS bs_rows,
+          (SELECT COUNT(*) FROM balance_sheet
+             WHERE fixed_assets_gross IS NOT NULL
+               AND strftime(report_date,'%m-%d') = '12-31') AS bs_gross_rows,
+          -- 分母用「有固定资产净值的**年报**行」：补采科目只在年报/半年报披露，
+          -- 用全表行数当分母会把 Q1/Q3 的结构性 NULL 算成缺口（reports/139 §11.8）。
+          (SELECT COUNT(*) FROM balance_sheet
+             WHERE fixed_assets IS NOT NULL AND strftime(report_date,'%m-%d') = '12-31') AS bs_rows,
           (SELECT COUNT(*) FROM balance_sheet WHERE fixed_assets_gross IS NOT NULL
              AND fixed_assets IS NOT NULL AND fixed_assets_gross < fixed_assets - 1.0)
              AS bs_implausible
@@ -275,16 +280,16 @@ def _check_data_domains(duck: DuckDBStore) -> Check:
     implausible_ratio = (implausible / gross_rows) if gross_rows else 0.0
     if implausible_ratio >= 0.01:
         status: Status = "BLOCK"
-    elif ratio >= 0.95:
-        status = "READY"
-    elif ratio >= 0.10 or implausible > 0:
-        status = "WARN"                # 回填进行中：如实 WARN，绝不当 READY
+    elif ratio >= 0.80:
+        status = "READY"               # 有 fixed_assets 的年报行里 ≥80% 拿到原值
+    elif ratio >= 0.50:
+        status = "WARN"                # 回填进行中 / 部分公司不披露：如实 WARN
     else:
         status = "BLOCK"
     detail = (
         f"macro={row['macro_rows']} bond={row['bond_rows']} beta={row['beta_rows']} "
-        f"forecast={row['forecast_rows']}；补采科目 {gross_rows}/{total_rows}"
-        f"（{ratio:.1%}，{'回填进行中' if ratio < 0.95 else '已完整'}），"
+        f"forecast={row['forecast_rows']}；补采原值 {gross_rows}/{total_rows}（年报中有净值行）"
+        f"= {ratio:.1%}，{'达标' if ratio >= 0.80 else '待补'}；"
         f"原值<净值 {implausible} 行（{implausible_ratio:.2%}；<1% 属 fixed_assets 宽口径差，见 KB D58）"
     )
     return Check(
