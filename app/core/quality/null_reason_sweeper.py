@@ -172,6 +172,12 @@ _REGULATORY_FIELDS: tuple[str, ...] = (
     "balance.risk_coverage_ratio",
 )
 _TECHNICAL_FIELDS: tuple[str, ...] = ("period_return", "annualized_volatility", "max_drawdown")
+# 只在**中报/年报**披露的科目（reports/139 §11.8 / D58）：一季报与三季报结构性 NULL，
+# 不能因为"本期覆盖率 0%、上期 99.6%"就判成"本期没人抓"（那是财报节奏，不是调度问题）。
+_QUARTERLY_STRUCTURAL_FIELDS: tuple[str, ...] = (
+    "balance.fixed_assets_gross",
+    "balance.accumulated_depreciation",
+)
 # 依赖"现金流量表补充资料·折旧摊销"的字段族（2026-11-14 三季报实测）：
 # 三季报通常**不披露补充资料**，东财只给经营现金流净额 → 这一族整列掉到 0.1%，
 # 与"没去抓"长得一模一样，必须靠 cash_flow_indirect 的实际抓取情况区分。
@@ -674,12 +680,18 @@ BALANCE_NOT_APPLICABLE: dict[str, RuleGroup] = {
 # NOT_DISPATCHED 判定，不在这里硬编码。
 BALANCE_SUBJECT_NOT_APPLICABLE: dict[str, RuleGroup] = {
     "balance.fixed_assets_gross": RuleGroup(
-        predicates=(_eq("src_is_bank", "银行", 1),),
-        detail="银行模板的「固定资产原值」与通用模板不是同一口径（实测原值<净值），该字段对银行不适用",
+        predicates=(
+            _eq("src_is_bank", "银行", 1),
+            _eq("src_is_q1_or_q3", "一/三季报不披露固定资产原值", 1),
+        ),
+        detail="固定资产原值只在**中报/年报**披露；银行模板另与通用模板口径不同（实测原值<净值）",
     ),
     "balance.accumulated_depreciation": RuleGroup(
-        predicates=(_eq("src_is_bank", "银行", 1),),
-        detail="银行模板没有「累计折旧」列（只在附注），该字段对银行不适用",
+        predicates=(
+            _eq("src_is_bank", "银行", 1),
+            _eq("src_is_q1_or_q3", "一/三季报不披露累计折旧", 1),
+        ),
+        detail="累计折旧只在**中报/年报**披露；银行模板没有这一列（只在附注）",
     ),
 }
 
@@ -754,7 +766,7 @@ def _shift_years(value: date, years: int) -> date:
         return value.replace(year=value.year - years, day=28)
 
 
-def _cell_frame_sql(domain: str, fields: Sequence[str]) -> str:
+def _cell_frame_sql(domain: str, fields: Sequence[str], report_date: date | None = None) -> str:
     """一个报告期的「每股一行」单元格视图。
 
     源表同一 (股票, 报告期) 可能有 annual/quarterly/中文 report_type 多条记录，
@@ -823,6 +835,8 @@ def _cell_frame_sql(domain: str, fields: Sequence[str]) -> str:
             f"SELECT aggregated.*, 1 AS src_row_present, "
             f"{financial_expr} AS src_is_financial"
             f", CASE WHEN {is_bank_sql('meta')} THEN 1 ELSE 0 END AS src_is_bank"
+            f", {1 if (report_date is not None and report_date.month in (3, 9)) else 0}"
+            f" AS src_is_q1_or_q3"
             f"{extra_flags} FROM aggregated "
             f"LEFT JOIN stock_meta meta USING (stock_code)"
         )
@@ -832,7 +846,7 @@ def _cell_frame_sql(domain: str, fields: Sequence[str]) -> str:
 def _load_cell_rows(
     store: DuckDBStore, domain: str, report_date: date, fields: Sequence[str]
 ) -> list[dict[str, Any]]:
-    return store.read_query(_cell_frame_sql(domain, fields), [report_date])
+    return store.read_query(_cell_frame_sql(domain, fields, report_date), [report_date])
 
 
 def _coverage_from_rows(rows: Sequence[Mapping[str, Any]], fields: Sequence[str]) -> dict[str, int]:
@@ -1305,9 +1319,12 @@ def sweep(
     if domain in _CASHFLOW_STRUCTURAL_SOURCE_EMPTY:
         not_dispatched: dict[str, str] = {}
     else:
-        excluded_fields = (
-            frozenset(_DEPRECIATION_FIELDS) if domain == DOMAIN_EXT else frozenset()
-        )
+        excluded = set()
+        if domain == DOMAIN_EXT:
+            excluded |= set(_DEPRECIATION_FIELDS)
+        if domain == "balance":
+            excluded |= set(_QUARTERLY_STRUCTURAL_FIELDS)
+        excluded_fields = frozenset(excluded)
         not_dispatched = _not_dispatched_fields(
             fields=fields,
             report_date=resolved_date,
