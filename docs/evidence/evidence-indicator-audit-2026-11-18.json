@@ -4505,7 +4505,7 @@
   }
  ],
  "db_probes": {
-  ".json": {
+  "round1.json": {
    "db": "D:\\Mr.Q\\掌控经济\\value-dashboard\\data\\valuedashboard.duckdb",
    "generated_at": "2026-11-18 16:27:03",
    "results": [

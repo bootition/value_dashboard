@@ -10,6 +10,12 @@ last-reviewed: 2026-11-18
 
 > 由 7 个流派审查 agent 产出、主控按 `docs/reports/139` §2「主控复核更正」逐条校正后的逐指标明细。
 > 机读版：`docs/evidence/evidence-indicator-audit-2026-11-18.json`；DB 实测：同目录 round1–4 探针。
+>
+> ⚠️ **本文件保留 7 个 agent 的原始判定与原始数字**（未经主控删改，便于追溯）。已知需要按 `reports/139` §2.4 修正的有 3 处：
+> ① 凡把「P0-9 市值 10 倍」列为阻断级的条目（16 条）——实测**已修好**（689009 八期比值 1.0、最新期 bad_rows=0）；
+> ② #30 的送转单位判反了——`xdxr.songzhuangu` 实测是**每股比例**，`1 + songzhuangu` 正确；
+> ③ #17/#18 的"指数序列缺失"实为字段路径写错（`index_valuation.extra->>'index_close'` 有 122,695 行）。
+> 另：#4 的「扇出 +36%」按行数重算为 **+56.7%**。
 
 裁决口径：`buildable_now` = 可直接落成正式指标；`buildable_after_fix` = 字段/数据够，但必须先改 X；`blocked` = 缺数据或结构性不可算。
 
