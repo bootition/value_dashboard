@@ -80,6 +80,7 @@ def read_persisted_auto_update_status(sqlite: SQLiteStore) -> dict[str, Any]:
 # 步骤名 → 中文展示（进度日志用）
 STEP_LABELS: dict[str, str] = {
     "check": "更新检查",
+    "analyst_forecast": "一致预期快照",
     "trading_dates": "交易日历",
     "prices": "股票价格",
     "indicators": "指标快照",

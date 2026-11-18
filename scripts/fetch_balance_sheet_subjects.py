@@ -303,15 +303,31 @@ def parse_sina(
         gross_value = _clean(gross.iloc[position])
         accum_value = _clean(accum.iloc[position])
         net_value = _clean(net.iloc[position])
-        # 累计折旧列缺失（银行/保险模板实测没有这一列）→ 用 原值 − 固定资产净值 推导。
-        # 依据：探源 §1.A #2 —— 601398 FY2025 5107.11 − 2840.83 = 2266.28 亿（减值前累计折旧）；
-        # 恒等式①「原值 − 累计折旧 = 净值」在 600519 FY2025 上残差 0 元。
-        if accum_value is None and gross_value is not None and net_value is not None:
-            accum_value = gross_value - net_value
+        # ⚠️ **不再推导累计折旧**（2026-11-18 对抗性验收 P1 后收紧）：
+        # 旧实现用 `原值 − 固定资产净值` 填补银行/保险模板缺失的「累计折旧」列，
+        # 但这个差里混着**固定资产减值准备**（库内没有该科目），实测 2,515/4,403 行
+        # 无法闭合，且 17 行出现 `原值 < 净值`（最差 600036 2023-06-30 差 −840 亿）。
+        # 推导值不是会计数：**宁缺不填**，模板没有这一列就留 NULL，原因写
+        # indicator_null_reason=SOURCE_EMPTY（"该行业模板无累计折旧列"）。
+        if accum_value is None:
+            pass
         # 原值/累计折旧只有中报与年报有值；季报一律不写（保留 NULL，见模块 docstring 口径纪律）
         if report_date.month not in ANNUAL_OR_SEMI_MONTHS:
             gross_value = None
             accum_value = None
+        # 合理性闸门（P1）：原值必须 ≥ 净值，否则说明两列在源里不是同一模板/同一口径
+        # （实测银行模板的原值列语义不同），这类行整组丢弃并计数，绝不写库。
+        if (
+            gross_value is not None
+            and net_value is not None
+            and net_value > 0
+            and gross_value < net_value - 1.0
+        ):
+            recon_guard = True
+            gross_value = None
+            accum_value = None
+        else:
+            recon_guard = False
         values: dict[str, float | None] = {
             "fixed_assets_gross": gross_value,
             "accumulated_depreciation": accum_value,
@@ -327,7 +343,8 @@ def parse_sina(
             "net": net_value,
             "impairment": _clean(impair.iloc[position]),
             "net_amount": _clean(net_amount.iloc[position]),
-            "derived_accum": accum_value is not None and _clean(accum.iloc[position]) is None,
+            "derived_accum": False,  # 已取消推导（见上）
+            "rejected_implausible": recon_guard,
         }
     return subjects, recon
 
@@ -618,7 +635,7 @@ def main() -> int:
     for batch_start in range(0, len(pending), max(1, args.batch_size)):
         batch = pending[batch_start:batch_start + max(1, args.batch_size)]
         labels: list[dict[str, Any]] = []
-        batch_derived = 0
+        batch_rejected = 0
         batch_identity_checked = 0
         batch_identity_bad = 0
         batch_no_rows = 0
@@ -657,8 +674,8 @@ def main() -> int:
 
             for report_date, values in sina_rows.items():
                 code_rows.setdefault(report_date, {}).update(values)
-                if recon_rows.get(report_date, {}).get("derived_accum"):
-                    batch_derived += 1
+                if recon_rows.get(report_date, {}).get("rejected_implausible"):
+                    batch_rejected += 1
 
             # 5 个科目默认走东财（任务书指定源）；`--subject-source sina` 时已在上面同一次新浪请求里取到，
             # 不再发第二个请求（探源 §2 实测两源逐分钱相等）。
@@ -685,8 +702,9 @@ def main() -> int:
                 })
             stats["stocks_processed"] += 1
             processed_codes.append(code)
-            stats["columns_derived"]["accumulated_depreciation"] += batch_derived
-            batch_derived = 0
+            stats.setdefault("rejected_implausible_rows", 0)
+            stats["rejected_implausible_rows"] += batch_rejected
+            batch_rejected = 0
 
             if offset % 10 == 0:
                 logger.info("  批次进度 %d/%d（累计写入候选 %d 行）", offset, len(batch), len(labels) + stats["rows_staged"])

@@ -475,7 +475,14 @@ def compute_beta_rows(
                 "source": benchmark["source"],
                 "fetch_time": fetch_time,
                 "raw_hash": _raw_hash(code, report_date, benchmark["code"], key, n_obs, beta),
-                "confidence": benchmark["confidence"],
+                # r² 过低（<0.05）说明 β 解释力不足：**保留原值不截断**，
+                # 但把 confidence 降级成 approximate，让下游知道这一行不可当强证据用
+                # （reports/139 第二轮验收 §3：122 行 β 越出 0–3 无护栏）。
+                "confidence": (
+                    "approximate"
+                    if (r2 is not None and r2 < 0.05)
+                    else benchmark["confidence"]
+                ),
                 "batch_id": batch_id,
             })
             stats["per_window"][key]["written"] += 1
@@ -751,7 +758,7 @@ def main(argv: list[str] | None = None) -> int:
 
     bench_ev = benchmark["evidence"]
     print(f"模式: {'WRITE' if write else 'DRY RUN'}  数据库: {paths.duckdb_path}")
-    print(f"外部请求: 0 次（本表纯库内派生，无网络、无限速/重试面）")
+    print("外部请求: 0 次（本表纯库内派生，无网络、无限速/重试面）")
     print(f"基准: {benchmark['code']}  source={benchmark['source']}  confidence={benchmark['confidence']}")
     print(f"  沪深300 体检: {bench_ev['hs300_probe'].get('reason')}"
           f"（点数 {bench_ev['hs300_probe'].get('n')}, 密度 {bench_ev['hs300_probe'].get('density_vs_calendar')}）")

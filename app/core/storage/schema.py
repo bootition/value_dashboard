@@ -133,8 +133,12 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
     total_equity_parent        DOUBLE,   -- 归属于母公司所有者权益
     -- 补采科目（schema v48，reports/139 §2.2 的 7 项；来源见 scripts/fetch_balance_sheet_subjects.py）
     -- 单位统一为「元」，与同表其他金额列一致。取不到时保留 NULL，原因写 indicator_null_reason。
-    fixed_assets_gross         DOUBLE,   -- 固定资产原值（新浪「固定资产原值」＝东财无此列）
-    accumulated_depreciation   DOUBLE,   -- 累计折旧（勾稽：原值 − 累计折旧 = fixed_assets 净值）
+    fixed_assets_gross         DOUBLE,   -- 固定资产原值（新浪「固定资产原值」；东财无此列）
+    -- 累计折旧。**不要再从「原值 − 净值」推导**：那个差里混着「固定资产减值准备」
+    -- （库内没有该科目），实测 2,515/4,403 行无法闭合，且银行/保险模板根本没有这一列。
+    -- 正式勾稽式：原值 − 累计折旧 − 减值准备 = 净值；缺科目时该列留 NULL
+    -- （indicator_null_reason=SOURCE_EMPTY），不要用推导值冒充（reports/139 §11.5）。
+    accumulated_depreciation   DOUBLE,
     other_current_assets       DOUBLE,   -- 其他流动资产（东财 OTHER_CURRENT_ASSET；**勿与 CURRENT_ASSET_OTHER 混用**）
     receivables_financing      DOUBLE,   -- 应收款项融资（东财 FINANCE_RECE，FY2019 新金融工具准则后才有）
     long_term_payables         DOUBLE,   -- 长期应付款（东财 LONG_PAYABLE）
