@@ -438,6 +438,22 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 | 机构持仓 | ❌ 判定不可用 | `stock_report_fund_hold` 列错位、`stock_institute_hold` 2025 起返回 0 行 |
 | AA 信用利差 / 受限货币资金 / 存货跌价准备 / 变现折扣 / 跨市场估值 | ❌ 免费源拿不到 | 见 §11.3 |
 
+### 11.7 前置就绪自检（把 6 件前置变成可复跑断言）
+
+新增 `scripts/check_indicator_readiness.py`（只读、`--json` 可接状态页/CI）：把 §7 的 6 件前置
+逐条变成断言，每条都输出**真实读数**而不是「OK」：
+
+| key | 断言 | 当前实测 |
+|---|---|---|
+| `sector_single_source` | 3 处调用都走 `app/core/sector.py`，且**代码里**（去掉注释后）不再有手写的 `('银行','非银金融')` 集合 | 3/3 收口 |
+| `denominator_status` | `indicator_null_reason` 至少 4 类原因码在用（6 类已在枚举里定义） | 130,406 行 / 70 字段 / 5 类在用 |
+| `roce_persistence` | `roce_10y_min`/`roce_10y_cv`/`roce_20y_median` 存在、有值、且都进 `SNAPSHOT_DERIVED_COLUMNS` | min 4,214 / cv 3,730 / 20y 1,404，登记 10 列 |
+| `yoy_split` | `*_yoy`(TTM) 与 `*_yoy_fy`(年报) 两套并存且 FY 列已回填 | 各 3 列；`revenue_yoy` 5,537 / `_fy` 5,531 |
+| `derived_registration` | 重建 SQL 的 SET 列与派生域登记**双向差集为空**（RG4 的运行时版） | 10 / 10，差集为空 |
+| `data_domains` | 4 张新表存在 + 资产负债表补采科目已回填 | macro 844 / bond 106,147 / beta 10,799 / forecast 9,337；补采 21,153/361,484 行（回填进行中） |
+
+当前整体结论：**READY**。回填完成后 `data_domains` 的读数会自动变成全量（无需改脚本）。
+
 ## 10. 一句话
 
 > 这批指标的**字段是真的、口径是脏的、工程是漏的**：没有幻觉列，但有 11 处"列名对、语义错"；
