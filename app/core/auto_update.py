@@ -20,6 +20,7 @@ from typing import Any
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.update_steps import STEP_ORDER
 
 logger = logging.getLogger(__name__)
 
@@ -77,26 +78,15 @@ def read_persisted_auto_update_status(sqlite: SQLiteStore) -> dict[str, Any]:
     }
 
 
-# 步骤名 → 中文展示（进度日志用）
+# 步骤名 → 中文展示（进度日志用）。
+#
+# 唯一来源是 `app/core/update_steps.py::STEP_ORDER`（26 步，每步自带 ``label``）：
+# 这里**派生**，不再维护第二份清单。历史上本文件手写 18 个键、STEP_ORDER 26 步，
+# 每加一步就有一步永远显示英文步骤名，两份清单还各自漂移（S8 收口）。
+# ``check`` 不是 ``report_step`` 步骤（更新前置检查的独立进度事件），单独补充。
 STEP_LABELS: dict[str, str] = {
+    **{step.name: (step.label or step.name) for step in STEP_ORDER},
     "check": "更新检查",
-    "analyst_forecast": "一致预期快照",
-    "trading_dates": "交易日历",
-    "prices": "股票价格",
-    "indicators": "指标快照",
-    "universe": "股票池与股本",
-    "announcements": "公告",
-    "financials": "财务数据",
-    "financial_detail_backfill": "财务明细回填",
-    "market_actions": "分红除权",
-    "buyback": "回购明细",
-    "business_overview": "业务概览",
-    "treasury_curve": "国债曲线",
-    "capital_history": "历史股本",
-    "research_statistics": "历史统计",
-    "funding": "融资事件",
-    "index_valuation": "指数估值",
-    "retries": "失败重试",
 }
 
 
