@@ -268,18 +268,24 @@ def _check_data_domains(duck: DuckDBStore) -> Check:
     gross_rows = int(row["bs_gross_rows"])
     implausible = int(row["bs_implausible"])
     ratio = (gross_rows / total_rows) if total_rows else 0.0
-    if implausible > 0:
-        status: Status = "BLOCK"      # 原值<净值 必须为 0（脚本闸门 + repair 已清）
+    # 「原值 < 净值」两类含义（reports/139 §11.8 / KB D58）：
+    #  a) 抓取口径错的脏值 → fetch 闸门 + repair 已清（银行 0 行）；
+    #  b) `balance_sheet.fixed_assets` 本身是含 PPE 以外资产的宽口径 → 口径差，不是脏值。
+    # 故按比例判定：<1% 记口径差（WARN），>=1% 才当系统性脏值（BLOCK）。
+    implausible_ratio = (implausible / gross_rows) if gross_rows else 0.0
+    if implausible_ratio >= 0.01:
+        status: Status = "BLOCK"
     elif ratio >= 0.95:
         status = "READY"
-    elif ratio >= 0.10:
+    elif ratio >= 0.10 or implausible > 0:
         status = "WARN"                # 回填进行中：如实 WARN，绝不当 READY
     else:
         status = "BLOCK"
     detail = (
         f"macro={row['macro_rows']} bond={row['bond_rows']} beta={row['beta_rows']} "
-        f"forecast={row['forecast_rows']}；补采科目 {gross_rows}/{total_rows}（{ratio:.1%}，"
-        f"{'回填进行中' if ratio < 0.95 else '已完整'}），原值<净值 {implausible} 行"
+        f"forecast={row['forecast_rows']}；补采科目 {gross_rows}/{total_rows}"
+        f"（{ratio:.1%}，{'回填进行中' if ratio < 0.95 else '已完整'}），"
+        f"原值<净值 {implausible} 行（{implausible_ratio:.2%}；<1% 属 fixed_assets 宽口径差，见 KB D58）"
     )
     return Check(
         "data_domains",

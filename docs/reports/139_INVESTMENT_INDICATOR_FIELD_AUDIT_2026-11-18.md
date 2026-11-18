@@ -396,7 +396,7 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 | 信用利差 | ⚠️ **只补到 AAA 档**（`bond_yield_curve` 106,147 行） | `bond_china_yield` 只返回 国债/商金债AAA/中短票AAA **三条曲线，没有 AA**。所以 #3/#5/#35 只能做「AAA − 国债」，**不能声称是格雷厄姆原文的 2×AAA/AA** |
 | beta | ✅ 已自建（`stock_beta` 10,799 行） | 但基准是「全市场市值加权代理」而非沪深300（000300 只有月末点），近 3 年 β=1.045/r²=0.870，详见 §11.4 |
 | 一致预期 | ⚠️ **只能从 2026-11-18 起打点**（已落 9,337 行/2,360 只） | 源接口只给当期快照、无历史；已接进自动更新每天一次 |
-| 机构持仓 | ❌ 未做 | `stock_report_fund_hold` 返回**列错位**（「股票代码」列里是市值），`stock_institute_hold` 2025 年起返回 0 行 —— 需要另找源或解析，本轮判定「不可用」 |
+| 机构持仓 | 🟡 **可做（终验推翻「不可用」）** | 列错位属实（`stock_report_fund_hold` 的「股票代码」列里是 2.87e9 市值），但**数据本身完好、可平移复原**；另有两条可用路径：`ak.stock_institute_hold_detail`（2021Q2–2025Q1 有「占流通股比例」）、`ak.fund_portfolio_hold_em`（按基金全量可采）。更正一条事实：`stock_institute_hold` 是 **2022 起**真空（2020 年还有 3,295 行），不是「2025 起」。**估算 1–2 人日**，本轮未实施 |
 | 变现折扣 / 跨市场估值 | ❌ 无源 | 需要人工资产折价假设 / 海外市场行情，均不在免费可得范围 |
 
 ### 11.4 数据补齐（第二批，2026-11-18 当天完成）
@@ -452,7 +452,15 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 | `derived_registration` | 重建 SQL 的 SET 列与派生域登记**双向差集为空**（RG4 的运行时版） | 10 / 10，差集为空 |
 | `data_domains` | 4 张新表存在 + 资产负债表补采科目已回填 | macro 844 / bond 106,147 / beta 10,799 / forecast 9,337；补采 21,153/361,484 行（回填进行中） |
 
-当前整体结论：**READY**。回填完成后 `data_domains` 的读数会自动变成全量（无需改脚本）。
+**当前整体结论不是 READY**（终验实测）：`data_domains` 因回填尚未完成（约 20%）而 **WARN**，其余 5 项 READY —— 这是**如实状态**，回填完成后会自动转 READY，无需改脚本。
+>
+> 运行方式（脚本走路径隔离，裸跑会直接 BLOCK，这是**有意**的 fail-closed）：
+> ```bash
+> export VD_ENV=formal VD_FORMAL_ACK=confirmed \n>        VD_DUCKDB_PATH="<$PWD>/data/valuedashboard.duckdb" \n>        VD_SQLITE_PATH="<$PWD>/data/valuedashboard.sqlite"
+> uv run --locked python scripts/check_indicator_readiness.py            # 人读
+> uv run --locked python scripts/check_indicator_readiness.py --json     # 给 CI/状态页
+> ```
+> 退出码：0 READY / 1 BLOCK / 2 WARN。
 
 ### 11.8 补采科目的「登记链」与一个新发现的口径坑
 
@@ -470,8 +478,7 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 **新发现的口径坑（写进 KB D58）**：`balance_sheet.fixed_assets` 并不总是「纯 PPE 净值」——
 实测 15 行（全是非金融，如 000722 FY2025：原值 28.11 亿 / 折旧 13.71 亿 / 库内净值 41.38 亿）
 出现 `原值 − 折旧 < 净值`，说明该股的 `fixed_assets` 含了 PPE 以外的东西（或在建工程/土地等）。
-**所以 #37/#40/#42 用「净值代原值」时必须标 `approximate`，而如果要用原值，就取
-`fixed_assets_gross − accumulated_depreciation`（有原值时更接近口径）**。
+**但这 15 行的成因并不唯一**：既有「库内 `fixed_assets` 是宽口径」的迹象（000722、002050、002108 等：`原值 − 折旧` 明显小于库内净值），也有「源端两列错位」的迹象（000036 的 `原值 == 累计折旧`）。**所以处置统一为：这两列对这 15 行一律置 NULL（无法闭合就不能用），并在指标层把这类股票排除出「用原值」的样本**；不要用它们反推 `fixed_assets` 的语义。
 
 ## 10. 一句话
 
