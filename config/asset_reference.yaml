@@ -145,7 +145,7 @@ zero_reference_tables:
     retirement_candidate: true
     cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
   # ─── 2026-11-18 新增四域（schema v48，reports/139 §11.4 / D62）────────────
-  # 注：第 4 张 `analyst_forecast_snapshot` **不在**本清单——它已被
+  # 注：`analyst_forecast_snapshot` 与 `institution_holdings` **不在**本清单——它已被
   # `app/core/analyst_forecast.py`（TABLE 常量 + forecast_as_of）与 `update.py`
   # 真实读取，引用数 >0。剩下三张仍只有抓取脚本在写，如实登记为零引用。
   # 四张表当前只有「抓取/计算脚本」在写，app/ 运行时代码尚未读取
@@ -174,10 +174,3 @@ zero_reference_tables:
     retirement_candidate: false
   # 2026-11-18（schema v49，reports/139 §11.3）：机构持仓域。
   # 只有 scripts/fetch_institution_holdings.py 在写/读，app/ 运行时代码尚未消费 → 如实登记。
-  - table: institution_holdings
-    domain: institution
-    rows_at_review: 0
-    columns: 11
-    reason: "机构持仓（股票×报告期×持有人类型，6 类持有人），2026-11-18 首次入库的试点批次，尚无指标读取（首个消费方：#17 CANSLIM 的 I 项「机构持股比例及其变化」）"
-    fulfillment: "把 ratio_of_float / holder_count 接进 #17 CANSLIM 的 I 项（机构持股比例 + 家数变化，按报告期对比上一期）；接入后删除本条目"
-    retirement_candidate: false
