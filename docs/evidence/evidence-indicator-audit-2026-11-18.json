@@ -12710,5 +12710,120 @@
     "status": "ok"
    }
   ]
+ },
+ "first_wave_specs": {
+  "generated_at": "2026-11-18",
+  "report": "docs/reports/139_APPENDIX_FIRST_WAVE_BUILD_SPEC_2026-11-18.md",
+  "note": "6 段 SQL 在正式库只读跑过（截面 2025-12-31），此处为实测返回",
+  "results": {
+   "G1_graham_number": {
+    "cols": [
+     "n",
+     "med_px_over_gn",
+     "p90",
+     "n_below_gn",
+     "mx"
+    ],
+    "rows": [
+     [
+      "3956",
+      "2.499",
+      "7.47",
+      "344",
+      "84.6"
+     ]
+    ],
+    "sec": 0.03
+   },
+   "G3_ep_minus_treasury": {
+    "cols": [
+     "n",
+     "med_ep_pct",
+     "gov10y_pct",
+     "n_pass_2x"
+    ],
+    "rows": [
+     [
+      "3994",
+      "2.112",
+      "1.847",
+      "1055"
+     ]
+    ],
+    "sec": 0.01
+   },
+   "F37_altman_z": {
+    "cols": [
+     "n",
+     "med_z",
+     "n_safe"
+    ],
+    "rows": [
+     [
+      "5347",
+      "4.052",
+      "3393"
+     ]
+    ],
+    "sec": 0.03
+   },
+   "F38_altman_zpp": {
+    "cols": [
+     "n",
+     "med_zpp",
+     "n_safe"
+    ],
+    "rows": [
+     [
+      "5525",
+      "4.08",
+      "3694"
+     ]
+    ],
+    "sec": 0.01
+   },
+   "F39_piotroski_f": {
+    "cols": [
+     "n",
+     "avg_f",
+     "med_f",
+     "n_f8"
+    ],
+    "rows": [
+     [
+      "5525",
+      "5.198",
+      "5.0",
+      "569"
+     ]
+    ],
+    "sec": 0.08
+   },
+   "F27_roce_persistence": {
+    "cols": [
+     "n",
+     "n_10y",
+     "n_min",
+     "n_cv",
+     "med_10y",
+     "med_min",
+     "med_cv",
+     "n_persistent"
+    ],
+    "rows": [
+     [
+      "5575",
+      "4214",
+      "4214",
+      "3730",
+      "0.0845",
+      "-0.0027",
+      "0.718",
+      "235"
+     ]
+    ],
+    "sec": 0.0
+   }
+  }
  }
 }
