@@ -432,6 +432,9 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 |---|---|---|
 | 资产负债表 7 列**全市场**回填 | 🔄 后台运行中（`bs_full_sina2.log`） | 新浪档 ≈1.9h（5,580 只，1.2s/只，`--resume` 每 50 只落盘）；跑完后用东财补漏档只补「5 科目缺失」的那 ~900–1,000 只（≈50–60 分钟）。当前已落 16,448 行原值 |
 | `indicator_null_reason` 对补采列的登记 | 待做 | 补采脚本本身不写原因；需在回填完成后按「模板无此列 / 准则前无此科目 / 真 0」三类扫一遍 balance 域 |
+| 一致预期消费方（#13 PEG 的预期增速） | ✅ 已铺路 | 新增 `analyst_forecast.forecast_as_of(stock_code, as_of)`：只取 `snapshot_date <= as_of` 的最近一期，超过 `max_age_days` 按缺失处理（防前视）；`test_analyst_forecast_snapshot.py` 新增「不许用未来快照」的正反用例 |
+| 四张新表的资产去向登记（D38） | ✅ 已登记 | `config/asset_reference.yaml` 增加 `macro_series`/`bond_yield_curve`/`stock_beta`/`analyst_forecast_snapshot` 四条零引用条目，各自写清首个消费方与「接入后删除本条目」；`vd data doctor` 的 `ZERO_REFERENCE_ASSET` 会在被读取时报「清单已过期」 |
+| 全量回填的自动接力 | ✅ 已就绪 | `.planning/.../watch_and_gapfill.py`（psutil 轮询）在新浪档结束后自动跑东财补漏档，串行避免双写 |
 | 机构持仓 | ❌ 判定不可用 | `stock_report_fund_hold` 列错位、`stock_institute_hold` 2025 起返回 0 行 |
 | AA 信用利差 / 受限货币资金 / 存货跌价准备 / 变现折扣 / 跨市场估值 | ❌ 免费源拿不到 | 见 §11.3 |
 

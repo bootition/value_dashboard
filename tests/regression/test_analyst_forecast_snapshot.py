@@ -18,6 +18,7 @@ import pandas as pd
 import pytest
 
 from app.core.analyst_forecast import (
+    forecast_as_of,
     normalize,
     refresh_daily,
     snapshot_evidence,
@@ -152,3 +153,30 @@ def test_refresh_daily_skips_when_watermark_is_today(duckdb_store) -> None:
     assert step["status"] == "skipped"
     assert step["reason"] == "already_refreshed_today"
     assert step["rows"] == 0
+
+
+def test_forecast_as_of_never_uses_future_snapshot(duckdb_store) -> None:
+    """as_of 取数必须只看 `snapshot_date <= as_of`：这是 #13 PEG 回测的防前视闸门。
+
+    造两期快照（11-10 的 2026E=1.00 / 11-18 的 2026E=9.99），
+    断言 as_of=11-15 拿到的是 1.00 而不是 9.99 —— 若实现改成「取最新一期」，
+    这条会立即变红。
+    """
+    old_rows, _ = normalize(_frame([("600519", 43, 1.00, 3.00)]), snapshot_date=date(2026, 11, 10))
+    write_snapshot(duckdb_store, old_rows, snapshot_date=date(2026, 11, 10),
+                   replace_scope="snapshot_date")
+
+    new_rows, _ = normalize(_frame([("600519", 43, 9.99, 3.00)]), snapshot_date=SNAPSHOT_DATE)
+    write_snapshot(duckdb_store, new_rows, snapshot_date=SNAPSHOT_DATE,
+                   replace_scope="snapshot_date")
+
+    as_of_past = forecast_as_of(duckdb_store, stock_code="600519", as_of=date(2026, 11, 15))
+    assert as_of_past == {"2026E": 1.00, "2029E": 3.00}
+
+    as_of_now = forecast_as_of(duckdb_store, stock_code="600519", as_of=date(2026, 11, 18))
+    assert as_of_now == {"2026E": 9.99, "2029E": 3.00}
+
+    # 快照过旧（>max_age_days）按缺失处理，不拿陈旧值冒充
+    assert forecast_as_of(
+        duckdb_store, stock_code="600519", as_of=date(2027, 1, 15), max_age_days=30,
+    ) is None

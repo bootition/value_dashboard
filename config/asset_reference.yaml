@@ -144,3 +144,31 @@ zero_reference_tables:
     fulfillment: "同 csmar_fi_t6：先口径裁决"
     retirement_candidate: true
     cold_archive_state: "已退役到冷库（Parquet），不删除数据；恢复方式：`scripts/cold_archive_switch.py` 逆向操作或 `CREATE TABLE AS SELECT * FROM read_parquet(...)`"
+  # ─── 2026-11-18 新增四域（schema v48，reports/139 §11.4 / D62）────────────
+  # 注：第 4 张 `analyst_forecast_snapshot` **不在**本清单——它已被
+  # `app/core/analyst_forecast.py`（TABLE 常量 + forecast_as_of）与 `update.py`
+  # 真实读取，引用数 >0。剩下三张仍只有抓取脚本在写，如实登记为零引用。
+  # 四张表当前只有「抓取/计算脚本」在写，app/ 运行时代码尚未读取
+  # （scripts/ 不算引用，见本文件抬头口径）→ 按 D38 如实登记为零引用，
+  # 等对应指标落地时把本条目删掉（references > 0 时 doctor 会报「清单已过期」）。
+  - table: macro_series
+    domain: macro
+    rows_at_review: 844
+    columns: 9
+    reason: "GDP/CPI 宏观序列，2026-11-18 首次入库，尚无指标读取（首个消费方：#8 巴菲特指标 / #34 CAPE10 / #41 Ohlson O）"
+    fulfillment: "把 GDP 接进 #8 的分母、CPI 接进 #34/#41 的通胀调整；接入后删除本条目"
+    retirement_candidate: false
+  - table: bond_yield_curve
+    domain: macro
+    rows_at_review: 106147
+    columns: 8
+    reason: "中债 3 条曲线（国债/商金债AAA/中短票AAA），尚无指标读取（首个消费方：#3/#5/#35 的 AAA−国债利差）"
+    fulfillment: "在 #3 E/P−利率 与 #35 市场温度计里用 `商金债AAA − 国债` 同期限利差；接入后删除本条目"
+    retirement_candidate: false
+  - table: stock_beta
+    domain: market
+    rows_at_review: 10799
+    columns: 12
+    reason: "个股 beta（250/500 日），尚无指标读取（首个消费方：#24 QMJ 的「安全」腿）"
+    fulfillment: "把 beta 接进 #24 QMJ 安全组，并如实标注基准是 CAPW_MARKET 代理；接入后删除本条目"
+    retirement_candidate: false

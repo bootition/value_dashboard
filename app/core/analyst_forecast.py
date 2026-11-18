@@ -73,6 +73,7 @@ __all__ = [
     "TABLE",
     "build_snapshot",
     "fetch_forecast",
+    "forecast_as_of",
     "normalize",
     "refresh_daily",
     "response_hash",
@@ -390,6 +391,51 @@ def snapshot_evidence(duck: DuckDBStore, snapshot_date: date) -> dict[str, Any]:
             for row in by_year
         ],
     }
+
+
+def forecast_as_of(
+    duck: DuckDBStore,
+    *,
+    stock_code: str,
+    as_of: date,
+    max_age_days: int = 30,
+) -> dict[str, float] | None:
+    """取 `as_of` 当天或之前**最近一次**快照的 EPS 预测（防前视，供 #13 PEG 用）。
+
+    为什么必须 as_of 而不是「最新一次」：一致预期是**每天都在变**的横截面，
+    用今天的一致预期去回测 2019 年的 PEG 就是未来函数（`reports/133` R7 的同类）。
+    这里按 `snapshot_date <= as_of` 取最近一期，并限制 `max_age_days`：
+    隔太久（默认 >30 天）说明中间没打点，返回 None 而不是拿陈旧值冒充。
+
+    返回 `{fiscal_year: eps_forecast}`，键形如 `"2026E"`（只含非空值，缺失年度不补 0，
+    见模块 docstring）。
+    """
+    rows = duck.read_query(
+        f"""
+        WITH latest AS (
+            SELECT MAX(snapshot_date) AS snapshot_date
+            FROM {TABLE}
+            WHERE stock_code = ? AND snapshot_date <= ?
+        )
+        SELECT snapshot_date, fiscal_year, eps_forecast
+        FROM {TABLE}
+        WHERE stock_code = ? AND snapshot_date = (SELECT snapshot_date FROM latest)
+          AND eps_forecast IS NOT NULL
+        ORDER BY fiscal_year
+        """,
+        [stock_code, as_of, stock_code],
+    )
+    if not rows:
+        return None
+    snapshot_date = rows[0]["snapshot_date"]
+    age_days = (as_of - snapshot_date).days
+    if age_days > max_age_days:
+        logger.info(
+            "一致预期快照过旧，按缺失处理: stock=%s snapshot=%s as_of=%s age=%sd > %sd",
+            stock_code, snapshot_date, as_of, age_days, max_age_days,
+        )
+        return None
+    return {str(row["fiscal_year"]): float(row["eps_forecast"]) for row in rows}
 
 
 def build_snapshot(
