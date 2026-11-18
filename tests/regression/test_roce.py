@@ -77,7 +77,8 @@ def _seed_income(
 
 def _snapshot(duck: DuckDBStore, code: str) -> dict[str, Any]:
     rows = duck.read_query(
-        """SELECT roce_latest, roce_5y_median, roce_5y_years, roce_10y_median, roce_10y_years
+        """SELECT roce_latest, roce_5y_median, roce_5y_years, roce_10y_median, roce_10y_years,
+                  roce_20y_median, roce_20y_years
            FROM indicator_snapshot WHERE stock_code = ?""",
         [code],
     )
@@ -240,29 +241,104 @@ def test_missing_financial_expenses_marks_missing_ebit(duckdb_store: DuckDBStore
     assert all(r["status"] == STATUS_MISSING_EBIT for r in rows[1:])
 
 
-def test_snapshot_median_and_year_counts(duckdb_store: DuckDBStore) -> None:
-    """快照 = 最近 N 个有效年报的中位数，并如实记录用到了几年。"""
-    _seed_snapshot_row(duckdb_store, "000006")
-    # CE 固定 1000；EBIT 依次 100/200/300 —— ROCE = 10% / 20% / 30%
-    _seed_balance(
-        duckdb_store, "000006",
-        total_assets=[1000.0] * 5, total_current_liabilities=[0.0] * 5,
+def _seed_n_years(duck: DuckDBStore, code: str, n_reports: int) -> None:
+    """铺 n_reports 份连续年报（CE 恒 1000、EBIT 恒 100），得到 n_reports-1 个有效 ROCE 年。"""
+    for i in range(n_reports):
+        report_date = f"{2000 + i}-12-31"
+        duck.write_query(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
+               VALUES (?, CAST(? AS DATE), 1000, 0)""",
+            [code, report_date],
+        )
+        duck.write_query(
+            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
+               VALUES (?, CAST(? AS DATE), 100, 0)""",
+            [code, report_date],
+        )
+    _seed_snapshot_row(duck, code)
+
+
+def _windows(duck: DuckDBStore, code: str) -> dict[str, Any]:
+    rows = duck.read_query(
+        """SELECT roce_5y_median, roce_5y_years, roce_10y_median, roce_10y_years,
+                  roce_20y_median, roce_20y_years, roce_latest
+           FROM indicator_snapshot WHERE stock_code = ?""",
+        [code],
     )
-    _seed_income(
-        duckdb_store, "000006",
-        total_profit=[100.0, 200.0, 300.0, 100.0, 100.0],
-        financial_expenses=[0.0] * 5,
-    )
+    return rows[0]
+
+
+def test_window_requires_exactly_n_years(duckdb_store: DuckDBStore) -> None:
+    """**严格窗口**：N 年中位必须由恰好 N 个有效年报算出，不足则留空。
+
+    2026-11-16 用户裁定：「10 年中位，就一定要 10 年的数据，不要给我搞什么
+    7 年、8 年这些。」旧实现用 `rn <= N` 直接取中位，会让只有 7 年数据的公司
+    冒出一个"10 年中位"——名实不符。
+    """
+    # 4 份年报 → 3 个有效 ROCE 年（首年无期初资本）
+    _seed_n_years(duckdb_store, "200004", 4)
+    # 5 份 → 4 个有效年
+    _seed_n_years(duckdb_store, "200005", 5)
+    # 6 份 → 5 个有效年
+    _seed_n_years(duckdb_store, "200006", 6)
+    # 11 份 → 10 个有效年
+    _seed_n_years(duckdb_store, "200011", 11)
 
     RoceBuilder(duck=duckdb_store).build()
 
-    snap = _snapshot(duckdb_store, "000006")
-    # 有效年报 4 个（2019 无期初 CE）→ ROCE 为 2020/2021/2022/2023 = 10%/20%/30%/10%
-    assert snap["roce_5y_years"] == 4
-    assert snap["roce_latest"] == pytest.approx(0.10)          # 2023 年
-    assert snap["roce_5y_median"] == pytest.approx(0.15)       # median(0.1,0.2,0.3,0.1)
-    assert snap["roce_10y_years"] == 4
-    assert snap["roce_10y_median"] == pytest.approx(0.15)
+    w3 = _windows(duckdb_store, "200004")
+    assert w3["roce_5y_years"] == 3
+    assert w3["roce_5y_median"] is None, "3 年数据不能冒充 5 年中位"
+    assert w3["roce_10y_median"] is None
+
+    w4 = _windows(duckdb_store, "200005")
+    assert w4["roce_5y_years"] == 4
+    assert w4["roce_5y_median"] is None, "4 年数据不能冒充 5 年中位"
+
+    w5 = _windows(duckdb_store, "200006")
+    assert w5["roce_5y_years"] == 5
+    assert w5["roce_5y_median"] == pytest.approx(0.10), "拿满 5 年才出 5 年中位"
+    assert w5["roce_10y_years"] == 5
+    assert w5["roce_10y_median"] is None, "5 年数据不能冒充 10 年中位"
+    assert w5["roce_20y_median"] is None
+
+    w10 = _windows(duckdb_store, "200011")
+    assert w10["roce_10y_years"] == 10
+    assert w10["roce_10y_median"] == pytest.approx(0.10)
+    assert w10["roce_20y_years"] == 10
+    assert w10["roce_20y_median"] is None, "10 年数据不能冒充 20 年中位"
+
+
+def test_20y_window_available_when_20_years_present(duckdb_store: DuckDBStore) -> None:
+    """有 21 份年报（20 个有效 ROCE 年）时，20 年中位才出值。"""
+    _seed_n_years(duckdb_store, "200021", 21)
+    RoceBuilder(duck=duckdb_store).build()
+    w = _windows(duckdb_store, "200021")
+    assert w["roce_20y_years"] == 20
+    assert w["roce_20y_median"] == pytest.approx(0.10)
+    assert w["roce_latest"] == pytest.approx(0.10)
+
+
+def test_median_is_median_of_valid_years(duckdb_store: DuckDBStore) -> None:
+    """窗口内的中位数确实是中位数，不是平均数。"""
+    _seed_snapshot_row(duckdb_store, "200007")
+    years = ("2019-12-31", "2020-12-31", "2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31")
+    for report_date, profit in zip(years, [100.0, 200.0, 300.0, 100.0, 100.0, 100.0], strict=True):
+        duckdb_store.write_query(
+            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
+               VALUES (?, CAST(? AS DATE), 1000, 0)""",
+            ["200007", report_date],
+        )
+        duckdb_store.write_query(
+            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
+               VALUES (?, CAST(? AS DATE), ?, 0)""",
+            ["200007", report_date, profit],
+        )
+    RoceBuilder(duck=duckdb_store).build()
+    snap = _snapshot(duckdb_store, "200007")
+    # 5 个有效年 ROCE = 20%/30%/10%/10%/10% → median = 10%
+    assert snap["roce_5y_years"] == 5
+    assert snap["roce_5y_median"] == pytest.approx(0.10)
 
 
 def test_quarterly_reports_are_ignored(duckdb_store: DuckDBStore) -> None:
@@ -329,7 +405,9 @@ def test_builder_reports_status_breakdown(duckdb_store: DuckDBStore) -> None:
     assert report["data_version"] == DATA_VERSION
     assert report["history_rows"] == len(YEARS)
     assert report["history_roce_ok"] == len(YEARS) - 1  # 首年无期初 CE
-    assert report["snapshot"]["roce_5y_median"] == 1
+    # YEARS 是 5 份年报 → 4 个有效 ROCE 年，严格 5 年窗口拿不满，因此 0 只出值
+    assert report["snapshot"]["roce_5y_median"] == 0
+    assert report["snapshot"]["roce_10y_median"] == 0
 
 
 def test_source_constant_is_recorded(duckdb_store: DuckDBStore) -> None:
@@ -372,15 +450,7 @@ def test_snapshot_republish_preserves_roce_columns(duckdb_store: DuckDBStore) ->
         SNAPSHOT_UPDATE_SQL,
     )
 
-    _seed_snapshot_row(duckdb_store, "000011")
-    _seed_balance(
-        duckdb_store, "000011",
-        total_assets=[1000.0] * 5, total_current_liabilities=[0.0] * 5,
-    )
-    _seed_income(
-        duckdb_store, "000011",
-        total_profit=[100.0] * 5, financial_expenses=[0.0] * 5,
-    )
+    _seed_n_years(duckdb_store, "000011", 6)  # 6 份年报 → 5 个有效 ROCE 年
     RoceBuilder(duck=duckdb_store).build()
     before = _snapshot(duckdb_store, "000011")
     assert before["roce_5y_median"] is not None
@@ -440,19 +510,22 @@ def _seed_eligibility(
 
 def _eligible(duck: DuckDBStore, code: str) -> Any:
     rows = duck.read_query(
-        "SELECT roce_eligible, roce_10y_years FROM indicator_snapshot WHERE stock_code = ?",
+        "SELECT roce_eligible, roce_5y_years, roce_10y_years "
+        "FROM indicator_snapshot WHERE stock_code = ?",
         [code],
     )
     return rows[0]
 
 
 def test_eligible_when_all_three_conditions_met(duckdb_store: DuckDBStore) -> None:
-    """非金融 + 市值 ≥ 100 亿 + 有效年数 ≥ 8 → 可筛选。"""
+    """非金融 + 市值 ≥ 100 亿 + 有效 ROCE 年数 ≥ 5 → 可筛选。"""
     _seed_eligibility(duckdb_store, "100001", years=9, mcap=2e10, industry="食品饮料")
     RoceBuilder(duck=duckdb_store).build()
     row = _eligible(duckdb_store, "100001")
+    # 窗口年数是「该窗口实际用到的年数」，5 年窗口最多报 5
+    assert row["roce_5y_years"] == 5
     assert row["roce_10y_years"] == 9
-    assert row["roce_eligible"] is True
+    assert row["roce_eligible"] is True, "门槛是 5 年有效 ROCE（书里的下限），不是 8 年"
 
 
 def test_ineligible_when_market_cap_below_100_yi(duckdb_store: DuckDBStore) -> None:
@@ -468,10 +541,11 @@ def test_ineligible_when_history_shorter_than_8_years(duckdb_store: DuckDBStore)
     用「有效年数」而不是「上市满 N 年」：算单年 ROCE 需要上一年的资本，
     上市满 5 年实际只够算出 4 个值（书里要求「过去 5 到 10 年」的历史）。
     """
-    _seed_eligibility(duckdb_store, "100003", years=7, mcap=2e10, industry="食品饮料")
+    # 5 份年报 → 4 个有效 ROCE 年 < 5，不满足门槛
+    _seed_eligibility(duckdb_store, "100003", years=4, mcap=2e10, industry="食品饮料")
     RoceBuilder(duck=duckdb_store).build()
     row = _eligible(duckdb_store, "100003")
-    assert row["roce_10y_years"] == 7
+    assert row["roce_5y_years"] == 4
     assert row["roce_eligible"] is False
 
 

@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 45
+DUCKDB_SCHEMA_VERSION = 46
 SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -311,6 +311,8 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     roce_5y_years    INTEGER,           -- 上者实际用到的年数（1 = 只有一年，别当中位数看）
     roce_10y_median  DOUBLE,            -- 最近 10 个有效年报 ROCE 中位数
     roce_10y_years   INTEGER,
+    roce_20y_median  DOUBLE,            -- 最近 20 个有效年报 ROCE 中位数（必须拿满 20 年）
+    roce_20y_years   INTEGER,
     -- 筛选口径标志（reports/132）：非金融 且 市值>=100亿 且 有效ROCE年数>=8
     roce_eligible    BOOLEAN,
     -- 行情
@@ -2303,6 +2305,24 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (45, 'ROCE eligibility flag: indicator_snapshot.roce_eligible')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+
+        # v46（2026-11-16, reports/133）：ROCE 增加 20 年窗口。
+        # 用户裁定：①门槛下限 8→5 年 ②可选 5/10/20 年窗口 ③**窗口必须拿满 N 年才出值**，
+        # 不足 N 年时该窗口为 NULL（不再让 7 年数据冒充"10 年中位"）。
+        for _col, _type in (
+            ("roce_20y_median", "DOUBLE"),
+            ("roce_20y_years", "INTEGER"),
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {_col} {_type}"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (46, 'ROCE 20y window + strict N-year medians')
             ON CONFLICT (version) DO NOTHING
             """
         )

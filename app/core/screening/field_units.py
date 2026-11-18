@@ -22,7 +22,7 @@ from __future__ import annotations
 PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     "roe", "roa", "roic",
     # ROCE（v42）：与 ROE/ROA/ROIC 同族的**小数比例**（0.2034 = 20.34%）
-    "roce_latest", "roce_5y_median", "roce_10y_median",
+    "roce_latest", "roce_5y_median", "roce_10y_median", "roce_20y_median",
     "gross_margin", "net_margin", "debt_ratio",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     # reports/131 P0-4 同比双口径：`*_yoy_fy` 与 `*_yoy` 同为小数比例

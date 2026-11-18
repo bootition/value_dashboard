@@ -242,7 +242,9 @@ INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     "roce_5y_median": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
     "roce_10y_median": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
     "roce_5y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
+    "roce_20y_median": {"unit": "ratio", "period_type": "current_only", "historical_capable": True},
     "roce_10y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
+    "roce_20y_years": {"unit": "count", "period_type": "current_only", "historical_capable": True},
     "roce_eligible": {"unit": "count", "period_type": "current_only", "historical_capable": False},
     "cf_to_net_profit": {"unit": "ratio", "period_type": "ttm", "historical_capable": True},
     # 成长

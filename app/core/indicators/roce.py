@@ -94,8 +94,9 @@ logger = logging.getLogger(__name__)
 DATA_VERSION = 1
 SOURCE = "derived_roce"
 
-#: 5 年 / 10 年窗口（按每股最近 N 个**有效年报**取值）
-ROCE_WINDOWS: tuple[int, ...] = (5, 10)
+#: 可选的中位窗口（按每股最近 N 个**有效年报**取值）。
+#: **窗口必须拿满 N 年才出值**：不足 N 年时该窗口留空（不能用 7 年冒充 10 年）。
+ROCE_WINDOWS: tuple[int, ...] = (5, 10, 20)
 
 #: 有效分母（资本占用 > 0）的状态码
 STATUS_OK = "OK"
@@ -103,8 +104,9 @@ STATUS_INVALID_DENOMINATOR = "INVALID_DENOMINATOR"
 STATUS_MISSING_EBIT = "MISSING_EBIT"
 STATUS_NO_PRIOR_PERIOD = "NO_PRIOR_PERIOD"   # 序列首年：没有上年报表，算不出平均资本
 
-#: 筛选口径（module docstring「筛选口径」）：有效年数下限与市值下限
-ELIGIBLE_MIN_YEARS = 8
+#: 筛选口径（module docstring「筛选口径」）：有效年数下限与市值下限。
+#: 下限取 5 年——书里「过去 5 到 10 年甚至更长时间」的下限，不是我自己拍的 8。
+ELIGIBLE_MIN_YEARS = 5
 ELIGIBLE_MIN_MARKET_CAP = 1e10
 
 #: 年报期过滤（本域只吃年报，理由见模块 docstring「期间口径」）
@@ -157,33 +159,49 @@ HISTORY_SELECT_SQL = f"""
 
 SNAPSHOT_UPDATE_SQL = """
     UPDATE indicator_snapshot AS s
-    SET roce_latest     = agg.latest,
-        roce_5y_median  = agg.med5,
-        roce_5y_years   = agg.n5,
-        roce_10y_median = agg.med10,
-        roce_10y_years  = agg.n10,
-        roce_eligible   = agg.eligible
+    SET roce_latest      = agg.latest,
+        roce_5y_median   = agg.med5,
+        roce_5y_years    = agg.n5,
+        roce_10y_median  = agg.med10,
+        roce_10y_years   = agg.n10,
+        roce_20y_median  = agg.med20,
+        roce_20y_years   = agg.n20,
+        roce_eligible    = agg.eligible
     FROM (
-        SELECT r.stock_code, r.latest, r.med5, r.n5, r.med10, r.n10,
-               (r.n10 >= ? AND r.med10 IS NOT NULL
+        -- 严格窗口（2026-11-16 用户裁定）：N 年中位必须由**恰好 N 个**有效年报算出，
+        -- 不足 N 年时该窗口为 NULL。旧实现用 `rn <= N` 直接取中位，会让只有 7 年
+        -- 数据的公司冒出一个"10 年中位"，名实不符。
+        SELECT w.stock_code, w.latest,
+               CASE WHEN w.n5  >= 5  THEN w.med5  END AS med5,
+               w.n5,
+               CASE WHEN w.n10 >= 10 THEN w.med10 END AS med10,
+               w.n10,
+               CASE WHEN w.n20 >= 20 THEN w.med20 END AS med20,
+               w.n20,
+               (w.n5 >= ?
                 AND COALESCE(snap.total_market_cap, 0) >= ?
                 AND COALESCE(meta.sw_level1, '') NOT IN ('银行', '非银金融')) AS eligible
         FROM (
-            SELECT stock_code,
-                   MAX(CASE WHEN rn = 1 THEN roce END)   AS latest,
-                   MEDIAN(roce) FILTER (WHERE rn <= 5)   AS med5,
-                   COUNT(roce) FILTER (WHERE rn <= 5)    AS n5,
-                   MEDIAN(roce) FILTER (WHERE rn <= 10)  AS med10,
-                   COUNT(roce) FILTER (WHERE rn <= 10)   AS n10
+            SELECT r.stock_code, r.latest, r.med5, r.n5, r.med10, r.n10, r.med20, r.n20
             FROM (
-                SELECT stock_code, report_date, roce,
-                       ROW_NUMBER() OVER (PARTITION BY stock_code
-                                          ORDER BY report_date DESC) AS rn
-                FROM roce_history
-                WHERE roce IS NOT NULL
-            ) ranked
-            GROUP BY stock_code
-        ) r
+                SELECT stock_code,
+                       MAX(CASE WHEN rn = 1  THEN roce END)        AS latest,
+                       MEDIAN(roce) FILTER (WHERE rn <= 5)          AS med5,
+                       COUNT(roce)  FILTER (WHERE rn <= 5)          AS n5,
+                       MEDIAN(roce) FILTER (WHERE rn <= 10)         AS med10,
+                       COUNT(roce)  FILTER (WHERE rn <= 10)         AS n10,
+                       MEDIAN(roce) FILTER (WHERE rn <= 20)         AS med20,
+                       COUNT(roce)  FILTER (WHERE rn <= 20)         AS n20
+                FROM (
+                    SELECT stock_code, report_date, roce,
+                           ROW_NUMBER() OVER (PARTITION BY stock_code
+                                              ORDER BY report_date DESC) AS rn
+                    FROM roce_history
+                    WHERE roce IS NOT NULL
+                ) ranked
+                GROUP BY stock_code
+            ) r
+        ) w
         LEFT JOIN stock_meta meta USING (stock_code)
         LEFT JOIN indicator_snapshot snap USING (stock_code)
     ) agg
@@ -252,10 +270,12 @@ class RoceBuilder:
                    FROM roce_history"""
             ).fetchone()
             snap = conn.execute(
-                """SELECT COUNT(*) FILTER (WHERE roce_5y_median IS NOT NULL) AS med5,
-                          COUNT(*) FILTER (WHERE roce_10y_median IS NOT NULL) AS med10,
-                          COUNT(*) FILTER (WHERE roce_latest IS NOT NULL) AS latest,
-                          COUNT(*) FILTER (WHERE roce_5y_median >= 0.20) AS ge20,
+                """SELECT COUNT(*) FILTER (WHERE roce_5y_median IS NOT NULL)   AS med5,
+                          COUNT(*) FILTER (WHERE roce_10y_median IS NOT NULL)  AS med10,
+                          COUNT(*) FILTER (WHERE roce_20y_median IS NOT NULL)  AS med20,
+                          COUNT(*) FILTER (WHERE roce_latest IS NOT NULL)      AS latest,
+                          COUNT(*) FILTER (WHERE roce_eligible)                AS eligible,
+                          COUNT(*) FILTER (WHERE roce_eligible AND roce_5y_median >= 0.20) AS ge20,
                           COUNT(*) AS total
                    FROM indicator_snapshot"""
             ).fetchone()
@@ -269,11 +289,13 @@ class RoceBuilder:
             "history_no_prior_period": int(rows[4]),
             "report_date_range": [str(rows[5]), str(rows[6])],
             "snapshot": {
-                "roce_latest": int(snap[2]),
+                "roce_latest": int(snap[3]),
                 "roce_5y_median": int(snap[0]),
                 "roce_10y_median": int(snap[1]),
-                "roce_5y_ge_20pct": int(snap[3]),
-                "total": int(snap[4]),
+                "roce_20y_median": int(snap[2]),
+                "roce_eligible": int(snap[4]),
+                "roce_eligible_ge_20pct": int(snap[5]),
+                "total": int(snap[6]),
             },
             "data_version": DATA_VERSION,
         }

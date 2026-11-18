@@ -419,6 +419,7 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
     "roic": True, "cf_to_net_profit": True,
     # ROCE（v42，reports/130）：年报序列中位数，历史序列来自 roce_history
     "roce_latest": True, "roce_5y_median": True, "roce_10y_median": True,
+    "roce_20y_median": True,
     # 成长: 需要多期数据 → historical_capable
     "revenue_yoy": True, "revenue_yoy_fy": True,
     "net_profit_yoy": True, "net_profit_yoy_fy": True,
@@ -757,6 +758,7 @@ def get_indicators(stock_code: str, request: Request) -> dict:
             "roce_latest": indicators.get("roce_latest"),
             "roce_5y_median": indicators.get("roce_5y_median"),
             "roce_10y_median": indicators.get("roce_10y_median"),
+            "roce_20y_median": indicators.get("roce_20y_median"),
         }),
         "growth": _with_meta({
             "revenue_yoy": indicators.get("revenue_yoy"),
