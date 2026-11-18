@@ -1,0 +1,408 @@
+#!/bin/sh
+# =============================================================================
+# value-dashboard pre-commit 门禁（2026-11-19 新建，设计说明见 .githooks/README.md）
+#
+# 四条设计原则（改之前先读 README，别往这里塞慢检查）：
+#   1. 快     ：总预算 ≤10s。只跑「暂存 .py 的 ruff」+「9 组静态护栏」。慢检查一律不进钩子。
+#   2. 准     ：只看暂存区。没有暂存内容 → 直接 exit 0，不打扰、不打印。
+#   3. 不锁死 ：工具缺失 / 超时 / 环境坏了 → 打印警告后放行（fail-open），绝不把仓库锁死。
+#   4. 留痕   ：SKIP_GATES=1 可绕过，但会打醒目警告并记到 $GIT_DIR/hook-skips.log。
+#
+# 副作用边界：只读仓库文件 + 写系统临时目录 + 写 $GIT_DIR/hook-skips.log。
+#             **不修改工作区任何文件**。
+# =============================================================================
+set -eu
+
+TAG="[pre-commit]"
+# 显式用 UTF-8 写 Python stdio：GBK 控制台下中文会变 mojibake（reports/138 §3.1）。
+PYTHONIOENCODING=utf-8
+PYTHONUTF8=1
+export PYTHONIOENCODING PYTHONUTF8
+
+# ---------------------------------------------------------------- 输出语言/编码
+# ASCII 兜底：Windows 控制台切不到 UTF-8（或用户显式要求）时改说英文，宁可丑不要乱码。
+ASCII_OUT=0
+case "${VD_HOOK_ASCII:-0}" in 1 | true | TRUE | yes) ASCII_OUT=1 ;; esac
+CHCP_BIN=""
+CHCP_RESTORE=""
+if [ "$ASCII_OUT" = 0 ] && [ -t 1 ] && command -v chcp.com >/dev/null 2>&1; then
+    CHCP_BIN=$(command -v chcp.com)
+    cp_now=$("$CHCP_BIN" 2>/dev/null | tr -dc '0-9' || true)
+    cp_now=${cp_now:-65001}
+    if [ "$cp_now" != 65001 ]; then
+        "$CHCP_BIN" 65001 >/dev/null 2>&1 || true
+        cp_after=$("$CHCP_BIN" 2>/dev/null | tr -dc '0-9' || true)
+        if [ "${cp_after:-0}" = 65001 ]; then
+            CHCP_RESTORE=$cp_now # 退出时还原，别把用户的控制台永久改成 65001
+        else
+            ASCII_OUT=1
+            CHCP_BIN=""
+        fi
+    fi
+fi
+
+# msg <中文> <ASCII>
+msg() {
+    if [ "$ASCII_OUT" = 1 ]; then printf '%s' "$2"; else printf '%s' "$1"; fi
+}
+say() { printf '%s %s\n' "$TAG" "$(msg "$1" "$2")" >&2; }
+blank() { printf '\n' >&2; }
+
+TMP_DIR=""
+cleanup() {
+    if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then rm -rf "$TMP_DIR" 2>/dev/null || true; fi
+    if [ -n "$CHCP_RESTORE" ] && [ -n "$CHCP_BIN" ]; then
+        "$CHCP_BIN" "$CHCP_RESTORE" >/dev/null 2>&1 || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+
+now_ms() {
+    # bash 5 有内建 EPOCHREALTIME（0 进程开销，MSYS 上每次 fork 要几十毫秒）；没有才退回 date。
+    if [ -n "${EPOCHREALTIME:-}" ]; then
+        _s=${EPOCHREALTIME%[.,]*}
+        _frac=${EPOCHREALTIME#*[.,]}
+        _ms=${_frac%???}                    # 微秒串去掉后 3 位 = 毫秒（"750512" -> "750"）
+        while [ ${#_ms} -lt 3 ]; do _ms="${_ms}0"; done
+        printf '%s' "$((_s * 1000 + _ms))"
+        return 0
+    fi
+    _v=$(date +%s%3N 2>/dev/null || true)
+    case "$_v" in
+        '' | *[!0-9]*) _v=$(($(date +%s) * 1000)) ;;
+    esac
+    printf '%s' "$_v"
+}
+count_lines() {
+    if [ -f "$1" ]; then
+        n=$(wc -l <"$1" 2>/dev/null || true)
+        case "${n:-0}" in '' | *[!0-9]*) printf 0 ;; *) printf '%s' "$n" ;; esac
+    else
+        printf 0
+    fi
+}
+# 退出码分类：只有「rc=1 且输出确实是一条 finding」才判该红。
+# 其余一律 fail-open —— 钩子的第一职责是别把仓库锁死。
+#   guards 的 finding 一定带 [RG6] / [RG1] 这类前缀（见 scripts/check_rework_guards.py finding.render）
+#   ruff   的 finding 一定是 path.py:行:列: CODE（--output-format=concise 默认样子）
+# classify_rc <rc> <输出文件> <guards|ruff>  → pass | block | timeout | env
+classify_rc() {
+    case "$1" in
+        0) printf 'pass' ;;
+        124 | 143) printf 'timeout' ;;
+        1)
+            # 2026-11-18 加固（reports/140 §11.6）：Exception 类关键字必须**行首锚定**。
+            # 否则 ruff 报的某条消息里恰好含 "ImportError" 之类字样时，真实 finding 会被
+            # 误判成"环境问题"而**放行**——即门禁自己制造假绿。
+            if grep -qiE '^(Traceback \(most recent call last\):|ModuleNotFoundError:|ImportError:)|command not found|No module named|failed to (spawn|launch)' "$2" 2>/dev/null; then
+                printf 'env'
+                return 0
+            fi
+            case "${3:-guards}" in
+                ruff)
+                    # 兼容两种排版：concise 的 "x.py:1:8: F401 ..." 与 pretty 的 "--> x.py:1:8"
+                    if grep -qE '(\.py:[0-9]+:[0-9]+:|-->)' "$2" 2>/dev/null; then printf 'block'; else printf 'env'; fi
+                    ;;
+                *)
+                    if grep -qE '\[RG[0-9]+\]' "$2" 2>/dev/null; then printf 'block'; else printf 'env'; fi
+                    ;;
+            esac
+            ;;
+        *) printf 'env' ;;
+    esac
+}
+
+# ---------------------------------------------------------------- 0. 定位仓库根
+# 钩子/手动试跑都可能从子目录启动，一律用 git 自己解析出的仓库根，不假设 CWD。
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    say "不在 git 仓库内（git rev-parse --show-toplevel 失败），跳过门禁。" \
+        "Not inside a git repo; skipping gates."
+    exit 0
+}
+cd "$REPO_ROOT" || {
+    say "无法进入仓库根 $REPO_ROOT，跳过门禁。" "Cannot chdir to $REPO_ROOT; skipping gates."
+    exit 0
+}
+
+# ---------------------------------------------------------------- 1. 暂存区快照
+# core.quotePath=false：中文文件名保持原样（默认会被转义成 \346\226\207，喂给 ruff 会变成不存在的路径）。
+# 只调一次 git：--name-status 同时给出「有没有暂存内容」+「每个文件的状态和路径」。
+staged_raw=$(git -c core.quotePath=false diff --cached --name-status) || staged_raw=""
+if [ -z "$staged_raw" ]; then
+    exit 0 # 没暂存内容：静默快速退出（最常见路径，必须 0 输出 0 成本）
+fi
+STAGED_COUNT=$(printf '%s\n' "$staged_raw" | wc -l)
+STAGED_COUNT=${STAGED_COUNT:-0}
+
+# ---------------------------------------------------------------- 2. 留痕（绕过）
+audit_log() { # $1 = 原因
+    [ "${VD_HOOK_NO_AUDIT:-0}" = 1 ] && return 0
+    _gd=$(git rev-parse --git-dir 2>/dev/null) || return 0
+    [ -n "$_gd" ] || return 0
+    _br=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf '?')
+    printf '%s\tskipped\tbranch=%s\tstaged=%s\t%s\n' \
+        "$(date '+%Y-%m-%d %H:%M:%S')" "$_br" "$STAGED_COUNT" "$1" \
+        >>"$_gd/hook-skips.log" 2>/dev/null || true
+}
+
+if [ -n "${SKIP_GATES:-}" ] && [ "${SKIP_GATES}" != 0 ]; then
+    blank
+    printf '%s ============================================================\n' "$TAG" >&2
+    say "⚠️  门禁被 SKIP_GATES=${SKIP_GATES} 手动跳过（本次提交未做任何检查）" \
+        "WARNING: gates SKIPPED via SKIP_GATES=${SKIP_GATES} (no checks ran)"
+    say "⚠️  这条记录已写入 \$GIT_DIR/hook-skips.log，属于可审计的绕过。" \
+        "WARNING: logged to \$GIT_DIR/hook-skips.log (auditable bypass)."
+    say "⚠️  补跑一次：uv run --locked python scripts/check_rework_guards.py" \
+        "Re-run later: uv run --locked python scripts/check_rework_guards.py"
+    printf '%s ============================================================\n' "$TAG" >&2
+    blank
+    audit_log "SKIP_GATES=${SKIP_GATES}"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- 3. 临时目录
+TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/vd-precommit.XXXXXX" 2>/dev/null) || TMP_DIR=""
+if [ -z "$TMP_DIR" ]; then
+    TMP_DIR="${TMPDIR:-/tmp}/vd-precommit-$$"
+    mkdir -p "$TMP_DIR" 2>/dev/null || {
+        say "无法创建临时目录，跳过门禁（fail-open）。" "Cannot create temp dir; skipping gates."
+        exit 0
+    }
+fi
+list_py_gate="$TMP_DIR/py_gate"   # 门禁覆盖范围内的 .py
+list_py_other="$TMP_DIR/py_other" # 范围外的 .py（scripts/ 等有存量债务）
+list_frontend="$TMP_DIR/frontend"
+list_docs="$TMP_DIR/docs"
+: >"$list_py_gate"
+: >"$list_py_other"
+: >"$list_frontend"
+: >"$list_docs"
+
+# ---------------------------------------------------------------- 4. 分类暂存文件
+printf '%s\n' "$staged_raw" | while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    st=${line%%	*}            # M / A / D / R100 ...
+    rest=${line#*	}
+    case "$st" in
+        D*) continue ;;            # 已删除的文件不送 lint（文件都不在了）
+        R* | C*) f=${rest##*	} ;; # 重命名/复制：取新路径
+        *) f=$rest ;;
+    esac
+    [ -n "$f" ] || continue
+    case "$f" in
+        *.py)
+            if [ "${VD_HOOK_RUFF_ALL:-0}" = 1 ]; then
+                printf '%s\n' "$f" >>"$list_py_gate"
+            else
+                case "$f" in
+                    app/* | tests/* | conftest.py | _pytest_policy.py) printf '%s\n' "$f" >>"$list_py_gate" ;;
+                    *) printf '%s\n' "$f" >>"$list_py_other" ;;
+                esac
+            fi
+            ;;
+        frontend/*) printf 'x
+' >>"$list_frontend" ;; # 必须真写一行，`: >>file` 是零字节（计数会变成 0）
+        docs/*.md) printf 'x
+' >>"$list_docs" ;;         # case 的 * 跨 /，等价于 docs/**/*.md
+    esac
+done
+N_PY=$(count_lines "$list_py_gate")
+N_PY_OTHER=$(count_lines "$list_py_other")
+N_FE=$(count_lines "$list_frontend")
+N_DOCS=$(count_lines "$list_docs")
+
+# ---------------------------------------------------------------- 5. 工具解析（失败则 fail-open）
+TIMEOUT_BIN=""
+command -v timeout >/dev/null 2>&1 && TIMEOUT_BIN=$(command -v timeout)
+tl() { # tl <秒> <命令...>
+    _secs=$1
+    shift
+    if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$_secs" "$@"; else "$@"; fi
+}
+
+PY_MODE=""   # uv | bin | ""(缺失)
+PY_BIN=""
+RUFF_MODE="" # uv | bin | ""(缺失)
+if command -v uv >/dev/null 2>&1 && [ -f uv.lock ] && [ -f pyproject.toml ]; then
+    PY_MODE=uv
+    if [ "$N_PY" -gt 0 ] && tl 25 uv run --locked ruff --version >/dev/null 2>&1; then RUFF_MODE=uv; fi
+fi
+if [ -z "$PY_MODE" ]; then
+    # 逐个探测：Windows 的 python3 可能只是 Microsoft Store 的假壳子，能 `command -v` 到但跑不起来。
+    for _cand in python3 python; do
+        if command -v "$_cand" >/dev/null 2>&1 && tl 8 "$_cand" -c 'pass' >/dev/null 2>&1; then
+            PY_MODE=bin
+            PY_BIN=$_cand
+            break
+        fi
+    done
+fi
+if [ -z "$RUFF_MODE" ] && command -v ruff >/dev/null 2>&1; then RUFF_MODE=bin; fi
+
+run_guards() {
+    if [ "$PY_MODE" = uv ]; then
+        tl 60 uv run --locked python scripts/check_rework_guards.py
+    else
+        tl 60 "$PY_BIN" scripts/check_rework_guards.py
+    fi
+}
+# --output-format=concise：固定成 "path.py:行:列: CODE msg" 一行一条，
+# 默认的 pretty 格式会多打源码片段、也不利于 classify_rc 可靠识别 finding。
+run_ruff() { # $@ = 文件
+    if [ "$RUFF_MODE" = uv ]; then
+        tl 30 uv run --locked ruff check --output-format=concise "$@"
+    else
+        tl 30 ruff check --output-format=concise "$@"
+    fi
+}
+guards_cmd() { # 给人复制的命令（哪怕当前环境没装 python 也要能打印出可用命令）
+    case "$PY_MODE" in
+        uv) printf 'uv run --locked python scripts/check_rework_guards.py' ;;
+        bin) printf '%s scripts/check_rework_guards.py' "$PY_BIN" ;;
+        *) printf 'uv run --locked python scripts/check_rework_guards.py' ;;
+    esac
+}
+ruff_cmd() {
+    if [ "$RUFF_MODE" = uv ]; then printf 'uv run --locked ruff check'; else printf 'ruff check'; fi
+}
+
+if [ "${VD_HOOK_DRY_RUN:-0}" = 1 ]; then
+    say "dry-run：暂存 $STAGED_COUNT 个文件；python=$PY_MODE/$PY_BIN ruff=$RUFF_MODE py_gate=$N_PY py_other=$N_PY_OTHER" \
+        "dry-run: staged=$STAGED_COUNT python=$PY_MODE/$PY_BIN ruff=$RUFF_MODE py_gate=$N_PY py_other=$N_PY_OTHER"
+    say "dry-run：将执行 [$(guards_cmd)]" "dry-run: would run [$(guards_cmd)]"
+    exit 0
+fi
+
+T0=$(now_ms)
+fail=0
+guards_ran=0
+ruff_ran=0
+
+# ---------------------------------------------------------------- 6. 检查 A：9 组静态护栏（RG1–RG9）
+if [ ! -f scripts/check_rework_guards.py ]; then
+    say "⚠️  未找到 scripts/check_rework_guards.py，跳过护栏检查（fail-open）。" \
+        "WARNING: scripts/check_rework_guards.py missing; skipping guard check."
+elif [ -z "$PY_MODE" ]; then
+    say "⚠️  未找到 python（uv/python3/python 都没有），跳过护栏检查（fail-open）。" \
+        "WARNING: no python interpreter found; skipping guard check."
+else
+    out="$TMP_DIR/guards.log"
+    rc=0
+    run_guards >"$out" 2>&1 || rc=$?
+    case "$(classify_rc "$rc" "$out" guards)" in
+        pass) guards_ran=1 ;;
+        block)
+            fail=1
+            cat "$out" >&2 || true
+            blank
+            say "❌ 反返工护栏未通过（RG1–RG9：时区/状态合并/单位/派生域/规则来源/编号/supersede/真相源/测试资产）" \
+                "FAILED: static guard rules RG1-RG9"
+            say "   上面每行都带「规则编号 + 文件:行号 + 原因」，按它改即可。" \
+                "   Each line above shows rule id + file:line + reason."
+            say "   只跑护栏看详情：$(guards_cmd)" "   See full detail: $(guards_cmd)"
+            say "   机器可读：$(guards_cmd) --json" "   Machine readable: $(guards_cmd) --json"
+            say "   规则含义：AGENTS.md 反返工段落 / scripts/check_rework_guards.py 文件头 docstring" \
+                "   Rule docs: AGENTS.md + docstring of scripts/check_rework_guards.py"
+            blank
+            ;;
+        timeout)
+            say "⚠️  护栏检查超时（60s）被跳过，本次放行——这本身是异常，请手动跑：$(guards_cmd)" \
+                "WARNING: guard check timed out (60s); skipped (fail-open). Please run: $(guards_cmd)"
+            ;;
+        *)
+            # 工具/环境问题（不是规则失败）：放行，但要说清楚，别让仓库变哑巴锁死。
+            say "⚠️  护栏跑不起来（rc=$rc，判定为环境问题而非规则失败），本次放行（fail-open）。" \
+                "WARNING: guards could not run (rc=$rc, env issue not a rule failure); fail-open."
+            say "   最常见原因：依赖没同步 / 缺 httpx 等包。修：uv sync --extra dev" \
+                "   Usual cause: unsynced env / missing deps. Fix: uv sync --extra dev"
+            say "   然后手动验证一次：$(guards_cmd)" "   Then verify manually: $(guards_cmd)"
+            head -n 8 "$out" >&2 2>/dev/null || true
+            ;;
+    esac
+fi
+
+# ---------------------------------------------------------------- 7. 检查 B：ruff（只跑暂存的 .py）
+if [ "$N_PY" -gt 0 ]; then
+    if [ -z "$RUFF_MODE" ]; then
+        say "⚠️  未找到 ruff（uv/全局都没有），跳过 lint（fail-open）。装上：uv sync --extra dev" \
+            "WARNING: ruff not found; skipping lint. Fix: uv sync --extra dev"
+    else
+        set --
+        while IFS= read -r f; do set -- "$@" "$f"; done <"$list_py_gate"
+        out="$TMP_DIR/ruff.log"
+        rc=0
+        run_ruff "$@" >"$out" 2>&1 || rc=$?
+        case "$(classify_rc "$rc" "$out" ruff)" in
+            pass) ruff_ran=1 ;;
+            block)
+                fail=1
+                cat "$out" >&2 || true
+                blank
+                say "❌ ruff 未通过（只检查了暂存的 $N_PY 个 .py 文件）" \
+                    "FAILED: ruff check on $N_PY staged .py file(s)"
+                say "   自动修：$(ruff_cmd) --fix <上面报错的文件>" \
+                    "   Auto-fix: $(ruff_cmd) --fix <files above>"
+                say "   规则集见 pyproject.toml [tool.ruff]（E4/E7/E9/F/I/UP/B/SIM）" \
+                    "   Rule set: pyproject.toml [tool.ruff]"
+                blank
+                ;;
+            timeout)
+                say "⚠️  ruff 超时（30s）被跳过，请手动跑：$(ruff_cmd) --fix <文件>" \
+                    "WARNING: ruff timed out (30s); please run manually."
+                ;;
+            *)
+                say "⚠️  ruff 未能正常启动（rc=$rc），跳过 lint（fail-open）。修：uv sync --extra dev" \
+                    "WARNING: ruff failed to start (rc=$rc); skipping lint. Fix: uv sync --extra dev"
+                head -n 8 "$out" >&2 2>/dev/null || true
+                ;;
+        esac
+    fi
+fi
+
+# ---------------------------------------------------------------- 8. 结果
+T1=$(now_ms)
+ELAPSED_MS=$((T1 - T0))
+[ "$ELAPSED_MS" -ge 0 ] 2>/dev/null || ELAPSED_MS=0
+
+if [ "$fail" = 1 ]; then
+    say "🚫 提交被拦截（耗时 ${ELAPSED_MS}ms）。改完重新 git add 再提交即可。" \
+        "BLOCKED (${ELAPSED_MS}ms). Fix, re-add, commit again."
+    say "   确认要绕过这一次：SKIP_GATES=1 git commit ...（留痕） / git commit --no-verify（不留痕）" \
+        "   Bypass once: SKIP_GATES=1 git commit ... (logged) / git commit --no-verify (silent)"
+    fail_rc=1
+else
+    if [ "$guards_ran" = 1 ] && [ "$ruff_ran" = 1 ]; then
+        say "✅ 通过：护栏 RG1–RG9 + ruff（${N_PY} 个 .py），耗时 ${ELAPSED_MS}ms" \
+            "OK: guards RG1-RG9 + ruff ($N_PY py), ${ELAPSED_MS}ms"
+    elif [ "$guards_ran" = 1 ]; then
+        say "✅ 通过：护栏 RG1–RG9，耗时 ${ELAPSED_MS}ms" "OK: guards RG1-RG9, ${ELAPSED_MS}ms"
+    else
+        # 什么都没真正跑起来（工具/环境缺失）→ 明说，别让人误以为"门禁通过了"。
+        say "⚠️  本次提交没有任何门禁真正跑起来（见上），按 fail-open 放行。" \
+            "WARNING: no gate actually ran (see above); fail-open."
+        say "   补跑一次：$(guards_cmd)  /  装工具：uv sync --extra dev" \
+            "   Run later: $(guards_cmd)  /  install tools: uv sync --extra dev"
+    fi
+    fail_rc=0
+fi
+
+# ---------------------------------------------------------------- 9. 提示（不阻塞）
+if [ "$N_FE" -gt 0 ]; then
+    say "ℹ️  暂存了 $N_FE 个 frontend/** 文件：钩子不跑 lint/test/build（太慢，会把人逼去 --no-verify）。" \
+        "INFO: $N_FE frontend file(s) staged; lint/test/build intentionally NOT run here."
+    say "   提交前自己跑一次：cd frontend && npm run lint && npm run test" \
+        "   Run manually: cd frontend && npm run lint && npm run test"
+fi
+if [ "$N_DOCS" -gt 0 ]; then
+    say "ℹ️  暂存了 $N_DOCS 个 docs/**/*.md：编号/front-matter/supersede/真相源已由 RG6–RG9 覆盖，不额外跑。" \
+        "INFO: $N_DOCS docs markdown file(s); numbering/front-matter already covered by RG6-RG9."
+fi
+if [ "$N_PY_OTHER" -gt 0 ]; then
+    names=$(tr '\n' ' ' <"$list_py_other" 2>/dev/null | cut -c1-200 || true)
+    say "ℹ️  跳过 $N_PY_OTHER 个门禁范围外的 .py（scripts/ 等有 ruff 存量债务，硬跑会误红）：$names" \
+        "INFO: skipped $N_PY_OTHER out-of-scope .py (pre-existing ruff debt): $names"
+    say "   觉得该文件也要 lint：VD_HOOK_RUFF_ALL=1 git commit ..." "   Force lint all: VD_HOOK_RUFF_ALL=1 git commit ..."
+fi
+
+exit "$fail_rc"

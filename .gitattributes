@@ -1,0 +1,17 @@
+# Git 属性（2026-11-18 新增，`reports/140` 落实阶段）
+#
+# 只写**必要的、有明确受害场景**的规则，不写 `* text=auto`：
+# 后者会在下一次提交时对全仓做一次换行归一化，把几百个文件的 diff 搅成噪音，
+# 与「禁止跨主题打包提交」的 Git 纪律冲突。
+#
+# 场景：本机 `core.autocrlf=true`，检出时会把 `.sh` 变成 CRLF。
+# 而在 Linux/macOS 上 `#!/bin/sh\r` 会被当成 bad interpreter，钩子直接不执行
+# —— 报错还很难懂（"bad interpreter: No such file or directory"）。
+# 本仓库原本没有跟踪任何 `.sh`，所以下面的规则只影响新文件，不会重写历史。
+
+# git 钩子必须是 LF
+.githooks/* text eol=lf
+*.sh text eol=lf
+
+# PowerShell 脚本按 Windows 惯例用 CRLF
+*.ps1 text eol=crlf
