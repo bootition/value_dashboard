@@ -1,3 +1,11 @@
+---
+title: 全项目红队修复实施闭环（代码 + 测试 + 正式库）
+status: approved
+category: reports
+created: 2026-09-08
+last-reviewed: 2026-11-18
+---
+
 # 112_RED_TEAM_FIX_ALL_2026-09-08
 
 日期：2026-09-08

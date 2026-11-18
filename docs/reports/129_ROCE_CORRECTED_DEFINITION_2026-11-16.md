@@ -1,6 +1,7 @@
 ---
 title: ROCE 口径更正版：已动用资本 = 总资产 − 流动负债（= 净营运资本 + 非流动资产）
 status: superseded
+superseded-by: reports/130_ROCE_IMPLEMENTATION_2026-11-16.md
 category: reports
 created: 2026-11-16
 last-reviewed: 2026-11-16
