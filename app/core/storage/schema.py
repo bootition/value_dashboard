@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 48
+DUCKDB_SCHEMA_VERSION = 49
 SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -563,6 +563,36 @@ CREATE TABLE IF NOT EXISTS analyst_forecast_snapshot (
     batch_id       VARCHAR NOT NULL,
     PRIMARY KEY (snapshot_date, stock_code, fiscal_year)
 );
+
+-- 机构持仓（schema v49；reports/139 §11.3「机构持仓」= 8 类外部序列里唯一还能免费拿到的）
+-- 一个 (股票 × 报告期 × 持有人类型) 一行，是「按报告期的机构持股比例」的规范形。
+-- 源：东方财富数据中心「主力数据-机构持仓」列表 `dataapi/zlsj/list`（akshare
+-- `stock_report_fund_hold` 的底层接口）—— 6 类持有人（基金/QFII/社保/券商/保险/信托）
+-- × 1 报告期 = 全市场一次拿全。**不走 akshare 包装**：1.18.81 把 22 个原始字段
+-- 按 23 个列名硬套，整表错位一格（「股票代码」列里是持股市值），详见
+-- `.planning/2026-11-18-indicator-feasibility-audit/out/inst_holdings_probe.md`。
+--
+-- 单位纪律（D40/D46 同款，写死在这里，取数/换算只有一处实现）：
+--   * `shares`         单位 = **股**（源端 TOTAL_SHARES 已是股，禁止再 ×10000）；
+--   * `ratio_of_float` 单位 = **百分数**（3.12 表示占流通股 3.12%，**不是** 0.0312）。
+--     源端 FREESHARES_RATIO 同为百分数，两端口径一致，落库不做任何缩放。
+--   * `holder_count`   = 持有该股的该类型机构家数（整数，源端 HOULD_NUM）。
+CREATE TABLE IF NOT EXISTS institution_holdings (
+    stock_code     VARCHAR NOT NULL,    -- 6 位股票代码
+    report_date    DATE    NOT NULL,    -- 报告期末（2025-06-30 等四个季末之一）
+    holder_type    VARCHAR NOT NULL,    -- 基金/QFII/社保/券商/保险/信托
+    shares         DOUBLE,              -- 持股数（**股**，不是万股、不是元）
+    ratio_of_float DOUBLE,              -- 占流通股比例（**百分数**：3.12 = 3.12%）
+    holder_count   INTEGER,             -- 该类型机构家数
+    source         VARCHAR NOT NULL,    -- eastmoney:zlsj_holder_list
+    fetch_time     TIMESTAMP NOT NULL,  -- naive UTC 抓取时刻（D19）
+    raw_hash       VARCHAR NOT NULL,    -- 原始响应 SHA-256
+    confidence     VARCHAR NOT NULL,    -- exact（比例齐全）/ approximate（只有股数，比例源端缺失）
+    batch_id       VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date, holder_type)
+);
+CREATE INDEX IF NOT EXISTS idx_institution_holdings_report_date
+    ON institution_holdings (report_date, holder_type);
 
 CREATE TABLE IF NOT EXISTS treasury_yield_curve (
     curve_date   DATE NOT NULL,        -- 曲线日期（交易日）
@@ -2459,6 +2489,18 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (48, 'balance sheet补充科目(7) + 宏观/债券曲线/beta/一致预期快照四域')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v49（2026-11-18, reports/139 §11.3）：
+        # institution_holdings = 「机构持仓」数据域（8 类外部序列里唯一还能免费拿到的一类）。
+        # 表体由上面的 CREATE TABLE IF NOT EXISTS 建（每次 init 幂等重跑），这里只记账。
+        # 一个 (股票 × 报告期 × 持有人类型) 一行；6 类持有人 × 1 报告期 = 全市场一次拿全。
+        # 唯一实现 app/core/institution_holdings.py，CLI scripts/fetch_institution_holdings.py。
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (49, 'institution_holdings：机构持仓(股票×报告期×持有人类型，6 类持有人)')
             ON CONFLICT (version) DO NOTHING
             """
         )

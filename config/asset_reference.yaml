@@ -172,3 +172,12 @@ zero_reference_tables:
     reason: "个股 beta（250/500 日），尚无指标读取（首个消费方：#24 QMJ 的「安全」腿）"
     fulfillment: "把 beta 接进 #24 QMJ 安全组，并如实标注基准是 CAPW_MARKET 代理；接入后删除本条目"
     retirement_candidate: false
+  # 2026-11-18（schema v49，reports/139 §11.3）：机构持仓域。
+  # 只有 scripts/fetch_institution_holdings.py 在写/读，app/ 运行时代码尚未消费 → 如实登记。
+  - table: institution_holdings
+    domain: institution
+    rows_at_review: 0
+    columns: 11
+    reason: "机构持仓（股票×报告期×持有人类型，6 类持有人），2026-11-18 首次入库的试点批次，尚无指标读取（首个消费方：#17 CANSLIM 的 I 项「机构持股比例及其变化」）"
+    fulfillment: "把 ratio_of_float / holder_count 接进 #17 CANSLIM 的 I 项（机构持股比例 + 家数变化，按报告期对比上一期）；接入后删除本条目"
+    retirement_candidate: false
