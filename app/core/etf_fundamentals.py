@@ -16,9 +16,10 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any
 
+from app.core.financial_period import cn_today
 from app.core.index_dashboard import SW_INDUSTRY_NAMES
 from app.core.market_cap import market_cap_by_date
 
@@ -131,7 +132,7 @@ def market_cap_series(duck: object, codes: list[str]) -> list[dict[str, Any]]:
     """
     if not codes:
         return []
-    cutoff = (date.today() - timedelta(days=_LOOKBACK_DAYS)).isoformat()
+    cutoff = (cn_today() - timedelta(days=_LOOKBACK_DAYS)).isoformat()
     rows = market_cap_by_date(duck, codes, since=cutoff)
     # 只保留月末最后交易日，控制前端点数
     monthly: dict[str, dict[str, Any]] = {}
@@ -151,7 +152,7 @@ def market_cap_series(duck: object, codes: list[str]) -> list[dict[str, Any]]:
 def earnings_series(duck: object, codes: list[str]) -> list[dict[str, Any]]:
     if not codes:
         return []
-    cutoff = (date.today() - timedelta(days=_LOOKBACK_DAYS)).isoformat()
+    cutoff = (cn_today() - timedelta(days=_LOOKBACK_DAYS)).isoformat()
     rows = duck.read_query(
         f"""SELECT i.report_date AS report_date,
                    SUM(i.parent_net_profit) AS total_profit,

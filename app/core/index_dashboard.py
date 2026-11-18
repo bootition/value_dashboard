@@ -19,6 +19,7 @@ from bisect import bisect_right
 from datetime import date, timedelta
 from typing import Any
 
+from app.core.financial_period import cn_today
 from app.core.market_cap import asof_shares_join_sql, asof_shares_value_sql
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
@@ -328,7 +329,7 @@ def _all_a_valuation_series(duck: object) -> list[dict[str, Any]]:
     if cached is not None and time.monotonic() - cached["built_at"] < _ALL_A_SERIES_TTL_SEC:
         return cached["series"]
 
-    cutoff = (date.today() - timedelta(days=TEN_YEAR_DAYS + 400)).isoformat()
+    cutoff = (cn_today() - timedelta(days=TEN_YEAR_DAYS + 400)).isoformat()
     # 逐股 point-in-time 对齐（ASOF）：每个月末，每只股票用"该日或之前
     # 最新一期"财报计算 TTM 与净资产，避免按统一报告期对齐时覆盖率随
     # 披露节奏抖动（旧实现 PB 与当前概览差约 10%）。

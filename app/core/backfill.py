@@ -27,6 +27,7 @@ import duckdb
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.manager import AdapterManager
+from app.core.financial_period import cn_today
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -153,7 +154,7 @@ class PriceBackfiller:
             stocks = stocks[:max_stocks]
             total = len(stocks)
 
-        end_date = datetime.now().strftime("%Y-%m-%d")
+        end_date = cn_today().strftime("%Y-%m-%d")
 
         success = 0
         skipped = 0

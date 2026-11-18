@@ -25,6 +25,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.responses import JSONResponse
 
 from app.core.config import Config, is_frozen_runtime
+from app.core.financial_period import cn_now
 from app.core.storage.duckdb_store import DuckDBReadLockedError, DuckDBStore
 from app.core.storage.path_policy import (
     DatabasePathSet,
@@ -230,7 +231,7 @@ def auto_update_is_due(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
         except Exception:
             # 旧库/极早期启动可能还没有 retry_list；价格判定仍可独立工作。
             pass
-        now = datetime.now()
+        now = cn_now()
         cutoff = now.date() - timedelta(days=1) if now.strftime("%H:%M") < "15:30" else now.date()
         rows = sqlite.query(
             "SELECT MAX(trade_date) AS target_date FROM trading_dates WHERE trade_date <= ?",

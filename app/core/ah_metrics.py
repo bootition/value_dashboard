@@ -66,6 +66,7 @@ import math
 from datetime import date, datetime
 from typing import Any, Literal
 
+from app.core.financial_period import cn_today
 from app.core.market_cap import market_cap_from
 
 __all__ = [
@@ -759,7 +760,7 @@ def build_ah_snapshot(
     有问题：那是「A、H 各自的分红节奏不同」的正常结果，调用方**不得**据此丢弃
     该股票（模块 docstring §3）。``units`` 字段显式标注市值/溢价/股息率单位。
     """
-    anchor = _to_date(as_of) or date.today()
+    anchor = _to_date(as_of) or cn_today()
     resolved = _resolve_mapping(duck, mapping)
     codes = sorted(resolved)
     if stock_codes:

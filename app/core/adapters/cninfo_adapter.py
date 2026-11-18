@@ -23,7 +23,6 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -33,6 +32,7 @@ from app.core.adapters.base import (
     FetchRequest,
     FetchResult,
 )
+from app.core.financial_period import CN_TZ
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,7 @@ _DEFAULT_REFERER = (
 _CNINFO_MAX_PAGE_NUM = 100
 
 # 公告日按北京（Asia/Shanghai）自然日归日；announcement_time 内部保持 UTC。
-_CN_TZ = ZoneInfo("Asia/Shanghai")
+_CN_TZ = CN_TZ  # 单源：app/core/financial_period.py（RG1）
 
 # ─── 公告类别常量 ────────────────────────────────────────────────────
 

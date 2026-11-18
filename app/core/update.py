@@ -35,9 +35,9 @@ from app.core.financial_guards import (
     guard_contract_liabilities_write,
 )
 from app.core.financial_period import CN_TZ as _CN_TZ
-from app.core.financial_period import expected_financial_period
 
 # 契约 §2：多子步骤状态归并按严重度取最坏值，rejected 不得被 success 覆盖。
+from app.core.financial_period import cn_now, cn_today, expected_financial_period
 from app.core.job_status import aggregate_job_status, merge_step_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -1052,7 +1052,7 @@ class IncrementalUpdater:
         self._resolve_complete_missing_records()
         if check_report["retry_tasks"]:
             expected_date = self._latest_expected_trading_date(
-                datetime.now().strftime("%Y-%m-%d")
+                cn_today().strftime("%Y-%m-%d")
             )
             self._cleanup_redundant_retries(expected_date)
             refreshed_tasks = self._check_retry_tasks()
@@ -2358,7 +2358,7 @@ class IncrementalUpdater:
         if last_moment is None:
             return True
         last_date = last_moment.date()
-        return (datetime.now(_CN_TZ).date() - last_date).days >= interval_days
+        return (cn_today() - last_date).days >= interval_days
 
     def _mark_csrc_refreshed(self) -> None:
         """Persist the CSRC refresh date so later runs skip the full scan."""
@@ -4675,7 +4675,7 @@ class IncrementalUpdater:
         logger.info("[增量] 检查需要价格更新的股票...")
 
         latest_local = self._get_latest_local_price_date()
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = cn_today().strftime("%Y-%m-%d")
         target_date = self._latest_expected_trading_date(today)
 
         # 2026-11-13 P0（B）：待重拉 qfq 的股票必须强制进入本轮目标集，
@@ -4761,7 +4761,7 @@ class IncrementalUpdater:
             # 否则每次运行取到的子集随机漂移
             target_stocks = target_stocks[:max_stocks]
 
-        fallback_start = latest_local or (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+        fallback_start = latest_local or (cn_today() - timedelta(days=30)).strftime("%Y-%m-%d")
         end_date = target_date
 
         # 增量窗口内发生除权除息的股票：qfq 需要全历史重拉。
@@ -4798,7 +4798,7 @@ class IncrementalUpdater:
         if self.price_full_refetch_on_stale and latest_local:
             try:
                 latest_date = datetime.strptime(latest_local, "%Y-%m-%d").date()
-                gap_days = (datetime.now().date() - latest_date).days
+                gap_days = (cn_today() - latest_date).days
                 raw_full_refetch = gap_days > self.incremental_window_days
             except ValueError:
                 raw_full_refetch = False
@@ -5162,7 +5162,7 @@ class IncrementalUpdater:
 
     def _latest_expected_trading_date(self, today: str, *, now: datetime | None = None) -> str:
         """Use the latest closed session, not today's still-open trading date."""
-        local_now = now or datetime.now()
+        local_now = now or cn_now()
         cutoff = today
         if local_now.strftime("%Y-%m-%d") == today and local_now.strftime("%H:%M") < "15:30":
             cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -5691,7 +5691,7 @@ class IncrementalUpdater:
                     GROUP BY index_code""",
                 codes,
             )
-            cutoff = datetime.now(_CN_TZ).date() - timedelta(days=35)
+            cutoff = cn_today() - timedelta(days=35)
             fresh = {
                 row["index_code"]
                 for row in coverage
@@ -6151,7 +6151,7 @@ class IncrementalUpdater:
             # 默认同时增量刷新 raw + qfq；显式单边任务保持原语义。
             adjust = extra.get("adjust") or "both"
             adjusts = ("raw", "qfq") if adjust == "both" else (adjust,)
-            end_date = datetime.now().strftime("%Y-%m-%d")
+            end_date = cn_today().strftime("%Y-%m-%d")
             results: dict[str, Any] = {}
             failure: str | None = None
             for side in adjusts:

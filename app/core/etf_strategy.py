@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import Any
 
+from app.core.financial_period import cn_today
 from app.core.storage.sqlite_store import SQLiteStore
 
 DEFAULT_STEP_PCT = 5.0
@@ -385,7 +386,7 @@ def grid_state_from(
         if sell_plan is None and current_price is not None:
             if persist_sell_plan:
                 assert sqlite is not None
-                plan_date = today or datetime.now(UTC).astimezone().date().isoformat()
+                plan_date = today or cn_today().isoformat()
                 sell_plan = ensure_sell_plan(
                     sqlite, etf_code=etf_code, trigger_date=plan_date,
                     trigger_price=current_price, shares=position["shares"],

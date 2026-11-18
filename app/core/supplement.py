@@ -51,6 +51,7 @@ from typing import Any
 import pandas as pd
 import requests
 
+from app.core.financial_period import cn_today
 from app.core.sector import is_financial_sql
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.sqlite_store import SQLiteStore
@@ -821,7 +822,7 @@ def em_symbol(code: str, exchange: str | None = None) -> str:
 
 def recent_quarter_ends(today: date | None = None, n: int = PERIODS_PER_REQUEST) -> list[str]:
     """最近 n 个已过去的季末报告期（含当季，若已过季末）。"""
-    today = today or date.today()
+    today = today or cn_today()
     ends: list[date] = []
     for year in (today.year, today.year - 1):
         for month, day in ((12, 31), (9, 30), (6, 30), (3, 31)):
@@ -1500,7 +1501,7 @@ class SupplementFetcher:
             self._record_guard_rejection(
                 stock_code=str(row["stock_code"]),
                 report_date=pd.Timestamp(row["report_date"]).date()
-                if "report_date" in frame.columns else date.today(),
+                if "report_date" in frame.columns else cn_today(),
                 source_field=str(CONTRACT_LIABILITIES_COLUMN),
                 detail=(
                     "写库前守卫：保险股的 "

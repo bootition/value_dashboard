@@ -54,6 +54,8 @@ from typing import Any
 
 import httpx
 
+from app.core.financial_period import cn_today
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -334,7 +336,7 @@ def fetch_hk_daily(
                 symbol=code,
                 period="daily",
                 start_date=(start or date(1990, 1, 1)).strftime("%Y%m%d"),
-                end_date=(end or date.today()).strftime("%Y%m%d"),
+                end_date=(end or cn_today()).strftime("%Y%m%d"),
                 adjust="",
             )
             rows = _normalize_daily_frame(
@@ -456,7 +458,7 @@ def fetch_hkd_cny_history(
     「央行中间价」。
     """
     start = to_date(start_date) or date(2000, 1, 1)
-    end = to_date(end_date) or date.today()
+    end = to_date(end_date) or cn_today()
     if end < start:
         return FxHistoryFetch(
             rows=[], upstream="boc_sina",

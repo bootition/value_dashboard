@@ -22,6 +22,7 @@ from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+from app.core.financial_period import cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -237,7 +238,7 @@ class ThsAdapter(BaseAdapter):
 
     def _window_ms(self, request: FetchRequest) -> tuple[int, int]:
         """历史端点窗口：默认近 1 年；thscode 端点最长 5 自然年由调用方约束。"""
-        end = date.today()
+        end = cn_today()
         start = end - timedelta(days=365)
         if request.start_date:
             with contextlib.suppress(ValueError):

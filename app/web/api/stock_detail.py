@@ -17,6 +17,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from app.core.financial_period import cn_today
 from app.core.pdf.manager import PDFManager
 
 router = APIRouter(prefix="/api/stock", tags=["stock-detail"])
@@ -366,7 +367,7 @@ def build_freshness_metadata(
     # 而 DuckDB 读回的 calculated_at 是无时区的本地（CN）时间戳、带时区的值
     # 又统一 astimezone(UTC)——北京时间 00:00–08:00 期间两边相差一天，
     # 详情页会显示 snapshot_age_days = -1（未来时间），stale_days 被负值拉低。
-    today = datetime.now(CN_TZ).date()
+    today = cn_today()
     expected_financial = date.fromisoformat(expected_financial_period())
     calculated_date: date | None = None
     if isinstance(calculated_at, datetime):

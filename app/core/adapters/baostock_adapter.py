@@ -22,10 +22,10 @@ import threading
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
 from typing import Any
 
 from app.core.adapters.base import BaseAdapter, FetchRequest, FetchResult
+from app.core.financial_period import cn_today
 
 try:
     import baostock as bs
@@ -238,7 +238,7 @@ class BaoStockAdapter(BaseAdapter):
 
         adjustflag = _ADJUST_FLAG.get(request.adjust, "3")
         start_date = request.start_date or "2010-01-01"
-        end_date = request.end_date or datetime.now().strftime("%Y-%m-%d")
+        end_date = request.end_date or cn_today().strftime("%Y-%m-%d")
 
         records: list[dict[str, Any]] = []
         raw_lines: list[str] = []
@@ -396,7 +396,7 @@ class BaoStockAdapter(BaseAdapter):
                 error_kind="per_symbol_data_error",
             )
 
-        current_year = datetime.now().year
+        current_year = cn_today().year
         start_year = (
             int(request.start_date[:4]) if request.start_date else _A_SHARE_EPOCH_YEAR
         )
@@ -539,8 +539,8 @@ class BaoStockAdapter(BaseAdapter):
     # ─── trading_dates ─────────────────────────────────────────────
 
     def _fetch_trading_dates(self, request: FetchRequest) -> FetchResult:
-        start_date = request.start_date or f"{datetime.now().year}-01-01"
-        end_date = request.end_date or datetime.now().strftime("%Y-%m-%d")
+        start_date = request.start_date or f"{cn_today().year}-01-01"
+        end_date = request.end_date or cn_today().strftime("%Y-%m-%d")
 
         records: list[dict[str, Any]] = []
 

@@ -22,6 +22,7 @@ from typing import Any
 
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.ths_adapter import ThsAdapter, normalize_thscode
+from app.core.financial_period import cn_today
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -100,7 +101,7 @@ class EtfPriceUpdater:
     def update_etf(self, etf_code: str, *, years: int = MAX_YEARS) -> dict[str, Any]:
         years = max(1, min(int(years), MAX_YEARS))
         thscode = normalize_thscode(etf_code)
-        end = date.today()
+        end = cn_today()
         start = end - timedelta(days=365 * years)
 
         daily = self._ths.fetch(FetchRequest(

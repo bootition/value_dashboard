@@ -26,6 +26,7 @@ from typing import Any
 from app.core.adapters.base import FetchRequest
 from app.core.adapters.capital_history_adapter import CapitalHistoryAdapter
 from app.core.adapters.manager import AdapterManager
+from app.core.financial_period import cn_today
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -1000,7 +1001,7 @@ class CapitalHistoryUpdater:
         （主链点存在即覆盖）；verified（东财交叉）仅作披露字段，
         不再阻断覆盖判定。
         """
-        start = date.today().replace(year=date.today().year - window_years).isoformat()
+        start = cn_today().replace(year=cn_today().year - window_years).isoformat()
         price_rows = self.duck.read_query(
             "SELECT trade_date FROM price_daily_raw "
             "WHERE stock_code = ? AND trade_date >= ? AND close IS NOT NULL "

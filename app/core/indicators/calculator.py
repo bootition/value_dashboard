@@ -538,7 +538,7 @@ class IndicatorCalculator:
             )
             and not (
                 row.get("listing_date") is not None
-                and str(row["listing_date"]) >= str(datetime.now().date() - timedelta(days=90))
+                and str(row["listing_date"]) >= str(cn_today() - timedelta(days=90))
             )
         ]
         # 2026-11-12 P0 收尾（与门禁同一政策）：输入缺口同样是**逐股排除**，

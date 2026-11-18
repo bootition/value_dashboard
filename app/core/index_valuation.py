@@ -317,7 +317,7 @@ class IndexValuationUpdater:
     @staticmethod
     def _daily_broad_codes(window: int = 4) -> list[str]:
         """按 UTC+8 日序号轮转的宽基子集，避免自动更新连打全部乐咕指数。"""
-        day = datetime.now(_CN_TZ).toordinal()
+        day = _cn_today().toordinal()
         codes = list(BROAD_INDEX_CODES)
         start = (day * window) % len(codes)
         return [codes[(start + i) % len(codes)] for i in range(window)]

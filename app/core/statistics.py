@@ -25,6 +25,7 @@ from bisect import bisect_right
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
+from app.core.financial_period import cn_today
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -367,7 +368,7 @@ class StatisticsBuilder:
         """单窗口统计：经验分位带 + μ/σ + 当前 z-score。"""
         if coverage_pct is not None and coverage_pct < COVERAGE_THRESHOLD_PCT:
             return {"reason": "coverage_below_threshold", "coverage_pct": coverage_pct}
-        today = date.today()
+        today = cn_today()
         start = today.replace(year=today.year - window_years) if window_years != 99 else None
         values: list[float] = []
         dates: list[str] = []
@@ -792,7 +793,7 @@ class StatisticsBuilder:
         """
         if not series:
             return []
-        today = date.today()
+        today = cn_today()
         window_starts: dict[int, date | None] = {
             w: (today.replace(year=today.year - w) if w != 99 else None)
             for w in WINDOW_YEARS
@@ -934,7 +935,7 @@ class StatisticsBuilder:
         """
         window_start = None
         if window_years != 99:
-            today = date.today()
+            today = cn_today()
             window_start = today.replace(
                 year=today.year - window_years
             ).isoformat()
@@ -1129,7 +1130,7 @@ def series_values(
     window_years: int,
 ) -> list[float]:
     """窗口内有效值序列（供分位计算）。"""
-    today = date.today()
+    today = cn_today()
     start = today.replace(year=today.year - window_years) if window_years != 99 else None
     out: list[float] = []
     for item in series:

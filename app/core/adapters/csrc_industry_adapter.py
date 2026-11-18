@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-from datetime import date
 from typing import Any
 
 from app.core.adapters.base import (
@@ -23,6 +22,7 @@ from app.core.adapters.base import (
     FetchRequest,
     FetchResult,
 )
+from app.core.financial_period import cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ class CSRCIndustryAdapter(BaseAdapter):
             df = ak.stock_industry_change_cninfo(
                 symbol=stock_code,
                 start_date="19900101",
-                end_date=date.today().strftime("%Y%m%d"),
+                end_date=cn_today().strftime("%Y%m%d"),
             )
         except (KeyError, TypeError) as e:
             # 新发行/无行业变更历史的股票：CNINFO 无返回列（akshare 内部 KeyError），

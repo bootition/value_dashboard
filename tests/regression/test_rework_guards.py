@@ -98,10 +98,12 @@ def test_rg1_flags_duplicate_timezone_and_utc_today(tmp_path: Path) -> None:
     )
     findings = check_timezone_single_source(tmp_path)
     rules = sorted(f.message.split("；")[0] for f in findings)
-    assert len(findings) == 3, [f.render() for f in findings]
+    # 1) 私拼 UTC+8  2) 重复定义 cn_today  3) aware now 取 .date()（第 3 行实现里那个）
+    # 4) datetime.now(UTC).date() 冒充今天
+    assert len(findings) == 4, [f.render() for f in findings]
     assert any("重复定义 UTC+8 时区" in m for m in rules)
     assert any("重复定义 cn_today" in m for m in rules)
-    assert any("用 UTC 日期冒充" in m for m in rules)
+    assert any("用某个时区的日期冒充'今天'" in m for m in rules)
 
 
 def test_rg1_allows_importing_the_single_source(tmp_path: Path) -> None:
@@ -117,6 +119,87 @@ def test_rg1_allows_importing_the_single_source(tmp_path: Path) -> None:
         "def age(x):\n    return (cn_today() - x).days\n",
     )
     assert check_timezone_single_source(tmp_path) == []
+
+
+def test_rg1_catches_the_six_injected_spellings(tmp_path: Path) -> None:
+    """曾经 6 种写法注入后仍全绿（拦截率 0%）：现在必须逐个抓到。"""
+    _write(
+        tmp_path, "app/core/injected.py",
+        "import datetime as dt\n"
+        "import pandas as pd\n"
+        "from datetime import date, datetime, timedelta, timezone\n"
+        "from datetime import date as _date\n"
+        "from zoneinfo import ZoneInfo\n"
+        "a = date.today()\n"
+        "b = dt.datetime.now()\n"
+        "c = _date.today()\n"
+        "d = pd.Timestamp.now()\n"
+        "e = dt.datetime.now(dt.timezone.utc).date()\n"
+        "f = ZoneInfo('Asia/Shanghai')\n"
+        "g = timezone(timedelta(hours=8))\n"
+        "h = datetime.utcnow()\n"
+        "i = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')\n"
+        "j = datetime.now().year\n"
+        "k = datetime.now().isoformat()\n"
+        "l = datetime.now().astimezone().isoformat()\n",
+    )
+    findings = check_timezone_single_source(tmp_path)
+    lines = {finding.line for finding in findings}
+    expected = {6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+    assert expected <= lines, f"漏报：{sorted(expected - lines)}"
+    # 第 17 行 `datetime.now().astimezone()` 立刻补了时区，是合法时刻，不该报
+    assert 17 not in lines, [f.render() for f in findings if f.line == 17]
+
+
+def test_rg1_ignores_comments_strings_and_docstrings(tmp_path: Path) -> None:
+    """旧正则的病根：注释里写 `date.today()` 也会红。AST 版本必须一条都不报。"""
+    _write(
+        tmp_path, "app/core/only_comments.py",
+        '"""历史实现的坑：`date.today()` 与 `datetime.now(UTC).date()` 相差一天。\n\n'
+        "也别再写 `datetime.datetime.now()` / `pd.Timestamp.now()` / `utcnow()`。\n"
+        '时区字面量 `ZoneInfo("Asia/Shanghai")` / `timezone(timedelta(hours=8))` 同样禁止。\n'
+        '"""\n'
+        "from app.core.financial_period import cn_today\n"
+        "# date.today()  datetime.now()  utcnow()  ZoneInfo('Asia/Shanghai')\n"
+        "# timezone(timedelta(hours=8))\n"
+        'NOTE = "date.today() / datetime.now(UTC).date()"\n'
+        "def age(x):\n    return (cn_today() - x).days\n",
+    )
+    assert check_timezone_single_source(tmp_path) == []
+
+
+def test_rg1_zoneinfo_allowed_only_in_the_owner_file(tmp_path: Path) -> None:
+    _write(
+        tmp_path, "app/core/financial_period.py",
+        "from datetime import date, datetime, timedelta, timezone\n"
+        "from zoneinfo import ZoneInfo\n"
+        "CN_TZ = ZoneInfo('Asia/Shanghai')\n"
+        "CN_TZ_2 = timezone(timedelta(hours=8))\n"
+        "def cn_today() -> date:\n    return datetime.now(CN_TZ).date()\n",
+    )
+    _write(
+        tmp_path, "app/core/not_owner.py",
+        "from zoneinfo import ZoneInfo\nTZ = ZoneInfo('Asia/Shanghai')\n",
+    )
+    findings = check_timezone_single_source(tmp_path)
+    assert [finding.path for finding in findings] == ["app/core/not_owner.py"], [
+        f.render() for f in findings
+    ]
+
+
+def test_rg1_allowlist_only_covers_instant_not_today(tmp_path: Path) -> None:
+    """白名单只豁免 naive 时刻；`today()` 在被豁免的路径里照样报。"""
+    _write(
+        tmp_path, "scripts/one_off.py",
+        "from datetime import date, datetime\n"
+        "STAMP = datetime.now().strftime('%Y%m%d_%H%M%S')\n"
+        "TODAY = date.today()\n"
+        "DAY = datetime.now().strftime('%Y-%m-%d')\n",
+    )
+    findings = check_timezone_single_source(tmp_path)
+    assert sorted(finding.line for finding in findings) == [3, 4], [
+        f.render() for f in findings
+    ]
 
 
 # ─── 3. RG2 状态合并单出口：顺序敏感，不能误伤"先定状态再追加字段" ────────
@@ -150,6 +233,55 @@ def test_rg2_allows_status_before_unpack() -> None:
 def test_rg2_ignores_the_single_exit_implementation() -> None:
     """`job_status.merge_step_status()` 自身就是单出口，不应被自己拦下。"""
     assert check_status_merge_single_exit(PROJECT_ROOT) == []
+
+
+def test_rg2_flags_status_inside_dict_update(tmp_path: Path) -> None:
+    """`step.update({"status": ...})`（reports/117 P0-2 的另一种写法）。"""
+    _write(
+        tmp_path, "app/core/aggregate/steps_demo.py",
+        "def merge(step, other):\n"
+        "    step.update({'status': 'success'})\n"
+        "    return step\n",
+    )
+    findings = check_status_merge_single_exit(tmp_path)
+    assert findings, "app/core 子目录里的聚合点没被扫到"
+    assert any("step.update" in finding.message for finding in findings), [
+        f.message for f in findings
+    ]
+
+
+def test_rg2_flags_second_layer_unpack_of_status(tmp_path: Path) -> None:
+    """`{**a, **{"status": ...}}`：第二层解包，机制与 P0-2 相同。"""
+    _write(
+        tmp_path, "app/core/steps_demo.py",
+        "def merge(step, other):\n"
+        "    return {**step, **{'status': 'success'}}\n",
+    )
+    findings = check_status_merge_single_exit(tmp_path)
+    assert findings
+    assert any("字典解包后又覆盖" in finding.message for finding in findings)
+
+
+def test_rg2_allows_result_write_into_fresh_skeleton(tmp_path: Path) -> None:
+    """`update.py` 的 5 处合法写法：先造本步骨架，再把结果整块写回。"""
+    _write(
+        tmp_path, "app/core/steps_demo.py",
+        "def _new_domain_step():\n    return {'status': 'skipped'}\n"
+        "def run():\n"
+        "    step = _new_domain_step()\n"
+        "    step.update({'status': 'success'})\n"
+        "    return step\n",
+    )
+    assert check_status_merge_single_exit(tmp_path) == []
+
+
+def test_rg2_ignores_modules_without_step_semantics(tmp_path: Path) -> None:
+    """纯数据模块的汇总行 status 不是步骤聚合，不该被卷进来。"""
+    _write(
+        tmp_path, "app/core/index_dashboard.py",
+        "def summarize(item):\n    return {**item, 'status': 'error'}\n",
+    )
+    assert check_status_merge_single_exit(tmp_path) == []
 
 
 # ─── 4. RG3 单位注册表：口径漂移 = 100 倍误差，必须抓得到 ─────────────────
@@ -224,6 +356,33 @@ def test_rg4_parsers_read_real_sql_and_ddl() -> None:
 
 def test_rg4_repository_registry_is_consistent() -> None:
     assert check_derived_domain_registry(PROJECT_ROOT) == []
+
+
+def test_rg4_flags_missing_snapshot_sql_instead_of_failing_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """取不到 `SNAPSHOT_UPDATE_SQL` 时必须报，不许静默跳过（fail-open）。"""
+    import types
+
+    from app.core.indicators import calculator as calculator_module
+
+    module_name = "app.core.indicators.demo_domain"
+    monkeypatch.setitem(sys.modules, module_name, types.ModuleType(module_name))
+
+    def rebuild(duck: object) -> None:  # pragma: no cover - 只被静态检查引用
+        return None
+
+    rebuild.__module__ = module_name
+    fake_domain = types.SimpleNamespace(
+        name="demo", columns=("stock_code",), rebuild=rebuild
+    )
+    monkeypatch.setattr(
+        calculator_module, "derived_snapshot_domains", lambda: [fake_domain]
+    )
+    findings = check_derived_domain_registry(PROJECT_ROOT)
+    assert any("fail-open" in finding.message for finding in findings), [
+        f.render() for f in findings
+    ]
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -26,6 +26,7 @@ from app.core.adapters.base import (
     FetchRequest,
     FetchResult,
 )
+from app.core.financial_period import cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ _MAX_ANCHOR_AGE_DAYS = 365
 
 
 def _cninfo_today() -> str:
-    return date.today().isoformat().replace("-", "")
+    return cn_today().isoformat().replace("-", "")
 
 
 def _parse_date(value: Any) -> str | None:
@@ -173,7 +174,7 @@ class CapitalHistoryAdapter(BaseAdapter):
         rows.sort(key=lambda r: r["effective_date"])
         if rows:
             latest = date.fromisoformat(rows[-1]["effective_date"])
-            if (date.today() - latest).days > _MAX_ANCHOR_AGE_DAYS:
+            if (cn_today() - latest).days > _MAX_ANCHOR_AGE_DAYS:
                 raise RuntimeError(
                     f"CNINFO 股本链最新锚点 {latest} 早于 {_MAX_ANCHOR_AGE_DAYS} 天"
                     f"（疑似日期参数截断回归，拒绝入库）"

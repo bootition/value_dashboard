@@ -16,6 +16,8 @@ from typing import Any
 
 import typer
 
+from app.core.financial_period import cn_today
+
 
 def _configure_update_logging() -> None:
     """自动更新是长时间子进程：把 INFO 级日志写到 stderr。
@@ -1256,7 +1258,7 @@ def data_report_dates(
     _, duck, _sqlite = _database_context()
     result: dict = {"coverage": coverage(duck)}
     if code:
-        as_of_date = _date.fromisoformat(as_of) if as_of else _date.today()
+        as_of_date = _date.fromisoformat(as_of) if as_of else cn_today()
         visible = latest_visible_annual(duck, code, as_of_date)
         result["query"] = {
             "stock_code": code,

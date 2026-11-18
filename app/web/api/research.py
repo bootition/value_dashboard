@@ -41,7 +41,7 @@ from typing import Any
 import duckdb
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from app.core.financial_period import CN_TZ
+from app.core.financial_period import CN_TZ, cn_today
 from app.core.point_in_time import (
     PIT_LIMITATIONS,
     ReportVisibility,
@@ -464,7 +464,7 @@ def get_announcements(
     """
     stock_code = _parse_stock_code(code)
     sqlite = request.app.state.sqlite
-    cutoff = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
+    cutoff = cn_today() - timedelta(days=days - 1)
 
     with _read_guard("research.announcements"):
         rows = _load_announcement_rows(sqlite, stock_code, cutoff)
@@ -524,7 +524,7 @@ def get_announcements_summary(
     本次实际解析了多少行，超过 `SUMMARY_SCAN_LIMIT` 时 `truncated=true`（不假装全量）。
     """
     sqlite = request.app.state.sqlite
-    cutoff = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
+    cutoff = cn_today() - timedelta(days=days - 1)
     cache_key = (str(getattr(sqlite, "db_path", "")), days, cutoff.isoformat())
 
     def compute() -> dict[str, Any]:

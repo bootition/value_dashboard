@@ -35,6 +35,7 @@ from app.core.adapters.base import (
     FetchRequest,
     FetchResult,
 )
+from app.core.financial_period import cn_today
 
 logger = logging.getLogger(__name__)
 
@@ -513,7 +514,7 @@ class AKShareAdapter(BaseAdapter):
         suspension_codes: set[str] | None = None
         try:
             self._wait_rate_limit()
-            frame = ak.stock_tfp_em(date=datetime.date.today().strftime("%Y%m%d"))
+            frame = ak.stock_tfp_em(date=cn_today().strftime("%Y%m%d"))
             raw_payloads.append(frame.to_json(orient="records", date_format="iso", force_ascii=False))
             suspension_codes = {
                 _strip_code(str(value).strip()).zfill(6)

@@ -32,6 +32,7 @@ from app.core.financial_guards import (
     guard_caches,
     guard_contract_liabilities_write,
 )
+from app.core.financial_period import cn_today
 from app.core.job_status import aggregate_job_status
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -665,8 +666,8 @@ class DataInitializer:
         if not stocks:
             return {"status": "skipped", "reason": "无股票数据"}
 
-        end_date = datetime.now().strftime("%Y-%m-%d")
-        start_date = (datetime.now() - timedelta(days=years * 365 + 30)).strftime("%Y-%m-%d")
+        end_date = cn_today().strftime("%Y-%m-%d")
+        start_date = (cn_today() - timedelta(days=years * 365 + 30)).strftime("%Y-%m-%d")
 
         total = len(stocks)
         success_count = 0
