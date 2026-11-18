@@ -2494,7 +2494,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         )
         # v49（2026-11-18, reports/139 §11.3）：
         # institution_holdings = 「机构持仓」数据域（8 类外部序列里唯一还能免费拿到的一类）。
-        # 表体由上面的 CREATE TABLE IF NOT EXISTS 建（每次 init 幂等重跑），这里只记账。
+        # 表体在上面已定义（init 幂等重跑），这里只写迁移记账行。
         # 一个 (股票 × 报告期 × 持有人类型) 一行；6 类持有人 × 1 报告期 = 全市场一次拿全。
         # 唯一实现 app/core/institution_holdings.py，CLI scripts/fetch_institution_holdings.py。
         connection.execute(
