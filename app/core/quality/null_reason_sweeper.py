@@ -82,6 +82,7 @@ from app.core.quality.null_reasons import (
     domain_fields,
     upsert_reasons,
 )
+from app.core.sector import is_bank_sql, is_financial_sql
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.supplement import (
     CASH_FLOW_STRUCTURAL_MISSING,
@@ -651,13 +652,16 @@ _CASHFLOW_STRUCTURAL_SOURCE_EMPTY: dict[str, dict[str, RuleGroup]] = (
     _cashflow_structural_source_empty_rules()
 )
 
-# 源表域：6 个银行监管指标只对金融股成立，非金融公司的 NULL 是**不适用**而不是缺失。
+# 源表域：6 个银行监管指标只对**银行**成立，非银行的 NULL 是**不适用**而不是缺失。
 # 实测（2026-09-30）：6 个字段非空数均为 0，不满足"上期/再上期 >50%"的调度条件，
 # 若不按行业分流，这 3.3 万个单元格会全部落进 unclassified。
+# 2026-11-18 修正（reports/139 第二轮验收 P2）：旧判据是「非金融 → 不适用」，
+# 但**券商/保险同样没有**资本充足率/不良率 —— 实测 121 只金融股里 501 个单元格
+# （非银金融 472 + 银行 29）因此落进 unclassified。改为按「非银行 → 不适用」。
 BALANCE_NOT_APPLICABLE: dict[str, RuleGroup] = {
     field_name: RuleGroup(
-        predicates=(_eq("src_is_financial", "金融行业", 0),),
-        detail="非金融行业公司没有资本充足率/不良率等银行监管指标，该字段本就不适用",
+        predicates=(_eq("src_is_bank", "银行", 0),),
+        detail="只有银行披露资本充足率/不良率等监管指标，非银行公司该字段本就不适用",
     )
     for field_name in _REGULATORY_FIELDS
 }
@@ -747,14 +751,26 @@ def _cell_frame_sql(domain: str, fields: Sequence[str]) -> str:
         aggregated = ", ".join(
             f"any_value({_quote(_plain_field(domain, name))}) AS {_quote(name)}" for name in fields
         )
+        # 行业判定：2026-11-18（reports/139 §5.3 / §7 前置 1）改为调用
+        # `app.core.sector.is_financial_sql` —— 全仓唯一实现。
+        #
+        # 旧写法把 `sw_level1 IN ('银行','非银金融','保险')` + `csrc_l1 LIKE '%金融%'`
+        # + 股票名 LIKE（%银行%/%证券%/%保险%）三路并起来，实测有两类错误：
+        #  ① `sw_level1` 里**不存在 '保险'** 这个取值（保险是 `sw_level2='保险Ⅱ'`），
+        #     那一段是死代码，只会让读代码的人以为保险已被覆盖；
+        #  ② 名称兜底把同花顺(300033)/指南针(300803)/大智慧(601519) 等
+        #     **软件股**判成金融股 —— 它们本就没有资本充足率/不良率，
+        #     该落 `NOT_APPLICABLE` 的 NULL 被这句兜底挤进了 unclassified。
+        # 正式库实测（reports/139 §6）：`sw_level1` = 银行 42 / 非银金融 79 / NULL 751，
+        # 旧兜底相对新判据多出的 7 只里只有 2 只真券商（宏源证券/海通证券，均已退市、
+        # 无当期行），其余 5 只全是软件/创投/电力 —— 去掉兜底只增加精度，不漏报。
+        #
+        # `meta.stock_code IS NULL`（该股没有行业记录）仍返回 NULL：「判不出就不写」，
+        # 绝不能因为 is_financial_sql 对 NULL 行业返回 FALSE 就把"判不出"降级成
+        # "非金融"，凭空写出 NOT_APPLICABLE。
         financial_expr = (
             "CASE WHEN meta.stock_code IS NULL THEN NULL "
-            "WHEN COALESCE(meta.sw_level1, '') IN ('银行', '非银金融', '保险') "
-            "OR COALESCE(meta.csrc_l1, '') LIKE '%金融%' "
-            "OR COALESCE(meta.name, '') LIKE '%银行%' "
-            "OR COALESCE(meta.name, '') LIKE '%证券%' "
-            "OR COALESCE(meta.name, '') LIKE '%保险%' "
-            "THEN 1 ELSE 0 END"
+            f"WHEN {is_financial_sql('meta')} THEN 1 ELSE 0 END"
         )
         extra_flags = ""
         if domain in CASH_FLOW_STRUCTURAL_MISSING:
@@ -788,7 +804,9 @@ def _cell_frame_sql(domain: str, fields: Sequence[str]) -> str:
             f"WHERE report_date = ? GROUP BY stock_code) "
             # `src_row_present`：该股该期在本表**有行**（1=抓到了）。
             f"SELECT aggregated.*, 1 AS src_row_present, "
-            f"{financial_expr} AS src_is_financial{extra_flags} FROM aggregated "
+            f"{financial_expr} AS src_is_financial"
+            f", CASE WHEN {is_bank_sql('meta')} THEN 1 ELSE 0 END AS src_is_bank"
+            f"{extra_flags} FROM aggregated "
             f"LEFT JOIN stock_meta meta USING (stock_code)"
         )
     return f"SELECT * FROM {table} WHERE report_date = ?"

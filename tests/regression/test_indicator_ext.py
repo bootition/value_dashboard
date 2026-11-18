@@ -817,9 +817,10 @@ def test_v38_event_indicators(
             "INSERT INTO buyback_events (stock_code, start_date, announce_date, buyback_shares, source, fetch_time, raw_hash, batch_id, confidence) VALUES "
             "('600070', CAST('2023-01-01' AS DATE), CAST('2023-01-01' AS DATE), 50, 't', now(), 'h', 'b', 'strict')"
         )
-        # 送转每 10 股送 2 股 → 比例 0.2
+        # 送转：xdxr.songzhuangu 存的是**每股**送转比例（D53 / reports/139 §5.3），
+        # 所以「每 10 股送 2 股」写入 0.2（不是 2.0），累计比例仍是 0.2。
         conn.execute("INSERT INTO xdxr (stock_code, event_date, category, songzhuangu) "
-                     "VALUES ('600070', CAST('2023-05-01' AS DATE), 1, 2.0)")
+                     "VALUES ('600070', CAST('2023-05-01' AS DATE), 1, 0.2)")
         # 三段业务：1000 / 600 / 400 → 最大占比 0.5；另加一个负数段不应破坏占比
         conn.execute(
             "INSERT INTO business_breakdown (stock_code, report_date, type, item_name, amount, ratio, source, fetch_time, raw_hash, batch_id, confidence) VALUES "
@@ -832,7 +833,7 @@ def test_v38_event_indicators(
     row = duckdb_store.read_query("SELECT * FROM indicator_ext WHERE stock_code = '600070'")[0]
     assert row["dilution_3y"] == 200 / 1000        # 只统计窗口内的 200，不含 5 年前的 900
     assert row["buyback_ratio_3y"] == 50 / 1000
-    assert row["bonus_share_ratio_3y"] == 0.2      # 每 10 股送 2 股
+    assert row["bonus_share_ratio_3y"] == 0.2      # 0.2 股/股 = 每 10 股送 2 股（每股口径）
     # 只在正收入段上算：1000 / (1000+600+400) = 0.5（负数段不影响）
     assert row["top_segment_share"] == 0.5
 

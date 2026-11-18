@@ -131,8 +131,13 @@ def test_screening_fields_map_to_disjoint_domains() -> None:
     snapshot_fields = domain_fields(DOMAIN_SNAPSHOT)
     ext_fields = domain_fields(DOMAIN_EXT)
     assert snapshot_fields and ext_fields
-    # 锚点：主快照域的 ROCE 六列 + 扩展域的自由现金流（两域各一个代表）
-    assert {"roce_5y_median", "roce_10y_median", "roce_eligible"} <= snapshot_fields
+    # 锚点：主快照域对外暴露的 ROCE 列 + 扩展域的自由现金流（两域各一个代表）
+    # 注意：`roce_*_years` / `roce_eligible` 是**口径内部门禁**，有意不进 SNAPSHOT_COLUMNS
+    # （engine.py:54 的注释 + v46 裁定），所以不能拿它们当锚点。
+    assert {"roce_5y_median", "roce_10y_median"} <= snapshot_fields
+    assert not ({"roce_eligible", "roce_5y_years", "roce_10y_years", "roce_20y_years"} & snapshot_fields), (
+        "资格/年数列是内部门禁，不应对用户暴露；若要暴露需先改 engine.py 注释与产品口径"
+    )
     assert {"free_cash_flow", "total_asset_turnover"} & ext_fields
     assert not snapshot_fields & ext_fields, "同一字段名不许跨域，否则稀疏表无法反查域"
     for name in snapshot_fields | ext_fields:

@@ -80,7 +80,7 @@ LEVERAGE_MAX = 100.0
 # 11) v38 事件类指标护栏
 DILUTION_MAX = 5.0          # 近3年融资稀释率（>500% 视为数据异常）
 BUYBACK_MAX = 1.0           # 回购占比不可能超过总股本
-BONUS_MAX = 20.0            # 近3年送转比例合计上限
+BONUS_MAX = 20.0            # 近3年送转比例合计上限（**每股**口径：10送10 = 1.0；20 = 累计 2000%）
 # 10) v37 指标护栏（2026-09-19 复审补加）。
 # 复审发现 v37 的 12 列**漏加护栏**，产生了大量业务无意义极值：
 #   cash_ratio 最大 213,591、accruals 最大 24,129（应计项目的数学上限是 2）、
@@ -397,8 +397,21 @@ def build_select_sql(codes: list[str] | None = None) -> str:
               BETWEEN i.report_date - INTERVAL 3 YEAR AND i.report_date
     ) bb ON true
     LEFT JOIN LATERAL (
-        -- 近 3 年送转比例合计（每 10 股送转 X 股 → 换算成比例）
-        SELECT SUM(COALESCE(x.songzhuangu, 0)) / 10.0 AS bonus FROM xdxr x
+        -- 近 3 年送转比例合计 = Σ 每股送转比例（10 送 10 → 1.0、10 送 3 → 0.3）。
+        --
+        -- **单位口径（实测，勿再 ÷10）**：`xdxr.songzhuangu` 存的是**每股**送转比例，
+        -- 不是「每 10 股送转 X 股」。原实现 `SUM(...) / 10.0` 把 `songzhuangu` 当成
+        -- 每 10 股口径，导致本列系统性少算 10 倍（reports/139 的 X-SZ10）。
+        -- 判据（reports/139 §2.4/§5.3，D53 见 `docs/runbooks/ops-knowledge-base.md`）：
+        --   · 用 `share_capital_history` 的股本跳变对照送转事件，
+        --     `跳变倍数 / (1 + songzhuangu)` 中位 = **1.000**（按 `/10` 解释则 1.09–4.26）；
+        --   · 按 `songzhuangu` 分 6 档，每档都是 1.000（共 5,421 个事件）；
+        --   · 旁证：本列三年累计口径下 10 送 10 应为 1.0/次，原实现只给 0.1。
+        -- 与本文件外的一致性：`scripts/backfill_share_capital_from_xdxr.py` 的股本回填
+        -- 一直用 `×(1 + songzhuangu)`——两边口径现已对齐（同一个事实只有一个写法）。
+        -- ⚠️ 与 `dividends.dividend_per_share`（D46）不是一回事：那一列是**已经 ÷10
+        -- 后的每股现金分红**，本处改的是 `xdxr.songzhuangu`，两列不要互相套用换算。
+        SELECT SUM(COALESCE(x.songzhuangu, 0)) AS bonus FROM xdxr x
         WHERE x.stock_code = i.stock_code
           AND x.event_date BETWEEN i.report_date - INTERVAL 3 YEAR AND i.report_date
     ) xr ON true

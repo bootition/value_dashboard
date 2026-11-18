@@ -317,6 +317,18 @@ STEP_ORDER: tuple[UpdateStep, ...] = (
             "失败保留旧值并进独立 retry/missing，不阻断主链。"
         ),
     ),
+    UpdateStep(
+        name="analyst_forecast",
+        label="一致预期快照",
+        domain="low_freq",
+        note=(
+            "schema v48 每日快照（reports/139 §2.2 #13 / source_probe §1.B6）：接口只给当期横截面、"
+            "无历史参数，今天不打点这一天就永远缺，所以必须每天跑；水位 "
+            "data_refresh_state['analyst_forecast_last_refresh'] = 北京日期，每天最多 1 次。"
+            "失败只让本步骤 failed/partial，不影响主链快照与 readiness；有界更新"
+            "（--max-stocks）在前面的阶段就提前 return，不跑本步骤。"
+        ),
+    ),
 )
 
 #: 步骤名集合：`update.py::report_step()` 的白名单，由 `STEP_ORDER` 派生，禁止单独维护。

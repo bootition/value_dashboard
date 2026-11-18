@@ -51,6 +51,7 @@ from typing import Any
 import pandas as pd
 import requests
 
+from app.core.sector import is_financial_sql
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -503,10 +504,13 @@ FINANCIAL_SECTOR_COLUMNS: tuple[str, ...] = (
 # 只补金融行业股票：申万一级「银行」「非银金融」。CSMAR 的 78 只金融股
 # （38 银行 + 36 券商 + 1 保险 + 1 信托 + 2 金控）全部落在这个口径内
 #（其中 3 只已退市：中天金融/宏源证券/海通证券，被 `is_listed` 过滤掉）。
-FINANCIAL_SECTOR_UNIVERSE_PREDICATE = (
-    "m.sw_level1 IN ('银行', '非银金融')"
-    " OR (m.sw_level1 IS NULL AND m.csrc_l1 = '金融业')"
-)
+#
+# 2026-11-18（reports/139 §5.1 / §7 前置 1）：判据**不再手写**，改由
+# `app.core.sector.is_financial_sql` 生成 —— 仓库里曾有三份互不一致的手写金融股
+# 判据（本处、`roce.py`、`null_reason_sweeper.py`），同一只股票在不同指标里
+# 「是不是金融」结论不同。这里保留常量名（外部按名 import），语义不变：
+# 申万一级命中即金融；申万一级缺失时用证监会门类「金融业」兜底；NULL 安全。
+FINANCIAL_SECTOR_UNIVERSE_PREDICATE = is_financial_sql("m")
 
 # ─── P0-6：保险股的「保险合同负债」不得写进通用科目 contract_liabilities ────
 #

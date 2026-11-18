@@ -1052,11 +1052,7 @@ LIMIT {MAX_RESULT_ROWS}
 
     def _rank_base(self, field: str) -> str | None:
         """Return the base indicator for a generated rank field, if valid."""
-        for suffix in RANK_SUFFIXES:
-            if field.endswith(suffix):
-                base = field.removesuffix(suffix)
-                return base if base in RANKABLE_INDICATORS or base in self._custom_fields else None
-        return None
+        return _rank_base_for(field, self._custom_fields)
 
     @staticmethod
     def _field_sql_name(field: str) -> str:
@@ -1094,15 +1090,7 @@ LIMIT {MAX_RESULT_ROWS}
             raise MaskedFieldError(blocked)
 
     def _is_known_field(self, field: str) -> bool:
-        return (
-            field in SNAPSHOT_COLUMNS
-            or field in NORMALIZED_FIELDS
-            or field in EXTENDED_COLUMNS          # 扩展指标域（schema v25）
-            or field in METADATA_COLUMNS
-            or field in STAT_FIELDS
-            or field in self._custom_fields
-            or self._rank_base(field) is not None
-        )
+        return _is_known_field_name(field, self._custom_fields)
 
     @staticmethod
     def _collect_stat_fields(
@@ -1675,7 +1663,7 @@ LIMIT {MAX_RESULT_ROWS}
 
 
 def _rank_base_for(field: str, custom_fields: set[str]) -> str | None:
-    """Module-level rank-field check used by save-time validation."""
+    """Module-level rank-field check shared by run-time and save-time validation."""
     for suffix in RANK_SUFFIXES:
         if field.endswith(suffix):
             base = field.removesuffix(suffix)
@@ -1683,25 +1671,41 @@ def _rank_base_for(field: str, custom_fields: set[str]) -> str | None:
     return None
 
 
+def _is_known_field_name(field: str, custom_fields: set[str]) -> bool:
+    """字段白名单的唯一判定入口（R1 单一实现，reports/139 §5.1 CB-09）。
+
+    运行期 `ScreeningEngine._is_known_field` 与保存期 `validate_rule_fields`
+    都调用这里。此前保存期维护的是**第二份手工白名单**，漏了
+    `EXTENDED_COLUMNS`（indicator_ext 扩展指标列），导致引用扩展字段的规则
+    "能跑不能存"——运行时不报错、保存时报"未知筛选字段"。
+
+    新增字段域时只改这一个函数；`tests/regression/test_dsl_extended_fields_savable.py`
+    用参数化断言守住"两份判定不分叉"。
+    """
+    return (
+        field in SNAPSHOT_COLUMNS
+        or field in NORMALIZED_FIELDS
+        or field in EXTENDED_COLUMNS          # 扩展指标域（schema v25）
+        or field in METADATA_COLUMNS
+        or field in STAT_FIELDS
+        or field in custom_fields
+        or _rank_base_for(field, custom_fields) is not None
+    )
+
+
 def validate_rule_fields(rule: dict, custom_fields: set[str] = frozenset()) -> None:
     """Save-time field validation (reports/76 P3-4).
 
-    Mirrors the engine's run-time checks (engine.py:545-553, 599-624) so
-    rules referencing unknown fields/sorts/columns are rejected when saved
-    instead of failing only when run. Raises ValueError with the same
-    messages the engine uses.
+    与运行期 `ScreeningEngine._is_known_field` 共用 `_is_known_field_name()`
+    这一份白名单（reports/139 §5.1 CB-09 / AGENTS R1），因此未知字段/排序/
+    结果列在保存时就被拒，不会拖到运行才报错。Raises ValueError with the
+    same messages the engine uses.
     """
     def _known(field: str) -> bool:
         if not isinstance(field, str) or not field:
             return False
-        return (
-            field in SNAPSHOT_COLUMNS
-            or field in NORMALIZED_FIELDS
-            or field in METADATA_COLUMNS
-            or field in STAT_FIELDS
-            or field in custom_fields
-            or _rank_base_for(field, custom_fields) is not None
-        )
+        # 与运行期共用同一份白名单（CB-09）：不再并列写第二份集合。
+        return _is_known_field_name(field, custom_fields)
 
     def _walk(node: dict, level: int = 1) -> None:
         if not isinstance(node, dict):

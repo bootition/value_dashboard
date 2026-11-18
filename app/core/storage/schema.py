@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（reports/79 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 46
+DUCKDB_SCHEMA_VERSION = 48
 SQLITE_SCHEMA_VERSION = 19
 
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
@@ -131,6 +131,15 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
     minority_interest          DOUBLE,   -- 少数股东权益
     total_equity               DOUBLE,   -- 所有者权益合计
     total_equity_parent        DOUBLE,   -- 归属于母公司所有者权益
+    -- 补采科目（schema v48，reports/139 §2.2 的 7 项；来源见 scripts/fetch_balance_sheet_subjects.py）
+    -- 单位统一为「元」，与同表其他金额列一致。取不到时保留 NULL，原因写 indicator_null_reason。
+    fixed_assets_gross         DOUBLE,   -- 固定资产原值（新浪「固定资产原值」＝东财无此列）
+    accumulated_depreciation   DOUBLE,   -- 累计折旧（勾稽：原值 − 累计折旧 = fixed_assets 净值）
+    other_current_assets       DOUBLE,   -- 其他流动资产（东财 OTHER_CURRENT_ASSET；**勿与 CURRENT_ASSET_OTHER 混用**）
+    receivables_financing      DOUBLE,   -- 应收款项融资（东财 FINANCE_RECE，FY2019 新金融工具准则后才有）
+    long_term_payables         DOUBLE,   -- 长期应付款（东财 LONG_PAYABLE）
+    investment_property        DOUBLE,   -- 投资性房地产（东财 INVEST_REALESTATE）
+    development_expenditure    DOUBLE,   -- 开发支出/资本化研发（东财 DEVELOP_EXPENSE）
     -- 金融行业监管指标（不适用或来源不可得时保留 NULL，并在 missing_list 记录原因）
     core_tier1_capital_adequacy_ratio DOUBLE, -- 核心一级资本充足率(%)
     tier1_capital_adequacy_ratio      DOUBLE, -- 一级资本充足率(%)
@@ -313,7 +322,16 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     roce_10y_years   INTEGER,
     roce_20y_median  DOUBLE,            -- 最近 20 个有效年报 ROCE 中位数（必须拿满 20 年）
     roce_20y_years   INTEGER,
-    -- 筛选口径标志（reports/132）：非金融 且 市值>=100亿 且 有效ROCE年数>=8
+    -- 持久性两列（schema v47，reports/139 §7 前置 3 / #27 ROCE 持久性）。
+    -- 窗口纪律与 10y_median 相同：**最近 10 个有效年报必须恰好 10 个**（n10 >= 10），
+    -- 不足 10 年一律 NULL（不允许 7 年冒充 10 年）。
+    roce_10y_min     DOUBLE,            -- 最近 10 个有效年报 ROCE 的**最小值**（地板；n10<10 → NULL）
+    roce_10y_cv      DOUBLE,            -- 变异系数 = STDDEV_SAMP(roce) / MEDIAN(roce)，小数比例。
+                                        -- **仅在 n10 >= 10 且 MEDIAN(roce) >= 0.02 时输出**，否则 NULL：
+                                        -- 0 < 中位 < 0.02 时中位数接近零，比值会炸成无意义的"伪变异系数"
+                                        -- （实测 158 只 cv>10 全部由 0<中位<0.01 造成，reports/139 #27）。
+    -- 筛选口径标志（reports/132；v46 起门槛由 8 年降为 5 年）：
+    -- 非金融 且 市值 >= 100 亿 且 有效 ROCE 年数 >= 5
     roce_eligible    BOOLEAN,
     -- 行情
     ma5             DOUBLE,
@@ -478,6 +496,70 @@ CREATE INDEX IF NOT EXISTS idx_business_breakdown_stock_report
 -- 财政部-中国国债收益率曲线（reports/68 P3 独立低频基准域）
 -- 每个点保存曲线日期、期限、收益率、来源、抓取时间、原始响应哈希和置信度；
 -- 独立于 A 股 stock_meta / 价格 / 财报 / 筛选池 / readiness，失败不得阻塞股票研究。
+-- 宏观序列（schema v48，reports/139 §2.2 的「8 类外部序列」中的 GDP / CPI / beta 之外的口径）
+-- 一个指标一行，按 (indicator, period_date, source) 唯一；单位记在 unit 列（亿元 / % 等）。
+CREATE TABLE IF NOT EXISTS macro_series (
+    indicator    VARCHAR NOT NULL,      -- gdp_quarterly / gdp_yoy / cpi_yoy / cpi_mom ...
+    period_date  DATE    NOT NULL,      -- 该期的期末日（季度 GDP 用季末日）
+    value        DOUBLE,                -- 实测值（单位见 unit，不做隐式换算）
+    unit         VARCHAR,               -- 'CNY_100M' / 'percent' / 'index'
+    source       VARCHAR NOT NULL,      -- akshare:macro_china_gdp / akshare:macro_china_cpi ...
+    fetch_time   TIMESTAMP NOT NULL,
+    raw_hash     VARCHAR NOT NULL,
+    confidence   VARCHAR NOT NULL,      -- strict / approximate
+    batch_id     VARCHAR NOT NULL,
+    PRIMARY KEY (indicator, period_date, source)
+);
+
+-- 中债收益率曲线（schema v48；信用利差 = 曲线 − 同期限国债，全部免费源）
+-- 实测 bond_china_yield 只返回 3 条：国债 / 商金债AAA / 中短票AAA（**无 AA**，所以只能做 AAA 级利差）
+CREATE TABLE IF NOT EXISTS bond_yield_curve (
+    curve_name   VARCHAR NOT NULL,      -- '国债' / '商金债AAA' / '中短票AAA'
+    curve_date   DATE    NOT NULL,
+    tenor        VARCHAR NOT NULL,      -- '1Y' / '5Y' / '10Y' ...
+    yield_pct    DOUBLE,                -- 收益率（百分数，3.12 = 3.12%）
+    source       VARCHAR NOT NULL,
+    fetch_time   TIMESTAMP NOT NULL,
+    raw_hash     VARCHAR NOT NULL,
+    confidence   VARCHAR NOT NULL,
+    batch_id     VARCHAR NOT NULL,
+    PRIMARY KEY (curve_name, curve_date, tenor)
+);
+
+-- 个股 beta（schema v48；不依赖外部源，用 price_daily_qfq 与基准指数日收益回归自建）
+CREATE TABLE IF NOT EXISTS stock_beta (
+    stock_code     VARCHAR NOT NULL,
+    report_date    DATE    NOT NULL,    -- 计算该值时可见的最近报告期（与指标对齐用）
+    benchmark      VARCHAR NOT NULL,    -- '000300' 等
+    window_days    INTEGER NOT NULL,    -- 250 / 500
+    beta           DOUBLE,
+    alpha          DOUBLE,
+    r2             DOUBLE,
+    n_obs          INTEGER,
+    source         VARCHAR NOT NULL,    -- self:price_daily_qfq
+    fetch_time     TIMESTAMP NOT NULL,
+    raw_hash       VARCHAR NOT NULL,
+    confidence     VARCHAR NOT NULL,
+    batch_id       VARCHAR NOT NULL,
+    PRIMARY KEY (stock_code, report_date, benchmark, window_days)
+);
+
+-- 分析师一致预期**快照**（schema v48；接口只给当期快照、**无法回补历史**，
+-- 所以从今天起按天/按周打点，越早开始越好：reports/139 §2.2 #13 PEG 的原意需要它）
+CREATE TABLE IF NOT EXISTS analyst_forecast_snapshot (
+    snapshot_date  DATE    NOT NULL,    -- 抓取日（不是报告期）
+    stock_code     VARCHAR NOT NULL,
+    fiscal_year    VARCHAR NOT NULL,    -- '2025E' / '2026E' ...
+    eps_forecast   DOUBLE,              -- 机构一致预期 EPS（元）
+    analyst_count  INTEGER,
+    source         VARCHAR NOT NULL,    -- akshare:stock_profit_forecast_em
+    fetch_time     TIMESTAMP NOT NULL,
+    raw_hash       VARCHAR NOT NULL,
+    confidence     VARCHAR NOT NULL,
+    batch_id       VARCHAR NOT NULL,
+    PRIMARY KEY (snapshot_date, stock_code, fiscal_year)
+);
+
 CREATE TABLE IF NOT EXISTS treasury_yield_curve (
     curve_date   DATE NOT NULL,        -- 曲线日期（交易日）
     tenor_years  DOUBLE NOT NULL,      -- 期限（年），如 10.0 / 0.25
@@ -2296,7 +2378,9 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
 
         # v45（2026-11-16, reports/132）：ROCE 筛选标志。
         # 把用户定稿的三条筛选固化成快照列，避免每次筛选都要手写三段条件：
-        #   非金融（sw_level1 不含银行/非银金融）+ 总市值 >= 100 亿 + 有效 ROCE 年数 >= 8。
+        #   非金融（sw_level1 不含银行/非银金融）+ 总市值 >= 100 亿 + 有效 ROCE 年数 >= 5。
+        # （年数门槛最初定 8，v46 按用户裁定降到 5；判据的唯一真源是
+        #   `app/core/indicators/roce.py::ELIGIBLE_MIN_YEARS`。）
         # 只加列不猜值：`vd data compute-roce` 会在同一事务里回填。
         connection.execute(
             "ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS roce_eligible BOOLEAN"
@@ -2323,6 +2407,54 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (46, 'ROCE 20y window + strict N-year medians')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+
+        # v47（2026-11-18, reports/139 §7 前置 3 / §3.1 #27「ROCE 持久性」）：
+        # #27 的全部内容就是这两列——`roce_10y_min`（地板）与 `roce_10y_cv`（稳定性）。
+        # 之前 131 说「零新增成本，只需加两个聚合列」，实测这两列**库里根本不存在**
+        # （indicator_snapshot 只有 latest/5y/10y/20y 的 median+years 与 eligible），
+        # 所以必须先建列再谈指标。
+        # 两列都必须同时进 `roce.SNAPSHOT_DERIVED_COLUMNS` 与 `SNAPSHOT_UPDATE_SQL`，
+        # 否则快照 DELETE+INSERT 重发会把它们静默清成 NULL（reports/131 K5 重演）。
+        # 只加列不猜值：`vd data compute-roce` 会在同一事务里回填。
+        for _col, _type in (
+            ("roce_10y_min", "DOUBLE"),
+            ("roce_10y_cv", "DOUBLE"),
+        ):
+            connection.execute(
+                f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {_col} {_type}"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (47, 'ROCE persistence: indicator_snapshot.roce_10y_min / roce_10y_cv')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+        # v48（2026-11-18, reports/139 §2.2 / §11.3）：
+        # ① balance_sheet 补 7 个可免费获取的科目列（第 8/9 项 restricted_cash、
+        #    inventory_provision 实测只存在于附注，东财 319 列与新浪 147 列都拿不到，故不建列）；
+        # ② 新增 4 个低频域：macro_series（GDP/CPI）、bond_yield_curve（中债 3 条曲线）、
+        #    stock_beta（价格自建）、analyst_forecast_snapshot（一致预期**只能从今天开始打点**）。
+        # 依据：.planning/2026-11-18-indicator-feasibility-audit/out/source_probe.md
+        for _col, _type in (
+            ("fixed_assets_gross", "DOUBLE"),
+            ("accumulated_depreciation", "DOUBLE"),
+            ("other_current_assets", "DOUBLE"),
+            ("receivables_financing", "DOUBLE"),
+            ("long_term_payables", "DOUBLE"),
+            ("investment_property", "DOUBLE"),
+            ("development_expenditure", "DOUBLE"),
+        ):
+            connection.execute(
+                f"ALTER TABLE balance_sheet ADD COLUMN IF NOT EXISTS {_col} {_type}"
+            )
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (48, 'balance sheet补充科目(7) + 宏观/债券曲线/beta/一致预期快照四域')
             ON CONFLICT (version) DO NOTHING
             """
         )

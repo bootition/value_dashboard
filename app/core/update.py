@@ -1253,6 +1253,13 @@ class IncrementalUpdater:
         #     指数估值每日 1 次低频域。失败保留旧值并进入独立 retry/missing。
         report_step("index_valuation", self._refresh_index_valuation())
 
+        # 5.5 卖方一致预期快照（schema v48，reports/139 §2.2 #13）。
+        #     接口只给**当期横截面**、无历史参数（source_probe §1.B6），所以「今天不打点，
+        #     这一天就永远没有」——它必须每天都跑。低频纪律与 etf_prices 同款：
+        #     data_refresh_state 水位每日最多 1 次（值 = 北京日期），失败只让本步骤
+        #     failed/partial，不影响主链快照与 readiness。
+        report_step("analyst_forecast", self._refresh_analyst_forecast())
+
         report["status"] = aggregate_job_status(report["steps"])
         report["finished_at"] = datetime.now(UTC).isoformat()
 
@@ -1488,6 +1495,28 @@ class IncrementalUpdater:
             ).refresh_if_due()
         except Exception as error:
             logger.warning("指数估值刷新失败(非致命): %s", error)
+            return {"status": "failed", "error": str(error)}
+
+    def _refresh_analyst_forecast(self) -> dict[str, Any]:
+        """卖方一致预期每日快照（schema v48，reports/139 §2.2 #13）。
+
+        唯一实现是 `app/core/analyst_forecast.py::refresh_daily()`：本方法只负责
+        「拿水位读写函数 → 调用 → 异常降级」，不重复任何抓取/写库口径。
+        水位 = `data_refresh_state[analyst_forecast_last_refresh]` 的北京日期，
+        因此一天最多抓 1 次（重启/重跑都不会重复请求）；失败只让本步骤 failed，
+        不影响价格/财务/快照/readiness。
+        """
+        try:
+            from app.core.analyst_forecast import STATE_KEY, refresh_daily
+
+            return refresh_daily(
+                duck=self.duck,
+                state_key=STATE_KEY,
+                read_state=self._read_refresh_state,
+                write_state=self._write_refresh_state,
+            )
+        except Exception as error:  # noqa: BLE001 - 本步骤失败不得炸整轮更新
+            logger.warning("一致预期快照失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
     # ─── 手工链自动接入（2026-11-14，reports/119 D28/D29）────────────────────

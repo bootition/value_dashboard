@@ -198,7 +198,8 @@ def test_delta_publish_refreshes_registered_roce_domain(
     # 钩子重算覆盖了旧的 0.9，且年数按真实历史给
     assert row["roce_5y_median"] == pytest.approx(0.14)
     assert row["roce_5y_years"] == 5
-    assert ELIGIBLE_MIN_YEARS > 5  # 5 年历史不足以进入 roce_eligible 池
+    # v46 裁定（2026-11-16）：资格门槛从 8 年降到 5 年，且窗口必须恰好取满 N 年
+    assert ELIGIBLE_MIN_YEARS == 5
     assert _probe(duckdb_store, code) == pytest.approx(1.0)
 
 
