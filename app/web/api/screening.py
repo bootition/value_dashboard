@@ -719,6 +719,13 @@ _DSL_INDICATOR_LABELS = {
     "dividend_financing_ratio": "分红融资比",
 }
 # 历史白名单：发布/校验时代 AST 之前创建的指标只能靠硬编码兜底。
+#
+# ⚠️ 这是单位事实的**第三份副本**（前两份：`app/core/screening/field_units.py` 与
+# `frontend/src/utils/screening-format.ts`，由门禁 RG3 + `frontend/tests/screening-format.test.ts`
+# 双向对拍）。此处**不能直接删**：`dividend_financing_ratio` 是**发布型 DSL 指标名**，
+# 不是快照列名（真实列名是 `dividend_financing_ratio_pct`，见 `schema.py`、`ast_nodes.py:287`），
+# 删了会让旧草稿里的该指标拿不到 percent 元数据、退回默认口径 → 100 倍误差。
+# 新增指标**禁止**往这里加；AST 时代的指标单位一律走 `field_units.py`。
 _DSL_INDICATOR_UNITS = {
     "dividend_financing_ratio": "percent",
 }

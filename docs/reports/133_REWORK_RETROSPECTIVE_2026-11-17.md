@@ -4,6 +4,7 @@ status: approved
 category: reports
 created: 2026-11-17
 last-reviewed: 2026-11-17
+number-collision-note: 本文件是「返工复盘」（AI 工作流/根因）。同编号另有 133_ROCE_WINDOWS_2026-11-16.md（ROCE 窗口改造），二者无关；引用时请写全文件名，勿只写 reports/133。
 ---
 
 # 返工与事故复盘（最近一个月）

@@ -270,11 +270,31 @@ find tests/regression/fixtures -type f | wc -l                            # 4
 
 ### 5.2 两个"看着该改、其实要改打包而不是删文件"的项
 
-- **[F1] 两份 `default.yaml`（各 16,809 B，字节相同）+ `sync_packaged_config.py`(180 行) + 1 条断言相等的测试**
-  = 用同步机制维持重复。测试守的是**补救措施**，不是消除重复。
-  **正解**：`value-dashboard.spec` 打包期把同一份映射进去（约 5 行），
-  同时删掉 16.8KB 重复 + 180 行脚本 + 1 条断言 —— 这一项属于"测试固化了错误"的确证案例。
-  **注意**：不能只删副本（会重演 `reports/135` 的发布事故），必须同时改打包。
+- **[F1] 两份 `default.yaml` —— ⚠️ 本报告初稿的判断已自我更正，结论是"暂不消除"**
+
+  初稿（沿用漏报审查的意见）称"用同步机制维持重复，正解是打包期映射同一份、约 5 行"。
+  **该判断被证伪**，理由是实测出的两条硬约束：
+
+  1. `pyproject.toml:57` 把 `"app.resources" = ["config/default.yaml"]` 声明为 **package-data**
+     —— `uv build` / `pip install .` 在**构建期**就从源码树取这个文件。
+     若把它改成 gitignore 的生成物，**新克隆直接打 wheel 会缺兜底配置**，安装版运行期读不到默认配置。
+  2. `value-dashboard.spec:32` 用 `required_file('config/default.yaml')` 从仓库根取同一文件。
+
+  所以"删副本"不是 5 行改动，而需要自定义 `build_py` 钩子在构建期生成副本，
+  并补一个**wheel 安装后的真机 smoke**才能证明没退化 —— 这是一次独立会话的工作量。
+
+  **同时实测确认现有控制是真起作用的**（不是"空转的补救措施"）：
+
+  ```
+  $ uv run --locked python scripts/sync_packaged_config.py --check      # → rc=0，逐字节相等
+  # 注入 2 行漂移后重复
+  $ uv run --locked python scripts/sync_packaged_config.py --check      # → rc=1
+    源 config/default.yaml: 16809 字节 / 270 行
+    副本 app/resources/config/default.yaml: 16823 字节 / 272 行
+    修复：uv run --locked python scripts/sync_packaged_config.py
+  ```
+
+  **裁决**：保留现状；"消除重复"降级为可选优化（记为 `T5'`），**不进本轮**。
 - **[F2] `docs/STATUS.md`** 需要结构性重写（只留当前裁决 + 剩余缺口，历史移 `docs/reports/`），
   不是继续追加。重写后 RG8 的 21 条基线可整体下调。
 
@@ -321,7 +341,7 @@ find tests/regression/fixtures -type f | wc -l                            # 4
 | **T2** | `STATUS.md` 结构性重写 + RG8 基线整批下调 | 1 天 | 必读量 ↓65%，真相源恢复可信 | `reports/134` 建议但未执行，已恶化 12.7% |
 | **T3** | RG1 从正则改 AST 调用点白名单（80 行） | 半天 | 拦截率 0% → >0%，顺带 28 处存量 | 唯一"每天启用"的规则当前形同装饰 |
 | **T4** | 拆 `update/prices.py` + `update/retry.py` | 2 天 | 1,636 行（25%）离开 god class | 闭包 62 模块 / 41,963 行是最大认知税 |
-| **T5** | `[F1]` 打包映射同一份配置，删重复 + 同步脚本 + 断言测试 | 半天 | 消掉一整类"发布即事故" | 把"维持重复"换成"消除重复" |
+| **T5'** | `[F1]` 消除配置重复（**已降级为可选**：需自定义 `build_py` 钩子 + wheel 安装 smoke，见 §5.2） | 1–2 天 | 消掉 16.8KB 重复与同步脚本 | 本轮实测现有 `--check` 控制有效（rc=1 + diff + 修复命令），**不属于缺陷** |
 | **T6** | `STEP_LABELS`(18) 与 `STEP_ORDER`(**26**) 合并为派生 | 2 小时 | 消掉已记三天未动的漂移 | 两份步骤清单必然继续分叉 |
 
 ## 9. 与旧结论的冲突裁决
@@ -340,3 +360,79 @@ find tests/regression/fixtures -type f | wc -l                            # 4
 - 门禁：`scripts/repo_integrity_guards.py`、`tests/regression/test_repo_integrity_guards.py`、
   基线 `docs/evidence/repo-integrity-baseline.json`
 - 复现命令：见各节代码块；认知成本用 `scripts/onboarding_metrics.py --compare`
+
+## 11. 修复落地（2026-11-18 第二轮，5 个修复 agent + 2 个独立审查）
+
+> 本节记录"把 §8 的待执行变成已执行"的结果。**所有数字都经主控独立复算**，
+> 不采信执行 agent 的自述；审查提出的结论也逐条复核过，其中 **4 条被判为误报**（见 §11.5）。
+
+### 11.1 已修（可验证）
+
+| # | 原问题 | 修法 | 验证 |
+|---|---|---|---|
+| **T3** | RG1 拦截率 0%，28 处 `date.today()` 全绿 | 正则 → **AST 调用点检查**（别名解析 + 日期粒度判定） | 对 HEAD 快照跑新检查器得 **53 条**违规（执行 agent 自述 49，**以 53 为准**）；修完 **0 条**，门禁绿 |
+| **T3b** | RG1 假阳性：注释里写 `date.today()` 会报 | AST 天然只认调用点 | 反向用例：注释/docstring/字符串里写该字样 → **0 findings** |
+| **T3c** | RG4 fail-open：常量取不到则静默跳过 | 取不到即报"门禁 fail-open" | 把 roce 的 `SNAPSHOT_UPDATE_SQL` 改名 → 必红 |
+| **T3d** | RG2 只扫 2 个文件，`step.update({...})` 可绕过 | 扫描面 2 → **11 个模块**；覆盖 `update()` / 二层解包 / `dict(**x, status=)` | 两种注入写法均必红；`update.py` 5 处合法写法有反向用例保护 |
+| **T6** | `STEP_ORDER` 26 步 vs `STEP_LABELS` 18 键双清单 | `STEP_LABELS` 改为由 `STEP_ORDER` **派生**（27 键 = 26 步 + 非 `report_step` 的 `check`） | 17 个同名标签与旧值逐字一致，0 差异 |
+| **§4.2** | 11 个零引用一次性脚本（1,587 行） | 逐个 W7 grep 后删除 | `scripts/` **92 → 81**；契约测试 54 passed；`populate_csrc_industry.py` 按审查结论**保留**（runbook 依赖） |
+| **§4.3** | `scripts/__pycache__/` 有已删模块的残留字节码 | 删 **29 个**孤儿 `.pyc`（源码已不存在） | 删后孤儿 0；有效模块字节码未动 |
+| **§4.3** | `.tmp-test-run-*` 未被忽略（`981deb9` 修过的同类问题复发） | `.gitignore` 加窄模式 `.tmp-test-run-*/` + `uv-*.lock` | 命中忽略；`tests/regression/fixtures/` 仍**不**被吞 |
+| **T2** | `STATUS.md` 109KB 追加式变更日志，29/75 行引用作废结论 | 重构 + 历史逐字迁入 `reports/141` | **110,438 B → 35,826 B（−67.6%）**；RG8 **15 → 0**；零丢失校验 265 条目 **MISSING=0** |
+| **R2 漏报** | 前端单位表死键 `dividend_financing_ratio`（后端只有 `_pct`） | 删死键，后端为唯一权威；两处百分数渲染收敛为一处 | 四类集合 38/18/30/12 **双向相等**；注入漂移 → 测试必红（2 fail / 3 fail，还原 23 绿） |
+| **T1** | **无 CI、无 git hook**，9 组门禁全靠记性 | `.githooks/pre-commit` + 幂等安装脚本，已 `core.hooksPath=.githooks` | 无暂存 **0.25s / exit 0**；暂存 1 个 `.py` 约 **3.5–4s**；真实拦红已验证（RG6 重号、ruff F401） |
+| 新增 | 钩子文件在 `autocrlf=true` 下会被检出成 CRLF → Linux 上 bad interpreter | 新增 `.gitattributes`（`.githooks/*`、`*.sh` 强制 LF；不写 `* text=auto` 避免全仓重归一化） | 仅影响新文件（仓库原本无跟踪 `.sh`） |
+
+### 11.2 RG6–RG9 基线：28 → 4
+
+只剩报告编号重复 4 组（`127/133/139/59`）。**这 4 组刻意不修**：重命名会打断全仓引用
+（`STATUS` 里 368 处、代码里 420 处 `reports/NNN`），而 RG6 已把它们锁进基线、不会变多。
+其中 **`133` 那一组才是真风险**（`STATUS` 用 "reports/133" 指返工复盘，而 `133_ROCE_WINDOWS`
+取代了 ROCE 定稿），已给两份文件加 `number-collision-note` front-matter 消歧。
+
+### 11.3 明确定义为"不该改"的（避免下一轮重复讨论）
+
+- **51 处 naive `datetime.now()` 仍保留**：它们全是"时刻语义"（备份目录名、证据文件名、
+  日志时间戳、审计列）。改成北京时区会改动**历史产物命名**与既有 DB naive 列口径。
+  RG1 只对 `today()` / 日期粒度 / `utcnow()` / 时区字面量硬报；时刻语义走白名单且**带理由**。
+  白名单是**按调用点类别**而非整文件——`scripts/**` 内 `today()` 与日期格式仍会报。
+- **两份 `default.yaml` 保留**（§5.2 `[F1]` 已更正）：`pyproject.toml:57` 把副本声明为
+  package-data，删副本会让 wheel 缺兜底配置。实测现有 `--check` 控制**有效**（注入 2 行漂移 → rc=1）。
+
+### 11.4 仍未做（诚实清单）
+
+| 项 | 为什么不做 | 触发条件 |
+|---|---|---|
+| **T4 拆 `update.py`**（6,633 行 / `IncrementalUpdater` 137 方法） | 需要全量 S1 回归 + 服务冻结窗口；本轮改动已横跨 30 个文件，再叠加结构拆分会无法归因 | 有独立会话 + 冻结窗口时 |
+| **T5' 消除配置重复** | 需自定义 `build_py` 钩子 + wheel 安装后真机 smoke（§5.2） | 有人愿意承担打包回归风险时 |
+| **RG3 双向**（前端键 ⊆ 后端键） | 前端侧已有 `frontend/tests/screening-format.test.ts` 做**双向严格相等**，RG3 单向属重复但无害 | 若前端测试不在提交前跑，再补进 RG3 |
+| **RG1 白名单按行标记** | 当前按"调用点类别"豁免已能防"整文件免检"；再细分收益递减 | 出现第一次白名单内真实漏报时 |
+
+### 11.5 审查提出的 4 条误报（复核后否决）
+
+独立审计报了 4 条"必须修"，主控逐条复现后判为**误报**。记录在此，防止下一轮重复返工：
+
+| 审查断言 | 我的复核 | 结论 |
+|---|---|---|
+| **P0：钩子 ruff 判定正则 `(\.py:[0-9]+:[0-9]+:\|-->)` 用了转义括号，永远不匹配 → ruff 全放行** | 从钩子里**抽出 `classify_rc` 实体函数**跑真实 ruff 输出 `a.py:1:8: F401` → 返回 **`block`**；环境错误输出 → `env`。文件里的括号**没有转义**，是审计自己复现时的 quoting 差异 | ❌ **误报**（但据此把 env 判定收窄，见 11.6） |
+| **P2：白名单漏判 `now().isoformat()[:10]` 与 `strftime(变量)`** | 在 `app/core/` 造探针文件写入这两种写法 → 门禁报 **2 条** | ❌ **误报** |
+| **P1b：`ready=TRUE` 就绪结论被搬进历史档，STATUS 看不到当前就绪状态** | 被搬走的是 **2026-08 的旧快照**（`reports/62`）；当前就绪状态在 STATUS 当前表里（`reports/139`：**就绪自检 READY 6/6**）。搬旧留新是正确行为 | ❌ **误报**（但暴露 STATUS 缺"如何复算就绪"的指引） |
+| **`od -tx1` 字节判断不存在**（指执行 agent 虚报） | 全仓 `grep -c "od -tx1"` = **0**，执行 agent 的自述不成立 | ✅ **属实**（改由 `.gitattributes` 从根上解决 CRLF，优于运行时探测） |
+
+**确认为真并已修的两条**：
+- `scripts/export_data_package.py` 加了 `cn_today` 导入但缺 `# noqa: E402`，
+  且 `repair_prices.py` 留了未使用的 `date` 导入 —— **4 处 ruff 报错**，
+  全部落在 `scripts/`（**不在 `AGENTS.md` 的 ruff 门禁范围**里，所以没人发现）。
+  已修，并确认"改过的 36 个 `.py` 全部 ruff 干净"。
+- RG1 白名单里 `app/cli/main.py` 的理由**事实错误**（声称与同表 `created_at` 一致，
+  而 `schema.py:1430` 是 `DEFAULT CURRENT_TIMESTAMP` = UTC 基准，差 8 小时）。
+  已改写为如实披露该口径不一致，并说明这是独立的口径变更、不在 RG1 范围。
+  `backup/manager.py` 把"备份 ID（本地时间命名）"与"manifest created_at（UTC）"合并成一条理由，
+  已拆开。
+
+### 11.6 顺手加固（审查副产物里成立的部分）
+
+- `classify_rc` 的"环境错误 vs 规则失败"判定，从"输出里出现 `Traceback|ModuleNotFoundError|…`
+  任一关键字"收窄为**行首锚定**，避免 ruff 报的某条消息里恰好含 `ImportError` 之类字样时
+  把真实 finding 误判成环境问题而**放行**。
+- 白名单理由文本改为"只豁免时区、不认可口径不一致"，避免理由本身成为假绿的制度化入口（`reports/133` 的病根）。
