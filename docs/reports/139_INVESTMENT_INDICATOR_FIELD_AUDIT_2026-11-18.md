@@ -418,8 +418,8 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 
 | # | 反证 | 实测 | 修法 |
 |---|---|---|---|
-| 1 | **补采脚本第一版写入了脏值** | 原值 − 净值 < −1 元的 **17 行**（最差 600036 2023-06-30 差 **−840.32 亿**：原值 536.76 亿 < 净值 1,060.71 亿，说明银行模板的「原值」与通用模板不同口径） | ①脚本加**合理性闸门**（`原值 < 净值 − 1` 整组丢弃并计数）；②新增 `scripts/repair_bs_subjects_implausible.py` 清理存量：**14 行**两列置 NULL（dry-run 14 → 修后 0） |
-| 2 | **「推导累计折旧」是伪值** | 银行/保险模板没有「累计折旧」列时用 `原值 − 净值` 推导；但那个差里混着**固定资产减值准备**（库内无此科目），2,515/4,403 行勾稽不闭合 | **取消推导**（宁缺不填，模板没有就 NULL + `SOURCE_EMPTY`）；存量 **703 行**已置 NULL；`schema.py` 的列注释改为正式恒等式 `原值 − 累计折旧 − 减值准备 = 净值` |
+| 1 | **补采脚本第一版写入了脏值** | 原值 − 净值 < −1 元的 **17 行**（最差 600036 2023-06-30 差 **−840.32 亿**：原值 536.76 亿 < 净值 1,060.71 亿，说明银行模板的「原值」与通用模板不同口径） | ①脚本加**合理性闸门**（`原值 < 净值 − 1` 整组丢弃并计数）；②新增 `scripts/repair_bs_subjects_implausible.py` 清理存量：**15 行**两列置 NULL（dry-run 15 → 修后 0），并**先把受影响行（含 7 个补采列）导出 Parquet 备份**再改（第二轮验收指出旧版备份缺列、无法回滚） |
+| 2 | **「推导累计折旧」是伪值** | 银行/保险模板没有「累计折旧」列时用 `原值 − 净值` 推导；但那个差里混着**固定资产减值准备**（库内无此科目），2,515/4,403 行勾稽不闭合 | **取消推导**（宁缺不填，模板没有就 NULL + `NOT_APPLICABLE`）；`schema.py` 的列注释改为正式恒等式 `原值 − 累计折旧 − 减值准备 = 净值`。⚠️ **范围更正（第三轮复核）**：清理只应针对**银行**——券商模板有真实的「累计折旧」列（实测 667 行满足 `原值 − 折旧 − 净值 ≈ 0`，无减值时精确闭合），第一版清理把非银金融也清了（误删真数据），第二轮回填已把券商值重新写回；repair 脚本已改为 `sw_level1 = 银行` |
 | 3 | **`stock_beta` 有 122 行 β 越出 0–3 且无标注** | 多为 r² 极低的估计 | 按 R4「不截断不置空」保留原值，但 **r² < 0.05 时把 `confidence` 降级为 `approximate`**，让下游知道该行不可当强证据 |
 
 另修：`STEP_LABELS` 补 `analyst_forecast`（之前状态页会显示英文键名）；`compute_stock_beta.py:754` 的 F541 空 f-string。
@@ -453,6 +453,25 @@ docs/evidence/evidence-indicator-audit-2026-11-18.json
 | `data_domains` | 4 张新表存在 + 资产负债表补采科目已回填 | macro 844 / bond 106,147 / beta 10,799 / forecast 9,337；补采 21,153/361,484 行（回填进行中） |
 
 当前整体结论：**READY**。回填完成后 `data_domains` 的读数会自动变成全量（无需改脚本）。
+
+### 11.8 补采科目的「登记链」与一个新发现的口径坑
+
+**登记链**（这正是 §5.1 说的「16 张注册表、15 张手工」最典型的一例）：
+新加 7 个补采列后，要让它们「能被筛选/能有空值原因」，必须**同时**改三处：
+
+1. `app/core/screening/engine.py::STATEMENT_FIELDS`（白名单，否则筛选看不见、`domain_fields()` 不认）；
+2. `app/core/dsl/ast_nodes.py::FIELD_METADATA`（`unit/period_type/historical_capable`，否则有测试直接红）；
+3. 空值原因规则（`null_reason_sweeper.BALANCE_SUBJECT_NOT_APPLICABLE`，否则这些 NULL 全是无声的）。
+
+三处都已补：7 列进白名单与 DSL 元数据（`unit=CNY / point_in_time / historical_capable=True`）；
+`fixed_assets_gross` 与 `accumulated_depreciation` 对**银行**登记 `NOT_APPLICABLE`（实测 42 行）；
+其余 5 列在回填完成前由覆盖率规则记 `NOT_DISPATCHED`，回填后会自动转为 `SOURCE_EMPTY`/`NOT_APPLICABLE`。
+
+**新发现的口径坑（写进 KB D58）**：`balance_sheet.fixed_assets` 并不总是「纯 PPE 净值」——
+实测 15 行（全是非金融，如 000722 FY2025：原值 28.11 亿 / 折旧 13.71 亿 / 库内净值 41.38 亿）
+出现 `原值 − 折旧 < 净值`，说明该股的 `fixed_assets` 含了 PPE 以外的东西（或在建工程/土地等）。
+**所以 #37/#40/#42 用「净值代原值」时必须标 `approximate`，而如果要用原值，就取
+`fixed_assets_gross − accumulated_depreciation`（有原值时更接近口径）**。
 
 ## 10. 一句话
 

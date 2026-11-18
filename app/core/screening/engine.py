@@ -252,6 +252,12 @@ STATEMENT_FIELDS: dict[str, set[str]] = {
         "monetary_funds", "trading_financial_assets", "notes_receivable", "accounts_receivable",
         "prepayments", "other_receivables", "inventory", "contract_assets", "total_current_assets",
         "long_term_equity_investment", "fixed_assets", "construction_in_progress", "right_of_use_assets",
+        # v48 补采科目（reports/139 §11.4 / D58）：登记后筛选可引用、空值原因可归因。
+        # 口径：金额单位元；`fixed_assets_gross − accumulated_depreciation − 减值准备 = fixed_assets`
+        # （库内无减值准备列，所以勾稽允许残差；原值<净值的行已由 repair 脚本清空）。
+        "fixed_assets_gross", "accumulated_depreciation", "other_current_assets",
+        "receivables_financing", "long_term_payables", "investment_property",
+        "development_expenditure",
         "intangible_assets", "goodwill", "deferred_tax_assets", "total_non_current_assets", "total_assets",
         "short_term_loans", "notes_payable", "accounts_payable", "prepayments_received",
         "contract_liabilities", "employee_benefits_payable", "taxes_payable", "total_current_liabilities",

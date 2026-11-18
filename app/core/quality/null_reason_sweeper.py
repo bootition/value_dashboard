@@ -667,6 +667,23 @@ BALANCE_NOT_APPLICABLE: dict[str, RuleGroup] = {
 }
 
 
+# 源表域：v48 新增的补采科目（reports/139 §11.4 / D58）里**确定不适用**的那两列。
+# 银行模板没有「累计折旧」列、且「固定资产原值」与通用模板口径不同（实测出现
+# `原值 < 净值`，如 000722 FY2025），所以这两列对银行一律 NOT_APPLICABLE；
+# 其余 5 个补采科目的 NULL 属于"回填未覆盖/源无该科目"，交给覆盖率规则与
+# NOT_DISPATCHED 判定，不在这里硬编码。
+BALANCE_SUBJECT_NOT_APPLICABLE: dict[str, RuleGroup] = {
+    "balance.fixed_assets_gross": RuleGroup(
+        predicates=(_eq("src_is_bank", "银行", 1),),
+        detail="银行模板的「固定资产原值」与通用模板不是同一口径（实测原值<净值），该字段对银行不适用",
+    ),
+    "balance.accumulated_depreciation": RuleGroup(
+        predicates=(_eq("src_is_bank", "银行", 1),),
+        detail="银行模板没有「累计折旧」列（只在附注），该字段对银行不适用",
+    ),
+}
+
+
 @dataclass
 class SweepResult:
     """一次清扫的结果（dry-run 与写库共用同一份统计）。"""
@@ -1228,9 +1245,10 @@ def _rules_for_domain(domain: str) -> _DomainRules:
         return _DomainRules(not_applicable={}, source_empty=structural)
     # 源表域：目前只登记了"非金融公司不适用银行监管指标"这一条确定规则；
     # 其余源字段的原因主要来自覆盖率（整期级/个股级 NOT_DISPATCHED）。
-    return _DomainRules(
-        not_applicable=BALANCE_NOT_APPLICABLE if domain == "balance" else {}
-    )
+    not_applicable = {}
+    if domain == "balance":
+        not_applicable = {**BALANCE_NOT_APPLICABLE, **BALANCE_SUBJECT_NOT_APPLICABLE}
+    return _DomainRules(not_applicable=not_applicable)
 
 
 def sweep(

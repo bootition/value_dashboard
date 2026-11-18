@@ -136,6 +136,15 @@ FIELD_METADATA: dict[str, dict[str, Any]] = {
     "balance.long_term_loans": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
     "balance.bonds_payable": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
     "balance.fixed_assets": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    # v48 补采科目（reports/139 §11.4 / D58）：金额单位元、时点值、可看历史。
+    # 现货率：`fixed_assets_gross`/`accumulated_depreciation` 只有中报与年报有值（Q1/Q3 结构性 NULL）。
+    "balance.fixed_assets_gross": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    "balance.accumulated_depreciation": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    "balance.other_current_assets": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    "balance.receivables_financing": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    "balance.long_term_payables": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    "balance.investment_property": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
+    "balance.development_expenditure": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
     "balance.intangible_assets": {"unit": "CNY", "period_type": "point_in_time", "historical_capable": True},
 
     # 利润表 (累计值, cumulative)
