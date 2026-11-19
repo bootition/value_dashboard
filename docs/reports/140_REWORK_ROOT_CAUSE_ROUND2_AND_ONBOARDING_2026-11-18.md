@@ -1042,3 +1042,154 @@ S1 包装器结束时打了 8 条
 各 agent 自建临时 run root（名字形如 `vd-s1-roce-*` / `vd-s1-verify-*`）留下的空目录。
 包装器**按设计拒绝清理非自己创建的目录**（这是对的安全设计），所以它们只是**磁盘噪音**，
 不影响结论；建议 W4 里约定 agent 的临时 run root 统一用 `vd-<会话名>-*` 并在收尾自清。
+
+## 16. 第四轮：把 §15.8 的欠账全部做完（2026-11-19）
+
+> §15.8 列了 7 项"仍未做"，并且我在汇报里把其中几项说成"需要决策 / 超出授权"。
+> **那些判断是错的** —— 除"要不要改写已推送历史"一件外，其余都只是**我该干而没干**。
+> 本节记录把它们做完的过程与结果。
+
+### 16.1 直接结论
+
+| §15.8 的欠账 | 状态 |
+|---|---|
+| 1. `_update_prices_incremental`（504 行）未搬 | ✅ 搬到 `update_parts/prices_step.py`（706 行，按"选谁/怎么抓/怎么结算"三段切） |
+| 1'. `_run_incremental_update_flow`（503 行）未搬 | ✅ 搬到 `update_parts/flow.py`（588 行），`report_step` 顺序 30 处 / 26 名逐位相同 |
+| 2. getsource 剩 8 处 | ✅ **13 → 1**（只剩收敛层自己；4 处负向耦合改 import 图，3 处位置断言改行为断言） |
+| 3. `price_daily_qfq` 就地重算看不见 | ✅ 用**内容纪元**堵上（见 16.3），顺带把 `raw_response_hash` 那个"已登记盲区"也关掉了 |
+| 4. 降级信息没进 HTTP 响应体 | ✅ 后端 `readiness_degraded` 已返回，**前端也真的显示了**（16.4） |
+| 5. `helpers/runtime.ts` 未接线 | ✅ 接上了（打包版/开发版的 CLI 前缀不同，见 16.4） |
+| 6. `EtfStrategyPanel` / `StockDetailPage` 未拆 | ✅ 738→**501**、805→**511**（**先补 32 条行为测试再拆**，见 16.5） |
+| 7. 另一个会话的 worktree 还在 | ⛔ 不是我的，不碰（但它是**全量 S1 跑不了**的直接原因，见 16.6） |
+
+另修一个**预存在**的红用例：`test_web_composition_root::test_duckdb_read_locked_maps_to_friendly_503`
+（§15.9 归因为"预存在"，本轮查明根因并修好 —— 见 16.2）。
+
+**累计效果（本会话 4 轮）**：`update.py` **6633 → 5226 行（−21%）**，方法数始终 **137**；
+前端三个最大组件 **1060→593 / 805→511 / 738→501**；getsource **13 → 1**。
+
+### 16.2 那个"预存在"的红用例：根因是测试自己的 setup 漏了一步
+
+`SQLiteStore.connection()` 用 `file:...?mode=ro` **只读**打开，
+**文件不存在时它直接抛 `OperationalError`**，根本走不到被测的 503 分支 ——
+而这条用例从没把 sqlite 建出来。所以它在 base commit 上就一直红。
+
+**修法**：断言（503 + `reason_code == duckdb_read_locked`）**一个字没动**，
+只补上应有的前置（用 `init_sqlite_schema` 建真实 sqlite，DuckDB 仍保持"被锁"）。
+这才是它本来要测的东西：**DuckDB 被锁时接口要给友好 503，而不是裸 500**。
+
+### 16.3 内容纪元：把"就地重算看不见"从根上解决
+
+**问题**：qfq 历史重算不新增行、只改数值 → 行数不变 → 指纹不变 → 缓存命中 → 假绿。
+
+**为什么不能"再加个 checksum"**（上一轮实测，28GB 正式库 read_only）：
+`MAX(trade_date)` 单表 +180ms、按年分桶 COUNT +204ms、
+`COUNT+SUM(round(close*100))`（唯一能看就地重算的）**+275ms** ——
+而指纹基线是 430–510ms（每开一次只读连接就 ~100ms）。**+60% 会把缓存收益抹光。**
+
+**解法：让写入自己记账。**
+- 新增 `app/core/storage/content_epoch.py`：计数器存 sqlite `data_refresh_state`
+  （**复用现表 = 零 schema 迁移**）；`bump()` 用 `BEGIN IMMEDIATE` 防两个写者丢计数；
+  `current()` **fail-open**（读不到就 0，退化成与旧行为等价）。
+- 计数点**只有一个**：`DuckDBStore.write_connection()` **成功退出**时 bump 一次（O(1)）。
+- 指纹 payload 加 `content_epoch` → **任何写事务**都会让指纹变化。
+
+**实测代价**：`current()` 在正式 sqlite 上**中位数 1.02ms**（min 0.51 / max 6.01），
+相对 430–510ms 基线可忽略。
+
+**为什么"读不 bump"是硬要求**：读也 bump → 指纹永远在变 → 缓存永远失效 = 等于没有缓存。
+bump 只在写连接成功路径上，读完全不经过它，**并有测试钉住**（连读 5 次纪元不变）。
+
+**意外收获**：上一轮留了个"**边界钉子**" `test_fingerprint_audit_lineage_hash_boundary_is_pinned`
+—— 断言 `raw_response_hash` 就地改**指纹不变**（当时判定列级摘要太贵、`bit_xor` 又奇偶敏感）。
+内容纪元落地后它**按设计报了红**并提示"请把本用例改成 must-change"，
+于是照它说的改了 —— **高基数列的就地改动现在也能发现了**。
+这正是"把边界钉住"这个做法的价值：覆盖范围变化不会被悄悄忽略。
+
+### 16.4 用户终于能看见"就绪结论打了折"
+
+后端其实一直在返回 `readiness_source` / `readiness_stale` / `readiness_degraded`，
+但前端**完全不消费** —— 守卫变弱了，界面还是绿点，**这是假绿的另一种形态**。
+
+- 新增 `utils/readiness-notice.ts`：把两种打折翻译成人话
+  （"本次就绪结论来自约 15 分钟前的缓存（已过期）" / "N 张超大表只核对了行数"），
+  **正常情况不弹提示**（否则几天内用户就无视它）
+- `ScreeningPage` 在就绪徽标旁按需展示；`types/screening.ts` 补字段
+- 7 条测试：正常不打扰、过期、降级、两者叠加、脏值（NaN/负数）与缺字段不崩、无清单不显示"0 张"
+
+**`helpers/runtime.ts` 接线**：后端 `GET /api/session` 一直返回 `packaged`（报告41 C3），
+但前端唯一该消费它的地方硬编码成开发版命令：空态写着
+`python -m app.cli.main data init`，而**打包版是 exe + `vd.bat`，正确命令是 `vd data init`**
+—— 打包版用户照着敲会失败。上一轮我说"这是行为变更、超出授权"，**其实它就是个文案 bug**。
+
+### 16.5 拆最后两个巨无霸：这次先补测试
+
+上一轮我判断 `StockDetailPage`(805) / `EtfStrategyPanel`(738) "不该拆"，
+理由不是不该拆，而是**没有行为测试就无法证明等价**。所以本轮**先把前置补上**：
+
+1. 新增 `etf-strategy-panel.test.ts`（14 条）+ `stock-detail-load.test.ts`（18 条），
+   **在拆之前写好并跑绿**（拆前全量 19 files / 127 passed）；
+2. 拆完对两个测试文件取 **sha256 复核一字未变**，仍 127 passed → "一行不改仍全绿"；
+3. 等价性：**27/27 个被搬走的函数体逐行一致**（归一化后），生命周期语句集合一致，
+   `template + style` 与 HEAD **字节相同**。
+
+| 文件 | 前 | 后 | 新模块 |
+|---|---|---|---|
+| `views/StockDetailPage.vue` | 805 | **511** | `useStockDetailLoad`(329) + `useTocFollow`(113) |
+| `components/EtfStrategyPanel.vue` | 738 | **501** | `useEtfOperations`(352) |
+
+### 16.6 ⚠️ 全量 S1 跑不了，原因是另一个会话在跑服务
+
+`scripts/s1-pytest.ps1` 按设计拒绝：
+
+```
+S1 preflight Before failed: Value Dashboard service is listening on 8765 - freeze S1
+```
+
+查证：PID 532696，`python -m app.web.main`，**17:21 启动**，解释器是 uv 托管的 CPython
+（不是我 worktree 的 `.venv`）→ **不是本会话起的**。
+`AGENTS W6` 明确写着"服务在跑时 wrapper 按设计拒绝，**不得绕过**；若拒绝原因是别人在跑，
+见 W4，别绕过"。所以本轮**没有做裸跑全量**（裸跑会派生真实的 `app.web.main` 与
+`data auto-update run` 子进程 —— 正是 2026-07-22 那次写坏正式库的形态）。
+
+**替代验证**：对**全部改动面**跑了 32 个定向文件的组合（更新链 14 + 指纹/筛选 7 +
+门禁/自检/打包 5 + 领域 5 + 备份 1），结果见 §16.7。
+**"全量 S1 全绿"这句话本轮仍然不成立** —— 不是代码原因，是仓库里有别人的服务在跑；
+等它停了必须补跑一次。
+
+### 16.7 本轮的验证输出
+
+```text
+$ ./.venv/Scripts/python.exe -m ruff check app tests/regression tests/support
+All checks passed!
+
+$ ./.venv/Scripts/python.exe scripts/check_rework_guards.py
+反返工护栏通过（10 组规则）
+
+$ ./.venv/Scripts/python.exe -m pytest <32 个定向文件> -q
+502 passed, 27 warnings in 578.83s (0:09:38)
+```
+
+覆盖的 32 个文件 = 更新链 14（编排/步骤清单/增量范围/手动链/自动更新/重试/公告/价格步骤接缝/
+行数棘轮/攒批/全量历史批/qfq 触发/同比口径）+ 指纹与筛选 7 + 门禁与自检与打包 5
+（RG 门禁 ×2 / preflight / 组合根 503 / wheel 内容）+ 领域 5 + 备份恢复 1。
+
+前端四条门禁：
+```text
+npm run lint                      → 0（无输出）
+node scripts/run-unit-tests.mjs   → tests 107 / pass 107 / fail 0   （+7 readiness-notice）
+npx vitest run                    → 19 files / 127 passed            （+2 文件 / +32 条）
+npx vue-tsc --noEmit              → 0
+```
+
+### 16.8 过程事故：两个 agent 没交付，靠 W5 收口
+
+| agent | 现象 | 处置 |
+|---|---|---|
+| `d-guards`（§15.7） | 28 分钟无落盘 + 2 个 F401 | 按 W5 中断，主控接手补完 RG10 用例 |
+| `w-getsource-tail` | 1 小时无落盘（活干了但没收尾） | 中断，主控核对并接手棘轮同步 |
+| `y-content-epoch` | **1.5 小时零文件变更** | 中断，**主控自己实现**（16.3） |
+
+`W5`（时间盒 + 落盘要求 + 超时中断自己做）这次连用三次，全部用上了。
+**教训**：任务书里"每完成一个文件就落盘"这句必须写死；只写"最多 N 分钟"不够 ——
+agent 会一直读到时间用完。
