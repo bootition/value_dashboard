@@ -1193,3 +1193,153 @@ npx vue-tsc --noEmit              → 0
 `W5`（时间盒 + 落盘要求 + 超时中断自己做）这次连用三次，全部用上了。
 **教训**：任务书里"每完成一个文件就落盘"这句必须写死；只写"最多 N 分钟"不够 ——
 agent 会一直读到时间用完。
+
+## 17. 测试套件审计：178 个文件 / 1,975 条测试 / 29 分钟（2026-11-19）
+
+> 用户问："这些测试是不是太多、太长了？有没有过去的功能没了但测试还在跑？"
+> 派了 **4 个独立审计 agent**（死代码 / Git 考古 / 重复覆盖 / 成本结构），
+> 又派 **4 个修复 agent** 落地。本节是结论。
+
+### 17.1 直接回答：**没有死测试堆着，但测试确实"贵"**
+
+| 审计 | 方法 | 结论 |
+|---|---|---|
+| **T2 Git 考古** | 扫 `git log` 里"移除/下线/废弃/取代"类提交 + 报告号，逐事件追"测试是否跟着删" | 后端 178 个文件里**零个**"函数删了测试还 import 它"的断裂型死测试；**只有 1 个**前端死测试（`sortField` 死入参，见 17.3） |
+| **T1 死代码** | 建引用图（391 文件 / 7,741 定义 / 45,284 条边），找"生产侧零引用、测试侧有引用"的符号 | 找到 **11 个**——但**死的是生产代码，不是测试**（见 17.2） |
+| **T3 重复覆盖** | 抽 (被测对象, 断言要点) 指纹找跨文件重合；扫弱断言 | 真重复存在但**量化很小**；**弱断言才是重点**（见 17.4） |
+| **T4 成本** | 历史耗时序列 + 静态扫 `sleep`/子进程/真库 + 抽样实测 `--durations` | **29 分钟不是被死测试或慢测试占的**（见 17.5） |
+
+**T3 与 T4 独立得出同一个结论**：
+> 靠"删测试"把 30 分钟砍下来**路走不通**（量化上限 **2–3%**）。
+> 真正的成本是"**~900 条测试每条都付 ~1 秒的真库开销**"，其中 **20.8% 是"每个测试重建一遍 schema"**。
+
+### 17.2 删掉的 11 个"只被测试养活"的死符号
+
+| 符号 | 被谁取代 |
+|---|---|
+| `sector.is_financial_sw_level1` | `is_financial_sql` / `is_non_financial_sql` |
+| `data_quality.share_capital_violations` | `listed_share_capital_gap_codes` |
+| `update_steps.STEP_BY_NAME` | `STEP_NAMES` |
+| `dsl/derived_fields.DERIVED_FIELD_KEYS` | `DERIVED_FIELDS` |
+| `asset_health.RULE_SEVERITIES` + `RULE_TIERS` | 真源 `_RULES` |
+| `null_reasons.reasons_for`（51 行，最大单笔） | `data_status.reason_distribution` |
+| `null_reason_sweeper.sweep_all` | `sweep` |
+| `report_periods.report_period_name` + 只服务它的 `_PERIOD_NAMES` | 无（纯死） |
+| `null_reasons.field_domain` | `domain_fields` |
+| `check_rework_guards._dict_literal_overrides_status` | `_dict_status_override_indexes` |
+| `data_status._DISABLED_MISSING_FIELDS` | 无（import + 同名私有别名，纯为测试造可断言属性） |
+
+**生产/脚本净 −125 行**。
+
+**关键取舍：只删了 1 个测试函数。** 审计预估"可删 ~21 个"，但实做时 10 个符号的测试
+**改成测活入口**而不是删 —— 因为那些断言验的是真实契约（例如 `reasons_for` 的 15 个调用点
+验的是"清扫器往稀疏表里写了什么"，改成直读表后断言一条不少）。
+**删死代码不等于删覆盖**，这个区分是本轮最重要的判断。
+
+三个审计漏项被现场补上：
+1. `_PERIOD_NAMES`（月→中文名表）唯一消费者就是被删的函数 → 一并删；
+2. **`test_cashflow_row_replacement.py` 在模块级 import `reasons_for`** —— 不处理会让该文件
+   10 个测试全部 collect 失败；
+3. `data_status._ACTIONABLE_MISSING_SQL` 与 `_DISABLED_MISSING_FIELDS` **完全同形**（尚未处理）。
+
+### 17.3 前端唯一那个真·死测试 + 一个存在 3 个月的**门禁缺口**
+
+`sortField` 入参的实现已在 `41181e1` 删除（提交信息原文"删死代码：结果面板 `sort?:` prop、
+`screening-quality.sortField`"），但测试还在传它 —— **16 处**，其中一条测试的**整个意图**就建立在这个死参数上。
+
+**为什么活了 3 个月**：三层门禁全都看不见测试代码的类型错误 ——
+- 根级 `tests/*.test.ts` 走 `node --experimental-strip-types --test`（**只剥类型不检查**）
+- `vitest` 的 include 只覆盖 `tests/component/**`
+- `vue-tsc` 只扫 `src/**`
+
+**修法（先补门禁再改代码）**：新增 `tsconfig.test.json` + `npm run typecheck:test`，
+覆盖 `src/** + tests/**`。**第一次跑就报 49 条错**，其中 16 条正是死入参。
+
+顺带纠正审计一处误判：审计说 7 处 `sort` prop 是死入参，**实际只有 3 处是真的**；
+另外 4 处是 `rule_json: {conditions, sort, columns}` 的 **legacy 兼容夹具**，必须保留。
+
+### 17.4 修 13 处弱断言（比"删冗余"重要得多）
+
+本仓 `assert True` / `except: pass` / `raises(Exception)` 几乎绝迹，但残留的几处**全在安全关键路径**。
+每处都用**变异验证**证明"改坏会红"：
+
+| 形态 | 改前 | 抓到的真盲区 |
+|---|---|---|
+| 恒真断言 | `assert updater.adapter_mgr is updater.adapter_mgr` | 进程级单例、某分支自建 manager → 原来都绿 |
+| 名不副实 | `test_..._independent_circuit_breaker` 只断言 `isinstance` | 熔断桶改全局共享（identity 仍不同）→ 原来绿 |
+| 抓太宽 | `pytest.raises(Exception, match="readonly\|read-only")` | 只用可写连接重放再抛同款异常 → 原来绿（现靠"确实没写进去"断言抓住） |
+| 零断言 | 3 处空壳 / 写了哨兵却不检查 | 退化为写正式目录 → 原来绿 |
+| 裸真值 | 13 处 `assert rows` / `assert findings` | **静默丢弃最新年报 → 旧断言绿、新断言红** |
+
+共 **+245 / −61 行**（强化断言必然增加行数，这是投资）。
+
+### 17.5 让 29 分钟变成 ~24 分钟：改 fixture 经济学，不是删测试
+
+成本结构（T4，分母 1749 s / 1975 条）：
+
+| 桶 | 秒 | 占比 |
+|---|---|---|
+| **每测试重建真实 DuckDB schema** | **~363** | **20.8%** ← 优化对象 |
+| 真库 CRUD + 生产代码路径 | ~1348 | 77.0%（必要） |
+| sleep / 轮询 | ~20 | 1.1% |
+| 真子进程 / 真构建 | ~11 | 0.6% |
+| collection + session 启动 | 7.5 | 0.4% |
+| 真网络 | 0 | 0%（全 monkeypatch） |
+
+**结构性事实**：最大单文件只占 8.7%（没有长尾）；47% 的用例 <5 ms。
+**时间是被 ~900 条"每条约 1 秒的真库测试"撑起来的。**
+
+**优化**：`tests/support/schema_template.py` —— 会话级建**一次**真模板，
+`duckdb_store` fixture 改成**复制模板**而不是重跑 DDL。
+
+| | 改前 | 改后 |
+|---|---|---|
+| pytest 自报（133 条同批） | 78.14 s | **50.10 s（−35.9%）** |
+| fixture setup 合计 | 28.53 s | **1.39 s（−95.1%）** |
+| setup 中位 | 0.320 s | **0.010 s** |
+
+外推全量 **≈ −4.9 分钟**。**覆盖面没有缩小**：新增 3 条"真跑 DDL"用例
+（从零建库 / 二次 init 幂等 / 模板与真 DDL 结构一致）—— 因为模板化后 v12 那条
+`DROP TABLE funding_events` 从"每测试一次"变成"每会话一次"，它若坏了 1000 条测试会**一起绿**。
+另加 3 条守卫（DDL 调用次数必须为 0、会话账本 `== 1`、AST 断言 fixture 体内无 DDL 调用）。
+
+`schema_migrations` 相关 11 个文件**零改动**复跑 235 passed / 3 skipped（与改前一致）。
+
+### 17.6 顺手把"耗时问题"变成可自查
+
+`--durations` 从来没进过 S1 日志，而调用方也传不进去（`$safeOptions` 白名单会拒），
+所以每次问"时间花在哪"都得重新实测（本轮审计为此花了一小时）。
+已把 `--durations=30` **内建**进 `scripts/s1-pytest.ps1`：以后全量跑完，
+`pytest-stdout.log` 里直接有最慢 30 条。
+
+### 17.7 还没做（下一轮的入口）
+
+1. **11.2% 的测试代码是内联 SQL 播种**（3,855 / 34,472 行，分布极不均：
+   `test_indicator_ext.py` 71%）。做成 `conftest` 的 `seed_factory` 能砍 2,000–2,500 行、
+   并减少重复建库 —— 但风险与工作量高一量级，**建议单独排期**。
+2. `data_status._ACTIONABLE_MISSING_SQL`（与已删的 `_DISABLED_MISSING_FIELDS` 同形的死别名）。
+3. `tsconfig.test.json` 里还 exclude 着 7 个文件 / 22 条历史遗留类型错（fixture 与类型演进脱节）。
+4. `npm run lint` 仍只扫 `src`，**测试代码没有 lint 覆盖**。
+5. 审计 W5 的另外 13 处裸真值断言在别的文件里（本轮只改了租约内 13 处）。
+
+### 17.8 修完后的全量回归：**2024 passed / 0 failed / 3 skipped，22:23**
+
+```
+========== 2024 passed, 3 skipped, 31 warnings in 1343.82s (0:22:23) ==========
+```
+
+对比：本次会话开头是 **29:09**（1972 条），更早是 **33:03**。测试数涨到 2024 条
+（新增 52 条守卫），时间反而少了 6 分 46 秒 —— 来源就是 17.5 的 schema 模板（setup −95%）。
+
+**第一次跑并不是全绿**（2020 passed / 3 failed），三个红灯的归因很值钱：
+
+| 失败 | 真因 |
+|---|---|
+| `test_supplement_refresh_writes_source_rows_and_respects_deadline` | ⭐ **过时断言**：它要求"同源旧行必须被删掉"，而那正是 `reports/147` 判定为**危险**并修掉的行为（旧实现一次误删 11,154 行）。它和 `test_partial_period_backfill_keeps_other_periods` **互相矛盾**，且矛盾的两条里只有后者是新口径。已翻转成"旧期同源行必须原样保留"（防止 147 事故复现） |
+| `test_path_isolation::test_policy_module_has_only_allowed_imports` | main 的 `8e66f00` 给 `path_policy` 加了 `import subprocess`，撞 import 白名单。白名单放行 subprocess（标准库，无循环依赖风险），**但新增结构性守卫把副作用锁死在 `shared_data_roots()` 一个函数里** |
+| `test_release_entrypoint::test_clean_release_builder_uses_locked_dependencies` | 它把 `package.json` 的 `"test"` 脚本**整条字符串钉死**；本轮给 `npm test` 加了 `typecheck:test` → 红。改成断言"必须包含 runner / vitest / typecheck 三步"，防漂移本意不变，但不会因"加一道检查"就红 |
+
+**第一个红灯正是用户问题的答案**：确实存在"过去的口径改了、测试还按老规矩跑"的测试。
+但**纯 Git 考古抓不到它** —— 当年没有任何提交改过这个测试文件，**变的是行为，不是测试**。
+所以找这类测试必须做**交叉比对**：把"测试断言的期望"与"当前设计文档/新守卫"对照，
+看有没有断言在要求某个已经被判定为危险的行为。
