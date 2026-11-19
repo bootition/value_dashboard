@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -621,10 +620,28 @@ def test_readiness_unchanged_by_business_domain(
 
 
 def test_readiness_code_has_no_business_domain_reference() -> None:
+    """`data_quality` 不得引用业务概览域（负向耦合，用 import 图 + AST 符号表守）。
+
+    拦的事故：`minimum_data_readiness` 被"顺手"接上 `company_profile` /
+    `business_breakdown`（比如"业务概览数据不全也让整站不可筛"），
+    或者反过来在数据质量里写一份业务概览域的健康判定。
+
+    为什么不再是 `inspect.getsource(module)` + `"company_profile" not in source`：
+    那种写法拦的是**文本**不是**耦合**——把表名写进注释/迁移说明就假红（重构
+    最常见的动作），而函数体内的延迟 import 反而可能漏掉。这里断言的是：
+    ① import 图里没有 `app.core.business`（**含函数体内的延迟 import**）；
+    ② AST 符号表里没有这两张表的真实引用（注释/docstring 已排除）。
+    """
     from app.core import data_quality as module
-    source = inspect.getsource(module)
-    assert "company_profile" not in source
-    assert "business_breakdown" not in source
+    from tests.support import source_guard
+
+    source_guard.assert_no_coupling(
+        module,
+        forbidden_modules=("app.core.business",),
+        forbidden_symbols=("company_profile", "business_breakdown"),
+        why="A 股 readiness 只由行情/财报核心表判定；接进业务概览域会让"
+            "「业务概览抓不到」被误判成「整个库不可用」",
+    )
 
 
 # ─── /business-overview API ───────────────────────────────────────────

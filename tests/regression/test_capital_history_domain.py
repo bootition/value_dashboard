@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from datetime import UTC, date, datetime, timedelta
 
@@ -446,6 +445,20 @@ def test_stat_field_whitelist_and_known_gate() -> None:
 def test_readiness_unchanged_and_no_data_quality_reference(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
+    """股本链 + 研究统计域不得改变 A 股 readiness，也不得被数据质量引用。
+
+    前半段是**行为断言**（写一行股本链，readiness 必须逐字段不变）；
+    后半段是**负向耦合**断言，改成 import 图 + AST 符号表：
+
+    拦的事故：`data_quality` 被接上 `app.core.capital` / `app.core.statistics`
+    （例如"股本链缺失 → 整站不可筛"），或直接在数据质量里查
+    `share_capital_history` / `research_statistics`。
+    旧写法 `"share_capital_history" not in inspect.getsource(module)` 拦的是文本：
+    写进注释就假红，函数体内延迟 import 反而可能躲过。
+    """
+    from app.core import data_quality as module
+    from tests.support import source_guard
+
     _seed_stock(duckdb_store)
     before = minimum_data_readiness(duckdb_store, sqlite_store)
     assert before["schema_compatibility"]["compatible"] is True
@@ -453,10 +466,12 @@ def test_readiness_unchanged_and_no_data_quality_reference(
     after = minimum_data_readiness(duckdb_store, sqlite_store)
     assert after == before
 
-    from app.core import data_quality as module
-    source = inspect.getsource(module)
-    assert "share_capital_history" not in source
-    assert "research_statistics" not in source
+    source_guard.assert_no_coupling(
+        module,
+        forbidden_modules=("app.core.capital", "app.core.statistics"),
+        forbidden_symbols=("share_capital_history", "research_statistics"),
+        why="这两个域缺失只该让对应指标为 NULL，不该把 A 股 readiness 判成不可用",
+    )
 
 
 # ─── API ─────────────────────────────────────────────────────────────────

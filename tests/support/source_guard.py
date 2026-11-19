@@ -40,25 +40,58 @@
 于是**方法体搬走后断言仍指向真正的实现**，不再因为搬家而变红。
 `assert_calls` 仍是结构级守卫，所以每处都必须登记在
 `tests/regression/test_update_structure.py` 的 `GETSOURCE_REGISTRY` 里并标注类别。
+
+## 第三类退路：负向耦合用 **import 图 + AST 符号表**（不是源码文本）
+
+"模块 A 不得引用域 D"这件事本来就该用 **import 关系**表达，跟源码文本无关。
+`inspect.getsource(module)` + `"某表" not in source` 有两个反向问题：
+
+* **假红**：把表名写进注释/docstring/迁移说明就红了（重构最常见的动作之一），
+  哪怕代码一行耦合都没有；
+* **假绿**：耦合常常长成函数体内的延迟 import（`def f(): from app.core.treasury import ...`），
+  这类字符串仍可能"没出现在"被搜的片段里，或者反过来——搜到了但被当成注释忽略。
+
+:func:`assert_no_coupling` 因此只看两样东西：
+
+1. **import 图**：`ast.walk` 收集整个模块文件里**全部** `import` / `from ... import`
+   节点——含函数体、条件分支、`try/except ImportError` 里的延迟 import；
+2. **符号表**：AST 里的标识符（含 `import` 别名、关键字参数名）与字符串常量里
+   的标识符片段，**显式跳过 docstring**（注释 ast 根本不保留）。
+
+于是"搬函数/改注释/加 docstring"不会误红，"真的加 import 或真的在 SQL 里写
+那两张表"一定红。
 """
 
 from __future__ import annotations
 
 import ast
 import inspect
+import re
+import warnings
 from collections.abc import Callable, Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 __all__ = [
     "ConstructionDouble",
     "ConstructionRecord",
     "assert_calls",
+    "assert_no_coupling",
+    "code_symbols",
     "constructed_with",
     "count_construction_sites",
+    "imported_modules",
     "resolve_body",
     "signature_of",
     "spy_calls",
 ]
+
+#: 源码字符串/字符串常量里切"标识符片段"用（`SELECT * FROM company_profile` → 三个词）。
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: 允许 `_tree_of` / `imported_modules` / `code_symbols` / `assert_no_coupling` 的入参：
+#: 模块对象、`.py` 路径，或**直接给的源码字符串**（变异验证用）。
+SourceTarget = Any
 
 
 class ConstructionDouble:
@@ -288,7 +321,144 @@ def assert_calls(
         )
 
 
+def imported_modules(target: SourceTarget) -> set[str]:
+    """模块的**全部** import 全名（含函数体/条件分支里的延迟 import）。
+
+    `from a.b import c` 同时记 `a.b` 与 `a.b.c` 两种写法，因此
+    `from app.core import treasury` 与 `from app.core.treasury import X` 都能被
+    `assert_no_coupling(forbidden_modules=("app.core.treasury",))` 抓到。
+    相对 import（`from . import x`）只记符号名，不猜绝对模块名。
+
+    `target`：模块对象 / `Path` / **源码字符串**（变异验证时喂一段假源码）。
+    """
+    tree = _tree_of(target)
+    found: set[str] = set()
+    # ast.walk 覆盖嵌套层级：这就是"函数体内 import 也算"的实现点，
+    # 不做任何"只看模块顶层"的过滤。
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            if node.module is None:  # 相对 import：只留符号
+                found.update(alias.name for alias in node.names)
+                continue
+            found.add(node.module)
+            found.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            found.update(alias.name for alias in node.names)
+    return found
+
+
+def code_symbols(target: SourceTarget) -> set[str]:
+    """AST 里出现的标识符集合：变量/属性/参数/关键字名 + 字符串常量里的标识符片段。
+
+    与「源码里搜文本」的区别：注释不算（ast 不保留注释），**docstring 也不算**
+    ——把表名写进说明不该变红；反之 ``"SELECT * FROM company_profile"`` 这类
+    SQL 字符串常量会被切词命中，这是真正的耦合形态。
+    """
+    tree = _tree_of(target)
+    docstring_ids = _docstring_constant_ids(tree)
+    tokens: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            tokens.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            tokens.add(node.attr)
+        elif isinstance(node, ast.alias):
+            tokens.add(node.name.rsplit(".", 1)[-1])
+            if node.asname:
+                tokens.add(node.asname)
+        elif (isinstance(node, ast.keyword) and node.arg) or isinstance(node, ast.arg):
+            tokens.add(node.arg)
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            tokens.add(node.name)
+        elif (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstring_ids
+        ):
+            tokens.update(_IDENTIFIER.findall(node.value))
+    return tokens
+
+
+def assert_no_coupling(
+    target: SourceTarget,
+    *,
+    forbidden_modules: Iterable[str] = (),
+    forbidden_symbols: Iterable[str] = (),
+    why: str = "",
+) -> None:
+    """断言 `target` 既**没有 import** 这些模块，也**没有在符号/字符串常量里**提到这些符号。
+
+    用于替代 `inspect.getsource(module)` + `「某表」 not in source` 的负向耦合守卫：
+    拦的是「模块之间偷偷耦合」，而不是「源码文本里恰好出现这个词」。
+    因此搬函数、改注释、加 docstring 都不会误红，真加 import / 真写 SQL 一定红。
+    """
+    banned_modules = tuple(forbidden_modules)
+    banned_symbols = tuple(forbidden_symbols)
+    modules = imported_modules(target)
+    module_hits = sorted({
+        name for name in modules
+        if any(name == banned or name.startswith(f"{banned}.") for banned in banned_modules)
+    })
+    assert not module_hits, (
+        f"{_label(target)} import 了禁止耦合的模块: {module_hits}"
+        + (f"（{why}）" if why else "")
+        + "。函数体内的延迟 import 同样计入 import 图，用「搬进函数里再 import」绕不过这条。"
+    )
+    if not banned_symbols:
+        return
+    symbols = code_symbols(target)
+    symbol_hits = sorted(set(banned_symbols) & symbols)
+    assert not symbol_hits, (
+        f"{_label(target)} 在代码/字符串常量里引用了禁止耦合的符号: {symbol_hits}"
+        + (f"（{why}）" if why else "")
+        + "。AST 符号表已排除注释与 docstring，命中即为真实引用。"
+    )
+
+
 # ────────────────────────── 内部工具 ──────────────────────────
+
+
+def _label(target: SourceTarget) -> str:
+    file = getattr(target, "__file__", None)
+    if isinstance(file, str):
+        return Path(file).name
+    if isinstance(target, Path):
+        return target.name
+    return "<源码字符串>"
+
+
+def _source_text(target: SourceTarget) -> tuple[str, str]:
+    """`(源码文本, 文件名)`。注意：**`str` 一律当源码文本**，路径请传 `Path`。"""
+    if isinstance(target, Path):
+        return target.read_text(encoding="utf-8"), str(target)
+    if isinstance(target, str):
+        return target, "<string>"
+    file = getattr(target, "__file__", None)
+    assert isinstance(file, str), (
+        f"{target!r} 既不是模块对象也不是 Path/源码字符串：无法拿到源码"
+    )
+    return Path(file).read_text(encoding="utf-8"), file
+
+
+def _tree_of(target: SourceTarget) -> ast.Module:
+    source, filename = _source_text(target)
+    with warnings.catch_warnings():
+        # 回归测试目录里有正则字符串没写成 raw string（SyntaxWarning），
+        # 这里只解析结构，不需要把告警打出来。
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.parse(source, filename=filename)
+
+
+_DocOwner = ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+
+
+def _docstring_constant_ids(tree: ast.Module) -> set[int]:
+    """所有 docstring 对应的 `ast.Constant` 节点 id（模块/函数/类各一个）。"""
+    owners = [
+        node for node in ast.walk(tree)
+        if isinstance(node, _DocOwner) and ast.get_docstring(node, clean=False) is not None
+    ]
+    return {id(owner.body[0].value) for owner in owners}
 
 
 def _function_node(func: Callable[..., Any]) -> ast.FunctionDef | ast.AsyncFunctionDef | None:

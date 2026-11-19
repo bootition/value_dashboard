@@ -13,11 +13,29 @@
 3. **`_retry_failed_tasks` 必须还是薄委托**，且新模块不许反向 import
    `app.core.update`（循环依赖）。
 
-## 为什么是"棘轮"而不是"清零"
+## 为什么还剩 1 处
 
-少数守卫确实无法行为化：`data_quality` 不得引用某域（负向耦合，没有行为可跑）、
-或者被守卫的函数体有 500 行、真跑要打网络。这些留着，但必须标注清楚
-"它保护的是约束还是位置"，让后来者知道哪些可以改、哪些只能等有行为替身。
+上一轮把 13 → 8；本轮把剩下的 7 处**全部**改成非文本断言，只剩
+`tests/support/source_guard.py` 里的 1 处 —— 它是**收敛层自身的唯一实现**：
+`resolve_body` / `assert_calls` 必须把函数体解析成 AST，绕不开
+`inspect.getsource`；全仓只有这一个调用点，而它自己就是「位置断言 → 结构断言」
+的降级实现。
+
+本轮替换对照（7 处文本断言 → 0）：
+
+* **负向耦合 4 处**（`data_quality` 不得引用某域）→
+  `source_guard.assert_no_coupling()`：**import 图**（`ast.walk` 收全部
+  `import` / `from ... import`，**含函数体内的延迟 import**）+ **AST 符号表**
+  （标识符与字符串常量切片，显式排除 docstring）。旧写法拦文本不拦耦合：
+  把表名写进注释就假红，真加延迟 import 未必拦得住。
+* **保护位置 3 处** → 行为断言：
+  - `/indicators` 暴露范围（extended）：真调 `list_available_indicators`，
+    把 ready 收窄一列，断言该列**不出现**（接口若按 `EXTENDED_COLUMNS` 铺
+    字段就会红）；
+  - `/indicators` 不再下发排名派生字段：真调端点，断言没有任何
+    `_{RANK_MODES}` 后缀字段，且 `rank_modes` 覆盖全部口径；
+  - `reason_distribution` 读稀疏表：真跑两次（空表 / 有数据 + 诱饵表），
+    断言分布逐字段等于稀疏表内容、诱饵表字段一条都不出现。
 """
 
 from __future__ import annotations
@@ -36,40 +54,23 @@ TESTS_ROOT = REPO_ROOT / "tests"
 # ── 棘轮 1：update.py 行数（只许降）──────────────────────────────────────
 # 2026-11-19（本会话）交付值：6457 → 6156（`_retry_failed_tasks` 306 行搬进
 # `update_parts/retry_tasks.py`，原地留 5 行同名委托）。**这个数字只许降。**
-UPDATE_PY_MAX_LINES = 6156
+UPDATE_PY_MAX_LINES = 5226
 
 # ── 棘轮 2：getsource 调用点（只许减，新增必须登记）──────────────────────
 # 键 = 相对仓库根的路径；值 = (允许的调用点数, 类别, 理由)
 #   类别 "保护约束" = 保护的是架构/契约约束（负向耦合），没有行为替身可写
 #   类别 "保护位置" = 保护的是"这段代码写在哪个函数体里"（反重构死结）
 #   类别 "收敛层"   = `tests/support/source_guard.py` 自身的唯一实现调用
+#
+# 2026-11-19（本轮）清账：剩 7 处中
+#   4 处 "保护约束" → `source_guard.assert_no_coupling()`（import 图 + AST 符号表）
+#   3 处 "保护位置" → 行为断言（真调 list_available_indicators / reason_distribution）
+# 于是登记表只剩下面这一条收敛层自身；总量上限同步下调 8 → 1。
 GETSOURCE_REGISTRY: dict[str, tuple[int, str, str]] = {
-    "tests/regression/test_business_overview_domain.py": (
-        1, "保护约束", "data_quality 不得引用业务概览域（负向耦合，无行为可跑）",
-    ),
-    "tests/regression/test_capital_history_domain.py": (
-        1, "保护约束", "data_quality 不得引用股本链域（负向耦合）",
-    ),
-    "tests/regression/test_funding_and_index_valuation_domain.py": (
-        1, "保护约束", "data_quality 不得引用融资/指数估值域（负向耦合）",
-    ),
-    "tests/regression/test_treasury_curve_domain.py": (
-        1, "保护约束", "data_quality 不得引用国债曲线域（负向耦合）",
-    ),
-    "tests/regression/test_extended_screening_exposure.py": (
-        1, "保护位置", "/indicators 必须基于 EXTENDED_SCREENING_READY 且不得用 "
-        "EXTENDED_COLUMNS：调用端点需 Request 对象，暂无行为替身",
-    ),
-    "tests/regression/test_screening_rank_mode.py": (
-        1, "保护位置", "/indicators 不得再为 RANKABLE_INDICATORS 铺排名派生字段："
-        "同上，暂无行为替身",
-    ),
-    "tests/regression/test_null_reason_placement.py": (
-        1, "保护位置", "reason_distribution 必须引用 NULL_REASON_TABLE（AST 级，"
-        "强于文本，但仍绑函数落点）",
-    ),
     "tests/support/source_guard.py": (
-        1, "收敛层", "resolve_body/assert_calls 需要解析函数体，是本仓唯一合法调用点",
+        1, "收敛层",
+        "resolve_body/assert_calls 必须把函数体解析成 AST；全仓唯一合法调用点，"
+        "它自己就是『位置断言 → 结构断言』的降级实现",
     ),
 }
 
@@ -128,9 +129,10 @@ def test_getsource_sites_match_registry() -> None:
     total = sum(found.values())
     cap = sum(allowed for allowed, *_ in GETSOURCE_REGISTRY.values())
     assert total <= cap, f"全仓 getsource 调用点 {total} > 棘轮上限 {cap}（只许减）"
-    # 交付时基线：8 处（7 处回归测试 + 1 处收敛层自身）。比上一轮 13 处少 5 处，
-    # 全部是"保护实现位置"的那批，已换成行为断言（见 reports/140 §13.7）。
-    assert total == 8, f"全仓 getsource 调用点 {total} != 交付基线 8：棘轮只许往小改"
+    # 交付时基线：**1 处**（只有 tests/support/source_guard.py 这个收敛层自身）。
+    # 演进：13 → 8（reports/140 §13.7 的行为化）→ 1（本轮把 4 处负向耦合改成
+    # import 图 + AST 符号表、3 处位置守卫改成行为断言）。这个数字只许往小改。
+    assert total == 1, f"全仓 getsource 调用点 {total} != 交付基线 1：棘轮只许往小改"
 
 
 def test_retry_failed_tasks_is_a_thin_delegate() -> None:
@@ -163,3 +165,89 @@ def test_retry_tasks_module_has_no_reverse_dependency() -> None:
     assert not offenders, (
         f"update_parts 反向 import 了 app.core.update（会成循环依赖）: {offenders}"
     )
+
+
+# ── 棘轮 3：替代品自身必须能红（变异自检）────────────────────────────────
+#
+# 本轮把 7 处 `getsource` 文本断言换成了 import 图 / 行为断言。**替代品失效**
+# 是这类"清扫"最常见的返工原因（守卫变成永远绿的摆设），所以这里用**喂源码
+# 字符串**的方式做等价变异：`source_guard.assert_no_coupling()` 对真实模块和
+# 对这段字符串走的是**同一个函数**，因此"含函数体内延迟 import 的源码会被判红"
+# 等价于"给真实模块加一处延迟 import 会被判红"。
+#
+# 为什么不在 `app/core/data_quality.py` 上真做这条变异：该文件正被另一个会话
+# 改（内容纪元方案），跨租约改写别人正在编辑的文件会制造假冲突（AGENTS W8）。
+
+_LAZY_IMPORT_MUTANT = '''
+"""docstring 里提到 treasury_yield_curve 不算耦合（要能被排除）"""
+
+from __future__ import annotations
+
+
+def _probe(readiness: dict) -> dict:
+    from app.core import treasury  # 函数体内的延迟 import —— 必须被判红
+
+    return {**readiness, "treasury": treasury}
+'''
+
+_COMMENT_ONLY_CONTROL = '''
+"""模块 docstring：这里说明为什么 data_quality 不得读 treasury_yield_curve。"""
+
+from __future__ import annotations
+
+
+def _probe(readiness: dict) -> dict:
+    # 只是在注释里提一句 treasury_yield_curve —— 不是耦合，不许假红
+    return readiness
+'''
+
+
+def test_import_graph_guard_goes_red_on_lazy_import() -> None:
+    """喂"含函数体内延迟 import 的源码"给 import 图断言 → 必须红（变异自检）。"""
+    import pytest
+
+    from tests.support import source_guard
+
+    with pytest.raises(AssertionError, match="app.core.treasury"):
+        source_guard.assert_no_coupling(
+            _LAZY_IMPORT_MUTANT,
+            forbidden_modules=("app.core.treasury",),
+            forbidden_symbols=("treasury_yield_curve",),
+        )
+    # 函数体内的 import 确实进了 import 图（这就是"上一轮的坑"）
+    assert "app.core.treasury" in source_guard.imported_modules(_LAZY_IMPORT_MUTANT)
+
+
+def test_import_graph_guard_stays_green_on_docstring_mention() -> None:
+    """同结构但只出现在 docstring/注释里 → 必须绿（重构改文案不许假红）。"""
+    from tests.support import source_guard
+
+    source_guard.assert_no_coupling(
+        _COMMENT_ONLY_CONTROL,
+        forbidden_modules=("app.core.treasury",),
+        forbidden_symbols=("treasury_yield_curve",),
+    )
+
+
+def test_coupling_guard_goes_red_on_sql_literal() -> None:
+    """不 import 模块、直接在 SQL 字符串里查该域的表 → 也必须红。"""
+    import pytest
+
+    from tests.support import source_guard
+
+    mutant = '''
+"""空 docstring"""
+
+from __future__ import annotations
+
+
+def readiness(store) -> list:
+    return store.read_query("SELECT COUNT(*) FROM treasury_yield_curve")
+'''
+
+    with pytest.raises(AssertionError, match="treasury_yield_curve"):
+        source_guard.assert_no_coupling(
+            mutant,
+            forbidden_modules=("app.core.treasury",),
+            forbidden_symbols=("treasury_yield_curve",),
+        )
