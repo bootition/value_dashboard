@@ -115,6 +115,12 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   revenue_yoy_fy: '营业收入同比(年报口径)',
   net_profit_yoy_fy: '净利润同比(年报口径)',
   deducted_profit_yoy_fy: '扣非净利润同比(年报口径)',
+  // 参数化基名（reports/143 §2）：年数由条件行的「年数」下拉选择，
+  // 所以名字里不再写死 3/5 年。**新增字段必须同时补这里**，
+  // 否则界面会出现纯英文（reports/143 §1 的 I-LABELCN 教训）。
+  revenue_cagr: '营收复合增速',
+  net_profit_cagr: '净利润复合增速',
+  deducted_profit_cagr: '扣非净利复合增速',
   revenue_cagr3: '营收 3 年复合增速',
   revenue_cagr5: '营收 5 年复合增速',
   net_profit_cagr3: '净利润 3 年复合增速',
@@ -149,6 +155,8 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   annualized_volatility: '年化波动率',
   max_drawdown: '最大回撤',
   ttm_dividend_yield: '股息率（TTM）',
+  // 期限由条件行的「国债期限」下拉选择
+  div_yield_spread: '股息率-国债利差',
   div_yield_spread_0p25y: '股息率-国债0.25年利差',
   div_yield_spread_0p5y: '股息率-国债0.5年利差',
   div_yield_spread_1y: '股息率-国债1年利差',
