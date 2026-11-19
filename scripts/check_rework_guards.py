@@ -19,12 +19,16 @@ RG2 状态合并单出口
     → 状态一律 `job_status.merge_step_status()`；禁止在步骤聚合模块里用
       字典解包再显式覆盖 `status`。
 
-RG3 单位注册表跨语言一致
+RG3 单位注册表跨语言一致（**双向**）
     存储口径（小数比例 / 百分数 / 倍数）在后端 `field_units.py` 与前端
     `screening-format.ts` 各存一份，漂移就是 100 倍误差（`reports/80` 簇 A/B/C、
     `dividend_yield` 量纲、科创板成交量 ×100）。
     本检查当天就抓出两处存量漂移：`cash_content_of_revenue` 后端=倍数/前端=比例、
     `balance.advance_from_customers_ratio` 前端缺登记（会被当百分数显示）。
+    2026-11-18 补上**反方向**：只查「后端有、前端缺」时，前端多挂的死键
+    （裸名 `dividend_financing_ratio`）永远看不见——它把后端不存在的字段当百分数
+    处理，同样是 100 倍误差。现在两个方向 + `FRONTEND_ONLY_ALLOWED` 显式白名单
+    （条目必须仍然真实存在，否则报「白名单过期」）。
 
 RG4 派生域注册表自洽
     `indicator_snapshot` 的发布是 DELETE+INSERT，凡不由计算器 staging 产出的列
@@ -86,6 +90,30 @@ UNIT_PAIRS = (
     ("PERCENT_STORED_FIELDS", "PERCENT_FIELDS"),
     ("RATIO_FIELDS", "RATIO_FIELDS"),
 )
+#: 后端另外三类非百分比单位集合：不进 `UNIT_PAIRS`（它们不构成 100 倍误差，
+#: 也不要求前端逐键镜像），但解析出来备用——前端若把一个「价格/天/每股」字段
+#: 登记进「小数比例/百分数/倍数」集合，RG3 要能报成**跨类漂移**，
+#: 而不是误报成"后端根本没有这个字段"（那会逼人往白名单里塞假条目）。
+PYTHON_EXTRA_UNIT_SETS = ("PRICE_FIELDS", "DAY_FIELDS", "PER_SHARE_FIELDS")
+
+#: 前端独有键白名单：`字段 → 理由`。
+#:
+#: RG3 双向化（2026-11-18）后，"前端有、后端没有"= 死键，必须报红；本表是唯一的
+#: 例外通道，只允许承接「前端静态登记、后端确实没有同名列」的历史别名，
+#: 而且每一条都必须**仍然真实存在**：若键在前后端两侧都不存在（或后端已经补登记），
+#: 就报「白名单过期」——白名单不许越攒越烂。
+#:
+#: 现在为什么是空的：唯一出现过的死键是裸名 `dividend_financing_ratio`
+#: （2026-11-18 已从 `frontend/src/utils/screening-format.ts` 的 `PERCENT_FIELDS` 删除）。
+#: 它是**发布型 DSL 指标名**、不是快照列：单位由
+#: `app/web/api/screening.py` 的 `_DSL_INDICATOR_UNITS` + `/api/screening/indicators`
+#: 的运行时元数据下发（前端 `applyIndicatorUnits`），后端唯一权威列名是
+#: `dividend_financing_ratio_pct`。也就是说裸名**不该**静态登记，因此也**不该**进本表
+#: （进了就会永远报"过期"）。真要新增条目，理由里必须写清"哪一侧缺、为什么必须缺"。
+FRONTEND_ONLY_ALLOWED: dict[str, str] = {}
+
+#: 白名单条目所在文件（"白名单过期"要指回本文件，而不是指向前端）。
+CHECKER_FILE = "scripts/check_rework_guards.py"
 
 
 @dataclass(frozen=True)
@@ -647,6 +675,13 @@ def _parse_python_unit_sets(text: str) -> dict[str, set[str]]:
         )
         if match:
             sets[name] = set(re.findall(r'"([^"]+)"', match.group(1)))
+    # 非百分比的三类集合：只用于把"跨类漂移"和"死键"区分开（见 PYTHON_EXTRA_UNIT_SETS）。
+    for name in PYTHON_EXTRA_UNIT_SETS:
+        match = re.search(
+            rf"^{name}[^=\n]*=\s*frozenset\(\s*\{{(.*?)\}}\s*\)", text, re.S | re.M
+        )
+        if match:
+            sets[name] = set(re.findall(r'"([^"]+)"', match.group(1)))
     return sets
 
 
@@ -660,17 +695,27 @@ def _parse_ts_unit_sets(text: str) -> dict[str, set[str]]:
 
 
 def compare_unit_sets(
-    python_sets: dict[str, set[str]], ts_sets: dict[str, set[str]],
+    python_sets: dict[str, set[str]],
+    ts_sets: dict[str, set[str]],
+    frontend_only_allowed: dict[str, str] | None = None,
 ) -> list[Finding]:
-    """后端单位注册表必须被前端完整镜像，且同一字段不得被归到不同口径。
+    """单位注册表必须**双向**一致：前端多出来的键同样是缺陷（死键）。
 
-    判据（前端可以是超集——它还有纯展示字段）：
+    判据（2026-11-18 双向化，补 `reports/80` 簇 A/B/C 漏掉的那一半）：
     * 后端每个字段都要在前端出现，否则运行时元数据缺失时会退回默认口径；
     * 后端/前端对同一字段的**口径类别**必须一致（比例 vs 百分数 = 100 倍误差）；
-    * 后端自己不能把同一字段登记到两个口径。
+    * **前端每个字段也必须在后端出现**：前端把一个后端不存在的字段当百分数
+      处理，等于凭空造出一份 100 倍误差的假口径。裸名
+      `dividend_financing_ratio` 就是这样在单向检查下活了很久的——单向只能
+      看见"后端有、前端缺"，永远看不见"前端有、后端没有"；
+    * 两侧各自都不能把同一字段登记到两个口径；
+    * 唯一例外是 `frontend_only_allowed`（本文件 `FRONTEND_ONLY_ALLOWED`），
+      且条目必须仍然真实存在，否则报"白名单过期"。
     """
+    allowed = FRONTEND_ONLY_ALLOWED if frontend_only_allowed is None else frontend_only_allowed
     findings: list[Finding] = []
     python_class: dict[str, str] = {}
+    ts_class: dict[str, str] = {}
     for python_name, ts_name in UNIT_PAIRS:
         py = python_sets.get(python_name)
         ts = ts_sets.get(ts_name)
@@ -688,14 +733,18 @@ def compare_unit_sets(
                     f"{name} 同时被登记为 {previous} 与 {python_name}",
                 ))
             python_class.setdefault(name, python_name)
+        for name in sorted(ts):
+            previous = ts_class.get(name)
+            if previous is not None and previous != python_name:
+                findings.append(Finding(
+                    "RG3", FRONTEND_UNITS_FILE, 0,
+                    f"{name} 在前端同时被登记为 {previous} 与 {python_name}",
+                ))
+            ts_class.setdefault(name, python_name)
     if findings:
         return findings
 
-    ts_class: dict[str, str] = {}
-    for python_name, ts_name in UNIT_PAIRS:
-        for name in ts_sets.get(ts_name, set()):
-            ts_class.setdefault(name, python_name)
-
+    # ① 后端 → 前端：漏登记 / 口径漂移
     for name, owner in sorted(python_class.items()):
         frontend_class = ts_class.get(name)
         if frontend_class is None:
@@ -708,6 +757,45 @@ def compare_unit_sets(
                 "RG3", FRONTEND_UNITS_FILE, 0,
                 f"{name} 口径漂移：后端 {owner} / 前端 {frontend_class}（100 倍误差风险）",
             ))
+
+    # ② 前端 → 后端：死键（本次补上的方向）
+    other_backend = {
+        name: set_name
+        for set_name, fields in python_sets.items()
+        if set_name not in {python_name for python_name, _ in UNIT_PAIRS}
+        for name in fields
+    }
+    for name, owner in sorted(ts_class.items()):
+        if name in python_class or name in allowed:
+            continue
+        backend_other = other_backend.get(name)
+        if backend_other is not None:
+            findings.append(Finding(
+                "RG3", FRONTEND_UNITS_FILE, 0,
+                f"{name} 跨类漂移：前端登记为 {owner}，后端登记为 {backend_other}",
+            ))
+            continue
+        findings.append(Finding(
+            "RG3", FRONTEND_UNITS_FILE, 0,
+            f"{name} 是死键：前端登记为 {owner}，后端 field_units.py 根本没有这个字段"
+            "（前端会把不存在的字段当该口径处理 = 100 倍误差的假口径）；"
+            "确属历史别名请登记进 FRONTEND_ONLY_ALLOWED 并写明理由",
+        ))
+
+    # ③ 白名单不许过期：条目必须仍然"只在前端存在"（两侧都没有 / 后端已补登记 = 过期）
+    for name in sorted(allowed):
+        if name in ts_class and name not in python_class:
+            continue
+        detail = (
+            f"后端已登记为 {python_class[name]}，该条目已无必要"
+            if name in python_class
+            else "前后端两侧都不存在"
+        )
+        findings.append(Finding(
+            "RG3", CHECKER_FILE, 0,
+            f"白名单过期：{name} {detail}；请删除 FRONTEND_ONLY_ALLOWED 里的这条"
+            f"（原理由：{allowed[name]}）",
+        ))
     return findings
 
 
