@@ -113,6 +113,15 @@ def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
 
 SCREENING_READINESS_CACHE_KEY = "screening_readiness_cache"
 SCREENING_READINESS_CACHE_TTL_SECONDS = 600
+# 2026-11-18 缺陷 B：allow_stale 不再是"过期就无限期返回"。
+# TTL(600s) 只是"该刷新了"的触发点；决策的**正确性边界**是硬上限 2×TTL。
+# 超过硬上限仍返回旧决策 = 对外宣称就绪的门禁可以永远基于三天前的判定
+# （后台 worker 遇写锁直接 return、异常只 logger.warning，都不会落盘，
+# 于是过期决策可以无限期存活）。2×TTL 的依据：一次完整后台刷新在正式库
+# 上约 20-60s，一个自动更新窗口约几分钟；给一个完整 TTL 的重试余量足以
+# 覆盖"刷新正在进行"，再久就说明刷新确实坏了，必须同步重算而不是继续骗。
+SCREENING_READINESS_STALE_MAX_AGE_SECONDS = 2 * SCREENING_READINESS_CACHE_TTL_SECONDS
+SCREENING_READINESS_REFRESH_STATE_KEY = "screening_readiness_refresh_state"
 FULL_DATA_QUALITY_CACHE_KEY = "data_quality_status_cache_v1"
 
 
@@ -175,12 +184,173 @@ def build_data_quality_status_cached(
     return quality
 
 
+# ---------------------------------------------------------------------------
+# 缺陷 A 修复（2026-11-18）：让筛选就绪指纹"能看见内容变化"
+#
+# 旧指纹对 12 张表只取 COUNT(*) + MIN/MAX(...)，对**就地 UPDATE / 内部替换**
+# 完全透明：交易日历把 03-04、03-05 两个工作日换成 03-07、03-08 两个周末后，
+# (COUNT, MIN, MAX) 三元组一模一样 → 指纹不变 → 缓存命中 → 返回
+# ready=True，而 `_has_complete_trading_calendar()` 按代码语义应为 False
+# （对外"假绿"）。
+#
+# "加 MAX(updated_at)" 方案**不成立**——schema 已逐表实测确认
+# (app/core/storage/schema.py)：
+#   trading_dates                            → 只有 trade_date TEXT PRIMARY KEY
+#   balance_sheet/income_statement/cash_flow → 完全没有 created_at/updated_at
+#   xdxr                                     → 没有时间戳列
+#   manual_overrides                         → 有 created_at，但改 payload 不刷新
+#   source_audit / fetch_batch               → 有 created_at / fetch_time
+#   indicator_snapshot                       → 有 calculated_at
+#
+# 也**不能**一键全量 checksum：source_audit 在正式库约 4300 万行，全表内容
+# 摘要会把 20s 缓存的价值抹平。故分层：
+#   1) 行数有界的小表（交易日历、人工覆盖）→ **精确内容摘要**（sha256，
+#      group_concat 单次传输，亚毫秒级）；
+#   2) 中等表（财务三表/分红/除权）→ DuckDB 行级 bit_xor(hash(row))，
+#      一次列扫描，实测 ≈4.4ms/百万行，且带行数预算上限兜底；
+#   3) 超大表（source_audit / *_archive / 价格表）→ 保持 COUNT + MAX(时间戳)，
+#      残余盲区（就地翻 reason_code 之类）在报告里显式登记；根治需要 schema
+#      层加 updated_at 列或统一的 content epoch，均在本文件租约之外。
+_CONTENT_CHECKSUM_ROW_BUDGET = 2_000_000
+# 表 → 需要从行内容摘要中排除的重列。raw_data 存 500+ 原始字段（单行可达
+# 数 KB），readiness/筛选只读解析后的列；计入内容摘要会把指纹从毫秒级抬到
+# GB 级扫描。dividends/xdxr 按 schema 没有这类列（schema 已实测确认）。
+_CONTENT_CHECKSUM_TABLES: dict[str, str] = {
+    "balance_sheet": " EXCLUDE (raw_data)",
+    "income_statement": " EXCLUDE (raw_data)",
+    "cash_flow": " EXCLUDE (raw_data)",
+    "dividends": "",
+    "xdxr": "",
+}
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _trading_calendar_fingerprint(sqlite: SQLiteStore) -> dict:
+    """Exact content digest of the persisted trading calendar.
+
+    COUNT+MIN+MAX 对"内部替换"透明（03-04/03-05 → 03-07/03-08 三值全等），
+    而 `_has_complete_trading_calendar()` 的判定**真的依赖完整日期集合**，
+    且对"价格表有、日历里没有"的日期零容忍；所以这张表必须对内容敏感。
+    正式库约 5k 行（20 年 × ~250 天），group_concat 单次传输 + sha256 实测
+    在毫秒以下，不影响 20s 缓存的收益。
+    """
+    try:
+        rows = sqlite.query(
+            """SELECT COUNT(*) AS n, MIN(trade_date) AS lo, MAX(trade_date) AS hi,
+                      group_concat(trade_date, ',' ORDER BY trade_date) AS joined
+               FROM trading_dates"""
+        )
+    except Exception:
+        # SQLite < 3.44 不支持聚合内 ORDER BY：退化为逐行取回（仍远小于一次
+        # 全量 readiness 构建），绝不让整个指纹失效。
+        joined = ",".join(
+            str(row["trade_date"])
+            for row in sqlite.query(
+                "SELECT trade_date FROM trading_dates ORDER BY trade_date"
+            )
+        )
+        rows = [{"n": None, "lo": None, "hi": None, "joined": joined}]
+    row = rows[0] if rows else {}
+    return {
+        "n": row.get("n"),
+        "lo": row.get("lo"),
+        "hi": row.get("hi"),
+        "digest": _sha256_text(row.get("joined") or ""),
+    }
+
+
+def _manual_overrides_fingerprint(sqlite: SQLiteStore) -> dict:
+    """Exact content digest of the published manual overrides.
+
+    `manual_overrides` 只有 created_at（无 updated_at）：发布后改 payload、
+    改状态都不刷新 created_at，COUNT + MAX(created_at) 完全看不见内容变化。
+    该表行数是个位到百位量级，直接做精确内容摘要。
+    """
+    rows = sqlite.query(
+        """SELECT COUNT(*) AS n, MAX(created_at) AS created_max,
+                  group_concat(
+                      id || '|' || stock_code || '|' || field_name || '|' ||
+                      COALESCE(CAST(report_date AS TEXT), '') || '|' ||
+                      COALESCE(CAST(override_value AS TEXT), '') || '|' ||
+                      COALESCE(reason, '') || '|' ||
+                      COALESCE(correction_template, '') || '|' ||
+                      COALESCE(status, ''),
+                      ';' ORDER BY stock_code, field_name, report_date, id
+                  ) AS joined
+           FROM manual_overrides
+           WHERE status = 'published' AND rolled_back_at IS NULL"""
+    )
+    row = rows[0] if rows else {}
+    return {
+        "n": row.get("n"),
+        "created_max": row.get("created_max"),
+        "digest": _sha256_text(row.get("joined") or ""),
+    }
+
+
+def _duck_content_checksums(
+    duck: DuckDBStore, row_counts: dict[str, int],
+) -> dict[str, dict]:
+    """Order-insensitive row-content checksums, **one** DuckDB round trip.
+
+    `bit_xor(hash(<整行 struct>))` 对行序不敏感、对任意列内容变化敏感
+    （就地 UPDATE 也改变），且只需一次列扫描。
+
+    关键成本事实（本机实测，正式库同量级）：`DuckDBStore.read_query` 每次
+    都要新开连接，单次约 24ms，**连接数才是指纹的主要成本**（旧公式 6 次
+    ≈120-140ms）。所以这里把所有被保护的表并成一条 `UNION ALL` 查询，按
+    行数预算决定哪些表走内容摘要、哪些表退回纯 COUNT。
+    """
+    payload: dict[str, dict] = {}
+    targets: list[str] = []
+    for table in _CONTENT_CHECKSUM_TABLES:
+        count = int(row_counts.get(table) or 0)
+        payload[table] = {"c": count}
+        if count > _CONTENT_CHECKSUM_ROW_BUDGET:
+            payload[table]["mode"] = "count-only"
+        else:
+            targets.append(table)
+    if not targets:
+        return payload
+    statements = []
+    for table in targets:
+        exclude = _CONTENT_CHECKSUM_TABLES[table]
+        statements.append(
+            f"""SELECT '{table}' AS tbl,
+                       bit_xor(hash(struct_pack(*COLUMNS(*{exclude})))) AS h
+                FROM {_quote_ident(table)}"""
+        )
+    try:
+        rows = duck.read_query(" UNION ALL ".join(statements))
+    except Exception:
+        # 任何 schema 意外都退回 COUNT（指纹仍然可用，只是退化到旧粒度）。
+        for table in targets:
+            payload[table]["mode"] = "count-only"
+        return payload
+    for row in rows:
+        payload.setdefault(str(row["tbl"]), {})["mode"] = "content"
+        payload[str(row["tbl"])]["xor"] = str(row["h"])
+    return payload
+
+
 def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str | None:
     """Cheap fingerprint for the global inputs behind screening readiness.
 
     COUNT(*) is metadata-only in DuckDB and the snapshot aggregate is served
     by zone maps on the production database; this must stay far cheaper than
     the full readiness build it guards.
+
+    缺陷 A 修复要点：只有"行数有界"的表才付内容摘要的代价，大表继续走
+    COUNT + MAX(时间戳)。这保证命中路径的开销仍在毫秒量级，同时让"日历内部
+    替换 / 财务就地重述 / 人工覆盖改 payload"这几类真实修复动作一定会改变
+    指纹（详见本文件顶部缺陷 A 说明）。
     """
     try:
         snap = duck.read_query(
@@ -188,55 +358,102 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
                       MAX(report_date) AS r, COUNT(*) AS n
                FROM indicator_snapshot"""
         )[0]
+        # source_audit 是 LINEAGE_INVALID 阻断码的来源。4300 万行做内容摘要
+        # 太贵；schema 确认它有 fetch_time/created_at：追加可见，就地翻标记
+        # 不可见（残余盲区已登记在缺陷 A 说明里）。
+        # 全部聚合塞进**一条** SQL：DuckDB 单次 read_query ≈24ms 的连接开销
+        # 才是指纹的主要成本，比聚合本身贵一个量级。
         counts = duck.read_query(
             """SELECT
                  (SELECT COUNT(*) FROM source_audit) AS source_audit_c,
                  (SELECT COUNT(*) FROM source_audit_archive) AS source_audit_archive_c,
                  (SELECT COUNT(*) FROM fetch_batch) AS fetch_batch_c,
                  (SELECT COUNT(*) FROM raw_response_archive_all) AS archive_c,
-                 (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c"""
+                 (SELECT COUNT(*) FROM indicator_snapshot) AS snapshot_c,
+                 (SELECT COUNT(*) FROM balance_sheet) AS balance_sheet,
+                 (SELECT COUNT(*) FROM income_statement) AS income_statement,
+                 (SELECT COUNT(*) FROM cash_flow) AS cash_flow,
+                 (SELECT COUNT(*) FROM dividends) AS dividends,
+                 (SELECT COUNT(*) FROM xdxr) AS xdxr,
+                 (SELECT MAX(fetch_time) FROM source_audit) AS source_audit_fetch_max,
+                 (SELECT MAX(created_at) FROM source_audit) AS source_audit_created_max"""
         )[0]
-        # 财务报表/分红/除权除息会改变 readiness 与筛选结果，必须进入指纹；
-        # 只用 COUNT + MAX(date) 聚合，仍比全量 readiness 构建便宜得多。
-        financials = duck.read_query(
-            """SELECT
-                 (SELECT COUNT(*) FROM balance_sheet) AS balance_c,
-                 (SELECT MAX(report_date) FROM balance_sheet) AS balance_max,
-                 (SELECT COUNT(*) FROM income_statement) AS income_c,
-                 (SELECT MAX(report_date) FROM income_statement) AS income_max,
-                 (SELECT COUNT(*) FROM cash_flow) AS cashflow_c,
-                 (SELECT MAX(report_date) FROM cash_flow) AS cashflow_max"""
-        )[0]
-        dividends = duck.read_query(
-            """SELECT COUNT(*) AS n, MAX(ex_date) AS ex_max,
-                      MAX(announcement_date) AS ann_max
-               FROM dividends"""
-        )[0]
-        xdxr = duck.read_query(
-            "SELECT COUNT(*) AS n, MAX(event_date) AS event_max FROM xdxr"
-        )[0]
-        overrides = sqlite.query(
-            """SELECT COUNT(*) AS n, MAX(created_at) AS created_max
-               FROM manual_overrides
-               WHERE status = 'published' AND rolled_back_at IS NULL"""
-        )[0]
-        calendar = sqlite.query(
-            """SELECT COUNT(*) AS n, MIN(trade_date) AS lo, MAX(trade_date) AS hi
-               FROM trading_dates"""
+        # 财务三表/分红/除权除息会改变 readiness 与筛选结果，且它们的
+        # "就地重述"不改变 COUNT/MAX(date)：行数有界时改做行内容摘要。
+        content = _duck_content_checksums(
+            duck, {table: int(counts.get(table) or 0) for table in _CONTENT_CHECKSUM_TABLES},
         )
-        calendar_fp = calendar[0] if calendar else {}
+        overrides = _manual_overrides_fingerprint(sqlite)
+        calendar_fp = _trading_calendar_fingerprint(sqlite)
         payload = {
             "snap": snap,
-            "counts": counts,
-            "financials": financials,
-            "dividends": dividends,
-            "xdxr": xdxr,
+            "counts": {k: v for k, v in counts.items() if k.endswith("_c")},
+            "audit": {
+                "fetch_max": counts.get("source_audit_fetch_max"),
+                "created_max": counts.get("source_audit_created_max"),
+            },
+            "content": content,
             "published_overrides": overrides,
             "trading_calendar": calendar_fp,
         }
         return hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
+    except Exception:
+        return None
+
+
+def load_screening_readiness_entry(
+    sqlite: SQLiteStore, fingerprint: str, *, allow_stale: bool = False,
+) -> dict | None:
+    """Return a cached screening decision **with its freshness metadata**.
+
+    Returns ``None`` on miss / fingerprint change / too old. The returned dict:
+        {"decision": dict, "cached_at": str, "age_seconds": float, "stale": bool}
+
+    缺陷 B 修复（2026-11-18）：``allow_stale=True`` 以前只要求"同指纹"，
+    过期多久都返回，于是 TTL 沦为"刷新触发器"而不是正确性边界；叠加
+    worker 遇写锁直接 return、异常只 logger.warning，过期决策可以被无限期
+    当作"已就绪"返回。现在 stale 读取同样有硬上限
+    ``SCREENING_READINESS_STALE_MAX_AGE_SECONDS``（2×TTL）：超过即返回 None，
+    由调用方同步重算（宁可慢一次，也不对外假绿）。
+    """
+    try:
+        rows = sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [SCREENING_READINESS_CACHE_KEY],
+        )
+        if not rows:
+            return None
+        payload = json.loads(rows[0]["value"] or "{}")
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("fingerprint") != fingerprint:
+            return None
+        updated = payload.get("updated_at")
+        age_seconds: float | None = None
+        if updated:
+            updated_dt = datetime.fromisoformat(updated)
+            if updated_dt.tzinfo is None:
+                updated_dt = updated_dt.replace(tzinfo=UTC)
+            age_seconds = (datetime.now(UTC) - updated_dt).total_seconds()
+        if age_seconds is not None:
+            max_age = (
+                SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+                if allow_stale
+                else SCREENING_READINESS_CACHE_TTL_SECONDS
+            )
+            if age_seconds > max_age:
+                return None
+        return {
+            "decision": payload.get("decision"),
+            "cached_at": updated,
+            "age_seconds": age_seconds,
+            "stale": bool(
+                age_seconds is not None
+                and age_seconds > SCREENING_READINESS_CACHE_TTL_SECONDS
+            ),
+        }
     except Exception:
         return None
 
@@ -249,29 +466,88 @@ def load_screening_readiness_cache(
     Fresh calls reject entries older than ``SCREENING_READINESS_CACHE_TTL_SECONDS``.
     ``allow_stale=True`` still requires the same input fingerprint but permits an
     expired decision so the request path can use stale-while-revalidate instead
-    of blocking on another 20s+ full-data-quality scan.
+    of blocking on another 20s+ full-data-quality scan. The staleness window is
+    **bounded** by ``SCREENING_READINESS_STALE_MAX_AGE_SECONDS`` (缺陷 B);
+    callers that need ``cached_at``/``stale`` should use
+    :func:`load_screening_readiness_entry`.
     """
+    entry = load_screening_readiness_entry(sqlite, fingerprint, allow_stale=allow_stale)
+    return entry["decision"] if entry else None
+
+
+def record_screening_readiness_refresh_outcome(
+    sqlite: SQLiteStore,
+    fingerprint: str,
+    *,
+    ok: bool,
+    error: str | None = None,
+    skipped_reason: str | None = None,
+) -> None:
+    """Persist the last background-refresh outcome so failures stay visible.
+
+    缺陷 B 修复（2026-11-18）：后台 worker 以前对"写锁活跃"直接 return、对
+    异常只 ``logger.warning``，两者都不落盘，运维与调用方都看不到"上次刷新
+    失败"。现在每次都写 ``data_refresh_state['screening_readiness_refresh_state']``
+    （best-effort，绝不抛出）：``last_success_at`` / ``last_failure_at`` /
+    ``consecutive_failures`` / ``last_error`` / ``last_skip_reason``。
+    """
+    now = datetime.now(UTC).isoformat()
     try:
         rows = sqlite.query(
             "SELECT value FROM data_refresh_state WHERE key = ?",
-            [SCREENING_READINESS_CACHE_KEY],
+            [SCREENING_READINESS_REFRESH_STATE_KEY],
+        )
+        state: dict = {}
+        if rows and rows[0].get("value"):
+            try:
+                loaded = json.loads(rows[0]["value"])
+                if isinstance(loaded, dict):
+                    state = loaded
+            except Exception:
+                state = {}
+        state["fingerprint"] = fingerprint
+        if ok:
+            state["last_success_at"] = now
+            state["consecutive_failures"] = 0
+            state["last_error"] = None
+            state["last_skip_reason"] = None
+        else:
+            state["last_failure_at"] = now
+            state["consecutive_failures"] = int(state.get("consecutive_failures") or 0) + 1
+            state["last_error"] = (error or "")[:500] or None
+            state["last_skip_reason"] = skipped_reason
+        state["updated_at"] = now
+        sqlite.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                             updated_at=excluded.updated_at""",
+            [
+                SCREENING_READINESS_REFRESH_STATE_KEY,
+                json.dumps(state, ensure_ascii=False, default=str),
+                now,
+            ],
+        )
+    except Exception:
+        logger.warning("screening readiness 刷新结果落盘失败(非致命)", exc_info=True)
+
+
+def read_screening_readiness_refresh_state(sqlite: SQLiteStore) -> dict:
+    """Read the persisted background-refresh outcome ({} when never recorded)."""
+    try:
+        rows = sqlite.query(
+            "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
+            [SCREENING_READINESS_REFRESH_STATE_KEY],
         )
         if not rows:
-            return None
-        payload = json.loads(rows[0]["value"] or "{}")
-        if payload.get("fingerprint") != fingerprint:
-            return None
-        if not allow_stale:
-            updated = payload.get("updated_at")
-            if updated:
-                updated_dt = datetime.fromisoformat(updated)
-                if (
-                    datetime.now(UTC) - updated_dt
-                ).total_seconds() > SCREENING_READINESS_CACHE_TTL_SECONDS:
-                    return None
-        return payload.get("decision")
+            return {}
+        payload = json.loads(rows[0].get("value") or "{}")
+        if not isinstance(payload, dict):
+            return {}
+        payload.setdefault("updated_at", rows[0].get("updated_at"))
+        return payload
     except Exception:
-        return None
+        return {}
 
 
 _screening_readiness_refresh_lock = threading.Lock()
@@ -301,12 +577,24 @@ def _screening_readiness_refresh_worker(
     try:
         from app.core.storage.update_lock import any_write_lock_active
 
+        # 缺陷 B：跳过也要留痕。以前遇写锁直接 return，调用方与运维都无法
+        # 区分"正在刷新"和"刷新一直在被写锁挡掉"。
         if any_write_lock_active(duck.db_path):
+            logger.warning(
+                "后台 screening readiness 刷新被写窗口跳过（缓存不更新）: %s", key,
+            )
+            record_screening_readiness_refresh_outcome(
+                sqlite, fingerprint, ok=False, skipped_reason="write_lock_active",
+            )
             return
         decision = screening_readiness(duck, sqlite)
         store_screening_readiness_cache(sqlite, fingerprint, decision)
+        record_screening_readiness_refresh_outcome(sqlite, fingerprint, ok=True)
     except Exception as error:
         logger.warning("后台 screening readiness 刷新失败: %s", error)
+        record_screening_readiness_refresh_outcome(
+            sqlite, fingerprint, ok=False, error=f"{type(error).__name__}: {error}",
+        )
     finally:
         with _screening_readiness_refresh_lock:
             _screening_readiness_refreshing.discard(key)
@@ -394,10 +682,11 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
         # 调用。交易日历与价格覆盖不变时结果不会变，因此用输入指纹做持久
         # 缓存；价格更新后仅首次筛选会重算一次。
         try:
-            cal_fp = sqlite.query(
-                "SELECT COUNT(*) AS c, MIN(trade_date) AS lo, MAX(trade_date) AS hi "
-                "FROM trading_dates"
-            )[0]
+            # 缺陷 A（嵌套双盲）：这一层内层缓存的日历指纹此前同样是
+            # COUNT+MIN+MAX，等同于把外层刚修掉的盲区又复制了一遍——外层
+            # 修好后内层仍会对"日历内部替换"命中旧结论。改用与外层同源的
+            # 精确内容摘要（日历只有 ~5k 行，成本可忽略）。
+            cal_fp = _trading_calendar_fingerprint(sqlite)
             price_fp = duck.read_query(
                 """SELECT
                      (SELECT COUNT(*) FROM price_daily_raw WHERE close IS NOT NULL) AS raw_c,

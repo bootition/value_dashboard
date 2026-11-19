@@ -3,6 +3,22 @@
 提供筛选规则运行、结果保存、导出、加入自选等功能。
 """
 
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/79 方案 A —— 更新窗口内基于快照的运行必须显式标注口径（随结果持久化标注、
+#     导出时同样标注）；写锁活跃（自动更新中）时不再 409 禁用。
+# S2  reports/131 §9.2 P0-5 —— 技术三列：阈值/字段集的唯一真源在 asset_health；
+#     最新期覆盖率 < 95% 的字段不暴露（进 unavailable）。
+# S3  reports/122 §2.3 J9 / §2.6 J5 —— 字段级遮蔽：显式传入的字段要与 /indicators 同源；
+#     废弃字段 → 替代字段映射（dividend_yield）；两条过滤规则同源。
+# S4  reports/68 P3 / §6 —— 国债基准与股息率利差（P3，含曲线对齐溯源）；P4 历史研究统计字段（§6）。
+# S5  reports/73 —— P3-2 / P3-9 修复：利差列附加曲线对齐溯源。
+# S6  reports/119 P0 —— 扩展指标域动态放行阈值：EXTENDED_SCREENING_READY 只是 2026-09-19 的
+#     静态清单，不能当动态覆盖率依据；最新报告期覆盖率低于阈值的字段不暴露。
+# S7  reports/124 —— 两列存储量纲不同（小数 vs 百分数），不可混用。
+# S8  reports/80 簇 A/B/C —— 单位口径统一：这两列不是「算错」，也不是「废弃」，别让提示误导用户。
+# S9  reports/76 P3-4 —— 保存时即校验字段名（与 engine.run 运行时校验同口径）。
+
+
 from __future__ import annotations
 
 import csv
@@ -18,12 +34,12 @@ from pydantic import BaseModel
 
 from app.core.data_quality import (
     ensure_screening_readiness_refresh,
-    load_screening_readiness_cache,
+    load_screening_readiness_entry,
     screening_readiness_cache_key,
     store_screening_readiness_cache,
 )
 
-# 技术三列阈值/字段集的唯一真源在 asset_health（reports/131 P0-5）。
+# 技术三列阈值/字段集的唯一真源在 asset_health（依据 S2 P0-5）。
 # 这里只允许 import，禁止再定义第二份常量：曾有 `_TECHNICAL_MIN_COVERAGE_PCT = 95.0`
 # 硬编码，运维把 config 调到 98 后体检说"不可信"而筛选仍可选中。
 from app.core.quality.asset_health import (
@@ -65,7 +81,7 @@ def _csv_export_header(
         # P1-C: 截断结果必须在导出的 CSV 中显式标注，禁止静默丢尾
         header.append("_truncated")
     if auto_update:
-        # reports/79 方案 A：更新窗口内基于快照的运行必须显式标注口径
+        # 依据 S1 方案 A：更新窗口内基于快照的运行必须显式标注口径
         header.append("_data_as_of")
         header.append("_auto_update_in_progress")
     return header
@@ -168,6 +184,24 @@ def _require_trusted_snapshot(request: Request) -> dict:
     })
 
 
+def _freshness_payload(entry: dict | None, *, source: str) -> dict:
+    """Expose readiness-cache freshness to the caller (缺陷 B).
+
+    以前门禁返回体只有 ``{"lock_active": False, "data_as_of": None}``：调用方
+    无法区分"刚算出来的就绪"和"三天前那份过期决策"。现在随门禁/结果一起
+    返回 ``readiness_source``（cache/stale_cache/computed）、``readiness_cached_at``、
+    ``readiness_stale``、``readiness_age_seconds``。
+    新增字段对前端是纯向后兼容的（旧客户端只读 lock_active/data_as_of）。
+    """
+    entry = entry or {}
+    return {
+        "readiness_source": source,
+        "readiness_cached_at": entry.get("cached_at"),
+        "readiness_stale": bool(entry.get("stale", False)),
+        "readiness_age_seconds": entry.get("age_seconds"),
+    }
+
+
 def _require_current_screenability(request: Request) -> dict:
     """Enforce the current database gate for screen-derived durable output.
 
@@ -178,12 +212,14 @@ def _require_current_screenability(request: Request) -> dict:
     完全没有 indicator_snapshot 行时不存在"不可信的快照"，仍由下方
     readiness 分支给出更具体的 minimum_data_not_ready。
 
-    reports/79 方案 A（用户决策）：写锁活跃（自动更新中）时不再 409 禁用——
+    依据 S1 方案 A（用户决策）：写锁活跃（自动更新中）时不再 409 禁用——
     引擎只读原子替换的 indicator_snapshot 与财务表（不直读 raw 价格），
     快照口径下筛选结果内部一致；放行并返回 data_as_of（快照价格日）供
     标注。快照完全缺失时仍 409 兜底。
 
-    Returns: {"lock_active": bool, "data_as_of": str | None}
+    Returns: {"lock_active": bool, "data_as_of": str | None,
+              "readiness_source": str, "readiness_cached_at": str | None,
+              "readiness_stale": bool, "readiness_age_seconds": float | None}
     """
     # 数据可信度门禁（唯一实现）：有快照且 untrusted_all=True →
     # 409 snapshot_values_untrusted。详情页用同一判定把全部指标置 null，
@@ -212,24 +248,39 @@ def _require_current_screenability(request: Request) -> dict:
                 "reason_code": "minimum_data_not_ready",
                 "message": "基础数据尚未就绪（无可用指标快照）",
             })
-        return {"lock_active": True, "data_as_of": data_as_of}
+        return {
+            "lock_active": True,
+            "data_as_of": data_as_of,
+            "readiness_source": "lock_window",
+            "readiness_cached_at": None,
+            "readiness_stale": False,
+            "readiness_age_seconds": None,
+        }
 
     from app.core.data_quality import screening_readiness
 
     cache_key = screening_readiness_cache_key(request.app.state.duck, request.app.state.sqlite)
     if cache_key:
-        cached = load_screening_readiness_cache(request.app.state.sqlite, cache_key)
-        if cached is None:
+        entry = load_screening_readiness_entry(
+            request.app.state.sqlite, cache_key,
+        )
+        freshness = _freshness_payload(entry, source="cache")
+        if entry is None:
             # 同指纹的过期决策采用 stale-while-revalidate：请求立即返回，
             # 后台单飞刷新，避免每 10 分钟让用户卡一次 20s+ 全库核对。
-            cached = load_screening_readiness_cache(
+            # 缺陷 B（2026-11-18）：stale 有硬上限（2×TTL），超过
+            # `load_screening_readiness_entry` 直接返回 None → 落到下面的
+            # 同步重算；宁可这一次慢，也不对外假绿。
+            entry = load_screening_readiness_entry(
                 request.app.state.sqlite, cache_key, allow_stale=True,
             )
-            if cached is not None:
+            freshness = _freshness_payload(entry, source="stale_cache")
+            if entry is not None:
                 ensure_screening_readiness_refresh(
                     request.app.state.duck, request.app.state.sqlite, cache_key,
                 )
-        if cached is not None:
+        if entry is not None:
+            cached = entry.get("decision") or {}
             request.app.state.startup_readiness = cached.get("readiness") or {}
             if not cached.get("ready"):
                 raise HTTPException(status_code=409, detail={
@@ -240,10 +291,11 @@ def _require_current_screenability(request: Request) -> dict:
                     ),
                     "readiness": cached.get("readiness") or {},
                     "warning_codes": cached.get("warning_codes") or [],
+                    **freshness,
                 })
             # 缓存的是 screening_readiness 决策，不是 gate 形状；调用方
             # run_screening 需要 lock_active/data_as_of 两个键。
-            return {"lock_active": False, "data_as_of": None}
+            return {"lock_active": False, "data_as_of": None, **freshness}
     decision = screening_readiness(request.app.state.duck, request.app.state.sqlite)
     if cache_key:
         store_screening_readiness_cache(request.app.state.sqlite, cache_key, decision)
@@ -258,8 +310,19 @@ def _require_current_screenability(request: Request) -> dict:
             "reason_code": reason_code,
             "readiness": decision["readiness"],
             "warning_codes": decision["warning_codes"],
+            "readiness_source": "computed",
+            "readiness_cached_at": None,
+            "readiness_stale": False,
+            "readiness_age_seconds": None,
         })
-    return {"lock_active": False, "data_as_of": None}
+    return {
+        "lock_active": False,
+        "data_as_of": None,
+        "readiness_source": "computed",
+        "readiness_cached_at": None,
+        "readiness_stale": False,
+        "readiness_age_seconds": None,
+    }
 
 
 class ScreeningRequest(BaseModel):
@@ -335,7 +398,7 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
             min_listing_years=req.min_listing_years,
             strict_only=req.strict_only,
             locked_indicators=locked_indicators,
-            # 字段级遮蔽（reports/122 §2.3 J9）：显式传入与 /indicators 同源的
+            # 字段级遮蔽（依据 S3 §2.3 J9）：显式传入与 /indicators 同源的
             # 不可信字段清单，命中即 409 —— 绝不静默返回空结果集。
             masked_fields=_masked_indicator_fields(request),
         )
@@ -353,7 +416,7 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
         "include_suspended": req.include_suspended,
         "min_listing_years": req.min_listing_years,
     }
-    # reports/79 方案 A: 更新窗口内的快照口径运行必须随结果持久化标注
+    # 依据 S1 方案 A: 更新窗口内的快照口径运行必须随结果持久化标注
     auto_update = bool(gate["lock_active"])
     data_as_of = gate.get("data_as_of")
     confidence_summary = {
@@ -380,6 +443,11 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
     result["run_id"] = run_id
     result["auto_update_in_progress"] = auto_update
     result["data_as_of"] = data_as_of
+    # 缺陷 B：把门禁用的就绪决策新鲜度一并返回（新增字段，向后兼容）。
+    result["readiness_source"] = gate.get("readiness_source")
+    result["readiness_cached_at"] = gate.get("readiness_cached_at")
+    result["readiness_stale"] = bool(gate.get("readiness_stale", False))
+    result["readiness_age_seconds"] = gate.get("readiness_age_seconds")
     return {
         **result,
         "results": [
@@ -518,7 +586,7 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="saved result rule provenance is missing")
     summary = json.loads(record.get("confidence_summary") or "{}")
     truncated = bool(summary.get("truncated"))
-    # reports/79 方案 A: 更新窗口内保存的结果导出时显式标注快照口径
+    # 依据 S1 方案 A: 更新窗口内保存的结果导出时显式标注快照口径
     auto_update = bool(summary.get("auto_update_in_progress"))
     data_as_of = summary.get("data_as_of")
 
@@ -637,7 +705,7 @@ def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], col
             "source": "published_override", "value": override["override_value"],
             "reason": override["reason"], "published_at": override["created_at"],
         }
-    # P3（reports/68）+ P3-2/P3-9 修复（reports/73）：利差列附加曲线对齐溯源
+    # P3（依据 S4）+ P3-2/P3-9 修复（依据 S5）：利差列附加曲线对齐溯源
     # （期限/曲线日/日期差）。对齐锚点用快照实际计算用的最新价格日
     # （latest_price_date，缺省回退 _report_date），且批量一次查询。
     spread_fields = [field for field in audit_names if field.startswith("div_yield_spread_")]
@@ -759,12 +827,12 @@ def _dsl_indicator_unit(expression: dict[str, Any]) -> str:
         return "plain"
 
 
-# 扩展指标域动态放行阈值（reports/119 P0）：最新报告期覆盖率低于此值的字段不暴露，
+# 扩展指标域动态放行阈值（依据 S6 P0）：最新报告期覆盖率低于此值的字段不暴露，
 # 避免「能选中但筛不出结果」。50% 的取值理由：结构性可空的字段（亏损公司杠杆、
 # 无分红公司股息率）实测仍在 73%~85%，真正的"整族缺失"是 0.1%~2% 这种量级。
 _EXTENDED_MIN_COVERAGE_PCT = 50.0
 
-# 技术三列门禁（2026-11-16，reports/131 §9.2 P0-5）：阈值与字段集直接复用
+# 技术三列门禁（2026-11-16，依据 S2 §9.2 P0-5）：阈值与字段集直接复用
 # asset_health 的 `technical_coverage_threshold()` / `TECHNICAL_COVERAGE_FIELDS`。
 # 体检说不可信，指标列表就必须以 unavailable(reason=not_available_for_latest_period)
 # 隐藏，不能一边报警一边让用户选；也不能再保留本地副本（R1 单一真源）。
@@ -845,7 +913,7 @@ def _extended_field_coverage(request: Request) -> dict[str, float]:
 
 
 def _masked_indicator_fields(request: Request) -> list[str]:
-    """当前"不可信"字段清单（字段级遮蔽，reports/122 §2.3 J9）。
+    """当前"不可信"字段清单（字段级遮蔽，依据 S3 §2.3 J9）。
 
     来源是 `data_quality.indicator_trust()["masked_fields"]` —— 与只读端点
     （个股详情/自选）同一份判定，避免"筛选说能用、详情说不可信"的分裂。
@@ -861,7 +929,7 @@ DEPRECATED_LABELS: dict[str, str] = {
 
 
 def _deprecated_indicator_names() -> dict[str, str]:
-    """废弃字段 → 替代字段（reports/122 §2.6 J5，dividend_yield）。"""
+    """废弃字段 → 替代字段（依据 S3 §2.6 J5，dividend_yield）。"""
     from app.core.screening.engine import DEPRECATED_COLUMNS
 
     return dict(DEPRECATED_COLUMNS)
@@ -871,7 +939,7 @@ def _deprecated_indicator_names() -> dict[str, str]:
 def list_available_indicators(request: Request) -> dict:
     """列出可用的筛选指标
 
-    2026-11-14（reports/122 §2.6 J5 / §2.3 J9）两条过滤规则：
+    2026-11-14（依据 S3 §2.6 J5 / §2.3 J9）两条过滤规则：
     1. **废弃字段不再列出**（`dividend_yield` → `ttm_dividend_yield`）：
        旧列分母用 `now()`，同一天不同时刻结果不同，不可复现；
     2. **当前不可信字段移到 `unavailable`**（reason=`masked_untrusted`）：
@@ -892,7 +960,7 @@ def list_available_indicators(request: Request) -> dict:
 
     indicators: list[dict] = []
     unavailable: list[dict] = []
-    # reports/131 §9.2 P0-5：技术三列最新期覆盖率 < 95% → 进 unavailable。
+    # 依据 S2 §9.2 P0-5：技术三列最新期覆盖率 < 95% → 进 unavailable。
     # 只影响这三个字段，绝不触碰下面的信任门禁（masked_untrusted/deprecated）。
     technical_coverage = _technical_field_coverage(request)
     technical_limit = technical_coverage_threshold()
@@ -930,7 +998,7 @@ def list_available_indicators(request: Request) -> dict:
         })
     # 扩展指标域（schema v25）：按**当前报告期实测覆盖率**动态放行。
     #
-    # 2026-11-14（reports/119 P0）：`EXTENDED_SCREENING_READY` 是 2026-09-19 的静态
+    # 2026-11-14（依据 S6 P0）：`EXTENDED_SCREENING_READY` 是 2026-09-19 的静态
     # 结论，此后 ext 冻结在 2026-06-30、报告期与快照错位一个月 → 55 项全部变成
     # 「能选中但永远筛不出结果」的死条件。静态白名单挡不住这种腐化，改为运行时判定：
     # 覆盖率 < 阈值（默认 50%）的字段**不暴露**，并用 `unavailable` 说明原因。
@@ -954,6 +1022,10 @@ def list_available_indicators(request: Request) -> dict:
             "domain": "extended",
             "coverage_pct": None if coverage is None else round(coverage, 2),
         })
+    # 2026-11-16：派生排名/分位字段必须带 `derived_from` 标记。
+    # 每个可排名指标派生 6 条（全市场排名/分位 + 证监会一级排名/分位 + 二级排名/分位），
+    # ROCE 三个窗口因此膨胀成 3 + 3×6 = **21 条**，用户在下拉里根本找不到主指标。
+    # 标记后前端默认折叠，只在打开「显示派生字段」时列出。
     for col in sorted(RANKABLE_INDICATORS):
         for suffix, label in (
             ("market_rank", "全市场排名"), ("market_percentile", "全市场分位"),
@@ -962,8 +1034,15 @@ def list_available_indicators(request: Request) -> dict:
             ("industry_rank", "证监会一级排名"), ("industry_percentile", "证监会一级分位"),
             ("sw2_rank", "证监会二级排名"), ("sw2_percentile", "证监会二级分位"),
         ):
-            indicators.append({"name": f"{col}_{suffix}", "rankable": False, "label": f"{col} {label}", "unit": "plain"})
-    # P4 历史研究统计字段（已发布统计域，reports/68 §6）
+            indicators.append({
+                "name": f"{col}_{suffix}",
+                "rankable": False,
+                "label": f"{col} {label}",
+                "unit": "plain",
+                "derived_from": col,
+                "derived_kind": "rank",
+            })
+    # P4 历史研究统计字段（已发布统计域，依据 S4 §6）
     for metric in STAT_METRICS:
         for window in STAT_WINDOWS:
             for method in STAT_METHODS:
@@ -975,6 +1054,8 @@ def list_available_indicators(request: Request) -> dict:
                     "metric": metric,
                     "window_years": window,
                     "method": method,
+                    "derived_from": metric,
+                    "derived_kind": "stat",
                 })
     # 已发布 DSL：只暴露每个名称的最新版本，并支持中文名/单位元数据。
     # 单位用于筛选输入/展示；percent 表示值本身是百分数（如 150.69 → 150.69%，
@@ -1017,13 +1098,13 @@ def list_available_indicators(request: Request) -> dict:
                 "domain": entry.get("domain") or "snapshot",
                 "reason": "deprecated",
                 "replaced_by": deprecated[name],
-                # 2026-11-15（reports/124）：两列存储量纲不同（小数 vs 百分数，实测恰
+                # 2026-11-15（依据 S7）：两列存储量纲不同（小数 vs 百分数，实测恰
                 # 100 倍）。不给倍数，用户把 >0.03 换成 >0.03 会命中几乎全市场。
                 "scale_factor": scale,
                 # 2026-11-16：这里原本写「字段已废弃（口径不可复现）」，措辞是错的——
                 # `dividend_yield` 与 `ttm_dividend_yield` 是**同一个指标**（实测 3,735 行
                 # 中位绝对差 0.0000），差别只是存储单位（小数 0.0121 vs 百分数 1.2118）。
-                # 说成"废弃"会让用户以为数算错了；真相是单位口径统一（reports/80 簇 A/B/C）。
+                # 说成"废弃"会让用户以为数算错了；真相是单位口径统一（依据 S8 簇 A/B/C）。
                 "message": (
                     f"同一指标的单位已统一，请改用「{DEPRECATED_LABELS.get(deprecated[name], deprecated[name])}」"
                     + (f"（字段 {deprecated[name]}）：旧列存小数（0.0121 = 1.21%），"
@@ -1089,7 +1170,7 @@ def save_rule(req: SaveRuleRequest, request: Request) -> dict:
     if len(json.dumps(req.rule_json, ensure_ascii=False).encode("utf-8")) > MAX_RULE_JSON_BYTES:
         raise HTTPException(status_code=400, detail="rule JSON is too large")
 
-    # reports/76 P3-4: 保存时即校验字段名（与 engine.run 运行时校验同口径），
+    # 依据 S9 P3-4: 保存时即校验字段名（与 engine.run 运行时校验同口径），
     # 未知字段/排序/结果列在保存时拒绝，不再拖到运行筛选才报错。
     from app.core.screening.engine import validate_rule_fields
 

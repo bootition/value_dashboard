@@ -84,7 +84,14 @@ def test_gate_no_lock_returns_pass_through(
 
     gate = _require_current_screenability(request)
 
-    assert gate == {"lock_active": False, "data_as_of": None}
+    # 缺陷 B（2026-11-18）：门禁返回体新增了就绪决策的新鲜度字段
+    # (readiness_source/cached_at/stale/age_seconds)，调用方才分得清"刚算的
+    # 就绪"和"过期决策"。故这里只断言请求链依赖的两个键 + 新鲜度语义，
+    # 不再做整字典相等断言（那不是契约，加兼容字段不该让它变红）。
+    assert gate["lock_active"] is False
+    assert gate["data_as_of"] is None
+    assert gate["readiness_source"] in {"cache", "stale_cache", "computed"}
+    assert gate["readiness_stale"] is False
 
 
 def test_gate_update_lock_returns_snapshot_data_as_of(
@@ -204,7 +211,12 @@ def test_gate_uses_fresh_persisted_readiness_cache_with_gate_shape(
     gate = _require_current_screenability(_FakeRequest(duckdb_store, sqlite_store))
 
     # 缓存的是 screening_readiness 决策；请求链需要 gate 形状。
-    assert gate == {"lock_active": False, "data_as_of": None}
+    assert gate["lock_active"] is False
+    assert gate["data_as_of"] is None
+    # 缺陷 B：命中未过期缓存时必须能看出"这条决策是什么时候算的"。
+    assert gate["readiness_source"] == "cache"
+    assert gate["readiness_stale"] is False
+    assert gate["readiness_cached_at"] is not None
 
 
 def test_gate_raises_409_from_fresh_persisted_not_ready_cache(
@@ -257,29 +269,65 @@ def test_warm_screening_readiness_cache_round_trip(
 def test_screening_readiness_cache_stale_while_revalidate_read(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
+    """TTL 过期后的 stale 读取：**硬上限内允许，超过即拒绝**。
+
+    ⚠️ 本用例原先断言"updated_at=2000-01-01 的决策在 allow_stale=True 时照样
+    返回"，等于把这个真缺陷写成了期望行为（缺陷 B，2026-11-18 实测确认）：
+    TTL 沦为"刷新触发器"而不是正确性边界，叠加后台 worker 遇写锁直接 return、
+    异常只 logger.warning 不落盘，过期决策可被无限期当作"已就绪"返回。
+    修复后 stale 有硬上限 ``SCREENING_READINESS_STALE_MAX_AGE_SECONDS``（2×TTL），
+    因此这里改为分别断言"硬上限内允许 stale / 超过硬上限必须拒绝"，并顺带
+    锁定 ``load_screening_readiness_entry`` 暴露的 ``stale``/``cached_at``。
+    行为变更的完整背景见 ``test_screening_cache_freshness.py`` 的模块 docstring。
+    """
     import json as _json
+    from datetime import UTC, datetime, timedelta
 
     from app.core.data_quality import (
         SCREENING_READINESS_CACHE_KEY,
+        SCREENING_READINESS_CACHE_TTL_SECONDS,
+        SCREENING_READINESS_STALE_MAX_AGE_SECONDS,
         load_screening_readiness_cache,
+        load_screening_readiness_entry,
         screening_readiness_cache_key,
     )
 
     fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store) or "test-fp"
     decision = {"ready": True, "readiness": {"ready": True}, "warning_codes": []}
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
-                                         updated_at=excluded.updated_at""",
-        [SCREENING_READINESS_CACHE_KEY, _json.dumps({
-            "fingerprint": fingerprint,
-            "decision": decision,
-            "updated_at": "2000-01-01T00:00:00+00:00",
-        }), "2000-01-01T00:00:00+00:00"],
-    )
 
+    def _store(age_seconds: int) -> None:
+        updated = (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+        sqlite_store.execute(
+            """INSERT INTO data_refresh_state (key, value, updated_at)
+               VALUES (?, ?, ?)
+               ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                             updated_at=excluded.updated_at""",
+            [SCREENING_READINESS_CACHE_KEY, _json.dumps({
+                "fingerprint": fingerprint,
+                "decision": decision,
+                "updated_at": updated,
+            }), updated],
+        )
+
+    # 1) 过期但在硬上限内：禁止 fresh 读取，允许 stale 读取（保持原设计的
+    #    stale-while-revalidate），并且必须能自证"这是旧的"。
+    _store(SCREENING_READINESS_CACHE_TTL_SECONDS + 60)
     assert load_screening_readiness_cache(sqlite_store, fingerprint) is None
     assert load_screening_readiness_cache(
         sqlite_store, fingerprint, allow_stale=True,
     ) == decision
+    entry = load_screening_readiness_entry(sqlite_store, fingerprint, allow_stale=True)
+    assert entry is not None
+    assert entry["decision"] == decision
+    assert entry["stale"] is True
+    assert entry["cached_at"] is not None
+
+    # 2) 超过硬上限：fresh 与 stale 都必须拒绝（改为同步重算/不可用）。
+    _store(SCREENING_READINESS_STALE_MAX_AGE_SECONDS + 60)
+    assert load_screening_readiness_cache(sqlite_store, fingerprint) is None
+    assert load_screening_readiness_cache(
+        sqlite_store, fingerprint, allow_stale=True,
+    ) is None
+    assert load_screening_readiness_entry(
+        sqlite_store, fingerprint, allow_stale=True,
+    ) is None
