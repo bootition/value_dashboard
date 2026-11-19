@@ -302,7 +302,7 @@ describe('EtfStrategyPanel 模态开关（拆分前置快照）', () => {
   })
 
   it('重新开始先取预览再弹确认框，未确认前不发 POST', async () => {
-    const wrapper = await mountPanel()
+    await mountPanel()
     await clickButton('重新开始')
     expect(bodyText()).toContain('确认清空')
     expect(bodyText()).toContain('etf_meta=3')
@@ -548,7 +548,7 @@ describe('EtfStrategyPanel 详情模态的降级（两路并发）', () => {
       return Promise.resolve({ data: {} })
     })
 
-    const wrapper = await mountPanel()
+    await mountPanel()
     await clickButton('详情')
 
     const text = bodyText()

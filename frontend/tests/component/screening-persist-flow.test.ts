@@ -18,10 +18,44 @@ vi.mock('axios', () => {
 
 import axios from 'axios'
 import type { Mock } from 'vitest'
+import type { ScreeningResult } from '../../src/types/screening.ts'
 
-const RESULT_ROWS = [
-  { stock_code: '600519', name: '贵州茅台', pe_ttm: 10, roe: 0.3, debt_ratio: 0.2 },
-  { stock_code: '000858', name: '五粮液', pe_ttm: 8, roe: 0.25, debt_ratio: 0.3 },
+// 2026-11-23：显式按 ScreeningResult 标注（面板 props 就是 readonly ScreeningResult[]）。
+// 旧 fixture 只写了 5 列，缺 exchange/csrc_l1/latest_close/pb_mrq/gross_margin/
+// net_margin/revenue_yoy/dividend_yield —— 这些是后端 /api/screening/run 每条结果必带的
+// 元数据列（types/screening.ts ScreeningResultKnownFields），缺了会让「列 → 中文本地化」
+// 的覆盖被高估。这里补齐为一条完整的结果行，取值只求类型正确、不参与任何断言。
+const RESULT_ROWS: ScreeningResult[] = [
+  {
+    stock_code: '600519',
+    name: '贵州茅台',
+    exchange: 'SSE',
+    csrc_l1: '制造业',
+    latest_close: 1680.5,
+    pe_ttm: 10,
+    pb_mrq: 8.2,
+    roe: 0.3,
+    gross_margin: 0.91,
+    net_margin: 0.52,
+    debt_ratio: 0.2,
+    revenue_yoy: 0.15,
+    dividend_yield: 0.023,
+  },
+  {
+    stock_code: '000858',
+    name: '五粮液',
+    exchange: 'SZSE',
+    csrc_l1: '制造业',
+    latest_close: 140.2,
+    pe_ttm: 8,
+    pb_mrq: 4.1,
+    roe: 0.25,
+    gross_margin: 0.75,
+    net_margin: 0.36,
+    debt_ratio: 0.3,
+    revenue_yoy: 0.1,
+    dividend_yield: 0.031,
+  },
 ]
 
 function mountPanel() {
@@ -38,7 +72,7 @@ function mountPanel() {
           warningCodes: [],
           untrustedFields: [],
           qualityStatus: 'available',
-          ruleTree: { id: 'r1', logic: 'AND', rules: [{ field: 'pe_ttm', op: '>', value: 0 }] },
+          ruleTree: { id: 'r1', logic: 'AND', rules: [{ id: 'c1', field: 'pe_ttm', op: '>', value: 0 }] },
           runId: 'run-1',
           ruleId: 1,
            ruleVersion: 1,

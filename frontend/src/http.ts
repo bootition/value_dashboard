@@ -1,4 +1,4 @@
-import axios, { type InternalAxiosRequestConfig } from 'axios'
+import axios, { type AxiosInstance, type InternalAxiosRequestConfig } from 'axios'
 
 // 2026-08-14 红队 P2-21：全局请求超时兜底——此前未设置，服务端卡住
 // （如单写者读退避 ~28s 触顶或挂起）时前端请求可无限挂起、按钮永久
@@ -18,12 +18,18 @@ interface RetryableConfig extends InternalAxiosRequestConfig {
 
 const WRITE_METHODS = new Set(['post', 'put', 'patch', 'delete'])
 
-async function obtainWriteToken(client: typeof axios): Promise<string> {
+async function obtainWriteToken(client: AxiosInstance): Promise<string> {
   const response = await client.get<{ write_token: string }>('/api/session')
   return response.data.write_token
 }
 
-export function installWriteTokenInterceptor(client: typeof axios = axios): void {
+// 2026-11-23（前端测试债 1）：入参由 `typeof axios`（= AxiosStatic）放宽到 `AxiosInstance`。
+// 函数体只用到 `interceptors.*` / `get` / `request`，这些都在 AxiosInstance 上；而 AxiosStatic
+// 额外带的是模块级静态成员（Cancel / CancelToken / Axios / AxiosError / getAdapter …），
+// axios.create() 造出来的实例天然没有。原注解让「给独立实例装拦截器」在类型上不成立，
+// 组件测试只能靠 `as` 硬转。AxiosStatic extends AxiosInstance，故 main.ts 的
+// `installWriteTokenInterceptor()` 调用不变。纯类型注解改动，无运行时行为变化。
+export function installWriteTokenInterceptor(client: AxiosInstance = axios): void {
   client.interceptors.request.use(async (request) => {
     const method = request.method?.toLowerCase() ?? ''
     if (!WRITE_METHODS.has(method)) return request

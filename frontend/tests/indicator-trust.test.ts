@@ -23,18 +23,23 @@ const blockedTrustFixture: IndicatorTrust = {
   warning_codes: ['LINEAGE_INVALID'],
   untrusted_all: true,
   untrusted_fields: [],
+  masked_fields: [],
 }
 
 const dividendTrustFixture: IndicatorTrust = {
   warning_codes: ['DIVIDEND_DATES_UNVERIFIED'],
   untrusted_all: false,
   untrusted_fields: ['consecutive_div_years', 'dividend_yield', 'dps', 'payout_ratio'],
+  // 字段级遮蔽清单（data-quality.ts IndicatorTrust.masked_fields）：
+  // 分红域走 untrusted_fields，字段级遮蔽这次没有命中，故为空。
+  masked_fields: [],
 }
 
 const cleanTrustFixture: IndicatorTrust = {
   warning_codes: [],
   untrusted_all: false,
   untrusted_fields: [],
+  masked_fields: [],
 }
 
 const indicatorsResponseFixture: IndicatorsResponse = {

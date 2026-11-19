@@ -38,8 +38,11 @@ const stockInfoFixture: StockInfo = {
   listing_date: '2001-08-27',
   is_st: false,
   is_suspended: false,
-  sw_level1: '食品饮料',
-  sw_level2: '白酒',
+  // 2026-11-23：`GET /api/stock/{code}/info` 的 SELECT 只有 csrc_l1/csrc_l2
+  // （app/web/api/stock_detail.py::get_stock_info），没有 sw_level1/sw_level2；
+  // 旧 fixture 里的申万字段是凭空加的，改成接口真实返回的证监会行业。
+  csrc_l1: '制造业',
+  csrc_l2: '酒、饮料和精制茶制造业',
   latest_close: 1680.5,
   latest_price_date: '2025-01-20',
 }
@@ -76,6 +79,10 @@ const growthFixture: GrowthIndicators = {
   revenue_cagr5: { value: 0.13, historical_capable: true },
   net_profit_cagr3: { value: 0.17, historical_capable: true },
   net_profit_cagr5: { value: 0.16, historical_capable: true },
+  // 扣非 CAGR 后端一直在算（app/core/indicators/calculator.py: deducted_profit_cagr3/5），
+  // fixture 落后于 GrowthIndicators 才缺这两格。
+  deducted_profit_cagr3: { value: 0.15, historical_capable: true },
+  deducted_profit_cagr5: { value: 0.14, historical_capable: true },
 }
 
 const safetyFixture: SafetyIndicators = {
