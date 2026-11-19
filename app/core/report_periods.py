@@ -73,6 +73,23 @@ def canonical_year_start_target(value: object) -> date | None:
     return date(parsed.year - 1, 12, 31)
 
 
+def annual_period_for(value: object) -> date | None:
+    """任意日期 → 它**当时能看到的最新年度报告期**（`YYYY-12-31`）。
+
+    用途（reports/146 §6）：`company_employee_history` 的东财批次把
+    `report_date` 写成了**抓取当天**（2026-08-25 ~ 2026-09-17），
+    导致 `2025-12-31` 这一期整期缺失 —— 而抓取时能看到的最新年度就是 FY2025。
+
+    规则：取 `<= 该日期` 的最近一个 12-31。
+    """
+    parsed = _as_date(value)
+    if parsed is None:
+        return None
+    if parsed.month == 12 and parsed.day == 31:
+        return parsed
+    return date(parsed.year - 1, 12, 31)
+
+
 def _as_date(value: object) -> date | None:
     if isinstance(value, datetime):
         return value.date()
