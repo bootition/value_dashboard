@@ -801,6 +801,11 @@ def _attach_result_report_dates(duck: Any, results: list[dict[str, Any]]) -> Non
 _DSL_INDICATOR_LABELS = {
     "dividend_financing_ratio": "分红融资比",
 }
+
+#: 未登记中文名的复合指标在界面上必须至少带一个中文标识（PRD §12.1
+#: 「用户可见指标名称必须全中文」）。只显示 `dividend_financing_ratio (DSL v2)`
+#: 这类纯英文标签是不可接受的，所以缺中文名时统一加「复合指标」前缀。
+_DSL_FALLBACK_PREFIX = "复合指标"
 # 历史白名单：发布/校验时代 AST 之前创建的指标只能靠硬编码兜底。
 #
 # ⚠️ 这是单位事实的**第三份副本**（前两份：`app/core/screening/field_units.py` 与
@@ -935,6 +940,22 @@ def _masked_indicator_fields(request: Request) -> list[str]:
     任何异常都退化为空清单（宁可少遮一个字段，也不让指标列表整个 500）。
     """
     return list(_indicator_trust_or_empty(request)["masked_fields"])
+
+
+def _dsl_indicator_label(expression: dict) -> str:
+    """复合指标的用户可见标签：中文名优先，无中文名时加「复合指标」前缀。
+
+    PRD §12.1 要求「用户可见指标名称必须全中文（内建指标、排名组合、
+    标准化财务表字段），稳定字段名仅用于 API/规则/导出」。
+    之前这里直接拼 `{name} (DSL v{n})`，界面上就出现纯英文标签
+    （用户 2026-11-16 反馈：`dividend_financing_ratio (DSL v2)`）。
+    """
+    name = str(expression.get("name") or "")
+    version = expression.get("version")
+    chinese = _DSL_INDICATOR_LABELS.get(name)
+    if chinese:
+        return f"{chinese}（复合指标 v{version}）"
+    return f"{_DSL_FALLBACK_PREFIX} {name}（v{version}）"
 
 
 #: 废弃字段替代者的中文名（只用于提示文案，避免让用户看到纯英文列名）。
@@ -1086,7 +1107,7 @@ def list_available_indicators(request: Request) -> dict:
             "name": expression["name"], "rankable": True,
             # 2026-09-02：筛选条件保留英文表达式名（规则 JSON 稳定口径）；
             # display_name 供复合指标管理/详情等非筛选界面显示中文名。
-            "label": f"{expression['name']} (DSL v{expression['version']})",
+            "label": _dsl_indicator_label(expression),
             "display_name": _DSL_INDICATOR_LABELS.get(expression["name"], expression["name"]),
             "unit": _dsl_indicator_unit(expression),
             "version": expression["version"], "content_hash": expression["content_hash"],

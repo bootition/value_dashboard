@@ -290,3 +290,46 @@ def test_rank_mode_works_in_conditions_sort_and_columns(
 
     assert [r["stock_code"] for r in rows] == ["000002", "000003", "000001"]
     assert [r["pe_ttm_market_rank"] for r in rows] == [1, 2, 3]
+
+
+# ─── 用户可见指标名必须含中文（PRD §12.1）────────────────────────────────
+
+
+def test_dsl_indicator_label_is_chinese_first() -> None:
+    """复合指标的界面标签必须以中文开头。
+
+    用户 2026-11-16 反馈：下拉里出现纯英文的
+    `dividend_financing_ratio (DSL v2)`。PRD §12.1 要求
+    「用户可见指标名称必须全中文，稳定字段名仅用于 API/规则/导出」。
+    """
+    from app.web.api.screening import _dsl_indicator_label
+
+    known = _dsl_indicator_label({"name": "dividend_financing_ratio", "version": 2})
+    assert known.startswith("分红融资比"), known
+    assert "v2" in known
+
+    # 未登记中文名的复合指标也必须带中文标识，不能整条英文
+    unknown = _dsl_indicator_label({"name": "my_custom_factor", "version": 3})
+    assert any("\u4e00" <= ch <= "\u9fff" for ch in unknown), unknown
+    assert unknown.startswith("复合指标"), unknown
+
+
+def test_every_indicator_label_contains_chinese() -> None:
+    """所有下发的指标标签都必须含中文（不变量，防止再退化成纯英文）。
+
+    统计域/排名字段靠模板拼中文（`STAT_METRIC_LABELS`、
+    `RANK_MODE_LABELS`），这里只校验**后端直接给 label 的**那些：
+    复合指标（DSL）是最容易漏的一类。
+    """
+    from app.web.api.screening import _dsl_indicator_label
+
+    samples = [
+        {"name": "dividend_financing_ratio", "version": 1},
+        {"name": "dividend_financing_ratio", "version": 2},
+        {"name": "some_unknown_dsl_name", "version": 7},
+    ]
+    for expression in samples:
+        label = _dsl_indicator_label(expression)
+        assert any("\u4e00" <= ch <= "\u9fff" for ch in label), (
+            f"复合指标标签无中文：{label}"
+        )

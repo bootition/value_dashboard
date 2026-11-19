@@ -224,10 +224,14 @@ const readinessCopy = computed(() => {
 
 function indicatorLabelOf(i: ScreeningIndicator): string {
   const meta = i as ScreeningIndicator & { label?: string; display_name?: string; dsl?: boolean }
-  // 复合指标在筛选条件里保留英文表达式名（规则 JSON 稳定口径）；
-  // 内置字段仍显示中文+英文缩写。管理界面用 display_name 显示中文。
+  // 2026-11-16：DSL 复合指标曾经直接显示 `dividend_financing_ratio (DSL v2)`
+  // 这种纯英文标签（PRD §12.1 要求用户可见名称必须全中文）。
+  // 现在优先级：display_name（后端给的权威中文名）→ FIELD_LABELS/STATEMENT 映射
+  // → 后端 label → 字段名兜底。
   const baseLabel = meta.dsl
-    ? (meta.label ?? meta.name)
+    ? (meta.display_name && meta.display_name !== i.name
+        ? `${meta.display_name}`
+        : fieldDisplayName(i.name, meta.label ?? i.name))
     : fieldDisplayName(i.name, meta.label)
   return fieldOptionLabel(i.name, baseLabel)
 }

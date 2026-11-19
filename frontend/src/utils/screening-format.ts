@@ -198,6 +198,17 @@ const STATEMENT_PREFIX_LABELS: Readonly<Record<string, string>> = {
 
 /** 资产负债表字段（标准化财务，与后端 STATEMENT_FIELDS 对齐）。 */
 const BALANCE_FIELD_LABELS: Readonly<Record<string, string>> = {
+  // 2026-11-16：以下字段之前缺中文名，界面会显示「资产负债表 · accumulated_depreciation」
+  // 这种半英文标签，不符合 PRD §12.1「用户可见指标名称必须全中文」。
+  accumulated_depreciation: '累计折旧',
+  fixed_assets_gross: '固定资产原值',
+  investment_property: '投资性房地产',
+  development_expenditure: '开发支出',
+  other_current_assets: '其他流动资产',
+  receivables_financing: '应收款项融资',
+  long_term_payables: '长期应付款',
+  advance_from_customers: '预收款项及合同负债（合并口径）',
+  advance_from_customers_ratio: '客户占款率（预收+合同负债）/总资产',
   monetary_funds: '货币资金',
   trading_financial_assets: '交易性金融资产',
   notes_receivable: '应收票据',
@@ -246,6 +257,9 @@ const BALANCE_FIELD_LABELS: Readonly<Record<string, string>> = {
 
 /** 利润表字段。 */
 const INCOME_FIELD_LABELS: Readonly<Record<string, string>> = {
+  // 跨年符号断点归一后的派生口径（reports/131 P0-7）：损失一律为正。
+  impairment_loss_positive: '资产减值损失（损失为正）',
+  credit_impairment_loss_positive: '信用减值损失（损失为正）',
   total_operating_revenue: '营业总收入',
   revenue: '营业收入',
   total_operating_cost: '营业总成本',
