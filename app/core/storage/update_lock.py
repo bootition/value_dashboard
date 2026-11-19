@@ -191,8 +191,17 @@ def any_write_lock_active(database_path: Path) -> bool:
     return update_lock_active(database_path) or duckdb_write_lock_active(database_path)
 
 
-@contextlib.contextmanager
 def _lease_path(database_path: Path) -> Path:
+    """租约文件路径（**纯路径计算，不是上下文管理器**）。
+
+    2026-11-19 修：这里曾被误加 `@contextlib.contextmanager`，于是
+    `_lease_path(x)` 返回的是 `_GeneratorContextManager` 而不是 Path，
+    下游 `lease.parent.mkdir(...)` 直接 `AttributeError` ——
+    而它被 `exclusive_update` 调用，导致**每一个** `with exclusive_update(...)`
+    的调用方全部崩掉（CLI 的 `data auto-update run` / 各类重建命令 / ROCE 重建）。
+    同一次提交里 `exclusive_update` 本身又**漏了**同一装饰器（纯生成器被当上下文管理器用），
+    两个错误互相掩盖：修掉其中一个才会暴露另一个。
+    """
     return database_path.parent / ".locks" / "db-write.lease.json"
 
 
@@ -242,6 +251,7 @@ def _clear_session_lease(database_path: Path) -> None:
         return
 
 
+@contextlib.contextmanager
 def exclusive_update(
     database_path: Path,
     *,
