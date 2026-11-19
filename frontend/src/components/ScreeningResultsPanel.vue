@@ -190,7 +190,9 @@ const tableColumns = computed(() => {
   for (const key of selectedColumns.value) {
     if (key in firstRow) {
       cols.push({
-        title: columnOptions.value.find(o => o.value === key)?.label || key,
+        // 2026-11-16（reports/148）：列不在下拉里（旧规则/未知列）时不能露英文表头
+        title: columnOptions.value.find(o => o.value === key)?.label
+          || fieldTitleWithUnit(key, fieldDisplayName(key, key)),
         key,
         sorter: 'default',
         // L1-7: 固定代码列，滚动时始终可见
@@ -286,6 +288,11 @@ async function exportCSV() {
   try {
     const resp = await axios.post<ScreeningExportResponse>('/api/screening/export_csv', {
       result_id: savedResultId.value,
+      // 2026-11-16（reports/148）：CSV 表头要中文（PRD §12.1）。
+      // 中文名解析只在 `fieldDisplayName()` 一处实现，后端不重复词表。
+      column_labels: Object.fromEntries(
+        selectedColumns.value.map((key: string) => [key, fieldDisplayName(key, key)]),
+      ),
     })
     const blob = new Blob(['\ufeff' + resp.data.csv], { type: 'text/csv;charset=utf-8;bom' })
     const url = URL.createObjectURL(blob)
@@ -365,7 +372,7 @@ async function addToWatchlist() {
           <n-tag v-for="code in warningCodes" :key="code" size="small" type="warning">{{ code }}</n-tag>
         </n-space>
         <div v-if="hasUntrustedFields" style="margin-top: 8px; color: #b8860b">
-          受影响字段：{{ untrustedFields.join(', ') }}。已允许保存结果/导出 CSV/保存到自选；
+          受影响字段：{{ untrustedFields.map(f => fieldDisplayName(f, f)).join('、') }}。已允许保存结果/导出 CSV/保存到自选；
           但这些字段当前存在数据质量告警，请结合数据状态页谨慎使用。
         </div>
         <div v-if="qualityUnavailable" style="margin-top: 8px; color: #d03050">

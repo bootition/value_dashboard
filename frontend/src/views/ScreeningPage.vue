@@ -51,6 +51,20 @@ interface UnavailableIndicator {
   readonly replaced_by?: string
 }
 const unavailableIndicators = ref<readonly UnavailableIndicator[]>([])
+/**
+ * 「已改名」的字段（2026-11-16，reports/148）。
+ *
+ * `dividend_yield` 这类不是"本期没数据"，而是**同一指标换了列名**（→ TTM 口径）。
+ * 以前它混在「当前报告期不可用指标」里，用户看到的是"这里有 7 个指标不能用"，
+ * 其中 1 个其实只是改名 —— 语义错了，也让"不可用"这个列表永远清不空。
+ * 现在两者分开：真不可用才进上面的列表，改名的单独一行提示。
+ */
+const renamedIndicators = computed(() =>
+  unavailableIndicators.value.filter((item) => item.reason === 'deprecated'),
+)
+const trulyUnavailableIndicators = computed(() =>
+  unavailableIndicators.value.filter((item) => item.reason !== 'deprecated'),
+)
 const loading = ref(false)
 const results = ref<readonly ScreeningResult[]>([])
 const executionTime = ref(0)
@@ -307,6 +321,11 @@ const indicatorOptions = computed(() =>
 )
 
 /** 某字段的参数规格（如 CAGR 年数）；无参数返回 null。 */
+/** 结果列多选的中文兜底（reports/148）：旧规则里的排名字段不在下拉里时不能露英文。 */
+function fallbackResultColumnOption(value: string): { label: string; value: string } {
+  return { label: fieldDisplayName(String(value), String(value)), value: String(value) }
+}
+
 function paramSpecOf(field: string) {
   return indicators.value.find((i) => i.name === field)?.param_spec ?? null
 }
@@ -619,7 +638,12 @@ async function restoreDraft() {
       syncEditorSnapshot()
       return
     }
-    if (draft.conditions) Object.assign(ruleTree, draft.conditions)
+    if (draft.conditions) {
+      // 草稿同样可能存着方案 C 之前的旧排名字段名 → 载入时迁移（reports/148）
+      const draftConditions = cloneScreeningRule(draft.conditions)
+      migrateLegacyRankFields(draftConditions)
+      Object.assign(ruleTree, draftConditions)
+    }
     if (draft.base_pool) Object.assign(basePool, draft.base_pool)
     if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
     if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
@@ -692,6 +716,46 @@ function deleteSelectedRule(): void {
   })
 }
 
+/**
+ * 把历史规则/草稿里的**旧排名字段名**迁移成新写法（2026-11-16，reports/148）。
+ *
+ * 方案 C 之后 `/indicators` 不再下发 930 个 `*_rank` 扁平字段，改由条件级
+ * `rank_mode` 表达。但库里的草稿/旧规则仍可能存着 `roce_10y_median_industry_rank`
+ * 这类名字 —— 下拉里找不到 → naive-ui 兜底渲染原值 → 界面显示英文。
+ *
+ * 迁移规则：`<base>_<suffix>` 且 `base` 在当前指标清单里、`suffix` 属于当前
+ * `rank_modes` → 改写成 `{ field: base, rank_mode: suffix }`，语义完全等价
+ * （后端 `expand_rank_modes` 会展开回同一个字段名）。
+ * `sw1_*` 已不在 rank_modes 里 → **不迁移**，靠 `fieldDisplayName` 的中文兜底显示。
+ */
+function migrateLegacyRankFields(node: unknown): void {
+  if (Array.isArray(node)) {
+    for (const item of node) migrateLegacyRankFields(item)
+    return
+  }
+  if (!node || typeof node !== 'object') return
+  const record = node as Record<string, unknown>
+  const field = record.field
+  if (typeof field === 'string' && !record.rank_mode) {
+    const modeValues = new Set(rankModes.value.map((item) => String(item.value)))
+    for (const mode of modeValues) {
+      const suffix = `_${mode}`
+      if (!field.endsWith(suffix)) continue
+      const base = field.slice(0, -suffix.length)
+      if (base && indicators.value.some((item) => item.name === base)) {
+        record.field = base
+        record.rank_mode = mode
+      }
+      break
+    }
+  }
+  for (const value of Object.values(record)) {
+    if (value !== record.field && (Array.isArray(value) || (value && typeof value === 'object'))) {
+      migrateLegacyRankFields(value)
+    }
+  }
+}
+
 function applyLoadedRule(rule: SavedRule) {
   // 先重置编辑区再覆盖，确保目标规则不含 conditions 时不残留旧内容。
   // 必须深拷贝：Object.assign(ruleTree, saved.conditions) 会把 conditions.rules
@@ -703,6 +767,7 @@ function applyLoadedRule(rule: SavedRule) {
       ? conditions
       : { logic: 'AND', rules: [] },
   )
+  migrateLegacyRankFields(clone)
   ruleTree.logic = 'AND'
   ruleTree.rules.splice(0, ruleTree.rules.length)
   Object.assign(ruleTree, clone)
@@ -885,14 +950,14 @@ onUnmounted(() => {
           </div>
           <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
           <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" :rank-modes="rankModes" :rankable-of="rankableOf" :param-spec-of="paramSpecOf" @warn="(msg: string) => message.warning(msg)" />
-          <div v-if="unavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
+          <div v-if="trulyUnavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
             <div class="unavailable-indicators-heading">
-              <strong>当前报告期不可用指标（{{ unavailableIndicators.length }}）</strong>
+              <strong>当前报告期不可用指标（{{ trulyUnavailableIndicators.length }}）</strong>
               <span>这些字段已从可选指标中移除；悬停查看原因与覆盖率。</span>
             </div>
             <div class="unavailable-indicators-list">
               <n-tooltip
-                v-for="item in unavailableIndicators"
+                v-for="item in trulyUnavailableIndicators"
                 :key="unavailableKey(item)"
                 trigger="hover"
                 placement="top"
@@ -913,6 +978,15 @@ onUnmounted(() => {
               </n-tooltip>
             </div>
           </div>
+          <!-- 已改名的字段单独提示，不再混进「不可用」计数（reports/148） -->
+          <p v-if="renamedIndicators.length > 0" class="renamed-indicators-note">
+            已改名（同一指标换了列名，不影响使用）：
+            <template v-for="(item, index) in renamedIndicators" :key="unavailableKey(item)">
+              <span v-if="index > 0">、</span>
+              <b>{{ unavailableLabel(item) }}</b>
+              <span v-if="item.replaced_by"> → {{ fieldDisplayName(item.replaced_by) }}</span>
+            </template>
+          </p>
         </div>
 
         <div class="screening-section">
@@ -920,6 +994,7 @@ onUnmounted(() => {
           <n-select
             v-model:value="selectedResultColumns"
             :options="resultColumnOptions"
+            :fallback-option="fallbackResultColumnOption"
             multiple
             filterable
             clearable
@@ -1032,6 +1107,8 @@ onUnmounted(() => {
 .unavailable-indicators-heading { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
 .unavailable-indicators-heading strong { color: #8a958d; font-size: 11px; }
 .unavailable-indicators-heading span { color: #a3ada6; font-size: 9px; }
+.renamed-indicators-note { margin: 9px 0 0; color: #8b978f; font-size: 10px; }
+.renamed-indicators-note b { color: #6d7b72; font-weight: 600; }
 .unavailable-indicators-list { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 9px; }
 .unavailable-chip { display: inline-flex; align-items: baseline; gap: 7px; padding: 4px 9px; border-radius: 999px; background: #f0f2f0; color: #9aa69f; cursor: help; font-size: 10px; opacity: .85; }
 .unavailable-chip-name { text-decoration: line-through; text-decoration-color: #c3ccc5; }

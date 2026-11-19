@@ -182,6 +182,12 @@ const RANK_SUFFIX_LABELS: Readonly<Record<string, string>> = {
   market_percentile: '全市场分位',
   industry_rank: '证监会一级排名',
   industry_percentile: '证监会一级分位',
+  // 2026-11-16（reports/148）：后端 RANK_SUFFIXES 有 8 条，前端只有 6 条 ——
+  // 漏了 sw1_*，导致 `pe_ttm_sw1_rank` 这类历史字段解析失败、界面显示纯英文。
+  // 注意：sw1_* 已不在 RANK_MODES（方案 C 只留 6 个口径），所以它们**只可能**
+  // 出现在历史规则/草稿里，靠这两条标签兜底显示中文即可，不提供新建入口。
+  sw1_rank: '申万一级排名',
+  sw1_percentile: '申万一级分位',
   sw2_rank: '证监会二级排名',
   sw2_percentile: '证监会二级分位',
 }

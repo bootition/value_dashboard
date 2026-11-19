@@ -92,7 +92,8 @@ const columns: DataTableColumns<DslExpression> = [
           displayNameOf(row.name),
           h('span', { class: 'dsl-version-badge' }, ` v${row.version}`),
         ]),
-        h('small', null, row.name),
+        // 机器标识（供 CLI/DSL 引用）保留，但用等宽小字明确标注，避免被当成名称
+        h('small', { class: 'dsl-code-id' }, `标识 ${row.name}`),
       ]),
   },
   { title: '表达式', key: 'expression', ellipsis: { tooltip: true } },
@@ -307,7 +308,7 @@ loadExpressions()
               {{ previewMeta.expanded_expression }}
             </n-descriptions-item>
             <n-descriptions-item v-if="previewMeta.dependencies?.length" label="依赖指标">
-              <n-tag v-for="dep in previewMeta.dependencies" :key="dep" size="small" style="margin-right: 4px;">{{ dep }}</n-tag>
+              <n-tag v-for="dep in previewMeta.dependencies" :key="dep" size="small" style="margin-right: 4px;">{{ displayNameOf(dep) }}</n-tag>
             </n-descriptions-item>
             <n-descriptions-item label="可用于历史序列">
               <n-tag :type="previewMeta.historical_capable ? 'success' : 'warning'" size="small">

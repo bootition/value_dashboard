@@ -3,7 +3,7 @@ import { computed, h } from 'vue'
 import { NEllipsis, NInputNumber, NSelect } from 'naive-ui'
 import type { VNode } from 'vue'
 import type { IndicatorOption, ScreeningRuleCondition } from '../types/screening.ts'
-import { fieldInputUnit } from '../utils/screening-format.ts'
+import { fieldDisplayName, fieldInputUnit } from '../utils/screening-format.ts'
 
 const props = defineProps<{
   condition: ScreeningRuleCondition
@@ -138,6 +138,22 @@ function onParamChange(value: string | number | null): void {
   emit('update:param', spec.key, value === null ? undefined : value)
 }
 
+/**
+ * 下拉值的**中文兜底**（2026-11-16，reports/148）。
+ *
+ * naive-ui 的 `n-select` 在 value 不在 options 里时会合成一个
+ * `label = String(value)` 的兜底选项（`Select.mjs` wrappedFallbackOptionRef），
+ * 于是历史规则/草稿里的旧字段名（如 `roce_10y_median_industry_rank`）
+ * 会**原样显示英文**并被截成「roce_10y_median_i…」。
+ *
+ * `render-label` 拿到的就是这个兜底选项，它不经过 `fieldDisplayName()`。
+ * 用 `fallback-option` 把标签换成中文解析结果，任何"字段还在、但已不在下拉里"
+ * 的情况都不会再露出英文。
+ */
+function fallbackIndicatorOption(value: string): { label: string; value: string } {
+  return { label: fieldDisplayName(String(value), String(value)), value }
+}
+
 async function onRankModeChange(value: string): Promise<void> {
   emit('update:rankMode', value === '' ? undefined : value)
 }
@@ -159,6 +175,7 @@ function toggleFieldComparison(): void {
         size="small"
         filterable
         :render-label="renderIndicatorLabel"
+        :fallback-option="fallbackIndicatorOption"
         aria-label="观察指标"
         @update:value="emit('update:field', $event)"
       />
@@ -209,7 +226,17 @@ function toggleFieldComparison(): void {
     </div>
     <label v-else-if="compareByField && hasValue" class="condition-control condition-control--value">
       <span>比较指标</span>
-      <n-select :consistent-menu-width="false" :value="condition.right_field" :options="indicatorOptions" size="small" filterable :render-label="renderIndicatorLabel" aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
+      <n-select
+        :consistent-menu-width="false"
+        :fallback-option="fallbackIndicatorOption"
+        :value="condition.right_field"
+        :options="indicatorOptions"
+        size="small"
+        filterable
+        :render-label="renderIndicatorLabel"
+        aria-label="比较指标"
+        @update:value="emit('update:rightField', $event)"
+      />
     </label>
     <label v-else-if="hasValue" class="condition-control condition-control--value">
       <span>目标值{{ inputHint ? '（' + inputHint + '）' : '' }}</span>

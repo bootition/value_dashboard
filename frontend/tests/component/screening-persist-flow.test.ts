@@ -108,7 +108,20 @@ describe('ScreeningResultsPanel 持久化流程（PRD §12 SC14/SC16/SC17）', (
     // 2) 导出 CSV（依赖已保存的 result_id）
     await wrapper.find('#export-btn').trigger('click')
     await flushPromises()
-    expect(post).toHaveBeenCalledWith('/api/screening/export_csv', { result_id: 7 })
+    // 2026-11-16（reports/148）：导出请求额外携带 column_labels，
+    // 让 CSV 表头是中文（PRD §12.1）。断言放宽为「带上 result_id + 中文标签映射」。
+    const exportCall = post.mock.calls.find(([url]) => url === '/api/screening/export_csv')
+    expect(exportCall).toBeTruthy()
+    const exportPayload = exportCall![1] as {
+      result_id: number
+      column_labels: Record<string, string>
+    }
+    expect(exportPayload.result_id).toBe(7)
+    // 每个列都要有中文标签，且不能退化成原始英文键
+    for (const [key, label] of Object.entries(exportPayload.column_labels)) {
+      expect(label, `${key} 的表头标签为空`).toBeTruthy()
+      expect(label).toMatch(/[一-鿿]/)
+    }
 
     // 3) 加入自选（使用筛选结果中的股票代码）
     await wrapper.find('#watchlist-btn').trigger('click')

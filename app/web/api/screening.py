@@ -75,9 +75,14 @@ _CSV_META_COLUMNS = [
 
 
 def _csv_export_header(
-    columns: list[str], truncated: bool, auto_update: bool = False,
+    columns: list[str],
+    truncated: bool,
+    auto_update: bool = False,
+    column_labels: dict[str, str] | None = None,
 ) -> list[str]:
-    header = columns + _CSV_META_COLUMNS
+    labels = column_labels or {}
+    # 有中文标签就用中文（PRD §12.1）；缺标签时保留原始列名，绝不静默丢掉列。
+    header = [labels.get(column, column) for column in columns] + _CSV_META_COLUMNS
     if truncated:
         # P1-C: 截断结果必须在导出的 CSV 中显式标注，禁止静默丢尾
         header.append("_truncated")
@@ -350,6 +355,10 @@ class SaveResultRequest(BaseModel):
 class ExportCsvRequest(BaseModel):
     """导出 CSV 请求"""
     result_id: int
+    # 2026-11-16（reports/148）：CSV 表头必须是中文（PRD §12.1）。
+    # 字段名→中文名的解析在前端（`fieldDisplayName` 是唯一实现），
+    # 后端不重复实现一份词表，只接受前端传上来的标签映射。
+    column_labels: dict[str, str] | None = None
 
 
 class AddToWatchlistRequest(BaseModel):
@@ -614,7 +623,7 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         provenance = _field_provenance(request.app.state.duck, request.app.state.sqlite, results, columns)
     except ValueError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
-    writer.writerow(_csv_export_header(columns, truncated, auto_update))
+    writer.writerow(_csv_export_header(columns, truncated, auto_update, req.column_labels))
 
     # 数据行
     for index, row in enumerate(results):
