@@ -162,3 +162,83 @@ ROCE 一个指标就占 21 条（3 窗口 × 6 + 3 主指标）——用户搜 "
   的独立研究统计域，有版本与样本元数据要求，与横截面排名不是一回事，本次未动。
 - 建议后续把「排名口径」也支持到**排序**与**结果列**（目前仅条件支持），
   否则用户仍无法按排名排序。
+
+---
+
+## 9. 补齐排序与结果列（2026-11-16 追加）
+
+用户看到 §8「遗留」后要求「全部都改了」。实测后发现**后端三项其实都支持**，
+缺的只是前端入口——因为上一轮把 930 个排名字段从下拉里删掉后，
+**排序**和**结果列**这两个下拉复用的是同一个指标列表，于是也失去了排名选项。
+
+| 能力 | 后端（改造前） | 前端入口（改造前） | 改造后 |
+|---|---|---|---|
+| ① 条件用排名 | ✅ | ✅ | ✅ |
+| ② 排序用排名 | ✅（`expand_rank_modes` 递归到了 `sort`） | ❌ 选不出 | ✅ 排序行新增「排名口径」下拉 |
+| ③ 结果列显示排名 | ✅（旧字段名可作列） | ❌ 选不出 | ✅ 结果列支持 `{field, rank_mode}` |
+
+### 9.1 后端
+
+```python
+def normalize_columns(columns_spec) -> list[str]:
+    """["stock_code", {"field": "pe_ttm", "rank_mode": "market_rank"}]
+       → ["stock_code", "pe_ttm_market_rank"]"""
+```
+
+- `run()` 与 `validate_rule_fields()` 都走它（防「能跑不能存」）
+- `ScreeningRequest.columns` 类型放宽为 `list[str | dict[str, Any]]`
+- 校验顺序：**先查 `field` 再展开**，否则 `{"rank_mode": ...}` 会先报
+  「rank_mode 只能用在带 field 的条件上」，对结果列来说语义不清
+
+### 9.2 前端
+
+- **排序行**：字段旁边新增「排名口径」下拉（仅 `rankable` 字段显示，首项「原始值」）
+- **结果列**：为每个可排名指标追加 6 个「`基础指标` · `口径`」选项；
+  用合成取值 `字段::rank::口径` 编码（多选下拉里同名字段无法区分），
+  提交时 `decodeResultColumn()` 还原成 `{field, rank_mode}`，
+  载入草稿/已保存规则时 `encodeResultColumn()` 反向编码
+
+### 9.3 端到端验收（正式库实测）
+
+```json
+{"conditions": {"logic": "AND", "rules": [
+   {"field": "pe_ttm", "op": ">", "value": 0, "rank_mode": "market_rank"},
+   {"field": "pe_ttm", "op": "<=", "value": 500}]},
+ "sort": [{"field": "pe_ttm", "rank_mode": "market_rank", "direction": "asc"}],
+ "columns": ["stock_code", "pe_ttm",
+             {"field": "pe_ttm", "rank_mode": "market_rank"},
+             {"field": "pe_ttm", "rank_mode": "market_percentile"}]}
+```
+
+```
+命中 3565
+000656  PE=0.25  全市场排名=1  分位=0.0000
+600841  PE=2.00  全市场排名=2  分位=0.0002
+002582  PE=2.12  全市场排名=3  分位=0.0004
+603726  PE=3.33  全市场排名=4  分位=0.0006
+```
+
+三项联用正确：条件筛出有 PE 的、按排名升序、结果里同时显示排名和分位。
+
+### 9.4 测试
+
+`test_screening_rank_mode.py` 从 10 条扩到 **14 条**，新增：
+
+| 用例 | 钉死的契约 |
+|---|---|
+| `test_normalize_columns_accepts_plain_and_rank_objects` | 两种列写法都能归一化 |
+| `test_normalize_columns_rejects_bad_shapes` | 非数组/非字段名/缺 field 都拒绝 |
+| `test_validate_rule_fields_accepts_rank_sort_and_columns` | 排序+结果列的排名口径可保存 |
+| **`test_rank_mode_works_in_conditions_sort_and_columns`** | **三项联用**：排名字段名、排序顺序、排名值 1/2/3 全部正确 |
+
+另外更新 `test_research_path_integrity.py` 里「指标列表必须暴露 `pe_ttm_industry_rank`」
+的旧断言 → 改为「不得暴露排名字段 + `rank_modes` 里必须有证监会一/二级排名且标签不含"申万"」，
+保留了 P1-D 的原始意图。
+
+### 9.5 门禁
+
+- `test_screening_rank_mode.py` **14 passed**（新增 4 条）
+- 11 个相关回归文件 **192 passed**
+- 前端 lint + build 全绿、screening 组件测试 7 passed
+- 唯一失败 `test_stock_detail_indicators_expose_annual_yoy_caliber`（404）来自
+  并行会话对 `stock_detail.py` 的 `router → secure_router` 重构，与本改动无关

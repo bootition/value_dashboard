@@ -233,13 +233,20 @@ def test_indicator_list_exposes_csrc_ranks_without_sw_labels(
     indicators = data["indicators"]
     names = [item["name"] for item in indicators]
 
-    assert "pe_ttm_industry_rank" in names
-    assert "pe_ttm_industry_percentile" in names
+    # 方案 C（2026-11-16, reports/142）：排名不再作为扁平字段下发，
+    # 改为条件级 `rank_mode`，能力通过 `rank_modes` 清单暴露。
+    # 本条断言改为：①不再出现排名字段；②口径清单里有一级/二级排名，
+    # 且标签是「证监会」而不是「申万」（P1-D 原始意图）。
+    assert "pe_ttm_industry_rank" not in names
+    assert "pe_ttm_industry_percentile" not in names
     assert not any("申万" in (item.get("label") or "") for item in indicators)
-    industry_label = next(
-        item.get("label") for item in indicators if item["name"] == "pe_ttm_industry_rank"
-    )
-    assert "证监会一级排名" in industry_label
+
+    modes = {item["value"]: item["label"] for item in data["rank_modes"]}
+    assert modes["industry_rank"] == "证监会一级排名"
+    assert modes["industry_percentile"] == "证监会一级分位"
+    assert modes["sw2_rank"] == "证监会二级排名"
+    assert modes["sw2_percentile"] == "证监会二级分位"
+    assert not any("申万" in label for label in modes.values())
 
 
 def test_industry_rank_is_partitioned_by_csrc_classification(

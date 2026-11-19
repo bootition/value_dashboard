@@ -334,7 +334,9 @@ class ScreeningRequest(BaseModel):
     include_suspended: bool = False
     min_listing_years: int = 1
     strict_only: bool = False
-    columns: list[str] | None = None
+    # 结果列支持 `{field, rank_mode}` 对象（方案 C，2026-11-16）：
+    # `["pe_ttm", {"field": "pe_ttm", "rank_mode": "market_rank"}]`
+    columns: list[str | dict[str, Any]] | None = None
 
 
 class SaveResultRequest(BaseModel):

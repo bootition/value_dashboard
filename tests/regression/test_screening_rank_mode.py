@@ -202,3 +202,91 @@ def test_indicators_endpoint_stops_emitting_rank_fields() -> None:
         "list_available_indicators 仍在为每个可排名指标铺排名字段"
     )
     assert "rank_modes" in source, "响应体必须下发 rank_modes 供前端渲染下拉"
+
+
+# ─── 排序与结果列也支持排名口径（方案 C 的另外两块，2026-11-16）────────────
+
+
+def test_normalize_columns_accepts_plain_and_rank_objects() -> None:
+    """结果列支持纯字段名与 `{field, rank_mode}` 两种写法。"""
+    from app.core.screening.engine import normalize_columns
+
+    out = normalize_columns([
+        "stock_code",
+        "pe_ttm",
+        {"field": "pe_ttm", "rank_mode": "market_rank"},
+        {"field": "roe", "rank_mode": "sw2_percentile"},
+    ])
+    assert out == [
+        "stock_code",
+        "pe_ttm",
+        "pe_ttm_market_rank",
+        "roe_sw2_percentile",
+    ]
+
+
+def test_normalize_columns_rejects_bad_shapes() -> None:
+    from app.core.screening.engine import normalize_columns
+
+    with pytest.raises(ValueError, match="结果列必须是数组"):
+        normalize_columns({"field": "pe_ttm"})
+    with pytest.raises(ValueError, match="必须是字段名或对象"):
+        normalize_columns([123])
+    with pytest.raises(ValueError, match="缺少 field"):
+        normalize_columns([{"rank_mode": "market_rank"}])
+
+
+def test_validate_rule_fields_accepts_rank_sort_and_columns() -> None:
+    """排序与结果列都带排名口径时，保存期校验必须通过（防"能跑不能存"）。"""
+    validate_rule_fields({
+        "conditions": {"logic": "AND", "rules": [
+            {"field": "pe_ttm", "op": ">", "value": 0},
+        ]},
+        "sort": [{"field": "pe_ttm", "rank_mode": "market_rank", "direction": "asc"}],
+        "columns": [
+            "stock_code",
+            {"field": "pe_ttm", "rank_mode": "market_rank"},
+        ],
+    })
+
+
+def test_rank_mode_works_in_conditions_sort_and_columns(
+    duckdb_store: DuckDBStore, sqlite_store: Any,
+) -> None:
+    """三项能力同时使用：条件筛排名、按排名排序、结果列显示排名。
+
+    这是方案 C 的完整验收：用户既要能"筛"，也要能"看"和"排"。
+    """
+    from app.core.screening.engine import ScreeningEngine
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta "
+        "(stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended, listing_date) "
+        "VALUES ('000001','A','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
+        "       ('000002','B','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
+        "       ('000003','C','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE))"
+    )
+    for code, pe in (("000001", 30.0), ("000002", 10.0), ("000003", 20.0)):
+        duckdb_store.write_query(
+            """INSERT INTO indicator_snapshot
+                   (stock_code, report_date, calculated_at, data_version, pe_ttm)
+               VALUES (?, CAST('2025-12-31' AS DATE), now(), 'fixture', ?)""",
+            [code, pe],
+        )
+
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+    rule = {
+        "conditions": {"logic": "AND", "rules": [
+            {"field": "pe_ttm", "op": ">", "value": 0, "rank_mode": "market_rank"},
+        ]},
+        # 按全市场 PE 排名升序：PE 最低的排第一
+        "sort": [{"field": "pe_ttm", "rank_mode": "market_rank", "direction": "asc"}],
+        "columns": [
+            "stock_code",
+            {"field": "pe_ttm", "rank_mode": "market_rank"},
+        ],
+    }
+    rows = engine.run(rule, min_listing_years=0)["results"]
+
+    assert [r["stock_code"] for r in rows] == ["000002", "000003", "000001"]
+    assert [r["pe_ttm_market_rank"] for r in rows] == [1, 2, 3]

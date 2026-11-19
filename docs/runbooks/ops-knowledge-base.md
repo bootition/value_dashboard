@@ -314,6 +314,7 @@ supersedes: null
 
 | I-RANKMODE | **横截面排名不再铺扁平字段，改为条件级 `rank_mode`**（方案 C，`reports/142`）：历史上为 155 个可排名指标各铺 6 条派生字段（`{指标}_market_rank` / `_industry_percentile` / `_sw2_rank` …）= **930 条**，与 DSL 的 `rank()/rank_industry()/percentile()/zscore()` 重复实现，且把主指标淹没（ROCE 独占 21 条）。现在条件里写 `{"field":"pe_ttm","rank_mode":"sw2_rank"}`，后端 `expand_rank_modes()` 在**入口**展开成 `pe_ttm_sw2_rank` 复用既有 SQL。**旧字段名写法仍兼容**。新增派生字段前先自问：DSL 函数是不是已经能表达了？ | `reports/142` §4 |
 | I-PCTUNIT | **`*_market_percentile` 存的是 0–1 小数，单位必须声明为 ratio 而不是 plain**：声明成 plain 时用户输入 90（想要前 10%）会命中 0 只且**不报错**。已实测：`>=0.9` → 399 只，`>=90` → 0 只 | `reports/142` §3 |
+| I-RANKCOL | **排名口径必须三处同时可用：条件 / 排序 / 结果列**（`reports/142` §9）。只做条件会让用户"能筛不能看、能筛不能排"——筛出"行业内 PE 前 3"却无法在表格里显示它是第几。结果列用 `{"field": "pe_ttm", "rank_mode": "market_rank"}` 对象写法，由 `normalize_columns()` 归一化成 `pe_ttm_market_rank`；`run()` 与 `validate_rule_fields()` 必须同源 | `reports/142` §9 |
 | I-EXPANDREC | **入口改写函数必须递归所有 dict/list 值，不能只认 `rules` 键**：`validate_rule_fields()` 的入参是 `{"conditions": {...}}`，只递归 `rules` 会让 `conditions` 里的新字段绕过展开与校验——非法值不报错、合法值只是碰巧通过，典型的「能跑不能存 / 能存不能跑」（CB-09 同型） | `reports/142` §6 |
 
 ---

@@ -44,6 +44,16 @@ export type RankMode =
   | 'sw2_rank'
   | 'sw2_percentile'
 
+/** 结果展示列：纯字段名，或「字段 + 排名口径」（方案 C，2026-11-16）。 */
+export type ResultColumn = string | { field: string; rank_mode: RankMode }
+
+/** 排序规则项：可选排名口径。 */
+export interface ScreeningSortSpec {
+  field: string
+  direction: 'asc' | 'desc'
+  rank_mode?: RankMode
+}
+
 export interface ScreeningRuleCondition {
   readonly id: string
   field: string

@@ -409,6 +409,45 @@ def expand_rank_modes(node: object) -> object:
     return out
 
 
+def normalize_columns(columns_spec: object) -> list[str]:
+    """把 `columns` 归一化成纯字段名列表。
+
+    支持两种写法（方案 C，2026-11-16）：
+
+        ["stock_code", "pe_ttm"]                                   # 纯字段
+        ["stock_code", {"field": "pe_ttm", "rank_mode": "market_rank"}]  # 排名列
+
+    第二种会展开成 `pe_ttm_market_rank`。结果集里的键就是展开后的字段名，
+    前端按 `RANK_SUFFIX_LABELS` 渲染中文表头。
+
+    为什么允许对象形状：结果展示列和筛选条件一样需要「排名口径」，
+    但列不是布尔条件、没有 op/value，所以用 `{field, rank_mode}` 而不是复用条件结构。
+    """
+    if columns_spec is None:
+        return []
+    if not isinstance(columns_spec, list):
+        raise ValueError("结果列必须是数组")
+    out: list[str] = []
+    for item in columns_spec:
+        if isinstance(item, str):
+            out.append(item)
+            continue
+        if not isinstance(item, dict):
+            raise ValueError(f"结果列必须是字段名或对象: {item!r}")
+        # 先校验 field 再展开，否则 `{"rank_mode": ...}` 会先在
+        # expand_rank_modes 里报"rank_mode 只能用在带 field 的条件上"，
+        # 对结果列来说语义不清。
+        raw_field = item.get("field")
+        if not isinstance(raw_field, str) or not raw_field:
+            raise ValueError(f"结果列对象缺少 field: {item!r}")
+        expanded = expand_rank_modes(dict(item))
+        field = expanded.get("field") if isinstance(expanded, dict) else None
+        if not isinstance(field, str) or not field:
+            raise ValueError(f"结果列对象缺少 field: {item!r}")
+        out.append(field)
+    return out
+
+
 RANK_SUFFIXES = (
     "_market_rank", "_market_percentile",
     "_industry_rank", "_industry_percentile",
@@ -550,7 +589,8 @@ class ScreeningEngine:
         #    之后全流程沿用既有的排名 SQL（无需第二套实现）。
         conditions = expand_rank_modes(rule.get("conditions", {}))
         sort_spec = expand_rank_modes(rule.get("sort", []))
-        columns_spec = rule.get("columns", [])
+        # 结果列支持 `{field, rank_mode}` 对象写法（方案 C 的第三块）
+        columns_spec = normalize_columns(rule.get("columns", []))
         if not isinstance(sort_spec, list) or any(
             not isinstance(item, dict) for item in sort_spec
         ):
@@ -1849,6 +1889,8 @@ def validate_rule_fields(rule: dict, custom_fields: set[str] = frozenset()) -> N
             raise ValueError(f"未知排序字段: {field}")
         if field is not None and not isinstance(field, str):
             raise ValueError(f"未知排序字段: {field}")
-    for column in rule.get("columns", []):
+    # 结果列支持 `{field, rank_mode}` 对象（方案 C 第三块）：
+    # 先归一化成字段名再校验，避免"能跑不能存"（CB-09）。
+    for column in normalize_columns(rule.get("columns", [])):
         if not _known(column):
             raise ValueError(f"未知结果字段: {column}")

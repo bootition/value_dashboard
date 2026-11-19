@@ -12,6 +12,8 @@ import type {
   ScreeningRunResponse,
   DataStatusSummaryResponse,
   WarningCode,
+  ResultColumn,
+  RankMode,
 } from '../types/screening.ts'
 import { cloneScreeningRule, generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
@@ -107,6 +109,8 @@ const ruleTree = reactive<ScreeningRuleNode>({
 interface SortRule {
   field: string
   direction: 'asc' | 'desc'
+  /** 排名口径（方案 C）：空 = 原始值 */
+  rank_mode?: string
 }
 
 const sortRules = ref<SortRule[]>([
@@ -147,16 +151,64 @@ const DEFAULT_RESULT_COLUMNS = [
 const selectedResultColumns = ref<string[]>([])
 const resultColumnOptions = computed(() => {
   const seen = new Set(RESULT_METADATA_COLUMNS.map(item => item.value))
-  const options = [...RESULT_METADATA_COLUMNS]
-  // indicatorOptions 展开派生字段时会返回分组结构，结果列只接受叶子选项
+  const options: Array<{ label: string; value: string }> = [...RESULT_METADATA_COLUMNS]
   for (const indicator of indicatorOptions.value) {
     if (!('value' in indicator)) continue
     if (seen.has(indicator.value)) continue
     seen.add(indicator.value)
     options.push({ label: indicator.label, value: indicator.value })
   }
+  // 方案 C（2026-11-16）：可排名指标额外提供 6 个「排名口径」列。
+  // 用一个合成值编码（`{field}::rank::{mode}`），避免 n-select 多选里
+  // 同名字段无法区分；提交给后端时再 decode 成 {field, rank_mode}。
+  for (const indicator of indicators.value) {
+    if (!indicator.rankable) continue
+    const base = fieldDisplayName(indicator.name, indicator.name)
+    for (const mode of rankModes.value) {
+      options.push({
+        label: `${base} · ${mode.label}`,
+        value: rankColumnValue(indicator.name, mode.value),
+      })
+    }
+  }
   return options
 })
+
+/** 结果列的合成取值：`字段::rank::口径`，与纯字段名互不冲突。 */
+const RANK_COLUMN_SEP = '::rank::'
+function rankColumnValue(field: string, mode: string): string {
+  return `${field}${RANK_COLUMN_SEP}${mode}`
+}
+/** 合成取值 → 后端列定义（纯字段名或 {field, rank_mode}）。 */
+function decodeResultColumn(value: string): ResultColumn {
+  const at = value.indexOf(RANK_COLUMN_SEP)
+  if (at < 0) return value
+  return {
+    field: value.slice(0, at),
+    rank_mode: value.slice(at + RANK_COLUMN_SEP.length) as RankMode,
+  }
+}
+/**
+ * 提交给后端的 columns（方案 C）：把合成取值解码成 `{field, rank_mode}`。
+ * 空选择时回落到默认列，保证结果表不会只剩代码。
+ */
+function selectedColumnsForRequest(): ResultColumn[] {
+  const picked = selectedResultColumns.value
+  if (picked.length === 0) return [...DEFAULT_RESULT_COLUMNS]
+  return picked.map(decodeResultColumn)
+}
+
+/** 后端列定义 → 合成取值（载入草稿/已保存规则时用）。 */
+function encodeResultColumn(column: ResultColumn): string {
+  if (typeof column === 'string') return column
+  return rankColumnValue(column.field, column.rank_mode)
+}
+
+/** 排序行的排名口径选项：首项「原始值」表示不带排名。 */
+const rankModeOptionsForSort = computed(() => [
+  { label: '原始值', value: '' },
+  ...rankModes.value,
+])
 
 const readinessCopy = computed(() => {
   if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
@@ -322,9 +374,7 @@ async function runScreening() {
       include_suspended: !basePool.exclude_suspended,
       min_listing_years: basePool.min_listing_years,
       strict_only: strictOnly.value,
-      columns: selectedResultColumns.value.length > 0
-        ? selectedResultColumns.value
-        : undefined,
+      columns: selectedColumnsForRequest(),
     }, {
       // 后端筛选门禁在无缓存冷启动时需执行一次全库数据质量核对；
       // 该请求单独放宽超时，避免默认 30s 把仍在正常计算的服务端请求
@@ -508,7 +558,7 @@ async function restoreDraft() {
     if (draft.base_pool) Object.assign(basePool, draft.base_pool)
     if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
     if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
-      selectedResultColumns.value = draft.result_columns
+      selectedResultColumns.value = draft.result_columns.map(encodeResultColumn)
     } else if (selectedResultColumns.value.length === 0) {
       selectedResultColumns.value = [...DEFAULT_RESULT_COLUMNS]
     }
@@ -531,9 +581,7 @@ async function persistRule(name: string): Promise<{ rule_id: number; version: nu
       rule_json: {
         conditions: ruleTree,
         sort: sortRules.value,
-        columns: selectedResultColumns.value.length > 0
-          ? [...selectedResultColumns.value]
-          : [...DEFAULT_RESULT_COLUMNS],
+        columns: selectedColumnsForRequest(),
       },
       locked_indicators: {},
       status: 'saved',
@@ -814,8 +862,16 @@ onUnmounted(() => {
           <n-space vertical>
             <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
               <span class="control-label">优先级 {{ index + 1 }}</span>
-              <n-select v-model:value="rule.field" :options="indicatorOptions" size="small" style="width: 220px" filterable />
-              <n-select v-model:value="rule.direction" :options="[{ label: '升序', value: 'asc' }, { label: '降序', value: 'desc' }]" size="small" style="width: 100px" />
+              <n-select v-model:value="rule.field" :options="indicatorOptions" size="small" style="width: 200px" filterable />
+              <n-select
+                v-if="rankableOf(rule.field)"
+                v-model:value="rule.rank_mode"
+                :options="rankModeOptionsForSort"
+                size="small"
+                style="width: 130px"
+                aria-label="排序排名口径"
+              />
+              <n-select v-model:value="rule.direction" :options="[{ label: '升序', value: 'asc' }, { label: '降序', value: 'desc' }]" size="small" style="width: 90px" />
               <n-button size="tiny" quaternary type="error" @click="removeSortRule(index)">删除</n-button>
             </n-space>
             <n-button size="tiny" @click="addSortRule">+ 添加排序规则</n-button>
