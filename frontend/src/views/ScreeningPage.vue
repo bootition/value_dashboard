@@ -317,7 +317,9 @@ const resultColumns = computed(() => {
 const UNAVAILABLE_REASON_LABELS: Readonly<Record<string, string>> = {
   not_available_for_latest_period: '当前报告期不可用（该期覆盖率不足）',
   masked_untrusted: '数据质量遮蔽（当前不可信）',
-  deprecated: '字段已废弃（口径不可复现）',
+  // 2026-11-16：旧列与新列是**同一个指标**，只是存储单位不同（小数 vs 百分数），
+  // 说成「口径不可复现」会让用户以为数算错了。
+  deprecated: '同一指标已统一单位，请改用新字段',
 }
 
 function unavailableName(item: UnavailableIndicator): string {
@@ -340,6 +342,12 @@ function unavailableCoverageText(item: UnavailableIndicator): string {
   if (typeof coverage === 'number' && Number.isFinite(coverage)) {
     return `覆盖率 ${fmtStoredPercent(coverage, 1)}`
   }
+  // 2026-11-16：废弃字段（如 dividend_yield → ttm_dividend_yield）与覆盖率无关，
+  // 以前统一写「覆盖率未知」，用户会以为"数据没采到"，其实是口径已统一。
+  if (item.reason === 'deprecated') {
+    return item.replaced_by ? `已改名为 ${fieldDisplayName(item.replaced_by)}` : '口径已统一'
+  }
+  if (item.reason === 'masked_untrusted') return '数据质量遮蔽'
   return '覆盖率未知'
 }
 
