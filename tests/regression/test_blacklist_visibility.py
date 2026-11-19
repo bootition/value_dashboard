@@ -382,3 +382,55 @@ def test_blacklist_does_not_touch_unrelated_codes(seeded: dict[str, Any]) -> Non
     add_stock(sqlite, BLOCKED, reason="不想看")
     assert blacklisted_code_set(sqlite) == frozenset({BLOCKED})
     assert not is_blacklisted(sqlite, VISIBLE)
+
+
+# ─── 7. 写入面：/api/blacklist/* 端点本身 ──────────────────────────
+
+
+def test_blacklist_api_round_trip(seeded: dict[str, Any]) -> None:
+    """详情页按钮实际走的路径：check → add → list → remove → check。"""
+    client = _api(seeded["duck"], seeded["sqlite"])
+
+    assert client.get(f"/api/blacklist/check/{BLOCKED}").json()["blacklisted"] is False
+    assert client.get("/api/blacklist/list").json() == {"items": [], "count": 0}
+
+    added = client.post("/api/blacklist/add", json={"stock_code": BLOCKED})
+    assert added.status_code == 200
+    assert added.json()["stock_code"] == BLOCKED
+
+    # 幂等：再加一次不报错
+    assert client.post("/api/blacklist/add", json={"stock_code": BLOCKED}).status_code == 200
+    assert client.get(f"/api/blacklist/check/{BLOCKED}").json()["blacklisted"] is True
+
+    listed = client.get("/api/blacklist/list").json()
+    assert listed["count"] == 1
+    assert listed["items"][0]["stock_code"] == BLOCKED
+    # 管理页要能辨认是哪只股票，所以名称/交易所来自 stock_meta
+    assert listed["items"][0]["name"] == BLOCKED_NAME
+    assert listed["items"][0]["exchange"] == "SZSE"
+
+    assert client.request(
+        "DELETE", "/api/blacklist/remove", json={"stock_code": BLOCKED}
+    ).status_code == 200
+    assert client.get(f"/api/blacklist/check/{BLOCKED}").json()["blacklisted"] is False
+    assert client.get("/api/blacklist/list").json()["count"] == 0
+
+
+def test_blacklist_api_rejects_unknown_and_malformed_codes(
+    seeded: dict[str, Any],
+) -> None:
+    client = _api(seeded["duck"], seeded["sqlite"])
+
+    # 格式不合法 → 400（不静默纠正成别的代码）
+    for bad in ("", "12345", "abcdef", "6005199"):
+        assert client.post("/api/blacklist/add", json={"stock_code": bad}).status_code == 400
+
+    # 格式合法但不在股票池 → 400（防止垃圾代码进黑名单把管理页塞满）
+    missing = client.post("/api/blacklist/add", json={"stock_code": "999999"})
+    assert missing.status_code == 400
+    assert "not found" in missing.json()["detail"]
+
+    # 重复移出 → 404，而不是假装成功
+    assert client.request(
+        "DELETE", "/api/blacklist/remove", json={"stock_code": BLOCKED}
+    ).status_code == 404
