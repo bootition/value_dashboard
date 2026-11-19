@@ -20,6 +20,7 @@ from app.core.storage.schema import DUCKDB_SCHEMA_V1, init_duckdb_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.update import IncrementalUpdater
 from app.web.api.stock_detail import get_kline
+from tests.support.seed import Seed
 
 
 class StaticAdapterManager:
@@ -136,12 +137,9 @@ def test_stock_refresh_preserves_known_optional_metadata(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """
-        INSERT INTO stock_meta
-            (stock_code, name, exchange, listing_date, is_st, is_suspended, csrc_l1)
-        VALUES ('600519', 'old', 'SSE', '2001-08-27', FALSE, TRUE, '食品饮料')
-        """
+    Seed(duckdb_store).stock(
+        "600519", name="old", exchange="SSE", listing_date="2001-08-27",
+        is_st=False, is_suspended=True, csrc_l1="食品饮料",
     )
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = StaticAdapterManager(
@@ -170,10 +168,9 @@ def test_stock_refresh_marks_absent_historical_codes_not_listed(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'current', 'SZSE', TRUE), ('000003', 'historical', 'SZSE', TRUE)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="current", exchange="SZSE", is_listed=True)
+    seed.stock("000003", name="historical", exchange="SZSE", is_listed=True)
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = StaticAdapterManager(
         {"stock_list": _result([{"stock_code": "000001", "name": "current", "exchange": "SZSE"}])}
@@ -196,10 +193,9 @@ def test_partial_stock_refresh_does_not_delist_an_unreturned_exchange(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'current', 'SZSE', TRUE), ('600001', 'sse', 'SSE', TRUE)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="current", exchange="SZSE", is_listed=True)
+    seed.stock("600001", name="sse", exchange="SSE", is_listed=True)
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = StaticAdapterManager(
         {"stock_list": _result([{"stock_code": "000001", "name": "current", "exchange": "SZSE"}])}
@@ -222,10 +218,8 @@ def test_listing_info_is_persisted_without_defaulting_unknown_status(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange)
-           VALUES ('600519', '贵州茅台', 'SSE')"""
-    )
+    # `is_st` / `is_suspended` 刻意不写：本用例钉的是"未知状态不得补默认值"。
+    Seed(duckdb_store).stock("600519", name="贵州茅台", exchange="SSE")
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = StaticAdapterManager(
         {
@@ -302,18 +296,10 @@ def test_non_bse_qfq_failure_preserves_old_prices_and_records_retry(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """
-        INSERT INTO stock_meta (stock_code, name, exchange, listing_date)
-        VALUES ('600519', '贵州茅台', 'SSE', '2001-08-27')
-        """
-    )
-    duckdb_store.write_query(
-        """
-        INSERT INTO price_daily_raw (stock_code, trade_date, close)
-        VALUES ('600519', '2025-01-02', 10.0)
-        """
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("600519", name="贵州茅台", exchange="SSE", listing_date="2001-08-27")
+    # 旧价格：qfq 拉取失败时必须原样留着。
+    seed.prices("600519", [("2025-01-02", 10.0)])
     backfiller = PriceBackfiller.__new__(PriceBackfiller)
     backfiller.adapter_mgr = StaticAdapterManager(
         {
@@ -350,36 +336,17 @@ def test_replenish_only_refetches_missing_current_stock_inputs(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-               VALUES ('000001', 'ready', 'SZSE', TRUE)"""
-        )
-        connection.execute(
-            """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_liabilities, total_equity)
-               VALUES ('000001', '2025-03-31', 100, 20, 80)"""
-        )
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-               VALUES ('000001', '2025-03-31', 100, 10)"""
-        )
-        connection.execute(
-            """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-               VALUES ('000001', '2025-03-31', 10)"""
-        )
-        connection.execute(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-               VALUES ('000001', '2025-03-31', 10)"""
-        )
-        connection.execute(
-            """INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-               VALUES ('000001', '2025-03-31', 10)"""
-        )
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000002', 'missing', 'SZSE', TRUE), ('000003', 'historical', 'SZSE', FALSE)"""
-    )
+    seed = Seed(duckdb_store)
+    # 000001：四类核心输入齐全 —— 补齐逻辑不该再回补它。
+    seed.stock("000001", name="ready", exchange="SZSE", is_listed=True)
+    seed.balance("000001", "2025-03-31", total_assets=100, total_liabilities=20, total_equity=80)
+    seed.income("000001", "2025-03-31", revenue=100, parent_net_profit=10)
+    seed.cash_flow("000001", "2025-03-31", cf_from_operating=10)
+    seed.prices("000001", [("2025-03-31", 10)], table="price_daily_raw")
+    seed.prices("000001", [("2025-03-31", 10)], table="price_daily_qfq")
+    # 000002 缺全部核心输入；000003 已退市（is_listed=False）不该被回补。
+    seed.stock("000002", name="missing", exchange="SZSE", is_listed=True)
+    seed.stock("000003", name="historical", exchange="SZSE", is_listed=False)
     updater = IncrementalUpdater.__new__(IncrementalUpdater)
     updater.duck = duckdb_store
     updater.sqlite = sqlite_store
@@ -413,18 +380,10 @@ def test_initializer_qfq_failure_preserves_old_prices_and_records_retry(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """
-        INSERT INTO stock_meta (stock_code, name, exchange, listing_date)
-        VALUES ('600519', '贵州茅台', 'SSE', '2001-08-27')
-        """
-    )
-    duckdb_store.write_query(
-        """
-        INSERT INTO price_daily_raw (stock_code, trade_date, close)
-        VALUES ('600519', '2025-01-02', 10.0)
-        """
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("600519", name="贵州茅台", exchange="SSE", listing_date="2001-08-27")
+    # 旧价格：qfq 拉取失败时必须原样留着。
+    seed.prices("600519", [("2025-01-02", 10.0)])
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = StaticAdapterManager(
         {
@@ -487,11 +446,8 @@ def test_initializer_rejects_financial_shell_rows(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """
-        INSERT INTO stock_meta (stock_code, name, exchange, listing_date)
-        VALUES ('600519', '贵州茅台', 'SSE', '2001-08-27')
-        """
+    Seed(duckdb_store).stock(
+        "600519", name="贵州茅台", exchange="SSE", listing_date="2001-08-27",
     )
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = StaticAdapterManager(

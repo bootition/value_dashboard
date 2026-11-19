@@ -39,6 +39,10 @@ from app.core.supplement import (
     SPECS,
     SupplementFetcher,
 )
+from tests.support.seed import Seed
+
+# `stock_meta` 与主链三表（`_seed_stock` / `_seed_trio`）仍内联：这几张表在本文件
+# 各只出现一次，没有重复样板可收敛。
 
 FETCH_TIME = datetime(2026, 11, 17, 12, 0, 0)
 LATEST = "2026-09-30"
@@ -109,24 +113,21 @@ def _seed_trio(duck, code: str = "600519", report_date: str = INCIDENT_PERIOD) -
 
 
 def _seed_old_source_rows(duck, code: str = "600519") -> None:
-    """上一轮写入的本源行（两张表各一行，都有真实值）。"""
-    duck.write_query(
-        """INSERT INTO cash_flow_indirect
-               (stock_code, report_date, report_type, net_profit,
-                source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 'semi_annual', ?,
-                   'eastmoney_f10', TIMESTAMP '2026-06-01 00:00:00',
-                   'oldhash', 'strict', 'oldbatch')""",
-        [code, INCIDENT_PERIOD, _OLD_INDIRECT_NET_PROFIT],
+    """上一轮写入的本源行（两张表各一行，都有真实值）。
+
+    provenance 五件套逐字写死成"上一批"（`oldhash`/`oldbatch`）：`replace_source_rows`
+    的删旧/写新判断就看 `source` 与批号，这与工厂的默认值**不是**同一件事。
+    """
+    seed = Seed(duck)
+    seed.cash_indirect(
+        code, INCIDENT_PERIOD, report_type="semi_annual", net_profit=_OLD_INDIRECT_NET_PROFIT,
+        source="eastmoney_f10", fetch_time="2026-06-01 00:00:00",
+        raw_response_hash="oldhash", confidence="strict", batch_id="oldbatch",
     )
-    duck.write_query(
-        """INSERT INTO cash_flow_activity
-               (stock_code, report_date, report_type, capex,
-                source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 'semi_annual', ?,
-                   'eastmoney_f10', TIMESTAMP '2026-06-01 00:00:00',
-                   'oldhash', 'strict', 'oldbatch')""",
-        [code, INCIDENT_PERIOD, _OLD_ACTIVITY_CAPEX],
+    seed.cash_activity(
+        code, INCIDENT_PERIOD, report_type="semi_annual", capex=_OLD_ACTIVITY_CAPEX,
+        source="eastmoney_f10", fetch_time="2026-06-01 00:00:00",
+        raw_response_hash="oldhash", confidence="strict", batch_id="oldbatch",
     )
 
 
@@ -422,21 +423,16 @@ def _seed_cashflow_supplement_rows(
     duck, code: str, report_date: str, *, net_profit: float = 1.0, capex: float = 1.0,
 ) -> None:
     """两张补充表各一行：有行、但结构性缺失列（如未确认投资损失）恒为 NULL。"""
-    duck.write_query(
-        """INSERT INTO cash_flow_indirect
-               (stock_code, report_date, report_type, net_profit,
-                source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 'annual', ?,
-                   'eastmoney_f10', TIMESTAMP '2026-11-17 00:00:00', 'h', 'strict', 'b')""",
-        [code, report_date, net_profit],
+    seed = Seed(duck)
+    seed.cash_indirect(
+        code, report_date, report_type="annual", net_profit=net_profit,
+        source="eastmoney_f10", fetch_time="2026-11-17 00:00:00",
+        raw_response_hash="h", confidence="strict", batch_id="b",
     )
-    duck.write_query(
-        """INSERT INTO cash_flow_activity
-               (stock_code, report_date, report_type, capex,
-                source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 'annual', ?,
-                   'eastmoney_f10', TIMESTAMP '2026-11-17 00:00:00', 'h', 'strict', 'b')""",
-        [code, report_date, capex],
+    seed.cash_activity(
+        code, report_date, report_type="annual", capex=capex,
+        source="eastmoney_f10", fetch_time="2026-11-17 00:00:00",
+        raw_response_hash="h", confidence="strict", batch_id="b",
     )
 
 
@@ -518,18 +514,15 @@ OTHER_SEMI = "2026-06-30"
 
 def _seed_other_periods(duck, code: str = "600519") -> None:
     """同源、同股票、**非本轮请求期次**的旧真实行（年报 + 半年报各一行）。"""
+    seed = Seed(duck)
     for report_date, report_type, net_profit in (
         (OTHER_ANNUAL, "annual", 11_000_000_000.0),
         (OTHER_SEMI, "semi_annual", 12_000_000_000.0),
     ):
-        duck.write_query(
-            """INSERT INTO cash_flow_indirect
-                   (stock_code, report_date, report_type, net_profit,
-                    source, fetch_time, raw_response_hash, confidence, batch_id)
-               VALUES (?, CAST(? AS DATE), ?, ?,
-                       'eastmoney_f10', TIMESTAMP '2026-06-01 00:00:00',
-                       'oldhash', 'strict', 'oldbatch')""",
-            [code, report_date, report_type, net_profit],
+        seed.cash_indirect(
+            code, report_date, report_type=report_type, net_profit=net_profit,
+            source="eastmoney_f10", fetch_time="2026-06-01 00:00:00",
+            raw_response_hash="oldhash", confidence="strict", batch_id="oldbatch",
         )
 
 

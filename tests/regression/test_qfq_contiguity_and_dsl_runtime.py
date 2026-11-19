@@ -4,6 +4,11 @@ P0-3 回归：QFQ 收益/波动/回撤必须只认连续交易日（缺行/NULL/
 分红按快照 as-of 日期而非墙上时钟；P0-4 回归：DSL 标识符白名单与布尔/多参数解析、
 严格模式拒绝未证 `right_field`、拒绝混合 snapshot/statement 时点。
 全部用例使用隔离临时库（duckdb_store / sqlite_store fixture），不联网。
+
+播种：能表达的都走 `tests/support/seed.py` 的按域工厂。**仍留内联 SQL 的两类**：
+1. `with duckdb_store.write_connection()` 事务块内的批量价格写入 —— 工厂自带写锁，
+   嵌套进已持有写锁的事务会撞锁，故保留；
+2. `dividends`/`source_audit` 这类工厂还没有对应方法的表（见各处的「缺什么 API」注释）。
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ from app.core.indicators.calculator import IndicatorCalculator
 from app.core.screening.engine import ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 def _calculator(duck: DuckDBStore, sqlite: SQLiteStore) -> IndicatorCalculator:
@@ -40,13 +46,11 @@ def seed_trading_dates(sqlite_store: SQLiteStore):
 def test_p0_3_red_nearest_prior_balance_green_same_period_prior_year(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query("""
-        INSERT INTO balance_sheet
-            (stock_code, report_date, total_assets, total_equity, total_equity_parent)
-        VALUES
-            ('600519', '2024-12-31', 1000, 500, 500),
-            ('600519', '2025-09-30', 2000, 1000, 1000)
-    """)
+    # 上年同期 2024-12-31（权益 500）才是分母；2025-09-30（权益 1000）是
+    # 「最近优先期」干扰行 —— 误用它 roe 会变成 100/((1500+1000)/2)=0.08。
+    seed = Seed(duckdb_store)
+    seed.balance('600519', '2024-12-31', total_assets=1000, total_equity=500, total_equity_parent=500)
+    seed.balance('600519', '2025-09-30', total_assets=2000, total_equity=1000, total_equity_parent=1000)
     metrics = _calculator(duckdb_store, sqlite_store)._calc_profitability(
         {'parent_net_profit': 100.0, 'net_profit': 200.0},
         {'report_date': '2025-12-31', 'total_assets': 3000.0, 'total_equity': 1500.0},
@@ -175,6 +179,9 @@ def test_raw_technical_metrics_do_not_compact_across_calendar_gaps(
 def test_p0_3_red_wall_clock_dividends_green_snapshot_as_of(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
+    # 保留内联：`dividends` 尚无工厂方法 —— 缺 `seed.dividends(code, ex_date,
+    # announcement_date=..., dividend_per_share=...)`（本表主键含 ex_date，
+    # 且 `announcement_date` 是本用例的**故意错配**维度，必须逐行写清）。
     duckdb_store.write_query("""
         INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
         VALUES
@@ -201,10 +208,7 @@ def test_p0_4_red_identifier_and_parser_green_safe_boolean_runtime(
         engine.create('pe_ttm', 'pb_mrq')
 
     ast = parse('pe_ttm > 1 AND pb_mrq > 1 OR pe_ttm < 0')
-    duckdb_store.write_query(
-        "INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm, pb_mrq) "
-        "VALUES ('600519', '2025-12-31', 10, 2)"
-    )
+    Seed(duckdb_store).snapshot('600519', '2025-12-31', pe_ttm=10, pb_mrq=2)
     value = duckdb_store.read_query(CodeGen().generate_select(ast, stock_code='600519'))[0]['result']
 
     assert value is True
@@ -219,14 +223,13 @@ def test_p0_4_red_identifier_and_parser_green_safe_boolean_runtime(
 def test_p0_4_red_right_field_unproven_green_strict_rejects_it(
     duckdb_store: DuckDBStore,
 ) -> None:
-    duckdb_store.write_query("""
-        INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-        VALUES ('000001', 'Strict left only', 'SZSE', '2020-01-01', false, false)
-    """)
-    duckdb_store.write_query("""
-        INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm, pb_mrq)
-        VALUES ('000001', '2025-12-31', 10, 5)
-    """)
+    seed = Seed(duckdb_store)
+    seed.stock('000001', name='Strict left only', exchange='SZSE',
+               listing_date='2020-01-01', is_st=False, is_suspended=False)
+    seed.snapshot('000001', '2025-12-31', pe_ttm=10, pb_mrq=5)
+    # 保留内联：`source_audit` 尚无工厂方法 —— 缺 provenance 审计行 API
+    # （`source/fetch_batch_id/fetch_time/raw_response_hash/confidence` 五件套 +
+    #  SQL 侧 `CURRENT_TIMESTAMP`/`repeat()` 生成值）。
     duckdb_store.write_query("""
         INSERT INTO source_audit
             (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
@@ -248,16 +251,11 @@ def test_p0_4_red_right_field_unproven_green_strict_rejects_it(
 def test_p0_4_red_independent_latest_rows_green_rejects_mixed_dates(
     duckdb_store: DuckDBStore,
 ) -> None:
-    duckdb_store.write_query("""
-        INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-        VALUES ('000001', 'Mixed dates', 'SZSE', '2020-01-01', false, false)
-    """)
-    duckdb_store.write_query(
-        "INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm) VALUES ('000001', '2025-12-31', 10)"
-    )
-    duckdb_store.write_query(
-        "INSERT INTO balance_sheet (stock_code, report_date, total_assets) VALUES ('000001', '2026-03-31', 100)"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock('000001', name='Mixed dates', exchange='SZSE',
+               listing_date='2020-01-01', is_st=False, is_suspended=False)
+    seed.snapshot('000001', '2025-12-31', pe_ttm=10)
+    seed.balance('000001', '2026-03-31', total_assets=100)
 
     result = ScreeningEngine(duck=duckdb_store).run(
         {'conditions': {'logic': 'AND', 'rules': []}}, min_listing_years=0,

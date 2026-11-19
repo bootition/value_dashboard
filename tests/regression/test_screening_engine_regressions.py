@@ -9,6 +9,7 @@ from app.core.screening.engine import (
 )
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 # ─── 1a: overrides VALUES / mixed_report_date NOT IN / WHERE 参数顺序 ───────
 
@@ -17,18 +18,15 @@ def test_run_binds_overrides_before_mixed_codes_and_where(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Override One', 'SZSE', '2020-01-01', false, false)"""
+    seed = Seed(duckdb_store)
+    seed.stock(
+        "000001", name="Override One", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('000001', '2025-12-31', 10)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
-           VALUES ('000001', '2025-12-31', 100)"""
-    )
+    seed.snapshot("000001", "2025-12-31", latest_close=10)
+    # 报表原值 100，勘误覆盖 200：`> 150` 只可能命中被覆盖后的值。
+    seed.balance("000001", "2025-12-31", total_assets=100)
+    # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库。
     sqlite_store.execute(
         """INSERT INTO manual_overrides
            (stock_code, field_name, report_date, override_value, reason, status)
@@ -72,15 +70,18 @@ def test_engine_rejects_non_dict_sort_with_value_error(duckdb_store: DuckDBStore
 # ─── 1c: 无排序/排序全无效时回退稳定 ORDER BY stock_code ──────────────────
 
 def test_no_sort_uses_stable_stock_code_order(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000002', 'Zed', 'SZSE', '2020-01-01', false, false),
-                  ('000001', 'Alpha', 'SZSE', '2020-01-01', false, false)"""
+    seed = Seed(duckdb_store)
+    # 插入顺序故意与代码顺序相反：回退排序必须是 stock_code，不是插入顺序。
+    seed.stock(
+        "000002", name="Zed", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm)
-           VALUES ('000002', '2025-12-31', 1), ('000001', '2025-12-31', 1)"""
+    seed.stock(
+        "000001", name="Alpha", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
+    seed.snapshot("000002", "2025-12-31", pe_ttm=1)
+    seed.snapshot("000001", "2025-12-31", pe_ttm=1)
 
     result = ScreeningEngine(duck=duckdb_store).run(
         {"conditions": {"logic": "AND", "rules": []}},
@@ -234,14 +235,15 @@ def test_published_statement_overrides_filtered_to_participating_pairs(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'One', 'SZSE', TRUE), ('000002', 'Two', 'SZSE', TRUE)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date)
-           VALUES ('000001', '2025-12-31'), ('000002', '2025-09-30')"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="One", exchange="SZSE", is_listed=True)
+    seed.stock("000002", name="Two", exchange="SZSE", is_listed=True)
+    # 000001 最新期 2025-12-31、000002 最新期 2025-09-30：只有「参与本期」的
+    # 勘误才准加载，000001 的 2025-09-30 是过期期 → 必须被过滤掉。
+    seed.snapshot("000001", "2025-12-31")
+    seed.snapshot("000002", "2025-09-30")
+    # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库；
+    # 且这一处在 sqlite_store.transaction() 内写（3 行同进同退）。
     with sqlite_store.transaction() as conn:
         conn.execute(
             """INSERT INTO manual_overrides
@@ -267,14 +269,11 @@ def test_published_statement_overrides_exceeding_cap_raises(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'One', 'SZSE', TRUE)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date)
-           VALUES ('000001', '2025-12-31')"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="One", exchange="SZSE", is_listed=True)
+    seed.snapshot("000001", "2025-12-31")
+    # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库；
+    # 且这一处在 sqlite_store.transaction() 内写（2 行同进同退）。
     with sqlite_store.transaction() as conn:
         conn.execute(
             """INSERT INTO manual_overrides

@@ -35,6 +35,7 @@ import pytest
 from app.core.data_quality import build_data_quality_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 _CSMAR_ADAPTER = "csmar-c17-phase-b/1"
 # 同一历史回填战役里确实存在的东财适配器（正式库实测，见模块 docstring）。
@@ -74,12 +75,11 @@ def _insert_audit(
     batch_id: str,
     raw_response_hash: str,
 ) -> None:
-    store.write_query(
-        """INSERT INTO source_audit
-               (stock_code, field_name, report_date, value, source, fetch_batch_id,
-                fetch_time, raw_response_hash, confidence)
-           VALUES (?, ?, '2025-12-31', 1.0, 'csmar', ?, CURRENT_TIMESTAMP, ?, 'strict')""",
-        [stock_code, field_name, batch_id, raw_response_hash],
+    # `fetch_time` 原来是 SQL 侧 `CURRENT_TIMESTAMP`（"刚抓的"）→ `trace_now=True`。
+    Seed(store, trace_now=True).source_audit(
+        stock_code, field_name,
+        report_date="2025-12-31", value=1.0, source="csmar",
+        fetch_batch_id=batch_id, raw_response_hash=raw_response_hash, confidence="strict",
     )
 
 

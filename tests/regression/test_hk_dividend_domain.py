@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -27,6 +27,8 @@ from app.core.ah_hk_mapping import build_ah_hk_mapping, normalize_company_name
 from app.core.hk_dividends import HKDividendUpdater
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 # ─── 构造器 ──────────────────────────────────────────────────────────
 
@@ -649,11 +651,7 @@ def test_hk_dividend_empty_with_a_share_dividend_is_not_legal_empty(
 ) -> None:
     """J4：A 股已实施分红 + 港股源 0 行 → source_incomplete，不是 legal_empty。"""
     _seed_stock(duckdb_store, "600941", "中国移动")
-    duckdb_store.write_query(
-        """INSERT INTO dividends
-           (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600941', '2024-06-30', '2024-06-01', 2.51)""",
-    )
+    Seed(duckdb_store).dividends("600941", [("2024-06-30", "2024-06-01", 2.51)])
     fake = _FakeHKAdapter(by_hk={"00941": _result([], confidence="missing")})
     updater = HKDividendUpdater(
         duck=duckdb_store, sqlite=sqlite_store, adapter=fake,
@@ -682,12 +680,10 @@ def test_hk_dividend_empty_without_a_share_dividend_stays_legal_empty(
 ) -> None:
     """对照：A 股也没有已实施分红时，才允许判 source_empty。"""
     _seed_stock(duckdb_store, "600941", "中国移动")
-    # 未实施（除净日在未来）不算"已实施"。
-    duckdb_store.write_query(
-        """INSERT INTO dividends
-           (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600941', CURRENT_DATE + INTERVAL '30 days', CURRENT_DATE, 1.0)""",
-    )
+    # 未实施（除净日在未来）不算"已实施"。日期在调用点按「今天 + 30 天」算，
+    # 与原来的 SQL 侧 `CURRENT_DATE + INTERVAL '30 days'` 同一口径（同一本机日期）。
+    today = date.today()
+    Seed(duckdb_store).dividends("600941", [(today + timedelta(days=30), today, 1.0)])
     fake = _FakeHKAdapter(by_hk={"00941": _result([], confidence="missing")})
     updater = HKDividendUpdater(
         duck=duckdb_store, sqlite=sqlite_store, adapter=fake,
@@ -711,17 +707,11 @@ def test_repair_hk_legal_empty_only_flips_mislabeled_rows(
     """D3：只把"A 股有已实施分红"的 source_empty 改为 source_incomplete。"""
     from scripts.repair_hk_legal_empty import find_mislabeled_rows, repair_rows
 
-    duckdb_store.write_query(
-        """INSERT INTO dividends
-           (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600941', '2024-06-30', '2024-06-01', 2.51)""",
-    )
+    Seed(duckdb_store).dividends("600941", [("2024-06-30", "2024-06-01", 2.51)])
+    # 原来卡在缺口 B（`missing_list` 无 SQLite 侧方法）。
+    seed_sqlite = SeedSqlite(sqlite_store)
     for code in ("600941", "000001"):
-        sqlite_store.execute(
-            """INSERT INTO missing_list (stock_code, field_name, reason_code)
-               VALUES (?, 'hk_dividends', 'source_empty')""",
-            [code],
-        )
+        seed_sqlite.missing_list(code, "hk_dividends", "source_empty")
 
     mislabeled, genuinely_empty = find_mislabeled_rows(duckdb_store, sqlite_store)
 

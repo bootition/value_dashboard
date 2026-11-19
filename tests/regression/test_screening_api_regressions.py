@@ -11,6 +11,13 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import resolve_rule_indicator_locks, router
 from app.web.api.stock_detail import router as stock_detail_router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed_sqlite import SeedSqlite
+
+# 本轮收敛：`screening_rules` 1 处 + `dsl_expressions` 2 处 → `SeedSqlite`
+# （后两处原本是事务内 `executemany`，改用 `join(conn)` 后提交权仍归调用方）。
+# 其余保留内联：`stock_meta` / `indicator_snapshot`（`_make_screenable` 与
+# 技术覆盖/同比两条用例）与 `screening_runs` 都不在本轮清单内 —— 其中
+# `screening_runs` 工厂本就没有方法（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
 
 
 def _make_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -22,6 +29,7 @@ def _make_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
 
 
 def _make_screenable(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
+    # 保留内联：这两行「可筛选股票」脚手架不在本轮清单内（工厂 `stocks()` 可覆盖）。
     duck.write_query(
         """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
            VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false)"""
@@ -155,10 +163,9 @@ def test_run_non_dict_sort_returns_400_not_500(
     client = _make_client(duckdb_store, sqlite_store)
     rule_json = {"conditions": {"logic": "AND", "rules": []}, "sort": ["pe_ttm"]}
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
-               VALUES ('legacy-bad-sort', 1, ?, '{}', 'saved')""",
-            [json.dumps(rule_json)],
+        # `join(conn)`：事务已在调用点手里，工厂只写不提交。
+        SeedSqlite(sqlite_store).join(conn).screening_rule(
+            "legacy-bad-sort", 1, json.dumps(rule_json), status="saved"
         )
 
     response = client.post(
@@ -183,6 +190,7 @@ def test_add_to_watchlist_deduplicates_requested_codes(
         json={"name": "watchlist-value", "rule_json": {"conditions": {"logic": "AND", "rules": []}}},
     ).json()
     with sqlite_store.transaction() as conn:
+        # 保留内联：`screening_runs` 工厂没有方法（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
         conn.execute(
             """INSERT INTO screening_runs
                (run_id, rule_id, rule_version, result_json, columns_json, sort_json,
@@ -216,16 +224,15 @@ def test_resolve_rule_indicator_locks_uses_max_published_version(
     sqlite_store: SQLiteStore,
 ) -> None:
     with sqlite_store.transaction() as conn:
-        conn.executemany(
-            """INSERT INTO dsl_expressions
-               (name, version, expression_text, status, content_hash)
-               VALUES (?, ?, 'pe_ttm', ?, ?)""",
-            [
-                ("locked_ind", 1, "published", "hash-v1"),
-                ("locked_ind", 2, "published", "hash-v2"),
-                ("locked_ind", 3, "draft", "hash-v3"),
-            ],
-        )
+        seed = SeedSqlite(sqlite_store).join(conn)
+        for version, status, content_hash in [
+            (1, "published", "hash-v1"),
+            (2, "published", "hash-v2"),
+            (3, "draft", "hash-v3"),
+        ]:
+            seed.dsl_expression(
+                "locked_ind", version, "pe_ttm", status=status, content_hash=content_hash
+            )
 
     locks = resolve_rule_indicator_locks(
         sqlite_store,
@@ -243,17 +250,16 @@ def test_indicators_derive_dsl_units_and_explain_plain_semantics(
     sqlite_store: SQLiteStore,
 ) -> None:
     with sqlite_store.transaction() as conn:
-        conn.executemany(
-            """INSERT INTO dsl_expressions
-               (name, version, expression_text, ast_json, status, content_hash)
-               VALUES (?, 1, ?, ?, 'published', ?)""",
-            [
-                ("asset_ratio", "balance.total_liabilities / balance.total_assets",
-                 json.dumps({"unit": "ratio"}), "ratio-hash"),
-                ("pct_ind", "balance.capital_adequacy_ratio",
-                 json.dumps({"unit": "percent"}), "percent-hash"),
-            ],
-        )
+        seed = SeedSqlite(sqlite_store).join(conn)
+        for name, expression_text, unit, content_hash in [
+            ("asset_ratio", "balance.total_liabilities / balance.total_assets",
+             "ratio", "ratio-hash"),
+            ("pct_ind", "balance.capital_adequacy_ratio", "percent", "percent-hash"),
+        ]:
+            seed.dsl_expression(
+                name, 1, expression_text, status="published",
+                ast_json=json.dumps({"unit": unit}), content_hash=content_hash,
+            )
     client = _make_client(duckdb_store, sqlite_store)
 
     body = client.get("/api/screening/indicators").json()
@@ -317,6 +323,7 @@ def test_technical_coverage_threshold_is_single_source_for_both_consumers(
         for index in range(100)
     ]
     with duckdb_store.transaction() as connection:
+        # 保留内联：100 行快照的 `calculated_at` 要库侧 `CURRENT_TIMESTAMP`，且不在本轮清单内。
         connection.executemany(
             """INSERT INTO indicator_snapshot
                    (stock_code, report_date, calculated_at, period_return,
@@ -370,6 +377,7 @@ def test_stock_detail_indicators_expose_annual_yoy_caliber(
     import app.core.data_quality as data_quality_module
 
     monkeypatch.setattr(data_quality_module, "read_warning_codes", lambda *a, **k: [])
+    # 保留内联：单行快照（`calculated_at` 走库侧时钟），不在本轮清单内。
     duckdb_store.write_query(
         """INSERT INTO indicator_snapshot
                (stock_code, report_date, calculated_at,

@@ -35,6 +35,7 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import router as stock_detail_router
+from tests.support.seed import Seed
 
 # ─── fixtures ────────────────────────────────────────────────────────────
 
@@ -80,41 +81,32 @@ class _FakeCapitalAdapter:
 
 
 def _seed_stock(duck: DuckDBStore, code: str = "600519") -> None:
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES (?, ?, 'SSE', true)",
-        [code, code],
-    )
+    Seed(duck).stock(code, name=code, exchange="SSE", is_listed=True)
 
 
 def _seed_price(duck: DuckDBStore, code: str, date_: date, close: float) -> None:
-    duck.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
-        [code, date_, close],
-    )
+    Seed(duck).prices(code, [(date_, close)])
 
 
 def _seed_financials(duck: DuckDBStore, code: str, report_date: date, profit: float, equity: float) -> None:
-    duck.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, parent_net_profit, revenue)
-           VALUES (?, ?, ?, 1000.0)""",
-        [code, report_date, profit],
-    )
-    duck.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_equity_parent)
-           VALUES (?, ?, ?)""",
-        [code, report_date, equity],
-    )
+    seed = Seed(duck)
+    seed.income(code, report_date, parent_net_profit=profit, revenue=1000.0)
+    seed.balance(code, report_date, total_equity_parent=equity)
 
 
 def _seed_capital(duck: DuckDBStore, code: str, rows: list[tuple[date, float]]) -> None:
-    for effective_date, total in rows:
-        duck.write_query(
-            """INSERT INTO share_capital_history
-               (stock_code, effective_date, total_shares, change_reason, is_anchor,
-                verified, source, raw_hash, batch_id)
-               VALUES (?, ?, ?, NULL, true, true, 'cninfo_capital', 'x', 'b1')""",
-            [code, effective_date, total],
-        )
+    # 主链锚点：`source='cninfo_capital'` + `verified=True` 是主链口径本身，
+    # 调用点必须逐字给出（工厂不猜 source，也不替调用方决定核验状态）。
+    Seed(duck).shares(
+        code,
+        rows,
+        change_reason=None,
+        is_anchor=True,
+        verified=True,
+        source="cninfo_capital",
+        raw_hash="x",
+        batch_id="b1",
+    )
 
 
 def _updater(duck: DuckDBStore, sqlite: SQLiteStore, adapter) -> CapitalHistoryUpdater:
@@ -227,12 +219,10 @@ def test_cross_cache_reused_and_skips_eastmoney(
     # 补价格，使主链不"陈旧"：有缓存 + 主链新鲜 → 不再入选 due
     _seed_price(duckdb_store, "600519", date(2026, 8, 7), 10.0)
     # 主链最新点也推进到价格日（避免"主链陈旧"再次入选）
-    duckdb_store.write_query(
-        """INSERT INTO share_capital_history
-           (stock_code, effective_date, total_shares, change_reason, is_anchor,
-            verified, source, raw_hash, batch_id)
-           VALUES ('600519', '2026-08-07', 1256000000.0, NULL, true, true,
-                   'cninfo_capital', 'x', 'b1')"""
+    Seed(duckdb_store).shares(
+        "600519", [("2026-08-07", 1256000000.0)],
+        change_reason=None, is_anchor=True, verified=True,
+        source="cninfo_capital", raw_hash="x", batch_id="b1",
     )
     fake.calls.clear()
     report_all = updater.update_all(max_stocks=20)
@@ -297,6 +287,8 @@ def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
         ("600519", latest - timedelta(days=1249 - i), 10.0 + (i % 100))
         for i in range(1250)
     ]
+    # 保留内联：在已持有写锁的 write_connection() 事务里批量写 1250 行 ——
+    # 工厂每次自带写锁，嵌套进来会撞锁（不是 API 缺失，是不能这么用）。
     with duck.write_connection() as conn:
         conn.executemany(
             "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
@@ -314,17 +306,12 @@ def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     _seed_capital(duck, "600519", [(date(2016, 6, 30), 1000000000.0)])
     ex_date = latest - timedelta(days=30)
     announcement_date = ex_date - timedelta(days=30)
-    duck.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', ?, ?, 1.0)""",
-        [ex_date, announcement_date],
-    )
+    Seed(duck).dividends("600519", [(ex_date, announcement_date, 1.0)])
     curve_date = latest - timedelta(days=2)
-    duck.write_query(
-        """INSERT INTO treasury_yield_curve
-           (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES (?, 10.0, 1.5, 'czb_mof', CURRENT_TIMESTAMP, 'x', 'strict', 'b1')""",
-        [curve_date],
+    # `fetch_time` 保持原来"刚抓的"口径（CURRENT_TIMESTAMP）：这类种子现在由
+    # `trace_now=True` 显式打开，默认仍是固定字面量。
+    Seed(duck, trace_now=True).treasury_yield_curve(
+        curve_date, 10.0, 1.5, raw_hash="x", confidence="strict", batch_id="b1",
     )
 
 
@@ -390,10 +377,11 @@ def test_coverage_threshold_blocks_pe_stats(
 ) -> None:
     _seed_statistics_inputs(duckdb_store, sqlite_store)
     # 价格早于股本首点 5 年 → 覆盖不足 90%
-    duckdb_store.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-           SELECT '600519', (DATE '2018-01-01' + INTERVAL (i) DAY), 10.0
-           FROM range(1400) AS t(i)""",
+    # 1400 个「连续日历日」的生成式序列：2018-01-01 起连推 1400 天（到 2021-11-11），
+    # 全部早于 _seed_statistics_inputs 铺的近 1250 个交易日，故与本文件其余价格种子不重叠。
+    Seed(duckdb_store).prices(
+        "600519",
+        [(date(2018, 1, 1) + timedelta(days=offset), 10.0) for offset in range(1400)],
     )
     builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
     series = builder.build_series("600519")
@@ -570,6 +558,7 @@ def test_update_all_uses_due_cursor(
     _seed_capital(duckdb_store, "600519", [(date(2026, 8, 7), 943800000.0)])
     # 构造 updater 以建缓存表，然后写入 600519 的交叉缓存
     _updater(duckdb_store, sqlite_store, _FakeCapitalAdapter(main=[], cross=[]))
+    # 保留内联：SQLite 侧的表（`capital_cross_cache`）不在 DuckDB 工厂范围内。
     sqlite_store.execute(
         """INSERT INTO capital_cross_cache
            (stock_code, events_json, verified_points, total_points, fetched_at)
@@ -635,12 +624,10 @@ def test_coverage_per_window_uses_main_chain(
     duckdb_store.write_query(
         """DELETE FROM share_capital_history WHERE stock_code = '600519'"""
     )
-    duckdb_store.write_query(
-        """INSERT INTO share_capital_history
-           (stock_code, effective_date, total_shares, change_reason, is_anchor,
-            verified, source, raw_hash, batch_id)
-           VALUES ('600519', '2025-08-01', 1000000000.0, NULL, true, true,
-                   'cninfo_capital', 'x', 'b1')"""
+    Seed(duckdb_store).shares(
+        "600519", [("2025-08-01", 1000000000.0)],
+        change_reason=None, is_anchor=True, verified=True,
+        source="cninfo_capital", raw_hash="x", batch_id="b1",
     )
     builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
     series = builder.build_series("600519")
@@ -672,10 +659,10 @@ def test_publish_columns_fixed_when_first_record_is_reason(
         """DELETE FROM share_capital_history WHERE stock_code = '600519'"""
     )
     # 分红生效期覆盖窗口内价格日（ex 2025-06-30 / ann 2025-01-01）
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', '2025-06-30', '2025-01-01', 1.0)
-           ON CONFLICT DO NOTHING"""
+    # `if_exists="ignore"` 就是 `ON CONFLICT DO NOTHING`：已存在则**保留旧值**
+    # （`overwrite=True` 是覆盖，语义相反，不能拿来凑）。
+    Seed(duckdb_store).dividends(
+        "600519", [("2025-06-30", "2025-01-01", 1.0)], if_exists="ignore",
     )
     builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
     report = builder.rebuild_all(["600519"])
@@ -706,15 +693,11 @@ def test_input_fingerprint_includes_dividends(
     builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
     before = builder._input_fingerprint()
 
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', '2026-06-30', '2026-05-01', 1.0)
-           ON CONFLICT DO NOTHING"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', '2026-07-30', '2026-07-01', 0.5)"""
-    )
+    # 两行刻意用不同的写入语义：第一行"已存在则跳过"（`if_exists="ignore"`），
+    # 第二行必须真的写进去（默认 `raise`）。
+    seed = Seed(duckdb_store)
+    seed.dividends("600519", [("2026-06-30", "2026-05-01", 1.0)], if_exists="ignore")
+    seed.dividends("600519", [("2026-07-30", "2026-07-01", 0.5)])
     after = builder._input_fingerprint()
     assert after != before
 
@@ -985,10 +968,7 @@ def test_bse_stock_skips_eastmoney_cross(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
     """北交所无东财 F10 交叉源：不请求（防无效请求触发熔断），如实记录。"""
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES ('920002', '920002', 'BSE', true)"
-    )
+    Seed(duckdb_store).stock("920002", name="920002", exchange="BSE", is_listed=True)
     fake = _FakeCapitalAdapter(main=_cross_main())
     updater = _updater(duckdb_store, sqlite_store, fake)
 

@@ -60,6 +60,10 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
 
+# 本文件的播种**全部留在内联**：主链三表 / 价格 / 股本都写在 `transaction()` 里
+# （工厂会自撞写锁），`indicator_snapshot` 依赖 CURRENT_TIMESTAMP，`stock_meta`
+# 全文件只出现一次；`dsl_expressions` 则没有对应的 SQLite 工厂方法。
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 共同夹具
 # ─────────────────────────────────────────────────────────────────────────────

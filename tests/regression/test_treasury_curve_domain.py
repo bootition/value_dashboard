@@ -30,6 +30,8 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.treasury import TreasuryCurveUpdater
 from app.web.api.stock_detail import router as stock_detail_router
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 # ─── 基于 2026-08-10 真实响应结构精简的 fixture ─────────────────────────
 
@@ -122,10 +124,9 @@ def _seed_price(duck: DuckDBStore, code: str, trade_date: date, close: float) ->
 def _seed_dividend(
     duck: DuckDBStore, code: str, ex_date: date, announcement_date: date, dps: float,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING""",
-        [code, ex_date, announcement_date, dps],
+    # 原来带 `ON CONFLICT DO NOTHING`（同一行重复调用不报错）→ `if_exists="ignore"`。
+    Seed(duck).dividends(
+        code, [(ex_date, announcement_date, dps)], if_exists="ignore",
     )
 
 
@@ -135,12 +136,11 @@ def _seed_curve(
     fetch_time: datetime | None = None,
     batch: str = "b1",
 ) -> None:
-    duck.write_query(
-        """INSERT INTO treasury_yield_curve
-           (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES (?, ?, ?, 'czb_mof', ?, ?, 'strict', ?)""",
-        [curve_date, tenor, yield_pct,
-         fetch_time or datetime.now(UTC), "0" * 64, batch],
+    # `fetch_time` 缺省是"刚抓的"（原来的 `datetime.now(UTC)`）→ `trace_now=True`；
+    # 用例要钉某一刻就显式传 `fetch_time`（调用点给的列覆盖工厂默认值）。
+    explicit = {} if fetch_time is None else {"fetch_time": fetch_time}
+    Seed(duck, trace_now=True).treasury_yield_curve(
+        curve_date, tenor, yield_pct, raw_hash="0" * 64, batch_id=batch, **explicit,
     )
 
 
@@ -485,10 +485,10 @@ def _seed_full_curve(duck: DuckDBStore, curve_date: date) -> None:
 
 
 def _seed_missing_entry(sqlite: SQLiteStore, day: str) -> None:
+    # 原来卡在 A（写在调用点事务里，工厂会自开事务）+ B（`missing_list` 无方法）。
     with sqlite.transaction() as conn:
-        conn.execute(
-            "INSERT INTO missing_list (stock_code, field_name, reason_code) VALUES (?, ?, ?)",
-            ["__market__", f"treasury_curve_daily_{day}", "source_empty"],
+        SeedSqlite(sqlite).join(conn).missing_list(
+            "__market__", f"treasury_curve_daily_{day}", "source_empty"
         )
 
 
@@ -782,13 +782,10 @@ def test_export_provenance_includes_curve_alignment_for_spread(
 
     _seed_stock(duckdb_store)
     _seed_curve(duckdb_store, date(2026, 8, 5), 10.0, 1.5)
-    duckdb_store.write_query(
-        """INSERT INTO source_audit
-           (stock_code, field_name, report_date, value, source, fetch_batch_id,
-            fetch_time, raw_response_hash, confidence)
-           VALUES ('600519', 'div_yield_spread_10y', '2026-08-07', 8.5,
-                   'derived_calculator', 'b1', CURRENT_TIMESTAMP, ?, 'approximate')""",
-        ["0" * 64],
+    Seed(duckdb_store, trace_now=True).source_audit(
+        "600519", "div_yield_spread_10y",
+        report_date="2026-08-07", value=8.5, source="derived_calculator",
+        fetch_batch_id="b1", raw_response_hash="0" * 64, confidence="approximate",
     )
     results = [{
         "stock_code": "600519",
@@ -816,13 +813,10 @@ def test_export_provenance_aligns_on_latest_price_date(
 
     _seed_stock(duckdb_store)
     _seed_curve(duckdb_store, date(2026, 8, 5), 10.0, 1.5)
-    duckdb_store.write_query(
-        """INSERT INTO source_audit
-           (stock_code, field_name, report_date, value, source, fetch_batch_id,
-            fetch_time, raw_response_hash, confidence)
-           VALUES ('600519', 'div_yield_spread_10y', '2026-06-30', 8.5,
-                   'derived_calculator', 'b1', CURRENT_TIMESTAMP, ?, 'approximate')""",
-        ["0" * 64],
+    Seed(duckdb_store, trace_now=True).source_audit(
+        "600519", "div_yield_spread_10y",
+        report_date="2026-06-30", value=8.5, source="derived_calculator",
+        fetch_batch_id="b1", raw_response_hash="0" * 64, confidence="approximate",
     )
     results = [{
         "stock_code": "600519",
@@ -852,11 +846,7 @@ def test_treasury_comparison_masks_dividend_when_unverified(
     _seed_dividend(duckdb_store, "600519",
                    date(2026, 6, 30), date(2026, 5, 1), 1.0)
     _seed_curve(duckdb_store, date(2026, 8, 5), 10.0, 1.5)
-    duckdb_store.write_query(
-        """INSERT INTO dividends
-           (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', DATE '2024-06-28', NULL, 1.0)"""
-    )
+    Seed(duckdb_store).dividends("600519", [("2024-06-28", None, 1.0)])
 
     client = _api_client(duckdb_store, sqlite_store)
     response = client.get("/api/stock/600519/treasury-comparison", params={"tenor": 10.0})

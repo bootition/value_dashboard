@@ -35,6 +35,7 @@ from app.core.quality.asset_health import (
 )
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 # 固定"现在"：所有超期判定都相对它计算，避免用真实时钟让测试在月末翻车。
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
@@ -82,10 +83,9 @@ def _rule(payload: dict, code: str) -> dict:
 
 
 def _insert_stock(duck: DuckDBStore, stock_code: str = "000001") -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES (?, '测试', 'SZSE', TRUE) ON CONFLICT DO NOTHING""",
-        [stock_code],
+    # "确保存在"语义：`if_exists="ignore"` 对应原来的 `ON CONFLICT DO NOTHING`。
+    Seed(duck).stock(
+        stock_code, name="测试", exchange="SZSE", is_listed=True, if_exists="ignore",
     )
 
 
@@ -110,16 +110,16 @@ def _insert_snapshot(
 ) -> None:
     """插入若干全字段有值的快照行；`null_fields` 里的列写 NULL。"""
     null_fields = null_fields or set()
-    columns = ["stock_code", "report_date", "calculated_at", *_snapshot_columns()]
-    sql = (
-        f"INSERT INTO indicator_snapshot ({', '.join(columns)}) "
-        f"VALUES ({', '.join('?' for _ in columns)})"
-    )
+    seed = Seed(duck)
     for code in codes:
-        values: list[Any] = [code, report_date, NOW]
-        for column in _snapshot_columns():
-            values.append(None if column in null_fields else 1.0)
-        duck.write_query(sql, values)
+        # 列集合取 SNAPSHOT_COLUMNS 全集（覆盖率类规则要的正是"每一列都有值"）。
+        seed.snapshot(
+            code, report_date.isoformat(), calculated_at=NOW,
+            **{
+                column: None if column in null_fields else 1.0
+                for column in _snapshot_columns()
+            },
+        )
 
 
 def _insert_extended(
@@ -130,19 +130,13 @@ def _insert_extended(
     values: dict[str, float] | None = None,
 ) -> None:
     values = values or {}
-    columns = [
-        "stock_code", "report_date", "calculated_at", "source", "data_version",
-        *_extended_columns(),
-    ]
-    sql = (
-        f"INSERT INTO indicator_ext ({', '.join(columns)}) "
-        f"VALUES ({', '.join('?' for _ in columns)})"
-    )
+    seed = Seed(duck)
     for code in codes:
-        payload: list[Any] = [code, report_date, NOW, "fixture", 1]
-        for column in _extended_columns():
-            payload.append(values.get(column, 1.0))
-        duck.write_query(sql, payload)
+        # 同样铺满 EXTENDED_COLUMNS 全集；`values` 只覆盖个别需要特定值的列。
+        seed.extended(
+            code, report_date.isoformat(), calculated_at=NOW, source="fixture", data_version=1,
+            **{column: values.get(column, 1.0) for column in _extended_columns()},
+        )
 
 
 # 覆盖率类规则的最小样本量（与 config asset_health.min_domain_rows 一致）。
@@ -229,22 +223,18 @@ def _bulk_register_null_reason(
 
 
 def _insert_three_statements(duck: DuckDBStore, report_date: date, code: str = "000001") -> None:
-    duck.write_query(
-        """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_liabilities, total_equity)
-           VALUES (?, ?, 100, 20, 80) ON CONFLICT DO NOTHING""",
-        [code, report_date],
+    """三表各一行（资产 100/负债 20/权益 80、收入 100/归母净利 10、经营现金流 10）。
+
+    每个用例只播种一次（`ON CONFLICT DO NOTHING` 那层"静默忽略"跟着去掉 ——
+    工厂的原则是重复播种必须当场红，不许静默留下上一次的值）。
+    """
+    seed = Seed(duck)
+    period = report_date.isoformat()
+    seed.balance(
+        code, period, total_assets=100, total_liabilities=20, total_equity=80,
     )
-    duck.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-           VALUES (?, ?, 100, 10) ON CONFLICT DO NOTHING""",
-        [code, report_date],
-    )
-    duck.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES (?, ?, 10) ON CONFLICT DO NOTHING""",
-        [code, report_date],
-    )
+    seed.income(code, period, revenue=100, parent_net_profit=10)
+    seed.cash_flow(code, period, cf_from_operating=10)
 
 
 def _set_refresh_state(sqlite: SQLiteStore, key: str, value: str) -> None:
@@ -608,12 +598,7 @@ def test_snapshot_period_gap_silent_when_aligned(duckdb_store: DuckDBStore) -> N
 
 def test_static_table_stale_fires_one_period_behind(duckdb_store: DuckDBStore) -> None:
     _insert_three_statements(duckdb_store, date(2026, 9, 30))
-    duckdb_store.write_query(
-        """INSERT INTO company_employee_history
-               (stock_code, report_date, employee_count, source, fetch_time, batch_id)
-           VALUES ('000001', ?, 100, 'fixture', ?, 'b')""",
-        [date(2026, 6, 30), NOW],
-    )
+    Seed(duckdb_store).headcounts("000001", [("2026-06-30", 100, "fixture")])
 
     findings = _findings(_payload(duckdb_store, repo_root=PROJECT_ROOT), "STATIC_TABLE_STALE")
 
@@ -625,12 +610,7 @@ def test_static_table_stale_fires_one_period_behind(duckdb_store: DuckDBStore) -
 
 def test_static_table_stale_silent_when_current(duckdb_store: DuckDBStore) -> None:
     _insert_three_statements(duckdb_store, date(2026, 9, 30))
-    duckdb_store.write_query(
-        """INSERT INTO company_employee_history
-               (stock_code, report_date, employee_count, source, fetch_time, batch_id)
-           VALUES ('000001', ?, 100, 'fixture', ?, 'b')""",
-        [date(2026, 9, 30), NOW],
-    )
+    Seed(duckdb_store).headcounts("000001", [("2026-09-30", 100, "fixture")])
 
     assert _findings(_payload(duckdb_store, repo_root=PROJECT_ROOT), "STATIC_TABLE_STALE") == []
 
@@ -644,11 +624,7 @@ def test_package_stale_fires_when_trading_days_exceeded(
     duckdb_store: DuckDBStore, health_repo: Path
 ) -> None:
     _write_manifest(health_repo, "2026-01-05")
-    duckdb_store.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-           VALUES ('000001', ?, 10)""",
-        [date(2026, 1, 20)],
-    )
+    Seed(duckdb_store).prices("000001", [("2026-01-20", 10)])
 
     findings = _findings(_payload(duckdb_store, repo_root=health_repo), "PACKAGE_STALE")
 
@@ -662,11 +638,7 @@ def test_package_stale_silent_when_package_is_current(
     duckdb_store: DuckDBStore, health_repo: Path
 ) -> None:
     _write_manifest(health_repo, "2026-01-19")
-    duckdb_store.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-           VALUES ('000001', ?, 10)""",
-        [date(2026, 1, 20)],
-    )
+    Seed(duckdb_store).prices("000001", [("2026-01-20", 10)])
 
     assert _findings(_payload(duckdb_store, repo_root=health_repo), "PACKAGE_STALE") == []
 
@@ -936,29 +908,17 @@ def _seed_chain_backlog(
     duckdb_store: DuckDBStore, *, listed: int = 3, cashflow_rows: int = 0,
 ) -> None:
     """listed 只票有完整资产负债表；其中 cashflow_rows 只补了 cash_flow_indirect。"""
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           SELECT 'C' || lpad(i::VARCHAR, 6, '0'), 'x', 'SZSE', TRUE
-           FROM range(0, ?) AS t(i)""",
-        [listed],
-    )
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_liabilities, total_equity)
-           SELECT 'C' || lpad(i::VARCHAR, 6, '0'), ?, 100, 20, 80
-           FROM range(0, ?) AS t(i)""",
-        [date(2026, 9, 30), listed],
-    )
-    if cashflow_rows:
-        duckdb_store.write_query(
-            """INSERT INTO cash_flow_indirect
-                   (stock_code, report_date, net_profit, source, fetch_time,
-                    raw_response_hash, confidence, batch_id)
-               SELECT 'C' || lpad(i::VARCHAR, 6, '0'), ?, 10, 'fixture', ?,
-                      'hash', 'strict', 'b'
-               FROM range(0, ?) AS t(i)""",
-            [date(2026, 9, 30), NOW, cashflow_rows],
+    seed = Seed(duckdb_store)
+    period = "2026-09-30"
+    # 代码格式单源：三张表原来是三份 `'C' || lpad(i::VARCHAR, 6, '0')`。
+    codes = [f"C{index:06d}" for index in range(listed)]
+    for code in codes:
+        seed.stock(code, name="x", exchange="SZSE", is_listed=True)
+        seed.balance(
+            code, period, total_assets=100, total_liabilities=20, total_equity=80,
         )
+    for code in codes[:cashflow_rows]:
+        seed.cash_indirect(code, period, net_profit=10)
 
 
 def _chain_state(sqlite_store: SQLiteStore, **chains: tuple[int, str | None]) -> None:
@@ -1082,12 +1042,7 @@ def test_p2_findings_do_not_enter_warning_codes(
     _insert_stock(duckdb_store)
     _insert_three_statements(duckdb_store, date(2026, 9, 30))
     _insert_snapshot(duckdb_store, date(2026, 9, 30), ["000001"])
-    duckdb_store.write_query(
-        """INSERT INTO company_employee_history
-               (stock_code, report_date, employee_count, source, fetch_time, batch_id)
-           VALUES ('000001', ?, 100, 'fixture', ?, 'b')""",
-        [date(2026, 6, 30), NOW],
-    )
+    Seed(duckdb_store).headcounts("000001", [("2026-06-30", 100, "fixture")])
 
     status = build_data_quality_status(duckdb_store, sqlite_store)
 

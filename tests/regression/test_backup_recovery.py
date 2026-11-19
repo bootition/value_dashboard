@@ -11,6 +11,14 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.maintenance import MaintenanceLockError, exclusive_maintenance
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed_sqlite import SeedSqlite
+
+# 本轮收敛：`test_personalized_restore_obeys_actual_foreign_key_topology` 里被引用的
+# 两层（`dsl_expressions` ×2 / `screening_rules` ×1）→ `SeedSqlite`。
+# **保留内联**的是「外键引用树本身」：`dsl_dependencies` / `screening_results` 逐行
+# 回捞 `id` 再拼 `*_id`（`SELECT id ...` + 自增 id 回捞），那是被测结构、不是造一行；
+# `raw_response_archive`（整批搬家 + 空 BLOB 载荷）/ `dividends_quarantine`（隔离表）
+# / 维护锁用例里的 `watchlist` 写（**故意造错**，必须写不进去）同理。
 
 
 def test_encrypted_backup_can_be_restored_with_its_recovery_key(
@@ -42,11 +50,15 @@ def test_backup_preserves_archived_and_quarantined_evidence(
     tmp_path: Path,
 ) -> None:
     _seed_backup_data(duckdb_store, sqlite_store)
+    # 保留内联：`raw_response_archive` 是「整批搬家」的证据表（空 BLOB 载荷是**故意造错**），
+    # 且 `fetch_time` 走库侧时钟 —— 工厂刻意不覆盖（见 `tests/support/seed.py`「尚未覆盖」）。
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
            VALUES (?, 'test', CURRENT_TIMESTAMP, ?)""",
         ["a" * 64, b"source-material"],
     )
+    # 保留内联：这是 `dividends_quarantine`（隔离表），不是 `dividends`；全仓仅此处
+    # 播种一行，刻意不建工厂方法（见 `tests/support/seed.py`「尚未覆盖」）。
     duckdb_store.write_query(
         """INSERT INTO dividends_quarantine
            (stock_code, ex_date, quarantine_reason, quarantined_at)
@@ -182,6 +194,7 @@ def test_restore_maintenance_lock_blocks_other_profile_writes(
 
     def attempt_other_process_write() -> None:
         try:
+            # 保留内联：**故意造错** —— 这一行必须在维护锁下写不进去（异常类型是被测对象）。
             sqlite_store.execute("INSERT INTO watchlist (stock_code, group_name) VALUES ('600519', 'blocked')")
         except Exception as error:
             errors.append(error)
@@ -218,27 +231,24 @@ def test_personalized_restore_obeys_actual_foreign_key_topology(
     sqlite_store: SQLiteStore,
 ) -> None:
     manager = BackupManager(duck=duckdb_store, sqlite=sqlite_store, paths=database_paths)
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status) VALUES ('base_metric', 1, 'pe_ttm', 'published')"""
+    SeedSqlite(sqlite_store).dsl_expression(
+        "base_metric", 1, "pe_ttm", status="published"
     )
     expression_id = sqlite_store.query("SELECT id FROM dsl_expressions")[0]["id"]
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status) VALUES ('derived_metric', 1, 'base_metric', 'published')"""
+    SeedSqlite(sqlite_store).dsl_expression(
+        "derived_metric", 1, "base_metric", status="published"
     )
     dependent_id = sqlite_store.query(
         "SELECT id FROM dsl_expressions WHERE name = 'derived_metric'"
     )[0]["id"]
+    # 保留内联：**外键引用树本身**（下面 `id` 由 `SELECT id ...` 逐层回捞后拼进 `*_id`）。
     sqlite_store.execute(
         "INSERT INTO dsl_dependencies (expression_id, depends_on_id, depends_on_version) VALUES (?, ?, 1)",
         [dependent_id, expression_id],
     )
-    sqlite_store.execute(
-        """INSERT INTO screening_rules (name, version, rule_json, locked_indicators)
-           VALUES ('value', 1, '{}', '{}')"""
-    )
+    SeedSqlite(sqlite_store).screening_rule("value", 1, "{}")
     rule_id = sqlite_store.query("SELECT id FROM screening_rules")[0]["id"]
+    # 保留内联：引用树的第三层（`rule_id` 是回捞来的 id，`data_date` 还要库侧时钟）。
     sqlite_store.execute(
         """INSERT INTO screening_results
            (title, rule_id, rule_version, data_date, result_json, columns_json)
@@ -246,9 +256,8 @@ def test_personalized_restore_obeys_actual_foreign_key_topology(
         [rule_id],
     )
     result_id = sqlite_store.query("SELECT id FROM screening_results")[0]["id"]
-    sqlite_store.execute(
-        "INSERT INTO watchlist (stock_code, source_rule_id, source_result_id) VALUES ('600519', ?, ?)",
-        [rule_id, result_id],
+    SeedSqlite(sqlite_store).watchlist(
+        "600519", source_rule_id=rule_id, source_result_id=result_id,
     )
     snapshot = manager._snapshot_personalized_data()
     manager._restore_personalized_data(snapshot)
@@ -344,6 +353,8 @@ def test_restore_matches_parquet_columns_by_name(
     tmp_path: Path,
 ) -> None:
     manager = BackupManager(duck=duckdb_store, sqlite=sqlite_store, paths=database_paths)
+    # 保留内联：本文件只此一处 `indicator_snapshot`（用例是 parquet 列序，不是造一行），
+    # 且不在本轮清单内。
     duckdb_store.write_query(
         """INSERT INTO indicator_snapshot
            (stock_code, report_date, latest_close, latest_price_date)
@@ -447,8 +458,10 @@ def test_startup_recovery_repairs_a_restore_interrupted_by_system_exit(
 
 
 def _seed_backup_data(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
+    # 保留内联：`stock_meta` 的 1 处脚手架不在本轮清单内（工厂 `Seed.stock()` 已可覆盖，
+    # 下一轮收敛）；SQLite 侧的 `watchlist` 已走工厂。
     duck.write_query(
         """INSERT INTO stock_meta (stock_code, name, exchange)
            VALUES ('600519', '贵州茅台', 'SSE')"""
     )
-    sqlite.execute("INSERT INTO watchlist (stock_code, group_name) VALUES ('600519', 'default')")
+    SeedSqlite(sqlite).watchlist("600519", group_name="default")

@@ -184,6 +184,9 @@ def test_quality_status_flags_active_dividend_alias_and_lineage_archive_gaps(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 保留内联（`dividends` / `source_audit` 两行）：整块在**已持有写锁**的
+    # `write_connection()` 事务里跨三张表（stock_meta/price/fetch_batch + 分红/审计）
+    # 一起落库 —— 工厂每次自带写锁，嵌套进来会自撞（不是缺 API，是不能这么用）。
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
@@ -317,6 +320,9 @@ def _insert_quality_fixture(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     seed.cash_flow("600519", "2025-03-31", cf_from_operating=120)
     seed.snapshot("600519", "2025-03-31", latest_price_date="2026-07-01")
 
+    # 保留内联（`dividends` / `source_audit` 两行）：同在**已持有写锁**的
+    # `write_connection()` 事务里（与上面的 sqlite 覆盖/`manual_overrides` 一起构成
+    # 一个场景），工厂自带写锁，嵌套进来会自撞。
     with duck.write_connection() as connection:
         connection.execute(
             """

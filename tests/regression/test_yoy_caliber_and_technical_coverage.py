@@ -14,6 +14,10 @@
    放进 `unavailable(reason=not_available_for_latest_period)`。
 
 全部使用 tmp_path 里的临时 DuckDB/SQLite（S1 隔离），不触碰 data/ 正式库。
+
+播种：能表达的都走 `tests/support/seed.py` 的按域工厂（数值仍逐字写在调用点）。
+**仍留内联 SQL 的只有一类**：`with duck.write_connection()` 事务块内的多表批量
+写入 —— 工厂自带写锁，嵌套进已持有写锁的事务会撞锁，故保留。
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from scripts.backfill_technical_indicators import (
 from scripts.backfill_technical_indicators import (
     select_candidates as select_technical_candidates,
 )
+from tests.support.seed import Seed
 
 REPORT_DATE = date(2026, 9, 30)
 TECHNICAL_FIELDS = ("period_return", "annualized_volatility", "max_drawdown")
@@ -48,12 +53,10 @@ TECHNICAL_FIELDS = ("period_return", "annualized_volatility", "max_drawdown")
 
 
 def _seed_stock(duck: DuckDBStore, code: str = "600519") -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, listing_date,
-                total_shares, circ_shares)
-           VALUES (?, '测试', 'SHSE', TRUE, '2020-01-01', 1000, 800)""",
-        [code],
+    # total_shares/circ_shares 必须显式给：市值与换手口径的分母就是这个数。
+    Seed(duck).stock(
+        code, name="测试", exchange="SHSE", is_listed=True,
+        listing_date="2020-01-01", total_shares=1000, circ_shares=800,
     )
 
 
@@ -74,6 +77,8 @@ def _seed_yoy_financials(duck: DuckDBStore, code: str = "600519") -> None:
         ("2026-06-30", 180.0, 18.0, 16.0),
         ("2026-09-30", 300.0, 30.0, 27.0),
     ]
+    # 保留内联：三表要在同一个 write_connection() 事务里一起写入（同一组报告期
+    # 必须同时出现，否则用例前提不成立）；工厂每次自带写锁，嵌套会撞锁。
     with duck.write_connection() as connection:
         connection.executemany(
             """INSERT INTO income_statement
@@ -105,18 +110,11 @@ def _seed_prices(
     raw_dates: list[str],
     qfq_dates: list[str],
 ) -> None:
-    for index, trade_date in enumerate(raw_dates):
-        duck.write_query(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-               VALUES (?, ?, ?, ?)""",
-            [code, trade_date, 10.0 + index, 1000.0],
-        )
-    for index, trade_date in enumerate(qfq_dates):
-        duck.write_query(
-            """INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-               VALUES (?, ?, ?)""",
-            [code, trade_date, 10.0 + index],
-        )
+    seed = Seed(duck)
+    seed.prices(code, [(trade_date, 10.0 + index) for index, trade_date in enumerate(raw_dates)],
+                volume=1000.0)
+    seed.prices(code, [(trade_date, 10.0 + index) for index, trade_date in enumerate(qfq_dates)],
+                table="price_daily_qfq")
 
 
 def _seed_trading_dates(sqlite: SQLiteStore, dates: list[str]) -> None:
@@ -134,11 +132,8 @@ def _insert_snapshot_row(
     period_return: float | None = None,
     report_date: date = REPORT_DATE,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, period_return, calculated_at)
-           VALUES (?, ?, ?, ?)""",
-        [code, report_date, period_return, datetime.now(UTC)],
+    Seed(duck).snapshot(
+        code, report_date, period_return=period_return, calculated_at=datetime.now(UTC),
     )
 
 
@@ -215,12 +210,9 @@ def test_backfill_yoy_script_rewrites_ttm_and_fills_fy(
         qfq_dates=["2026-09-28", "2026-09-29", "2026-09-30"],
     )
     # 迁移后的存量行：*_yoy 还是旧的年报口径 −50%，*_yoy_fy 为空。
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, revenue_yoy, net_profit_yoy,
-                deducted_profit_yoy)
-           VALUES ('600519', ?, -0.5, -0.5, -0.5)""",
-        [REPORT_DATE],
+    Seed(duckdb_store).snapshot(
+        "600519", REPORT_DATE,
+        revenue_yoy=-0.5, net_profit_yoy=-0.5, deducted_profit_yoy=-0.5,
     )
     backup = tmp_path / "backup-yoy"
 
@@ -406,11 +398,9 @@ def test_technical_pending_roundtrip_and_source_wiring(
     # ── 价格侧接线：行为断言（真跑一轮价格步骤，见 qfq 回归同一套假适配器）──
     target_date, local_date = "2026-11-13", "2026-11-12"
     _seed_stock(duckdb_store, "600519")
+    # 本地只有更早一天的收盘：增量步骤要判断「今天该不该补」就看这两行。
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES (?, ?, 9.0)",
-            ["600519", local_date],
-        )
+        Seed(duckdb_store).prices("600519", [(local_date, 9.0)], table=table)
 
     def _result(adjust: str, trade_date: str) -> FetchResult:
         payload = f"{adjust}:{trade_date}".encode()
@@ -481,6 +471,7 @@ def test_ttm_yoy_uses_abs_denominator_on_negative_base(
         ("2024-12-31", 100.0, -100.0, -100.0),
         ("2025-12-31", 100.0, -50.0, -50.0),
     ]
+    # 保留内联：同上 —— write_connection() 事务块内写入，工厂会撞写锁。
     with duckdb_store.write_connection() as connection:
         connection.executemany(
             """INSERT INTO income_statement

@@ -33,6 +33,8 @@ from app.core.job_status import aggregate_job_status, merge_step_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.data_status import _actionable_missing_condition
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 # ─── 公共 fixture 工具 ──────────────────────────────────────────────
 
@@ -45,21 +47,29 @@ def _insert_stock(
     circ_shares: int | None = 80,
     listing_date: date | None = date(2020, 1, 1),
 ) -> None:
-    store.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, listing_date, total_shares, circ_shares)
-           VALUES (?, ?, 'SZSE', TRUE, ?, ?, ?)
-           ON CONFLICT (stock_code) DO UPDATE SET
-               listing_date = excluded.listing_date,
-               total_shares = excluded.total_shares,
-               circ_shares = excluded.circ_shares""",
-        [code, code, listing_date, total_shares, circ_shares],
+    """一只已上市股票；门禁只读股本与上市日，其余列保持 NULL。
+
+    原实现是 ``INSERT ... ON CONFLICT DO UPDATE`` 的 upsert：本文件每个调用点
+    对同一 code 只播一次（一个用例一个新库），upsert 分支从未被执行。改用工厂
+    后重复播种会当场抛 ``DuplicateSeed``——比"静默覆盖股本"更安全。
+    """
+    Seed(store).stock(
+        code,
+        name=code,
+        exchange="SZSE",
+        is_listed=True,
+        listing_date=listing_date,
+        total_shares=total_shares,
+        circ_shares=circ_shares,
     )
 
 
 def _insert_bulk_valid_stocks(store: DuckDBStore, prefix: str, count: int) -> list[str]:
     """Insert ``count`` listed stocks that honour the share-capital floor."""
     codes = [f"{prefix}{index:05d}" for index in range(count)]
+    # 刻意保留内联批量写：这是 5,000 行 × 一条 executemany 的规模构造，
+    # 且要求在 write_connection() 事务内一次落盘；工厂是「一行一事务」的
+    # 按域接口，逐只播种会让「少数违规不阻断全市场」这条门禁用例跑不动。
     with store.write_connection() as connection:
         connection.executemany(
             """INSERT INTO stock_meta
@@ -72,33 +82,16 @@ def _insert_bulk_valid_stocks(store: DuckDBStore, prefix: str, count: int) -> li
 
 def _insert_publish_sources(store: DuckDBStore, code: str) -> None:
     """Insert the core inputs compute_snapshot_for_all requires for one stock."""
-    with store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO balance_sheet
-                   (stock_code, report_date, total_assets, total_liabilities, total_equity)
-               VALUES (?, '2025-03-31', 100.0, 20.0, 80.0)""",
-            [code],
-        )
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-               VALUES (?, '2025-03-31', 100.0, 10.0)""",
-            [code],
-        )
-        connection.execute(
-            """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-               VALUES (?, '2025-03-31', 1.0)""",
-            [code],
-        )
-        connection.execute(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-               VALUES (?, '2025-03-31', 10.0)""",
-            [code],
-        )
-        connection.execute(
-            """INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-               VALUES (?, '2025-03-31', 10.0)""",
-            [code],
-        )
+    seed = Seed(store)
+    seed.balance(
+        code, "2025-03-31", total_assets=100.0, total_liabilities=20.0, total_equity=80.0
+    )
+    seed.income(code, "2025-03-31", revenue=100.0, parent_net_profit=10.0)
+    seed.cash_flow(code, "2025-03-31", cf_from_operating=1.0)
+    # 原始/前复权是同一逻辑对两张表各跑一遍：只换表名，行内容逐字相同 ——
+    # 就绪判据要求两张表**各自**存在，缺任一张都不许发布。
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        seed.prices(code, [("2025-03-31", 10.0)], table=table)
 
 
 # ─── 门禁分级（契约 §3）─────────────────────────────────────────────
@@ -272,10 +265,7 @@ def test_publish_quarantines_broken_stock_and_keeps_its_previous_row(
     _insert_stock(duckdb_store, "000002", total_shares=100, circ_shares=200)
     _insert_publish_sources(duckdb_store, "000002")
     # 隔离股上一代已发布行（旧报告期 + 旧价格），发布后必须还在。
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('000002', '2024-12-31', 10.0)"""
-    )
+    Seed(duckdb_store).snapshot("000002", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -308,10 +298,7 @@ def test_publish_rejects_the_whole_batch_only_on_hard_block(
     """hard_block 时一条不写，上一代快照完整保留。"""
     _insert_stock(duckdb_store, "000001")
     _insert_publish_sources(duckdb_store, "000001")
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('OLD001', '2024-12-31', 10.0)"""
-    )
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -338,10 +325,11 @@ def test_incremental_publish_reports_quarantine_without_deleting_old_row(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """增量路径同样逐股隔离：隔离股不重算、旧行不被删除。"""
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close) VALUES
-           ('000001', '2025-03-31', 10), ('000002', '2024-12-31', 20)"""
-    )
+    # 000001 是本次要重算的已发布行（旧价 10）；000002 的 2024-12-31 旧行
+    # 在增量路径里必须原样躺着，不许被隔离逻辑删掉或改写。
+    seed = Seed(duckdb_store)
+    seed.snapshot("000001", "2025-03-31", latest_close=10)
+    seed.snapshot("000002", "2024-12-31", latest_close=20)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -457,14 +445,18 @@ def test_actionable_missing_count_matches_the_shared_condition(
     sqlite_store: SQLiteStore,
 ) -> None:
     """CLI/状态页/update.py 必须报同一个数字，且不含已解决行。"""
-    sqlite_store.execute(
-        """INSERT INTO missing_list (stock_code, field_name, reason_code, resolved_at) VALUES
-           ('000001', 'price.close', 'source_incomplete', NULL),
-           ('000002', 'balance.capital_adequacy_ratio', 'source_unsupported', NULL),
-           ('000003', 'price.close', 'source_incomplete', '2026-01-01 00:00:00'),
-           ('830001', 'placement_funding', 'source_unsupported', NULL),
-           ('600001', 'placement_funding', 'source_unsupported', NULL)"""
-    )
+    # 原来卡在缺口 B（`missing_list` 没有 SQLite 侧播种方法，跨库不能借 Seed）。
+    # 现在：未解决行给 `resolved_at=None`，已解决行逐字给一个历史时刻 ——
+    # "已解决的不许计入"就是这两类行的区别。
+    seed = SeedSqlite(sqlite_store)
+    for stock_code, field_name, reason_code, resolved_at in [
+        ("000001", "price.close", "source_incomplete", None),
+        ("000002", "balance.capital_adequacy_ratio", "source_unsupported", None),
+        ("000003", "price.close", "source_incomplete", "2026-01-01 00:00:00"),
+        ("830001", "placement_funding", "source_unsupported", None),
+        ("600001", "placement_funding", "source_unsupported", None),
+    ]:
+        seed.missing_list(stock_code, field_name, reason_code, resolved_at=resolved_at)
 
     condition, disabled = _actionable_missing_condition()
     expected = sqlite_store.query(
@@ -480,10 +472,9 @@ def test_actionable_missing_count_matches_the_shared_condition(
 def test_actionable_missing_count_excludes_every_resolved_row(
     sqlite_store: SQLiteStore,
 ) -> None:
-    sqlite_store.execute(
-        """INSERT INTO missing_list (stock_code, field_name, reason_code, resolved_at) VALUES
-           ('000001', 'price.close', 'source_incomplete', '2026-01-01 00:00:00'),
-           ('000002', 'price.close', 'source_incomplete', '2026-02-01 00:00:00')"""
-    )
+    # 同上（缺口 B）：两行都**已解决**，只是解决时刻不同。
+    seed = SeedSqlite(sqlite_store)
+    seed.missing_list("000001", "price.close", "source_incomplete", resolved_at="2026-01-01 00:00:00")
+    seed.missing_list("000002", "price.close", "source_incomplete", resolved_at="2026-02-01 00:00:00")
 
     assert actionable_missing_count(sqlite_store) == 0

@@ -8,6 +8,18 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import resolve_rule_indicator_locks, router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
+
+# `dsl_expressions` 的 6 处播种全部走 `SeedSqlite.dsl_expression()`：`status='published'`
+# 与 `content_hash`（锁定指纹）是用例的论点，按调用点逐字传入，工厂不替它编。
+
+
+def _seed_two_candidate_stocks(store: DuckDBStore) -> None:
+    """两只候选股的元数据：名字/上市日是用例输入；`exchange` 由工厂推断为 SZSE。"""
+    seed = Seed(store)
+    seed.stock("000001", name="One", listing_date="2020-01-01", is_st=False, is_suspended=False)
+    seed.stock("000002", name="Two", listing_date="2020-01-01", is_st=False, is_suspended=False)
 
 
 def _app(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -26,22 +38,15 @@ def test_screening_executes_a_hash_locked_published_dsl_indicator(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.web.api.screening._require_current_screenability", lambda request: {"lock_active": False, "data_as_of": None})
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false),
-                  ('000002', 'Two', 'SZSE', '2020-01-01', false, false)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm, pb_mrq)
-           VALUES ('000001', '2025-12-31', 10, 2), ('000002', '2025-12-31', 10, 10)"""
-    )
+    _seed_two_candidate_stocks(duckdb_store)
+    seed = Seed(duckdb_store)
+    seed.snapshot("000001", "2025-12-31", pe_ttm=10, pb_mrq=2)
+    seed.snapshot("000002", "2025-12-31", pe_ttm=10, pb_mrq=10)
     insert_minimum_screenable_data(duckdb_store, "000001")
     insert_minimum_screenable_data(duckdb_store, "000002")
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES (?, ?, ?, 'published', ?, ?, ?, ?)""",
-        ["value_score", 1, "pe_ttm / pb_mrq", "Value score", "higher_is_better", False, "locked-hash"],
+    SeedSqlite(sqlite_store).dsl_expression(
+        "value_score", 1, "pe_ttm / pb_mrq", status="published", description="Value score",
+        direction="higher_is_better", historical_capable=False, content_hash="locked-hash",
     )
     client = _app(duckdb_store, sqlite_store)
 
@@ -70,11 +75,9 @@ def test_screening_rejects_a_stale_published_indicator_lock(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES (?, ?, ?, 'published', ?, ?, ?, ?)""",
-        ["score", 1, "pe_ttm", "Score", "none", False, "current-hash"],
+    SeedSqlite(sqlite_store).dsl_expression(
+        "score", 1, "pe_ttm", status="published", description="Score",
+        direction="none", historical_capable=False, content_hash="current-hash",
     )
     response = _app(duckdb_store, sqlite_store).post("/api/screening/rules/save", json={
         "name": "stale lock",
@@ -90,11 +93,9 @@ def test_screening_locks_a_published_dsl_indicator_used_as_the_right_field(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES (?, ?, ?, 'published', ?, ?, ?, ?)""",
-        ["right_score", 2, "pe_ttm", "Right score", "none", False, "right-hash"],
+    SeedSqlite(sqlite_store).dsl_expression(
+        "right_score", 2, "pe_ttm", status="published", description="Right score",
+        direction="none", historical_capable=False, content_hash="right-hash",
     )
 
     response = _app(duckdb_store, sqlite_store).post("/api/screening/rules/save", json={
@@ -113,10 +114,9 @@ def test_screening_locks_a_published_dsl_indicator_used_as_the_right_field(
 
 
 def test_cli_and_web_share_published_indicator_lock_resolution(sqlite_store: SQLiteStore) -> None:
-    sqlite_store.execute(
-           """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES ('cli_score', 3, 'pe_ttm', 'published', 'CLI score', 'none', false, 'cli-hash')"""
+    SeedSqlite(sqlite_store).dsl_expression(
+        "cli_score", 3, "pe_ttm", status="published", description="CLI score",
+        direction="none", historical_capable=False, content_hash="cli-hash",
     )
 
     locks = resolve_rule_indicator_locks(
@@ -134,22 +134,15 @@ def test_screening_executes_published_cross_section_dsl_function(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.web.api.screening._require_current_screenability", lambda request: {"lock_active": False, "data_as_of": None})
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false),
-                  ('000002', 'Two', 'SZSE', '2020-01-01', false, false)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm)
-           VALUES ('000001', '2025-12-31', 10), ('000002', '2025-12-31', 20)"""
-    )
+    _seed_two_candidate_stocks(duckdb_store)
+    seed = Seed(duckdb_store)
+    seed.snapshot("000001", "2025-12-31", pe_ttm=10)
+    seed.snapshot("000002", "2025-12-31", pe_ttm=20)
     insert_minimum_screenable_data(duckdb_store, "000001")
     insert_minimum_screenable_data(duckdb_store, "000002")
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES (?, ?, ?, 'published', ?, ?, ?, ?)""",
-        ["pe_rank", 1, "rank(pe_ttm)", "PE rank", "lower_is_better", False, "rank-hash"],
+    SeedSqlite(sqlite_store).dsl_expression(
+        "pe_rank", 1, "rank(pe_ttm)", status="published", description="PE rank",
+        direction="lower_is_better", historical_capable=False, content_hash="rank-hash",
     )
     client = _app(duckdb_store, sqlite_store)
     rule = client.post("/api/screening/rules/save", json={
@@ -173,20 +166,18 @@ def test_published_dsl_and_indicator_catalog_expose_financial_industry_fields(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Bank', 'SZSE', '2020-01-01', false, false)"""
+    Seed(duckdb_store).stock(
+        "000001", name="Bank", listing_date="2020-01-01", is_st=False, is_suspended=False
     )
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query(
         """UPDATE balance_sheet SET capital_adequacy_ratio = 12
            WHERE stock_code = '000001' AND report_date = '2025-12-31'"""
     )
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES (?, ?, ?, 'published', ?, ?, ?, ?)""",
-        ["capital_score", 1, "balance.capital_adequacy_ratio", "Capital score", "higher_is_better", False, "capital-hash"],
+    SeedSqlite(sqlite_store).dsl_expression(
+        "capital_score", 1, "balance.capital_adequacy_ratio", status="published",
+        description="Capital score", direction="higher_is_better", historical_capable=False,
+        content_hash="capital-hash",
     )
     client = _app(duckdb_store, sqlite_store)
     indicators = client.get("/api/screening/indicators").json()["indicators"]

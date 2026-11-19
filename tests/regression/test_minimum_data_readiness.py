@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -13,6 +15,18 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
+
+#: 门禁用例的同一只"就绪股票"骨架：12 处用例逐字相同，收敛成一个函数。
+#: `is_st` / `is_suspended` 必须是 false —— 门禁另有 ST/停牌分支，这里不能留 NULL。
+
+
+def _ready_stock(duck: DuckDBStore) -> None:
+    """`stock_meta` 一行：SZSE、2020-01-01 上市、非 ST、未停牌（种子工厂负责列口径）。"""
+    Seed(duck).stock(
+        "000001", name="ready", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
+    )
 
 
 def test_empty_database_is_not_screenable(duckdb_store: DuckDBStore) -> None:
@@ -25,10 +39,7 @@ def test_empty_database_is_not_screenable(duckdb_store: DuckDBStore) -> None:
 def test_readiness_requires_complete_history_fresh_prices_and_coherent_snapshot(
     duckdb_store: DuckDBStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
 
     assert minimum_data_readiness(duckdb_store)["ready"] is True
@@ -81,10 +92,7 @@ def test_readiness_identifies_each_remaining_hard_requirement(
     changes: list[str],
     missing_key: str,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     for statement in changes:
         duckdb_store.write_query(statement)
@@ -102,10 +110,7 @@ def test_readiness_identifies_each_remaining_hard_requirement(
 
 
 def test_readiness_requires_sufficient_nonzero_volume(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query("UPDATE price_daily_raw SET volume = 0 WHERE stock_code = '000001'")
 
@@ -125,10 +130,7 @@ def test_readiness_requires_sufficient_nonzero_volume(duckdb_store: DuckDBStore)
 def test_readiness_requires_company_actions_and_share_capital(
     duckdb_store: DuckDBStore, statement: str, missing_key: str,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query(statement)
 
@@ -136,16 +138,16 @@ def test_readiness_requires_company_actions_and_share_capital(
 
 
 def test_readiness_rejects_snapshot_older_than_financial_source_input(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
-    duckdb_store.write_query(
-        """INSERT INTO source_audit
-           (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
-           VALUES ('000001', 'revenue', '2025-12-31', 100, 'test', 'new-financial-source',
-                   CURRENT_TIMESTAMP + INTERVAL '1 second', repeat('a', 64), 'strict')"""
+    # `fetch_time` 必须是**未来**（快照的 `calculated_at` 之后才算"新输入"）：
+    # 工厂不替你编时刻，调用点逐字给；`repeat('a', 64)` 这个形状也同样写在调用点。
+    Seed(duckdb_store).source_audit(
+        "000001", "revenue",
+        report_date="2025-12-31", value=100.0, source="test",
+        fetch_batch_id="new-financial-source",
+        fetch_time=datetime.now() + timedelta(seconds=1), raw_response_hash="a" * 64,
+        confidence="strict",
     )
 
     readiness = minimum_data_readiness(duckdb_store)
@@ -155,10 +157,7 @@ def test_readiness_rejects_snapshot_older_than_financial_source_input(duckdb_sto
 
 
 def test_readiness_rejects_materialized_data_without_source_graph(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query("DELETE FROM source_audit WHERE stock_code = '000001'")
 
@@ -171,10 +170,7 @@ def test_readiness_rejects_materialized_data_without_source_graph(duckdb_store: 
 def test_screening_requires_a_persisted_trading_calendar(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
 
     decision = screening_readiness(duckdb_store, sqlite_store)
@@ -186,10 +182,7 @@ def test_screening_requires_a_persisted_trading_calendar(
 def test_screening_rejects_a_trading_calendar_gap_for_a_qfq_series(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
     assert screening_readiness(duckdb_store, sqlite_store)["ready"] is True
@@ -210,10 +203,7 @@ def test_screening_rejects_a_trading_calendar_gap_for_a_qfq_series(
 def test_screening_rejects_an_internal_qfq_gap_on_a_calendar_date(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
     # Remove a gap larger than the 2% suspension tolerance.
@@ -233,10 +223,7 @@ def test_screening_rejects_an_internal_qfq_gap_on_a_calendar_date(
 def test_screening_tolerates_a_small_calendar_gap_as_suspension(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
     # A single missing bar is within the 2% suspension tolerance.
@@ -254,10 +241,7 @@ def test_screening_tolerates_a_small_calendar_gap_as_suspension(
 def test_published_override_after_snapshot_blocks_readiness(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query(
         "UPDATE indicator_snapshot SET calculated_at = TIMESTAMP '2000-01-01' WHERE stock_code = '000001'"
@@ -283,10 +267,7 @@ def test_readiness_blocks_durable_actions_when_current_data_changes(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'ready', 'SZSE', '2020-01-01', FALSE, FALSE)"""
-    )
+    _ready_stock(duckdb_store)
     insert_minimum_screenable_data(duckdb_store)
     assert minimum_data_readiness(duckdb_store)["ready"] is True
 

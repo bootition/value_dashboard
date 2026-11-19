@@ -11,7 +11,8 @@
 播种统一走 `tests/support/seed.py` 的**按域工厂**（`reports/140` §17.7 第 1 条）：
 `stock_meta` 的 `name/exchange/is_listed` 形状、财务三表的主键与必填列口径由工厂
 负责；**股票名单、报告期、数值一律逐字写在用例里** —— 哪几只股票、哪张表缺，
-才是这些用例的本意。
+才是这些用例的本意。SQLite 操作库（`job_logs`/`retry_list`/`trading_dates`）同理走
+`tests/support/seed_sqlite.py` 的按域工厂：表的枚举默认值与唯一索引口径由它负责。
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from app.core.init import CSRC_BATCH_SIZE, DataInitializer
 from app.core.storage.update_lock import exclusive_update
 from app.core.update import IncrementalUpdater
 from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 
 def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
@@ -194,9 +196,10 @@ def test_update_lock_pid_probe_rejects_exited_windows_process(monkeypatch) -> No
 def test_update_lock_recovery_closes_crashed_incremental_job(duckdb_store, sqlite_store) -> None:
     lock_path = duckdb_store.db_path.parent / ".value-dashboard.update.lock"
     lock_path.write_text("pid=99999999\ntime=0\n", encoding="ascii")
-    sqlite_store.execute(
-        """INSERT INTO job_logs (job_type, status, started_at, details_json)
-           VALUES ('incremental_update', 'running', '2026-08-04T10:33:17+00:00', '{}')"""
+    sqlite_seed = SeedSqlite(sqlite_store)
+    sqlite_seed.job_log(
+        "incremental_update", status="running",
+        started_at="2026-08-04T10:33:17+00:00", details_json="{}",
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -485,12 +488,9 @@ def test_treasury_curve_fingerprint_detects_value_updates(
     duckdb_store, sqlite_store,
 ) -> None:
     """行数与最大日期不变、收益率被 upsert 修正时也必须触发利差重算。"""
-    duckdb_store.write_query(
-        """INSERT INTO treasury_yield_curve
-           (curve_date, tenor_years, yield_pct, source, fetch_time,
-            raw_hash, confidence, batch_id)
-           VALUES ('2026-08-28', 10.0, 2.10, 'czb_mof', CURRENT_TIMESTAMP,
-                   '0', 'strict', 'b1')"""
+    # "刚抓的"（原来的 SQL 侧 `CURRENT_TIMESTAMP`）→ 显式开 `trace_now`。
+    Seed(duckdb_store, trace_now=True).treasury_yield_curve(
+        "2026-08-28", 10.0, 2.10, raw_hash="0", confidence="strict", batch_id="b1",
     )
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     before = updater._treasury_curve_fingerprint()
@@ -711,8 +711,8 @@ def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store
         seed.stock(code, exchange="SZ" if code == "000001" else "SH", name=code,
                    is_listed=True, is_suspended=False, listing_date=listing,
                    if_exists="ignore")
-    with sqlite_store.transaction() as conn:
-        conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-08-06')")
+    sqlite_seed = SeedSqlite(sqlite_store)
+    sqlite_seed.trading_dates(["2026-08-06"])
 
     manager = _SimulatedPriceManager()
     manager.fail_codes = {"600519"}  # 模拟 600519 抓取失败，其余正常提交

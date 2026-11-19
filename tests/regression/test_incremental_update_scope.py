@@ -5,6 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
+
+# `data_refresh_state` 的 7 处播种全部走工厂：6 处前提是「刚刷新过」→
+# `refresh_state(..., updated_now=True)`（默认固定字面量会静默把它们变陈旧）；
+# 1 处（`test_universe_steps_run_when_marker_stale_or_absent`）要的是「2 天前」的
+# 陈旧标记 → 显式 `updated_at=stale`。后续那句 `UPDATE ... SET value = ?` 不播种、
+# 只是就地改水位，留在调用点。
 
 
 def _check_report(blocked: bool = False) -> dict:
@@ -94,10 +102,9 @@ def test_csrc_refresh_due_initial_run() -> None:
 
 def test_csrc_refresh_throttled_by_persisted_marker(duckdb_store, sqlite_store) -> None:
     today = datetime.now(UTC).date().isoformat()
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES ('csrc_industry_last_refresh', ?, ?)""",
-        [today, datetime.now(UTC).isoformat()],
+    # 「刚刷新过」→ 工厂的 `updated_now=True`（默认固定字面量会静默变陈旧）。
+    SeedSqlite(sqlite_store).refresh_state(
+        "csrc_industry_last_refresh", today, updated_now=True
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -117,10 +124,8 @@ def test_universe_step_skips_csrc_when_recently_refreshed(
     from app.core.init import DataInitializer
 
     today = datetime.now(UTC).date().isoformat()
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES ('csrc_industry_last_refresh', ?, ?)""",
-        [today, datetime.now(UTC).isoformat()],
+    SeedSqlite(sqlite_store).refresh_state(
+        "csrc_industry_last_refresh", today, updated_now=True
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_stock_universe",
@@ -181,11 +186,7 @@ def test_universe_steps_are_throttled_by_daily_marker(
 
     now = datetime.now(UTC)
     for key in ("stock_list_last_refresh", "listing_info_last_refresh"):
-        sqlite_store.execute(
-            """INSERT INTO data_refresh_state (key, value, updated_at)
-               VALUES (?, ?, ?)""",
-            [key, now.isoformat(), now.isoformat()],
-        )
+        SeedSqlite(sqlite_store).refresh_state(key, now.isoformat(), updated_now=True)
 
     def forbidden(self) -> dict:
         raise AssertionError("stock_list/listing_info must be skipped within the daily interval")
@@ -200,11 +201,9 @@ def test_universe_steps_are_throttled_by_daily_marker(
     # 没有元数据缺口的正常库仍应命中节流；缺口新股会触发定向补抓（见下一条测试）。
     # 契约 §5：缺口口径 = 三列元数据 ∪ 股本完整性，所以"无缺口"必须连股本一起给齐，
     # 否则该股会被判为 share_capital 缺口并在日内窗口内定向补抓（这正是修复目标）。
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended,
-            total_shares, circ_shares)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', TRUE, FALSE, FALSE, 100, 80)"""
+    Seed(duckdb_store).stock(
+        "000001", name="Test", exchange="SZSE", listing_date="2020-01-01", is_listed=True,
+        is_st=False, is_suspended=False, total_shares=100, circ_shares=80,
     )
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     step = updater._refresh_universe_metadata()
@@ -221,20 +220,12 @@ def test_listing_info_gap_forces_targeted_refresh_inside_daily_window(
     from app.core.init import DataInitializer
 
     now = datetime.now(UTC)
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES ('stock_list_last_refresh', ?, ?)""",
-        [now.isoformat(), now.isoformat()],
-    )
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES ('listing_info_last_refresh', ?, ?)""",
-        [now.isoformat(), now.isoformat()],
-    )
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended)
-           VALUES ('301688', 'N Test', 'SZSE', NULL, TRUE, NULL, NULL)"""
+    seed_state = SeedSqlite(sqlite_store)
+    seed_state.refresh_state("stock_list_last_refresh", now.isoformat(), updated_now=True)
+    seed_state.refresh_state("listing_info_last_refresh", now.isoformat(), updated_now=True)
+    Seed(duckdb_store).stock(
+        "301688", name="N Test", exchange="SZSE", listing_date=None, is_listed=True,
+        is_st=None, is_suspended=None,
     )
     seen: list[list[str] | None] = []
 
@@ -263,11 +254,8 @@ def test_universe_steps_run_when_marker_stale_or_absent(
     from app.core.init import DataInitializer
 
     stale = (datetime.now(UTC) - timedelta(days=2)).isoformat()
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES ('stock_list_last_refresh', ?, ?)""",
-        [stale, stale],
-    )
+    # 前提是「2 天前的陈旧水位」：显式给时间戳，绝不能用 `updated_now=True`。
+    SeedSqlite(sqlite_store).refresh_state("stock_list_last_refresh", stale, updated_at=stale)
     calls: list[str] = []
     monkeypatch.setattr(
         DataInitializer, "_fetch_stock_universe",
@@ -342,14 +330,11 @@ def test_universe_step_runs_csrc_inside_interval_when_null_gap_exists(
 ) -> None:
     from app.core.init import DataInitializer
 
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1)
-           VALUES ('000001', 'a', 'SZSE', true, NULL)"""
+    Seed(duckdb_store).stock(
+        "000001", name="a", exchange="SZSE", is_listed=True, csrc_l1=None
     )
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES ('csrc_industry_last_refresh', ?, ?)""",
-        [datetime.now(UTC).date().isoformat(), datetime.now(UTC).isoformat()],
+    SeedSqlite(sqlite_store).refresh_state(
+        "csrc_industry_last_refresh", datetime.now(UTC).date().isoformat(), updated_now=True
     )
     monkeypatch.setattr(
         DataInitializer, "_fetch_stock_universe",
