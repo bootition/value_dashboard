@@ -294,7 +294,12 @@ function indicatorLabelOf(i: ScreeningIndicator): string {
         ? `${meta.display_name}`
         : fieldDisplayName(i.name, meta.label ?? i.name))
     : fieldDisplayName(i.name, meta.label)
-  return fieldOptionLabel(i.name, baseLabel)
+  // 2026-11-16（reports/145）：字段的可算基准期早于最新报告期时，必须在下拉里
+  // 标出用的是哪一期 —— 季报不披露折旧摊销，EBITDA 族实际基于最近半年报/年报。
+  const basisNote = meta.basis_label && meta.basis_report_date !== meta.latest_report_date
+    ? `（${meta.basis_label}口径）`
+    : ''
+  return fieldOptionLabel(i.name, `${baseLabel}${basisNote}`)
 }
 
 const indicatorOptions = computed(() =>

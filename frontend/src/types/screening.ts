@@ -30,6 +30,14 @@ export interface ScreeningIndicator {
    * 每个可排名指标会派生 6 条排名/分位字段，加上统计域还有 percentile/zscore，
    * ROCE 三个窗口因此膨胀成 21 条。带此标记的默认折叠。
    */
+  /**
+   * 该字段的**可算基准期**（reports/145）。
+   * 只在基准期早于最新报告期时下发：季报不披露折旧摊销，EBITDA 族实际用的是
+   * 最近一个半年报/年报的数（如 `basis_label = "2026 半年报"`），必须让用户看见。
+   */
+  readonly basis_report_date?: string
+  readonly basis_label?: string
+  readonly latest_report_date?: string
   readonly derived_from?: string
   readonly derived_kind?: 'rank' | 'stat'
   /**

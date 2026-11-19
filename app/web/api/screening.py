@@ -894,12 +894,40 @@ def _technical_field_coverage(request: Request) -> dict[str, float]:
     }
 
 
-def _extended_field_coverage(request: Request) -> dict[str, float]:
-    """按 (字段 → 最新报告期覆盖率%) 实测 indicator_ext。
+#: 覆盖率门禁往前回溯的期数（reports/145）。
+#: 8 期 ≈ 两年，足够跨过「季报无折旧摊销」的坑；再往前就太旧、失去参考意义。
+_EXTENDED_COVERAGE_LOOKBACK = 8
 
-    一次聚合查询算完 55 列（COUNT(col) 在 DuckDB 上是列存扫描，实测 < 0.6s）；
-    任何异常都返回空字典（调用方按"无数据不拦"处理），绝不能因为体检失败
-    把筛选指标列表整个打挂。
+
+def _period_type_label(report_date: object) -> str:
+    """报告期 → 中文口径名（年报 / 半年报 / 一季报 / 三季报）。"""
+    text = str(report_date or "")
+    year = text[:4] if len(text) >= 4 else text
+    suffix = text[5:10]
+    mapping = {
+        "03-31": "一季报",
+        "06-30": "半年报",
+        "09-30": "三季报",
+        "12-31": "年报",
+    }
+    return f"{year} {mapping.get(suffix, '报告期')}"
+
+
+def _extended_field_coverage(request: Request) -> dict[str, dict[str, object]]:
+    """按字段统计覆盖率，并给出**各自可算的基准期**（reports/145）。
+
+    为什么不是只看最新期：`reports/145` §1 —— 一季报/三季报天生不披露现金流量表
+    补充资料，折旧摊销族在 Q1/Q3 只剩个位数。只看最新期会让 EBITDA 全家在季报
+    窗口被整族隐藏（界面上显示成「覆盖率 0.1%」），而它们在最近一个半年报/年报
+    里覆盖率 >98%，完全可用。
+
+    返回：``{字段: {"coverage_pct": float, "basis_report_date": str|None,
+    "latest_report_date": str, "basis_label": str|None}}``
+
+    - ``basis_report_date`` 为 None 表示最近 ``_EXTENDED_COVERAGE_LOOKBACK`` 期
+      都没有达标覆盖 → 调用方据此隐藏该字段；
+    - ``basis_report_date`` 早于 ``latest_report_date`` 表示"用的是上一期口径"，
+      前端会提示「按 XXXX 年报/半年报口径」，让用户知道数的时点。
     """
     from app.core.screening.engine import EXTENDED_SCREENING_READY
 
@@ -910,26 +938,49 @@ def _extended_field_coverage(request: Request) -> dict[str, float]:
     try:
         rows = request.app.state.duck.read_query(
             f"""
-            WITH latest AS (
-                SELECT MAX(report_date) AS report_date FROM indicator_ext
+            WITH recent AS (
+                SELECT DISTINCT report_date
+                FROM indicator_ext
+                ORDER BY report_date DESC
+                LIMIT {int(_EXTENDED_COVERAGE_LOOKBACK)}
             )
-            SELECT COUNT(*) AS total, {counts}
-            FROM indicator_ext e, latest
-            WHERE e.report_date = latest.report_date
+            SELECT e.report_date AS report_date, COUNT(*) AS total, {counts}
+            FROM indicator_ext e
+            JOIN recent r ON r.report_date = e.report_date
+            GROUP BY e.report_date
+            ORDER BY e.report_date DESC
             """
         )
     except Exception:  # noqa: BLE001 - 体检失败不能影响指标列表
         return {}
     if not rows:
         return {}
-    row = rows[0]
-    total = int(row.get("total") or 0)
-    if total <= 0:
-        return {}
-    return {
-        column: float(row.get(column) or 0) / total * 100.0
-        for column in columns
-    }
+
+    latest_report_date = str(rows[0].get("report_date") or "")
+    result: dict[str, dict[str, object]] = {}
+    for column in columns:
+        basis_date: str | None = None
+        basis_coverage = 0.0
+        newest_coverage = 0.0
+        for idx, row in enumerate(rows):
+            total = int(row.get("total") or 0)
+            if total <= 0:
+                continue
+            coverage = float(row.get(column) or 0) / total * 100.0
+            if idx == 0:
+                newest_coverage = coverage
+            if coverage >= _EXTENDED_MIN_COVERAGE_PCT:
+                basis_date = str(row.get("report_date") or "")
+                basis_coverage = coverage
+                break
+        result[column] = {
+            # 没找到达标期时，仍报出最新期的真实覆盖率（用于 unavailable 提示）
+            "coverage_pct": basis_coverage if basis_date else newest_coverage,
+            "basis_report_date": basis_date,
+            "latest_report_date": latest_report_date,
+            "basis_label": _period_type_label(basis_date) if basis_date else None,
+        }
+    return result
 
 
 def _masked_indicator_fields(request: Request) -> list[str]:
@@ -1096,24 +1147,44 @@ def list_available_indicators(request: Request) -> dict:
     # 覆盖率 < 阈值（默认 50%）的字段**不暴露**，并用 `unavailable` 说明原因。
     # 三季报不披露现金流量表补充资料，折旧摊销族天然缺失 —— 这正是需要隐藏而非
     # 让用户筛出 0 结果的场景。
+    # 2026-11-16（reports/145）：门禁基准期从「最新一期」改为「每个字段各自最近
+    # 一个达标期」。原因：一季报/三季报天生不披露现金流量表补充资料，折旧摊销族
+    # 在季报窗口只剩个位数有值（实测 09-30 仅 5/5575），旧逻辑会把 EBITDA 全家
+    # 整族隐藏成「覆盖率 0.09%」，而它们在最近半年报/年报里覆盖率 >98%。
     extended_coverage = _extended_field_coverage(request)
     for col in sorted(EXTENDED_SCREENING_READY):
-        coverage = extended_coverage.get(col)
-        if coverage is not None and coverage < _EXTENDED_MIN_COVERAGE_PCT:
+        meta = extended_coverage.get(col) or {}
+        coverage = meta.get("coverage_pct")
+        basis = meta.get("basis_report_date")
+        latest_period = meta.get("latest_report_date")
+        if coverage is not None and basis is None:
+            # 最近 N 期都达不到阈值 —— 这才是真的"没有可用数据"
             unavailable.append({
                 "name": col,
                 "domain": "extended",
-                "coverage_pct": round(coverage, 2),
+                "coverage_pct": round(float(coverage), 2),
                 "reason": "not_available_for_latest_period",
+                "message": (
+                    f"最近 {_EXTENDED_COVERAGE_LOOKBACK} 个报告期内覆盖率均不足 "
+                    f"{_EXTENDED_MIN_COVERAGE_PCT:.0f}%；最新期覆盖率 "
+                    f"{float(coverage):.2f}%"
+                ),
             })
             continue
-        indicators.append({
+        entry = {
             "name": col,
             "rankable": col in RANKABLE_INDICATORS,
             "unit": field_unit(col),
             "domain": "extended",
-            "coverage_pct": None if coverage is None else round(coverage, 2),
-        })
+            "coverage_pct": None if coverage is None else round(float(coverage), 2),
+        }
+        # 基准期早于最新期 → 明确告诉前端"这是上一期口径"，
+        # 否则用户会以为筛选用的是最新季报的数。
+        if basis and latest_period and str(basis) != str(latest_period):
+            entry["basis_report_date"] = str(basis)
+            entry["basis_label"] = meta.get("basis_label")
+            entry["latest_report_date"] = str(latest_period)
+        indicators.append(entry)
     # 2026-11-16：派生排名/分位字段必须带 `derived_from` 标记。
     # 每个可排名指标派生 6 条（全市场排名/分位 + 证监会一级排名/分位 + 二级排名/分位），
     # ROCE 三个窗口因此膨胀成 3 + 3×6 = **21 条**，用户在下拉里根本找不到主指标。
