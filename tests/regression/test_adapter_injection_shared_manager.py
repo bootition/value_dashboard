@@ -12,13 +12,15 @@
 
 from __future__ import annotations
 
-import inspect
+from pathlib import Path
 from typing import Any
 
-import app.core.update as update_module
 from app.core.adapters.manager import AdapterManager
 from app.core.index_valuation import IndexValuationUpdater
 from app.core.update import IncrementalUpdater
+from tests.support import source_guard
+
+APP_ROOT = Path(__file__).resolve().parents[2] / "app"
 
 
 def _updater(duckdb_store, sqlite_store) -> tuple[IncrementalUpdater, AdapterManager]:
@@ -117,29 +119,79 @@ def test_default_adapter_mgr_is_single_instance(duckdb_store, sqlite_store) -> N
     assert updater.adapter_mgr is updater.adapter_mgr
 
 
-def test_retry_path_updater_constructions_inject_shared_manager() -> None:
-    """重试路径（_retry_failed_tasks）里的四处构造也必须注入共享 manager。"""
-    source = inspect.getsource(IncrementalUpdater._retry_failed_tasks)
-    for name in (
-        "BusinessOverviewUpdater", "CapitalHistoryUpdater",
-        "TreasuryCurveUpdater", "FundingUpdater",
-    ):
-        index = source.index(f"{name}(")
-        window = source[index:index + 200]
-        assert "adapter=self.adapter_mgr" in window, f"{name} 未注入共享 adapter_mgr"
+def test_retry_path_updater_constructions_inject_shared_manager(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """重试路径里的四处构造也必须注入共享 manager。
+
+    行为断言（不再是 `inspect.getsource(_retry_failed_tasks)` 里搜
+    `adapter=self.adapter_mgr` 文本）：真跑一遍 `_retry_failed_tasks`，
+    四处构造全部被记录替身接住，逐个检查 kwargs 里的 `adapter` 是不是
+    **同一个** 共享实例。自建 `AdapterManager()` 会让熔断状态分叉 → 变红。
+    """
+    updater, shared = _updater(duckdb_store, sqlite_store)
+    targets = {
+        "company_profile": "app.core.business.BusinessOverviewUpdater",
+        "share_capital_history": "app.core.capital.CapitalHistoryUpdater",
+        "treasury_yield_curve": "app.core.treasury.TreasuryCurveUpdater",
+        "ipo_funding": "app.core.funding.FundingUpdater",
+    }
+    records = {
+        data_type: source_guard.constructed_with(monkeypatch, target, label=data_type)
+        for data_type, target in targets.items()
+    }
+    tasks = [
+        {"id": index + 1, "stock_code": "600519", "data_type": data_type}
+        for index, data_type in enumerate(targets)
+    ]
+
+    updater._retry_failed_tasks(tasks)
+
+    for record in records.values():
+        record.assert_count(1)
+        record.assert_injected("adapter", shared)
 
 
-def test_index_valuation_updater_has_no_adapter_injection_point() -> None:
+def test_index_valuation_updater_has_no_adapter_injection_point(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
     """已知缺口（不在本文件归属内）：IndexValuationUpdater 自建 3 个专用适配器。
 
     它刻意"不经 AdapterManager 以便多源并存"（乐咕/中证/申万各自限速），因此
     update.py 无法注入共享 manager，也就是说该域**没有熔断保护**。若将来
     `IndexValuationUpdater.__init__` 增加 `adapter`/`adapter_mgr` 参数，本断言
-    会失败——届时请把 update.py 的两处构造改为注入 `self.adapter_mgr`。
+    会失败——届时请把构造点改为注入 `self.adapter_mgr`。
+
+    断言方式：参数契约用 `inspect.signature`；两处运行期构造用记录替身接住，
+    检查"只传 duck/sqlite、没传 adapter"；构造点**总数**用 AST 跨模块统计
+    （不再是 `inspect.getsource(update_module).count(...)`，那种写法既绑死
+    "构造点必须留在 update.py"，也看不到刷在别的模块里的新构造点）。
     """
-    parameters = inspect.signature(IndexValuationUpdater.__init__).parameters
+    parameters = source_guard.signature_of(IndexValuationUpdater.__init__)
 
     assert "adapter" not in parameters
     assert "adapter_mgr" not in parameters
-    source = inspect.getsource(update_module)
-    assert source.count("IndexValuationUpdater(") == 2, "新增构造点请同步复核注入"
+
+    updater, _shared = _updater(duckdb_store, sqlite_store)
+    record = source_guard.constructed_with(
+        monkeypatch, "app.core.index_valuation.IndexValuationUpdater",
+    )
+
+    updater._refresh_index_valuation()
+    updater._retry_failed_tasks(
+        [{"id": 1, "stock_code": "000300", "data_type": "index_valuation"}],
+    )
+
+    record.assert_count(2)
+    record.assert_not_passing("adapter")
+    record.assert_not_passing("adapter_mgr")
+    for index, kwargs in enumerate(record.calls):
+        assert set(kwargs) == {"duck", "sqlite"}, (
+            f"第 {index + 1} 处 IndexValuationUpdater 构造的入参变了: {sorted(kwargs)}"
+        )
+
+    sites = source_guard.count_construction_sites(APP_ROOT, "IndexValuationUpdater")
+    assert sites == 3, (
+        f"全仓 IndexValuationUpdater 构造点 {sites} != 3（update.py 两处 + cli 一处）："
+        "新增构造点请回来复核是否需要注入共享 adapter_mgr"
+    )

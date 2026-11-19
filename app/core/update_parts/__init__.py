@@ -20,4 +20,8 @@
 
 - ``prices`` — ``PriceReplaceBuffer``：全历史价格替换的攒批缓冲
   （原 ``app/core/update.py::_PriceReplaceBuffer``）。
+- ``retry`` — ``retry_list`` 的读写、退避排期与结算（``mark_retry_failed`` /
+  ``check_retry_tasks`` / ``settle_non_retryable_*`` / ``cleanup_unretryable_tasks``）。
+- ``retry_tasks`` — ``_retry_failed_tasks`` 的重试编排（306 行按 ``data_type``
+  分派到各域 updater）；``update.py`` 只留同名薄委托。
 """
