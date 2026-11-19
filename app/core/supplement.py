@@ -1687,12 +1687,21 @@ class SupplementFetcher:
                             # all：按"本轮有新数据的股票"整体覆盖同源行（清掉窗口外
                             # 的旧本源行），但**排除**本轮明确返回全空的那几期 ——
                             # 空值保护在两种 delete_scope 下都必须成立。
+                            # 2026-11-16（reports/147 事故）：`all` 模式的删除范围必须
+                            # **限制在本轮请求的期次内**。旧实现只按 stock_code 匹配，
+                            # 于是"只补 2025-06-30 一期"会把同一批股票 2025-09-30 /
+                            # 2025-12-31 / 2026-06-30 的旧真实数据全部删掉
+                            # （实测一次丢掉 5,575 行 2025 年报 + 5,579 行 2026 半年报），
+                            # 只能靠全量重采救回来。
                             conn.execute(
                                 f"""DELETE FROM {table} AS t
                                     WHERE t.source = ?
                                       AND EXISTS (
                                           SELECT 1 FROM _supp_rows AS r
                                           WHERE r.stock_code = t.stock_code
+                                      )
+                                      AND t.report_date IN (
+                                          SELECT DISTINCT report_date FROM _supp_rows
                                       )
                                       AND NOT EXISTS (
                                           SELECT 1 FROM _supp_empty AS e

@@ -507,3 +507,67 @@ def test_structural_missing_is_stored_per_report_date(duckdb_store) -> None:
     )
     assert {str(row["report_date"])[:10] for row in rows} == set(periods), rows
     assert len(rows) == len(periods)
+
+
+# ─── A3：部分期次补采不得删掉其他期次（reports/147 事故）──────────────
+
+OTHER_ANNUAL = "2025-12-31"
+OTHER_SEMI = "2026-06-30"
+
+
+def _seed_other_periods(duck, code: str = "600519") -> None:
+    """同源、同股票、**非本轮请求期次**的旧真实行（年报 + 半年报各一行）。"""
+    for report_date, report_type, net_profit in (
+        (OTHER_ANNUAL, "annual", 11_000_000_000.0),
+        (OTHER_SEMI, "semi_annual", 12_000_000_000.0),
+    ):
+        duck.write_query(
+            """INSERT INTO cash_flow_indirect
+                   (stock_code, report_date, report_type, net_profit,
+                    source, fetch_time, raw_response_hash, confidence, batch_id)
+               VALUES (?, CAST(? AS DATE), ?, ?,
+                       'eastmoney_f10', TIMESTAMP '2026-06-01 00:00:00',
+                       'oldhash', 'strict', 'oldbatch')""",
+            [code, report_date, report_type, net_profit],
+        )
+
+
+def test_partial_period_backfill_keeps_other_periods(
+    duckdb_store, monkeypatch,
+) -> None:
+    """**只补一期**不得删掉其他期次的旧行（reports/147 实测事故）。
+
+    事故经过：为补 `2025-06-30` 的折旧摊销断档，按 `periods=["2025-06-30"]`
+    调 `refresh(force_codes=上市全部 5,580 只)`。`delete_scope='all'` 的删除
+    条件只按 `stock_code` 匹配，于是把同一批股票**其他期次**的同源行一起删了 ——
+    一次丢掉 5,575 行 2025 年报 + 5,579 行 2026 半年报，只能全量重采救回。
+
+    修法：`all` 模式的删除范围加 `t.report_date IN (SELECT report_date FROM _supp_rows)`，
+    把"窗口外旧行"的清理限制在**本轮真正请求的期次**内。
+    """
+    _seed_stock(duckdb_store)
+    _seed_trio(duckdb_store)
+    _seed_other_periods(duckdb_store)
+    _use_delete_scope(monkeypatch, "all")
+    # 本轮只请求事故期（2025-06-30），返回一条有值的行
+    _use_fetch_rows(monkeypatch, [
+        {**_EM_ROW_MIN, "REPORT_DATE": f"{INCIDENT_PERIOD} 00:00:00"},
+    ])
+
+    report = SupplementFetcher(duck=duckdb_store).refresh(
+        CASHFLOW_SUPPLEMENT, periods=[INCIDENT_PERIOD], deadline_seconds=30,
+    )
+
+    assert report["status"] == "success", report
+    # 本轮期次：新值写入
+    written = _row_for(duckdb_store, "cash_flow_indirect", "600519", INCIDENT_PERIOD)
+    assert written is not None
+    assert written["net_profit"] == pytest.approx(_EM_ROW_MIN["NETPROFIT"])
+    # 非本轮期次：**必须原样保留**
+    for period, expected in (
+        (OTHER_ANNUAL, 11_000_000_000.0),
+        (OTHER_SEMI, 12_000_000_000.0),
+    ):
+        row = _row_for(duckdb_store, "cash_flow_indirect", "600519", period)
+        assert row is not None, f"{period} 的旧行被部分期次补采误删 —— reports/147 事故"
+        assert row["net_profit"] == pytest.approx(expected)

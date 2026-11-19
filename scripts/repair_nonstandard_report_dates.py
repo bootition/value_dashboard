@@ -61,13 +61,22 @@ TARGET_TABLES: tuple[str, ...] = (
     "balance_sheet_ext",
     "income_statement",
     "indicator_ext",
+    "financial_sector_items",
+    "report_metadata",
+)
+
+#: **不得修改**的视图：`csmar_*_items` 是冷归档 parquet 的只读视图
+#: （`read_parquet('D:/vd-cold-archive-*/csmar_*_items.parquet')`）。
+#: 它们同样含 01-01 行，但那是**原始归档证据**，改了就无法追溯上游到底给了什么；
+#: 而且 DuckDB 的视图本来也不支持 DELETE。
+#: 实测：`csmar_balance_items` 71,858 / `csmar_cashflow_items` 62,367 /
+#: `csmar_income_items` 71,525 / `csmar_financial_items` 45,725 行 01-01。
+READ_ONLY_VIEWS: frozenset[str] = frozenset({
     "csmar_balance_items",
     "csmar_cashflow_items",
     "csmar_income_items",
     "csmar_financial_items",
-    "financial_sector_items",
-    "report_metadata",
-)
+})
 
 #: 有 `report_type` 列、且改期后必须重算该列的表。
 #: （`2008-01-01` 被标成 `quarterly`，改期成 `2007-12-31` 后应为 `annual`）
@@ -96,8 +105,22 @@ class TablePlan:
         return bool(self.deletable or self.reschedulable)
 
 
+def _is_base_table(duck, table: str) -> bool:
+    """该名字是不是可写的基表（视图/外部表一律不可写）。"""
+    try:
+        rows = duck.read_query(
+            "SELECT table_name FROM duckdb_tables() WHERE table_name = ?", [table]
+        )
+    except Exception:  # noqa: BLE001 - 老版本 DuckDB 没有 duckdb_tables()
+        return True
+    return bool(rows)
+
+
 def _plan_table(duck, table: str) -> TablePlan:
     plan = TablePlan(table=table)
+    if table in READ_ONLY_VIEWS or not _is_base_table(duck, table):
+        plan.error = "只读视图/冷归档，跳过（原始证据不可改）"
+        return plan
     try:
         plan.total_rows = int(
             duck.read_query(f'SELECT COUNT(*) AS n FROM "{table}"')[0]["n"]
@@ -146,35 +169,35 @@ def _apply_plan(duck, plan: TablePlan) -> tuple[int, int]:
     deleted = updated = 0
     with duck.write_connection() as connection:
         if plan.deletable:
+            # DuckDB 的 `DELETE ... WHERE EXISTS (SELECT ... FROM 同一张表)`
+            # 会报 "Can only delete from base table"（自引用不支持）。
+            # 改为：把待删主键注册成临时表，再用 `DELETE ... USING` 关联。
+            import pandas as pd
+
+            connection.register(
+                "_to_delete",
+                pd.DataFrame(plan.deletable, columns=["stock_code", "report_date"]),
+            )
             connection.execute(
                 f"""
-                DELETE FROM "{plan.table}"
-                WHERE report_date IS NOT NULL
-                  AND NOT (
-                        (month(report_date) = 3  AND day(report_date) = 31)
-                     OR (month(report_date) = 6  AND day(report_date) = 30)
-                     OR (month(report_date) = 9  AND day(report_date) = 30)
-                     OR (month(report_date) = 12 AND day(report_date) = 31)
-                  )
-                  AND EXISTS (
-                      SELECT 1 FROM "{plan.table}" t2
-                      WHERE t2.stock_code = "{plan.table}".stock_code
-                        AND t2.report_date = "{plan.table}".report_date - INTERVAL 1 DAY
-                  )
+                DELETE FROM "{plan.table}" AS t
+                USING _to_delete AS d
+                WHERE t.stock_code = d.stock_code
+                  AND CAST(t.report_date AS DATE) = CAST(d.report_date AS DATE)
                 """
             )
             deleted = len(plan.deletable)
+            connection.unregister("_to_delete")
         for _stock, raw_date, target in plan.reschedulable:
             connection.execute(
                 f'UPDATE "{plan.table}" SET report_date = CAST(? AS DATE) '
-                "WHERE report_date = CAST(? AS DATE)",
-                [target, raw_date],
+                "WHERE stock_code = ? AND report_date = CAST(? AS DATE)",
+                [target, _stock, raw_date],
             )
             updated += 1
         if plan.table in REPORT_TYPE_TABLES and (deleted or updated):
             # 改期后 `report_type` 必须跟着重算：`2008-01-01` 原本被标成
             # 'quarterly'，改成 `2007-12-31` 后应为 'annual'。
-            # 不重算会让 `report_type='annual'` 的过滤静默漏掉这批行。
             connection.execute(
                 f"""
                 UPDATE "{plan.table}"

@@ -219,6 +219,32 @@ def probe_port(port: int, *, host: str = "127.0.0.1", timeout: float = 0.5) -> b
         return sock.connect_ex((host, port)) == 0
 
 
+def check_db_write_lease() -> Check:
+    """正式库写租约（reports/147）：有别的会话正在写库 → BLOCK。
+
+    为什么算 BLOCK 而不是 WARN：写正式库是**互斥**操作，不是"注意一下"就行的。
+    租约由 `scripts/session_lease.py` 维护，文件在 `<data>/.locks/db-write.lease.json`。
+    """
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    try:
+        import session_lease
+    except Exception:  # noqa: BLE001 - 租约模块缺失不该让自检崩掉
+        return Check("写租约", PASS, "session_lease 不可用（跳过）")
+
+    lease = session_lease._read_lease()
+    if lease is None:
+        return Check("写租约", PASS, "正式库无人持有写租约")
+    state, detail = session_lease._lease_state(lease)
+    if state == "active":
+        return Check(
+            "写租约",
+            BLOCK,
+            f"另一个会话正在写正式库：{detail}",
+            "别写 data/：用 scripts/session_lease.py enqueue 登记排队，或等对方 release",
+        )
+    return Check("写租约", WARN, f"残留的失效租约（{detail}），可直接 acquire 回收")
+
+
 def build_report(*, port: int = DEFAULT_WEB_PORT, allow_port: bool = False) -> Report:
     port_check = check_port(port, open_=probe_port(port))
     if allow_port and port_check.status == BLOCK:
@@ -228,6 +254,7 @@ def build_report(*, port: int = DEFAULT_WEB_PORT, allow_port: bool = False) -> R
         check_worktrees(collect_worktrees()),
         check_foreign_pytest(collect_python_processes()),
         port_check,
+        check_db_write_lease(),
     ])
 
 
