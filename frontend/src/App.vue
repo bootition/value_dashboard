@@ -72,6 +72,7 @@ const menuItems = [
   { label: '指数', route: '/index', key: 'index-dashboard', icon: 'index' },
   { label: '自选列表', route: '/watchlist', key: 'watchlist', icon: 'watchlist' },
   { label: '个股详情', route: '/stock', key: 'stock-search', icon: 'stock' },
+  { label: '黑名单', route: '/blacklist', key: 'blacklist', icon: 'blacklist' },
   { label: '数据状态', route: '/data-status', key: 'data-status', icon: 'status' },
 ]
 

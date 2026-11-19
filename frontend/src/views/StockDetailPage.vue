@@ -3,11 +3,13 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NAlert, NButton, NResult, NSpace, NSpin, NTag,
-  useMessage,
+  useDialog, useMessage,
 } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { isIndicatorUntrusted } from '../types/data-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { isBlacklistedDetail } from '../types/blacklist.ts'
+import type { BlacklistCheckResponse } from '../types/blacklist.ts'
 import KlineChartCard from '../components/KlineChartCard.vue'
 import IndicatorGroupSection from '../components/IndicatorGroupSection.vue'
 import StockTocNav from '../components/StockTocNav.vue'
@@ -31,6 +33,7 @@ import type { WarningCode } from '../types/data-quality.ts'
 
 const route = useRoute()
 const message = useMessage()
+const dialog = useDialog()
 
 const stockCode = computed(() => {
   const code = route.params.code
@@ -40,6 +43,9 @@ const hasStockCodeError = computed(() => !stockCode.value)
 const loading = ref(false)
 // L0-7（报告42）: 无效股票/无数据时呈现友好结果态，而非一页横线
 const stockUnavailable = ref(false)
+// 黑名单屏蔽态：与「股票不存在」分开——这个状态带移出按钮，是自救入口。
+const stockBlacklisted = ref(false)
+const blacklistBusy = ref(false)
 const generation = ref(0)
 const stockInfo = ref<StockInfo | null>(null)
 const indicators = ref<IndicatorsResponse | null>(null)
@@ -70,7 +76,11 @@ async function fetchAll() {
   const gen = ++generation.value
   loading.value = true
   stockUnavailable.value = false
+  stockBlacklisted.value = false
   try {
+    // 先问一句「是不是被屏蔽了」：命中就直接渲染屏蔽态，不再打 4 个必然 404
+    // 的详情请求（否则一次进入会留下 4 条无意义错误日志）。
+    if (await isBlacklisted(gen)) return
     await Promise.all([
       fetchStockInfo(gen),
       fetchIndicators(gen),
@@ -83,6 +93,25 @@ async function fetchAll() {
   }
 }
 
+/**
+ * 黑名单判定。
+ *
+ * 判定失败（网络/服务重启）时**退回正常加载**而不是把页面判定为可用：
+ * 单股端点自己也有守卫，真被屏蔽会返回结构化 404，由 `fetchStockInfo` 兜底。
+ */
+async function isBlacklisted(gen: number): Promise<boolean> {
+  try {
+    const resp = await axios.get<BlacklistCheckResponse>(
+      `/api/blacklist/check/${stockCode.value}`,
+    )
+    if (gen !== generation.value) return true
+    stockBlacklisted.value = resp.data.blacklisted
+    return resp.data.blacklisted
+  } catch {
+    return false
+  }
+}
+
 async function fetchStockInfo(gen: number) {
   try {
     const resp = await axios.get<StockInfo>(`/api/stock/${stockCode.value}/info`)
@@ -92,6 +121,11 @@ async function fetchStockInfo(gen: number) {
     if (gen !== generation.value) return
     stockInfo.value = null
     if (isAxiosError(e) && e.response?.status === 404) {
+      // 结构化 404：区分「代码不存在」（终态）与「被黑名单屏蔽」（可撤销）
+      if (isBlacklistedDetail(e.response.data?.detail)) {
+        stockBlacklisted.value = true
+        return
+      }
       stockUnavailable.value = true
       return
     }
@@ -159,6 +193,54 @@ async function fetchBusinessOverview(gen: number) {
       return
     }
     message.warning(friendlyErrorMessage(e, '加载业务概览失败'))
+  }
+}
+
+// ─── 黑名单操作 ────────────────────────────────────────────────────────────
+// 产品裁定：加入前必须二次确认（防误点）；加入后原地渲染屏蔽态，
+// 屏蔽态本身带「移出黑名单」按钮，所以误加也当场救得回来。
+
+function confirmAddToBlacklist() {
+  const label = stockInfo.value?.name || stockCode.value
+  dialog.warning({
+    title: '加入黑名单',
+    content:
+      `加入后「${label}」不会再出现在筛选、搜索、自选、个股详情和导出结果里。\n`
+      + '它的行情与财报数据会保留、自动更新照常抓取，随时可以在「黑名单」页移出。',
+    positiveText: '确认加入',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      await addToBlacklist()
+    },
+  })
+}
+
+async function addToBlacklist() {
+  if (blacklistBusy.value) return
+  blacklistBusy.value = true
+  try {
+    await axios.post('/api/blacklist/add', { stock_code: stockCode.value })
+    message.success('已加入黑名单')
+    stockBlacklisted.value = true
+  } catch (e) {
+    message.error(friendlyErrorMessage(e, '加入黑名单失败'))
+  } finally {
+    blacklistBusy.value = false
+  }
+}
+
+async function removeFromBlacklist() {
+  if (blacklistBusy.value) return
+  blacklistBusy.value = true
+  try {
+    await axios.delete('/api/blacklist/remove', { data: { stock_code: stockCode.value } })
+    message.success('已移出黑名单')
+    // 重新拉一次全量数据，而不是只翻个 flag——否则页面会停在一堆空卡片上
+    await fetchAll()
+  } catch (e) {
+    message.error(friendlyErrorMessage(e, '移出黑名单失败'))
+  } finally {
+    blacklistBusy.value = false
   }
 }
 
@@ -312,6 +394,23 @@ onUnmounted(() => {
         </n-space>
       </template>
     </n-result>
+    <!-- 黑名单屏蔽态：内容全隐藏，但保留「移出」这条路——否则误加后无法自救 -->
+    <n-result
+      v-else-if="stockBlacklisted"
+      status="warning"
+      title="已加入黑名单"
+      :description="`股票 ${stockCode} 已加入黑名单，其内容不再显示。原始行情与财报数据仍保留在库中，自动更新照常抓取。`"
+    >
+      <template #footer>
+        <n-space justify="center">
+          <n-button type="primary" :loading="blacklistBusy" @click="removeFromBlacklist">
+            移出黑名单
+          </n-button>
+          <router-link to="/blacklist"><n-button>黑名单管理</n-button></router-link>
+          <router-link to="/screening"><n-button>回到筛选</n-button></router-link>
+        </n-space>
+      </template>
+    </n-result>
     <n-spin v-else :show="loading">
       <div class="detail-topbar">
         <router-link to="/stock" class="stock-search-back">← 返回个股搜索</router-link>
@@ -336,6 +435,16 @@ onUnmounted(() => {
                 <div class="identity-quote">
                   <strong class="quote-price">{{ fmt(stockInfo?.latest_close) }}</strong>
                   <span class="quote-date">最新收盘价 · {{ stockInfo?.latest_price_date || '—' }}</span>
+                </div>
+                <div class="identity-actions">
+                  <n-button
+                    size="small"
+                    quaternary
+                    :loading="blacklistBusy"
+                    @click="confirmAddToBlacklist"
+                  >
+                    加入黑名单
+                  </n-button>
                 </div>
               </div>
               <dl class="identity-meta">
@@ -540,6 +649,10 @@ onUnmounted(() => {
   color: #8a978e;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+.identity-actions {
+  flex: 0 0 auto;
+  padding-top: 2px;
 }
 .identity-quote {
   flex: 0 0 auto;

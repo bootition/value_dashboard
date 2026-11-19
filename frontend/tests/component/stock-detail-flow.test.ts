@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
-import { NMessageProvider } from 'naive-ui'
+import { NDialogProvider, NMessageProvider } from 'naive-ui'
 import { h } from 'vue'
 import StockDetailPage from '../../src/views/StockDetailPage.vue'
 
@@ -14,7 +14,10 @@ vi.mock('axios', () => {
     isAxiosError: (e: unknown) => (e as { isAxiosError?: boolean })?.isAxiosError === true,
     isCancel: () => false,
   }
-  return { default: mock }
+  // 页面用 `import axios, { isAxiosError } from 'axios'`（命名导入）。
+  // 只模拟 default 会让 named export 为 undefined，404 分支一进入就抛
+  // TypeError——以前没人走过 404 分支所以没暴露。
+  return { default: mock, isAxiosError: mock.isAxiosError, isCancel: mock.isCancel }
 })
 
 import axios from 'axios'
@@ -131,8 +134,13 @@ async function mountDetailWithCode(code: string) {
     history: createMemoryHistory(),
     routes: [{ path: '/stock/:code', component: { template: '<div/>' } }],
   })
+  // 加入黑名单需要二次确认弹窗（useDialog），因此必须挂 NDialogProvider；
+  // 真实应用里由 App.vue 提供（n-message-provider > n-dialog-provider）。
   const wrapper = mount(NMessageProvider, {
-    slots: { default: () => h(StockDetailPage) },
+    slots: {
+      default: () =>
+        h(NDialogProvider, null, { default: () => h(StockDetailPage) }),
+    },
     global: { plugins: [router] },
   })
   await router.push(`/stock/${code}`)
@@ -216,16 +224,42 @@ const ANNOUNCEMENTS = {
   disclaimer: '只包含已登记进 announcement_registry 的公告，不是全市场全量公告库。',
 }
 
+interface AxiosMockOptions {
+  /** `/api/blacklist/check/{code}` 的应答：可见 / 被拉黑 / 端点失效 */
+  blacklistCheck?: 'visible' | 'blacklisted' | 'fail'
+  /** `/info` 返回结构化 404（`detail.code = stock_blacklisted`），用于覆盖兜底分支 */
+  infoStructured404?: boolean
+}
+
 function setupAxiosMock(
   payload: Record<string, unknown> | null = null,
   businessOverviewPayload: Record<string, unknown> | null = null,
   treasuryPayload: Record<string, unknown> | null = null,
   statisticsPayload: Record<string, unknown> | null = null,
+  options: AxiosMockOptions = {},
 ) {
   const klineRequests: Array<Record<string, unknown>> = []
   const get = axios.get as Mock
   get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+    // 黑名单判定：默认「可见」，让既有用例不受影响
+    if (url.includes('/api/blacklist/check/')) {
+      if (options.blacklistCheck === 'fail') {
+        return Promise.reject(new Error('blacklist check unavailable'))
+      }
+      return Promise.resolve({
+        data: { stock_code: '600519', blacklisted: options.blacklistCheck === 'blacklisted' },
+      })
+    }
     if (url.includes('/info')) {
+      if (options.infoStructured404) {
+        return Promise.reject(Object.assign(new Error('Not Found'), {
+          isAxiosError: true,
+          response: {
+            status: 404,
+            data: { detail: { code: 'stock_blacklisted', message: '该股票已加入黑名单，内容不再显示' } },
+          },
+        }))
+      }
       return Promise.resolve({ data: { stock_code: '600519', name: '贵州茅台', pinyin: 'gzmt', exchange: 'SSE', listing_date: '2001-08-27', is_st: false, is_suspended: false, latest_close: null, latest_price_date: '2026-07-31' } })
     }
     if (url.includes('/indicators')) {
@@ -457,5 +491,61 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
     expect(cards).toHaveLength(2)
     expect(wrapper.find('#return').text()).toContain('历史研究统计')
     expect(wrapper.find('#valuation').text()).toContain('股息率-国债10年利差')
+  })
+})
+
+describe('StockDetailPage 黑名单（2026-11-22，用户需求）', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+  })
+
+  it('被拉黑的股票只渲染屏蔽态，且不再请求任何详情端点', async () => {
+    setupAxiosMock(null, null, null, null, { blacklistCheck: 'blacklisted' })
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已加入黑名单')
+    expect(wrapper.text()).toContain('移出黑名单')
+
+    const urls = (axios.get as Mock).mock.calls.map(([url]: [string]) => String(url))
+    expect(urls.some((url) => url.includes('/info'))).toBe(false)
+    expect(urls.some((url) => url.includes('/indicators'))).toBe(false)
+    expect(urls.some((url) => url.includes('/kline'))).toBe(false)
+    expect(urls.some((url) => url.includes('/business-overview'))).toBe(false)
+  })
+
+  it('单股端点返回结构化 404 时同样进入屏蔽态（而不是股票不存在）', async () => {
+    setupAxiosMock(null, null, null, null, {
+      blacklistCheck: 'fail',
+      infoStructured404: true,
+    })
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已加入黑名单')
+    expect(wrapper.text()).not.toContain('股票不存在或暂无数据')
+  })
+
+  it('点「加入黑名单」先弹确认框，未确认前不发 POST', async () => {
+    setupAxiosMock()
+    const post = axios.post as Mock
+    post.mockResolvedValue({ data: { status: 'ok', stock_code: '600519' } })
+
+    const { wrapper } = await mountDetailWithCode('600519')
+    await flushPromises()
+
+    const trigger = wrapper
+      .findAll('button')
+      .find((button) => button.text().includes('加入黑名单'))
+    expect(trigger).toBeTruthy()
+
+    await trigger!.trigger('click')
+    await flushPromises()
+
+    // 确认框已弹出（建在 document.body 上），但还没发请求
+    expect(document.body.textContent).toContain('确认加入')
+    expect(post).not.toHaveBeenCalled()
+    expect(wrapper.text()).not.toContain('已加入黑名单')
   })
 })

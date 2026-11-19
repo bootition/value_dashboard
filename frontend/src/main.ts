@@ -49,6 +49,12 @@ const router = createRouter({
       meta: { title: '指数详情' },
     },
     {
+      path: '/blacklist',
+      name: 'blacklist',
+      component: () => import('./views/BlacklistPage.vue'),
+      meta: { title: '黑名单' },
+    },
+    {
       path: '/data-status',
       name: 'data-status',
       component: () => import('./views/DataStatusPage.vue'),

@@ -3,7 +3,7 @@ title: 代码地图（CODE MAP）—— 想改 X 就读 Y
 status: approved
 category: reference
 created: 2026-11-17
-last-reviewed: 2026-11-17
+last-reviewed: 2026-11-22
 ---
 
 # 代码地图
@@ -101,6 +101,7 @@ last-reviewed: 2026-11-17
 | 加 CLI 命令 | `app/cli/main.py`（Typer 子 app） | 命名风格：现有 65 个 snake_case 与 24 个 kebab-case 混用，**新增一律 kebab-case** |
 | 跑/修数据 | `scripts/` 下的 `repair_*`（16 个）/ `fetch_*`（11 个）/ `import_*`（12 个），默认 dry-run、`--yes` 落库 | 危险脚本规范见 `scripts/verify_no_dangerous_maintenance.py` |
 | **删任何"看起来多余"的东西** | `docs/reports/136` §7（可移除清单）/ §8（不要删清单）→ 本文件 §9 | 先确认它防的是哪次事故；`AGENTS.md` §8 的 10 项永久保留 |
+| **加一个"全局隐藏某只股票"的机制**（黑名单/白名单/忽略名单） | `app/core/blacklist.py`（排除谓词的**唯一**生成点 `exclusion_condition()`） | 读侧出口清单见 `docs/runbooks/ops-knowledge-base.md` §20；单股端点写进 `stock_detail.py` 的 `_guarded_router`，否则结构性测试会红；**不要**停止抓取，理由见 KB U2 |
 
 ---
 

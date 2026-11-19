@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.core.blacklist import blacklisted_code_set, exclusion_condition
 from app.core.screening.defaults import base_pool_defaults
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
@@ -76,11 +77,21 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             "FROM watchlist ORDER BY group_name, added_at DESC"
         )
 
+    # 2026-11-22：黑名单股票从自选列表里剔除。**不删除 watchlist 行**——
+    # 移出黑名单后原来自选的股票会自动回到列表，避免"加错黑名单顺手毁掉自选"。
+    blocked_codes = blacklisted_code_set(sqlite)
+    if blocked_codes:
+        rows = [row for row in rows if str(row["stock_code"]) not in blocked_codes]
+
     # 分组列表必须先于空行短路计算：当前过滤分组为空时也必须返回全量分组，
     # 否则前端侧栏分组按钮全部消失、无法切回其他分组（2026-08-14 红队 P2-19）。
+    # 计数必须与上面 `rows` 同口径剔除黑名单，否则侧栏显示「3」而表里只有 2 行。
+    group_pred, group_params = exclusion_condition("stock_code", blocked_codes)
+    groups_where = f" WHERE {group_pred}" if group_pred else ""
     groups = sqlite.query(
-        "SELECT group_name, COUNT(*) as cnt "
-        "FROM watchlist GROUP BY group_name ORDER BY group_name"
+        f"SELECT group_name, COUNT(*) as cnt FROM watchlist{groups_where} "
+        "GROUP BY group_name ORDER BY group_name",
+        group_params,
     )
 
     if not rows:
@@ -202,6 +213,11 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     )
     if not known:
         raise HTTPException(status_code=400, detail="stock code not found in universe")
+    # 黑名单股票不许进自选（用户手动敲代码也拦，不只是前端隐藏）
+    if stock_code in blacklisted_code_set(sqlite):
+        raise HTTPException(
+            status_code=400, detail="stock is blacklisted; remove it from the blacklist first"
+        )
     with sqlite.transaction() as conn:
         if req.source_result_id is not None:
             result = conn.execute(

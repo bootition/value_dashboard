@@ -263,18 +263,20 @@ class BackupManager:
     PERSONALIZED_TABLES = [
         "dsl_expressions", "dsl_dependencies", "screening_rules",
          "screening_results", "watchlist", "manual_overrides",
+         "stock_blacklist",
          "plans", "job_logs", "retry_list", "missing_list",
          "pdf_tasks", "pdf_archive_manifest",
          # "backup_registry",  # P2修复: 排除自身 "config",
     ]
     _PERSONALIZED_DELETE_ORDER = [
+        "stock_blacklist",
         "watchlist", "screening_results", "dsl_dependencies", "screening_rules",
         "dsl_expressions", "manual_overrides", "plans", "job_logs", "retry_list",
         "missing_list", "pdf_tasks", "pdf_archive_manifest",
     ]
     _PERSONALIZED_INSERT_ORDER = [
         "dsl_expressions", "dsl_dependencies", "screening_rules", "screening_results",
-        "watchlist", "manual_overrides", "plans", "job_logs", "retry_list",
+        "watchlist", "manual_overrides", "stock_blacklist", "plans", "job_logs", "retry_list",
         "missing_list", "pdf_tasks", "pdf_archive_manifest",
     ]
 

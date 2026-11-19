@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # 当前 schema 版本（依据 S3 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 49
-SQLITE_SCHEMA_VERSION = 19
+SQLITE_SCHEMA_VERSION = 20
 
 # ─── 依据索引（本文件所有「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）───
 # schema 有 3000 行 DDL + 60 条迁移历史，同一个报告的小节号曾被逐行重复十几次，
@@ -1447,6 +1447,14 @@ CREATE TABLE IF NOT EXISTS watchlist (
     added_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (source_rule_id) REFERENCES screening_rules(id),
     FOREIGN KEY (source_result_id) REFERENCES screening_results(id)
+);
+
+-- 股票黑名单（用户态：加入后该股票不再出现在任何研究面；
+-- 原始数据仍留在 DuckDB、自动更新照常抓取。见 app/core/blacklist.py）
+CREATE TABLE IF NOT EXISTS stock_blacklist (
+    stock_code  TEXT PRIMARY KEY,
+    reason      TEXT,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 人工覆写
@@ -2998,6 +3006,33 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 (19, "announcement_registry: (stock_code, announcement_time) + (announcement_time) indexes"),
             )
             logger.info("SQLite schema v19 已应用")
+
+        # v20: 股票黑名单（2026-11-22，用户需求：详情页一键加入黑名单）。
+        # 背景：用户态数据存 SQLite（watchlist/screening_rules/manual_overrides 同惯例），
+        # DuckDB 是单写者+排他锁、自动更新期间写不进去。原始数据一行不动，
+        # 只在读侧排除（实现与理由见 app/core/blacklist.py 模块 docstring）。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 20"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stock_blacklist (
+                    stock_code  TEXT PRIMARY KEY,
+                    reason      TEXT,
+                    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (
+                    20,
+                    "stock_blacklist: user-state blacklist hidden from all research "
+                    "surfaces; data still fetched, raw rows untouched",
+                ),
+            )
+            logger.info("SQLite schema v20 已应用")
 
 
 def init_all_schema(

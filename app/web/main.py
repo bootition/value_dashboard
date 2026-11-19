@@ -617,6 +617,7 @@ def create_app(
         }
 
     # ─── 注册 API 路由 ──────────────────────────────────────────────
+    from app.web.api.blacklist import router as blacklist_router
     from app.web.api.data_status import router as data_status_router
     from app.web.api.dsl import router as dsl_router
     from app.web.api.etf_strategy import router as etf_strategy_router
@@ -629,6 +630,7 @@ def create_app(
     app.include_router(screening_router)
     app.include_router(stock_detail_router)
     app.include_router(watchlist_router)
+    app.include_router(blacklist_router)
     app.include_router(dsl_router)
     app.include_router(index_dashboard_router)
     app.include_router(etf_strategy_router)

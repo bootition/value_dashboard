@@ -7,8 +7,10 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.core.blacklist import blacklisted_code_set, filter_rows
 from app.core.dsl.engine import DSLEngine
 from app.core.dsl.parser import MAX_EXPRESSION_BYTES
+from app.web.api.blacklist import require_visible_stock
 
 router = APIRouter(prefix="/api/dsl", tags=["dsl"])
 
@@ -87,7 +89,17 @@ def validate_expression(name: str, version: int, request: Request) -> dict[str, 
 
 @router.post("/expressions/{name}/{version}/preview-sample")
 def preview_sample(name: str, version: int, request: Request) -> dict[str, Any]:
-    return _require_success(_engine(request).preview_sample(name, version))
+    """10 行抽样预览。结果行自带 `stock_code`，所以必须剔除黑名单股票。
+
+    DSL 引擎的 SQL 不认识用户态黑名单（它只拿得到 DuckDB），因此在 API 层
+    事后过滤：抽样本来就只是「看一眼长什么样」，少几行不影响语义。
+    """
+    payload = _require_success(_engine(request).preview_sample(name, version))
+    blocked = blacklisted_code_set(request.app.state.sqlite)
+    if blocked and isinstance(payload.get("results"), list):
+        payload["results"] = filter_rows(payload["results"], blocked)
+        payload["count"] = len(payload["results"])
+    return payload
 
 
 @router.post("/expressions/{name}/{version}/preview-single")
@@ -97,6 +109,8 @@ def preview_single(
     req: PreviewSingleRequest,
     request: Request,
 ) -> dict[str, Any]:
+    # 单股预览会回显 stock_code 与整段指标值；黑名单股票与详情页同口径 404。
+    require_visible_stock(request, req.stock_code)
     return _require_success(_engine(request).preview_single(name, version, req.stock_code))
 
 

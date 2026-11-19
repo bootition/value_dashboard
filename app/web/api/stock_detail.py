@@ -29,13 +29,26 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
+from app.core.blacklist import blacklisted_codes, exclusion_condition
 from app.core.financial_period import cn_today
 from app.core.pdf.manager import PDFManager
+from app.web.api.blacklist import require_visible_stock
 
-router = APIRouter(prefix="/api/stock", tags=["stock-detail"])
+# 2026-11-22：本模块内部拆成两个子 router，对外仍只暴露一个 `router`（见文件末尾聚合）。
+#
+# - `_public_router`：仅 `/search`。它没有 `{stock_code}` 路径参数，守卫依赖无法挂，
+#   改为在 SQL 层用 `exclusion_condition()` 过滤（与筛选引擎同源的唯一生成点）。
+# - `_guarded_router`：全部 `/{stock_code}/...` 端点。挂一次依赖即覆盖全部单股出口，
+#   新增端点只要写在这个 router 上就自动受守卫——逐个端点手写检查必然会漏（`AGENTS R1`）。
+_public_router = APIRouter(prefix="/api/stock", tags=["stock-detail"])
+_guarded_router = APIRouter(
+    prefix="/api/stock",
+    tags=["stock-detail"],
+    dependencies=[Depends(require_visible_stock)],
+)
 
 TTM_FLOW_FIELDS = (
     "revenue",
@@ -261,7 +274,7 @@ def _history_stats(values: list[float]) -> dict:
     }
 
 
-@router.get("/{stock_code}/metric-history")
+@_guarded_router.get("/{stock_code}/metric-history")
 def get_metric_history(
     stock_code: str,
     request: Request,
@@ -459,7 +472,7 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
 }
 
 
-@router.get("/search")
+@_public_router.get("/search")
 def search_stocks(
     request: Request,
     query: str = Query(min_length=1, max_length=80),
@@ -471,21 +484,30 @@ def search_stocks(
 
     escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     pattern = f"%{escaped}%"
+    # 黑名单股票不出现在搜索结果里（用户需求：加入后不再出现在任何研究面）。
+    # 本端点是 stock_detail 里唯一没有 `{stock_code}` 路径参数的路由，因此不能
+    # 用 secure_router 的依赖守卫，改为池条件过滤——片段仍由
+    # `app/core/blacklist.py::exclusion_condition()` 唯一生成。
+    blacklist_pred, blacklist_params = exclusion_condition(
+        "stock_code", blacklisted_codes(request.app.state.sqlite)
+    )
+    blacklist_filter = f"AND {blacklist_pred}" if blacklist_pred else ""
     rows = request.app.state.duck.read_query(
-        """SELECT stock_code, name, exchange, csrc_l1
+        f"""SELECT stock_code, name, exchange, csrc_l1
            FROM stock_meta
            WHERE is_listed IS TRUE
              AND (stock_code LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')
+             {blacklist_filter}
            ORDER BY
              CASE WHEN stock_code = ? THEN 0 WHEN name = ? THEN 1 ELSE 2 END,
              stock_code
            LIMIT 20""",
-        [pattern, pattern, term, term],
+        [pattern, pattern, *blacklist_params, term, term],
     )
     return {"items": rows, "query": term}
 
 
-@router.get("/{stock_code}/info")
+@_guarded_router.get("/{stock_code}/info")
 def get_stock_info(stock_code: str, request: Request) -> dict:
     """股票基本信息 (PRD §14 SD1: 代码/名称/拼音/最近收盘价/价格日期)"""
     duck = request.app.state.duck
@@ -517,7 +539,7 @@ def get_stock_info(stock_code: str, request: Request) -> dict:
     return info
 
 
-@router.get("/{stock_code}/kline")
+@_guarded_router.get("/{stock_code}/kline")
 def get_kline(
     stock_code: str,
     request: Request,
@@ -707,7 +729,7 @@ def _merge_sum(a: float | None, b: float | None) -> float | None:
     return a + b
 
 
-@router.get("/{stock_code}/indicators")
+@_guarded_router.get("/{stock_code}/indicators")
 def get_indicators(stock_code: str, request: Request) -> dict:
     """指标摘要 (PRD §14 SD3: 估值/盈利/成长/安全/股东回报)"""
     duck = request.app.state.duck
@@ -833,7 +855,7 @@ def _update_lock_active(duck: Any) -> bool:
         return False
 
 
-@router.get("/{stock_code}/financial-trend")
+@_guarded_router.get("/{stock_code}/financial-trend")
 def get_financial_trend(
     stock_code: str,
     request: Request,
@@ -956,7 +978,7 @@ def _apply_published_overrides(rows: list[dict], sqlite, stock_code: str) -> Non
             target[override["field_name"]] = override["override_value"]
 
 
-@router.get("/{stock_code}/business-overview")
+@_guarded_router.get("/{stock_code}/business-overview")
 def get_business_overview(stock_code: str, request: Request) -> dict:
     """业务概览 (依据 S1 独立低频域: 公司资料 + 主营构成 + 溯源)
 
@@ -1059,7 +1081,7 @@ def get_business_overview(stock_code: str, request: Request) -> dict:
     }
 
 
-@router.get("/{stock_code}/treasury-comparison")
+@_guarded_router.get("/{stock_code}/treasury-comparison")
 def get_treasury_comparison(
     stock_code: str,
     request: Request,
@@ -1241,7 +1263,7 @@ def get_treasury_comparison(
     }
 
 
-@router.get("/{stock_code}/research-statistics")
+@_guarded_router.get("/{stock_code}/research-statistics")
 def get_research_statistics(
     stock_code: str,
     request: Request,
@@ -1291,7 +1313,7 @@ def get_research_statistics(
     }
 
 
-@router.get("/{stock_code}/source-audit")
+@_guarded_router.get("/{stock_code}/source-audit")
 def get_source_audit(
     stock_code: str,
     request: Request,
@@ -1404,7 +1426,7 @@ CUSTOM_TREND_FIELDS: dict[str, str] = {
 }
 
 
-@router.get("/{stock_code}/custom-trend")
+@_guarded_router.get("/{stock_code}/custom-trend")
 def get_custom_trend(
     stock_code: str,
     request: Request,
@@ -1484,7 +1506,7 @@ def get_custom_trend(
     return {"trend": trend, "fields": valid_fields, "count": len(trend)}
 
 
-@router.get("/{stock_code}/available-fields")
+@_guarded_router.get("/{stock_code}/available-fields")
 def get_available_fields() -> dict:
     """列出可用于自定义趋势的字段"""
     return {"fields": list(CUSTOM_TREND_FIELDS.keys()) + ["gross_margin", "net_margin", "debt_ratio", "roe"]}
@@ -1617,7 +1639,7 @@ def _total_market_cap_reference(duck: Any, stock_code: str) -> dict[str, Any] | 
     }
 
 
-@router.get("/{stock_code}/ah-metrics")
+@_guarded_router.get("/{stock_code}/ah-metrics")
 def get_ah_metrics(stock_code: str, request: Request) -> dict:
     """A+H「H 股市值」快照（依据 S6 §2.7 J12 的产品出口；依据 S6 接入）
 
@@ -1697,7 +1719,7 @@ def get_ah_metrics(stock_code: str, request: Request) -> dict:
 
 # ─── M4-问题3: PDF 浏览器打开（最小实现） ──────────────────────────
 
-@router.get("/{stock_code}/pdf/{filename}", response_model=None)
+@_guarded_router.get("/{stock_code}/pdf/{filename}", response_model=None)
 def serve_pdf(
     stock_code: str,
     filename: str,
@@ -1762,7 +1784,7 @@ def serve_pdf(
     })
 
 
-@router.get("/{stock_code}/pdf-list")
+@_guarded_router.get("/{stock_code}/pdf-list")
 def list_pdfs(stock_code: str, request: Request) -> dict:
     """列出已下载的 PDF 文件"""
     import re
@@ -1779,3 +1801,14 @@ def list_pdfs(stock_code: str, request: Request) -> dict:
     hot_names = {item["filename"] for item in files}
     files.extend(item for item in mgr.list_archived_pdfs(stock_code) if item["filename"] not in hot_names)
     return {"files": files, "count": len(files)}
+
+
+# ─── 对外的单一入口（必须在全部路由声明之后才能聚合）─────────────
+#
+# 為什么用聚合而不是让调用方 include 两次：`app/web/main.py` 与 6 个回归测试
+# 都是 `include_router(stock_detail_router)` 一次了事；变成两个入口会让“忘了 include 守卫那个”
+# 变成新的漏网方式。聚合后外部入口不变，内部划分也能被
+# `tests/regression/test_blacklist_visibility.py` 的结构性断言直接验证。
+router = APIRouter(tags=["stock-detail"])
+router.include_router(_public_router)
+router.include_router(_guarded_router)

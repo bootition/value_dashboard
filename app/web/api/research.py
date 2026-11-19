@@ -52,6 +52,7 @@ from app.core.point_in_time import (
 )
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 from app.web.api._ttl_cache import TTLCache
+from app.web.api.blacklist import require_visible_stock
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,16 @@ _classifier: Any = None
 
 
 # ─── 参数校验（全部 400 + reason，不把用户输入拼进 SQL）────────────────
+
+
+def _require_visible(request: Request, stock_code: str) -> None:
+    """黑名单股票在研究域一律 404。
+
+    直接复用 `app/web/api/blacklist.py::require_visible_stock` 的同一个实现
+    （同为「判黑名单 → 404 + 结构化 detail」），不在这里再写一份判定，
+    否则两处错一个就会出现「详情页屏蔽了、公告照样能翻」的漏洞（`AGENTS R1`）。
+    """
+    require_visible_stock(request, stock_code)
 
 
 def _parse_stock_code(code: str) -> str:
@@ -246,6 +257,7 @@ def get_as_reported(
     - 200 但个别字段为 null：该期有行、该字段本身空值，`missing_fields` 会列出。
     """
     stock_code = _parse_stock_code(code)
+    _require_visible(request, stock_code)
     as_of_date = _parse_iso_date(as_of, field="as_of")
     freq = _parse_frequency(frequency)
     wanted = _parse_fields(fields)
@@ -338,6 +350,7 @@ def get_visible_periods(
     回测时应在 `announce_date` 之后再使用该期数字，之前仍用上一期。
     """
     stock_code = _parse_stock_code(code)
+    _require_visible(request, stock_code)
     freq = _parse_frequency(frequency)
     as_of_date = _parse_iso_date(as_of, field="as_of") if as_of else None
     duck = request.app.state.duck
@@ -463,6 +476,7 @@ def get_announcements(
     `total` / `by_category` 统计的是**整个时间窗**，不是当前页。
     """
     stock_code = _parse_stock_code(code)
+    _require_visible(request, stock_code)
     sqlite = request.app.state.sqlite
     cutoff = cn_today() - timedelta(days=days - 1)
 

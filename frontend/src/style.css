@@ -138,6 +138,8 @@ body {
 .icon-stock { border-radius: 50% 50% 2px 2px; }
 .icon-status { border-radius: 50%; }
 .icon-status::after { content: ''; display: block; width: 7px; height: 7px; margin: 3px; border-left: 1px solid currentColor; border-bottom: 1px solid currentColor; }
+.icon-blacklist { border-radius: 50%; border-color: currentColor; position: relative; }
+.icon-blacklist::after { content: ''; position: absolute; left: -1px; right: -1px; top: 50%; border-top: 1.4px solid currentColor; transform: rotate(-45deg); }
 
 .app-sidebar-foot {
   margin-top: auto;
