@@ -603,7 +603,15 @@ try {
                 Write-NewUtf8File `
                     -Path (Join-Path $runRoot ".vd-s1-owned") `
                     -Content $ownershipSentinel
-                $effectiveArgs = @("--basetemp", (Join-Path $runRoot "pytest-tmp")) + $PytestArgs
+                # 2026-11-19（测试成本审计）：把逐条耗时**永久留痕**。
+                # 以前 `--durations` 从没进过 S1：日志里只有"通过/失败/总时长"，
+                # 于是"这 30 分钟花在哪"每次都要重新猜、重新实测（本轮审计就为此花了 1 小时）。
+                # `$safeOptions` 白名单会拒掉调用方传的 `--durations`，但**内建**这一条是安全的：
+                # 它只多打一段报告、不改任何执行语义。
+                $effectiveArgs = @(
+                    "--basetemp", (Join-Path $runRoot "pytest-tmp"),
+                    "--durations=30"
+                ) + $PytestArgs
             }
 
             # 2026-08-14 红队 P3：优先仓库 venv 解释器（与 vd.bat 一致），
