@@ -114,19 +114,18 @@ def test_fingerprint_changes_when_source_audit_flag_flipped_in_place(
     assert load_screening_readiness_entry(sqlite_store, baseline)["decision"] == _READY
 
 
-def test_fingerprint_audit_lineage_hash_boundary_is_pinned(
+def test_fingerprint_detects_audit_hash_change_via_content_epoch(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    """**已登记的残余盲区**：`raw_response_hash` 就地改坏，外层指纹仍看不见。
+    """`raw_response_hash` 就地改坏 —— **现在能发现了**（2026-11-19 内容纪元落地后）。
 
-    为什么没修：`raw_response_hash` 是 64 字符高基数字符串列，对 22.4M 行做
-    `SUM(hash(col))` 实测 +300ms 以上、`bit_xor` 虽然便宜但**奇偶敏感**（偶数列
-    同值会抵消成 0，等于给了个假安全感）。而 `confidence` 这类**标记列**的
-    分布已经进了指纹（见上一个用例），`LINEAGE_INVALID` 的另一半判据
-    （`orphan_batch_rows`）由 `fetch_batch` 分布 + `fetch_batch_c` 兜住。
+    历史：这里原本是"已登记残余盲区"的边界钉子 —— 断言改 hash 后指纹**不变**，
+    因为对 22.4M 行的高基数列做内容摘要太贵（`SUM(hash())` +300ms 以上、
+    `bit_xor` 又奇偶敏感，会给出假安全感）。
 
-    这条用例把边界**钉住**：真补上内容信号时它会立刻变红，提醒同步更新
-    报告里的残余盲区清单（而不是悄悄多了个没人知道的覆盖）。
+    内容纪元（`app/core/storage/content_epoch.py`）改变了这笔账：
+    **任何写事务都会让纪元 +1**，所以不再需要"按列做摘要"也能发现就地改动。
+    钉子按设计报了红（"边界变了…请把本用例改成 must-change"），于是照它说的改成 must-change。
     """
     _seed_screenable(duckdb_store, sqlite_store)
     _insert_audit_row(duckdb_store, raw_hash="a" * 64)
@@ -137,16 +136,10 @@ def test_fingerprint_audit_lineage_hash_boundary_is_pinned(
         "UPDATE source_audit SET raw_response_hash = repeat('b', 32)"
     )
     after = screening_readiness_cache_key(duckdb_store, sqlite_store)
-    assert after == baseline, (
-        "边界变了：raw_response_hash 现已进入外层指纹 → 请更新 "
-        "reports/140 §13.4 的残余盲区清单并把本用例改成 must-change"
+    assert after != baseline, (
+        "就地改 raw_response_hash 后指纹没变：LINEAGE_INVALID 的 invalid_hash_rows "
+        "判据会被旧缓存掩盖"
     )
-    # 但**行数**维度的 lineage 变化仍然可见（删除/归档迁移都会改变 COUNT）。
-    duckdb_store.write_query(
-        "DELETE FROM source_audit WHERE raw_response_hash = repeat('b', 32)"
-    )
-    after_delete = screening_readiness_cache_key(duckdb_store, sqlite_store)
-    assert after_delete is not None and after_delete != baseline
 
 
 def test_fingerprint_changes_when_archive_and_batch_flipped_in_place(
@@ -301,3 +294,101 @@ def test_fingerprint_is_stable_across_repeated_calls(
     entry = load_screening_readiness_entry(sqlite_store, second)
     assert entry is not None and entry["decision"] == _READY
     assert SCREENING_READINESS_CACHE_KEY == "screening_readiness_cache"
+
+
+# ── 盲区 ③ 的正面收口：价格表「就地重算」必须让指纹变 ──────────────────────
+# 以前价格表只在外层指纹里放 COUNT(*)。qfq 历史重算**不新增行**、只改已有行的数值，
+# 于是行数不变 → 指纹不变 → 缓存命中 → 对外仍是旧的 ready 结论（假绿）。
+# 修法不是"算得更狠"（行级摘要在 1750 万行上 +275ms，基线才 430–510ms），
+# 而是**让写入自己记账**：DuckDBStore 每个成功写事务把 content_epoch +1，
+# 指纹把这个数字也吃进哈希。
+
+
+def _insert_price_row(duck: DuckDBStore, *, code: str, trade_date: str, close: float) -> None:
+    duck.write_query(
+        "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) VALUES (?, ?, ?, ?)",
+        [code, trade_date, close, 1000.0],
+    )
+
+
+def _update_price_close(duck: DuckDBStore, *, code: str, trade_date: str, close: float) -> None:
+    """**不新增行**，只改已有行的数值 —— 这就是"就地重算"的形态。"""
+    duck.write_query(
+        "UPDATE price_daily_qfq SET close = ? WHERE stock_code = ? AND trade_date = ?",
+        [close, code, trade_date],
+    )
+
+
+def test_fingerprint_changes_when_price_row_recomputed_in_place(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """qfq 就地重算（行数不变）必须让指纹变化，否则缓存会拿旧结论假装已就绪。"""
+    _seed_screenable(duckdb_store, sqlite_store)
+    _insert_price_row(duckdb_store, code="600519", trade_date="2024-01-02", close=100.0)
+
+    before = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert before is not None
+
+    # 关键：行数不变、没有任何时间戳字段变化
+    _update_price_close(duckdb_store, code="600519", trade_date="2024-01-02", close=88.5)
+
+    after = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert after is not None
+    assert after != before, (
+        "价格改值后指纹没变：缓存会命中旧的 ready 结论（qfq 就地重算 = 假绿）"
+    )
+
+
+def test_content_epoch_advances_only_on_writes_not_reads(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """读操作绝不许 bump —— 否则指纹永远在变，缓存等于没有。"""
+    from app.core.storage import content_epoch
+
+    _seed_screenable(duckdb_store, sqlite_store)
+    first = content_epoch.current(sqlite_store.paths.sqlite_path)
+
+    for _ in range(5):
+        duckdb_store.read_query("SELECT COUNT(*) AS n FROM price_daily_qfq")
+
+    assert content_epoch.current(sqlite_store.paths.sqlite_path) == first, (
+        "只读操作改变了内容纪元：缓存会永远失效"
+    )
+
+    _insert_price_row(duckdb_store, code="000002", trade_date="2024-06-05", close=9.9)
+    assert content_epoch.current(sqlite_store.paths.sqlite_path) > first, (
+        "写操作没有推进内容纪元：就地改动将无法被发现"
+    )
+
+
+def test_content_epoch_bump_is_monotonic_and_reasoned(
+    sqlite_store: SQLiteStore,
+) -> None:
+    """纪元必须单调递增，且记下原因（便于排查"谁把缓存打掉的"）。"""
+    import json
+
+    from app.core.storage import content_epoch
+
+    path = sqlite_store.paths.sqlite_path
+    start = content_epoch.current(path)
+    for index in range(3):
+        content_epoch.bump(path, reason=f"probe-{index}")
+
+    assert content_epoch.current(path) == start + 3
+
+    row = sqlite_store.query(
+        "SELECT value FROM data_refresh_state WHERE key = ?", [content_epoch.CONTENT_EPOCH_KEY]
+    )
+    payload = json.loads(row[0]["value"])
+    assert payload["epoch"] == start + 3
+    assert payload["reason"] == "probe-2"
+
+
+def test_content_epoch_fails_open_when_store_is_unreadable(tmp_path) -> None:
+    """记账失败绝不能让业务写入失败：读不到就返回 0，不抛异常。"""
+    from app.core.storage import content_epoch
+
+    missing = tmp_path / "nope.sqlite"
+    assert content_epoch.current(missing) == 0
+    # bump 在表不存在时也不许抛（业务写入路径会吞它，但这里直接验证"不抛"）
+    assert content_epoch.bump(missing, reason="probe") is None

@@ -540,6 +540,10 @@ def screening_readiness_fingerprint(
         overrides = _manual_overrides_fingerprint(sqlite)
         calendar_fp = _trading_calendar_fingerprint(sqlite)
         degraded = _degradation_summary(content)
+        # 读不到（表未建 / 文件缺失 / 任何错误）时返回 0，指纹退化成与旧行为等价。
+        from app.core.storage import content_epoch as _content_epoch
+
+        content_epoch = _content_epoch.current(sqlite.paths.sqlite_path)
         payload = {
             "snap": {
                 "c": counts.get("snap_c_at"),
@@ -561,6 +565,11 @@ def screening_readiness_fingerprint(
                 for table in _DISTRIBUTION_SIGNALS
             },
             "content": content,
+            # 内容纪元：由 DuckDBStore 在每个**成功的写事务**后 +1（O(1)，见
+            # app/core/storage/content_epoch.py）。价格表 1750 万行做行级摘要要 +275ms
+            # （指纹基线才 430–510ms），所以"就地重算"改用"写入自己记账"来暴露：
+            # 只要有人改过库，纪元就不同 → 缓存不命中 → 不会拿旧结论假装已就绪。
+            "content_epoch": content_epoch,
             "degraded": degraded,
             "published_overrides": overrides,
             "trading_calendar": calendar_fp,
