@@ -71,7 +71,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-__all__ = ["STEP_BY_NAME", "STEP_NAMES", "STEP_ORDER", "UpdateStep"]
+__all__ = ["STEP_NAMES", "STEP_ORDER", "UpdateStep"]
 
 
 @dataclass(frozen=True)
@@ -339,6 +339,3 @@ STEP_ORDER: tuple[UpdateStep, ...] = (
 
 #: 步骤名集合：`update.py::report_step()` 的白名单，由 `STEP_ORDER` 派生，禁止单独维护。
 STEP_NAMES: frozenset[str] = frozenset(step.name for step in STEP_ORDER)
-
-#: 名字 → 步骤，供日志/前端/测试按名查找。
-STEP_BY_NAME: dict[str, UpdateStep] = {step.name: step for step in STEP_ORDER}

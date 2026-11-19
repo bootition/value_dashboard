@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from app.core.update_steps import STEP_BY_NAME, STEP_NAMES, STEP_ORDER
+from app.core.update_steps import STEP_NAMES, STEP_ORDER
 
 #: 主流程的**源码集合**。
 #
@@ -123,7 +123,6 @@ def test_step_order_has_no_duplicate_names() -> None:
     names = [step.name for step in STEP_ORDER]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     assert not duplicates, f"STEP_ORDER 里有重复步骤名：{duplicates}"
-    assert len(STEP_BY_NAME) == len(STEP_ORDER)
 
 
 def test_step_order_covers_at_least_twenty_steps() -> None:

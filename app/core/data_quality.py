@@ -1088,11 +1088,6 @@ def share_capital_hard_block(violation_count: int, listed_count: int) -> bool:
     )
 
 
-def share_capital_violations(duck: DuckDBStore) -> list[str]:
-    """Deprecated alias — kept so existing callers keep one implementation (§3)."""
-    return listed_share_capital_gap_codes(duck)
-
-
 def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
     """Quality gate consulted before an indicator snapshot is published.
 

@@ -204,9 +204,6 @@ DERIVED_FIELDS: dict[str, DerivedField] = {
     )
 }
 
-#: 全部派生字段的完整键（``表.字段``）。
-DERIVED_FIELD_KEYS: frozenset[str] = frozenset(DERIVED_FIELDS)
-
 #: 裸字段名默认展开到派生口径（"默认用派生口径，原始列保留可查"的落地点）。
 #:
 #: 只对**没有被全路径限定的裸名**生效：``asset_impairment_loss`` 落派生字段；

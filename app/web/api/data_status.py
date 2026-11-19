@@ -23,7 +23,6 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from app.core.financial_period import CN_TZ
 from app.core.missing_conditions import (
     ACTIONABLE_MISSING_SQL,
-    DISABLED_MISSING_FIELDS,
     actionable_missing_condition,
 )
 from app.core.quality.null_reasons import DOMAINS, reason_distribution
@@ -42,9 +41,8 @@ _SUMMARY_TTL_SECONDS = 300
 # core 需要同一口径的 actionable_missing_count()，此前靠
 # `from app.web.api.data_status import _actionable_missing_condition`
 # 惰性导入绕环，是本仓唯一一处 core→web 层反转。现在真源只有一个方向：
-# web → core（`app/core/missing_conditions.py`）。下面两个私有名保留为
+# web → core（`app/core/missing_conditions.py`）。下面这个私有名保留为
 # 向后兼容别名，历史测试/脚本仍可照旧导入。
-_DISABLED_MISSING_FIELDS = DISABLED_MISSING_FIELDS
 _ACTIONABLE_MISSING_SQL = ACTIONABLE_MISSING_SQL
 
 _SUMMARY_CACHE: dict[str, dict[str, object]] = {}

@@ -30,7 +30,6 @@ import pandas as pd
 import pytest
 
 from app.core.quality import null_reason_sweeper as sweeper
-from app.core.quality.null_reasons import reasons_for
 from app.core.supplement import (
     ACTIVITY_COLUMNS,
     ACTIVITY_VALUE_COLUMNS,
@@ -60,6 +59,22 @@ _OLD_ACTIVITY_CAPEX = 888_000_000.0
 
 
 # ─── 夹具 ─────────────────────────────────────────────────────────────
+
+
+def _null_reason_rows(duck, field_name: str, report_date: str | None = None) -> list[dict]:
+    """稀疏表里的空值原因明细（生产侧只保留聚合读入口 `reason_distribution`）。
+
+    这些用例验的是**清扫器写进库里的内容**，所以直读表而不是走查询层。
+    """
+    sql = (
+        "SELECT stock_code, report_date, field_name, reason_code, detail "
+        "FROM indicator_null_reason WHERE field_name = ?"
+    )
+    params: list[object] = [field_name]
+    if report_date is not None:
+        sql += " AND report_date = ?"
+        params.append(report_date)
+    return duck.read_query(sql + " ORDER BY stock_code", params)
 
 
 def _seed_stock(duck, code: str = "600519", name: str = "贵州茅台") -> None:
@@ -445,12 +460,7 @@ def test_structural_missing_indirect_registered_as_source_empty(
         "SOURCE_EMPTY": 2,
     }, result.by_field
 
-    rows = reasons_for(
-        duckdb_store,
-        domain="cash_flow_indirect",
-        report_date=report_date,
-        fields=[STRUCTURAL_INDIRECT_FIELD],
-    )
+    rows = _null_reason_rows(duckdb_store, STRUCTURAL_INDIRECT_FIELD, report_date)
     assert len(rows) == 2, rows
     assert {row["reason_code"] for row in rows} == {"SOURCE_EMPTY"}
     assert {str(row["report_date"])[:10] for row in rows} == {report_date}
@@ -474,12 +484,7 @@ def test_other_cash_effect_reason_is_semantic_mismatch_not_source_missing(
     )
     assert result.by_field[STRUCTURAL_ACTIVITY_FIELD] == {"SOURCE_EMPTY": 2}
 
-    rows = reasons_for(
-        duckdb_store,
-        domain="cash_flow_activity",
-        report_date=report_date,
-        fields=[STRUCTURAL_ACTIVITY_FIELD],
-    )
+    rows = _null_reason_rows(duckdb_store, STRUCTURAL_ACTIVITY_FIELD, report_date)
     assert rows
     for row in rows:
         detail = row["detail"] or ""
@@ -500,11 +505,7 @@ def test_structural_missing_is_stored_per_report_date(duckdb_store) -> None:
             write=True,
         )
 
-    rows = reasons_for(
-        duckdb_store,
-        domain="cash_flow_indirect",
-        fields=[STRUCTURAL_INDIRECT_FIELD],
-    )
+    rows = _null_reason_rows(duckdb_store, STRUCTURAL_INDIRECT_FIELD)
     assert {str(row["report_date"])[:10] for row in rows} == set(periods), rows
     assert len(rows) == len(periods)
 

@@ -84,16 +84,10 @@ def is_bank_sql(alias: str | None = None) -> str:
     )
 
 
-def is_financial_sw_level1(sw_level1: str | None) -> bool:
-    """Python 侧判定（只用于读 `stock_meta.sw_level1` 的场景，不含 csrc 兜底）。"""
-    return (sw_level1 or "").strip() in FINANCIAL_SW_LEVEL1
-
-
 __all__ = [
     "FINANCIAL_CSRC_L1",
     "FINANCIAL_SW_LEVEL1",
     "is_bank_sql",
     "is_financial_sql",
-    "is_financial_sw_level1",
     "is_non_financial_sql",
 ]

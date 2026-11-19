@@ -82,7 +82,7 @@ def _importing_files(root: Path, module: str) -> list[str]:
 
 
 def _constant_true_write_calls(root: Path) -> list[str]:
-    """`sweep(..., write=True)` / `sweep_all(..., write=True)` 的硬编码调用点。"""
+    """`sweep(..., write=True)` 的硬编码调用点。"""
     hits: list[str] = []
     for path in _python_files(root):
         for node in ast.walk(_parse(path)):
@@ -90,7 +90,7 @@ def _constant_true_write_calls(root: Path) -> list[str]:
                 continue
             func = node.func
             name = func.id if isinstance(func, ast.Name) else None
-            if name not in {"sweep", "sweep_all"}:
+            if name != "sweep":
                 continue
             for keyword in node.keywords:
                 if (
@@ -111,22 +111,20 @@ def test_sweep_defaults_to_dry_run() -> None:
     拦：①有人把默认翻成 `True`，CLI 的"预演绝不写库"承诺立刻失效；
     ②`domain` 拿到默认值，"只清扫 ext 域"退化成扫全库（分钟级 → 十几分钟级）。
     """
-    for func in (sweeper.sweep, sweeper.sweep_all):
-        params = inspect.signature(func).parameters
-        write = params["write"]
-        assert write.kind is inspect.Parameter.KEYWORD_ONLY, (
-            f"{func.__name__}.write 必须是 keyword-only：位置参数会被误传"
-        )
-        assert write.default is False, (
-            f"{func.__name__}.write 默认值必须是 False（dry-run）——"
-            "否则任何一次调用都在未加 --yes、未持写锁的情况下写正式库"
-        )
+    params = inspect.signature(sweeper.sweep).parameters
+    write = params["write"]
+    assert write.kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"{sweeper.sweep.__name__}.write 必须是 keyword-only：位置参数会被误传"
+    )
+    assert write.default is False, (
+        f"{sweeper.sweep.__name__}.write 默认值必须是 False（dry-run）——"
+        "否则任何一次调用都在未加 --yes、未持写锁的情况下写正式库"
+    )
 
     domain = inspect.signature(sweeper.sweep).parameters["domain"]
     assert domain.default is inspect.Parameter.empty, (
-        "sweep.domain 不应有默认值：全库清扫必须是调用方显式要求（sweep_all）"
+        "sweep.domain 不应有默认值：全库清扫必须是调用方逐域显式要求"
     )
-    assert inspect.signature(sweeper.sweep_all).parameters["write"].default is False
 
 
 # ─── 2. 唯一写库入口：`app/` 里没有别的调用点 ─────────────────────

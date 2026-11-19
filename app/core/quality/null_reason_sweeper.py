@@ -63,7 +63,7 @@ NULL 能被解释），也看反例（字段有值却满足同一条件 ⇒ 说�
   `--yes` 才写；写之前查 `any_write_lock_active`（别的进程在写就退出，不排队、不抢），
   写窗口用 `exclusive_update` + `DuckDBStore.transaction()` 双重串行，只碰
   `indicator_null_reason` 一张稀疏表。`app/` 与 `scripts/` 里**没有第二处**用
-  `write=True` 调 `sweep` / `sweep_all` 的地方（守卫：
+  `write=True` 调 `sweep` 的地方（守卫：
   `tests/regression/test_null_reason_placement.py`）。
 - **读端是在线的**：`GET /api/data-status/null-reasons`
   → `app/web/api/data_status.py::get_null_reasons`
@@ -1472,16 +1472,3 @@ def sweep(
         write,
     )
     return result
-
-
-def sweep_all(
-    store: DuckDBStore,
-    *,
-    report_date: date | str | None = None,
-    write: bool = False,
-) -> dict[str, SweepResult]:
-    """对全部域依次清扫（snapshot 先于 ext：ext 的对齐判定依赖 snapshot 的最新期）。"""
-    return {
-        domain: sweep(store, domain=domain, report_date=report_date, write=write)
-        for domain in DOMAINS
-    }

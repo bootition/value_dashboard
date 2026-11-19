@@ -36,7 +36,6 @@ import repair_nonstandard_report_dates as repair  # noqa: E402
 from app.core.report_periods import (  # noqa: E402
     canonical_year_start_target,
     is_standard_report_date,
-    report_period_name,
 )
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 
@@ -60,14 +59,6 @@ from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
 )
 def test_is_standard_report_date(value: object, expected: bool) -> None:
     assert is_standard_report_date(value) is expected
-
-
-def test_report_period_name() -> None:
-    assert report_period_name(date(2026, 6, 30)) == "2026 半年报"
-    assert report_period_name(date(2025, 12, 31)) == "2025 年报"
-    assert report_period_name(date(2026, 9, 30)) == "2026 三季报"
-    assert report_period_name(date(2026, 3, 31)) == "2026 一季报"
-    assert "非标准报告期" in report_period_name(date(2024, 1, 1))
 
 
 def test_year_start_maps_to_previous_annual() -> None:

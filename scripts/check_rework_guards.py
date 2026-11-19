@@ -535,11 +535,6 @@ def _dict_status_override_indexes(node: ast.Dict) -> list[int]:
     return hits
 
 
-def _dict_literal_overrides_status(node: ast.Dict) -> bool:
-    """兼容入口：该 dict 是否用解包之后的字面量 status 覆盖了被解包的状态。"""
-    return bool(_dict_status_override_indexes(node))
-
-
 def _enclosing_function(node: ast.AST, parents: dict[int, ast.AST]) -> ast.AST | None:
     current = parents.get(id(node))
     while current is not None:
