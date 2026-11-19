@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -15,8 +16,13 @@ from app.core.storage.path_policy import (
     VdEnv,
     canonicalize_path,
 )
-from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
+from app.core.storage.schema import init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.schema_template import (
+    build_schema_template,
+    materialize_duckdb_from_template,
+    release_schema_template,
+)
 
 
 def insert_minimum_screenable_data(store: DuckDBStore, stock_code: str = "000001") -> None:
@@ -161,11 +167,44 @@ def database_paths(tmp_path: Path) -> DatabasePathSet:
     ).validate()
 
 
+@pytest.fixture(scope="session")
+def schema_template_path(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Path]:
+    """会话级：用**一次**真实 ``init_duckdb_schema()`` 建出可复制的 schema 模板库。
+
+    2026-11-19（.planning/2026-11-19-test-audit/T4_cost.md §5①）：``init_duckdb_schema``
+    实测中位 0.404 s × 956 条用 ``duckdb_store`` 的测试 ≈ 363 s = 全量 1749 s 的
+    20.8%。schema 内容是常量，于是「每会话建一次模板 + 每测试拷一份」
+    （复制+打开+查询实测 0.035 s）替代「每测试跑一遍 DDL」，**不缩小任何覆盖面**
+    —— 每条测试仍然拿到一个独立的、schema 完整的真实 DuckDB 文件库。
+
+    模板只交给本 fixture 与 ``duckdb_store`` 复制用；测试永远拿不到模板路径
+    （见 ``tests/support/schema_template.py`` 的不变式 1）。
+    """
+    template = build_schema_template(tmp_path_factory.mktemp("schema-template"))
+    try:
+        yield template
+    finally:
+        # 恢复可写，避免只读属性挡住临时目录清理。
+        release_schema_template(template)
+
+
 @pytest.fixture
-def duckdb_store(database_paths: DatabasePathSet) -> DuckDBStore:
-    """Return an isolated DuckDB store initialized inside pytest's temp directory."""
+def duckdb_store(
+    database_paths: DatabasePathSet,
+    schema_template_path: Path,
+) -> DuckDBStore:
+    """Return an isolated DuckDB store materialized from the session schema template.
+
+    2026-11-19：建库方式从「每条测试跑一遍 DDL」改为「从会话级模板复制一份」。
+    隔离性不变 —— 复制件是 ``tmp_path`` 下的独立文件，有自己的 WAL 与写锁。
+    注意保持「复制 → 构造」两个语句：单行 ``return SomeCall(...)`` 会被
+    ``tests/support/source_guard.py::resolve_body`` 当成委托壳追进
+    ``DuckDBStore.__init__``，本 fixture 的 AST 守卫（
+    ``test_schema_template_fixture.py::test_duckdb_store_fixture_body_has_no_ddl_call``）
+    就会看错函数体。
+    """
+    materialize_duckdb_from_template(schema_template_path, database_paths.duckdb_path)
     store = DuckDBStore(paths=database_paths)
-    init_duckdb_schema(store)
     return store
 
 
