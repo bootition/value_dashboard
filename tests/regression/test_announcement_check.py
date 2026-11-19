@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater, classify_announcement
+from tests.support.seed_sqlite import SeedSqlite
 
 
 class EmptySQLite:
@@ -230,11 +231,11 @@ def test_legal_empty_placement_funding_missing_is_resolved(
     duckdb_store, sqlite_store,
 ) -> None:
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    sqlite_store.execute(
-        """INSERT INTO missing_list (stock_code, field_name, reason_code)
-           VALUES ('000001', 'placement_funding', 'source_empty'),
-                  ('920000', 'placement_funding', 'source_empty')"""
-    )
+    # 原来卡在缺口 B（`missing_list` 无 SQLite 侧方法）；`resolved_at` 都留 NULL
+    # —— "未解决"正是 `_resolve_legal_empty_funding_missing()` 要认的行。
+    seed_sqlite = SeedSqlite(sqlite_store)
+    seed_sqlite.missing_list("000001", "placement_funding", "source_empty")
+    seed_sqlite.missing_list("920000", "placement_funding", "source_empty")
     assert updater._resolve_legal_empty_funding_missing() == 1
     rows = sqlite_store.query(
         "SELECT stock_code, resolved_at FROM missing_list ORDER BY stock_code"

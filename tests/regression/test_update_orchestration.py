@@ -26,6 +26,14 @@ from app.core.update import (
     _announcement_step_result,
     _merge_indicator_steps,
 )
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite, sql_now
+
+# 本轮收敛：`missing_list` 的 2 处（写在 `sqlite_store.transaction()` 里）→
+# `SeedSqlite.join(conn).missing_list()`。
+# **保留内联**的是 3 处 `retry_list`：两处 `last_attempt` 要库侧 `CURRENT_TIMESTAMP`
+# （"刚尝试过"），一处靠 `cursor.lastrowid` 回捞 id 后喂给 `_mark_retry_failed` ——
+# 后者正是工厂刻意不做的事（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
 
 
 def _fetch_result(
@@ -60,13 +68,19 @@ def _seed_stock(
     total_shares: float | None = 100.0,
     circ_shares: float | None = 80.0,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, listing_date, is_st,
-                is_suspended, total_shares, circ_shares)
-           VALUES (?, 'x', 'SZSE', ?, ?, ?, ?, ?, ?)""",
-        [code, listed, listing_date, is_st, is_suspended, total_shares, circ_shares],
-    )
+    # `exchange` 显式写 'SZSE'（工厂默认按代码段推断，会把 600001/600002 判成 SHSE）。
+    seed = Seed(duckdb_store)
+    seed.stock(code, name="x", exchange="SZSE", is_listed=listed, listing_date=listing_date,
+               is_st=is_st, is_suspended=is_suspended, total_shares=total_shares,
+               circ_shares=circ_shares)
+
+
+def _seed_local_price_rows(duckdb_store) -> None:
+    """两只股票的本地日线：000001 到 2026-10-10（新），000002 停在 2015-01-05（陈旧）。"""
+    seed = Seed(duckdb_store)
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        seed.prices("000001", [("2026-10-10", 10)], table=table)
+        seed.prices("000002", [("2015-01-05", 10)], table=table)
 
 
 def _stub_flow(updater: IncrementalUpdater) -> None:
@@ -127,15 +141,11 @@ def test_xdxr_window_uses_each_stocks_own_local_date(duckdb_store, sqlite_store)
     _seed_stock(duckdb_store, "000001")
     _seed_stock(duckdb_store, "000002")
     _seed_stock(duckdb_store, "000003")
-    for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
-            "('000001', '2026-10-10', 10), ('000002', '2015-01-05', 10)"
-        )
-    duckdb_store.write_query(
-        "INSERT INTO xdxr (stock_code, event_date, category) VALUES "
-        "('000001', '2026-10-05', 1), ('000002', '2016-06-01', 1), ('000003', '2026-09-01', 1)"
-    )
+    _seed_local_price_rows(duckdb_store)
+    seed = Seed(duckdb_store)
+    seed.xdxr("000001", "2026-10-05")
+    seed.xdxr("000002", "2016-06-01")
+    seed.xdxr("000003", "2026-09-01")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     fallback_start = "2026-06-01"
     rows = {
@@ -176,15 +186,10 @@ def test_xdxr_window_can_derive_dates_in_sql(duckdb_store, sqlite_store) -> None
     """不传 stock_windows 时，一条 JOIN SQL 自行求每只股票的本地最新日期。"""
     _seed_stock(duckdb_store, "000001")
     _seed_stock(duckdb_store, "000002")
-    for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
-            "('000001', '2026-10-10', 10), ('000002', '2015-01-05', 10)"
-        )
-    duckdb_store.write_query(
-        "INSERT INTO xdxr (stock_code, event_date, category) VALUES "
-        "('000001', '2026-10-05', 1), ('000002', '2016-06-01', 1)"
-    )
+    _seed_local_price_rows(duckdb_store)
+    seed = Seed(duckdb_store)
+    seed.xdxr("000001", "2026-10-05")
+    seed.xdxr("000002", "2016-06-01")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
 
     codes = updater._get_xdxr_codes_since(
@@ -383,6 +388,7 @@ def test_settled_non_retryable_rows_do_not_consume_retry_budget(
     """retry_count=4/5 的合法空任务立即结算，不得再被推成 retry_exhausted。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     with sqlite_store.transaction() as conn:
+        # 保留内联：`last_attempt` 要库侧 `CURRENT_TIMESTAMP`（"刚尝试过"），本轮不收敛。
         conn.execute(
             """INSERT INTO retry_list
                    (stock_code, data_type, adapter, error, retry_count, max_retries,
@@ -416,6 +422,7 @@ def test_zero_attempt_failure_is_rechecked_once(duckdb_store, sqlite_store) -> N
     """历史 `无可用适配器 (tried: [])` 行重置为一次干净重试，且只重置一次。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     with sqlite_store.transaction() as conn:
+        # 保留内联：同上（`last_attempt` 用库侧时钟），本轮不收敛。
         conn.execute(
             """INSERT INTO retry_list
                    (stock_code, data_type, adapter, error, retry_count, max_retries,
@@ -545,14 +552,11 @@ def test_incremental_check_uses_actionable_missing_count(
 ) -> None:
     """已解决的历史缺失不得计入 missing_count（旧口径 11,823 vs 可行动 162）。"""
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO missing_list (stock_code, field_name, reason_code, resolved_at)
-               VALUES ('600519', 'listing_info', 'source_incomplete', CURRENT_TIMESTAMP)"""
-        )
-        conn.execute(
-            """INSERT INTO missing_list (stock_code, field_name, reason_code)
-               VALUES ('000001', 'share_capital', 'source_incomplete')"""
-        )
+        # `join(conn)`：事务已在调用点手里，工厂只写不提交。
+        seed = SeedSqlite(sqlite_store).join(conn)
+        # 已解决的历史行：`resolved_at` 仍由库侧时钟给（`sql_now()` ＝ `datetime('now')`）。
+        seed.missing_list("600519", "listing_info", "source_incomplete", resolved_at=sql_now())
+        seed.missing_list("000001", "share_capital", "source_incomplete")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
 
     report = updater.run_incremental_check(include_announcements=False)
@@ -567,6 +571,8 @@ def test_retry_exhaustion_keeps_legacy_field_name_for_unknown_kind(
     """error_kind=unknown 的耗尽行保持 field_name='retry_exhausted:<type>'（兼容旧查询）。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     with sqlite_store.transaction() as conn:
+        # 保留内联：`lastrowid` 回捞 —— 这一行后面要被 `_mark_retry_failed` 指着更新，
+        # 工厂刻意不返回 id（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
         cursor = conn.execute(
             """INSERT INTO retry_list
                    (stock_code, data_type, adapter, error, retry_count,

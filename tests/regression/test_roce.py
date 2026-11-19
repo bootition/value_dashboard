@@ -33,6 +33,7 @@
 from __future__ import annotations
 
 import statistics
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -47,6 +48,7 @@ from app.core.indicators.roce import (
     RoceBuilder,
 )
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import Seed
 
 #: 一年一期的年报日期
 YEARS = ("2019-12-31", "2020-12-31", "2021-12-31", "2022-12-31", "2023-12-31")
@@ -60,11 +62,10 @@ def _seed_balance(
     total_current_liabilities: list[float],
     years: tuple[str, ...] = YEARS,
 ) -> None:
+    seed = Seed(duck)
     for report_date, ta, tcl in zip(years, total_assets, total_current_liabilities, strict=True):
-        duck.write_query(
-            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
-               VALUES (?, CAST(? AS DATE), ?, ?)""",
-            [code, report_date, ta, tcl],
+        seed.balance(
+            code, report_date, total_assets=ta, total_current_liabilities=tcl,
         )
 
 
@@ -76,12 +77,9 @@ def _seed_income(
     financial_expenses: list[float],
     years: tuple[str, ...] = YEARS,
 ) -> None:
+    seed = Seed(duck)
     for report_date, tp, fin in zip(years, total_profit, financial_expenses, strict=True):
-        duck.write_query(
-            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
-               VALUES (?, CAST(? AS DATE), ?, ?)""",
-            [code, report_date, tp, fin],
-        )
+        seed.income(code, report_date, total_profit=tp, financial_expenses=fin)
 
 
 def _snapshot(duck: DuckDBStore, code: str) -> dict[str, Any]:
@@ -95,15 +93,10 @@ def _snapshot(duck: DuckDBStore, code: str) -> dict[str, Any]:
 
 
 def _seed_snapshot_row(duck: DuckDBStore, code: str) -> None:
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES (?, ?, 'SZSE', true)",
-        [code, code],
-    )
-    duck.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, calculated_at, data_version)
-           VALUES (?, CAST('2023-12-31' AS DATE), now(), 'fixture')""",
-        [code],
-    )
+    seed = Seed(duck)
+    seed.stock(code, name=code, exchange="SZSE", is_listed=True)
+    # 快照行只是 ROCE 列的载体：`report_date` 固定，`calculated_at` 取当下（原为 SQL `now()`）。
+    seed.snapshot(code, "2023-12-31", calculated_at=datetime.now(UTC), data_version="fixture")
 
 
 def test_capital_employed_is_total_assets_minus_current_liabilities(
@@ -163,13 +156,11 @@ def test_single_year_roce_uses_average_capital_employed(
 def test_cash_is_not_excluded_from_capital_employed(duckdb_store: DuckDBStore) -> None:
     """不剔现金：货币资金再多也不动分母（剔除会掏空白酒/家电的分母）。"""
     _seed_snapshot_row(duckdb_store, "000003")
+    seed = Seed(duckdb_store)
     for report_date in YEARS:
-        duckdb_store.write_query(
-            """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_current_liabilities,
-                monetary_funds, short_term_loans, long_term_loans, bonds_payable)
-               VALUES (?, CAST(? AS DATE), 1000, 300, 600, 0, 0, 0)""",
-            ["000003", report_date],
+        seed.balance(
+            "000003", report_date, total_assets=1000, total_current_liabilities=300,
+            monetary_funds=600, short_term_loans=0, long_term_loans=0, bonds_payable=0,
         )
     _seed_income(
         duckdb_store, "000003",
@@ -228,17 +219,11 @@ def test_invalid_denominator_keeps_null_roce_but_preserves_ce(
 def test_missing_financial_expenses_marks_missing_ebit(duckdb_store: DuckDBStore) -> None:
     """金融股利润表没有「财务费用」这一行 → EBIT 缺失，不能当成 0。"""
     _seed_snapshot_row(duckdb_store, "000005")
+    seed = Seed(duckdb_store)
     for report_date in YEARS:
-        duckdb_store.write_query(
-            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
-               VALUES (?, CAST(? AS DATE), 1000, 300)""",
-            ["000005", report_date],
-        )
-        duckdb_store.write_query(
-            """INSERT INTO income_statement (stock_code, report_date, total_profit)
-               VALUES (?, CAST(? AS DATE), 100)""",
-            ["000005", report_date],
-        )
+        seed.balance("000005", report_date, total_assets=1000, total_current_liabilities=300)
+        # `financial_expenses` 刻意不写（NULL ≠ 0）：这就是本用例要的"缺财务费用"。
+        seed.income("000005", report_date, total_profit=100)
 
     RoceBuilder(duck=duckdb_store).build()
 
@@ -258,18 +243,11 @@ def test_missing_financial_expenses_marks_missing_ebit(duckdb_store: DuckDBStore
 
 def _seed_n_years(duck: DuckDBStore, code: str, n_reports: int) -> None:
     """铺 n_reports 份连续年报（CE 恒 1000、EBIT 恒 100），得到 n_reports-1 个有效 ROCE 年。"""
+    seed = Seed(duck)
     for i in range(n_reports):
         report_date = f"{2000 + i}-12-31"
-        duck.write_query(
-            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
-               VALUES (?, CAST(? AS DATE), 1000, 0)""",
-            [code, report_date],
-        )
-        duck.write_query(
-            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
-               VALUES (?, CAST(? AS DATE), 100, 0)""",
-            [code, report_date],
-        )
+        seed.balance(code, report_date, total_assets=1000, total_current_liabilities=0)
+        seed.income(code, report_date, total_profit=100, financial_expenses=0)
     _seed_snapshot_row(duck, code)
 
 
@@ -337,18 +315,11 @@ def test_20y_window_available_when_20_years_present(duckdb_store: DuckDBStore) -
 def test_median_is_median_of_valid_years(duckdb_store: DuckDBStore) -> None:
     """窗口内的中位数确实是中位数，不是平均数。"""
     _seed_snapshot_row(duckdb_store, "200007")
+    seed = Seed(duckdb_store)
     years = ("2019-12-31", "2020-12-31", "2021-12-31", "2022-12-31", "2023-12-31", "2024-12-31")
     for report_date, profit in zip(years, [100.0, 200.0, 300.0, 100.0, 100.0, 100.0], strict=True):
-        duckdb_store.write_query(
-            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
-               VALUES (?, CAST(? AS DATE), 1000, 0)""",
-            ["200007", report_date],
-        )
-        duckdb_store.write_query(
-            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
-               VALUES (?, CAST(? AS DATE), ?, 0)""",
-            ["200007", report_date, profit],
-        )
+        seed.balance("200007", report_date, total_assets=1000, total_current_liabilities=0)
+        seed.income("200007", report_date, total_profit=profit, financial_expenses=0)
     RoceBuilder(duck=duckdb_store).build()
     snap = _snapshot(duckdb_store, "200007")
     # 5 个有效年 ROCE = 20%/30%/10%/10%/10% → median = 10%
@@ -359,18 +330,15 @@ def test_median_is_median_of_valid_years(duckdb_store: DuckDBStore) -> None:
 def test_quarterly_reports_are_ignored(duckdb_store: DuckDBStore) -> None:
     """只吃年报：季报累计值直接除年平均资本会系统性低估。"""
     _seed_snapshot_row(duckdb_store, "000007")
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
-           VALUES ('000007', CAST('2023-09-30' AS DATE), 999, 0),
-                  ('000007', CAST('2023-12-31' AS DATE), 1000, 0),
-                  ('000007', CAST('2022-12-31' AS DATE), 900, 0)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
-           VALUES ('000007', CAST('2023-09-30' AS DATE), 75, 0),
-                  ('000007', CAST('2023-12-31' AS DATE), 100, 0),
-                  ('000007', CAST('2022-12-31' AS DATE), 80, 0)"""
-    )
+    seed = Seed(duckdb_store)
+    # 同一只票：一期季报（2023-09-30）夹在两年年报里，只有年报能进 ROCE 序列。
+    for report_date, total_assets, total_profit in (
+        ("2023-09-30", 999, 75),
+        ("2023-12-31", 1000, 100),
+        ("2022-12-31", 900, 80),
+    ):
+        seed.balance("000007", report_date, total_assets=total_assets, total_current_liabilities=0)
+        seed.income("000007", report_date, total_profit=total_profit, financial_expenses=0)
 
     RoceBuilder(duck=duckdb_store).build()
 
@@ -495,32 +463,19 @@ def _seed_eligibility(
     duck: DuckDBStore, code: str, *, years: int, mcap: float, industry: str | None,
 ) -> None:
     """构造 n 年连续年报 + 快照行（市值/行业可控）。"""
-    import datetime as _dt
-
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed, sw_level1, listing_date) "
-        "VALUES (?, ?, 'SZSE', true, ?, CAST('2000-01-01' AS DATE))",
-        [code, code, industry],
+    seed = Seed(duck)
+    seed.stock(
+        code, name=code, exchange="SZSE", is_listed=True, sw_level1=industry,
+        listing_date="2000-01-01",
     )
     for i in range(years + 1):  # +1：第一条没有期初资本
         report_date = f"{2010 + i}-12-31"
-        duck.write_query(
-            """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_current_liabilities)
-               VALUES (?, CAST(? AS DATE), 1000, 400)""",
-            [code, report_date],
-        )
-        duck.write_query(
-            """INSERT INTO income_statement (stock_code, report_date, total_profit, financial_expenses)
-               VALUES (?, CAST(? AS DATE), 100, 0)""",
-            [code, report_date],
-        )
-    duck.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, calculated_at, data_version, total_market_cap)
-           VALUES (?, CAST(? AS DATE), now(), 'fixture', ?)""",
-        [code, f"{2010 + years}-12-31", mcap],
+        seed.balance(code, report_date, total_assets=1000, total_current_liabilities=400)
+        seed.income(code, report_date, total_profit=100, financial_expenses=0)
+    seed.snapshot(
+        code, f"{2010 + years}-12-31", calculated_at=datetime.now(UTC), data_version="fixture",
+        total_market_cap=mcap,
     )
-    _ = _dt  # 保持导入可读性
 
 
 def _eligible(duck: DuckDBStore, code: str) -> Any:
@@ -816,18 +771,15 @@ def test_eligible_is_false_not_null_without_roce_history(
     实测（正式库）：115 行曾是 NULL。
     """
     # 只建快照、不建任何 roce_history（模拟 2024 年后上市的新股）
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended,
-                listing_date)
-           VALUES ('100099', '新股', 'SZSE', true, '制造业', false, false,
-                   CAST('2025-01-01' AS DATE))"""
+    seed = Seed(duckdb_store)
+    seed.stock(
+        "100099", name="新股", exchange="SZSE", is_listed=True, csrc_l1="制造业",
+        is_st=False, is_suspended=False, listing_date="2025-01-01",
     )
     # 市值住在 indicator_snapshot（不是 stock_meta）
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, calculated_at, data_version, total_market_cap)
-           VALUES ('100099', CAST('2025-12-31' AS DATE), now(), 'fixture', 5e9)"""
+    seed.snapshot(
+        "100099", "2025-12-31", calculated_at=datetime.now(UTC), data_version="fixture",
+        total_market_cap=5e9,
     )
     RoceBuilder(duck=duckdb_store).build()
 

@@ -25,6 +25,7 @@ from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web import main as web_main
+from tests.support.seed import Seed
 
 # ─── P1-1: read_connection 重试 ─────────────────────────────────────────
 
@@ -253,23 +254,15 @@ def test_treasury_comparison_batch_window_matches_legacy_semantics(
             "ON CONFLICT DO NOTHING",
             [code, trade_date, close],
         )
+    seed = Seed(duck)
     # 分红 1：2025-08-01 除权（对 2026-08-01 在 1 年窗口内；对 2026-08-05 在窗口外）
-    duck.write_query(
-        "INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        [code, date(2025, 8, 1), date(2025, 7, 30), 1.0],
-    )
+    seed.dividends(code, [(date(2025, 8, 1), date(2025, 7, 30), 1.0)], if_exists="ignore")
     # 分红 2：2026-07-01 除权（两个价格日都在窗口内）
-    duck.write_query(
-        "INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share) "
-        "VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING",
-        [code, date(2026, 7, 1), date(2026, 6, 30), 2.0],
-    )
-    duck.write_query(
-        """INSERT INTO treasury_yield_curve
-           (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES (?, 10.0, 1.5, 'czb_mof', ?, '0'*64, 'strict', 'b1')""",
-        [date(2026, 7, 31), datetime.now(UTC)],
+    seed.dividends(code, [(date(2026, 7, 1), date(2026, 6, 30), 2.0)], if_exists="ignore")
+    # 曲线抓取时刻原来是 `datetime.now(UTC)` → 调用点逐字给，工厂不替它编。
+    seed.treasury_yield_curve(
+        date(2026, 7, 31), 10.0, 1.5, fetch_time=datetime.now(UTC),
+        raw_hash="0" * 64, confidence="strict", batch_id="b1",
     )
 
     client = TestClient(app)

@@ -1,8 +1,19 @@
+"""指标数据质量回归（口径如实缺失 / TTM 对齐 / 分红窗口）。
+
+播种：能表达的都走 `tests/support/seed.py` 的按域工厂。**仍留内联 SQL 的三类**：
+1. `with duckdb_store.write_connection()` 事务块内的多行写入 —— 工厂自带写锁，
+   嵌套进已持有写锁的事务会撞锁，故保留；
+2. `dividends` / `treasury_yield_curve` / `manual_overrides` 这类工厂还没有方法的表；
+3. 依赖 `CURRENT_DATE`（相对「今天」构造 13/11 个月前的分红）的行 —— 工厂的
+   日期列是字面量，表达不了相对日期。
+"""
+
 from __future__ import annotations
 
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 def _calculator(store: DuckDBStore, sqlite: SQLiteStore) -> IndicatorCalculator:
@@ -13,14 +24,13 @@ def test_dividend_summary_sums_only_latest_year(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """
-        INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-        VALUES
-            ('600519', '2023-06-30', '2023-06-01', 1.0),
-            ('600519', '2024-06-30', '2024-06-01', 1.5),
-            ('600519', '2024-12-31', '2024-12-01', 2.0)
-        """
+    Seed(duckdb_store).dividends(
+        "600519",
+        [
+            ("2023-06-30", "2023-06-01", 1.0),
+            ("2024-06-30", "2024-06-01", 1.5),
+            ("2024-12-31", "2024-12-01", 2.0),
+        ],
     )
 
     summary = _calculator(duckdb_store, sqlite_store)._get_dividend_summary("600519")
@@ -43,6 +53,8 @@ def test_latest_financials_ignore_newer_shell_row(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 保留内联：三表要在**同一个** write_connection 事务里一起写入（这个用例
+    # 本身就是「最新期是空壳行」的场景），工厂每次自带写锁，嵌套会撞锁。
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """
@@ -81,6 +93,7 @@ def test_ttm_matches_the_prior_year_same_report_period_not_row_position(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 保留内联：同上 —— write_connection() 事务块内写入，工厂会撞写锁。
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """INSERT INTO income_statement (stock_code, report_date, revenue)
@@ -100,11 +113,12 @@ def test_ttm_does_not_use_income_newer_than_snapshot_as_of(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue)
-           VALUES ('600519', '2025-03-31', 200), ('600519', '2024-12-31', 1000),
-                  ('600519', '2024-03-31', 100), ('600519', '2025-06-30', 500)"""
-    )
+    # 2025-06-30 在快照 as-of 之后：TTM 不得把它算进来（否则 2025-03-31 口径错位）。
+    seed = Seed(duckdb_store)
+    seed.income("600519", "2025-03-31", revenue=200)
+    seed.income("600519", "2024-12-31", revenue=1000)
+    seed.income("600519", "2024-03-31", revenue=100)
+    seed.income("600519", "2025-06-30", revenue=500)
 
     ttm = _calculator(duckdb_store, sqlite_store)._get_ttm_data("600519", "2025-03-31")
 
@@ -116,10 +130,10 @@ def test_published_income_correction_applies_to_ttm_and_growth_history(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit, deducted_net_profit)
-           VALUES ('600519', '2025-12-31', 200, 20, 18), ('600519', '2024-12-31', 100, 10, 9)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.income("600519", "2025-12-31", revenue=200, parent_net_profit=20, deducted_net_profit=18)
+    seed.income("600519", "2024-12-31", revenue=100, parent_net_profit=10, deducted_net_profit=9)
+    # 保留内联：`manual_overrides` 是 SQLite 侧的表（已发布人工修正），不在 DuckDB 工厂范围。
     sqlite_store.execute(
         """INSERT INTO manual_overrides
            (stock_code, field_name, report_date, override_value, reason, status)
@@ -138,6 +152,10 @@ def test_dividend_yield_uses_only_trailing_twelve_months(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 保留内联：日期是 SQL 侧 `CURRENT_DATE - INTERVAL '13 months'` 的**日历月**
+    # 运算（相对今天构造 13/11 个月前的分红，让用例不随日历漂移）。要换成工厂调用
+    # 就得在 Python 侧重造日历月（`timedelta` 只能按天，得引 `dateutil.relativedelta`），
+    # 等于给种子再立一份日期口径，而且"今天"会从库里时钟挪到进程时钟 —— 不是缺 API。
     duckdb_store.write_query(
         """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
            SELECT '600519', CURRENT_DATE - INTERVAL '13 months', CURRENT_DATE - INTERVAL '14 months', 10.0
@@ -153,10 +171,9 @@ def test_unverified_dividend_dates_do_not_produce_shareholder_metrics(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, dividend_per_share)
-           VALUES ('600519', '2025-12-31', 2.0)"""
-    )
+    # `announcement_date` 传 None 是**故意**的（未证公告日 → 股东回报指标必须
+    # 整项缺失）；工厂不会替它填 ex_date。
+    Seed(duckdb_store).dividends("600519", [("2025-12-31", None, 2.0)])
     calculator = _calculator(duckdb_store, sqlite_store)
 
     assert calculator._get_dividend_summary("600519")["latest_dps"] is None
@@ -169,9 +186,9 @@ def test_missing_debt_components_and_circulating_shares_remain_missing(
     sqlite_store: SQLiteStore,
 ) -> None:
     calculator = _calculator(duckdb_store, sqlite_store)
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, total_shares, circ_shares)
-           VALUES ('600519', 'Test', 'SSE', 1000, NULL)"""
+    # circ_shares 故意留 NULL：没有流通股本时流通市值/换手类指标必须保持缺失。
+    Seed(duckdb_store).stock(
+        "600519", name="Test", exchange="SSE", total_shares=1000, circ_shares=None,
     )
 
     assert calculator._get_shares("600519", {})["circ_shares"] is None
@@ -250,28 +267,19 @@ def test_refresh_treasury_spreads_updates_only_treasury_columns(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('600519', 'Test', 'SSE', true)"""
+    Seed(duckdb_store).stock("600519", name="Test", exchange="SSE", is_listed=True)
+    # 只种本用例要校验的三列：latest_close/latest_price_date 是 refresh 的筛选与
+    # 对齐依据，pe_ttm 必须保持不变，ttm_dividend_yield 由 refresh 重算；
+    # `calculated_at` 由生产方在 UPDATE 时回写，这里不编造。
+    Seed(duckdb_store).snapshot(
+        "600519", "2025-12-31",
+        latest_close=10.0, latest_price_date="2026-08-31", pe_ttm=25.0,
     )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-           (stock_code, report_date, latest_close, latest_price_date,
-            calculated_at, pe_ttm, ttm_dividend_yield)
-           VALUES ('600519', '2025-12-31', 10.0, '2026-08-31',
-                   CURRENT_TIMESTAMP, 25.0, NULL)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', '2026-06-30', '2026-06-01', 2.0)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO treasury_yield_curve
-           (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash,
-            confidence, batch_id)
-           VALUES ('2026-08-31', 10.0, 3.0, 'czb_mof', CURRENT_TIMESTAMP, ?,
-                   'strict', 'test-batch')""",
-        ["a" * 64],
+    Seed(duckdb_store).dividends("600519", [("2026-06-30", "2026-06-01", 2.0)])
+    # 曲线要"刚抓的"（原来的 SQL 侧 `CURRENT_TIMESTAMP`）→ 显式开 `trace_now`；
+    # raw_hash/batch_id 仍是调用点原来的值。
+    Seed(duckdb_store, trace_now=True).treasury_yield_curve(
+        "2026-08-31", 10.0, 3.0, raw_hash="a" * 64, batch_id="test-batch",
     )
 
     report = _calculator(duckdb_store, sqlite_store).refresh_treasury_spreads(["600519"])

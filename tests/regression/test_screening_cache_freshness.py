@@ -33,7 +33,6 @@ from app.core.data_quality import (
     _screening_readiness_refresh_worker,
     load_screening_readiness_cache,
     load_screening_readiness_entry,
-    read_screening_readiness_refresh_state,
     screening_readiness_cache_key,
     store_screening_readiness_cache,
 )
@@ -88,6 +87,27 @@ def _store_decision(
             updated,
         ],
     )
+
+
+def _read_refresh_state(sqlite: SQLiteStore) -> dict:
+    """读 ``data_refresh_state`` 里的筛就绪刷新记账（{} = 从未记账）。
+
+    生产侧只有**写**方（``record_screening_readiness_refresh_outcome``，由
+    后台刷新 worker 在跳过/失败/成功三条路径上调用），没有生产读方；原先
+    暴露给测试的 ``read_screening_readiness_refresh_state()`` 因此删掉了。
+    这里直接按原键读，断言内容与删前完全一致（包括"从未记账 == {}"）。
+    """
+    rows = sqlite.query(
+        "SELECT value FROM data_refresh_state WHERE key = ?",
+        [SCREENING_READINESS_REFRESH_STATE_KEY],
+    )
+    if not rows or not rows[0].get("value"):
+        return {}
+    try:
+        payload = json.loads(rows[0]["value"])
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def test_fingerprint_changes_when_calendar_rows_replaced_in_place(
@@ -334,7 +354,7 @@ def test_background_refresh_failure_is_persisted_and_not_infinite_stale(
         sqlite_store, fingerprint, _READY_DECISION,
         age_seconds=SCREENING_READINESS_CACHE_TTL_SECONDS + 60,
     )
-    assert read_screening_readiness_refresh_state(sqlite_store) == {}
+    assert _read_refresh_state(sqlite_store) == {}
 
     def _boom(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
         raise RuntimeError("simulated readiness scan explosion")
@@ -344,7 +364,7 @@ def test_background_refresh_failure_is_persisted_and_not_infinite_stale(
         duckdb_store, sqlite_store, fingerprint, f"{duckdb_store.db_path}|{sqlite_store.db_path}|{fingerprint}",
     )
 
-    state = read_screening_readiness_refresh_state(sqlite_store)
+    state = _read_refresh_state(sqlite_store)
     assert state["last_failure_at"], "刷新失败必须落盘，不能只有 logger.warning"
     assert state["consecutive_failures"] == 1
     assert "simulated readiness scan explosion" in (state["last_error"] or "")
@@ -363,7 +383,7 @@ def test_background_refresh_failure_is_persisted_and_not_infinite_stale(
     _screening_readiness_refresh_worker(
         duckdb_store, sqlite_store, fingerprint, f"{duckdb_store.db_path}|{sqlite_store.db_path}|{fingerprint}",
     )
-    state = read_screening_readiness_refresh_state(sqlite_store)
+    state = _read_refresh_state(sqlite_store)
     assert state["last_skip_reason"] == "write_lock_active"
     assert state["consecutive_failures"] == 2
 
@@ -377,7 +397,7 @@ def test_background_refresh_failure_is_persisted_and_not_infinite_stale(
     _screening_readiness_refresh_worker(
         duckdb_store, sqlite_store, fingerprint, f"{duckdb_store.db_path}|{sqlite_store.db_path}|{fingerprint}",
     )
-    state = read_screening_readiness_refresh_state(sqlite_store)
+    state = _read_refresh_state(sqlite_store)
     assert state["consecutive_failures"] == 0
     assert state["last_success_at"]
     assert state["last_failure_at"], "失败历史不应被成功刷新抹掉"

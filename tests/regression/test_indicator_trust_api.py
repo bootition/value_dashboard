@@ -14,6 +14,7 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import router as stock_detail_router
 from app.web.api.watchlist import router as watchlist_router
 from tests.conftest import insert_minimum_screenable_data
+from tests.support.seed import Seed
 
 SNAPSHOT_VALUE_FIELDS = (
     "latest_close", "pe_ttm", "pb_mrq", "roe", "gross_margin", "net_margin",
@@ -79,20 +80,24 @@ def test_stock_search_matches_partial_code_and_name(
 
 
 def _poison_lineage(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO source_audit
-           (stock_code, field_name, report_date, value, source, fetch_batch_id,
-            fetch_time, raw_response_hash, confidence)
-           VALUES ('000001', 'revenue', DATE '2025-12-31', 1, 'tampered', 'missing-batch',
-                   CURRENT_TIMESTAMP - INTERVAL '1 day', 'not-a-sha', 'strict')"""
+    """毒源：孤儿批次（`missing-batch` 不在 `fetch_batch`）+ 长度非 64 的 hash。
+
+    这两点才是 `LINEAGE_INVALID` 的判据（`app/core/data_quality.py` 的
+    `invalid_hash_rows` / `orphan_batch_rows`）。`fetch_time` 不参与判定，用工厂的
+    固定字面量即可（仍早于快照的 `calculated_at`，与原 `now() - INTERVAL '1 day'`
+    同一方向）；`raw_response_hash` 是**故意**写成 `'not-a-sha'` 的，工厂逐字照收、
+    不校验形状 —— 校验是要被测的生产逻辑。
+    """
+    Seed(duckdb_store).source_audit(
+        "000001", "revenue",
+        report_date="2025-12-31", value=1.0, source="tampered",
+        fetch_batch_id="missing-batch", raw_response_hash="not-a-sha", confidence="strict",
     )
 
 
 def _poison_dividend_dates(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('000001', DATE '2024-06-28', NULL, 1.0)"""
-    )
+    """毒源：`announcement_date` 缺着 → `DIVIDEND_DATES_UNVERIFIED`。"""
+    Seed(duckdb_store).dividends("000001", [("2024-06-28", None, 1.0)])
 
 
 def _flat_indicator_metrics(body: dict) -> list[dict]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from app.core.housekeeping import gc_operational_tables
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed_sqlite import SeedSqlite, sql_now
 
 
 def test_gc_clears_expired_pending_plans(
@@ -48,12 +49,14 @@ def test_gc_keeps_old_confirmed_plan_and_running_job(
 def test_gc_clears_old_resolved_missing(
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 原来卡在三个缺口上：写在调用点事务里（A）、`missing_list` 无 SQLite 方法（B）、
+    # `resolved_at` 要"库侧 200 天前"（C 的相对哨兵）。
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO missing_list (stock_code, field_name, reason_code, resolved_at)
-               VALUES ('000001', 'pe_ttm', 'source_incomplete', datetime('now', '-200 days')),
-                      ('000002', 'pe_ttm', 'source_incomplete', NULL)"""
+        seed_sqlite = SeedSqlite(sqlite_store).join(conn)
+        seed_sqlite.missing_list(
+            "000001", "pe_ttm", "source_incomplete", resolved_at=sql_now("-200 days")
         )
+        seed_sqlite.missing_list("000002", "pe_ttm", "source_incomplete")
     result = gc_operational_tables(sqlite_store)
     assert result["resolved_missing"] == 1
     remaining = sqlite_store.query("SELECT COUNT(*) AS cnt FROM missing_list")[0]["cnt"]

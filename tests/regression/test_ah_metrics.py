@@ -35,6 +35,7 @@ from app.core.ah_metrics import (
     h_share_count,
 )
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import Seed
 
 MAPPING = {
     "601398": {
@@ -96,14 +97,10 @@ def _seed_fx(duck: DuckDBStore, day: str, rate: float) -> None:
 
 
 def _seed_a_dividend(duck: DuckDBStore, code: str, day: str, dps: float | None) -> None:
-    duck.write_query(
-        """INSERT INTO dividends
-               (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT (stock_code, ex_date) DO UPDATE SET
-               dividend_per_share = excluded.dividend_per_share""",
-        [code, day, day, dps],
-    )
+    # 原来是 `ON CONFLICT (stock_code, ex_date) DO UPDATE SET dividend_per_share`：
+    # DuckDB 的 `INSERT OR REPLACE` 同样是"只更新本次提供的列"的 upsert，而这四列
+    # 每次都全给（公告日 = 除权日）→ `overwrite=True` 语义等价。
+    Seed(duck).dividends(code, [(day, day, dps)], overwrite=True)
 
 
 def _seed_h_dividend(

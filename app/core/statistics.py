@@ -1131,22 +1131,3 @@ def _statistics_worker_build_chunk(
     except Exception as error:
         return [(code, None, str(error)) for code in codes]
     return results
-
-
-def series_values(
-    series: list[dict[str, Any]],
-    metric: str,
-    window_years: int,
-) -> list[float]:
-    """窗口内有效值序列（供分位计算）。"""
-    today = cn_today()
-    start = today.replace(year=today.year - window_years) if window_years != 99 else None
-    out: list[float] = []
-    for item in series:
-        d = date.fromisoformat(item["price_date"])
-        if start is not None and d < start:
-            continue
-        value = item.get(metric)
-        if value is not None:
-            out.append(float(value))
-    return out

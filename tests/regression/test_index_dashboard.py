@@ -30,6 +30,7 @@ from app.core.index_dashboard import (
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.index_dashboard import router as index_router
+from tests.support.seed import Seed
 
 
 def _seed_index_valuation(duck: DuckDBStore) -> None:
@@ -58,15 +59,13 @@ def _seed_index_valuation(duck: DuckDBStore) -> None:
 
 
 def _seed_treasury(duck: DuckDBStore) -> None:
+    # 50 个曲线日（主键 `(curve_date, tenor_years)`）："刚抓的"用 `trace_now=True`
+    # 打开，`raw_hash` 逐行不同照旧写在调用点。
+    seed = Seed(duck, trace_now=True)
     base = date(2026, 9, 1)
     for i in range(50):
         d = base - timedelta(days=30 * i)
-        duck.write_query(
-            """INSERT INTO treasury_yield_curve
-               (curve_date, tenor_years, yield_pct, source, fetch_time, raw_hash, confidence, batch_id)
-               VALUES (?, 10, 1.72, 'czb_mof', CURRENT_TIMESTAMP, ?, 'strict', 'b')""",
-            [d.isoformat(), f"t{i:02d}"],
-        )
+        seed.treasury_yield_curve(d, 10.0, 1.72, raw_hash=f"t{i:02d}", batch_id="b")
 
 
 def test_erp_formula_matches_article_caliber() -> None:

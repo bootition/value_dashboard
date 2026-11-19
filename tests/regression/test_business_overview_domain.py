@@ -28,6 +28,12 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import router as stock_detail_router
+from tests.support.seed_sqlite import SeedSqlite
+
+# 本轮收敛：`missing_list` 的 1 处（事务内两行）→ `SeedSqlite.join(conn).missing_list()`。
+# **保留内联**：`stock_meta` 1 处脚手架、`company_profile` 3 处（工厂没有这张表的方法）、
+# `business_breakdown` 3 处（`fetch_time` 要库侧 `CURRENT_TIMESTAMP`、逐行 `type/rank`）——
+# 都不在本轮清单内，按租约不动。
 
 # ─── 东财 F10 fixture（基于 2026-08-10 真实响应结构精简） ─────────────
 
@@ -112,6 +118,7 @@ def _result(
 
 
 def _seed_stock(duck: DuckDBStore, code: str = "600519") -> None:
+    # 保留内联：`stock_meta` 的这 1 处脚手架不在本轮清单内（工厂 `Seed.stock()` 可覆盖）。
     duck.write_query(
         "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES (?, ?, 'SSE', true)",
         [code, code],
@@ -287,6 +294,7 @@ class _FakeF10Adapter:
 
 
 def _seed_business_rows(duck: DuckDBStore, code: str = "600519") -> None:
+        # 保留内联：`company_profile` 工厂没有方法（见 `tests/support/seed.py`「尚未覆盖」）。
     duck.write_query(
         """INSERT INTO company_profile
            (stock_code, code, name, profile, scope, employee_num,
@@ -295,6 +303,7 @@ def _seed_business_rows(duck: DuckDBStore, code: str = "600519") -> None:
                    CURRENT_TIMESTAMP, ?, 'approximate', 'old-batch')""",
         [code, code, "0" * 64],
     )
+        # 保留内联：`business_breakdown` 的 `fetch_time` 要库侧 `CURRENT_TIMESTAMP`，逐行 `type/rank`。
     duck.write_query(
         """INSERT INTO business_breakdown
            (stock_code, report_date, type, item_name, amount, ratio, rank,
@@ -609,6 +618,7 @@ def test_readiness_unchanged_by_business_domain(
     before = minimum_data_readiness(duckdb_store, sqlite_store)
     assert before["schema_compatibility"]["compatible"] is True
 
+    # 保留内联：同 `_seed_business_rows` —— `company_profile` 无工厂方法。
     duckdb_store.write_query(
         """INSERT INTO company_profile
            (stock_code, code, name, profile, scope, employee_num,
@@ -617,6 +627,7 @@ def test_readiness_unchanged_by_business_domain(
                    'eastmoney_f10', CURRENT_TIMESTAMP, ?, 'approximate', 'b')""",
         ["0" * 64],
     )
+    # 保留内联：`fetch_time` 用库侧 `CURRENT_TIMESTAMP`（不是确定性的"某一刻"）。
     duckdb_store.write_query(
         """INSERT INTO business_breakdown
            (stock_code, report_date, type, item_name, amount, ratio, rank,
@@ -678,6 +689,7 @@ def test_business_overview_api_returns_composition_history_and_provenance(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
     _seed_stock(duckdb_store)
+    # 保留内联：`company_profile` 无工厂方法；`fetch_time` 也要库侧时钟。
     duckdb_store.write_query(
         """INSERT INTO company_profile
            (stock_code, code, name, profile, scope, employee_num, csrc_industry, trade_market,
@@ -691,6 +703,7 @@ def test_business_overview_api_returns_composition_history_and_provenance(
         (2, "茅台酒", 146499906480.49, 86.77, 1),
         (3, "国内", 165390000000.0, 98.0, 1),
     ):
+        # 保留内联：三行 `type`/`rank` 逐行不同 + `fetch_time` 走库侧时钟。
         duckdb_store.write_query(
             """INSERT INTO business_breakdown
                (stock_code, report_date, type, item_name, amount, ratio, rank,
@@ -844,11 +857,9 @@ def test_due_stock_codes_skip_recently_confirmed_source_missing(
         lambda key, default: {"business_overview_missing_retry_days": 7}.get(key, default),
     )
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO missing_list (stock_code, field_name, reason_code)
-               VALUES (?, 'company_profile', 'source_empty'),
-                      (?, 'business_breakdown', 'source_empty')""",
-            ["600519", "600519"],
-        )
+        # `join(conn)`：事务已在调用点手里，工厂只写不提交（提交权仍归调用方）。
+        seed_state = SeedSqlite(sqlite_store).join(conn)
+        seed_state.missing_list("600519", "company_profile", "source_empty")
+        seed_state.missing_list("600519", "business_breakdown", "source_empty")
 
     assert updater._due_stock_codes(30) == []

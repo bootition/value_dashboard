@@ -3,6 +3,10 @@
 覆盖累计现金分红（每股股息 × 除权日生效股本链）与累计股权融资
 （IPO+增发+配股）两个快照输入字段，以及 FundingUpdater 有界续传
 必须作用在“未覆盖子集”而非全市场前缀的断点修复。
+
+播种统一走 `tests/support/seed.py` 的按域工厂：工厂只负责「怎么把行放进去」
+（主键、provenance 必填列、日期写法），**金额/股数一律逐字写在调用点上** ——
+「放什么」才是这些用例的全部意义。
 """
 
 from __future__ import annotations
@@ -14,31 +18,29 @@ from app.core.funding import FundingUpdater
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 def _seed_stock(duck: DuckDBStore, code: str = "000001") -> None:
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES (?, ?, 'SZSE', true)",
-        [code, code],
-    )
+    Seed(duck).stock(code, name=code, exchange="SZSE", is_listed=True)
 
 
 def _seed_share_chain(duck: DuckDBStore, code: str = "000001") -> None:
-    duck.write_query(
-        """INSERT INTO share_capital_history
-           (stock_code, effective_date, total_shares, is_anchor, verified, source, raw_hash, batch_id)
-           VALUES (?, '2020-01-01', 100.0, true, true, 'fixture', ?, 'batch-1'),
-                  (?, '2023-01-01', 200.0, true, true, 'fixture', ?, 'batch-1')""",
-        [code, "0" * 64, code, "0" * 64],
+    """时点股本链：2020 起 100 股 → 2023 起 200 股（分红按除权日生效的那一档折算）。"""
+    Seed(duck).shares(
+        code,
+        [("2020-01-01", 100.0), ("2023-01-01", 200.0)],
+        is_anchor=True,
+        verified=True,
+        source="fixture",
     )
 
 
 def _seed_dividends(duck: DuckDBStore, code: str = "000001") -> None:
-    duck.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES (?, '2021-06-01', '2021-05-20', 1.0),
-                  (?, '2024-06-01', '2024-05-20', 2.0)""",
-        [code, code],
+    """两期现金分红（除权日 + 公告日 + 每股股息逐行不同）。"""
+    Seed(duck).dividends(
+        code,
+        [("2021-06-01", "2021-05-20", 1.0), ("2024-06-01", "2024-05-20", 2.0)],
     )
 
 
@@ -78,15 +80,38 @@ def test_cumulative_dividend_amount_zero_when_no_dividends(
 def test_cumulative_financing_amount_sums_ipo_placement_and_rights(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, issue_price, issue_shares,
-            raise_funds, raise_funds_net, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES
-            ('000001', 'ipo', '1991-04-03', 40.0, 675000.0, NULL, 27000000.0, false, 'cninfo_funding', CURRENT_TIMESTAMP, ?, 'approximate', 'b1'),
-            ('000001', 'a_placement', '2010-09-16', 18.26, 379580000.0, 6931130800.0, NULL, true, 'eastmoney_f10', CURRENT_TIMESTAMP, ?, 'approximate', 'b1'),
-            ('000001', 'rights', '1993-05-24', 16.0, 20205000.0, 323280000.0, NULL, false, 'eastmoney_f10', CURRENT_TIMESTAMP, ?, 'approximate', 'b1') """,
-        ["0" * 64, "0" * 64, "0" * 64],
+    seed = Seed(duckdb_store)
+    # `**cols` 只给全批同值，而 raise_funds / raise_funds_net / source / derived
+    # 逐行不同 → 用行的第四项（逐行 cols）把三笔事件放进**一次**调用。
+    # IPO 只剩募资净额、增发/配股只有募资总额 —— 这个口径差异正是本用例的意义。
+    seed.fundings(
+        "000001",
+        [
+            (
+                "ipo", "1991-04-03", 675000.0,
+                {
+                    "issue_price": 40.0, "raise_funds": None,
+                    "raise_funds_net": 27000000.0, "derived": False,
+                    "source": "cninfo_funding", "confidence": "approximate",
+                },
+            ),
+            (
+                "a_placement", "2010-09-16", 379580000.0,
+                {
+                    "issue_price": 18.26, "raise_funds": 6931130800.0,
+                    "raise_funds_net": None, "derived": True,
+                    "source": "eastmoney_f10", "confidence": "approximate",
+                },
+            ),
+            (
+                "rights", "1993-05-24", 20205000.0,
+                {
+                    "issue_price": 16.0, "raise_funds": 323280000.0,
+                    "raise_funds_net": None, "derived": False,
+                    "source": "eastmoney_f10", "confidence": "approximate",
+                },
+            ),
+        ],
     )
 
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
@@ -103,13 +128,10 @@ def test_cumulative_financing_amount_none_when_uncovered_or_missing_amount(
     assert calc._get_cumulative_financing_amount("000001") is None
 
     # 已覆盖但某事件金额缺失 → 整值 fail-closed
-    duckdb_store.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, issue_price, issue_shares,
-            raise_funds, raise_funds_net, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES
-            ('000002', 'ipo', '1991-04-03', NULL, NULL, NULL, NULL, false, 'cninfo_funding', CURRENT_TIMESTAMP, ?, 'missing', 'b2')""",
-        ["0" * 64],
+    Seed(duckdb_store).fundings(
+        "000002", [("ipo", "1991-04-03", None)],
+        issue_price=None, raise_funds=None, raise_funds_net=None, derived=False,
+        source="cninfo_funding", confidence="missing",
     )
     assert calc._get_cumulative_financing_amount("000002") is None
 
@@ -120,11 +142,10 @@ def test_funding_update_all_advances_past_covered_prefix(
     """有界续传断点：前 N 只已覆盖时，max_stocks 必须从未覆盖子集继续推进。"""
     _seed_stock(duckdb_store, "000001")
     _seed_stock(duckdb_store, "000002")
-    duckdb_store.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, raise_funds, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('000001', 'ipo', '1991-04-03', 1.0, false, 'cninfo_funding', CURRENT_TIMESTAMP, ?, 'approximate', 'b3')""",
-        ["0" * 64],
+    # 「已覆盖」的唯一判据是 funding_events 里有该股一行；1.0 只是占位金额。
+    Seed(duckdb_store).fundings(
+        "000001", [("ipo", "1991-04-03", None)],
+        raise_funds=1.0, derived=False, source="cninfo_funding", confidence="approximate",
     )
 
     class _RecordingAdapter:
@@ -175,21 +196,20 @@ def test_screening_executes_published_dividend_financing_ratio(
 ) -> None:
     from app.core.screening.engine import ScreeningEngine
 
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_st, is_suspended, is_listed)
-           VALUES
-            ('000001', 'One', 'SZSE', '2020-01-01', false, false, true),
-            ('000002', 'Two', 'SZSE', '2020-01-01', false, false, true)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-           (stock_code, report_date, cumulative_dividend_amount, cumulative_financing_amount)
-           VALUES
-            ('000001', '2025-12-31', 200.0, 100.0),
-            ('000002', '2025-12-31', 50.0, 100.0)"""
-    )
+    seed = Seed(duckdb_store)
+    # 两只各持一期快照：分红 200/50、融资都是 100 → 比值 2.0 / 0.5，只有一只过 >1。
+    for code, name, dividend in (("000001", "One", 200.0), ("000002", "Two", 50.0)):
+        seed.stock(
+            code, name=name, exchange="SZSE", listing_date="2020-01-01",
+            is_st=False, is_suspended=False, is_listed=True,
+        )
+        seed.snapshot(
+            code, "2025-12-31",
+            cumulative_dividend_amount=dividend, cumulative_financing_amount=100.0,
+        )
     content_hash = "divfin-hash"
+    # 需要 SQLite 侧播种器：dsl_expressions 与 Seed 持有的 DuckDBStore 不同库
+    # （见 seed.py 模块 docstring「尚未覆盖」），故保留内联 SQL。
     sqlite_store.execute(
         """INSERT INTO dsl_expressions
            (name, version, expression_text, status, description, direction, historical_capable, content_hash)
@@ -228,13 +248,11 @@ def test_cumulative_dividend_includes_buyback_amount(
     _seed_stock(duckdb_store)
     _seed_share_chain(duckdb_store)
     _seed_dividends(duckdb_store)
-    duckdb_store.write_query(
-        """INSERT INTO buyback_events
-           (stock_code, start_date, announce_date, buyback_shares,
-            buyback_amount, progress, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('000001', '2024-01-01', '2024-12-01', 100.0, 1234.5,
-                   '实施中', 'eastmoney_repurchase', CURRENT_TIMESTAMP, ?, 'approximate', 'bb1')""",
-        ["0" * 64],
+    # 回购注销金额进入「广义分红」：已回购金额 1234.5 必须原样加上去。
+    Seed(duckdb_store).buyback(
+        "000001", "2024-01-01", 100.0, announce_date="2024-12-01",
+        buyback_amount=1234.5, progress="实施中",
+        source="eastmoney_repurchase", confidence="approximate",
     )
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     assert calc._get_cumulative_dividend_amount("000001") == pytest.approx(
@@ -290,14 +308,16 @@ def test_cumulative_financing_ignores_buyback_event_type(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
     # 即使 funding_events 中混入 buyback 事件，融资侧也只应统计 IPO/增发/配股
-    duckdb_store.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, issue_price, issue_shares,
-            raise_funds, raise_funds_net, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES
-            ('000001', 'ipo', '1991-04-03', 1.0, 100.0, NULL, 100.0, false, 'cninfo_funding', CURRENT_TIMESTAMP, ?, 'approximate', 'b1'),
-            ('000001', 'buyback', '2024-01-01', NULL, NULL, 999999.0, NULL, false, 'eastmoney_repurchase', CURRENT_TIMESTAMP, ?, 'approximate', 'b1')""",
-        ["0" * 64, "0" * 64],
+    seed = Seed(duckdb_store)
+    seed.fundings(
+        "000001", [("ipo", "1991-04-03", 100.0)],
+        issue_price=1.0, raise_funds=None, raise_funds_net=100.0, derived=False,
+        source="cninfo_funding", confidence="approximate",
+    )
+    seed.fundings(
+        "000001", [("buyback", "2024-01-01", None)],
+        issue_price=None, raise_funds=999999.0, raise_funds_net=None, derived=False,
+        source="eastmoney_repurchase", confidence="approximate",
     )
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     assert calc._get_cumulative_financing_amount("000001") == 100.0
@@ -306,12 +326,10 @@ def test_cumulative_financing_ignores_buyback_event_type(
 def test_cumulative_financing_derives_from_price_times_shares_when_amounts_missing(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, issue_price, issue_shares,
-            raise_funds, raise_funds_net, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('000001', 'ipo', '1991-04-03', 10.0, 100.0, NULL, NULL, false, 'cninfo_funding', CURRENT_TIMESTAMP, ?, 'approximate', 'b9')""",
-        ["0" * 64],
+    Seed(duckdb_store).fundings(
+        "000001", [("ipo", "1991-04-03", 100.0)],
+        issue_price=10.0, raise_funds=None, raise_funds_net=None, derived=False,
+        source="cninfo_funding", confidence="approximate",
     )
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     assert calc._get_cumulative_financing_amount("000001") == pytest.approx(1000.0)
@@ -326,13 +344,10 @@ def test_buyback_updater_retains_existing_events_on_empty_source(
     from app.core.adapters.base import FetchResult, SourceMetadata
     from app.core.buyback import BuybackUpdater
 
-    duckdb_store.write_query(
-        """INSERT INTO buyback_events
-           (stock_code, start_date, announce_date, buyback_shares,
-            buyback_amount, progress, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('000001', '2024-01-01', '2024-12-01', 100.0, 1234.5,
-                   '实施中', 'eastmoney_repurchase', CURRENT_TIMESTAMP, ?, 'approximate', 'bb1')""",
-        ["0" * 64],
+    Seed(duckdb_store).buyback(
+        "000001", "2024-01-01", 100.0, announce_date="2024-12-01",
+        buyback_amount=1234.5, progress="实施中",
+        source="eastmoney_repurchase", confidence="approximate",
     )
 
     class EmptyBuybackAdapter:

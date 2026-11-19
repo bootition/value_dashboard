@@ -7,6 +7,9 @@ from app.core.data_maintenance import legacy_quarantine_summary, quarantine_lega
 
 def test_quarantine_moves_only_unsupported_legacy_records(duckdb_store) -> None:
     timestamp = datetime.now(UTC)
+    # 保留内联（`source_audit` / `dividends` 两行）：整块在**已持有写锁**的
+    # `write_connection()` 事务里跨 fetch_batch/source_audit/dividends 一起落库，
+    # 且共用同一个 `timestamp`；工厂自带写锁，嵌套进来会自撞。
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """INSERT INTO fetch_batch
@@ -60,6 +63,8 @@ def test_quarantine_moves_empty_payload_archives_with_their_audits(duckdb_store)
     timestamp = datetime.now(UTC)
     empty_hash = "e" * 64
     other_hash = "f" * 64
+    # 保留内联（`source_audit` 一行）：同在**已持有写锁**的 `write_connection()`
+    # 事务里（与空 payload 归档一起构成"空归档"场景），工厂自带写锁，嵌套会自撞。
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """INSERT INTO fetch_batch

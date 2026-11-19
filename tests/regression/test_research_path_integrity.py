@@ -25,19 +25,22 @@ from app.core.screening.engine import MAX_RESULT_ROWS, ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import router as screening_router
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
+
+# `stock_meta`（3 处）/ `indicator_snapshot`（2 处）的批量播种全部走
+# `Seed.join(conn).stocks()/snapshots()`：连接已在调用点手里（`write_connection()`），
+# 快照的 `calculated_at` 仍交给库侧时钟（`CURRENT_TIMESTAMP` 哨兵）。
+# 剩下 2 处 `screening_rules` 在 `sqlite_store.transaction()` 内、且不在本轮清单里，
+# 按租约保留内联（工厂的 `SeedSqlite.screening_rule` + `join` 已可覆盖，下一轮收敛）。
 
 # ─── P1-B: 退市门禁 ─────────────────────────────────────────────
 
 def _seed_listed_stocks(store: DuckDBStore, count: int, exchange: str = "SSE") -> None:
+    rows = [(f"{600000 + i:06d}", f"stock-{i}") for i in range(count)]
     with store.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, is_st, is_suspended)
-               VALUES (?, ?, ?, true, false, false)""",
-            [
-                (f"{600000 + i:06d}", f"stock-{i}", exchange)
-                for i in range(count)
-            ],
+        # `join(connection)`：写锁已在调用点手里，工厂不再自开事务（否则自撞写锁）。
+        Seed(store).join(connection).stocks(
+            rows, exchange=exchange, is_listed=True, is_st=False, is_suspended=False
         )
 
 
@@ -132,17 +135,24 @@ def test_stock_list_adapter_reports_partial_source_error(monkeypatch: pytest.Mon
 
 def _seed_pool_for_truncation(store: DuckDBStore, count: int) -> None:
     with store.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended)
-               VALUES (?, ?, 'SZSE', '2020-01-01', true, false, false)""",
+        seed = Seed(store).join(connection)
+        seed.stocks(
             [(f"{600000 + i:06d}", f"stock-{i}") for i in range(count)],
+            exchange="SZSE", listing_date="2020-01-01",
+            is_listed=True, is_st=False, is_suspended=False,
         )
-        connection.executemany(
-            """INSERT INTO indicator_snapshot
-               (stock_code, report_date, latest_close, latest_price_date, pe_ttm, calculated_at)
-               VALUES (?, '2026-06-30', 10.0, '2026-07-31', ?, CURRENT_TIMESTAMP)""",
-            [(f"{600000 + i:06d}", 1.0 + (i % 50)) for i in range(count)],
+        seed.snapshots(
+            [
+                {
+                    "stock_code": f"{600000 + i:06d}",
+                    "report_date": "2026-06-30",
+                    "latest_close": 10.0,
+                    "latest_price_date": "2026-07-31",
+                    "pe_ttm": 1.0 + (i % 50),
+                    "calculated_at": CURRENT_TIMESTAMP,
+                }
+                for i in range(count)
+            ]
         )
 
 
@@ -256,21 +266,26 @@ def test_industry_rank_is_partitioned_by_csrc_classification(
     """P1-D: _industry_rank 与 _sw1_rank 同为 csrc_l1 分区（口径一致，
     仅命名不同）；legacy 列仍可用，新正确命名列可选择。"""
     with duckdb_store.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO stock_meta
-               (stock_code, name, exchange, csrc_l1, csrc_l2, listing_date, is_listed, is_st, is_suspended)
-               VALUES (?, ?, 'SZSE', ?, ?, '2020-01-01', true, false, false)""",
+        seed = Seed(duckdb_store).join(connection)
+        seed.stocks(
             [
-                ("000001", "a", "制造业", "大类A"),
-                ("000002", "b", "制造业", "大类A"),
-                ("000003", "c", "金融业", "大类B"),
+                ("000001", "a", {"csrc_l1": "制造业", "csrc_l2": "大类A"}),
+                ("000002", "b", {"csrc_l1": "制造业", "csrc_l2": "大类A"}),
+                ("000003", "c", {"csrc_l1": "金融业", "csrc_l2": "大类B"}),
             ],
+            exchange="SZSE", listing_date="2020-01-01",
+            is_listed=True, is_st=False, is_suspended=False,
         )
-        connection.executemany(
-            """INSERT INTO indicator_snapshot
-               (stock_code, report_date, pe_ttm, calculated_at)
-               VALUES (?, '2026-06-30', ?, CURRENT_TIMESTAMP)""",
-            [("000001", 10.0), ("000002", 20.0), ("000003", 30.0)],
+        seed.snapshots(
+            [
+                {
+                    "stock_code": code,
+                    "report_date": "2026-06-30",
+                    "pe_ttm": pe_ttm,
+                    "calculated_at": CURRENT_TIMESTAMP,
+                }
+                for code, pe_ttm in [("000001", 10.0), ("000002", 20.0), ("000003", 30.0)]
+            ]
         )
 
     result = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store).run(
@@ -316,15 +331,15 @@ def test_cli_run_to_web_export_preserves_truncated_marker(
     monkeypatch.setattr("app.core.screening.engine.MAX_RESULT_ROWS", 3)
     codes = [f"60000{i}" for i in range(10)]
     for index, code in enumerate(codes):
-        duckdb_store.write_query(
-            """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-               VALUES (?, ?, 'SZSE', '2020-01-01', false, false)""",
-            [code, f"stock-{index}"],
+        Seed(duckdb_store).stock(
+            code, name=f"stock-{index}", exchange="SZSE", listing_date="2020-01-01",
+            is_st=False, is_suspended=False,
         )
         insert_minimum_screenable_data(duckdb_store, code)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
 
     with sqlite_store.transaction() as conn:
+        # 保留内联：不在本轮清单内（下一轮可换 `SeedSqlite.join(conn).screening_rule()`）。
         conn.execute(
             """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
                VALUES ('cli-trunc', 1, ?, '{}', 'saved')""",
@@ -396,15 +411,15 @@ def _seed_cli_screenable_pool(
 
     codes = [f"60000{i}" for i in range(count)]
     for index, code in enumerate(codes):
-        duckdb_store.write_query(
-            """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-               VALUES (?, ?, 'SZSE', '2020-01-01', false, false)""",
-            [code, f"stock-{index}"],
+        Seed(duckdb_store).stock(
+            code, name=f"stock-{index}", exchange="SZSE", listing_date="2020-01-01",
+            is_st=False, is_suspended=False,
         )
         insert_minimum_screenable_data(duckdb_store, code)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
 
     with sqlite_store.transaction() as conn:
+        # 保留内联：同上（不在本轮清单内）。
         conn.execute(
             """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
                VALUES (?, 1, ?, '{}', 'saved')""",

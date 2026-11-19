@@ -3,14 +3,20 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.web.main import auto_update_is_due
+from tests.support.seed_sqlite import SeedSqlite
+
+# 2026-11-23 修正：原来这里 monkeypatch 的是 `app.web.main.datetime`，
+# 但 `auto_update_is_due()` 用的是 **`cn_now()`** —— 补丁打在了一个该函数根本不读的符号上，
+# **完全无效**。测试之所以是绿的，只是因为"真实时钟"恰好晚于种子里的 2026-09-08；
+# 而且 15:30 收盘切换那条分支从来没有被真正走到过（改坏了也测不出来）。
+# 现在改成 patch `cn_now`，并把"收盘前/收盘后"两个时点都钉住。
+_FAKE_CLOSE = datetime(2026, 9, 8, 16, 0, 0)   # 收盘后
+_FAKE_INTRADAY = datetime(2026, 9, 9, 10, 0, 0)  # 次日盘中（<15:30）
 
 
-class _FakeDatetime(datetime):
-    @classmethod
-    def now(cls, tz=None):
-        # 固定为北京时间收盘后 16:00，期望目标为当天交易日。
-        value = datetime(2026, 9, 8, 16, 0, 0)
-        return value.astimezone(tz) if tz is not None else value
+def _pin_now(monkeypatch, value):  # noqa: ANN001
+    """把 `auto_update_is_due` 真正读的时钟固定住。"""
+    monkeypatch.setattr("app.web.main.cn_now", lambda: value)
 
 
 def _ensure_auto_update_state(sqlite_store) -> None:
@@ -30,13 +36,11 @@ def _ensure_auto_update_state(sqlite_store) -> None:
 
 
 def test_auto_update_due_after_close_uses_today(duckdb_store, sqlite_store, monkeypatch) -> None:
-    monkeypatch.setattr("app.web.main.datetime", _FakeDatetime)
+    _pin_now(monkeypatch, _FAKE_CLOSE)
     _ensure_auto_update_state(sqlite_store)
-    with sqlite_store.transaction() as conn:
-        conn.execute(
-            "INSERT INTO auto_update_state (id, state, paused, current_stage) VALUES (1, 'enabled', 0, 'idle')"
-        )
-        conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-09-08')")
+    seed = SeedSqlite(sqlite_store)
+    seed.auto_update_state(state="enabled", paused=0, current_stage="idle")
+    seed.trading_dates(["2026-09-08"])
     duckdb_store.write_query(
         "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', '2026-09-07', 10)"
     )
@@ -49,14 +53,39 @@ def test_auto_update_due_after_close_uses_today(duckdb_store, sqlite_store, monk
     assert auto_update_is_due(duckdb_store, sqlite_store) is False
 
 
-def test_auto_update_not_due_when_disabled_or_paused(duckdb_store, sqlite_store, monkeypatch) -> None:
-    monkeypatch.setattr("app.web.main.datetime", _FakeDatetime)
+def test_close_cutoff_switches_target_between_previous_and_today(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """15:30 收盘切换：**同一份数据**，收盘前不该到期、收盘后该到期。
+
+    这条用例之前根本不存在 —— 老用例把 `datetime` patched 掉了，
+    而 `auto_update_is_due()` 读的是 `cn_now()`，于是那个 15:30 分支
+    从来没有被真正走到过（改坏了也测不出来）。
+    """
     _ensure_auto_update_state(sqlite_store)
-    with sqlite_store.transaction() as conn:
-        conn.execute(
-            "INSERT INTO auto_update_state (id, state, paused, current_stage) VALUES (1, 'enabled', 1, 'idle')"
-        )
-        conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-09-08')")
+    seed = SeedSqlite(sqlite_store)
+    seed.auto_update_state(state="enabled", paused=0, current_stage="idle")
+    # 日历里同时有 09-08 与 09-09；价格只补到 09-08
+    seed.trading_dates(["2026-09-08", "2026-09-09"])
+    duckdb_store.write_query(
+        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', '2026-09-08', 11)"
+    )
+
+    # 09-09 盘中（<15:30）：目标仍是 09-08 → 已达标 → 不该到期
+    _pin_now(monkeypatch, _FAKE_INTRADAY)
+    assert auto_update_is_due(duckdb_store, sqlite_store) is False
+
+    # 09-09 收盘后：目标切成 09-09 → 还缺 → 该到期
+    _pin_now(monkeypatch, datetime(2026, 9, 9, 16, 0, 0))
+    assert auto_update_is_due(duckdb_store, sqlite_store) is True
+
+
+def test_auto_update_not_due_when_disabled_or_paused(duckdb_store, sqlite_store, monkeypatch) -> None:
+    _pin_now(monkeypatch, _FAKE_CLOSE)
+    _ensure_auto_update_state(sqlite_store)
+    seed = SeedSqlite(sqlite_store)
+    seed.auto_update_state(state="enabled", paused=1, current_stage="idle")
+    seed.trading_dates(["2026-09-08"])
     assert auto_update_is_due(duckdb_store, sqlite_store) is False
 
     with sqlite_store.transaction() as conn:
@@ -68,19 +97,15 @@ def test_auto_update_due_when_retry_task_is_ready(
     duckdb_store, sqlite_store, monkeypatch
 ) -> None:
     """价格已最新但存在到期 retry 时，调度器仍须启动下一轮更新。"""
-    monkeypatch.setattr("app.web.main.datetime", _FakeDatetime)
+    _pin_now(monkeypatch, _FAKE_CLOSE)
     _ensure_auto_update_state(sqlite_store)
-    with sqlite_store.transaction() as conn:
-        conn.execute(
-            "INSERT INTO auto_update_state (id, state, paused, current_stage) "
-            "VALUES (1, 'enabled', 0, 'idle')"
-        )
-        conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-09-08')")
-        conn.execute(
-            """INSERT INTO retry_list
-                   (stock_code, data_type, adapter, error, retry_count, max_retries)
-               VALUES ('601091', 'dividends', 'manager', 'source error', 0, 5)"""
-        )
+    seed = SeedSqlite(sqlite_store)
+    seed.auto_update_state(state="enabled", paused=0, current_stage="idle")
+    seed.trading_dates(["2026-09-08"])
+    seed.retry(
+        "601091", "dividends", adapter="manager", error="source error",
+        retry_count=0, max_retries=5,
+    )
     duckdb_store.write_query(
         "INSERT INTO price_daily_raw (stock_code, trade_date, close) "
         "VALUES ('000001', '2026-09-08', 11)"

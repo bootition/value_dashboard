@@ -13,6 +13,7 @@ from app.core.financial_period import expected_financial_period
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import build_freshness_metadata, calculate_ttm_trend
+from tests.support.seed import Seed
 
 
 def test_non_annual_ttm_uses_annual_plus_current_minus_prior_period() -> None:
@@ -60,17 +61,13 @@ def test_dsl_period_functions_execute_against_normalized_history(
     period: str,
     expected: float,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO indicator_snapshot (stock_code, report_date)
-               VALUES ('600519', '2025-03-31')"""
-        )
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES
-               ('600519', '2025-03-31', 300), ('600519', '2024-12-31', 1000),
-               ('600519', '2024-09-30', 600), ('600519', '2024-03-31', 200)"""
-        )
+    seed = Seed(duckdb_store)
+    seed.snapshot("600519", "2025-03-31")
+    # TTM = 1000 + 300 − 200；YoY/QoQ 都在这条归一化历史上取值。
+    seed.income("600519", "2025-03-31", revenue=300)
+    seed.income("600519", "2024-12-31", revenue=1000)
+    seed.income("600519", "2024-09-30", revenue=600)
+    seed.income("600519", "2024-03-31", revenue=200)
 
     field = FieldRef(table="income", field="revenue", period=period)
     result = duckdb_store.read_query(CodeGen().generate_select(field, stock_code="600519"))
@@ -82,13 +79,11 @@ def test_dsl_ttm_function_form_matches_period_suffix(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute("INSERT INTO indicator_snapshot (stock_code, report_date) VALUES ('600519', '2025-03-31')")
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES ('600519', '2025-03-31', 300), ('600519', '2024-12-31', 1000),
-                      ('600519', '2024-03-31', 200)"""
-        )
+    seed = Seed(duckdb_store)
+    seed.snapshot("600519", "2025-03-31")
+    seed.income("600519", "2025-03-31", revenue=300)
+    seed.income("600519", "2024-12-31", revenue=1000)
+    seed.income("600519", "2024-03-31", revenue=200)
 
     expression = FuncCall(func_name="TTM", args=[FieldRef(table="income", field="revenue")])
     result = duckdb_store.read_query(CodeGen().generate_select(expression, stock_code="600519"))
@@ -110,13 +105,12 @@ def test_dsl_textual_period_forms_parse_and_execute(
     expression: str,
     expected: float,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute("INSERT INTO indicator_snapshot (stock_code, report_date) VALUES ('600519', '2025-03-31')")
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES ('600519', '2025-03-31', 300), ('600519', '2024-12-31', 1000),
-                      ('600519', '2024-09-30', 600), ('600519', '2024-03-31', 200)"""
-        )
+    seed = Seed(duckdb_store)
+    seed.snapshot("600519", "2025-03-31")
+    seed.income("600519", "2025-03-31", revenue=300)
+    seed.income("600519", "2024-12-31", revenue=1000)
+    seed.income("600519", "2024-09-30", revenue=600)
+    seed.income("600519", "2024-03-31", revenue=200)
 
     result = duckdb_store.read_query(CodeGen().generate_select(parse(expression), stock_code="600519"))
 
@@ -127,12 +121,11 @@ def test_dsl_period_function_returns_null_when_exact_prior_quarter_is_missing(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute("INSERT INTO indicator_snapshot (stock_code, report_date) VALUES ('600519', '2025-03-31')")
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES ('600519', '2025-03-31', 300), ('600519', '2024-09-30', 600)"""
-        )
+    seed = Seed(duckdb_store)
+    seed.snapshot("600519", "2025-03-31")
+    # 缺 2024-12-31 这一期：上一季不存在 → QoQ 必须 NULL，不得跨期凑数。
+    seed.income("600519", "2025-03-31", revenue=300)
+    seed.income("600519", "2024-09-30", revenue=600)
 
     result = duckdb_store.read_query(CodeGen().generate_select(parse("income.revenue@QoQ"), stock_code="600519"))
 
@@ -143,12 +136,10 @@ def test_dsl_qoq_uses_march_31_as_the_prior_period_for_june_30(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute("INSERT INTO indicator_snapshot (stock_code, report_date) VALUES ('600519', '2025-06-30')")
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES ('600519', '2025-06-30', 500), ('600519', '2025-03-31', 200)"""
-        )
+    seed = Seed(duckdb_store)
+    seed.snapshot("600519", "2025-06-30")
+    seed.income("600519", "2025-06-30", revenue=500)
+    seed.income("600519", "2025-03-31", revenue=200)
 
     result = duckdb_store.read_query(CodeGen().generate_select(parse("income.revenue@QoQ"), stock_code="600519"))
 
@@ -159,13 +150,13 @@ def test_dsl_mrq_and_yoy_convert_cumulative_flows_to_single_quarters(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    with duckdb_store.write_connection() as connection:
-        connection.execute("INSERT INTO indicator_snapshot (stock_code, report_date) VALUES ('600519', '2025-06-30')")
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue) VALUES
-               ('600519', '2025-03-31', 100), ('600519', '2025-06-30', 300),
-               ('600519', '2024-03-31', 80), ('600519', '2024-06-30', 200)"""
-        )
+    seed = Seed(duckdb_store)
+    seed.snapshot("600519", "2025-06-30")
+    # 累计口径 → 单季：MRQ = 300 − 100；YoY = (200 − 120) / 120。
+    seed.income("600519", "2025-03-31", revenue=100)
+    seed.income("600519", "2025-06-30", revenue=300)
+    seed.income("600519", "2024-03-31", revenue=80)
+    seed.income("600519", "2024-06-30", revenue=200)
 
     mrq = duckdb_store.read_query(CodeGen().generate_select(parse("income.revenue@MRQ"), stock_code="600519"))
     yoy = duckdb_store.read_query(CodeGen().generate_select(parse("income.revenue@YoY"), stock_code="600519"))

@@ -106,6 +106,9 @@ def _event(
 
 
 def _seed_quarantine(store: DuckDBStore, rows: list[tuple[str, str, float | None]]) -> None:
+    # 保留内联（本函数与下面的 `_seed_dividends`）：两条都在**已持有写锁**的
+    # `write_connection()` 事务里 `executemany`，工厂每次自带写锁，嵌套进来会自撞；
+    # 另外 `dividends_quarantine` 只此一处用到，也刻意不建方法（见 seed.py「尚未覆盖」）。
     with store.write_connection() as conn:
         conn.executemany(
             """INSERT INTO dividends_quarantine
@@ -535,6 +538,9 @@ def test_apply_never_zeroes_cash_when_source_amount_is_missing(
     """200541 2007-06-08 实况：巨潮「派息比例」为空（说明却写着 10转增3股派5元），
     库里 0.5 是真的 → 现金口径未知时绝不能用 0 覆盖，只能补别的空字段。
     """
+    # 保留内联：三行 `stock_dividend`/`transfer_share`/`announcement_date` 的缺失组合
+    # 是「回填空值 vs 整行跳过」的分野，且写在**已持有写锁**的 `write_connection()`
+    # 事务里 —— 工厂自带写锁，嵌套进来会自撞。
     with store.write_connection() as conn:
         conn.executemany(
             """INSERT INTO dividends

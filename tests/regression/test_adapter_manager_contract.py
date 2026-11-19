@@ -253,7 +253,16 @@ def test_close_clears_circuit_breaker() -> None:
     manager = _manager_with({"akshare_eastmoney": _ScriptedAdapter([_result([])])})
     for _ in range(5):
         manager._record_circuit_failure("akshare_eastmoney", "price_daily")
-    assert manager._circuit_breaker
+    # 具体期望值（契约 §1：桶 key 恒为 ``adapter:data_type``；阈值 5 次即熔断）：
+    # 5 次故障必须落在且只落在该桶，计数等于实际记录次数、且已真的熔断。
+    # key 用字面量而非 `manager._circuit_key(...)`，否则"桶 key 格式"变异照样绿。
+    bucket = "akshare_eastmoney:price_daily"
+    assert set(manager._circuit_breaker) == {bucket}, (
+        f"故障只允许落进 {bucket}，实际桶: {sorted(manager._circuit_breaker)}"
+    )
+    tripped = manager._circuit_breaker[bucket]
+    assert tripped["failures"] == 5, f"计数必须等于实际记录次数，实际 {tripped['failures']}"
+    assert tripped["tripped_until"] is not None, "5 次（=阈值）必须真的熔断，否则 close() 清了个假的"
 
     manager.close()
 

@@ -7,6 +7,7 @@ from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.backfill import PriceBackfiller
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 class DividendAdapter:
@@ -128,10 +129,7 @@ def test_dividend_backfill_preserves_verified_values_when_response_is_sparse(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-           VALUES ('600519', '2025-06-30', '2025-05-01', 1.5)"""
-    )
+    Seed(duckdb_store).dividends("600519", [("2025-06-30", "2025-05-01", 1.5)])
     backfiller = _backfiller(
         duckdb_store, sqlite_store, _result([{"ex_date": "2025-06-30", "dividend_per_share": None}]),
     )

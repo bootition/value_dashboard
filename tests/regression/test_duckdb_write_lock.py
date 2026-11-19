@@ -43,7 +43,16 @@ def test_connection_config_always_has_uniform_triple(duckdb_store: DuckDBStore) 
     config = duckdb_store._connection_config()
 
     assert set(config) == {"memory_limit", "threads", "preserve_insertion_order"}
-    assert config["threads"]
+    # 具体期望（`_connection_config() -> dict[str, str]`，值直接进 DuckDB 的
+    # SET 参数，所以是**字符串**）：threads 必须是能解析成正整数的数字串，
+    # memory_limit 必须非空 —— "非空"糊不过去（空串/None/"abc" 都要红）。
+    assert str(config["threads"]).isdigit(), (
+        f"threads 必须是正整数的字符串形式，实际 {config['threads']!r}"
+    )
+    assert int(config["threads"]) >= 1, f"threads 必须 >= 1，实际 {config['threads']}"
+    assert isinstance(config["memory_limit"], str) and config["memory_limit"].strip(), (
+        f"memory_limit 必须是非空字符串，实际 {config['memory_limit']!r}"
+    )
     assert str(config["preserve_insertion_order"]).lower() in {"true", "false"}
 
 

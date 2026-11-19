@@ -8,6 +8,7 @@ from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.update import IncrementalUpdater
+from tests.support.seed_sqlite import SeedSqlite
 
 
 class PriceAdapter:
@@ -223,10 +224,9 @@ def test_cleanup_redundant_retries_drops_up_to_date_entries(
                 "VALUES (?, 'latest_close', '2026-08-05', 10, 'tencent', ?, CURRENT_TIMESTAMP, ?, 'strict')",
                 [code, batch_id, digest],
             )
-        sqlite_store.execute(
-            "INSERT INTO retry_list (stock_code, data_type, adapter, error, retry_count, last_attempt) "
-            "VALUES (?, 'price_daily', 'local_cache', 'no available adapter', 0, ?)",
-            [code, datetime.now(UTC).isoformat()],
+        SeedSqlite(sqlite_store).retry(
+            code, "price_daily", adapter="local_cache", error="no available adapter",
+            last_attempt=datetime.now(UTC).isoformat(),
         )
 
     seed("600001")

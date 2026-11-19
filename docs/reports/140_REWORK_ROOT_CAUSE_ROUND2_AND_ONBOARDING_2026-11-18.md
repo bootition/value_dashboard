@@ -1413,3 +1413,50 @@ import core 常量 → 包一层同名私有别名 → 唯一效果是"让测试
 2. `seed.py` 只管 DuckDB；SQLite 侧（`job_logs`/`retry_list`/`trading_dates`/`watchlist`）
    按设计没做，需要时另立 `seed_sqlite.py`（不要合并成一个"跨库万能口"）。
 3. 出厂 `seed.snapshot()` 与 `prices(table=...)` 的非默认用法还没被大量使用，属预留。
+
+### 18.6 勘误 + 独立审查的结论（2026-11-23）
+
+> 交付前按要求派了独立审查 agent（`rv-final-audit`）复核。它**证伪了一处数字**，
+> 也**提错了一条**（被执行的 agent 当场纠正）。两条都记在这里。
+
+**(1) 数字勘误：播种收敛量被混了口径。**
+我在 §18 与提交信息里写「`INSERT INTO` 618 → 409（−209）」，这是**两个域混算**：
+618 是 `tests/regression/` 单域的旧值、409 是 `tests/` 全域的新值。实测（同一条命令可复现）：
+
+| 口径 | 起点（`3a8f218`，本轮开工前） | 现在 | 降幅 |
+|---|---|---|---|
+| `tests/` 全域 | **755** | **409** | **−346** |
+| `tests/regression/` 单域 | **755** | **395** | **−360** |
+
+（`git grep -c "INSERT INTO" <commit> -- "tests/**/*.py"` 逐文件求和。）
+真实降幅比原先声称的**更大**，但口径错就是错。
+
+**(2) 审查提错的一条，执行 agent 当场停手。**
+审查说 `data_quality.record_screening_readiness_refresh_outcome()` "生产零调用、只有测试在调，应删"。
+执行 agent 按"删前必须自己核实"的要求查证后**停下没删**：该函数被
+`_screening_readiness_refresh_worker()` 在**三条路径**调用（写锁跳过 / 成功 / 异常），
+而 worker 由 `app/web/api/screening.py` 的 stale-while-revalidate 分支真起线程 —— **是活的生产代码**。
+只删了**读侧**（`read_screening_readiness_refresh_state()`，生产读者确为 0），
+`data_refresh_state` 的那个 key 与写方保留（运维观测面还在）。
+
+> 教训：**审查 agent 也会错**。"生产零调用"这种判断必须由**动手的人**再验一遍，
+> 否则会把活代码删掉。这也是为什么任务书里要写"删前自己再 grep 一遍"。
+
+**(3) 审查确认成立的部分**（真跑，不是看 diff）：assert 0 改动（42 文件 AST 比对）、
+测试函数名集合不变、契约测试"改坏必红"（把工厂改成静默丢弃未知列 → 13 条红）、
+前端 `exclude` 真清空（`--listFiles` 实测 32 个 tests 文件被检查）、
+scheduler 的 patch 错符号修复成立（改 `"15:30"`→`"23:59"` → 正好 2 条红）。
+
+**(4) 审查还找出并已修掉的**：
+- `docs/STATUS.md` 里"S1 既有失败 2 项待排查"是**过时陈述**（两条实测都过）→ 已关闭并注明日期；
+- `dsl/derived_fields.is_derived_field()`、`statistics.series_values()` 零引用 → 已删；
+- 5 处真弱断言（`assert manager._circuit_breaker` 之类）→ 已改强并各自变异验证；
+- `seed.py` docstring 补「迁移守则」：把内联 `INSERT` 里的 `CURRENT_TIMESTAMP` 换成工厂调用时
+  必须显式 `trace_now=True`，否则"刚抓的"会静默变成固定过去时间（实测已有 3 处这种漂移，
+  而现有断言不读那列，所以全绿 —— 属静默语义漂移）。
+
+**(5) 审查登记的"下一轮"（都不是必须用户决策，只是本轮时间盒外）**：
+- 另有约 **12 条同类弱断言**（`test_index_dashboard` / `test_research_api` / `test_quality_grading` 等）
+  未改 —— 每条都要先读懂该接口契约才能决定"该硬编码什么"，不适合赶工；
+- 剩余 **395** 处内联播种（其中相当一部分属"外键引用树 / 故意造错 / 只出现一次的表"，
+  逐类理由见 §18.2）。
