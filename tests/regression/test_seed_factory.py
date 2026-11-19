@@ -31,14 +31,27 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta
 
 import pytest
 
 from app.core.storage.duckdb_store import DuckDBStore
-from tests.support.seed import DuplicateSeed, Seed, SeedError, UnknownSeedColumn
+from tests.support.seed import (
+    CURRENT_TIMESTAMP,
+    DEFAULT_FETCH_TIME,
+    DuplicateSeed,
+    Seed,
+    SeedError,
+    SqlValue,
+    UnknownSeedColumn,
+    sql_now,
+)
 
 STOCK = "600519"
 REPORT_DATE = "2024-12-31"
+#: `indicator_ext` 的 `calculated_at` / `source` / `data_version` 是 NOT NULL 且
+#: 不是 provenance 五件套 —— 由调用点显式给（工厂方法签名里就是这么要求的）。
+EXT_CALCULATED_AT = "2026-09-19 00:00:00"
 
 #: 生产口径的形状（`app/core/business.py:151` 的 `uuid4().hex` 有 32 位；
 #: `app/core/adapters/base.py:290` 的 sha256 有 64 位）。
@@ -103,6 +116,49 @@ def _one(store: DuckDBStore, table: str) -> dict:
             "total_share",
             id="shares:total_share",
         ),
+        pytest.param(
+            # 扩展指标域（`indicator_ext`）是为压缩 asset_health 的覆盖率用例才补的：
+            # 它与 `indicator_snapshot` 同主键但不同表，工厂必须**分开**校验列。
+            lambda seed: seed.extended(
+                STOCK, REPORT_DATE, calculated_at=EXT_CALCULATED_AT, source="fixture",
+                data_version=1, free_cash_flo=1.0,
+            ),
+            "indicator_ext",
+            "free_cash_flo",
+            id="extended:free_cash_flo",
+        ),
+        pytest.param(
+            # 分红：主机列是 ex_date，最容易被写成 `dividend_per_share` 的近似拼法。
+            lambda seed: seed.dividends(
+                STOCK, [("2025-06-30", None, 1.0)], dividend_per_shar=1.0,
+            ),
+            "dividends",
+            "dividend_per_shar",
+            id="dividends:dividend_per_shar",
+        ),
+        pytest.param(
+            lambda seed: seed.treasury_yield_curve("2026-08-31", 10.0, 3.0, yield_pc=3.0),
+            "treasury_yield_curve",
+            "yield_pc",
+            id="treasury_yield_curve:yield_pc",
+        ),
+        pytest.param(
+            # `source_audit` 的批次列叫 `fetch_batch_id`（不是别处的 `batch_id`），
+            # 这张表最常见的拼错就是漏掉 `_id` —— 必须当场红，不能静默 NULL。
+            lambda seed: seed.source_audit(STOCK, "revenue", fetch_batch="b1"),
+            "source_audit",
+            "fetch_batch",
+            id="source_audit:fetch_batch",
+        ),
+        pytest.param(
+            # 逐行 cols（`fundings` 第四项）与全批 `**cols` 都要走同一套列校验。
+            lambda seed: seed.fundings(
+                STOCK, [("ipo", "2025-01-01", 1000.0, {"raise_fund": 1.0})],
+            ),
+            "funding_events",
+            "raise_fund",
+            id="fundings:per_row_raise_fund",
+        ),
     ],
 )
 def test_misspelled_column_raises_unknown_seed_column_and_writes_no_row(
@@ -158,6 +214,24 @@ def test_misspelled_column_raises_unknown_seed_column_and_writes_no_row(
             "stock_meta",
             id="stock",
         ),
+        pytest.param(
+            lambda seed: seed.extended(
+                STOCK, REPORT_DATE, calculated_at=EXT_CALCULATED_AT, source="fixture",
+                data_version=1, free_cash_flow=1.0,
+            ),
+            "indicator_ext",
+            id="extended",
+        ),
+        pytest.param(
+            lambda seed: seed.dividends(STOCK, [("2025-06-30", "2025-05-01", 1.0)]),
+            "dividends",
+            id="dividends",
+        ),
+        pytest.param(
+            lambda seed: seed.treasury_yield_curve("2026-08-31", 10.0, 3.0),
+            "treasury_yield_curve",
+            id="treasury_yield_curve",
+        ),
     ],
 )
 def test_duplicate_seed_raises_and_keeps_first_value(
@@ -187,6 +261,8 @@ def test_overwrite_true_replaces_the_existing_row_instead_of_ignoring_it(
     提供的列。`selling_expenses` 第二次没传 → 保留上一次的 100.0，不是 NULL。
     这条钉在这里是为了让人**看见**它：以为"覆盖 = 整行替换"的人会写出
     "我改了 revenue，旧费用还在"的种子而毫无察觉。需要整行干净重来就先把行删掉。
+    反面 `if_exists="ignore"`（`ON CONFLICT DO NOTHING`）**保留**旧值 ——
+    "确保存在"不是"改成我的值"，两者不能互换（下面用 `dividends` 各钉一遍）。
     """
     seed = Seed(duckdb_store)
     seed.income(STOCK, REPORT_DATE, revenue=1000.0, net_profit=300.0, selling_expenses=100.0)
@@ -201,14 +277,39 @@ def test_overwrite_true_replaces_the_existing_row_instead_of_ignoring_it(
     seed.stock(STOCK, name="新名", overwrite=True)
     assert duckdb_store.read_query("SELECT name FROM stock_meta") == [{"name": "新名"}]
 
+    # 反面同理：`if_exists="ignore"`（`ON CONFLICT DO NOTHING`）与 `overwrite=True`
+    # **相反** —— ignore 保留旧值，那是"确保存在"，不是"改成我的值"。收敛
+    # "已核验的分红不得被稀疏响应清零"这类种子时，拿 overwrite 凑会静默改掉
+    # 被断言守护的值；两者同时传等于调用点没说清要哪个 → `SeedError`，一行不落。
+    seed.dividends(STOCK, [("2025-06-30", None, 1.0)])
+    seed.dividends(STOCK, [("2025-06-30", None, 9.9)], if_exists="ignore")
+    assert duckdb_store.read_query("SELECT dividend_per_share FROM dividends") == [
+        {"dividend_per_share": 1.0}
+    ]
+
+    seed.dividends(STOCK, [("2025-06-30", None, 2.0)], overwrite=True)
+    assert duckdb_store.read_query("SELECT dividend_per_share FROM dividends") == [
+        {"dividend_per_share": 2.0}
+    ]
+
+    with pytest.raises(SeedError, match="语义相反"):
+        seed.dividends(
+            STOCK, [("2025-06-30", None, 3.0)], overwrite=True, if_exists="ignore"
+        )
+    assert duckdb_store.read_query("SELECT dividend_per_share FROM dividends") == [
+        {"dividend_per_share": 2.0}
+    ]
+
 
 # ── 不变式 4：无主键事件流可重复追加 ────────────────────────────────
 def test_keyless_event_streams_accept_repeated_seeding(duckdb_store: DuckDBStore) -> None:
-    """`funding_events` / `buyback_events` 无主键 —— 同一行重复播种必须都留下。
+    """`funding_events` / `buyback_events` / `source_audit` 无主键 —— 重复播种必须都留下。
 
     这是表的真实语义，不是工厂疏忽：东财 F10 会把一次增发按发行对象拆成多条
     同 `list_date` 记录，单股原子替换靠 `DELETE→INSERT`、不靠主键去重
-    （`app/core/storage/schema.py:689` 的注释）。
+    （`app/core/storage/schema.py:689` 的注释）；`source_audit` 的主键只有自增
+    `id`，同一 `(stock, field)` 每次抓取各留一条审计 —— "重复就抛"会把这些
+    用例逼回内联 SQL。
     """
     seed = Seed(duckdb_store)
     fundings = [("a_placement", "2026-02-05", 1000.0), ("a_placement", "2026-02-05", 2000.0)]
@@ -217,9 +318,12 @@ def test_keyless_event_streams_accept_repeated_seeding(duckdb_store: DuckDBStore
     seed.fundings(STOCK, fundings)
     seed.buyback(STOCK, "2026-03-01", 500.0)
     seed.buyback(STOCK, "2026-03-01", 500.0)
+    seed.source_audit(STOCK, "revenue", raw_response_hash="a" * 64)
+    seed.source_audit(STOCK, "revenue", raw_response_hash="b" * 64)
 
     assert _count(duckdb_store, "funding_events") == 4
     assert _count(duckdb_store, "buyback_events") == 2
+    assert _count(duckdb_store, "source_audit") == 2
 
 
 # ── 不变式 5：未传的业务列必须是 NULL ────────────────────────────────
@@ -250,6 +354,33 @@ def test_business_columns_not_passed_stay_null(duckdb_store: DuckDBStore) -> Non
     snapshot = _one(duckdb_store, "indicator_snapshot")
     assert snapshot["latest_close"] == 10.0
     assert snapshot["pe_ttm"] is None
+
+    # 分红：「未证公告日」= `announcement_date` 真的缺着（不是被工厂填成 ex_date）。
+    # 股东回报指标整项缺失那一组用例的全部前提就在这一行。
+    seed.dividends(STOCK, [("2025-06-30", None, 1.0)])
+    dividend = _one(duckdb_store, "dividends")
+    assert dividend["dividend_per_share"] == 1.0
+    assert dividend["announcement_date"] is None
+    assert dividend["stock_dividend"] is None
+    assert dividend["transfer_share"] is None
+
+    # 审计：业务列（报告期/值/原因码）不写就是 NULL；`created_at` 由 schema 的
+    # `DEFAULT CURRENT_TIMESTAMP` 兜底 —— 工厂不替它编，也不塞一个假时间。
+    seed.source_audit(STOCK, "revenue")
+    audit = _one(duckdb_store, "source_audit")
+    assert audit["report_date"] is None
+    assert audit["value"] is None
+    assert audit["reason_code"] is None
+    assert audit["api_version"] is None
+    assert audit["created_at"] is not None
+
+    # 融资事件：金额/价格不在 `rows` 里就是 NULL（`raise_funds` 缺失 → fail-closed）。
+    seed.fundings(STOCK, [("ipo", "2025-01-01", 1000.0)])
+    funding = _one(duckdb_store, "funding_events")
+    assert funding["issue_shares"] == 1000.0
+    assert funding["issue_price"] is None
+    assert funding["raise_funds"] is None
+    assert funding["raise_funds_net"] is None
 
 
 # ── 不变式 6：screenable() 的"确保股票存在"语义 ─────────────────────
@@ -362,6 +493,18 @@ def test_default_values_are_deterministic_for_the_same_row(duckdb_store: DuckDBS
     )[0]
     assert other["raw_response_hash"] != first["raw_response_hash"]
 
+    # `trace_now=True` 是唯一的**显式**出口：只有它把 `fetch_time` 写成"这一刻"。
+    # 新鲜度类用例（"刚抓的""比快照晚"）靠这个开关收敛，否则只能退回内联
+    # `INSERT ... CURRENT_TIMESTAMP`。作用域仅限 fetch_time —— hash/batch_id 照旧。
+    Seed(duckdb_store, trace_now=True).treasury_yield_curve("2026-08-31", 10.0, 3.0)
+    fresh = _one(duckdb_store, "treasury_yield_curve")
+    assert abs(datetime.now() - fresh["fetch_time"]) < timedelta(minutes=5)
+    assert HASH64.fullmatch(fresh["raw_hash"])
+    assert HASH32.fullmatch(fresh["batch_id"])
+
+    # 而默认（不开开关）仍是那个固定字面量：同一份种子换实例重复播也一致。
+    assert first["fetch_time"] == datetime.fromisoformat(DEFAULT_FETCH_TIME)
+
 
 # ── 附加：表名收口 ───────────────────────────────────────────────────
 def test_prices_rejects_a_table_outside_the_price_pair(duckdb_store: DuckDBStore) -> None:
@@ -372,3 +515,239 @@ def test_prices_rejects_a_table_outside_the_price_pair(duckdb_store: DuckDBStore
         seed.prices(STOCK, [("2024-12-31", 10.0)], table="income_statement")
 
     assert _count(duckdb_store, "income_statement") == 0
+
+
+# ── A：`join(conn)` —— 调用点已开事务时，工厂不许自己再开（写锁自撞）──────
+class _NoWriteLockStore:
+    """把"工厂又去申请写锁/事务"变成**立刻失败**的假 store（而不是死等 30s）。
+
+    DuckDB 的写锁是应用级文件锁：在 `store.transaction()` 块里再调
+    `store.transaction()` 会自己等自己（实测 ~30s 后 `DuckDBWriteLockError`）。
+    用真实 store 验证"没自撞"要付 30s 的代价，用这个假 store 付 0s，
+    而且失败信息直指原因。它把每次 store 侧调用都记进 `calls`，用来证明
+    `join()` 之后一条 store 调用都没发生。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def transaction(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("transaction")
+        raise AssertionError("join(conn) 之后不许再申请写事务/写锁")
+
+    def write_connection(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("write_connection")
+        raise AssertionError("join(conn) 之后不许再申请写连接/写锁")
+
+    def read_connection(self, *args: object, **kwargs: object) -> None:
+        self.calls.append("read_connection")
+        raise AssertionError("join(conn) 之后不许另开读连接（DESCRIBE 用绑定连接）")
+
+
+def test_join_never_acquires_the_write_lock(duckdb_store: DuckDBStore) -> None:
+    """`join(conn)` 绑定后 MUST 一次 `transaction()` / `write_connection()` 都不申请。
+
+    这是缺口 A 的全部意义：18+ 处内联播种之所以留在
+    `with store.write_connection():` / `store.transaction():` 块里，就是因为
+    工厂自带事务会**自撞写锁**。假 store 在 store 侧任何调用上直接抛
+    `AssertionError`，所以这条用例同时钉住两件事：方法真的写进了库（断言在
+    真 store 上读得到），且过程中没有任何一次锁申请。
+    """
+    no_lock = _NoWriteLockStore()
+    with duckdb_store.write_connection() as conn:
+        Seed(no_lock).join(conn).stock(STOCK, name="贵州茅台")  # type: ignore[arg-type]
+        Seed(no_lock).join(conn).income(STOCK, REPORT_DATE, revenue=1000.0)  # type: ignore[arg-type]
+
+    assert no_lock.calls == []
+    assert duckdb_store.read_query(
+        "SELECT name FROM stock_meta WHERE stock_code = ?", [STOCK]
+    ) == [{"name": "贵州茅台"}]
+    assert _count(duckdb_store, "income_statement") == 1
+
+
+def test_joined_seed_defers_commit_to_the_caller(duckdb_store: DuckDBStore) -> None:
+    """绑定的 façade **不提交**：调用方回滚，工厂写进去的行必须一起消失。
+
+    "绑定了就当我 commit 了"是这类 façade 最容易撒的谎：调用方后半段抛错、
+    `with` 回滚，而种子留在库里 —— 之后每条断言都对着一个"上一轮成功写的"
+    世界跑。这条用例用真事务 + 真回滚钉死它。
+    """
+
+    class _Boom(Exception):
+        pass
+
+    # 一个 `with` 里同时"期待 Boom"和"持有真事务"：抛错时 `transaction()` 的
+    # finally 走 rollback —— 这正是要验证的那条路径。
+    with pytest.raises(_Boom), duckdb_store.transaction() as conn:
+        seed = Seed(duckdb_store).join(conn)
+        seed.stock(STOCK, name="贵州茅台")
+        seed.balance(STOCK, REPORT_DATE, total_assets=2000.0)
+        raise _Boom
+
+    assert _count(duckdb_store, "stock_meta") == 0
+    assert _count(duckdb_store, "balance_sheet") == 0
+
+
+def test_joined_seed_keeps_column_validation_and_duplicate_detection(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """绑定后口径不变：拼错列名照样 `UnknownSeedColumn`，重复主键照样 `DuplicateSeed`。
+
+    "在调用方事务里"不是放松校验的理由 —— 恰恰相反：块里通常后面还有别的写，
+    一行错种子落进去就是"整块都脏"。
+    """
+    with duckdb_store.write_connection() as conn:
+        seed = Seed(duckdb_store).join(conn)
+
+        with pytest.raises(UnknownSeedColumn, match="report_dte"):
+            seed.balance(STOCK, REPORT_DATE, report_dte=REPORT_DATE, total_assets=1.0)
+
+        seed.balance(STOCK, REPORT_DATE, total_assets=2000.0)
+        with pytest.raises(DuplicateSeed, match="balance_sheet"):
+            seed.balance(STOCK, REPORT_DATE, total_assets=3000.0)
+
+    assert _count(duckdb_store, "balance_sheet") == 1
+    assert _one(duckdb_store, "balance_sheet")["total_assets"] == 2000.0
+
+
+# ── C：库侧时钟哨兵（白名单表达式）────────────────────────────────────
+def _within_a_minute_of_the_database_clock(store: DuckDBStore) -> int:
+    """数出 `indicator_snapshot.calculated_at` 落在库侧"现在 ±1 分钟"的行数。
+
+    为什么不是 `calculated_at = CURRENT_TIMESTAMP`：DuckDB 的 `CURRENT_TIMESTAMP`
+    在每条语句里各自求值（微秒精度），两条语句永远不会"相等"；把等号当判据，
+    用例只会在**写死字面量**时才绿 —— 那恰好是这条要排除的写法。
+    """
+    return store.read_query(
+        "SELECT COUNT(*) AS c FROM indicator_snapshot "
+        "WHERE calculated_at BETWEEN CURRENT_TIMESTAMP - INTERVAL 1 MINUTE "
+        "AND CURRENT_TIMESTAMP + INTERVAL 1 MINUTE"
+    )[0]["c"]
+
+
+def test_sql_now_sentinel_writes_the_database_clock(duckdb_store: DuckDBStore) -> None:
+    """`calculated_at=CURRENT_TIMESTAMP` 必须落成**库的现在**，不是 Python 字面量。
+
+    新鲜度判据（`WHERE calculated_at > now() - INTERVAL ...`）要的是库侧时钟：
+    写死字面量会让"刚算过"在跑测试的第二天悄悄变成"很久没算"；写 Python 的
+    `datetime.now()` 又会带进本机时区。这条钉住哨兵真的走了 SQL 函数。
+    """
+    Seed(duckdb_store).snapshot(STOCK, REPORT_DATE, calculated_at=CURRENT_TIMESTAMP)
+
+    row = duckdb_store.read_query(
+        "SELECT calculated_at FROM indicator_snapshot"
+    )[0]
+    assert isinstance(row["calculated_at"], datetime)
+    assert abs(datetime.now() - row["calculated_at"].replace(tzinfo=None)) < timedelta(minutes=5)
+    # 库侧自比：`CURRENT_TIMESTAMP` 在 DuckDB 里是**语句级**求值（微秒精度），
+    # 所以用窗口而不是等号 —— 等号只会钉住"两条语句跑在同一微秒"这个假条件。
+    assert _within_a_minute_of_the_database_clock(duckdb_store) == 1
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "now()",
+        "CURRENT_TIMESTAMP; DROP TABLE stock_meta",
+        "datetime('now', 'localtime')",
+        "1=1",
+        "(SELECT MAX(fetch_time) FROM treasury_yield_curve)",
+        "strftime('%s','now')",
+    ],
+)
+def test_sql_sentinel_rejects_anything_outside_the_whitelist(expression: str) -> None:
+    """哨兵 MUST 只收白名单表达式 —— 任意 SQL 字符串既是注入面又是万能口。
+
+    白名单之外的东西进不了 SQL 文本（`SqlValue.__init__` 当场抛），所以"某一列
+    交给库函数"这件事永远不会退化成 `seed.raw_sql("...")`。
+    """
+    with pytest.raises(SeedError):
+        SqlValue(expression)
+
+
+def test_sql_now_modifier_helper_rejects_arbitrary_text() -> None:
+    """`sql_now()` 的修饰符也只收 `±N second|minute|hour|day|month|year`。"""
+    assert sql_now("-200 days").sql == "datetime('now', '-200 days')"
+    assert sql_now().sql == "datetime('now')"
+    for bad in ("+1 day') OR 1=1 --", "localtime", "-200 days' ); DELETE FROM x --", "1 day ago"):
+        with pytest.raises(SeedError):
+            sql_now(bad)
+
+
+# ── D：批量脚手架（一次事务 + executemany），与逐行等价 ────────────────
+def test_stocks_bulk_equals_row_by_row_seeding(duckdb_store: DuckDBStore) -> None:
+    """`stocks([...])` 必须与逐行 `stock()` 得到**完全相同**的表内容。
+
+    批量入口只省"怎么写进去"（一次事务 + `executemany`），不许顺带改口径：
+    名字兜底、交易所推断、逐行列优先级都得与单行路径一致，否则池子类用例
+    （6000 行）与其余用例会长在两套语义上。
+    """
+    codes = ["600000", "600001", "000001", "830001"]
+    rows = [
+        (code, f"per-row-{code}", {"listing_date": "2020-01-01"}) for code in codes
+    ]
+    select = (
+        "SELECT stock_code, name, exchange, CAST(listing_date AS VARCHAR) AS listing_date "
+        "FROM stock_meta ORDER BY stock_code"
+    )
+
+    seed = Seed(duckdb_store)
+    for code in codes:
+        seed.stock(code, name=f"per-row-{code}", listing_date="2020-01-01")
+    row_by_row = duckdb_store.read_query(select)
+
+    # 同一个库上再播一遍会撞主键：批量路径用 overwrite=True 覆盖同一批主键。
+    Seed(duckdb_store).stocks(rows, overwrite=True)
+    assert duckdb_store.read_query(select) == row_by_row
+
+    duckdb_store.write_query("DELETE FROM stock_meta")
+    Seed(duckdb_store).stocks(rows)
+    assert duckdb_store.read_query(select) == row_by_row
+    # 交易所按代码段推断：批量路径不许把它写死成某一个值。
+    assert {row["exchange"] for row in duckdb_store.read_query(select)} == {"SHSE", "SZSE", "BSE"}
+
+
+def test_bulk_scaffolds_validate_columns_and_primary_keys(duckdb_store: DuckDBStore) -> None:
+    """批量入口同样过列校验与主键判据：拼错列名一行都不落，重复主键当场抛。
+
+    `executemany` 最容易丢的就是这两道闸（"批量嘛，先塞进去再说"）：拼错的列名
+    在 `executemany` 里会整批失败、或者更糟——被当成新列名忽略；而重复主键要么
+    整批回滚、要么静默留旧值，两种都不该发生。
+    """
+    seed = Seed(duckdb_store)
+
+    with pytest.raises(UnknownSeedColumn, match="nmae"):
+        seed.stocks([("600000", "a"), ("600001", "b")], nmae="x")
+    assert _count(duckdb_store, "stock_meta") == 0
+
+    with pytest.raises(SeedError, match="主键列"):
+        seed.snapshots([{"stock_code": "600000"}])
+
+    seed.prices_bulk([("600000", "2024-12-31", 10.0), ("600001", "2024-12-31", 20.0)])
+    assert _count(duckdb_store, "price_daily_raw") == 2
+    with pytest.raises(DuplicateSeed, match="price_daily_raw"):
+        seed.prices_bulk([("600000", "2024-12-31", 11.0)])
+
+
+def test_snapshots_bulk_seeds_many_rows_with_the_database_clock(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """`snapshots([...])` 是 6000 行池子的批量面：每行只给列，哨兵照样生效。
+
+    逐行调 `snapshot()` = 6000 次写锁；这条同时钉住"批量 + 库侧时钟"能组合
+    （`calculated_at=CURRENT_TIMESTAMP` 逐行求值），这正是截断类用例的前提。
+    """
+    Seed(duckdb_store).snapshots(
+        [
+            {
+                "stock_code": f"{600000 + i:06d}",
+                "report_date": "2026-06-30",
+                "pe_ttm": 1.0 + i,
+                "calculated_at": CURRENT_TIMESTAMP,
+            }
+            for i in range(50)
+        ]
+    )
+
+    assert _count(duckdb_store, "indicator_snapshot") == 50
+    assert _within_a_minute_of_the_database_clock(duckdb_store) == 50
