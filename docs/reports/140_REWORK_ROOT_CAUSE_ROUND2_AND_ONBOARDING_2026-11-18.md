@@ -1009,3 +1009,36 @@ helper 却没写用例）。按 `AGENTS W5` 中断它，主控接手补完（RG1
 6. **`EtfStrategyPanel`(738) / `StockDetailPage`(805) 未拆** —— 前置是先补行为测试。
 7. 既有两个 worktree（另一个会话的 `fix-quarterly-coverage-fallback` 带 5 个未提交改动），
    **合并前必须让仓库安静下来再跑一次全量 S1**。
+
+### 15.9 全量回归结果与 4 个失败的归因（worktree 内跑，29:09）
+
+`scripts/s1-pytest.ps1 tests/regression`（主控串行跑，符合 W4/W6）：
+
+```
+===== 4 failed, 1968 passed, 3 skipped, 33 warnings in 1749.32s (0:29:09) =====
+```
+
+**逐个归因（4 个都不是本轮代码引入的回归）**：
+
+| 失败 | 真因 | 证据 |
+|---|---|---|
+| `test_extended_screening_exposure::test_indicators_endpoint_exposes_exactly_the_ready_set` | **陈旧字节码** | 断言打印出来的是**另一个函数**（`_deprecated_indicator_names`）的源码 —— 这是 `.pyc` 里的 `co_firstlineno` 与磁盘上已改动的文件错位的典型症状。清 `__pycache__` 后**两个文件 29 passed** |
+| `test_screening_rank_mode::test_indicators_endpoint_stops_emitting_rank_fields` | 同上（同一类 `inspect.getsource` 断言） | 同上 |
+| `test_wheel_contents::test_pep517_wheel_contains_runtime_resources` | **worktree 环境**：断言 wheel 里有 `app/web/static/assets/*`，而 `assets/` 是 gitignore 的构建产物，worktree 里没有（主仓库里有） | `ls app/web/static/assets` → worktree MISSING / 主仓库 EXISTS |
+| `test_web_composition_root::test_duckdb_read_locked_maps_to_friendly_503` | **预存在**：`sqlite3.OperationalError: unable to open database file`（只读打开一个尚未创建的 sqlite）| **在 base commit `3b7711f` 的主仓库里用同一命令同样失败**；且这些测试文件与 `sqlite_store.py` 本轮**一个字节未改**（`git diff --quiet 3b7711f..HEAD -- <file>` 全部 UNTOUCHED） |
+
+**结论**：本轮 6 个提交涉及的功能面（update 拆分 / 前端拆分 / 指纹 / 门禁）**没有引入回归**；
+2 个是陈旧字节码（清缓存即绿）、1 个是 worktree 缺 gitignore 产物、1 个是预存在失败。
+**但"全量全绿"这句话本轮仍不成立** —— 要把那 1 个预存在失败修掉才算。
+
+> 教训（值得进 W4 的 skill）：`inspect.getsource` 类断言在**文件被改动过但 `.pyc` 没失效**时
+> 会读到错位源码，报出来的错误信息**看起来像"某函数缺少某符号"**，极易被误判成真回归。
+> 遇到这类失败先 `find . -name __pycache__ -exec rm -rf {} +` 再复跑，别急着改代码。
+
+### 15.10 顺带发现：`preflight` 的"Unowned run-root"警告
+
+S1 包装器结束时打了 8 条
+`[WARN] 无法清理残留运行根 … Refusing cleanup of an unowned run-root name` —— 那些是
+各 agent 自建临时 run root（名字形如 `vd-s1-roce-*` / `vd-s1-verify-*`）留下的空目录。
+包装器**按设计拒绝清理非自己创建的目录**（这是对的安全设计），所以它们只是**磁盘噪音**，
+不影响结论；建议 W4 里约定 agent 的临时 run root 统一用 `vd-<会话名>-*` 并在收尾自清。
