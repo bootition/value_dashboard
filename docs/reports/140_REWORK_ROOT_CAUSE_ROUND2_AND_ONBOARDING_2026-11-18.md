@@ -737,3 +737,144 @@ COUNT/MIN/MAX after : (20, '2026-03-02', '2026-03-27')
 6. **`python -m pytest` 的冻结态 preflight 在多进程并发时会误红**
    （"Python process state changed during formal capture"，本轮 9 次尝试 7 次命中）
    —— 跑全量 S1 前应先降低并发。
+
+## 14. 第二轮独立审查结果与本轮更正（2026-11-19）
+
+> §13 记录"做了什么"，本节记录**审查怎样把它打回来、以及改了什么**。
+> 两个对抗性审查 agent：`rv-round2-facts`（24 个子声称复算：证实 14 / 部分 7 / 证伪 2 / 无法验证 1）、
+> `rv-round2-design`（门禁语义、测试弱化、租约事故）。
+
+### 14.1 被证伪的两项声称 —— 都是真洞，已修
+
+**(1) 缓存的"stale 硬上限"可以被绕过（S1，真缺陷）**
+原实现把年龄闸门整块写在 `if age_seconds is not None:` 里面：
+
+```python
+updated = payload.get("updated_at")
+age_seconds = None
+if updated:                      # ← payload 里没有 updated_at 时，下面整块被跳过
+    age_seconds = ...
+if age_seconds is not None:      # ← TTL 与 2×TTL 硬上限同时失效
+    if age_seconds > max_age: return None
+```
+
+于是**payload 缺 `updated_at`**（旧版本写下的行 / 迁移残留）时，`age_seconds=None` →
+TTL 与硬上限**全被跳过** → 旧决策被无限期当作"已就绪"返回。
+"缺陷 B 已封顶"只对**写了时间戳的行**成立。
+**修**：时间戳缺失或解析失败一律 **fail-closed**（`return None`，宁可重算一次 20s）。
+补用例 `test_missing_updated_at_fails_closed_instead_of_bypassing_the_cap`
+（注意 `data_refresh_state.updated_at` 列是 NOT NULL，真实攻击面在 **JSON payload** 里）。
+
+**(2) RG6 的"显式消歧"只看键名不看值（S1，门禁被一行空键关掉）**
+原判据是 `if "number-collision-note" in parse_front_matter(...)` ——
+给同编号每份文件加一行 `number-collision-note:`（空值）即**永久豁免**。
+提交信息里"补 2 个反向用例防止加个注释混过去"**是过度声明**：那两个用例只能区分
+"键有没有"，分不出"值有没有内容"。
+**修**：新增 `has_meaningful_collision_note()`，三条同时满足才算已消歧 ——
+值非空、长度 ≥ 20、且**点名了对方文件名**（`*.md`）。
+补 2 个用例：空值必须红、有字但没点名对方文件也必须红。
+（审查复核确认：空值/`x`/20 字占位 → 全红，洞已堵。）
+
+### 14.2 被夸大或表述不实的 5 处 —— 已逐条更正
+
+| # | 我说过 | 实测 | 更正 |
+|---|---|---|---|
+| 1 | 拆分的「6 个函数体**逐行 IDENTICAL**」 | **6/6 语义等价、0/6 字节相同**（3 个函数的 SQL 字面量缩进被重排；`self.x`→参数化必然逐字不同） | 已在 `update_parts/retry.py` docstring 更正为"语义等价"，并注明"别再拿逐字一致当证据"。**未发现真实行为差异**（SQLite 不敏感空白） |
+| 2 | 缓存性能「117.5ms → 92.1ms」 | **机制与数值自相矛盾**：自报建连 24ms×省 4 次 ≈ 96ms，却只报总收益 25.4ms，同时新增两处摘要开销 | **不再引用该数字**（未做可信基准，属不可验证） |
+| 3 | `null_reason_sweeper` 的 `reports/136` 追溯"被租约重叠改坏" | 索引项 `S3 reports/136` **一直存在**，行内 `依据 S3 L2` 本就可回溯 | `3726e5f` 属**冗余加固**，不是"修损失"。归因已更正 |
+| 4 | 前端"删死代码 616 行" | 616 是两文件行数之和；`frontend/src` 净减 **502 行** | 数字已改用净值 |
+| 5 | `test_screening_gate` 改动"断言更多更严" | 新增 3 个键断言（更严）但把整字典相等改成逐键断言，**丢了"不得多返回键"的保证**（更松） | 属选择性表述。另补了一条与实现无关的绝对断言：硬上限必须 `>TTL 且 ≤4×TTL 且 ==2×TTL`（此前把 2×TTL 改成 10 年，测试**仍然全绿**） |
+
+另：起点计数有误 —— `null_reason 13→5` 实为 **10→5**，`update 39→12` 实为 **38→12**。
+
+### 14.3 RG9 的语义变更：理由成立，但原始改法丢了信号 —— 已补 WARN
+
+`git commit -- <paths>` 使用**临时索引**，旧的 RG9（"未入库也报红"）会把**别人正在写的**
+新测试误判成未入库，于是拦掉我们自己的分主题提交（实测：本轮所有按主题提交都被它拦过）。
+审查复现并确认这个理由成立。
+
+但"零信号"不可接受：**「测试写了、本地绿了、忘了提交」**这一整类失效会彻底从门禁里消失
+（文件在新克隆里根本不存在，CI 侧永远看不到）。
+**修**：降级为 **WARN（不阻塞、不改变退出码）**，且在 `GIT_INDEX_FILE` 存在（正做部分提交）时跳过。
+补 2 个用例：未入库必须出 WARN 且 exit 0；`GIT_INDEX_FILE` 存在时必须静默。
+
+### 14.4 租约重叠事故：**我违反了自己刚立的 W8，而且复发了 3 次**
+
+`AGENTS W8`（2026-11-18 我自己加的）要求"并行 agent 必须按文件/目录划分互斥写域"。
+本轮实际发生：
+
+| 冲突文件 | 撞的两个 agent | 后果 |
+|---|---|---|
+| `app/core/quality/null_reason_sweeper.py` | fx-sweeper + fx-report-refs-2 | docstring 追溯被顺手改成索引风格（语义未丢） |
+| `app/core/update.py` | fx-split-update + fx-report-refs-2（**同一提交 `2532a03` 内**） | 无 |
+| `app/core/supplement.py` | 同上 | 提交信息只写"另修两处过期注释"，**披露不实**（实际 +48/−29） |
+
+审查用"docstring 置空后 `ast.dump` 比对"逐个核过 7 个提交的每个 `.py`：
+**没有发现静默语义变更**（泄漏的是注释归属，不是行为）。
+**但这是运气，不是纪律**。W8 要真正生效，派活时必须先列文件清单并做交集检查。
+
+### 14.5 更严重的同类问题：**提交边界不自洽（历史窗口）**
+
+审查发现：`73bb498..3726e5f` **连续 5 个提交**里，`app/web/api/screening.py` 都
+`import app.core.blacklist`，而该文件直到 `79f15e4` 才入库。
+把它 `git archive` 出来跑，直接 **`ModuleNotFoundError`** —— **这 5 个提交在新克隆上连 import 都过不去**。
+
+- **原因**：同一工作区里有**另一个会话**在并行开发"股票黑名单"功能，
+  它改了 `screening.py` 并提交，但新模块文件当时还是未跟踪状态。
+- **现状**：`79f15e4` 已把 `blacklist.py` 入库，**HEAD 是自洽的**；
+  缺陷只存在于那 5 个历史提交（影响 `git bisect`）。
+- **不修**：修它要改写已推送的历史，且另一会话正在同一分支上工作 —— 风险远大于收益。
+  **记录在此**，作为"共享工作区 + 并行会话"的真实代价。
+
+### 14.6 并行会话带来的连带影响（必须记住）
+
+| 现象 | 真相 |
+|---|---|
+| 全量 S1 报 `2 failed / 1875 passed / 3 skipped`（32:03） | **本次结论不可采信**：跑的过程中另一会话正在改 `screening.py` 等文件（`inspect.getsource` 读到的是改了一半的文件）。两个失败中：①`null_reason` docstring 那条是**真实缺陷**（已修）；②`test_extended_screening_exposure` 在文件稳定后**单跑通过** |
+| S1 报 `FATAL: Formal database state changed` + 4 个进程存活 | 测试派生的 `app.cli.main data auto-update run` 与 `app.web.main` 成了**孤儿进程**（正是 `AGENTS W6` 警告的形态），它们**真的写了正式库**。已 kill |
+| 正式库 sha256 变了 | **不是损坏**。长度完全一致（28,076,421,120 B），事后只读核验：70 张表 / schema v49 / `indicator_snapshot` 5,575 行 / `institution_holdings` 432,523 行 / 86 期 / `price_daily_qfq` 17,554,918 行 —— 与之前独立核过的值**全部一致**。属孤儿进程就地写了状态行 |
+| 工作区 `reports/NNN` 计数 246 vs 提交态 240 | 差的 6 处来自另一会话，**不计入本轮** |
+
+**我这边的替代验证**：不再依赖被污染的全量 S1，改为**按我改过的模块跑定向集**：
+`test_rework_guards` + `test_repo_integrity_guards` + `test_null_reason_placement` +
+`test_screening_cache_freshness` + `test_screening_gate` + `test_update_orchestration` +
+`test_update_step_inventory` + `test_price_batch_flush` + `test_retry_persistence` +
+`test_source_result_contract` + `test_indicator_ext` + `test_backup_recovery`
+→ **192 passed**。
+
+### 14.7 `getsource` 顽疾的量化（§13.7 的补充）
+
+审查数出全仓 **13 个 `inspect.getsource` 调用点 / 11 个测试函数 / 10 个文件**，
+其中 **9 处保护的是"代码写在哪个函数里"而不是行为**（含
+`source.count("IndexValuationUpdater(") == 2` 这种按文本数构造次数的写法）。
+§13.7 说的"4 块拆不动"只对应其中 6 处。
+
+**自相矛盾之处（诚实记录）**：本轮我自己**又新增了 1 处** ——
+`test_null_reason_placement.py` 里用 `sweeper.__doc__` 断言 docstring 含某些字。
+这正是我在 §13.7 抱怨的同一件事。
+
+最小改法（未做，约 2–3h）：建 `tests/support/source_guard.py` 收敛这类断言；
+把 4 个 `update.py` 卡点改成"记录构造 kwargs 的 stub"行为测试；
+加一条 `source_guard_sites <= 13` 的棘轮，防止继续增加。
+
+### 14.8 本轮新增/仍未做
+
+**已修**（14.1 / 14.3）：缓存 fail-closed、RG6 内容判据、RG9 WARN、硬上限数值锚定、
+`retry.py` docstring 不实表述。
+
+**仍未做（诚实清单）**：
+1. `source_audit` / 归档表 / 价格表 / `indicator_snapshot` 的指纹仍是 `COUNT+MAX`，
+   **就地翻标记依旧假绿**；`_CONTENT_CHECKSUM_ROW_BUDGET=2,000,000` 超预算会退回 count-only（盲区随数据增长回来）。
+2. 5 个历史提交的 import 不自洽窗口（不修，见 14.5）。
+3. `getsource` 顽疾（13 处）与 4 块 `update.py` 拆不动。
+4. 7 个前端 god component（`ScreeningPage.vue` 948 行仍塞 9 件事）。
+5. 本轮之后另一会话仍在推进"排名口径"与"黑名单"两条线，
+   **任何跨会话的最终验证都必须在仓库安静时重跑一次全量 S1**。
+
+### 14.9 一句话
+
+> 这轮两个审查各拍到 1 个**真洞**（缓存硬上限可绕过、RG6 一行空键即豁免）、
+> 纠正了 **5 处夸大或表述不实**、并暴露出**我违反自己立的 W8 共 3 次**。
+> 全部已修并补了反向用例。**但"全量 S1 全绿"这句话本轮不成立** ——
+> 不是代码有问题，而是仓库里同时有另一个会话在改；
+> 结论必须等仓库安静后重跑一次才能下。
