@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import { isRuleNode, generateRuleId } from '../types/screening.ts'
-import type { IndicatorOption, ScreeningRuleNode } from '../types/screening.ts'
+import type { IndicatorOption, ScreeningRuleCondition, ScreeningRuleNode } from '../types/screening.ts'
 import RuleConditionRow from './RuleConditionRow.vue'
 
 // Self-import for recursive rendering in the template.
@@ -15,6 +15,10 @@ const props = defineProps<{
   maxConditions: number
   isRoot: boolean
   indicatorOptions: IndicatorOption[]
+  /** 可用排名口径（方案 C），透传给条件行 */
+  rankModes: Array<{ label: string; value: string }>
+  /** 判定某字段是否支持排名口径 */
+  rankableOf: (field: string) => boolean
   opOptions: Array<{ label: string; value: string }>
 }>()
 
@@ -73,7 +77,11 @@ function removeAt(index: number): void {
 
 function updateField(index: number, field: string): void {
   const item = props.node.rules[index]
-  if (item && !isRuleNode(item)) item.field = field
+  if (!item || isRuleNode(item)) return
+  item.field = field
+  // 换到不支持排名的字段时，必须清掉 rank_mode，
+  // 否则后端会收到 `xxx_market_rank` 这种不存在的字段。
+  if (!props.rankableOf(field)) item.rank_mode = undefined
 }
 
 function updateOp(index: number, op: string): void {
@@ -97,6 +105,13 @@ function updateValue(index: number, value: number | [number, number]): void {
 function updateRightField(index: number, value: string | undefined): void {
   const item = props.node.rules[index]
   if (item && !isRuleNode(item)) item.right_field = value
+}
+
+/** 排名口径（方案 C）：空 = 原始值。 */
+function updateRankMode(index: number, value: string | undefined): void {
+  const item = props.node.rules[index]
+  if (!item || isRuleNode(item)) return
+  item.rank_mode = value as ScreeningRuleCondition['rank_mode']
 }
 </script>
 
@@ -133,6 +148,8 @@ function updateRightField(index: number, value: string | undefined): void {
           :is-root="false"
           :indicator-options="indicatorOptions"
           :op-options="opOptions"
+          :rank-modes="rankModes"
+          :rankable-of="rankableOf"
           @delete="removeAt(index)"
           @warn="(message: string) => emit('warn', message)"
         />
@@ -142,6 +159,9 @@ function updateRightField(index: number, value: string | undefined): void {
           :ordinal="index + 1"
           :indicator-options="indicatorOptions"
           :op-options="opOptions"
+          :rank-modes="rankModes"
+          :rankable="rankableOf(item.field)"
+          @update:rank-mode="updateRankMode(index, $event)"
           @update:field="updateField(index, $event)"
           @update:op="updateOp(index, $event)"
           @update:value="updateValue(index, $event)"

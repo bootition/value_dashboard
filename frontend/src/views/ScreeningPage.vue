@@ -32,6 +32,8 @@ function apiErrorText(e: unknown, fallback: string): string {
   return friendlyErrorMessage(e, fallback)
 }
 const indicators = ref<readonly ScreeningIndicator[]>([])
+/** 条件级排名口径（方案 C，后端 /indicators 下发）：空 = 原始值 */
+const rankModes = ref<Array<{ label: string; value: string }>>([])
 // 2026-11-14（reports/120 §5 J5/J9）：后端把「当前报告期不可用/被遮蔽」的字段
 // 从 indicators 移到 unavailable（字段名 + reason + coverage_pct）。
 // 只让字段消失不给理由，用户会以为功能没了——这里在指标选择区灰显并给 tooltip。
@@ -165,14 +167,8 @@ const readinessCopy = computed(() => {
   return { state: 'blocked', label: '数据尚未就绪' }
 })
 
-// 派生字段（排名/分位/统计）默认折叠（2026-11-16）。
-// 每个可排名指标派生 6 条排名字段，ROCE 三个窗口因此变成 3+18=21 条，
-// 主指标被埋在中间根本选不到。折叠后主指标只留 3 条，需要时再展开。
-const showDerivedFields = ref(false)
-
-const derivedFieldCount = computed(
-  () => indicators.value.filter((i) => (i as ScreeningIndicator).derived_from).length,
-)
+// 方案 C（2026-11-16）：后端不再下发 930 条排名派生字段（`pe_ttm_market_rank` …），
+// 改为条件行上的「排名口径」下拉（rankModes）。下拉里只剩主指标 + 统计域。
 
 function indicatorLabelOf(i: ScreeningIndicator): string {
   const meta = i as ScreeningIndicator & { label?: string; display_name?: string; dsl?: boolean }
@@ -184,35 +180,18 @@ function indicatorLabelOf(i: ScreeningIndicator): string {
   return fieldOptionLabel(i.name, baseLabel)
 }
 
-const indicatorOptions = computed(() => {
-  const base: Array<{ label: string; value: string }> = []
-  const derived: Array<{ label: string; value: string }> = []
-  for (const i of indicators.value) {
-    const option = { label: indicatorLabelOf(i), value: i.name }
-    if ((i as ScreeningIndicator).derived_from) derived.push(option)
-    else base.push(option)
-  }
-  if (!showDerivedFields.value) return base
-  // 展开时用分组标题隔开，避免"主指标 / 排名派生"混在一起
-  return [
-    { type: 'group' as const, label: `常用指标（${base.length}）`, key: 'base', children: base },
-    {
-      type: 'group' as const,
-      label: `排名与统计派生（${derived.length}）`,
-      key: 'derived',
-      children: derived,
-    },
-  ]
-})
+const indicatorOptions = computed(() =>
+  indicators.value.map((i) => ({ label: indicatorLabelOf(i), value: i.name })),
+)
 
-/** 取第一个**叶子**选项的 value（分组选项本身没有 value）。 */
+/** 某字段是否支持排名口径：后端 `rankable` 标记。 */
+function rankableOf(field: string): boolean {
+  return indicators.value.some((i) => i.name === field && i.rankable)
+}
+
+/** 取第一个指标的 value（方案 C 后下拉不再有分组，直接取首项）。 */
 function firstIndicatorValue(): string | undefined {
-  for (const option of indicatorOptions.value) {
-    if ('value' in option) return option.value
-    const child = option.children[0]
-    if (child) return child.value
-  }
-  return undefined
+  return indicatorOptions.value[0]?.value
 }
 
 const resultColumns = computed(() => {
@@ -676,11 +655,16 @@ onMounted(async () => {
     const resp = await axios.get<{
       indicators?: readonly ScreeningIndicator[]
       unavailable?: readonly UnavailableIndicator[]
+      rank_modes?: ReadonlyArray<{ value: string; label: string }>
     }>('/api/screening/indicators')
     // 降级：旧后端 / 抓包数据的 `indicators` 或 `unavailable` 缺失时都不崩。
     const loadedIndicators = Array.isArray(resp.data.indicators) ? resp.data.indicators : []
     indicators.value = loadedIndicators
     unavailableIndicators.value = Array.isArray(resp.data.unavailable) ? resp.data.unavailable : []
+    // 方案 C：排名口径由后端下发，前端不再自己拼 6 个后缀
+    rankModes.value = Array.isArray(resp.data.rank_modes)
+      ? resp.data.rank_modes.map((m) => ({ label: m.label, value: m.value }))
+      : []
     // 2026-08-14 红队 F3：应用后端下发的单位元数据（单一来源），
     // 修复小数/百分数双口径下条件输入与结果展示的 100 倍误差。
     const units: Record<string, string> = {}
@@ -794,21 +778,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
-          <div class="derived-toggle-row">
-            <n-switch v-model:value="showDerivedFields" size="small" aria-label="显示派生字段" />
-            <span>
-              显示派生字段（排名 / 分位 / 统计，共 {{ derivedFieldCount }} 条）
-            </span>
-            <n-tooltip trigger="hover" placement="top">
-              <template #trigger>
-                <span class="derived-toggle-hint">?</span>
-              </template>
-              每个可排名指标会自动派生「全市场排名 / 全市场分位 / 证监会一级排名 / 一级分位 /
-              二级排名 / 二级分位」6 条字段（如 ROCE 三个窗口共 18 条）。
-              默认隐藏，避免主指标被淹没。
-            </n-tooltip>
-          </div>
-          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" />
+          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" :rank-modes="rankModes" :rankable-of="rankableOf" @warn="(msg: string) => message.warning(msg)" />
           <div v-if="unavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
             <div class="unavailable-indicators-heading">
               <strong>当前报告期不可用指标（{{ unavailableIndicators.length }}）</strong>
@@ -998,6 +968,4 @@ onUnmounted(() => {
 @media (max-width: 1060px) { .screening-workspace { grid-template-columns: 1fr; }.screening-run-panel { position: static; }.rule-load-row { grid-template-columns: 1fr; }.screening-section-title--conditions { display: block; }.screening-section-title--conditions p { max-width: none; text-align: left; }.standing-condition-line { grid-template-columns: 1fr minmax(150px, .7fr); }.standing-condition-line p { grid-column: 1 / -1; margin: -6px 0 10px; } }
 @media (max-width: 620px) { .screening-editor-card { padding: 20px 14px; }.standing-condition-line { grid-template-columns: 1fr; gap: 8px; padding-top: 12px; padding-bottom: 12px; }.standing-condition-line p { grid-column: 1; margin: 0; }.standing-conditions-heading div span { display: none; } }
 
-.derived-toggle-row { display: flex; align-items: center; gap: 8px; margin: 12px 0 8px; color: #6b7a70; font-size: 12px; }
-.derived-toggle-hint { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: #eef4ef; color: #5c7a63; font-size: 10px; font-weight: 700; cursor: help; }
 </style>

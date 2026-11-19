@@ -35,12 +35,27 @@ export interface ScreeningIndicator {
 }
 
 /** Leaf condition in a screening rule tree. */
+/** 条件级排名口径（2026-11-16 方案 C）。缺省 = 用原始值。 */
+export type RankMode =
+  | 'market_rank'
+  | 'market_percentile'
+  | 'industry_rank'
+  | 'industry_percentile'
+  | 'sw2_rank'
+  | 'sw2_percentile'
+
 export interface ScreeningRuleCondition {
   readonly id: string
   field: string
   op: string
   value: number | [number, number] | null
   right_field?: string
+  /**
+   * 排名口径：空 = 原始值；否则后端把 field 展开成 `{field}_{rank_mode}`。
+   * 过去这些是 930 条独立的扁平字段（`pe_ttm_market_rank` …），
+   * 现在收成条件上的一个下拉。
+   */
+  rank_mode?: RankMode
 }
 
 /** Recursive AND/OR group in a screening rule tree. */

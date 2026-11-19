@@ -32,6 +32,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.core.blacklist import blacklisted_code_set, filter_rows
 from app.core.data_quality import (
     ensure_screening_readiness_refresh,
     load_screening_readiness_entry,
@@ -561,6 +562,12 @@ def get_saved_result(result_id: str, request: Request) -> dict:
     row = rows[0]
     # 解析 JSON 字段
     row["result_json"] = json.loads(row["result_json"]) if row.get("result_json") else []
+    # 2026-11-22：已保存结果是历史 run 的冻结快照（result_json 是一整段 JSON），
+    # 无法在 SQL 层过滤，只能读出来后在内存里剔掉黑名单股票。否则「加入黑名单后
+    # 不再出现」会被历史结果绕过（依据 app/core/blacklist.py 模块 docstring）。
+    row["result_json"] = filter_rows(
+        row["result_json"], blacklisted_code_set(sqlite)
+    )
     row["columns_json"] = json.loads(row["columns_json"]) if row.get("columns_json") else []
     row["sort_json"] = json.loads(row["sort_json"]) if row.get("sort_json") else []
     return row
@@ -576,6 +583,8 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="saved result not found")
     record = saved[0]
     results = json.loads(record["result_json"])
+    # 与 get_saved_result 同口径：导出也不能把黑名单股票漏出去。
+    results = filter_rows(results, blacklisted_code_set(sqlite))
     columns = json.loads(record["columns_json"])
     data_date = record["data_date"]
     rule = sqlite.query(
@@ -643,11 +652,15 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
         if result is None:
             raise HTTPException(status_code=400, detail="a saved screening result is required")
         saved_codes = {row.get("stock_code") for row in json.loads(result["result_json"])}
+        # 黑名单股票不许进自选（前端已看不到了，这里是绕过前端的兜底）
+        blocked_codes = blacklisted_code_set(sqlite)
         # 先去重：同一请求里重复代码只 upsert 一次，added 按唯一代码数计。
         unique_codes = list(dict.fromkeys(stock_codes))
         requested_codes = set(unique_codes)
         if not requested_codes <= saved_codes:
             raise HTTPException(status_code=400, detail="stock codes must come from the saved result")
+        if requested_codes & blocked_codes:
+            raise HTTPException(status_code=400, detail="blacklisted stock codes cannot be added")
         conn.executemany(
             """INSERT INTO watchlist
                (stock_code, group_name, source_rule_id, source_result_id)
@@ -1026,22 +1039,19 @@ def list_available_indicators(request: Request) -> dict:
     # 每个可排名指标派生 6 条（全市场排名/分位 + 证监会一级排名/分位 + 二级排名/分位），
     # ROCE 三个窗口因此膨胀成 3 + 3×6 = **21 条**，用户在下拉里根本找不到主指标。
     # 标记后前端默认折叠，只在打开「显示派生字段」时列出。
-    for col in sorted(RANKABLE_INDICATORS):
-        for suffix, label in (
-            ("market_rank", "全市场排名"), ("market_percentile", "全市场分位"),
-            # P1-D修复: 行业排名按 PRD §24 为 CSRC（证监会）口径；
-            # 不再以"申万"标签误导用户，并暴露正确命名的 CSRC 列。
-            ("industry_rank", "证监会一级排名"), ("industry_percentile", "证监会一级分位"),
-            ("sw2_rank", "证监会二级排名"), ("sw2_percentile", "证监会二级分位"),
-        ):
-            indicators.append({
-                "name": f"{col}_{suffix}",
-                "rankable": False,
-                "label": f"{col} {label}",
-                "unit": "plain",
-                "derived_from": col,
-                "derived_kind": "rank",
-            })
+    # 排名口径改为**条件级下拉**（2026-11-16 方案 C）。
+    #
+    # 过去这里为 RANKABLE_INDICATORS 里每个指标铺 6 条扁平字段
+    # （`pe_ttm_market_rank` / `pe_ttm_industry_percentile` …）。
+    # 155 个可排名指标 × 6 = **930 条**，ROCE 一个指标就占 21 条，主指标被埋在
+    # 下拉中间根本选不到；而且它与 DSL 已有的
+    # `rank()/rank_industry()/percentile()/zscore()/normalize()` 是同一功能的
+    # 两套实现（PRD §11.2 把排名定位为 DSL 运算）。
+    #
+    # 现在只下发「可用的排名口径」清单（见响应体 rank_modes），前端在条件行上
+    # 渲染一个下拉；后端 `expand_rank_modes()` 把它展开回原字段名，
+    # 排名 SQL（NULLS LAST、csrc_l1 为 NULL 时行业排名返回 NULL 等）完全不变。
+    # 只有 `rankable: true` 的指标才会在该条件下显示这个下拉。
     # P4 历史研究统计字段（已发布统计域，依据 S4 §6）
     for metric in STAT_METRICS:
         for window in STAT_WINDOWS:
@@ -1128,9 +1138,16 @@ def list_available_indicators(request: Request) -> dict:
         kept.append(entry)
     indicators = kept
 
+    from app.core.screening.engine import RANK_MODE_LABELS, RANK_MODES
+
     return {
         "indicators": indicators,
         "count": len(indicators),
+        # 条件级排名口径（方案 C）：前端据此渲染条件行上的「排名口径」下拉。
+        # 空/缺省 = 用原始值；否则后端展开成 `{field}_{mode}`。
+        "rank_modes": [
+            {"value": mode, "label": RANK_MODE_LABELS[mode]} for mode in RANK_MODES
+        ],
         # 不暴露的字段必须**带原因**返回：只消失不给理由，用户会以为功能没了。
         # reason ∈ {deprecated, masked_untrusted, not_available_for_latest_period}
         "unavailable": unavailable,

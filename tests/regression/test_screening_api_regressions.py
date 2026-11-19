@@ -263,9 +263,23 @@ def test_indicators_derive_dsl_units_and_explain_plain_semantics(
     assert by_name["asset_ratio"]["unit"] == "ratio"
     assert by_name["pct_ind"]["unit"] == "percent"
     assert "不进行百分比换算" in body["unit_semantics"]["plain"]
-    # sw1 后缀不暴露（历史别名只保留在引擎侧兼容旧规则）；sw2 仍暴露。
-    assert not any(name.endswith("_sw1_rank") or name.endswith("_sw1_percentile") for name in by_name)
-    assert any(name.endswith("_sw2_rank") for name in by_name)
+    # 方案 C（2026-11-16）：排名不再作为扁平字段下发，改为条件级 `rank_mode`。
+    # 任何 `*_rank` / `*_percentile` 派生字段都不得再出现在指标列表里
+    # （155 个可排名指标 × 6 = 930 条会把主指标淹没）。
+    rank_suffixes = (
+        "_market_rank", "_market_percentile",
+        "_industry_rank", "_industry_percentile",
+        "_sw1_rank", "_sw1_percentile", "_sw2_rank", "_sw2_percentile",
+    )
+    leaked = [name for name in by_name if name.endswith(rank_suffixes)]
+    assert not leaked, f"仍在下发排名派生字段：{leaked[:5]}"
+    # 能力本身不能少：6 个口径必须通过 rank_modes 下发
+    modes = {item["value"] for item in body["rank_modes"]}
+    assert modes == {
+        "market_rank", "market_percentile",
+        "industry_rank", "industry_percentile",
+        "sw2_rank", "sw2_percentile",
+    }
 
 
 # ─── 技术覆盖阈值单一真源（2026-11-17 独立审计问题 2）─────────────────────

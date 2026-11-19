@@ -30,6 +30,7 @@ import re
 import time
 from typing import Any
 
+from app.core.blacklist import blacklisted_codes, exclusion_condition
 from app.core.dsl.codegen import quote_identifier
 from app.core.dsl.derived_fields import (
     DERIVED_FIELDS,
@@ -346,6 +347,68 @@ RANKABLE_INDICATORS: set[str] = {
 # sw1_rank/sw1_percentile 与 industry_rank/industry_percentile 同义（均按
 # csrc_l1 分区），保留纯为兼容已保存规则/历史测试；产品与 /indicators 均
 # 不再暴露 sw1 后缀，新规则应使用 industry_rank/industry_percentile。
+#: 条件级「排名口径」（2026-11-16 方案 C）。
+#:
+#: 过去每个可排名指标都要在指标下拉里铺 6 条派生字段
+#: （`pe_ttm_market_rank`、`pe_ttm_industry_percentile` …），
+#: 155 个指标 × 6 = **930 条**，ROCE 一个指标就占 21 条，主指标被埋住。
+#: 现在改成**条件上的一个下拉**：`rank_mode` 为空表示用原始值，
+#: 否则在后台把字段展开成 `{field}_{rank_mode}`，复用原有（已回归的）排名 SQL。
+#:
+#: PRD §11.2/§12.2/§12.4 要求的「全市场排名 / CSRC 一级·二级排名 / 百分位」
+#: 能力一条不少，只是不再以 930 个扁平字段的形式塞给用户。
+RANK_MODES: tuple[str, ...] = (
+    "market_rank",
+    "market_percentile",
+    "industry_rank",
+    "industry_percentile",
+    "sw2_rank",
+    "sw2_percentile",
+)
+RANK_MODE_LABELS: dict[str, str] = {
+    "market_rank": "全市场排名",
+    "market_percentile": "全市场分位",
+    "industry_rank": "证监会一级排名",
+    "industry_percentile": "证监会一级分位",
+    "sw2_rank": "证监会二级排名",
+    "sw2_percentile": "证监会二级分位",
+}
+
+
+def expand_rank_modes(node: object) -> object:
+    """把条件树里的 `rank_mode` 展开成字段后缀（原地返回新结构）。
+
+    `{"field": "pe_ttm", "rank_mode": "market_rank", ...}`
+        → `{"field": "pe_ttm_market_rank", ...}`
+
+    为什么在入口做这一步而不是改 SQL：排名列的生成、NULLS LAST、
+    「csrc_l1 为 NULL 时行业排名返回 NULL」（PRD §12.4）、
+    「排名分母只由基础股票池决定」（PRD §12.3）这些语义都已实现并有回归；
+    在入口改写字段名可以零风险复用，不会引入第二套排名实现。
+    """
+    if isinstance(node, list):
+        return [expand_rank_modes(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    # 递归**所有** dict/list 值，不能只认 `rules` 键：
+    # `validate_rule_fields()` 拿到的是 `{"conditions": {...}, "sort": [...]}`，
+    # 只递归 `rules` 会让 `conditions` 里的 rank_mode 逃过展开与校验。
+    out: dict[str, object] = {
+        key: expand_rank_modes(value) for key, value in node.items()
+    }
+    mode = out.pop("rank_mode", None)
+    if isinstance(mode, str) and mode:
+        if mode not in RANK_MODES:
+            raise ValueError(f"未知排名口径：{mode}")
+        field = out.get("field")
+        if not isinstance(field, str) or not field:
+            raise ValueError("rank_mode 只能用在带 field 的条件上")
+        if any(field.endswith(f"_{m}") for m in RANK_MODES):
+            raise ValueError(f"字段 {field} 已带排名后缀，不要再指定 rank_mode")
+        out["field"] = f"{field}_{mode}"
+    return out
+
+
 RANK_SUFFIXES = (
     "_market_rank", "_market_percentile",
     "_industry_rank", "_industry_percentile",
@@ -413,6 +476,9 @@ class ScreeningEngine:
         # 警告一并冒泡 —— 用户看到的是指标名，看不到它内部用了哪一列）。
         self._compiled_field_refs: set[str] = set()
         self._mixed_report_date_codes: list[str] = []
+        #: 用户黑名单代码（`app/core/blacklist.py`）；在 `run()` 里从 SQLite 重读，
+        #: 不在 `__init__` 里缓存——用户随时可能增删，缓存会造出「刚移出却还看不见」。
+        self._blacklist_codes: list[str] = []
 
     def run(
         self,
@@ -480,8 +546,10 @@ class ScreeningEngine:
         )
 
         # 1. 解析规则
-        conditions = rule.get("conditions", {})
-        sort_spec = rule.get("sort", [])
+        #    方案 C（2026-11-16）：条件的 `rank_mode` 在此展开成排名字段后缀，
+        #    之后全流程沿用既有的排名 SQL（无需第二套实现）。
+        conditions = expand_rank_modes(rule.get("conditions", {}))
+        sort_spec = expand_rank_modes(rule.get("sort", []))
         columns_spec = rule.get("columns", [])
         if not isinstance(sort_spec, list) or any(
             not isinstance(item, dict) for item in sort_spec
@@ -528,6 +596,10 @@ class ScreeningEngine:
         # 2026-08-27：不再因个别股票存在快照/完整期不一致而阻断全市场筛选。
         # 改为把这类股票从本次基础池中排除，其他正常股票照常筛选/导出。
         self._mixed_report_date_codes = self._load_mixed_report_date_codes()
+        # 2026-11-22：黑名单股票同样从基础池排除。必须加在池里而不是前端过滤——
+        # 排名/分位是跑在 base_pool 之上的窗口函数，池里剔掉才能让排名分母与
+        # 页面可见行数自洽（见 app/core/blacklist.py 模块 docstring「与排名口径的关系」）。
+        self._blacklist_codes = blacklisted_codes(self.sqlite)
 
         # 3. 构建 SQL
         sql, params = self._build_sql(
@@ -637,7 +709,7 @@ class ScreeningEngine:
         # ─── 阶段1: 基础池 + per-stock 最新快照 ──────────────────
         sql_parts: list[str] = []
 
-        # 基础池过滤条件（pool_params 只含 mixed_report_date NOT IN 的值）
+        # 基础池过滤条件（pool_params 只含 mixed_report_date / 黑名单 NOT IN 的值）
         pool_conditions: list[str] = ["m.is_listed IS TRUE"]
         pool_params: list[Any] = []
         if not include_st:
@@ -652,6 +724,14 @@ class ScreeningEngine:
             excluded_slots = ", ".join("?" for _ in self._mixed_report_date_codes)
             pool_conditions.append(f"m.stock_code NOT IN ({excluded_slots})")
             pool_params.extend(self._mixed_report_date_codes)
+        # 黑名单：SQL 片段与绑定参数的唯一生成点在 app/core/blacklist.py。
+        # 顺序必须保持「mixed_report_date 之后」，与下方 params 组装顺序一致。
+        blacklist_pred, blacklist_params = exclusion_condition(
+            "m.stock_code", self._blacklist_codes
+        )
+        if blacklist_pred:
+            pool_conditions.append(blacklist_pred)
+            pool_params.extend(blacklist_params)
 
         pool_where = " AND ".join(pool_conditions) if pool_conditions else "1=1"
 
@@ -1429,6 +1509,14 @@ LIMIT {MAX_RESULT_ROWS}
             slots = ", ".join("?" for _ in self._mixed_report_date_codes)
             conds.append(f"stock_code NOT IN ({slots})")
             params.extend(self._mixed_report_date_codes)
+        # 与 _build_sql 的基础池必须同口径，否则 base_pool_size 会含黑名单股票，
+        # 出现「池 5,578 只但结果里怎么也算不出」的假数字（AGENTS R1）。
+        blacklist_pred, blacklist_params = exclusion_condition(
+            "stock_code", self._blacklist_codes
+        )
+        if blacklist_pred:
+            conds.append(blacklist_pred)
+            params.extend(blacklist_params)
         where = " AND ".join(conds) if conds else "1=1"
         rows = self.duck.read_query(
             f"SELECT COUNT(*) as cnt FROM stock_meta WHERE {where}", params
@@ -1721,6 +1809,11 @@ def validate_rule_fields(rule: dict, custom_fields: set[str] = frozenset()) -> N
     结果列在保存时就被拒，不会拖到运行才报错。Raises ValueError with the
     same messages the engine uses.
     """
+    # 方案 C（2026-11-16）：保存期也要先展开 `rank_mode`，否则
+    # `{"field": "pe_ttm", "rank_mode": "market_rank"}` 校验时看到基名、
+    # 运行期却是 `pe_ttm_market_rank`，又会变成「能跑不能存」。
+    rule = expand_rank_modes(dict(rule))
+
     def _known(field: str) -> bool:
         if not isinstance(field, str) or not field:
             return False

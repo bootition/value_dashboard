@@ -9,6 +9,10 @@ const props = defineProps<{
   condition: ScreeningRuleCondition
   ordinal: number
   indicatorOptions: IndicatorOption[]
+  /** 可用的排名口径（方案 C）；空数组则不显示该下拉 */
+  rankModes: Array<{ label: string; value: string }>
+  /** 当前字段是否支持排名口径 */
+  rankable: boolean
   opOptions: Array<{ label: string; value: string }>
 }>()
 
@@ -17,6 +21,7 @@ const emit = defineEmits<{
   'update:op': [value: string]
   'update:value': [value: number | [number, number]]
   'update:rightField': [value: string | undefined]
+  'update:rankMode': [value: string | undefined]
   'delete': []
 }>()
 
@@ -83,6 +88,21 @@ function firstIndicatorValue(): string | undefined {
   return undefined
 }
 
+/**
+ * 排名口径选项（2026-11-16 方案 C）。
+ *
+ * 只有 `rankable` 的字段才显示这个下拉；首项「原始值」表示不带排名。
+ * 取代了过去的 930 条扁平排名字段（`pe_ttm_market_rank` …）。
+ */
+const rankModeOptions = computed(() => [
+  { label: '原始值', value: '' },
+  ...props.rankModes,
+])
+
+async function onRankModeChange(value: string): Promise<void> {
+  emit('update:rankMode', value === '' ? undefined : value)
+}
+
 function toggleFieldComparison(): void {
   emit('update:rightField', compareByField.value ? undefined : firstIndicatorValue())
 }
@@ -101,6 +121,16 @@ function toggleFieldComparison(): void {
         :render-label="renderIndicatorLabel"
         aria-label="观察指标"
         @update:value="emit('update:field', $event)"
+      />
+    </label>
+    <label v-if="rankable" class="condition-control condition-control--rank">
+      <span>排名口径</span>
+      <n-select
+        :value="condition.rank_mode ?? ''"
+        :options="rankModeOptions"
+        size="small"
+        aria-label="排名口径"
+        @update:value="onRankModeChange"
       />
     </label>
     <label class="condition-control condition-control--operator">
@@ -150,7 +180,7 @@ function toggleFieldComparison(): void {
 <style scoped>
 .condition-line {
   display: grid;
-  grid-template-columns: 42px minmax(260px, 2.2fr) minmax(110px, .6fr) minmax(150px, .9fr) 88px;
+  grid-template-columns: 42px minmax(240px, 2fr) minmax(96px, .55fr) minmax(112px, .68fr) minmax(130px, .8fr) 84px;
   align-items: stretch;
   min-height: 74px;
   margin: 0 18px;
