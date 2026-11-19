@@ -8,7 +8,7 @@
 |---|---|---|
 | `app/core/indicators/roce.py:183` | `COALESCE(meta.sw_level1,'') NOT IN ('银行','非银金融')` | 已是 NULL 安全，但没有 csrc 兜底 |
 | `app/core/supplement.py:507` | `m.sw_level1 IN ('银行','非银金融') OR (m.sw_level1 IS NULL AND m.csrc_l1='金融业')` | NULL 安全 + 有兜底，但**只用在补采**，不是通用判据 |
-| `app/core/quality/null_reason_sweeper.py:752` | `COALESCE(sw_level1,'') IN ('银行','非银金融','保险') OR csrc_l1 LIKE '%金融%' OR name LIKE '%银行%'…` | `sw_level1` 里**没有 '保险' 这个取值**（保险是 `sw_level2`）；又用股票名兜底，会把同花顺/指南针类软件股误判 |
+| `app/core/quality/null_reason_sweeper.py`（`_cell_frame_sql` 的 `src_is_financial`，旧行号 `:752` 已漂移，按符号定位） | `COALESCE(sw_level1,'') IN ('银行','非银金融','保险') OR csrc_l1 LIKE '%金融%' OR name LIKE '%银行%'…` | `sw_level1` 里**没有 '保险' 这个取值**（保险是 `sw_level2`）；又用股票名兜底，会把同花顺/指南针类软件股误判 |
 
 **为什么以申万一级为准**：`csrc_l1='金融业'` 里混着同花顺、指南针、大智慧等
 软件公司（`reports/131` 陷阱 8）；而 `sw_level1` 是干净的行业分类，实测

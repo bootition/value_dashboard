@@ -1,6 +1,6 @@
 """指标空值原因清扫器：把「NULL」拆成 6 种可解释的原因。
 
-为什么（docs/reports/119 §5）
+为什么（依据 S1 §5）
 ---------------------------
 `indicator_snapshot` / `indicator_ext` 的 NULL 混了 6 种含义，前端统一渲染成「—」。
 清扫器负责**逐单元格**给出确定性原因并写入稀疏表 `indicator_null_reason`，
@@ -14,7 +14,7 @@
    （`income.deducted_net_profit`、`balance.fixed_assets`、…，与 `missing_list`
    既有命名一致，不另建表）；
 4. `cash_flow_indirect` / `cash_flow_activity` → 现金流量表补充资料两张表
-   （2026-11-17，reports/135）。域内结构性缺失的列（`CASH_FLOW_STRUCTURAL_MISSING`）
+   （2026-11-17，依据 S2）。域内结构性缺失的列（`CASH_FLOW_STRUCTURAL_MISSING`）
    一律登记 `SOURCE_EMPTY` + 依据 detail，按 `report_date` 落库。
    为什么必须扩到源表：审计抓到的"有源、没调度"重灾区（扣非、固定资产、6 个银行
    监管指标）都发生在源表；只清扫指标表的话它们永远归因不到。
@@ -54,12 +54,58 @@ NULL 能被解释），也看反例（字段有值却满足同一条件 ⇒ 说�
 `MASKED_UNTRUSTED`：遮蔽的真值在 `app/core/data_quality.py::indicator_trust`，
 清扫器再判一次必然与之打架，只在枚举里保留取值。
 
+归属与调用面（2026-11-19 复核；裁决变更见 依据 S5 §13）
+--------------------------------------------------------------
+本模块是空值归因的**离线写入端**：不在请求路径上，也不在自动更新链里。
+写的人（运维脚本）与读的人（API/前端/体检规则）刻意分离，两侧都不许绕过对方：
+
+- **唯一写库入口是 CLI**：`scripts/classify_null_reasons.py`。默认 dry-run 只统计，
+  `--yes` 才写；写之前查 `any_write_lock_active`（别的进程在写就退出，不排队、不抢），
+  写窗口用 `exclusive_update` + `DuckDBStore.transaction()` 双重串行，只碰
+  `indicator_null_reason` 一张稀疏表。`app/` 与 `scripts/` 里**没有第二处**用
+  `write=True` 调 `sweep` / `sweep_all` 的地方（守卫：
+  `tests/regression/test_null_reason_placement.py`）。
+- **读端是在线的**：`GET /api/data-status/null-reasons`
+  → `app/web/api/data_status.py::get_null_reasons`
+  → `app/core/quality/null_reasons.py::reason_distribution`（按「最近一次落库」聚合
+  `indicator_null_reason`；表未迁移/为空时返回 `table_ready=False` 而不是 5xx）。
+  前端消费在 `frontend/src/components/ScreeningResultsPanel.vue`；体检侧
+  `app/core/quality/asset_health.py::_rule_null_reason_missing` 用它算登记率，
+  表为空时按约定 skip（否则登记链一上线就全站 P2）。
+- **为什么不接进更新链**：沿用 `scripts/classify_null_reasons.py` 模块 docstring 的裁决
+  —— 一次全库清扫要回查源三表与分红、写几万行稀疏记录；放进自动更新会把「取数」和
+  「体检」两件事耦死，也会把状态页拖垮。依据 S5 §13 复核确认这条裁决仍然成立。
+- **为什么不挪到 `scripts/lib/`**：`app/core/quality/` 是质量域（`CODE_MAP.md`：体检规则 +
+  空值原因 + 归档核验），读**和**写两侧的口径都长在这个域里
+  （`null_reasons.py` 的原因枚举与字段表、`sector.is_financial_sql` 行业口径、
+  `supplement.CASH_FLOW_STRUCTURAL_MISSING` 结构缺失清单）。把写入端搬到 `scripts/`
+  会把同一个域劈成两个包，还会打断
+  `scripts/check_indicator_readiness.py::_SECTOR_CONSUMERS` 按 `app/` 路径键做的
+  `is_bank_sql` 收口检查（文件缺失该检查直接判 BLOCK）。
+  依据 S3 L2 的「迁出到 scripts/lib」建议基于「`app/` 内无调用点 ⇒ 无人调用」的
+  误判——调用点在脚本侧、读端在生产侧；**2026-11-19 复核后改为不迁**。
+
 用法
 ----
     from app.core.quality.null_reason_sweeper import sweep
 
     result = sweep(store, domain="ext", write=False)   # 默认只读
+
+    # 真写只走 CLI（带写锁 + dry-run 默认）：
+    #   python scripts/classify_null_reasons.py --domain all --yes
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/119 §5 —— 为什么必须把 NULL 拆成 6 种可解释原因。
+# S2  reports/135 —— 现金流量补充域：`CASH_FLOW_STRUCTURAL_MISSING` 是「源有字段但该期结构性不披露」，
+#     不是「源没有字段」；现金流量补充资料两表不套用整期级覆盖率规则。
+# S3  reports/136 L2 —— 「迁出到 scripts/lib」建议的前提（`app/` 内无调用点 ⇒ 无人调用）不成立。
+# S4  reports/139 §5.3 / §6 / §7 前置 1 / §11.4 / §11.8 / D58 / 第二轮验收 P2 ——
+#     行业判定改为调用共享实现；正式库实测 sw_level1 分布；只在**中报/年报**披露的科目
+#     （一季报与三季报结构性 NULL）；v48 补采科目里确定不适用的两列；
+#     第二轮验收 P2 修正「非金融 → 不适用」的旧判据。
+# S5  reports/140 §13 —— 清扫器与体检不耦死的裁决复核（2026-11-19 仍成立）。
+
 
 from __future__ import annotations
 
@@ -172,7 +218,7 @@ _REGULATORY_FIELDS: tuple[str, ...] = (
     "balance.risk_coverage_ratio",
 )
 _TECHNICAL_FIELDS: tuple[str, ...] = ("period_return", "annualized_volatility", "max_drawdown")
-# 只在**中报/年报**披露的科目（reports/139 §11.8 / D58）：一季报与三季报结构性 NULL，
+# 只在**中报/年报**披露的科目（依据 S4 §11.8 / D58）：一季报与三季报结构性 NULL，
 # 不能因为"本期覆盖率 0%、上期 99.6%"就判成"本期没人抓"（那是财报节奏，不是调度问题）。
 _QUARTERLY_STRUCTURAL_FIELDS: tuple[str, ...] = (
     "balance.fixed_assets_gross",
@@ -608,7 +654,7 @@ EXT_SOURCE_MISSING: dict[str, RuleGroup] = {
     for field_name in _DEPRECIATION_FIELDS
 }
 
-# 现金流量补充域（2026-11-17，reports/135）：`CASH_FLOW_STRUCTURAL_MISSING` 是
+# 现金流量补充域（2026-11-17，依据 S2）：`CASH_FLOW_STRUCTURAL_MISSING` 是
 # 「东财四套模板都拿不到哪些列」的事实清单，这里把它变成**可落库的规则**。
 #
 # 为什么这件事必须在清扫器里做：事实清单一直只被 `supplement.py` 和测试引用，
@@ -641,7 +687,7 @@ def _cashflow_structural_source_empty_rules() -> dict[str, dict[str, RuleGroup]]
             else:
                 predicates = (_eq("src_is_eastmoney", "东财本源行", 1),)
             if field_name in CASH_FLOW_UNMAPPED_BY_DECISION:
-                # 语义纠正（reports/135）：这**不是**"源没有字段"，而是源有字段、
+                # 语义纠正（依据 S2）：这**不是**"源没有字段"，而是源有字段、
                 # 口径与 CSMAR 不完全相等，团队主动不映射。NullReason 枚举没有
                 # SEMANTIC_MISMATCH / NOT_MAPPED（新增会破坏既有契约），
                 # 因此原因码仍用 SOURCE_EMPTY，语义写进 detail 供主控裁决。
@@ -661,7 +707,7 @@ _CASHFLOW_STRUCTURAL_SOURCE_EMPTY: dict[str, dict[str, RuleGroup]] = (
 # 源表域：6 个银行监管指标只对**银行**成立，非银行的 NULL 是**不适用**而不是缺失。
 # 实测（2026-09-30）：6 个字段非空数均为 0，不满足"上期/再上期 >50%"的调度条件，
 # 若不按行业分流，这 3.3 万个单元格会全部落进 unclassified。
-# 2026-11-18 修正（reports/139 第二轮验收 P2）：旧判据是「非金融 → 不适用」，
+# 2026-11-18 修正（依据 S4 第二轮验收 P2）：旧判据是「非金融 → 不适用」，
 # 但**券商/保险同样没有**资本充足率/不良率 —— 实测 121 只金融股里 501 个单元格
 # （非银金融 472 + 银行 29）因此落进 unclassified。改为按「非银行 → 不适用」。
 BALANCE_NOT_APPLICABLE: dict[str, RuleGroup] = {
@@ -673,7 +719,7 @@ BALANCE_NOT_APPLICABLE: dict[str, RuleGroup] = {
 }
 
 
-# 源表域：v48 新增的补采科目（reports/139 §11.4 / D58）里**确定不适用**的那两列。
+# 源表域：v48 新增的补采科目（依据 S4 §11.4 / D58）里**确定不适用**的那两列。
 # 银行模板没有「累计折旧」列、且「固定资产原值」与通用模板口径不同（实测出现
 # `原值 < 净值`，如 000722 FY2025），所以这两列对银行一律 NOT_APPLICABLE；
 # 其余 5 个补采科目的 NULL 属于"回填未覆盖/源无该科目"，交给覆盖率规则与
@@ -780,7 +826,7 @@ def _cell_frame_sql(domain: str, fields: Sequence[str], report_date: date | None
         aggregated = ", ".join(
             f"any_value({_quote(_plain_field(domain, name))}) AS {_quote(name)}" for name in fields
         )
-        # 行业判定：2026-11-18（reports/139 §5.3 / §7 前置 1）改为调用
+        # 行业判定：2026-11-18（依据 S4 §5.3 / §7 前置 1）改为调用
         # `app.core.sector.is_financial_sql` —— 全仓唯一实现。
         #
         # 旧写法把 `sw_level1 IN ('银行','非银金融','保险')` + `csrc_l1 LIKE '%金融%'`
@@ -790,7 +836,7 @@ def _cell_frame_sql(domain: str, fields: Sequence[str], report_date: date | None
         #  ② 名称兜底把同花顺(300033)/指南针(300803)/大智慧(601519) 等
         #     **软件股**判成金融股 —— 它们本就没有资本充足率/不良率，
         #     该落 `NOT_APPLICABLE` 的 NULL 被这句兜底挤进了 unclassified。
-        # 正式库实测（reports/139 §6）：`sw_level1` = 银行 42 / 非银金融 79 / NULL 751，
+        # 正式库实测（依据 S4 §6）：`sw_level1` = 银行 42 / 非银金融 79 / NULL 751，
         # 旧兜底相对新判据多出的 7 只里只有 2 只真券商（宏源证券/海通证券，均已退市、
         # 无当期行），其余 5 只全是软件/创投/电力 —— 去掉兜底只增加精度，不漏报。
         #
@@ -1307,7 +1353,7 @@ def sweep(
         for previous_date, previous_rows in history_frames
     ]
 
-    # 现金流量补充资料两表**不套用整期级覆盖率规则**（2026-11-17，reports/135）。
+    # 现金流量补充资料两表**不套用整期级覆盖率规则**（2026-11-17，依据 S2）。
     # 理由（正式库实测）：`cash_flow_indirect` @2025-09-30 有 5,580 行、
     # `cf_from_operating_indirect` 基本全有值，但补充资料族（折旧摊销/营运资本）
     # 三季报普遍不披露 → 整期级规则会把 13+ 个字段判成"没去抓"（77,345 格），

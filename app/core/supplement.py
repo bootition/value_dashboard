@@ -1,4 +1,4 @@
-"""补采域核心逻辑（2026-11-14，reports/119 D29「手工链」自动接入）
+"""补采域核心逻辑（2026-11-14，依据 S1 D29「手工链」自动接入）
 
 本模块把三个一次性脚本的核心逻辑抽成**可调用函数**，让自动更新主流程
 （`app/core/update.py::_run_incremental_update_flow`）与 CLI 共用同一份实现：
@@ -31,6 +31,23 @@
 - 不写 `indicator_snapshot` / `readiness`；失败保留旧值并如实计数；
 - 每轮都有 `max_stocks` 与 `deadline_seconds` 双上限，保证更新周期不被拖长。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/119 D29「手工链」 / P1-3 —— 三个一次性脚本逻辑抽成可调用函数（续传判据错，不是调度缺失）；
+#     P1-3：2026Q3 主链 `balance_sheet.fixed_assets` 一度只剩 1.8%，故只回填 NULL。
+# S2  reports/122 §A —— 金融股专用三表 2025Q2+ 与公允价值变动收益回填；
+#     另含列名语义历史包袱（`exchange_gain` 等实测结果）。
+# S3  reports/124 —— `f"{spec.endpoint}:{batch_id}"[:32]` 截断导致任务键碰撞的修复。
+# S4  reports/126 —— 冷却过滤不能让"待补"凭空消失：必须区分「真的没得补」与「有得补但都在冷却」。
+# S5  reports/131 §9.2 P0-3 / P0-6 —— P0-3：东财 F10 `xjllbAjaxNew` 现金流量表全量字段映射改为
+#     按**整表**列集合落库（不再只列已映射的 10 列 / 1 列），同目标列多候选源字段；
+#     P0-6：保险股判定（源响应自带 ORG_TYPE，`sw_level2='保险Ⅱ'` 优先）与保险合同负债改道，
+#     并裁决「不改 schema」（专用列未建，需主控加列）。
+# S6  reports/135 —— 事故修复后的落库纪律：字段映射是**单一真相**（解析层与落库层共用）；
+#     源返回了该期就必须交给落库层，**全 NULL 的行也要**；`replace_source_rows` 先删同源再插；
+#     公开别名供空值原因清扫器取两张补充表的数值列。
+# S7  reports/139 §5.1 / §7 前置 1 —— 金融/行业判据不再手写，改由共享判据实现。
+
 
 from __future__ import annotations
 
@@ -106,7 +123,7 @@ ATTEMPT_STATE_KEEP_DAYS = 30
 
 #: 落库行里的**非数值列**（元数据）。`_persist_rows` 判"这一行是不是全空"时
 #: 只看其余列 —— `fetch_time`/`batch_id` 这些永远非空，算进来会让空行变成"有值"。
-#: 2026-11-17（reports/135）：这里必须是**单一真相**，解析层与落库层共用。
+#: 2026-11-17（依据 S6）：这里必须是**单一真相**，解析层与落库层共用。
 _ROW_META_COLUMNS: frozenset[str] = frozenset({
     "stock_code", "report_date", "report_type", "source", "fetch_time",
     "raw_response_hash", "confidence", "batch_id", "raw_data",
@@ -118,11 +135,11 @@ BALANCE_SHEET_EXT = "balance_sheet_ext"
 DEDUCTED_PROFIT = "deducted_profit"
 FIXED_ASSET_SUPPLEMENT = "fixed_assets_supplement"
 REGULATORY_METRICS = "regulatory_metrics"
-# 2026-11-15 新增（reports/122）：金融股专用三表 2025Q2+ / 公允价值变动收益回填
+# 2026-11-15 新增（依据 S2）：金融股专用三表 2025Q2+ / 公允价值变动收益回填
 FINANCIAL_SECTOR = "financial_sector_items"
 EXCHANGE_GAIN = "exchange_gain_supplement"
 
-# ─── 东财 F10 `xjllbAjaxNew` 现金流量表全量字段映射（2026-11-16，reports/131 §9.2 P0-3）
+# ─── 东财 F10 `xjllbAjaxNew` 现金流量表全量字段映射（2026-11-16，依据 S5 §9.2 P0-3）
 #
 # 事故：`CSMAR_CUTOFF = 2025-03-31` 之后的报告期全走东财补充管线，而该管线只按
 # 10 个字段（间接法）+ 1 个字段（capex）写列 —— 实测 FY2025 年报：
@@ -157,7 +174,7 @@ INDIRECT_FIELD_MAP: dict[str, str] = {
     "INVEST_LOSS": "investment_loss",
     "DISPOSAL_LONGASSET_LOSS": "disposal_long_term_asset_loss",
     "NETCASH_OPERATE": "cf_from_operating_indirect",
-    # 2026-11-16 补齐（reports/131 P0-3）：净利润 / 减值 / 财务费用 / 递延所得税 /
+    # 2026-11-16 补齐（依据 S5 P0-3）：净利润 / 减值 / 财务费用 / 递延所得税 /
     # 营运资本三项 / 其他调整 / 债务与租赁 / 现金及现金等价物期初期末
     "NETPROFIT": "net_profit",
     "FA_SCRAP_LOSS": "fixed_asset_scrap_loss",
@@ -242,7 +259,9 @@ CASHFLOW_ORG_DERIVED_SUMS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 
 #: 东财三套模板都**没有**对应科目的列（结构性命中不了，不是"没抓到"）。
-#: 登记责任：`app/core/quality/null_reason_sweeper.py`（`NullReason.SOURCE_EMPTY`）。
+#: 登记责任：判据在 `app/core/quality/null_reason_sweeper.py`（`NullReason.SOURCE_EMPTY`），
+#: 落库只经离线 CLI `scripts/classify_null_reasons.py`（默认 dry-run，`--yes` 才写）——
+#: 不是更新链里的一步，所以本模块只给清单、等运维脚本刷新。
 #: 本模块只负责给出「哪些列是结构性缺失」这一事实清单 + 原因，**不写**
 #: `indicator_null_reason`（那张表的唯一写入者是清扫器，见 null_reasons.py 约束 2）。
 CASH_FLOW_STRUCTURAL_MISSING: dict[str, dict[str, str]] = {
@@ -324,7 +343,7 @@ DEDUCTED_FIELD_MAP: dict[str, str] = {
     "DEDUCT_PARENT_NETPROFIT": "deducted_net_profit",
 }
 # 公允价值变动收益 → income_statement.exchange_gain。
-# ⚠️ 列名与语义的历史包袱（2026-11-15 实测，reports/122）：`exchange_gain` 这个
+# ⚠️ 列名与语义的历史包袱（2026-11-15 实测，依据 S2）：`exchange_gain` 这个
 # 列**存的是公允价值变动收益**（schema.py 注释、CSMAR `B001301000`、akshare
 # `FAIRVALUE_CHANGE_INCOME` 三方一致，且 600028/600030 逐值核对相等），而不是
 # 汇兑收益。新浪适配器把「汇兑收益」映射到本列属于口径错误，且新浪只在 ~194 只
@@ -337,7 +356,7 @@ EXCHANGE_GAIN_FIELD_MAP: dict[str, str] = {
 EXCHANGE_GAIN_COLUMNS: tuple[str, ...] = ("stock_code", "report_date", "exchange_gain")
 
 # 两张现金流量明细表的**全部数值列**（顺序与 schema 物理列序一致）。
-# 2026-11-16（reports/131 P0-3）：原实现只列了已映射的 10 列 / 1 列，
+# 2026-11-16（依据 S5 P0-3）：原实现只列了已映射的 10 列 / 1 列，
 # 于是未映射的列永远写 NULL 且没有任何显式声明。现在按整表列集合落库，
 # 源侧拿不到的列由 `CASH_FLOW_STRUCTURAL_MISSING` 显式登记。
 _INDIRECT_VALUE_COLUMNS: tuple[str, ...] = (
@@ -405,7 +424,7 @@ ACTIVITY_COLUMNS: tuple[str, ...] = (
     *_ACTIVITY_VALUE_COLUMNS,
     "source", "fetch_time", "raw_response_hash", "confidence", "batch_id",
 )
-#: 公开别名（2026-11-17，reports/135）：空值原因清扫器要把这两张表的**数值列**
+#: 公开别名（2026-11-17，依据 S6）：空值原因清扫器要把这两张表的**数值列**
 #: 登记成 `cash_flow_indirect.<列>` / `cash_flow_activity.<列>` 字段。
 #: 单一真相仍是上面的私有元组，清扫器只读这里，绝不另抄一份列名。
 INDIRECT_VALUE_COLUMNS = _INDIRECT_VALUE_COLUMNS
@@ -417,7 +436,7 @@ BALANCE_EXT_COLUMNS: tuple[str, ...] = (
 )
 DEDUCTED_COLUMNS: tuple[str, ...] = ("stock_code", "report_date", "deducted_net_profit")
 # 固定资产净额 → balance_sheet.fixed_assets。
-# 2026-11-14 审查（reports/119 P1-3）：2026Q3 主链 `balance_sheet.fixed_assets`
+# 2026-11-14 审查（依据 S1 P1-3）：2026Q3 主链 `balance_sheet.fixed_assets`
 # 只剩 102/5,575（1.8%），而上期 99.9% —— 新浪 Q3 返回的资产负债表没有这个键
 # （抽 000408 raw_data：Q2 有、Q3 无）。东财 F10 `zcfzbAjaxNew` 有该字段
 # （同一接口已在补 other_payables），复用它**只回填 NULL**。
@@ -426,7 +445,7 @@ FIXED_ASSET_FIELD_MAP: dict[str, str] = {
 }
 FIXED_ASSET_COLUMNS: tuple[str, ...] = ("stock_code", "report_date", "fixed_assets")
 
-# ─── 金融股专用三表（2026-11-15，reports/122 §A）─────────────────────────
+# ─── 金融股专用三表（2026-11-15，依据 S2 §A）─────────────────────────
 #
 # 背景：`financial_sector_items` 5,058 行 / 25 个业务列（含主键与元数据共 33 列，
 # 以 pragma 实测为准）只覆盖到 2025-03-31（CSMAR C17 截止），2025Q2 之后
@@ -506,7 +525,7 @@ FINANCIAL_SECTOR_COLUMNS: tuple[str, ...] = (
 # （38 银行 + 36 券商 + 1 保险 + 1 信托 + 2 金控）全部落在这个口径内
 #（其中 3 只已退市：中天金融/宏源证券/海通证券，被 `is_listed` 过滤掉）。
 #
-# 2026-11-18（reports/139 §5.1 / §7 前置 1）：判据**不再手写**，改由
+# 2026-11-18（依据 S7 §5.1 / §7 前置 1）：判据**不再手写**，改由
 # `app.core.sector.is_financial_sql` 生成 —— 仓库里曾有三份互不一致的手写金融股
 # 判据（本处、`roce.py`、`null_reason_sweeper.py`），同一只股票在不同指标里
 # 「是不是金融」结论不同。这里保留常量名（外部按名 import），语义不变：
@@ -515,7 +534,7 @@ FINANCIAL_SECTOR_UNIVERSE_PREDICATE = is_financial_sql("m")
 
 # ─── P0-6：保险股的「保险合同负债」不得写进通用科目 contract_liabilities ────
 #
-# 事故（reports/131 §9.2 P0-6）：601318 中国平安 / 601319 中国人保 /
+# 事故（依据 S5 §9.2 P0-6）：601318 中国平安 / 601319 中国人保 /
 # 601336 新华保险 / 601601 中国太保 / 601628 中国人寿 五只保险股，
 # FY2022–FY2025 共 19 行 `balance_sheet.contract_liabilities` 有值，
 # 却占**全市场合同负债合计的 42%–68%**（2026-11-16 复核已达 50%–78%）。
@@ -542,7 +561,7 @@ INSURANCE_CONTRACT_LIABILITY_SOURCES: tuple[str, ...] = (
 #: 被禁止承接该科目的通用列
 CONTRACT_LIABILITIES_COLUMN = "contract_liabilities"
 #: 该科目真正该落的专用列（`financial_sector_items`）。
-#: ⚠️ 2026-11-16 实测正式库**没有**这一列 —— 按 reports/131 裁决「不改 schema」，
+#: ⚠️ 2026-11-16 实测正式库**没有**这一列 —— 按 依据 S5 裁决「不改 schema」，
 #: 这里只登记常量；主控加列后 `_adapt_spec_to_schema()` 会自动启用映射。
 INSURANCE_CONTRACT_LIABILITY_COLUMN = "insurance_contract_liability"
 INSURANCE_CONTRACT_LIABILITY_TABLE = "financial_sector_items"
@@ -713,7 +732,7 @@ SPECS: dict[str, SupplementSpec] = {
         write_mode="replace_source_rows",
         pending_mode="latest_period",
         judge_table="cash_flow_activity",
-        # 2026-11-16（reports/131 P0-3）：金融专用模板（ORG_TYPE 银行/保险）
+        # 2026-11-16（依据 S5 P0-3）：金融专用模板（ORG_TYPE 银行/保险）
         # 的折旧/减值/递延所得税字段名与通用模板不同，按行业覆盖解析。
         org_field_maps=CASHFLOW_ORG_FIELD_MAPS,
         org_field_maps_merge=True,
@@ -936,7 +955,7 @@ class SupplementFetcher:
                 if have is not None and str(have)[:10] >= latest:
                     continue
             pending.append((str(row["stock_code"]), str(row.get("exchange") or "")))
-        # 2026-11-16（reports/126）：**冷却过滤不能让"待补"凭空消失**。
+        # 2026-11-16（依据 S4）：**冷却过滤不能让"待补"凭空消失**。
         # 旧行为：把冷却中的股票直接滤掉 → `pending` 变空 → 上层 update.py 把
         # `no_pending_codes` 当成"已追平" → 水位前进，但待补数一动不动
         # （实测 `balance_sheet_ext` 105 只连续多轮不变，`CHAIN_PROGRESS_STALLED`
@@ -1061,7 +1080,7 @@ class SupplementFetcher:
     def last_skipped_empty_rows(self) -> int:
         """上一轮落库时因「全列 NULL」被跳过的行数（旧行保留、不插空行）。
 
-        2026-11-17（reports/135）：这个计数就是"本轮覆盖到的期次里，有几行
+        2026-11-17（依据 S6）：这个计数就是"本轮覆盖到的期次里，有几行
         (表, 股票, 报告期) 源侧没给任何有效数据"。它必须可见 —— 事故当时的
         症状正是"删了但没人知道没补回来"。
         """
@@ -1208,7 +1227,7 @@ class SupplementFetcher:
     def _insurer_codes(self, codes: Sequence[str]) -> set[str]:
         """按 `stock_meta` 的行业口径解析保险股代码集合。
 
-        判据（reports/131 §9.2 P0-6）：`sw_level2='保险Ⅱ'` 优先，其次
+        判据（依据 S5 §9.2 P0-6）：`sw_level2='保险Ⅱ'` 优先，其次
         `sw_level1='保险'`、公司名含「保险」。查询失败返回空集（守卫仍由
         源行 `ORG_TYPE` 在解析层兜底，不会因为查不到行业就放行）。
         """
@@ -1324,7 +1343,7 @@ class SupplementFetcher:
             ),
             "",
         )
-        # 2026-11-16（reports/131 P0-6）：保险股判定。源响应自带 ORG_TYPE，
+        # 2026-11-16（依据 S5 P0-6）：保险股判定。源响应自带 ORG_TYPE，
         # 缺该键时由 `refresh()` 用 stock_meta.sw_level2 兜底（见 `_insurer_codes`）。
         stock_is_insurer = is_insurance_stock(org_type=stock_org)
         merged: dict[date, dict[str, Any]] = {}
@@ -1348,7 +1367,7 @@ class SupplementFetcher:
                     em_map = org_map
                 if spec.org_derived_sums is not None:
                     derived = spec.org_derived_sums.get(stock_org, {})
-            # 2026-11-16（reports/131 P0-3）：同一目标列可能有多条候选源字段
+            # 2026-11-16（依据 S5 P0-3）：同一目标列可能有多条候选源字段
             #（通用模板 vs 金融专用模板）。解析规则改为**先到先得**：
             # spec.field_map 里靠前的键优先，取到第一个非空值后不再覆盖。
             # 旧实现是 `{column: _to_float(row.get(em_field))}` 的 dict 推导式，
@@ -1376,7 +1395,7 @@ class SupplementFetcher:
                 not any(value is not None for value in values.values())
                 and spec.key != CASHFLOW_SUPPLEMENT
             ):
-                # 2026-11-17（reports/135）：现金流量补充域**必须**把「源返回了该期
+                # 2026-11-17（依据 S6）：现金流量补充域**必须**把「源返回了该期
                 # 但一个科目都没给」的行也交给落库层 —— 只有落库层知道哪些
                 # (stock_code, report_date) 是本轮"覆盖到但无有效数据"，从而
                 # 既不删旧行也不插空行（`skipped_empty_rows`）。其余域维持原样。
@@ -1410,7 +1429,7 @@ class SupplementFetcher:
                 "batch_id": batch_id,
             }
             if spec.key == CASHFLOW_SUPPLEMENT:
-                # 2026-11-16（reports/131 P0-3）：按**整表**列集合落库，不再是
+                # 2026-11-16（依据 S5 P0-3）：按**整表**列集合落库，不再是
                 # 只写 field_map 里那几个已映射的列。两张表的数值列清单来自
                 # `spec.columns`，源侧没有的列保持 NULL（并已在
                 # `CASH_FLOW_STRUCTURAL_MISSING` 里显式登记原因）。
@@ -1426,7 +1445,7 @@ class SupplementFetcher:
                     "source": SOURCE,
                     "raw_data": "{}",
                 }
-                # 2026-11-17（reports/135）：**全 NULL 的行也要交给落库层**，由
+                # 2026-11-17（依据 S6）：**全 NULL 的行也要交给落库层**，由
                 # `_persist_rows` 统一决定"不删旧行、不插空行、只计数"。
                 # 旧实现在这里 `if any(...)` 直接把空行丢掉，落库层看不到它们，
                 # 于是 replace 模式照删不误 —— 2025-06-30 的 4 行真实数据就是这么没的。
@@ -1528,7 +1547,7 @@ class SupplementFetcher:
         `lineage_payload`：本轮请求描述（JSON 字节），会用 `src_hash` 归档进
         `raw_response_archive`，使 `fetch_batch` 的摘要与归档一一对应。
 
-        `replace_source_rows` 的删除纪律（2026-11-17，reports/135 事故修复）
+        `replace_source_rows` 的删除纪律（2026-11-17，依据 S6 事故修复）
         -----------------------------------------------------------------
         旧实现按 `report_date IN (batch_periods)`（或整股票）删，然后只插"至少一个
         非空值"的行 —— 一支股票在 A 期有值、B 期全空时，B 期的**旧真实数据**会被
@@ -1714,7 +1733,7 @@ class SupplementFetcher:
         spec = SPECS[key]
         if field_map is not None:
             spec = replace(spec, field_map=dict(field_map))
-        # 2026-11-16（reports/131 P0-6）：按目标表**真实**列集合裁剪 spec。
+        # 2026-11-16（依据 S5 P0-6）：按目标表**真实**列集合裁剪 spec。
         # 主控还没加的列（`financial_sector_items.insurance_contract_liability`）
         # 绝不能出现在 INSERT 里，否则整批 `INSERT ... BY NAME` 直接失败。
         self._guard_rejections = []
@@ -1750,7 +1769,7 @@ class SupplementFetcher:
                 key, resolved_periods, retry_days=retry_days,
             )
             pending = all_pending[:max_stocks] if max_stocks > 0 else all_pending
-            # 2026-11-17（reports/131 P0-3）：`force_codes` 用于"判据认为已追平、
+            # 2026-11-17（依据 S5 P0-3）：`force_codes` 用于"判据认为已追平、
             # 但库里该期只有半空壳"的存量修复——pending 判据只看"有没有行"、
             # 不看"行里的列填没填"。显式点名时绕过判据。
             if force_codes:
@@ -1779,7 +1798,7 @@ class SupplementFetcher:
 
         # `pending_codes` 已经做过失败冷却过滤与每轮上限截断，这里不再重复。
         if not pending:
-            # 2026-11-16（reports/126）：**必须区分**「真的没得补」与「有得补但都在冷却」。
+            # 2026-11-16（依据 S4）：**必须区分**「真的没得补」与「有得补但都在冷却」。
             # 旧实现两者都报 `no_pending_codes`，而 `update.py` 把 `no_pending_codes`
             # 当成"该域已追平"→ 推进水位 → 待补数永远不动（`balance_sheet_ext`
             # 105 只连续多轮不变就是这么来的），`CHAIN_PROGRESS_STALLED` 因此永久红。
@@ -1800,7 +1819,7 @@ class SupplementFetcher:
 
         batch_id = uuid.uuid4().hex
         fetched_at = datetime.now(UTC).replace(tzinfo=None)
-        # 2026-11-15（reports/124）：这里原来写 `f"{spec.endpoint}:{batch_id}"[:32]`，
+        # 2026-11-15（依据 S3）：这里原来写 `f"{spec.endpoint}:{batch_id}"[:32]`，
         # 产出的是 "xjllbAjaxNew:451ef0802792468b909c" 这种 **32 位非十六进制**串。
         # 数据质量规则按"32 位且形如 MD5 = legacy 历史批次"判定，其余形态一律算
         # **真 lineage 断裂** → LINEAGE_INVALID → 整个快照被遮蔽（实测 13 个批次
@@ -1857,7 +1876,7 @@ class SupplementFetcher:
                         batch_id=batch_id, fetched_at=fetched_at, src_hash=src_hash,
                         available_columns=available_columns,
                     )
-                    # 2026-11-17（reports/135）：解析层现在会把"全 NULL 行"也留下
+                    # 2026-11-17（依据 S6）：解析层现在会把"全 NULL 行"也留下
                     # （作为空值保护的证据），所以不能再用 `any(parsed.values())`
                     # 判"有没有数据"——那会把空行算成有数据。改为看**数值列**。
                     if any(
