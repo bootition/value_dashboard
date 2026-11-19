@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -71,11 +72,17 @@ class Finding:
         return f"[{self.rule}] {self.path}: {self.message}"
 
 
+#: 不阻塞提交、但必须留痕的提示（例如「测试写了却没 git add」）。
+#: 用模块级累加器是为了不改动四个检查函数的统一签名 ``check(root) -> list[Finding]``。
+_WARNINGS: list[Finding] = []
+
+
 @dataclass
 class Report:
     checked: list[str] = field(default_factory=list)
     findings: list[Finding] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    warnings: list[Finding] = field(default_factory=list)
 
 
 def _rel(root: Path, path: Path) -> str:
@@ -121,6 +128,24 @@ REPORT_TOKEN = re.compile(
 )
 BARE_REPORT_TOKEN = re.compile(r"(?<![\w/])(\d{1,3})_([A-Za-z0-9_\-]+)\.md")
 NULLISH = {"", "null", "none", "n/a", "-", "无", "na"}
+
+#: RG6「编号重复已消歧」的判据（2026-11-19 加固）。
+#: 只判断「`number-collision-note` 这个键存在」是不够的 —— 给同编号每份文件加一行
+#: `number-collision-note:`（空值）就能永久豁免，等于把门禁关掉（独立审查抓到）。
+COLLISION_NOTE_MIN_LEN = 20
+_COLLISION_NOTE_FILENAME = re.compile(r"\d{1,3}[_A-Za-z0-9\-]*\.md")
+
+
+def has_meaningful_collision_note(meta: dict[str, str]) -> bool:
+    """`number-collision-note` 是否真的说明了「和我撞号的是哪份」。
+
+    三条同时满足才算：值非空、长度 ≥ :data:`COLLISION_NOTE_MIN_LEN`、且点名了
+    至少一份报告文件名（`.md`）。消歧的用途就是指出对方是谁，所以要求点名。
+    """
+    note = (meta.get("number-collision-note") or "").strip()
+    if len(note) < COLLISION_NOTE_MIN_LEN:
+        return False
+    return bool(_COLLISION_NOTE_FILENAME.search(note))
 
 
 def supersede_targets(meta: dict[str, str], key: str) -> list[str]:
@@ -191,7 +216,7 @@ def check_report_identity(root: Path) -> list[Finding]:
         # 只要有一份没写 → 仍然是沉默二义 → 报。
         noted = [
             name for name in names
-            if "number-collision-note" in (parse_front_matter(reports_dir / name) or {})
+            if has_meaningful_collision_note(parse_front_matter(reports_dir / name) or {})
         ]
         if len(noted) == len(names):
             continue
@@ -385,6 +410,20 @@ def check_test_assets_tracked(root: Path) -> list[Finding]:
                     "RG9", rel, "ignored",
                     "被 .gitignore 吞掉 → 新克隆缺失，本机却全绿（必红测试资产）",
                 ))
+                continue
+            # 「未被忽略但未入库」不阻塞提交（否则 `git commit -- <paths>` 的临时索引
+            # 会把别人正在写的测试误判成未入库，拦掉合法的分主题提交），但**不能零信号**：
+            # 「测试写了、本地绿了、忘了提交」这一整类失效必须留痕，否则 CI/新克隆侧
+            # 永远看不到（文件根本不存在）。所以降级为 WARN（不 return 1）。
+            # `GIT_INDEX_FILE` 存在 = 正在做部分提交，此时索引本就不含别人未暂存的文件，
+            # 报了全是噪音 → 跳过该 WARN。
+            if os.environ.get("GIT_INDEX_FILE"):
+                continue
+            _WARNINGS.append(Finding(
+                "RG9", rel, "untracked",
+                "存在于工作区但未入库（WARN，不阻塞）：提交前记得 git add，"
+                "否则新克隆会缺这个测试",
+            ))
     return findings
 
 
@@ -435,6 +474,8 @@ def run_all(root: Path = PROJECT_ROOT, baseline: set[str] | None = None) -> Repo
             else:
                 fresh.append(finding)
     report.findings = fresh
+    report.warnings = list(_WARNINGS)
+    _WARNINGS.clear()
     return report
 
 
@@ -473,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
             "baselined": len(report.notes),
         }, ensure_ascii=False, indent=2))
     else:
+        for warning in report.warnings:
+            print(f"[WARN] {warning.render()}")
         for finding in report.findings:
             print(finding.render())
         if report.findings:

@@ -93,6 +93,34 @@ def test_rg6_still_flags_partially_disambiguated_collision(tmp_path: Path) -> No
     ), "消息要指出是哪一份没写注释"
 
 
+def test_rg6_still_flags_empty_disambiguation_note(tmp_path: Path) -> None:
+    """空值注释 = 没消歧。只判断「键存在」会让门禁被一行空 key 永久关掉。"""
+    for name in ("139_A_2026-11-18.md", "139_B_2026-11-18.md"):
+        _report(
+            tmp_path / "docs/reports" / name,
+            extra="number-collision-note:\n",
+        )
+
+    findings = check_report_identity(tmp_path)
+
+    assert any("dup-139" in f.key for f in findings), "空值 note 不能豁免"
+
+
+def test_rg6_still_flags_placeholder_note_without_counterpart_filename(
+    tmp_path: Path,
+) -> None:
+    """写了字但没点名对方文件 = 仍然没消歧（读者不知道撞的是哪份）。"""
+    for name in ("139_A_2026-11-18.md", "139_B_2026-11-18.md"):
+        _report(
+            tmp_path / "docs/reports" / name,
+            extra="number-collision-note: 同编号另有另一份，无关\n",
+        )
+
+    findings = check_report_identity(tmp_path)
+
+    assert any("dup-139" in f.key for f in findings), "没点名对方文件名不能豁免"
+
+
 def test_rg6_detects_missing_front_matter(tmp_path: Path) -> None:
     path = tmp_path / "docs/reports/112_NO_META_2026-09-08.md"
     path.parent.mkdir(parents=True)
@@ -218,6 +246,44 @@ def test_rg9_detects_test_asset_swallowed_by_gitignore(tmp_path: Path) -> None:
     assert any(f.path.endswith("sina_lrb_600519.json") and f.key == "ignored" for f in findings), (
         "被 gitignore 吞掉的测试夹具必须报出来（新克隆必红、本机全绿）"
     )
+
+
+def test_rg9_warns_but_does_not_block_on_untracked_test(tmp_path: Path) -> None:
+    """「测试写了、本地绿了、忘了提交」必须留痕，但不能阻塞提交。
+
+    全阻塞会让 `git commit -- <paths>` 的临时索引把别人正在写的测试误判成未入库
+    （2026-11-19 实测把主控自己的分主题提交全拦了）；零信号又会让这类失效在
+    CI / 新克隆侧完全不可见（文件根本不存在）。所以：WARN，不 return 1。
+    """
+    _git_init(tmp_path)
+    _report(tmp_path / "docs/reports/01_SEED_2026-11-19.md")  # 让 RG6 不因缺报告目录报红
+    probe = tmp_path / "tests/regression/new_probe_test.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("x = 1\n", encoding="utf-8")
+
+    report = run_all(tmp_path)
+
+    assert report.findings == [], "未入库不该阻塞提交"
+    assert any(
+        w.key == "untracked" and "new_probe_test.py" in w.path for w in report.warnings
+    ), "未入库必须出 WARN"
+
+
+def test_rg9_skips_untracked_warn_during_partial_commit(
+    tmp_path: Path, monkeypatch,
+) -> None:  # noqa: ANN001
+    """部分提交时索引本就不含别人未暂存的文件 → WARN 全是噪音，应跳过。"""
+    _git_init(tmp_path)
+    _report(tmp_path / "docs/reports/01_SEED_2026-11-19.md")  # 让 RG6 不因缺报告目录报红
+    probe = tmp_path / "tests/regression/new_probe_test.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_INDEX_FILE", str(tmp_path / ".git" / "fake-index"))
+
+    report = run_all(tmp_path)
+
+    assert report.findings == []
+    assert report.warnings == [], "GIT_INDEX_FILE 存在时不该报 untracked WARN"
 
 
 def test_rg9_passes_when_fixture_negated(tmp_path: Path) -> None:
