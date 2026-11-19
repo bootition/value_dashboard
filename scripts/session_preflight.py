@@ -117,19 +117,64 @@ def check_working_tree(porcelain: str | None) -> Check:
     )
 
 
-def check_worktrees(worktree_list: str | None) -> Check:
-    """超过 1 个 worktree → 另一个会话可能已在别处开工（这是好设计，但要知情）。"""
+#: `git worktree list` 的一行：`<path>  <sha> [<branch>]`（path 与 sha 之间是两个以上空格）
+_WORKTREE_LINE = re.compile(r"^(?P<path>.+?)\s{2,}(?P<sha>[0-9a-f]{7,})\s")
+
+
+def _worktree_paths(worktree_list: str) -> list[str]:
+    """从 `git worktree list` 的人类可读输出里抽出路径列表（顺序 = 主树在前）。"""
+    paths: list[str] = []
+    for line in worktree_list.splitlines():
+        match = _WORKTREE_LINE.match(line.strip())
+        if match:
+            paths.append(match.group("path").strip().strip('"'))
+    return paths
+
+
+def _same_path(left: str, right: str) -> bool:
+    """Windows 大小写不敏感 + 斜杠方向不同，比较前统一归一化。"""
+    def norm(value: str) -> str:
+        text = os.path.normcase(os.path.realpath(value.replace("\\", "/"))).replace("\\", "/")
+        return text.rstrip("/")
+    return norm(left) == norm(right)
+
+
+def check_worktrees(worktree_list: str | None, *, current_root: str | None = None) -> Check:
+    """只有「在主工作树里还看见别的 worktree」才 BLOCK。
+
+    2026-11-22 修正：原实现只要 worktree 数 > 1 就 BLOCK —— 于是**一旦你按 W4 真的
+    建了自己的私有 worktree，它就永久 BLOCK 你**（把自己也算成"别人"）。
+    这会让规则执行器自相矛盾：照做反而开不了工。
+    正确语义：
+    * 只有当**前目录就是主工作树**、且存在额外 worktree 时才 BLOCK（你还没隔离）；
+    * 若当前目录已在某个**非主** worktree 内（= W4 已满足），直接 PASS，其余 worktree 只作信息展示。
+    """
     if worktree_list is None:
         return Check("worktree", WARN, "取不到 worktree 列表，降级放行")
     entries = [line for line in worktree_list.splitlines() if line.strip()]
     if len(entries) <= 1:
         return Check("worktree", PASS, "只有主工作树")
-    others = "、".join(entries[1:4])
+
+    paths = _worktree_paths(worktree_list)
+    primary, others = (paths[0], paths[1:]) if paths else (None, [])
+
+    if current_root and primary and any(
+        _same_path(current_root, path) for path in others
+    ):
+        return Check(
+            "worktree",
+            PASS,
+            f"已在私有 worktree 内（W4 已满足）：{current_root}"
+            + (f"；另有 {len(others)} 个 worktree（知情即可）" if others else ""),
+        )
+
+    preview = "、".join(entries[1:4])
     return Check(
         "worktree",
         BLOCK,
-        f"存在 {len(entries) - 1} 个额外 worktree：{others}",
-        "先确认它们是否还在跑（git worktree list）；若在跑，你应当也在自己的 worktree 里干活",
+        f"存在 {len(entries) - 1} 个额外 worktree：{preview}",
+        "你还在主工作树里。按 AGENTS W4 建自己的 worktree（create_worktree）后再开工，"
+        "不要在共享树上和别的会话叠加",
     )
 
 
@@ -195,7 +240,15 @@ def collect_porcelain() -> str | None:
 
 
 def collect_worktrees() -> str | None:
-    return _run(["git", "worktree", "list"])
+    # core.quotePath=false：否则非 ASCII 路径会被转义成 æ…
+    # 那样 check_worktrees 的"当前目录是不是我的 worktree"永远比不中 → 永久 BLOCK。
+    return _run(["git", "-c", "core.quotePath=false", "worktree", "list"])
+
+
+def collect_toplevel() -> str | None:
+    """当前所在工作树的根目录（用来判断「我是不是已经在私有 worktree 里」）。"""
+    output = _run(["git", "rev-parse", "--show-toplevel"])
+    return output.strip() if output else None
 
 
 def collect_python_processes() -> list[str] | None:
@@ -225,7 +278,7 @@ def build_report(*, port: int = DEFAULT_WEB_PORT, allow_port: bool = False) -> R
         port_check = Check("端口", WARN, f"{port} 有服务在监听（已声明为自己所起）")
     return Report(checks=[
         check_working_tree(collect_porcelain()),
-        check_worktrees(collect_worktrees()),
+        check_worktrees(collect_worktrees(), current_root=collect_toplevel()),
         check_foreign_pytest(collect_python_processes()),
         port_check,
     ])
