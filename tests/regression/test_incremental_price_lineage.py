@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
 
 
 def test_price_refetch_records_field_lineage_after_persisting(
@@ -53,9 +54,7 @@ def test_incremental_bse_price_update_requires_qfq(duckdb_store, sqlite_store) -
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('430001', 'BSE', 'BSE')"
-    )
+    Seed(duckdb_store).stock("430001", name="BSE", exchange="BSE")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._get_latest_local_price_date = lambda: "2025-12-30"
 
@@ -89,12 +88,10 @@ def test_xdxr_stock_gets_full_qfq_refetch(duckdb_store, sqlite_store) -> None:
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000001', 'PA', 'SZSE')"
-    )
-    duckdb_store.write_query(
-        "INSERT INTO xdxr (stock_code, event_date, category) VALUES ('000001', '2026-07-30', 1)"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="PA", exchange="SZSE")
+    # 只登记「这天除权除息」这一事实；送转/分红金额列留 NULL（本用例不关心）。
+    seed.xdxr("000001", "2026-07-30", category=1)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._get_latest_local_price_date = lambda: "2026-07-29"
 
@@ -124,9 +121,7 @@ def test_non_xdxr_stock_without_local_rows_gets_full_refetch(duckdb_store, sqlit
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000002', 'VANKE', 'SZSE')"
-    )
+    Seed(duckdb_store).stock("000002", name="VANKE", exchange="SZSE")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._get_latest_local_price_date = lambda: "2026-07-29"
 
@@ -155,16 +150,12 @@ def test_partial_resume_uses_oldest_target_date_for_xdxr_window(
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000004', 'RESUME', 'SZSE')"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000004", name="RESUME", exchange="SZSE")
+    # 同一逻辑对 raw / qfq 各跑一遍：只换表名，行内容逐字相同。
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES ('000004', '2026-08-01', 9)"
-        )
-    duckdb_store.write_query(
-        "INSERT INTO xdxr (stock_code, event_date, category) VALUES ('000004', '2026-08-02', 1)"
-    )
+        seed.prices("000004", [("2026-08-01", 9)], table=table)
+    seed.xdxr("000004", "2026-08-02", category=1)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
     updater._get_latest_local_price_date = lambda: "2026-08-05"
@@ -196,9 +187,7 @@ def test_stale_local_price_triggers_raw_full_refetch(duckdb_store, sqlite_store)
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000003', 'TEST', 'SZSE')"
-    )
+    Seed(duckdb_store).stock("000003", name="TEST", exchange="SZSE")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._get_latest_local_price_date = lambda: "2026-06-01"
     updater.price_full_refetch_on_stale = True
@@ -231,13 +220,10 @@ def test_stale_local_price_stays_incremental_by_default(duckdb_store, sqlite_sto
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('000003', 'TEST', 'SZSE')"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000003", name="TEST", exchange="SZSE")
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES ('000003', '2026-06-01', 9)"
-        )
+        seed.prices("000003", [("2026-06-01", 9)], table=table)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._get_latest_local_price_date = lambda: "2026-06-01"
 
@@ -275,9 +261,7 @@ def test_raw_and_qfq_fetch_in_parallel(duckdb_store, sqlite_store) -> None:
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600000', 'PAR', 'SHSE')"
-    )
+    Seed(duckdb_store).stock("600000", name="PAR", exchange="SHSE")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
 
@@ -307,13 +291,10 @@ def test_current_prices_without_latest_lineage_are_refetched(
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600002', 'LINEAGE', 'SHSE')"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("600002", name="LINEAGE", exchange="SHSE")
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES ('600002', '2026-08-05', 9)"
-        )
+        seed.prices("600002", [("2026-08-05", 9)], table=table)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
     updater._get_latest_local_price_date = lambda: "2026-08-05"
@@ -346,11 +327,9 @@ def test_watchlist_stocks_are_updated_first_with_limit(duckdb_store, sqlite_stor
                 raw_response=raw_response,
             )
 
+    seed = Seed(duckdb_store)
     for code in ("000001", "600519"):
-        duckdb_store.write_query(
-            "INSERT INTO stock_meta (stock_code, name, exchange) VALUES (?, ?, 'SZSE')",
-            [code, code],
-        )
+        seed.stock(code, exchange="SZSE")
     sqlite_store.execute(
         "INSERT INTO watchlist (stock_code, group_name) VALUES ('600519', '重点研究')"
     )
@@ -374,9 +353,7 @@ def test_price_fetch_timeout_records_retry(duckdb_store, sqlite_store) -> None:
         def recover_after_timeout(self) -> None:
             pass
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600001', 'SLOW', 'SHSE')"
-    )
+    Seed(duckdb_store).stock("600001", name="SLOW", exchange="SHSE")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater.price_fetch_timeout_seconds = 1
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
@@ -397,10 +374,9 @@ def test_price_fetch_timeout_records_retry(duckdb_store, sqlite_store) -> None:
 
 def test_get_xdxr_codes_since_returns_only_matching_stocks(duckdb_store, sqlite_store) -> None:
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    duckdb_store.write_query(
-        "INSERT INTO xdxr (stock_code, event_date, category) VALUES "
-        "('000001', '2026-07-30', 1), ('000002', '2026-06-01', 1)"
-    )
+    seed = Seed(duckdb_store)
+    for code, event_date in (("000001", "2026-07-30"), ("000002", "2026-06-01")):
+        seed.xdxr(code, event_date, category=1)
 
     codes = updater._get_xdxr_codes_since("2026-07-01")
 
@@ -504,14 +480,10 @@ def test_large_response_uses_full_replace_and_preserves_lineage(
             ]
             return make_result(request.adjust, rows)
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600600', 'REPLACE', 'SHSE')"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("600600", name="REPLACE", exchange="SHSE")
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
-            "('600600', '2026-06-01', 9), ('600600', '2026-06-02', 9)"
-        )
+        seed.prices("600600", [("2026-06-01", 9), ("2026-06-02", 9)], table=table)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._PRICE_FULL_REPLACE_THRESHOLD = 10
     updater._latest_expected_trading_date = lambda today: "2026-08-05"
@@ -557,14 +529,11 @@ def test_full_replace_rejects_truncated_source_and_keeps_old_data(
                 {"trade_date": "2026-07-01", "close": 10.0, "volume": 100.0},
             ])
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600601', 'TRUNC', 'SHSE')"
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("600601", name="TRUNC", exchange="SHSE")
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
-            "('600601', '2026-06-01', 9), ('600601', '2026-06-02', 9), "
-            "('600601', '2026-06-03', 9)"
+        seed.prices(
+            "600601", [("2026-06-01", 9), ("2026-06-02", 9), ("2026-06-03", 9)], table=table
         )
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=Adapter())
     updater._PRICE_FULL_REPLACE_THRESHOLD = 0
