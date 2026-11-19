@@ -1,4 +1,4 @@
-"""跨年口径断点派生字段（reports/131 §9.2 P0-7 / P0-8，2026-11-16）。
+"""跨年口径断点派生字段（依据 S1 §9.2 P0-7 / P0-8，2026-11-16）。
 
 为什么需要这一层
 ----------------
@@ -20,7 +20,7 @@
    执行准则的公司）。两者合计（61,677.7 亿 → 68,348.5 亿，+10.8%）才是连续口径。
    → 派生口径 ``advance_from_customers`` = 预收款项 + 合同负债（合并口径）。
 
-设计纪律（与 reports/131 的硬约束一致）
+设计纪律（与 依据 S1 的硬约束一致）
 --------------------------------------
 - **原始列一行不改**：归一化只发生在派生层。原始列仍可查询，但引用时一律带
   ``field_semantics_break:*`` 警告（**不标废弃** —— 它们在各自区间内仍然正确，
@@ -28,7 +28,7 @@
 - **SQL 只有一个真源**：本模块的 ``build_sql`` 同时被
   ① DSL 代码生成（``app/core/dsl/codegen.py`` —— 详情页自定义趋势/预览）
   ② 筛选引擎（``app/core/screening/engine.py`` —— base_pool 派生列）
-  使用，杜绝"同一概念两处各写一套"（reports/131 P0-4 的同型教训）。
+  使用，杜绝"同一概念两处各写一套"（依据 S1 P0-4 的同型教训）。
 - **不制造假 0**：``advance_from_customers`` 只在两列**都**缺失时返回 NULL；
   任一列有值则缺失侧按 0 计（会计上"没有该科目"就是 0）。若一律
   ``COALESCE(a,0)+COALESCE(b,0)``，2015 年以前两列都没有的股票会被写成
@@ -38,6 +38,13 @@
   落到派生字段（见 ``BARE_NAME_DEFAULTS``）；要取原始值必须写全路径
   （``income.asset_impairment_loss@LATEST``），并会收到口径断点警告。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/131 §9.2 P0-7 / P0-8 / P0-4 —— 跨年口径断点派生：资产减值损失符号 FY2018 翻转
+#     （P0-7）；预收款项 FY2020 语义变更，必须用「预收 + 合同负债」合并口径，
+#     「合同负债/总资产」类排名不分年断开就会误导（P0-8）；同一概念只许一处 SQL 真源
+#     （P0-4 的同型教训）。
+
 
 from __future__ import annotations
 
@@ -132,7 +139,7 @@ def _advance_from_customers_builder(alias: str, date_expr: str, raw: RawResolver
 def _advance_ratio_builder(alias: str, date_expr: str, raw: RawResolver) -> str:
     """客户占款率 = (预收款项 + 合同负债) / 总资产（占款类指标的合并口径消费者）。
 
-    reports/131 P0-8：「合同负债/总资产」类排名必须用合并口径，否则 2019→2020
+    依据 S1 P0-8：「合同负债/总资产」类排名必须用合并口径，否则 2019→2020
     会出现 −96.6% 的假断崖。分母 ≤ 0 或缺失 → NULL（比率无业务含义）。
     """
     advance = _advance_from_customers_builder(alias, date_expr, raw)

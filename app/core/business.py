@@ -1,15 +1,22 @@
-"""个股业务概览低频域更新服务（reports/67, reports/68 §6）
+"""个股业务概览低频域更新服务（依据 S1, 依据 S2 §6）
 
 独立数据域：company_profile / business_breakdown 两张 DuckDB 表，
 独立东财 F10 适配器实例与限速，失败保留旧值并记录独立 retry/missing，
 绝不进入 stock_meta / indicator_snapshot / 筛选池 / readiness。
 
-写入语义（reports/68 §5 架构与安全门槛）：
+写入语义（依据 S2 §5 架构与安全门槛）：
 - 单股事务原子替换：一只股票的资料 + 构成在同一个 DuckDB 事务内完成。
 - 任一侧网络错误 → 整股失败，保留旧值，写入 retry_list（去重）。
 - 空/畸形响应（合法 missing）→ 保留旧值，写入 missing_list（去重/可解决）。
 - 新数据到达时解决对应未解决 missing 条目。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/67 / §4.5 —— 个股业务概览独立低频域：通常随财报期后触发或按月检查（§4.5）；
+#     不进主链 readiness。
+# S2  reports/68 §5 / §6 —— 写入语义的架构与安全门槛（§5）；business_breakdown 随刷新
+#     自然累积「历史可得数据」（§5）；统计域口径见 §6。
+
 
 from __future__ import annotations
 
@@ -215,7 +222,7 @@ class BusinessOverviewUpdater:
         """在事务内原子替换该股票来源返回报告期的主营构成。
 
         仅删除本次来源返回的报告期（通常是最近一期），保留更早的历史期，
-        使 business_breakdown 随刷新自然累积"历史可得数据"（reports/68 §5）。
+        使 business_breakdown 随刷新自然累积"历史可得数据"（依据 S2 §5）。
         """
         report_dates = sorted({row.get("report_date") for row in result.data})
         if report_dates:
@@ -373,7 +380,7 @@ class BusinessOverviewUpdater:
     def update_all(self, max_stocks: int = 0, *, mark_refreshed: bool = True) -> dict[str, Any]:
         """更新全部上市股票（研究优先名单优先，失败不阻断整体）。
 
-        业务概览是低频域：通常随财报期后触发或按月检查（reports/67 §4.5）。
+        业务概览是低频域：通常随财报期后触发或按月检查（依据 S1 §4.5）。
         max_stocks>0 时只处理“缺失/陈旧”子集，不能对全市场列表前 N 只
         反复刷新，否则 CLI 加速命令会把已覆盖的前缀刷了一遍又一遍。
         """

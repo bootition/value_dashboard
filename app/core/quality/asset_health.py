@@ -1,6 +1,6 @@
 """资产健康检查（asset health）—— 把一次性人工审查固化成每轮可复跑的规则引擎。
 
-为什么需要（背景：`docs/reports/119` 与 `docs/runbooks/ops-knowledge-base.md` D28–D33）
+为什么需要（背景：S1 与 `docs/runbooks/ops-knowledge-base.md` D28–D33）
 ----------------------------------------------------------------------------------
 2026-11-14 的数据包价值兑现度审查找出的每一个问题（扩展指标冻结在旧报告期、
 扣非净利润归零、字段覆盖率塌陷、手工链不跑、数据包过期、schema 漂移、
@@ -23,8 +23,8 @@
 10 SCHEMA_DDL_DRIFT           P1  block       cheap      schema.py DDL 表名 vs 库内实际表，双向差集非空
 11 ZERO_REFERENCE_ASSET      P3  inventory   cheap      零引用资产清单（config/asset_reference.yaml）如实披露
 12 DEDUCTED_PROFIT_GAP        P1  block       cheap      income_statement 最新报告期 deducted_net_profit 覆盖率 < 50%（→ 扣非四兄弟遮蔽）
-13 CHAIN_PROGRESS_STALLED     P1  block       cheap      补采链在跑但待补数量不降（"跑也白跑"，reports/122 §2.5 J1 防复发）
-14 TECHNICAL_COVERAGE_GAP     P1  block       cheap      技术三列（period_return/波动率/最大回撤）最新期覆盖率 < 95%（reports/131 §9.2 P0-5）
+13 CHAIN_PROGRESS_STALLED     P1  block       cheap      补采链在跑但待补数量不降（"跑也白跑"，依据 S2 §2.5 J1 防复发）
+14 TECHNICAL_COVERAGE_GAP     P1  block       cheap      技术三列（period_return/波动率/最大回撤）最新期覆盖率 < 95%（依据 S3 §9.2 P0-5）
 
 severity 语义：只有 **block** 进 `level_counts` / `p1_codes` / `warning_codes` /
 `vd data doctor` 退出码；disclose 看得见但不阻断；inventory 是纯清单。
@@ -45,13 +45,26 @@ severity 语义：只有 **block** 进 `level_counts` / `p1_codes` / `warning_co
    `data_quality._SNAPSHOT_BLOCKING_WARNINGS` / `_SCREENING_BLOCKING_WARNINGS`
    （不会让筛选整体 409），但 block 级中"某几个字段不可信"的两条
    （规则 1/12）通过 `data_quality.masked_fields_for_codes()` 做**字段级遮蔽**
-   —— 只遮坏掉的字段，其余照常可用（reports/122 §2.3 J9）。
+   —— 只遮坏掉的字段，其余照常可用（依据 S2 §2.3 J9）。
 4. **规则失败 ≠ 资产健康**：单条规则抛错时该规则记 status=error 并出现在
    输出里，其余规则照跑；引擎整体永不因单条规则失败而抛异常。
 5. **口径复用**：规则 5 直接调用 `data_quality.snapshot_period_mismatches()`，
    规则 9 直接调用 `archive_crosscheck.run_crosscheck()`，规则 2/8 共用同一次
    覆盖率测量 —— 判定只有一处真相，避免"体检结论"与"页面结论"漂移。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/119 D29 ①–⑦ / P0 根因 / §1.4 / §2 / §5 C2 / §5 P2-1 —— 手工派生链七域的超期判定
+#     （D29 ①–⑦，含 PDF 域⑦不参与超期判定）；扩展指标域报告期须与界面快照同源（P0 根因）；
+#     §1.4 抓取侧 2026Q2 起归零；§2「6 张表停更」的数据包 manifest 比对；§5 C2 同字段环比跌幅看门狗；
+#     §5 P2-1 有值却说不清原因的字段；「只进不出的表」= 零引用资产（写库脚本不算引用）。
+# S2  reports/122 §2.3 J9 / §2.3 J9-1 / §2.4 J10 / §2.5 J1 —— J9：字段级遮蔽与 severity 分级
+#     （只遮坏掉的字段）；J9-1 结构性可空白名单与"不是我们的数据坏了"不该让退出码变红；
+#     J10 体检两档调度（cheap / expensive）；J1 规则 13 CHAIN_PROGRESS_STALLED 防复发
+#     （补采链在跑但待补数量不降 = "跑也白跑"）。
+# S3  reports/131 §9.2 P0-5 —— 技术三列（period_return/波动率/最大回撤）覆盖率 < 95% 即
+#     TECHNICAL_COVERAGE_GAP；阈值只能从这里取，禁止调用方各写一份常量（该报告之后的审计结论）。
+
 
 from __future__ import annotations
 
@@ -76,7 +89,7 @@ _LEVEL_ORDER = {P1: 0, P2: 1, P3: 2}
 
 # ─── 分级：severity（这条命中意味着什么）＆ tier（跑一次多贵）─────────────
 #
-# severity（2026-11-14 reports/122 §2.3 J9）：
+# severity（2026-11-14 依据 S2 §2.3 J9）：
 #   block     = 屏幕上的数字可能不可信 / 该域已失效，属于**必须修**的问题；
 #               只有 block 才计入 level_counts 与 p1_codes（→ warning_codes /
 #               `vd data doctor` 退出码）。
@@ -95,7 +108,7 @@ SEVERITY_INVENTORY = "inventory"
 SEVERITIES: tuple[str, ...] = (SEVERITY_BLOCK, SEVERITY_DISCLOSE, SEVERITY_INVENTORY)
 _SEVERITY_ORDER = {SEVERITY_BLOCK: 0, SEVERITY_DISCLOSE: 1, SEVERITY_INVENTORY: 2}
 
-# tier（2026-11-14 reports/122 §2.4 J10）：体检分两档调度。
+# tier（2026-11-14 依据 S2 §2.4 J10）：体检分两档调度。
 #   cheap     = 目标 <5s，状态页/每轮自动更新后都跑；
 #   expensive = 归档交叉核验（正式库实测 ~35s），只给 `vd data doctor`
 #               全量或每日定时任务跑。
@@ -245,7 +258,7 @@ class RuleOutcome:
 
 @dataclass(frozen=True)
 class ManualChain:
-    """手工派生链登记项（reports/119 D29 的 ①–⑦）。
+    """手工派生链登记项（依据 S1 D29 的 ①–⑦）。
 
     成功时间来源按优先级：① `data_refresh_state` 记账 → ② 数据侧探针。
     为什么要有 ②：D29 的绝大多数链**根本没有记账**（脚本直接写表就退出）。
@@ -360,7 +373,7 @@ STRUCTURAL_NULL_NOTES: dict[str, str] = {
     "ev_ebitda": "结构性可空：需 EBITDA 可用（依赖折旧摊销），留存样本仍 >4,500 只",
 }
 
-# ─── 结构性可空白名单（reports/122 §2.3 J9-1）─────────────────────────────────
+# ─── 结构性可空白名单（依据 S2 §2.3 J9-1）─────────────────────────────────
 # 判定标准（写死在这里，避免下一个人凭感觉往里加）：**这个字段为空本身是
 # 一种合法状态，而不是"我们的数据坏了"** —— 亏损、无分红、无商誉、无有息
 # 负债、无国债基准对应期限…… 对这些字段报 FIELD_COVERAGE_LOW / NULL_REASON
@@ -382,7 +395,7 @@ STRUCTURAL_NULL_FIELDS: frozenset[str] = frozenset({
     "goodwill_ratio",
     # 无折旧摊销 → EV/EBITDA 不可算（与 ENGINE (b) 类例外同源）
     "ev_ebitda",
-    # ── 2026-11-15 追加（reports/122）──
+    # ── 2026-11-15 追加（依据 S2）──
     # 三季报不披露现金流量表补充资料 → 折旧/EBITDA 族在 Q3 天然为空
     # （数据源限制，不是"没去抓"；已由 null_reason 标 SOURCE_EMPTY）
     "depreciation_amortization",
@@ -446,7 +459,7 @@ def _structural_null_detail(field: str, settings: dict[str, Any]) -> str | None:
         field, "结构性可空：该字段对某类合法子群体本就不成立（亏损/无分红/无商誉）",
     )
 
-# 静态低频域：最新报告期落后"应有报告期"即告警（reports/119 D29 ②/③ 的衍生域）。
+# 静态低频域：最新报告期落后"应有报告期"即告警（依据 S1 D29 ②/③ 的衍生域）。
 STATIC_TABLE_SPECS: tuple[tuple[str, str], ...] = (
     (
         "company_employee_history",
@@ -517,7 +530,7 @@ def technical_coverage_threshold(settings: dict[str, Any] | None = None) -> floa
     """技术三列覆盖率门槛（**唯一真相**）。
 
     `TECHNICAL_COVERAGE_GAP` 规则与 `/api/screening/indicators` 门禁都必须
-    从这里取阈值，禁止在任何调用方再写一份常量 —— reports/131 之后的审计
+    从这里取阈值，禁止在任何调用方再写一份常量 —— 依据 S3 之后的审计
     发现 screening.py 曾硬编码 95.0，运维把 config 调成 98 后出现"体检说
     不可信、指标列表仍可选中"的分裂。`settings` 只给已持有配置快照的调用方
     （如 HealthContext）复用，其余调用方一律读 `config/default.yaml`
@@ -733,7 +746,7 @@ def _domain_coverage(ctx: HealthContext, domain: str) -> dict[str, Any] | None:
 
 
 def _rule_ext_period_mismatch(ctx: HealthContext) -> list[Finding]:
-    """扩展指标域报告期必须与界面快照同源对齐（reports/119 P0 根因）。
+    """扩展指标域报告期必须与界面快照同源对齐（依据 S1 P0 根因）。
 
     筛选 SQL 按 `ex.report_date = s.report_date` 严格对齐，一旦错位，
     55 项扩展字段全部变成"能选中但筛不出结果"的死条件。
@@ -777,7 +790,7 @@ def _rule_field_coverage_low(ctx: HealthContext) -> list[Finding]:
 
     结构性可空字段（亏损/无分红/无商誉/无国债基准）**照样进 findings**，
     但 severity 降为 disclose：它们是"这个字段对某类公司天然为空"，
-    不是"我们的数据坏了"，不该让医生退出码变红（reports/122 §2.3 J9-1）。
+    不是"我们的数据坏了"，不该让医生退出码变红（依据 S2 §2.3 J9-1）。
     """
     threshold = _setting_number(ctx.settings, "coverage_low_pct", DEFAULT_COVERAGE_LOW_PCT)
     findings: list[Finding] = []
@@ -826,7 +839,7 @@ def _rule_field_coverage_low(ctx: HealthContext) -> list[Finding]:
 
 
 def _rule_field_coverage_drop(ctx: HealthContext) -> list[Finding]:
-    """同字段环比跌幅看门狗（reports/119 §5 C2）。
+    """同字段环比跌幅看门狗（依据 S1 §5 C2）。
 
     基线取 `field_coverage_history` 中**最近一次不同 run_id** 的记录：
     同一次体检写的行不能给自己当基线。没有基线 → 跳过（不告警），
@@ -933,7 +946,7 @@ def _chain_last_success(ctx: HealthContext, chain: ManualChain) -> tuple[datetim
 
 
 def _rule_manual_chain_stale(ctx: HealthContext) -> list[Finding]:
-    """手工链必须有人跑（reports/119 D29）：超期即 P1。
+    """手工链必须有人跑（依据 S1 D29）：超期即 P1。
 
     正式库实测（2026-11-14）：ETF 行情停在 2026-09-18（`etf_daily` 只在 retry
     分支被拉），而主流程每轮都在推进价格 —— 正是这条规则要抓的情形。
@@ -976,7 +989,7 @@ def _rule_manual_chain_stale(ctx: HealthContext) -> list[Finding]:
     return findings
 
 
-# ─── 规则 13 CHAIN_PROGRESS_STALLED（reports/122 §2.5 J1 防复发）───────────────
+# ─── 规则 13 CHAIN_PROGRESS_STALLED（依据 S2 §2.5 J1 防复发）───────────────
 #
 # "跑了但没进展"是 2026-09 那批事故的共同形态：补采链每轮都 success、
 # last_success_at 一直在动，但目标期该补的股票数一个没少（续传判据写错：
@@ -1010,7 +1023,7 @@ class ChainBacklogProbe:
 
 # 目标报告期统一取"最新完整资产负债表期"（与规则 6/12 同口径）：探针必须
 # 跟着**应有**报告期走，不能跟着各链自己的 MAX(report_date) 走 —— 否则链
-# 停在哪一期，待补数就是 0，永远报不出来（这正是 reports/122 §2.5 J1 的形态）。
+# 停在哪一期，待补数就是 0，永远报不出来（这正是 依据 S2 §2.5 J1 的形态）。
 _CHAIN_TARGET_PERIOD_CTE = """
     WITH target_period AS (
         SELECT MAX(report_date) AS period FROM balance_sheet
@@ -1207,7 +1220,7 @@ def _record_chain_progress(ctx: HealthContext, measured: dict[str, dict[str, Any
 
 
 def _rule_chain_progress_stalled(ctx: HealthContext) -> list[Finding]:
-    """水位停滞：最后成功时间在推进，但待补数量没有下降（reports/122 §2.5 J1 防复发）。"""
+    """水位停滞：最后成功时间在推进，但待补数量没有下降（依据 S2 §2.5 J1 防复发）。"""
     if ctx.sqlite is None:
         raise _RuleSkipped("无 SQLite 状态库（data_refresh_state），无法比较两轮待补数量")
     measured = _measure_chain_backlogs(ctx)
@@ -1383,7 +1396,7 @@ def _trading_days_between(ctx: HealthContext, earlier: date, later: date) -> int
 
 
 def _rule_package_stale(ctx: HealthContext) -> list[Finding]:
-    """数据包 manifest 的行情日期 vs 库内行情（reports/119 §2 的"6 张表停更"）。"""
+    """数据包 manifest 的行情日期 vs 库内行情（依据 S1 §2 的"6 张表停更"）。"""
     path, payload = _latest_package_manifest(ctx.repo_root)
     if path is None:
         raise _RuleSkipped("未找到 .planning/vd-datapackage-*/manifest.json")
@@ -1425,7 +1438,7 @@ def _rule_package_stale(ctx: HealthContext) -> list[Finding]:
 
 
 def _rule_null_reason_missing(ctx: HealthContext) -> list[Finding]:
-    """NULL 有值却说不清原因的字段（reports/119 §5 P2-1）。
+    """NULL 有值却说不清原因的字段（依据 S1 §5 P2-1）。
 
     `indicator_null_reason` 是稀疏表，只登记"NULL 且原因已知"的单元格。
     空表 = 这条登记链还没上线，按约定**跳过不告警**（否则一上线全站 P2）。
@@ -1472,7 +1485,7 @@ def _rule_null_reason_missing(ctx: HealthContext) -> list[Finding]:
             if ratio >= limit:
                 continue
             # 结构性可空字段同理降级：它们的 NULL 本来就该发生，要求逐格登记
-            # 原因是纯噪音（reports/122 §2.3 J9-1）。仍然披露，方便核对。
+            # 原因是纯噪音（依据 S2 §2.3 J9-1）。仍然披露，方便核对。
             structural_note = _structural_null_detail(name, ctx.settings)
             findings.append(
                 Finding(
@@ -1504,7 +1517,7 @@ def _rule_null_reason_missing(ctx: HealthContext) -> list[Finding]:
 
 
 def _rule_crosscheck_below_threshold(ctx: HealthContext) -> list[Finding]:
-    """归档交叉核验一致率（reports/119：自算实现正确性的唯一独立证据）。
+    """归档交叉核验一致率（依据 S1：自算实现正确性的唯一独立证据）。
 
     贵重规则：正式库实测 ~31s（pandas 全表 merge）。只在调用方允许昂贵规则
     且仍有预算时执行，否则如实跳过。
@@ -1570,7 +1583,7 @@ def _schema_ddl_tables(schema_path: Path) -> set[str]:
 
 
 def _rule_schema_ddl_drift(ctx: HealthContext) -> list[Finding]:
-    """schema.py 声明的表 vs 库里实际的表（reports/119：schema 已升版但库没迁移）。"""
+    """schema.py 声明的表 vs 库里实际的表（依据 S1：schema 已升版但库没迁移）。"""
     schema_path = ctx.repo_root / "app" / "core" / "storage" / "schema.py"
     declared = _schema_ddl_tables(schema_path)
     if not declared:
@@ -1623,7 +1636,7 @@ def _rule_schema_ddl_drift(ctx: HealthContext) -> list[Finding]:
 def _runtime_reference_counts(repo_root: Path, tables: list[str]) -> dict[str, int]:
     """统计 `app/` 下**运行时代码**对各表名的引用数（不含 schema.py）。
 
-    写库脚本（scripts/）不算引用：只进不出的表正是 reports/119 说的
+    写库脚本（scripts/）不算引用：只进不出的表正是 依据 S1 说的
     "囤积而非利用"。schema.py 是定义本身，也必须排除，否则恒不为零。
     一次遍历算全部表名：单表一次扫描要 47ms，12 张表逐次扫就是半秒。
     """
@@ -1747,7 +1760,7 @@ def _rule_zero_reference_asset(ctx: HealthContext) -> list[Finding]:
 
 
 def _rule_technical_coverage_gap(ctx: HealthContext) -> list[Finding]:
-    """技术三列覆盖率门禁（reports/131 §9.2 P0-5）。
+    """技术三列覆盖率门禁（依据 S3 §9.2 P0-5）。
 
     为什么单独一条规则：`FIELD_COVERAGE_LOW` 的阈值是 90% 且把技术三列
     当作普通"上界面字段"；但技术列只需要 ≥2 条连续 qfq 收盘，95% 以下
@@ -1804,7 +1817,7 @@ def _rule_deducted_profit_gap(ctx: HealthContext) -> list[Finding]:
     """扣非净利润是价值判断的核心字段，最新报告期塌陷即为 P1。
 
     正式库 2026-11-14 实测：2026-09-30 期 0/5,575（Q2 也只有 20 行）——
-    抓取侧自 2026Q2 起归零（reports/119 §1.4）。
+    抓取侧自 2026Q2 起归零（依据 S1 §1.4）。
     """
     columns = _table_columns(ctx.duck, "income_statement")
     if "deducted_net_profit" not in columns or "report_date" not in columns:
@@ -2037,7 +2050,7 @@ def run_asset_health(
 
     findings.sort(key=Finding.sort_key)
     # level_counts / p1_codes **只统计 severity=block**：disclose/inventory 是
-    # "看得见但不用修"的披露，混进来就又把真问题淹了（reports/122 §2.3 J9 的核心诉求）。
+    # "看得见但不用修"的披露，混进来就又把真问题淹了（依据 S2 §2.3 J9 的核心诉求）。
     # code_counts 则统计全部 finding，便于核对"某条规则一共报了多少"。
     level_counts = {P1: 0, P2: 0, P3: 0}
     code_counts: dict[str, int] = {}
@@ -2366,7 +2379,7 @@ def run_doctor(
 ) -> dict[str, Any]:
     """`vd data doctor` 的完整实现：体检 +（可选）写基线。
 
-    2026-11-14（reports/122 §2.4 J10 分层调度）：跑的是 **expensive 档**（`--fast` 时降级
+    2026-11-14（依据 S2 §2.4 J10 分层调度）：跑的是 **expensive 档**（`--fast` 时降级
     cheap）。跑完把"上次 expensive 摘要"写进 `data_refresh_state` —— 状态页/
     每轮只跑 cheap，但需要知道最近一次全量核验是什么时候、结果如何。
     """

@@ -11,6 +11,25 @@
 所有指标基于 latest_restated 口径 (PRD §8.1)。
 """
 
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# --------------------------------------------------------------------
+# S1  reports/133 R3 / D28 —— 派生域保全契约：凡不由本计算器 staging 产出的列
+#     （ROCE 六列、H 股市值等）必须显式登记「列名 + 重建函数」，否则整批
+#     DELETE+INSERT 发布会把它们静默清成 NULL。D28 是同型事故（capital_history 冻结）。
+# S2  reports/131 K5 —— 2026-11-16 ROCE 落地当晚，每次快照重发把全市场 5,575 行
+#     roce_* 清成 NULL（S1 守卫要防的就是这个）。
+# S3  reports/130 —— ROCE 口径 C 落地（CE = 总资产 − 流动负债，年报序列中位数）。
+# S4  reports/82 —— 分红融资比前置列（累计分红 / 累计股权融资）。
+# S5  reports/68 P3 / §5 —— 国债基准与股息率利差（P3）；历史研究统计的窗口聚合口径（§5）。
+# S6  reports/122 §2.6 J5 —— 缺项一律保持 NULL，不按 0 兜底：ROE/ROA 期初缺失、
+#     流动资产或流动负债缺失（流动比率/速动比率）、利息费用缺失或为 0（利息保障倍数）、
+#     DPS 无记录/股本缺失/TTM EPS<=0，都走这一条纪律；同比分母必须是正净利润。
+# S7  reports/135 —— 增长率遇负基数必须用 abs 作分母；增量发布不能用 staging 的列集合
+#     当 owned_columns（会漏掉非本计算器产出的列）。
+# S8  reports/119 P1-5 —— 利息保障倍数口径修复：不再要求「三项全部非空」。
+# S9  reports/97 —— Sina 明细 TEMP TABLE 合并写入（同思路：先落临时表再一次合并）。
+
+
 from __future__ import annotations
 
 import contextlib
@@ -41,15 +60,15 @@ SNAPSHOT_TABLE = "indicator_snapshot"
 class DerivedSnapshotDomain:
     """一个"不由本计算器生产、但住在 indicator_snapshot 里"的派生域。
 
-    背景（`reports/133` R3 / `reports/131` K5 / D28）
+    背景（`依据 S1` R3 / `依据 S2` K5 / D28）
     ------------------------------------------------
     `indicator_snapshot` 的发布是"整表/整批 DELETE + INSERT"。凡是**不由本
     计算器 staging 产出**的列（ROCE 六列、H 股市值几列、任何以后新增的
     外部派生列），INSERT 时都不会被写入 → 静默变 NULL。这不是某一次的 bug，
     而是"派生列没有重建触发、也没有保全契约"这一类事故的固定生产机制：
 
-    * 2026-11-16 `reports/130` ROCE 落地当晚，每次快照重发把全市场 5,575 行
-      `roce_*` 清成 NULL（`reports/131` K5）；
+    * 2026-11-16 `依据 S3` ROCE 落地当晚，每次快照重发把全市场 5,575 行
+      `roce_*` 清成 NULL（`依据 S2` K5）；
     * 同型事故 D28（`capital_history` 域冻结）；
     * 同一个补丁只补了整表发布路径，**增量发布路径 `_publish_snapshot_delta`
       仍在清空**——本守卫上线当天就会把它照出来。
@@ -139,7 +158,7 @@ class IndicatorCalculator:
         # 获取分红数据
         dividends = self._get_dividend_summary(stock_code, financials.get("report_date"))
 
-        # ─── 0. 分红融资比数据前置（reports/82 后续指标）──────────
+        # ─── 0. 分红融资比数据前置（依据 S4 后续指标）──────────
         result["cumulative_dividend_amount"] = self._get_cumulative_dividend_amount(stock_code)
         result["cumulative_financing_amount"] = self._get_cumulative_financing_amount(stock_code)
         if (
@@ -175,7 +194,7 @@ class IndicatorCalculator:
         # ─── 6. 行情指标 ──────────────────────────────────────────
         result.update(self._calc_technical(stock_code))
 
-        # ─── 7. 国债基准与股息率利差（reports/68 P3） ───────────────
+        # ─── 7. 国债基准与股息率利差（依据 S5 P3） ───────────────
         result.update(self._calc_treasury_spread(stock_code))
 
         return result
@@ -1523,7 +1542,7 @@ class IndicatorCalculator:
     def _calc_treasury_spread(self, stock_code: str) -> dict[str, Any]:
         """TTM 已实施现金股息率与相对各关键期限国债收益率的利差（P3）。
 
-        口径（reports/68 §5）：
+        口径（依据 S5 §5）：
         - TTM 股息率：价格日前 12 个月内已除权（ex_date<=D）且已公告
           （announcement_date<=D）的实际现金分红合计 / D 收盘价。
         - 曲线对齐：取不晚于 D 的最近曲线点，最大陈旧 5 个自然日；
@@ -1635,7 +1654,7 @@ class IndicatorCalculator:
         # ROE = TTM归母净利润 / 平均归母权益
         # V2-3.3修复: |ROE|>1.0 时置NULL
         # P1-24修复: 用(期初+期末)/2而非期末值
-        # 2026-11-15（reports/122 §2.6 J5）结论：上一期权益缺失时 ROE 保持 NULL，不把期初按 0
+        # 2026-11-15（依据 S6 §2.6 J5）结论：上一期权益缺失时 ROE 保持 NULL，不把期初按 0
         # 处理（否则"平均权益"退化成期末的一半，ROE 会被系统性放大）。
         equity = financials.get("total_equity_parent") if financials.get("total_equity_parent") is not None else financials.get("total_equity")
         avg_equity = None
@@ -1649,7 +1668,7 @@ class IndicatorCalculator:
 
         # ROA = TTM净利润 / 平均总资产
         # P1-24修复: 用(期初+期末)/2而非期末值
-        # 2026-11-15（reports/122 §2.6 J5）结论：同 ROE——上一期总资产缺失时保持 NULL。
+        # 2026-11-15（依据 S6 §2.6 J5）结论：同 ROE——上一期总资产缺失时保持 NULL。
         total_assets = financials.get("total_assets")
         avg_assets = None
         if prev_assets is not None and total_assets is not None:
@@ -1679,7 +1698,7 @@ class IndicatorCalculator:
 
         # ROIC = TTM营业利润 / 投入资本
         # 投入资本 = 总权益 + 有息负债
-        # 2026-11-15（reports/122 §2.6 J5）结论：这里保持 NULL，不把缺项按 0 处理。
+        # 2026-11-15（依据 S6 §2.6 J5）结论：这里保持 NULL，不把缺项按 0 处理。
         # - 营业利润缺失 → 分子无法计算；
         # - 归母权益/总权益缺失 → 不能拿 0 代替（会算出无穷大 ROIC）；
         # - `_calc_interest_bearing_debt` 三项全空时返回 None（fail-closed），
@@ -1696,7 +1715,7 @@ class IndicatorCalculator:
             result["roic"] = None
 
         # 经营现金流 / 净利润
-        # 2026-11-15（reports/122 §2.6 J5）结论：分母必须是正净利润。净利润 <= 0 时该比率没有
+        # 2026-11-15（依据 S6 §2.6 J5）结论：分母必须是正净利润。净利润 <= 0 时该比率没有
         # 经济含义（负分母会让"现金流好"看起来像负值），不能按 0 或绝对值兜底。
         if op_cf is not None and net_profit and net_profit > 0:
             result["cf_to_net_profit"] = op_cf / net_profit
@@ -1705,7 +1724,7 @@ class IndicatorCalculator:
 
         return result
 
-    # 同比双口径（2026-11-16，reports/131 §9.2 P0-4，schema v43）。
+    # 同比双口径（2026-11-16，依据 S2 §9.2 P0-4，schema v43）。
     # key = 快照列名；value = TTM 序列里的净利润字段名。
     _TTM_YOY_METRICS: tuple[tuple[str, str], ...] = (
         ("revenue_yoy", "revenue"),
@@ -1716,7 +1735,7 @@ class IndicatorCalculator:
     def _calc_growth(self, stock_code: str) -> dict[str, Any]:
         """3. 成长指标（同比双口径）
 
-        口径纪律（reports/131 §9.2 P0-4，**不允许**在别处再写一套）：
+        口径纪律（依据 S2 §9.2 P0-4，**不允许**在别处再写一套）：
 
         - ``*_yoy``    = **TTM 口径**：最新报告期 TTM ÷ 上年最后一个报告期 TTM − 1。
           必须与详情页 ``stock_detail._metric_history_rows(..., base_period='ttm')``
@@ -1895,7 +1914,7 @@ class IndicatorCalculator:
                 base_value = prior.get(field)
                 if current_value is None or base_value in (None, 0):
                     continue
-                # 2026-11-17（reports/135）**负基数必须用 abs 分母**：
+                # 2026-11-17（依据 S7）**负基数必须用 abs 分母**：
                 # 旧写法 `curr/base - 1` 在基期为负时方向反了——亏损从 −88.6 亿收窄到
                 # −84.5 亿（变好）会算成 −4.6%（变差），亏损扩大反而算成正增长。
                 # 全量实测：`net_profit_yoy` 负基期 1,455 只（763 只亏损收窄被报成负增长、
@@ -1924,7 +1943,7 @@ class IndicatorCalculator:
             result["debt_ratio"] = None
 
         # 流动比率 = 流动资产 / 流动负债
-        # 2026-11-15（reports/122 §2.6 J5）结论：流动资产/流动负债缺失时保持 NULL，不按 0 兜底：
+        # 2026-11-15（依据 S6 §2.6 J5）结论：流动资产/流动负债缺失时保持 NULL，不按 0 兜底：
         # 缺资产按 0 会把比率压成 0，缺负债则分母为 0；都不能用总资产/总负债替代。
         if total_current_assets is not None and total_current_liabilities and total_current_liabilities > 0:
             result["current_ratio"] = total_current_assets / total_current_liabilities
@@ -1932,7 +1951,7 @@ class IndicatorCalculator:
             result["current_ratio"] = None
 
         # 速动比率 = (流动资产 - 存货) / 流动负债
-        # 2026-11-15（reports/122 §2.6 J5）修复：存货为 NULL 时按 0 计。
+        # 2026-11-15（依据 S6 §2.6 J5）修复：存货为 NULL 时按 0 计。
         # 存货是"没有就是 0"的典型科目——银行/保险/互联网/服务业本来就没有
         # 存货，源里留 NULL 不代表缺失。旧写法要求三项全非空，导致这 53 只
         # （2026-09-30 实测）速动比率被整项压成 NULL（覆盖率 97.2% → 98.2%）。
@@ -1950,7 +1969,7 @@ class IndicatorCalculator:
         result["interest_bearing_debt"] = self._calc_interest_bearing_debt(financials)
 
         # 利息保障倍数 = TTM营业利润 / TTM利息费用
-        # 2026-11-15（reports/122 §2.6 J5）结论：保持 NULL。利息费用缺失或为 0 时倍数在数学上是
+        # 2026-11-15（依据 S6 §2.6 J5）结论：保持 NULL。利息费用缺失或为 0 时倍数在数学上是
         # 无穷大/无定义，不能把利息费用按 0 处理；也不能用 financial_expenses
         # 兜底（其中混有汇兑损益、手续费，口径不同）。
         op_profit = ttm.get("operating_profit")
@@ -1978,7 +1997,7 @@ class IndicatorCalculator:
         result: dict[str, Any] = {}
 
         # 分红率 = 已验证的最近年度每股股息 / 每股收益
-        # 2026-11-15（reports/122 §2.6 J5）结论：保持 NULL。DPS 无记录、股本缺失、TTM EPS <= 0
+        # 2026-11-15（依据 S6 §2.6 J5）结论：保持 NULL。DPS 无记录、股本缺失、TTM EPS <= 0
         # 时都无法定义有意义的分红率；EPS 为负更不能按 0 或绝对值兜底。
         # `latest_dps` 来自"已公告 + 已除权"的年度合计，0 不会作为有效记录返回。
         dps = dividends.get("latest_dps")  # 最新一年DPS
@@ -2169,7 +2188,7 @@ class IndicatorCalculator:
     def _calc_interest_bearing_debt(financials: dict) -> float | None:
         """有息负债 = 短期借款 + 长期借款 + 应付债券。
 
-        2026-11-14 修复（reports/119 P1-5）：旧实现要求三项**全部非空**才算，
+        2026-11-14 修复（依据 S8 P1-5）：旧实现要求三项**全部非空**才算，
         但 `bonds_payable`（应付债券）全市场只有约 815 只非空 —— 绝大多数公司
         本来就没有发债，该科目为空是**正常态**而非缺失。结果 `interest_bearing_debt`
         与依赖它的 `roic` 覆盖率被压到 11.8%，且是"悄悄少算"（不是全空），
@@ -2178,7 +2197,7 @@ class IndicatorCalculator:
         正确口径：缺失科目按 0 计，只要**至少一项有值**即可计算；
         三项全空才返回 None（该股确实没有可识别的有息负债明细）。
 
-        2026-11-15（reports/122 §2.6 J5）复核：维持该口径。三项全空时无法区分"真无借款"与
+        2026-11-15（依据 S6 §2.6 J5）复核：维持该口径。三项全空时无法区分"真无借款"与
         "借款明细整段没采到"，保持 NULL 是 fail-closed；若将来确认源以 NULL
         表示零借款，再单独评估是否改成 0.0（需同步 roic 覆盖率与测试）。
         """
@@ -2331,7 +2350,7 @@ class IndicatorCalculator:
         单事务内完成受影响行 DELETE、新行 INSERT、行数与键校验、衍生 lineage，
         任一步失败都整体回滚，上一代已发布快照保持原样。
 
-        2026-11-17（`reports/133` R3）：补上派生域保全/重建/校验。此前本路径
+        2026-11-17（`依据 S1` R3）：补上派生域保全/重建/校验。此前本路径
         不跑 ROCE 聚合，增量重算过的股票（=每天价格变动的全体）ROCE 六列会被
         静默置空——整表路径的补丁没覆盖到这里。
         """
@@ -2434,7 +2453,7 @@ class IndicatorCalculator:
                     f"WHERE stock_code IN ({placeholders})",
                     preserved,
                 ).fetchone()[0]
-            # 2026-11-17（reports/135）：**不能用 staging 的列集合当 owned_columns**。
+            # 2026-11-17（依据 S7）：**不能用 staging 的列集合当 owned_columns**。
             # 生产路径的 staging 是 `CREATE TABLE ... AS SELECT * FROM indicator_snapshot
             # WHERE FALSE`（全 70 列），于是 `untouched = 全列 - 全列 = 空`：
             #   ① 派生列保全（COALESCE 回填）不执行；
@@ -2685,7 +2704,7 @@ class IndicatorCalculator:
         # 2026-09-04 自动更新验证轮实锤，并已在库副本上复现）。
         # 改为 pandas 向量化注册 + 单条 INSERT SELECT：
         # 24.5 万行实测 0.3s / 峰值 <100MB，且仍在同一事务内保持原子性
-        # （与 reports/97 Sina 明细 TEMP TABLE 合并写入同思路）。
+        # （与 依据 S9 Sina 明细 TEMP TABLE 合并写入同思路）。
         import pandas as pd
 
         lineage_columns = (

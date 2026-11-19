@@ -1,4 +1,4 @@
-"""历史研究统计域构建（P4，reports/68 §5/§6）
+"""历史研究统计域构建（P4，依据 S1 §5/§6）
 
 序列（最新重述回看口径，PRD §8.4）：
 - PE(D) = close(D) × shares(D) / TTM归母净利(D 对应报告期)；PE≤0 不参与统计
@@ -14,6 +14,15 @@
 
 发布：staging → 原子发布 research_statistics（版本递增、输入指纹）；失败保留上一版。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/68 §5 / §6 / §3.5 —— 历史研究统计域（独立只读域）：窗口聚合口径见 §5/§6；
+#     覆盖率门槛 90%（历史股本连续可验证，§3.5）。
+# S2  reports/73 —— 修复阶段性能优化与正确性：日期一次性预解析为 date 对象；
+#     固定规范列集合（避免首记录为 reason 行时列序漂移，P4-4）；
+#     加入 dividends——仅分红变化也触发统计重建（P4-9）；全量重建并行化（进程池 worker）。
+# S3  reports/76 P3-2 —— 清理孤儿 research_statistics_staging_* 表。
+
 
 from __future__ import annotations
 
@@ -47,7 +56,7 @@ __all__ = [
 WINDOW_MIN_SAMPLES: dict[int, int] = {1: 120, 3: 360, 5: 600, 10: 1200, 99: 1200}
 WINDOW_YEARS = (1, 3, 5, 10, 99)
 _WRITE_BATCH_RECORDS = 2_000
-COVERAGE_THRESHOLD_PCT = 90.0  # reports/68 §3.5：历史股本连续可验证覆盖 ≥90%
+COVERAGE_THRESHOLD_PCT = 90.0  # 依据 S1 §3.5：历史股本连续可验证覆盖 ≥90%
 MAX_STALENESS_DAYS = 5
 DEFAULT_TENOR = 10.0
 STAT_METRICS = ("pe_ttm", "pb_mrq", "ttm_dividend_yield", "spread_10y")
@@ -163,7 +172,7 @@ class StatisticsBuilder:
     ) -> list[dict[str, Any]]:
         """构建单股逐价格日的研究序列（内存算法）。
 
-        reports/73 修复阶段性能优化：日期一次性预解析为 date 对象，
+        依据 S2 修复阶段性能优化：日期一次性预解析为 date 对象，
         分红预解析并按 ex_date 排序（单指针滑窗，不再逐日全表扫描）。
         """
         price_rows = self._batch_cache.get("price", {}).get(stock_code, self._batch_sentinel)
@@ -762,7 +771,7 @@ class StatisticsBuilder:
         return report
 
     def _cleanup_staging_tables(self) -> None:
-        """Drop orphaned research_statistics_staging_* tables (reports/76 P3-2).
+        """Drop orphaned research_statistics_staging_* tables (依据 S3 P3-2).
 
         A killed rebuild leaves its staging table behind; sweep them before
         the next atomic publish so the formal schema stays clean.
@@ -785,7 +794,7 @@ class StatisticsBuilder:
         stock_code: str,
         series: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """单股全指标×全窗口统计（reports/73 修复阶段性能优化）。
+        """单股全指标×全窗口统计（依据 S2 修复阶段性能优化）。
 
         单次遍历 series 填充所有窗口的值桶（避免每窗口重复遍历）；
         percentile 用 bisect_right 替代线性计数；覆盖每股一批查询
@@ -974,7 +983,7 @@ class StatisticsBuilder:
     def _input_fingerprint(self) -> str:
         """输入指纹：价格/财务/股本/曲线/分红最新日期与行数摘要。
 
-        P4-9 修复（reports/73）：加入 dividends——仅分红变化也触发统计重建，
+        P4-9 修复（依据 S2）：加入 dividends——仅分红变化也触发统计重建，
         避免发布域 TTM 股息率/利差陈旧。
         2026-08-13：share_capital_history 追加 verified 计数——交叉核验
         （verified 标志变化）也触发重建，防止披露口径与发布域脱节。
@@ -1040,7 +1049,7 @@ class StatisticsBuilder:
         )[0]
         return int(row["v"]) + 1
 
-    # P4-4 修复（reports/73）：固定规范列集合，避免首记录为 reason 行时
+    # P4-4 修复（依据 S2）：固定规范列集合，避免首记录为 reason 行时
     # 成功行的 min_date/max_date 丢失、列顺序脆弱。
     _PUBLISH_COLUMNS = (
         "stock_code", "metric", "window_years", "method", "value", "samples",
@@ -1065,7 +1074,7 @@ class StatisticsBuilder:
                 )
 
 
-# ─── 进程池 worker（reports/73 修复阶段：全量重建并行化）──────────────────
+# ─── 进程池 worker（依据 S2 修复阶段：全量重建并行化）──────────────────
 
 
 def _statistics_worker_init(duck_path: str, sqlite_path: str) -> None:

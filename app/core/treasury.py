@@ -1,14 +1,21 @@
-"""财政部国债收益率曲线低频域更新服务（P3，reports/68 §4）
+"""财政部国债收益率曲线低频域更新服务（P3，依据 S1 §4）
 
 独立基准域：treasury_yield_curve 单表，独立财政部适配器实例与限速，
 失败保留旧值并记录独立 retry/missing，绝不进入 A 股表、筛选池或 readiness。
 
-写入语义（reports/68 §4 硬门槛）：
+写入语义（依据 S1 §4 硬门槛）：
 - 未来日期拒绝：任何晚于本地（UTC+8）今天的曲线点不得入库。
 - 历史回填：单期限一次请求（czbQueryYz），单期限事务内原子替换。
 - 日终增量：czbQueryXy 单日全曲线，upsert 合并。
 - 对齐：取不晚于价格日的最近曲线点，最大陈旧 5 个自然日；超限视为不可用。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/68 §4 / §4.3 —— 财政部国债收益率曲线低频域（P3）：写入语义硬门槛见 §4；
+#     最大陈旧 5 个自然日（MAX_STALENESS_DAYS，§4.3）。
+# S2  reports/73 —— P3 修复批次：P3-8 用户显式传期限但全部非法时明确失败；
+#     P3-4 每日最多一次低频自动集成；P3-9 批量对齐用单次 SQL；P3-7 missing 统计按国债域过滤。
+
 
 from __future__ import annotations
 
@@ -34,7 +41,7 @@ __all__ = ["TreasuryCurveUpdater", "KEY_TENORS"]
 
 REFRESH_MARKER_KEY = "treasury_curve_last_refresh"
 RETRY_DATA_TYPE = "treasury_yield_curve"
-MAX_STALENESS_DAYS = 5  # reports/68 §4.3：最大陈旧 5 个自然日
+MAX_STALENESS_DAYS = 5  # 依据 S1 §4.3：最大陈旧 5 个自然日
 HISTORY_START = "2006-01-01"  # 曲线自 2006-03-01 起（阶段0 实测）
 
 
@@ -84,7 +91,7 @@ class TreasuryCurveUpdater:
         未来日期在适配器层拒绝；失败保留旧值并写 retry；空结果写 missing。
         """
         targets = [t for t in (tenors or list(KEY_TENORS)) if t in KEY_TENORS]
-        # P3-8 修复（reports/73）：用户显式传了期限但全部非法 → 明确失败，
+        # P3-8 修复（依据 S2）：用户显式传了期限但全部非法 → 明确失败，
         # 不再静默空转返回 success。
         if tenors and not targets:
             return {
@@ -265,7 +272,7 @@ class TreasuryCurveUpdater:
         max_tenors_backfill: int = 0,
         max_gap_fill_days: int = 3,
     ) -> dict[str, Any]:
-        """低频自动集成：每日最多一次（P3-4 修复，reports/73）。
+        """低频自动集成：每日最多一次（P3-4 修复，依据 S2）。
 
         标记 key 记录上次刷新时间；当日（UTC+8）已刷新则直接 skip，
         不发起任何网络请求。未到期/未刷新时：更新当日曲线，并对近 30 天
@@ -482,7 +489,7 @@ class TreasuryCurveUpdater:
         price_dates: list[str | date],
         tenors: list[float],
     ) -> dict[tuple[str, float], dict[str, Any]]:
-        """批量对齐（P3-9 修复，reports/73）：单次 SQL 查询全部
+        """批量对齐（P3-9 修复，依据 S2）：单次 SQL 查询全部
         (价格日 × 期限) 组合的最近曲线点，消除逐项 N+1 查询。"""
         results: dict[tuple[str, float], dict[str, Any]] = {}
         unique_dates = sorted({str(price_date)[:10] for price_date in price_dates})
@@ -549,7 +556,7 @@ class TreasuryCurveUpdater:
             "SELECT COUNT(*) AS count FROM retry_list WHERE data_type = ?",
             [RETRY_DATA_TYPE],
         )[0]["count"]
-        # P3-7 修复（reports/73）：missing 统计按国债域过滤（stock_code=
+        # P3-7 修复（依据 S2）：missing 统计按国债域过滤（stock_code=
         # '__market__' 且 field_name 以 treasury_curve 开头），与 retry_open
         # 口径一致，不再混入全库股票缺失数。
         missing_open = self.sqlite.query(

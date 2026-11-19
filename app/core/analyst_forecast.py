@@ -1,4 +1,4 @@
-"""卖方一致预期（EPS 预测）每日快照（schema v48 / reports/139 §2.2 #13）。
+"""卖方一致预期（EPS 预测）每日快照（schema v48 / 依据 S3 §2.2 #13）。
 
 ## 为什么是「每天一行」而不是回补
 
@@ -10,7 +10,7 @@
 1. `snapshot_date` 一律取北京时间的**今天**（`cn_today()`，AGENTS R5），不是 UTC 日期；
 2. 允许显式指定其它日期，但**必须**由调用方 `allow_backfill_date=True` 显式确认，
    且 `confidence` 降级为 `approximate` —— 把今天的横截面写成历史日期就是伪造历史，
-   不能因为「反正没人看得出」而静默发生（reports/133 E-STATUS 同款）。
+   不能因为「反正没人看得出」而静默发生（依据 S1 E-STATUS 同款）。
 
 ## 单位纪律（D40/D46 同款）
 
@@ -45,6 +45,13 @@ executemany**。整批在**一个事务**里：先按范围删旧快照、再插
 `data_refresh_state`（值为北京日期字符串），每日最多 1 次；异常由调用方接住，
 只让本步骤 failed/partial，**不影响 readiness**（readiness 只看数据日期，不看 job 步骤状态）。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/133 E-STATUS / R7 —— 状态静默不可见属同类事故；R7 未来函数（用当期一致预期回测历史）。
+# S2  reports/138 §3.4 —— dry-run 的全部价值就是写库前能看见真实读数。
+# S3  reports/139 §2.2 #13 / source_probe §1.B6 —— schema v48 卖方一致预期每日快照。
+# 注：`note`/`task` 等可执行字符串里的 reports/NNN（步骤与任务名的对外文案）按纪律保留。
+
 
 from __future__ import annotations
 
@@ -403,7 +410,7 @@ def forecast_as_of(
     """取 `as_of` 当天或之前**最近一次**快照的 EPS 预测（防前视，供 #13 PEG 用）。
 
     为什么必须 as_of 而不是「最新一次」：一致预期是**每天都在变**的横截面，
-    用今天的一致预期去回测 2019 年的 PEG 就是未来函数（`reports/133` R7 的同类）。
+    用今天的一致预期去回测 2019 年的 PEG 就是未来函数（依据 S1 R7 的同类）。
     这里按 `snapshot_date <= as_of` 取最近一期，并限制 `max_age_days`：
     隔太久（默认 >30 天）说明中间没打点，返回 None 而不是拿陈旧值冒充。
 
@@ -451,7 +458,7 @@ def build_snapshot(
     """抓取 + 规范化 +（非 dry-run 时）写库，返回可核对的 JSON 证据。
 
     dry-run 也会**真的抓一次**（1.7s）：没有真实抓取结果，「会不会写 2,802 行」就只能靠猜，
-    而 dry-run 的全部价值就是让写库前能看见真实读数（reports/138 §3.4）。
+    而 dry-run 的全部价值就是让写库前能看见真实读数（依据 S2 §3.4）。
     """
     today = cn_today(now)
     target = snapshot_date or today

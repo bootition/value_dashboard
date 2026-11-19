@@ -6,7 +6,7 @@
 > 「我们倾向于剔除超额现金（即现金减去债务后的余额，如果现金远多于债务的话）」
 > 「如果你对这种处理方式存疑，也可以将部分现金计入投入资本。」
 
-最终口径（2026-11-16 定稿，`reports/132`）
+最终口径（2026-11-16 定稿，依据 S4）
 ------------------------------------------
     已动用资本 CE(t) = 总资产(t) − 流动负债(t)
                      = 净营运资本 + 全部长期资产
@@ -55,7 +55,7 @@
 「有极值是正常的。只要验证数据是真实的、是对的，不需要剔除极值。」
 因此不做 |ROCE| 上限、不做截断。唯一的 NULL 来自数学：CE ≤ 0 时比值无定义，
 此时 `roce_history.status` 如实标注 `INVALID_DENOMINATOR`，CE 原值照常保留可复核。
-同理，ROE 域里的 `abs(roe) <= 1.0` 静默置空属于同一类错误，应删除（`reports/132` §5）。
+同理，ROE 域里的 `abs(roe) <= 1.0` 静默置空属于同一类错误，应删除（依据 S4 §5）。
 
 期间口径
 --------
@@ -75,7 +75,7 @@
    用"有效年数"而不是"上市满 N 年"，因为算单年 ROCE 需要上一年的资本，
    "上市满 5 年"实际只够算出 4 个值。
 
-持久性两列（schema v47，`reports/139` §7 前置 3 / §3.1 #27）
+持久性两列（schema v47，依据 S6 §7 前置 3 / §3.1 #27）
 ----------------------------------------------------------
 `roce_10y_min` / `roce_10y_cv` 是 #27「ROCE 持久性」的全部内容，窗口纪律与
 `roce_10y_median` **完全一致**：最近 10 个有效年报必须**恰好 10 个**（`n10 >= 10`）。
@@ -84,7 +84,7 @@
 - `roce_10y_cv` = `STDDEV_SAMP(roce) / MEDIAN(roce)`（稳定性，越小越稳）。
   **分母门：仅在 `MEDIAN(roce) >= 0.02` 时输出**，否则 NULL。
   理由：中位数接近零时比值是算术产物而不是"波动"——实测 158 只 `cv > 10`
-  全部由 `0 < 中位 < 0.01` 造成（`reports/139` #27 实测）。这与本域
+  全部由 `0 < 中位 < 0.01` 造成（依据 S6 #27 实测）。这与本域
   「不设比例护栏」的裁决**不矛盾**：那条针对的是分子/结果的极值，这里挡的是
   **分母趋零让比值失去解释力**——宁可 NULL 也不输出伪变异系数。
 
@@ -93,6 +93,16 @@
 `roce_10y_median`（历史成色）+ `roce_5y_median`（趋势）+ `roce_latest`（现况）。
 持久性指标再叠加 `roce_10y_min`（地板）与 `roce_10y_cv`（稳定性），共五列位。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/119 D28 —— 全量重算 vs 增量水位 + 补偿逻辑的复杂度权衡（"全量更便宜"的由来）。
+# S2  reports/130 —— 口径 C 设计意图：CE = 总资产 − 流动负债，取年报序列中位数。
+# S3  reports/131 K5 / D28 —— 每次快照重发把全市场 roce_* 清成 NULL 的事故来源。
+# S4  reports/132 / §5 —— 2026-11-16 定稿口径；§5 同型错误：`abs(roe) <= 1.0` 静默置空应删除。
+# S5  reports/133 R3 —— 派生域保全契约：非本域产出的列必须显式登记，否则被 DELETE+INSERT 静默清空。
+# S6  reports/139 §7 前置 3 / §3.1 #27 / X-V46 —— 持久性两列（schema v47）；
+#     #27 实测「0 < 中位 < 0.01」把整列置空；X-V46：v46 加 20y 两列忘记登记，RG4 红了一轮。
+
 
 from __future__ import annotations
 
@@ -240,12 +250,12 @@ SNAPSHOT_UPDATE_SQL = f"""
 # 住在 `indicator_snapshot` 里、由本域（而不是指标计算器 staging）生产的列。
 # 登记到 `app/core/indicators/calculator.py::derived_snapshot_domains()` 后，
 # 两条发布路径都会先保全、再调用 `rebuild_snapshot_columns()`、最后校验没有列
-# 被清空（`reports/133` R3；事故来源 `reports/131` K5/D28）。
+# 被清空（依据 S5 R3；事故来源 依据 S3 K5/D28）。
 #
 # **这里必须与 `SNAPSHOT_UPDATE_SQL` 的 SET 列表逐字一致**：
 # `scripts/check_rework_guards.py` 的 RG4 就是这么比的——重建 SQL 写了但没登记
 # = 快照重发时不保全（写进去也会被下一次 DELETE+INSERT 清成 NULL）。
-# 历史事故：v46 加了 20y 两列却忘了登记，RG4 红了整整一轮（`reports/139` X-V46）。
+# 历史事故：v46 加了 20y 两列却忘了登记，RG4 红了整整一轮（依据 S6 X-V46）。
 SNAPSHOT_DERIVED_COLUMNS: tuple[str, ...] = (
     "roce_latest",
     "roce_5y_median",
@@ -273,7 +283,7 @@ def rebuild_snapshot_columns(connection: Any) -> None:
 class RoceBuilder:
     """构建 roce_history 并用它刷新 indicator_snapshot 的十列。
 
-    设计意图（`reports/130`）：
+    设计意图（依据 S2）：
     - `roce_history` 是**全历史年报序列**（可回溯、可画图、可审计）；
     - `indicator_snapshot.roce_*` 是**筛选入口**（横截面用）；
     - 两者同源同事务，绝不各算一套。
@@ -291,7 +301,7 @@ class RoceBuilder:
 
         为什么全量而不是增量：本域的数据源是**年报**（每股每年一行），
         全库 `roce_history` 目前规模在十万行量级，一条 INSERT…SELECT
-        的耗时远小于维护增量水位 + 补偿逻辑的复杂度（reports/119 D28 的
+        的耗时远小于维护增量水位 + 补偿逻辑的复杂度（依据 S1 D28 的
         「派生域没有重建触发就会冻结」教训，这里用最笨但不会错的方式规避）。
         """
         calculated_at = datetime.now(UTC).replace(tzinfo=None)

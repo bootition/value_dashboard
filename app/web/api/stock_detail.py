@@ -9,6 +9,21 @@
 - PDF 打开
 """
 
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/67 —— 业务概览独立低频域（公司资料 + 主营构成 + 溯源）。
+# S2  reports/68 P3 / P4 / P5 —— 国债比较（P3：TTM 已实施股息率与所选期限利差）、
+#     历史研究统计序列 + 窗口聚合（P4/P5）。
+# S3  reports/73 —— 修复批次：P3-3 股息率/利差按信任遮蔽（服务端信任遮蔽模型，曲线基准不受影响）；
+#     P4-13 详情页统计为实时构建，须标注实时计算口径。
+# S4  reports/76 P1-2 / P1-3 —— 自动更新窗口标注（前端横幅）且不遮罩曲线基准；
+#     消除逐价格日 N+1（分红一次全量读取后在内存中做）。
+# S5  reports/119 §5 D —— 不要再写 `NULL AS as_reported_value` 之类的假兜底列。
+# S6  reports/122 §2.7 J12 / reports/127 —— A+H「H 股市值」快照的产品出口与 API 接入。
+# S7  reports/130 —— ROCE（v42）：历史序列来自 roce_history。
+# S8  reports/135 —— 同比公式必须与 calculator._calc_ttm_yoy()/_yoy() 同源。
+# S9  reports/131 §9.2 P0-4 —— 同比双口径：`*_yoy` 是 TTM 口径，`*_yoy_fy` 是年报口径，两列不可互相回填。
+
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
@@ -166,7 +181,7 @@ def _metric_history_yoy(rows: list[dict], metric: str) -> list[dict]:
             item["value"] = None
             out.append(item)
             continue
-        # 2026-11-17（reports/135）：与 `calculator._calc_ttm_yoy()` / `_yoy()` 同一公式。
+        # 2026-11-17（依据 S8）：与 `calculator._calc_ttm_yoy()` / `_yoy()` 同一公式。
         # `cur / base - 1` 在基期为负时方向反了（亏损收窄被显示成负增长），
         # 且会让快照与详情页在负基数股票上给出相反结论。
         item["value"] = (
@@ -418,7 +433,7 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
     # 盈利能力: 从财务报表计算 → historical_capable
     "roe": True, "roa": True, "gross_margin": True, "net_margin": True,
     "roic": True, "cf_to_net_profit": True,
-    # ROCE（v42，reports/130）：年报序列中位数，历史序列来自 roce_history
+    # ROCE（v42，依据 S7）：年报序列中位数，历史序列来自 roce_history
     "roce_latest": True, "roce_5y_median": True, "roce_10y_median": True,
     "roce_20y_median": True,
     # 成长: 需要多期数据 → historical_capable
@@ -763,7 +778,7 @@ def get_indicators(stock_code: str, request: Request) -> dict:
         }),
         "growth": _with_meta({
             "revenue_yoy": indicators.get("revenue_yoy"),
-            # reports/131 P0-4 同比双口径：`*_yoy` 是 TTM 口径，`*_yoy_fy`
+            # 依据 S9 P0-4 同比双口径：`*_yoy` 是 TTM 口径，`*_yoy_fy`
             # 是年报口径。两者必须同时下发，否则用户永远看不到差别。
             "revenue_yoy_fy": indicators.get("revenue_yoy_fy"),
             "net_profit_yoy": indicators.get("net_profit_yoy"),
@@ -802,14 +817,14 @@ def get_indicators(stock_code: str, request: Request) -> dict:
         "latest_price_date": str(indicators.get("latest_price_date", "")) if indicators.get("latest_price_date") else None,
         "freshness": freshness,
         "trust": trust,
-        # reports/76 P1-2: 自动更新窗口内跳过全量质量重建，前端据此展示
+        # 依据 S4 P1-2: 自动更新窗口内跳过全量质量重建，前端据此展示
         # "自动更新中"横幅而非误读为数据不可信。
         "auto_update_in_progress": _update_lock_active(duck),
     }
 
 
 def _update_lock_active(duck: Any) -> bool:
-    """True while the auto-update writer holds the update lock (reports/76)."""
+    """True while the auto-update writer holds the update lock (依据 S4)."""
     try:
         from app.core.storage.update_lock import update_lock_active
 
@@ -943,7 +958,7 @@ def _apply_published_overrides(rows: list[dict], sqlite, stock_code: str) -> Non
 
 @router.get("/{stock_code}/business-overview")
 def get_business_overview(stock_code: str, request: Request) -> dict:
-    """业务概览 (reports/67 独立低频域: 公司资料 + 主营构成 + 溯源)
+    """业务概览 (依据 S1 独立低频域: 公司资料 + 主营构成 + 溯源)
 
     - profile: 公司简介 / 经营范围 / 行业 / 员工数 + 来源 / 抓取时间 / 哈希 / 批次
     - breakdown: 最近报告期按产品/行业/地区构成 + 历史可得数据
@@ -1051,7 +1066,7 @@ def get_treasury_comparison(
     tenor: float = Query(10.0),
     limit: int = Query(250, ge=1, le=1000),
 ) -> dict:
-    """国债比较 (reports/68 P3): TTM 已实施股息率与所选期限国债收益率
+    """国债比较 (依据 S2 P3): TTM 已实施股息率与所选期限国债收益率
 
     - series: 按该股价格日降序取最新 limit 天，每天返回 TTM 已实施股息率、
       对齐国债收益率（≤价格日最近点、最大陈旧 5 自然日）、利差与对齐信息。
@@ -1060,7 +1075,7 @@ def get_treasury_comparison(
     """
     from app.core.adapters.czb_mof_adapter import KEY_TENORS
 
-    # P3-3 修复（reports/73）：与服务端信任遮蔽模型一致——
+    # P3-3 修复（依据 S3）：与服务端信任遮蔽模型一致——
     # DIVIDEND_DATES_UNVERIFIED 或快照级警告生效时遮蔽 TTM 股息率/利差。
     from app.core.data_quality import (
         indicator_trust,
@@ -1102,7 +1117,7 @@ def get_treasury_comparison(
             "provenance": None,
         }
 
-    # reports/76 P1-3: 消除逐价格日 N+1。分红一次全量读取后在内存中做
+    # 依据 S4 P1-3: 消除逐价格日 N+1。分红一次全量读取后在内存中做
     # 滑动窗口（窗口 [price_date-1y, price_date]，需公告日与除权日均
     # 不晚于 price_date），曲线对齐改用 align_many 单次批量查询。
     div_rows = duck.read_query(
@@ -1171,7 +1186,7 @@ def get_treasury_comparison(
             series.append(item)
             continue
         item["curve_yield"] = align["yield_pct"]
-        # P3-3 修复（reports/73）：股息率/利差按信任遮蔽（曲线基准不受影响）
+        # P3-3 修复（依据 S3）：股息率/利差按信任遮蔽（曲线基准不受影响）
         if not div_trusted:
             item["reason"] = "dividend_untrusted"
         elif ttm_div_yield is None:
@@ -1221,7 +1236,7 @@ def get_treasury_comparison(
             "warning_codes": trust["warning_codes"],
             "untrusted_all": trust["untrusted_all"],
         },
-        # reports/76 P1-2: 自动更新窗口标注（前端横幅），不遮罩曲线基准。
+        # 依据 S4 P1-2: 自动更新窗口标注（前端横幅），不遮罩曲线基准。
         "auto_update_in_progress": _update_lock_active(duck),
     }
 
@@ -1233,7 +1248,7 @@ def get_research_statistics(
     metric: Literal["pe_ttm", "pb_mrq", "ttm_dividend_yield", "spread_10y"] = "pe_ttm",
     window_years: Literal[1, 3, 5, 10, 99] = 10,
 ) -> dict:
-    """历史研究统计 (reports/68 P5/P4): 序列 + 窗口聚合统计
+    """历史研究统计 (依据 S2 P5/P4): 序列 + 窗口聚合统计
 
     - series: 按价格日升序的研究序列（最新重述回看口径，不用于回测）
     - statistics: 各窗口聚合（样本数/分位带/μσ/z-score/覆盖/原因码）
@@ -1268,7 +1283,7 @@ def get_research_statistics(
         "series": series,
         "statistics": statistics,
         "coverage_threshold_pct": COVERAGE_THRESHOLD_PCT,
-        # P4-13 修复（reports/73）：标注实时计算口径——详情页统计为实时构建，
+        # P4-13 修复（依据 S3）：标注实时计算口径——详情页统计为实时构建，
         # 与筛选使用的已发布统计域（research_statistics 表）可能存在时差，
         # 发布域过期时两者分位/z-score 可能不一致。
         "computed": "realtime",
@@ -1286,7 +1301,7 @@ def get_source_audit(
 
     M4-问题5修复: 补充生效日期/数据版本/公式
 
-    2026-11-14（reports/119 §5 D 类）：原来这里写着 `NULL AS as_reported_value`
+    2026-11-14（依据 S5 §5 D 类）：原来这里写着 `NULL AS as_reported_value`
     与 `NULL AS latest_restated_diff`——两个字段进了响应但**恒为 NULL**，
     属于「假接口」（比没有更糟：前端以为拿到了当时可见值）。
     现在二者已从 SQL 与前端类型里删除；「当时可见值 vs 最新重述值」改由
@@ -1604,7 +1619,7 @@ def _total_market_cap_reference(duck: Any, stock_code: str) -> dict[str, Any] | 
 
 @router.get("/{stock_code}/ah-metrics")
 def get_ah_metrics(stock_code: str, request: Request) -> dict:
-    """A+H「H 股市值」快照（reports/122 §2.7 J12 的产品出口；reports/127 接入）
+    """A+H「H 股市值」快照（依据 S6 §2.7 J12 的产品出口；依据 S6 接入）
 
     - 不在 A+H 名单 → 404 ``reason="not_an_ah_stock"``（前端据此隐藏该区块）；
     - 是 A+H 但快照表里没有该股 → 404 ``reason="ah_snapshot_missing"``

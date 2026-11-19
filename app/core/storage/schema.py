@@ -17,11 +17,43 @@ from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
-# 当前 schema 版本（reports/79 方案 C 快速启动依据）：
+# 当前 schema 版本（依据 S3 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 49
 SQLITE_SCHEMA_VERSION = 19
 
+# ─── 依据索引（本文件所有「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）───
+# schema 有 3000 行 DDL + 60 条迁移历史，同一个报告的小节号曾被逐行重复十几次，
+# 新人改一列要跳出去翻 N 次报告。下面每条保留报告号 + 原文小节号，查证按 S 编号回溯。
+#
+# S1   reports/68 P3 / §3 / §5 / §6 —— 低频外部域三件套：国债收益率曲线与股息率利差（P3）、
+#         历史总股本链主链（§3，CNINFO p_stock2215）、历史研究统计域（§5/§6，独立只读域）。
+# S2   reports/67 —— 个股业务概览：独立低频域（公司资料 + 主营构成 + 溯源），不进主链 readiness。
+# S3   reports/79 方案 C —— 迁移「快速启动」：两库 schema_migrations 都已到位就跳过待应用迁移。
+# S4   reports/82 —— 分红融资比前置列（2026-08-25 数据补全批）。
+# S5   reports/119 §5 P2-1 / §5 C2 / §5 P2-2 —— indicator_null_reason 空值原因表（P2-1）、
+#         字段覆盖率历史与看门狗基线（C2）、行业变更历史（P2-2）。
+# S6   reports/120 —— 空值原因表 + 字段覆盖率历史落地（schema v39）。
+# S7   reports/121 —— 2026-11-14 第二批修复新增域（公告台账索引等，v40）。
+# S8   reports/122 §2.1 J3 / §2.7 J12 —— 报告元数据（CSMAR IfCorrect/DeclareDate/Typrep）、
+#         港股日行情与 A+H「H 股市值」快照（行业口径总市值 = A 价 × 总股本，H 股按 A 价计）。
+# S9   reports/127 —— A+H「H 股市值」快照接入 API 出口。
+# S10  reports/123 —— csmar_risk_factors 迁至 Parquet 冷库（2026-11-15）。
+# S11  reports/130 —— ROCE 域（v42 roce_history 年度序列；口径 C：CE = 总资产 − 流动负债，
+#         取年报中位数，不剔现金、不设比例护栏）。
+# S12  reports/131 §9.2 P0-4 / P0-6 / P0-7 / P0-8 / K5 —— 同比双口径（*_yoy = TTM，*_yoy_fy = 年报，
+#         两列不可互相回填）、保险股「保险合同负债」专用落点、资产减值损失符号 FY2018 翻转、
+#         预收款项 FY2020 语义已变（CAS14 重分类到合同负债）、派生列未登记保全被快照重发静默清成 NULL。
+# S13  reports/132 —— ROCE 筛选标志（v45；v46 起门槛由 8 年降为 5 年）。
+# S14  reports/133 —— ROCE 增加 20 年窗口（v46）。
+# S15  reports/139 §2.2 / §2.2 #13 / §7 前置 3 / §3.1 #27 / §11.3 / §11.5 —— 资产负债表 7 项补采科目、
+#         「8 类外部序列」中 GDP/CPI/beta 之外的口径、PEG 每日快照（接口只给当期横截面，故必须打点）、
+#         ROCE 持久性（n10 必须恰好 10 年）、机构持仓（唯一还能免费拿到的外部序列）、
+#         缺科目时留 NULL（indicator_null_reason=SOURCE_EMPTY）不要用推导值冒充。
+#
+# 原则：这里只登记 (报告, 小节, 一句话结论)。结论本身已写进下面的列注释/迁移注释，
+# 索引只负责「想深挖该翻哪一节」，因此行内不再重复报告号。
+# ─────────────────────────────────────────────────────────────────────
 # ─── DuckDB Schema (分析库) ───────────────────────────────────────────
 
 DUCKDB_SCHEMA_V1 = """
@@ -103,7 +135,7 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
     short_term_loans           DOUBLE,   -- 短期借款
     notes_payable              DOUBLE,   -- 应付票据
     accounts_payable           DOUBLE,   -- 应付账款
-    prepayments_received       DOUBLE,   -- 预收款项。**FY2020 起语义已变（reports/131 §9.2 P0-8）**：
+    prepayments_received       DOUBLE,   -- 预收款项。**FY2020 起语义已变（依据 S12 §9.2 P0-8）**：
     --   新收入准则 CAS14（境内上市 2020-01-01 起施行）把「与客户合同相关的预收款」
     --   重分类为 contract_liabilities，本列一夜掉 96.6%（37,379.8 亿 → 1,284.3 亿，
     --   非空率 94.9% → 28.2%），残留只有租金等非合同类。
@@ -131,13 +163,13 @@ CREATE TABLE IF NOT EXISTS balance_sheet (
     minority_interest          DOUBLE,   -- 少数股东权益
     total_equity               DOUBLE,   -- 所有者权益合计
     total_equity_parent        DOUBLE,   -- 归属于母公司所有者权益
-    -- 补采科目（schema v48，reports/139 §2.2 的 7 项；来源见 scripts/fetch_balance_sheet_subjects.py）
+    -- 补采科目（schema v48，依据 S15 §2.2 的 7 项；来源见 scripts/fetch_balance_sheet_subjects.py）
     -- 单位统一为「元」，与同表其他金额列一致。取不到时保留 NULL，原因写 indicator_null_reason。
     fixed_assets_gross         DOUBLE,   -- 固定资产原值（新浪「固定资产原值」；东财无此列）
     -- 累计折旧。**不要再从「原值 − 净值」推导**：那个差里混着「固定资产减值准备」
     -- （库内没有该科目），实测 2,515/4,403 行无法闭合，且银行/保险模板根本没有这一列。
     -- 正式勾稽式：原值 − 累计折旧 − 减值准备 = 净值；缺科目时该列留 NULL
-    -- （indicator_null_reason=SOURCE_EMPTY），不要用推导值冒充（reports/139 §11.5）。
+    -- （indicator_null_reason=SOURCE_EMPTY），不要用推导值冒充（依据 S15 §11.5）。
     accumulated_depreciation   DOUBLE,
     other_current_assets       DOUBLE,   -- 其他流动资产（东财 OTHER_CURRENT_ASSET；**勿与 CURRENT_ASSET_OTHER 混用**）
     receivables_financing      DOUBLE,   -- 应收款项融资（东财 FINANCE_RECE，FY2019 新金融工具准则后才有）
@@ -174,7 +206,7 @@ CREATE TABLE IF NOT EXISTS income_statement (
     -- 其中: 利息费用/利息收入
     interest_expense         DOUBLE,        -- 利息费用
     interest_income          DOUBLE,        -- 利息收入
-    asset_impairment_loss    DOUBLE,        -- 资产减值损失。**符号在 FY2018 翻转（reports/131 §9.2 P0-7）**：
+    asset_impairment_loss    DOUBLE,        -- 资产减值损失。**符号在 FY2018 翻转（依据 S12 §9.2 P0-7）**：
     --   财会〔2018〕15 号起「资产减值损失/信用减值损失」按**损失以负号列示**；
     --   2017 及以前按**损失为正**。库内两段直接透传、未做符号归一，2018 年为混合年
     --   （同年不同公司混用两种约定），逐年汇总会正负相消成「假低值」。
@@ -281,7 +313,7 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     net_margin   DOUBLE,
     roic         DOUBLE,
     cf_to_net_profit DOUBLE,
-    -- 成长：同比双口径（2026-11-16，reports/131 §9.2 P0-4，schema v43）
+    -- 成长：同比双口径（2026-11-16，依据 S12 §9.2 P0-4，schema v43）
     --   *_yoy    = TTM 口径：最新报告期 TTM ÷ 上年最后一个报告期 TTM − 1，
     --              与详情页 /api/stock/{code}/metric-history?metric=*_yoy 同源；
     --   *_yoy_fy = 年报口径：最近两个完整年报的同比（旧算法保留列）。
@@ -311,11 +343,11 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     payout_ratio     DOUBLE,
     dps              DOUBLE,            -- 每股股息
     consecutive_div_years INTEGER,
-    -- 分红融资比数据前置（2026-08-25，reports/82 后续指标）
+    -- 分红融资比数据前置（2026-08-25，依据 S4 后续指标）
     cumulative_dividend_amount DOUBLE,   -- A股累计现金分红金额（元，按A股流通股本折算，H股不计入）
     cumulative_financing_amount DOUBLE,  -- A股累计股权融资金额（元，IPO+增发+配股，优先募资额/净额）
     dividend_financing_ratio_pct DOUBLE, -- 分红融资比（%，A股口径）：广义分红/股权融资 × 100
-    -- 已动用资本回报率 ROCE（2026-11-16，schema v42，reports/130）
+    -- 已动用资本回报率 ROCE（2026-11-16，schema v42，依据 S11）
     -- 小数比例：0.2034 = 20.34%。口径 C：CE = 总资产 − 流动负债，
     -- 取**年报**序列的中位数（书中「历史 ROCE」用法），不剔现金、不设比例护栏。
     -- 明细见 app/core/indicators/roce.py 模块 docstring。
@@ -326,15 +358,15 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     roce_10y_years   INTEGER,
     roce_20y_median  DOUBLE,            -- 最近 20 个有效年报 ROCE 中位数（必须拿满 20 年）
     roce_20y_years   INTEGER,
-    -- 持久性两列（schema v47，reports/139 §7 前置 3 / #27 ROCE 持久性）。
+    -- 持久性两列（schema v47，依据 S15 §7 前置 3 / #27 ROCE 持久性）。
     -- 窗口纪律与 10y_median 相同：**最近 10 个有效年报必须恰好 10 个**（n10 >= 10），
     -- 不足 10 年一律 NULL（不允许 7 年冒充 10 年）。
     roce_10y_min     DOUBLE,            -- 最近 10 个有效年报 ROCE 的**最小值**（地板；n10<10 → NULL）
     roce_10y_cv      DOUBLE,            -- 变异系数 = STDDEV_SAMP(roce) / MEDIAN(roce)，小数比例。
                                         -- **仅在 n10 >= 10 且 MEDIAN(roce) >= 0.02 时输出**，否则 NULL：
                                         -- 0 < 中位 < 0.02 时中位数接近零，比值会炸成无意义的"伪变异系数"
-                                        -- （实测 158 只 cv>10 全部由 0<中位<0.01 造成，reports/139 #27）。
-    -- 筛选口径标志（reports/132；v46 起门槛由 8 年降为 5 年）：
+                                        -- （实测 158 只 cv>10 全部由 0<中位<0.01 造成，依据 S15 #27）。
+    -- 筛选口径标志（依据 S13；v46 起门槛由 8 年降为 5 年）：
     -- 非金融 且 市值 >= 100 亿 且 有效 ROCE 年数 >= 5
     roce_eligible    BOOLEAN,
     -- 行情
@@ -351,7 +383,7 @@ CREATE TABLE IF NOT EXISTS indicator_snapshot (
     period_return    DOUBLE,
     annualized_volatility DOUBLE,
     max_drawdown     DOUBLE,
-    -- 国债基准与股息率利差（reports/68 P3：TTM已实施股息率与相对各期限利差）
+    -- 国债基准与股息率利差（依据 S1 P3：TTM已实施股息率与相对各期限利差）
     ttm_dividend_yield DOUBLE,          -- TTM已实施现金股息率(%)
     div_yield_spread_0p25y DOUBLE,      -- 相对0.25年期国债利差(%)
     div_yield_spread_0p5y DOUBLE,       -- 相对0.5年期国债利差(%)
@@ -458,7 +490,7 @@ CREATE TABLE IF NOT EXISTS raw_response_archive (
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 个股业务概览（reports/67 独立低频域）──────────────────────────────────
+-- 个股业务概览（依据 S2 独立低频域）──────────────────────────────────
 -- 独立于 stock_meta / indicator_snapshot / readiness；失败保留旧值，
 -- 不进筛选池，不阻断日常价格、财务与 A 股 readiness。
 CREATE TABLE IF NOT EXISTS company_profile (
@@ -497,10 +529,10 @@ CREATE TABLE IF NOT EXISTS business_breakdown (
 CREATE INDEX IF NOT EXISTS idx_business_breakdown_stock_report
     ON business_breakdown (stock_code, report_date);
 
--- 财政部-中国国债收益率曲线（reports/68 P3 独立低频基准域）
+-- 财政部-中国国债收益率曲线（依据 S1 P3 独立低频基准域）
 -- 每个点保存曲线日期、期限、收益率、来源、抓取时间、原始响应哈希和置信度；
 -- 独立于 A 股 stock_meta / 价格 / 财报 / 筛选池 / readiness，失败不得阻塞股票研究。
--- 宏观序列（schema v48，reports/139 §2.2 的「8 类外部序列」中的 GDP / CPI / beta 之外的口径）
+-- 宏观序列（schema v48，依据 S15 §2.2 的「8 类外部序列」中的 GDP / CPI / beta 之外的口径）
 -- 一个指标一行，按 (indicator, period_date, source) 唯一；单位记在 unit 列（亿元 / % 等）。
 CREATE TABLE IF NOT EXISTS macro_series (
     indicator    VARCHAR NOT NULL,      -- gdp_quarterly / gdp_yoy / cpi_yoy / cpi_mom ...
@@ -549,7 +581,7 @@ CREATE TABLE IF NOT EXISTS stock_beta (
 );
 
 -- 分析师一致预期**快照**（schema v48；接口只给当期快照、**无法回补历史**，
--- 所以从今天起按天/按周打点，越早开始越好：reports/139 §2.2 #13 PEG 的原意需要它）
+-- 所以从今天起按天/按周打点，越早开始越好：依据 S15 §2.2 #13 PEG 的原意需要它）
 CREATE TABLE IF NOT EXISTS analyst_forecast_snapshot (
     snapshot_date  DATE    NOT NULL,    -- 抓取日（不是报告期）
     stock_code     VARCHAR NOT NULL,
@@ -564,7 +596,7 @@ CREATE TABLE IF NOT EXISTS analyst_forecast_snapshot (
     PRIMARY KEY (snapshot_date, stock_code, fiscal_year)
 );
 
--- 机构持仓（schema v49；reports/139 §11.3「机构持仓」= 8 类外部序列里唯一还能免费拿到的）
+-- 机构持仓（schema v49；依据 S15 §11.3「机构持仓」= 8 类外部序列里唯一还能免费拿到的）
 -- 一个 (股票 × 报告期 × 持有人类型) 一行，是「按报告期的机构持股比例」的规范形。
 -- 源：东方财富数据中心「主力数据-机构持仓」列表 `dataapi/zlsj/list`（akshare
 -- `stock_report_fund_hold` 的底层接口）—— 6 类持有人（基金/QFII/社保/券商/保险/信托）
@@ -608,7 +640,7 @@ CREATE TABLE IF NOT EXISTS treasury_yield_curve (
 CREATE INDEX IF NOT EXISTS idx_treasury_yield_curve_date
     ON treasury_yield_curve (curve_date);
 
--- 历史总股本链（P4，reports/68 §3 主链：CNINFO p_stock2215）
+-- 历史总股本链（P4，依据 S1 §3 主链：CNINFO p_stock2215）
 -- 半年/年报期末锚点 + 变动事件共同构成历史骨架；verified 由东财 F10 近邻交叉核验。
 -- 仅用于历史 PE/PB 研究序列，不替代 stock_meta 的当前股本；缺失日 fail-closed。
 CREATE TABLE IF NOT EXISTS share_capital_history (
@@ -626,7 +658,7 @@ CREATE TABLE IF NOT EXISTS share_capital_history (
 CREATE INDEX IF NOT EXISTS idx_share_capital_history_stock
     ON share_capital_history (stock_code, effective_date);
 
--- 历史研究统计域（P4，reports/68 §5/§6 独立只读域）
+-- 历史研究统计域（P4，依据 S1 §5/§6 独立只读域）
 -- 每股票×序列×窗口×方法一行；staging→原子发布，版本+输入指纹；筛选只能 join 已发布域。
 CREATE TABLE IF NOT EXISTS research_statistics (
     stock_code       VARCHAR NOT NULL,
@@ -919,7 +951,7 @@ CREATE TABLE IF NOT EXISTS indicator_ext (
 );
 CREATE INDEX IF NOT EXISTS idx_indicator_ext_date
     ON indicator_ext (report_date);
--- 指标空值原因（2026-11-14，reports/119 §5 P2-1）。
+-- 指标空值原因（2026-11-14，依据 S5 §5 P2-1）。
 -- 为什么需要：indicator_snapshot / indicator_ext 的 NULL 至少有 6 种含义
 -- （源缺失 / 不适用 / 分母无效 / 没去抓 / 被遮蔽 / 该算没算），前端统一渲染成
 -- "—"，用户无法区分"没有"和"坏了"，我们也失去自检信号。
@@ -937,7 +969,7 @@ CREATE TABLE IF NOT EXISTS indicator_null_reason (
 CREATE INDEX IF NOT EXISTS idx_indicator_null_reason_field
     ON indicator_null_reason (field_name, report_date);
 
--- 字段覆盖率历史（2026-11-14，reports/119 §5 C2 覆盖率看门狗基线）。
+-- 字段覆盖率历史（2026-11-14，依据 S5 §5 C2 覆盖率看门狗基线）。
 -- 为什么需要：现在"某字段覆盖率从 99.9% 掉到 1.8%"没有任何人知道
 -- （2026Q3 fixed_assets 实测）。每轮体检写一行，环比跌幅超阈值即告警。
 CREATE TABLE IF NOT EXISTS field_coverage_history (
@@ -954,9 +986,9 @@ CREATE TABLE IF NOT EXISTS field_coverage_history (
 CREATE INDEX IF NOT EXISTS idx_field_coverage_history_field
     ON field_coverage_history (domain, field_name, recorded_at);
 
--- ─── 2026-11-14 第二批修复新增域（reports/121）─────────────────────────
+-- ─── 2026-11-14 第二批修复新增域（依据 S7）─────────────────────────
 
--- 行业变更历史（reports/119 §5 P2-2 / reports/122 §2.1 J3）。
+-- 行业变更历史（依据 S5 §5 P2-2 / 依据 S8 §2.1 J3）。
 -- 为什么需要：我们只有"现在"的行业，任何回测里用"当前行业"都是未来信息。
 -- 两个来源都是现成的：CSMAR 原始文件每个报告期都带 Indcd/Indnme（2012 证监会
 -- 标准，1990~2025Q1），证监会接口的 `as_of_date` 也已经在适配器里排好序，
@@ -975,7 +1007,7 @@ CREATE TABLE IF NOT EXISTS industry_history (
 CREATE INDEX IF NOT EXISTS idx_industry_history_stock
     ON industry_history (stock_code, effective_date);
 
--- 港股日行情（reports/122 §2.7 J12；行业口径总市值 = A 价 × 总股本，H 股按 A 价计）。
+-- 港股日行情（依据 S8 §2.7 J12；行业口径总市值 = A 价 × 总股本，H 股按 A 价计）。
 -- 只覆盖 A+H 映射表里的 H 股代码（约 202 只），日频、体量很小。
 CREATE TABLE IF NOT EXISTS hk_price_daily (
     stock_code VARCHAR NOT NULL,   -- 港股代码（5 位，如 00941）
@@ -998,7 +1030,7 @@ CREATE TABLE IF NOT EXISTS fx_rate_daily (
     PRIMARY KEY (pair, trade_date)
 );
 
--- 报告元数据（reports/122 §2.1 J3）：CSMAR 原始文件的 IfCorrect/DeclareDate/Typrep
+-- 报告元数据（依据 S8 §2.1 J3）：CSMAR 原始文件的 IfCorrect/DeclareDate/Typrep
 -- 导入时被整体丢弃，导致 PRD 的 as_reported vs latest_restated 语义无法落地。
 -- 只存"这一行是合并还是母公司报表、是否更正过、更正披露日"——
 -- 数值仍在三表里，本表只做标记。
@@ -1015,7 +1047,7 @@ CREATE TABLE IF NOT EXISTS report_metadata (
 CREATE INDEX IF NOT EXISTS idx_report_metadata_stock
     ON report_metadata (stock_code, report_date);
 
--- A+H「H 股市值」快照（v41，reports/122 §2.7 J12 的落地出口；reports/127 补 API）。
+-- A+H「H 股市值」快照（v41，依据 S8 §2.7 J12 的落地出口；依据 S9 补 API）。
 -- 为什么需要：`app/core/ah_metrics.py::build_ah_snapshot()` 早已算出 203 只
 -- A+H 的 `h_share_market_cap_cny`（H 价 × H 股本 × 汇率，人民币元）、AH 溢价、
 -- 双侧股息率，但**没有任何出口**——无落库、无 API、前端零命中，用户永远
@@ -1091,7 +1123,7 @@ CREATE TABLE IF NOT EXISTS balance_sheet_ext (
 CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date
     ON balance_sheet_ext (report_date);
 
--- 已动用资本回报率 ROCE 的**年度序列**（v42，2026-11-16，reports/130）。
+-- 已动用资本回报率 ROCE 的**年度序列**（v42，2026-11-16，依据 S11）。
 -- 为什么单独建表：ROCE 的正确用法是「历史 ROCE 的中位数」（书中原文：
 -- 「我们初步筛选出的约150家公司，都在过去5到10年甚至更长时间里，实现了
 -- 超过20%的ROCE」）。单期值会被一次性损益和周期波动污染，而现有
@@ -1170,7 +1202,7 @@ CREATE TABLE IF NOT EXISTS financial_sector_items (
     -- 保险
     premiums_receivable            DOUBLE,   -- 应收保费净额
     insurance_contract_reserve     DOUBLE,   -- 保险合同准备金
-    -- v44（reports/131 P0-6）：保险股「保险合同负债」专用落点。此前被误映射进
+    -- v44（依据 S12 P0-6）：保险股「保险合同负债」专用落点。此前被误映射进
     -- 通用 `contract_liabilities`；ALTER 迁移也声明本列，两处必须保持同步。
     insurance_contract_liability   DOUBLE,   -- 保险合同负债
     policyholder_deposits          DOUBLE,   -- 保户储金及投资款
@@ -1244,7 +1276,7 @@ CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock
 --   tangible_asset_ratio     有形资产比率 / admin_expense_rate 管理费用率
 --   book_to_market_bdt       账面市值比 / effective_tax_rate 实际税率
 -- 域纪律：独立域，不进筛选界面（数据截止 2025Q1 且部分与自算指标重叠）。
--- 冷库表 csmar_risk_factors：已迁至 Parquet 冷库（2026-11-15，reports/123），
+-- 冷库表 csmar_risk_factors：已迁至 Parquet 冷库（2026-11-15，依据 S10），
 -- 见 config/cold_archive.yaml + scripts/cold_archive_split.py / scripts/cold_archive_switch.py；
 -- 主库仅留同名视图。恢复：CREATE TABLE ... AS SELECT * FROM read_parquet(...)。
 
@@ -1671,7 +1703,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v9: 财政部国债收益率曲线 + 快照股息率利差列（P3，reports/68）
+        # v9: 财政部国债收益率曲线 + 快照股息率利差列（P3，依据 S1）
         for column in (
             "ttm_dividend_yield DOUBLE",
             "div_yield_spread_0p25y DOUBLE",
@@ -1698,7 +1730,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v10: 历史总股本链 + 历史研究统计域（P4，reports/68）
+        # v10: 历史总股本链 + 历史研究统计域（P4，依据 S1）
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_share_capital_history_stock "
             "ON share_capital_history (stock_code, effective_date)"
@@ -1714,7 +1746,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v11: 融资事件域 + 指数估值域（数据补全 2026-08-25，reports/82）
+        # v11: 融资事件域 + 指数估值域（数据补全 2026-08-25，依据 S4）
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_funding_events_stock "
             "ON funding_events (stock_code)"
@@ -2319,7 +2351,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v39（2026-11-14, reports/120）：空值原因表 + 字段覆盖率历史表。
+        # v39（2026-11-14, 依据 S6）：空值原因表 + 字段覆盖率历史表。
         # 只建表、不加列，迁移本身零风险；版本号必须与 DUCKDB_SCHEMA_VERSION 同步，
         # 否则 skip_if_current 快速路径会永久判"未到最新"而每次启动都跑全量 DDL
         # （test_redteam_2026_08_13_fixes 的两个用例就是钉这条契约的）。
@@ -2330,7 +2362,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v40（2026-11-14, reports/121）：行业变更历史 / 港股日行情 / 汇率 / 报告元数据。
+        # v40（2026-11-14, 依据 S7）：行业变更历史 / 港股日行情 / 汇率 / 报告元数据。
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2338,7 +2370,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v41（v41, reports/122 §2.7 J12）：把 `build_ah_snapshot()` 算好的
+        # v41（v41, 依据 S8 §2.7 J12）：把 `build_ah_snapshot()` 算好的
         # 「H 股市值」落到 `ah_market_snapshot`（只建表、不加列、不动
         # indicator_snapshot）。写入路径是 scripts/refresh_ah_market_snapshot.py，
         # 读取路径是 GET /api/stock/{code}/ah-metrics。
@@ -2352,7 +2384,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v42（2026-11-16, reports/130）：ROCE 域。新增 roce_history 年度序列表
+        # v42（2026-11-16, 依据 S11）：ROCE 域。新增 roce_history 年度序列表
         # （上面 DDL 已建；此处只补 indicator_snapshot 的五列）并记账。
         # 五列全部可空：历史不足、金融股无流动/非流动划分、分母非正时保持 NULL，
         # 语义见 app/core/indicators/roce.py。
@@ -2373,7 +2405,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v43（2026-11-16, reports/131 §9.2 P0-4）：同比双口径。
+        # v43（2026-11-16, 依据 S12 §9.2 P0-4）：同比双口径。
         # `_calc_growth()` 改按 TTM 口径写 `*_yoy`（与详情页 metric-history 同源），
         # 旧的"最新两个年报"口径另存 `*_yoy_fy`。存量行由
         # `scripts/backfill_yoy_calibers.py` 一次性回填（本迁移只建列，不猜值）。
@@ -2392,7 +2424,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
 
-        # v44（2026-11-17, reports/131 P0-6）：保险股「保险合同负债」原先被误映射进
+        # v44（2026-11-17, 依据 S12 P0-6）：保险股「保险合同负债」原先被误映射进
         # 通用科目 `contract_liabilities`（5 只险企占全市场合同负债 42%–68%）。
         # 守卫已禁止再写入通用列，这里给金融专用表补一个正确的落点；
         # `supplement.py` 每轮查 information_schema，列一存在就自动启用映射。
@@ -2410,7 +2442,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
 
-        # v45（2026-11-16, reports/132）：ROCE 筛选标志。
+        # v45（2026-11-16, 依据 S13）：ROCE 筛选标志。
         # 把用户定稿的三条筛选固化成快照列，避免每次筛选都要手写三段条件：
         #   非金融（sw_level1 不含银行/非银金融）+ 总市值 >= 100 亿 + 有效 ROCE 年数 >= 5。
         # （年数门槛最初定 8，v46 按用户裁定降到 5；判据的唯一真源是
@@ -2427,7 +2459,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
 
-        # v46（2026-11-16, reports/133）：ROCE 增加 20 年窗口。
+        # v46（2026-11-16, 依据 S14）：ROCE 增加 20 年窗口。
         # 用户裁定：①门槛下限 8→5 年 ②可选 5/10/20 年窗口 ③**窗口必须拿满 N 年才出值**，
         # 不足 N 年时该窗口为 NULL（不再让 7 年数据冒充"10 年中位"）。
         for _col, _type in (
@@ -2445,13 +2477,13 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
 
-        # v47（2026-11-18, reports/139 §7 前置 3 / §3.1 #27「ROCE 持久性」）：
+        # v47（2026-11-18, 依据 S15 §7 前置 3 / §3.1 #27「ROCE 持久性」）：
         # #27 的全部内容就是这两列——`roce_10y_min`（地板）与 `roce_10y_cv`（稳定性）。
         # 之前 131 说「零新增成本，只需加两个聚合列」，实测这两列**库里根本不存在**
         # （indicator_snapshot 只有 latest/5y/10y/20y 的 median+years 与 eligible），
         # 所以必须先建列再谈指标。
         # 两列都必须同时进 `roce.SNAPSHOT_DERIVED_COLUMNS` 与 `SNAPSHOT_UPDATE_SQL`，
-        # 否则快照 DELETE+INSERT 重发会把它们静默清成 NULL（reports/131 K5 重演）。
+        # 否则快照 DELETE+INSERT 重发会把它们静默清成 NULL（依据 S12 K5 重演）。
         # 只加列不猜值：`vd data compute-roce` 会在同一事务里回填。
         for _col, _type in (
             ("roce_10y_min", "DOUBLE"),
@@ -2467,7 +2499,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v48（2026-11-18, reports/139 §2.2 / §11.3）：
+        # v48（2026-11-18, 依据 S15 §2.2 / §11.3）：
         # ① balance_sheet 补 7 个可免费获取的科目列（第 8/9 项 restricted_cash、
         #    inventory_provision 实测只存在于附注，东财 319 列与新浪 147 列都拿不到，故不建列）；
         # ② 新增 4 个低频域：macro_series（GDP/CPI）、bond_yield_curve（中债 3 条曲线）、
@@ -2492,7 +2524,7 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
-        # v49（2026-11-18, reports/139 §11.3）：
+        # v49（2026-11-18, 依据 S15 §11.3）：
         # institution_holdings = 「机构持仓」数据域（8 类外部序列里唯一还能免费拿到的一类）。
         # 表体在上面已定义（init 幂等重跑），这里只写迁移记账行。
         # 一个 (股票 × 报告期 × 持有人类型) 一行；6 类持有人 × 1 报告期 = 全市场一次拿全。
@@ -2944,7 +2976,7 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             )
             logger.info("SQLite schema v18 已应用")
 
-        # v19: 公告台账索引（2026-11-14, reports/121）。
+        # v19: 公告台账索引（2026-11-14, 依据 S7）。
         # 背景：`/api/research/announcements` 按 (stock_code, announcement_time)
         # 取某股时间窗公告，但表上只有 announcement_id 主键，实测 EXPLAIN 是
         # `SCAN announcement_registry`（22,179 行全扫）。两个索引分别服务
@@ -2981,7 +3013,7 @@ def init_all_schema(
     paths from environment variables (VD_ENV, VD_DUCKDB_PATH, VD_SQLITE_PATH).
     This is a convenience for CLI commands that run after _ensure_formal_env_vars().
 
-    skip_if_current (reports/79 方案 C): 当两个库的 schema_migrations 已到
+    skip_if_current (依据 S3 方案 C): 当两个库的 schema_migrations 已到
     最新版本时跳过全部 DDL——正式库上这段幂等 DDL 实测约 5s（10GB DuckDB
     上逐条 CREATE/ALTER 检查目录），是启动 8~12s 的主要成分。跳过后的启动
     路径约 3~4s。迁移版本必须随每次 schema 变更递增（DUCKDB_SCHEMA_VERSION /

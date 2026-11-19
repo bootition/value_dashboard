@@ -1,16 +1,25 @@
-"""历史总股本链回填与核验服务（P4，reports/68 §3）
+"""历史总股本链回填与核验服务（P4，依据 S1 §3）
 
 主链：CNINFO p_stock2215 锚点 + 变动事件；东财 F10 仅作近邻交叉校验。
 - 仅当 CNINFO 相邻锚点一致且中间无冲突事件，或来源明确持续有效时，
-  才可将股本延续到中间交易日（reports/68 §3.3）。
+  才可将股本延续到中间交易日（依据 S1 §3.3）。
 - 双源冲突超过容差、锚点不一致或无可验证股本的日期必须 missing；
-  禁止当前总股本、插值或默认值回填（reports/68 §3.4）。
+  禁止当前总股本、插值或默认值回填（依据 S1 §3.4）。
 - 默认十年窗口内历史总股本必须连续可验证覆盖至少 90% 的有行情交易日（§3.5）。
 
 历史日 D 的股本取值：≤D 最近主链点的 total_shares。
 verified：该点与其前一点之间的区间内，东财近邻（±10 天）事件与主链值一致，
 或无东财事件；冲突时该区间 fail-closed（主链点 verified=false）。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
+# S1  reports/68 §3 / §3.3 / §3.4 / §3.5 —— 历史总股本链主链（CNINFO p_stock2215）：
+#     只有「跨财报期双源核验通过」才可把股本延续到中间交易日（§3.3）；
+#     禁止用当前总股本、插值或默认值回填（§3.4）；历史股本连续可验证覆盖率门槛 90%（§3.5）。
+# S2  reports/74 —— 东财交叉数据落盘后只续未核验的股票，绝不重跑已核验（中断/失败可续传）。
+# S3  reports/73 —— P4 修复批次：P4-7 东财事件按 ±CROSS_NEIGHBOR_DAYS 近邻匹配；
+#     P4-11 per-stock 异常隔离（单股失败不中断整批）；P4-2 有界续传只处理缺失/陈旧的上市股票。
+
 
 from __future__ import annotations
 
@@ -36,10 +45,10 @@ logger = logging.getLogger(__name__)
 __all__ = ["CapitalHistoryUpdater", "CROSS_TOLERANCE", "CROSS_NEIGHBOR_DAYS",
            "COVERAGE_THRESHOLD_PCT"]
 
-CROSS_TOLERANCE = 0.001        # 双源相对差容差（reports/68 §3.4）
+CROSS_TOLERANCE = 0.001        # 双源相对差容差（依据 S1 §3.4）
 CROSS_NEIGHBOR_DAYS = 10       # 东财事件近邻匹配窗口（阶段0 实测双源日期集不重叠）
 RETRY_DATA_TYPE = "share_capital_history"
-COVERAGE_THRESHOLD_PCT = 90.0  # reports/68 §3.5
+COVERAGE_THRESHOLD_PCT = 90.0  # 依据 S1 §3.5
 
 
 class CapitalHistoryUpdater:
@@ -73,7 +82,7 @@ class CapitalHistoryUpdater:
         self.adapter = adapter or AdapterManager()
         self._ensure_cross_cache_table()
 
-    # ─── 东财交叉数据本地缓存（reports/74 修复：中断/失败后只续未核验，
+    # ─── 东财交叉数据本地缓存（依据 S2 修复：中断/失败后只续未核验，
     #     绝不重跑已核验股票，避免反复全量请求东财）───────────────────
     # 2026-08-13 补全（STATUS 缺口 #7 待办①）：cross_status/error 落盘，
     # 失败/空结果也记录，批次审查可见；due 游标按状态区分（error 行带
@@ -587,7 +596,7 @@ class CapitalHistoryUpdater:
                 cross_by_date[d] = float(total)
 
         for _index, _row in enumerate(rows):
-            # P4-7 修复（reports/73）：东财事件按 ±CROSS_NEIGHBOR_DAYS 近邻匹配
+            # P4-7 修复（依据 S3）：东财事件按 ±CROSS_NEIGHBOR_DAYS 近邻匹配
             # 主链点（阶段0 实测双源日期集不重叠，区间包含匹配无法核验）；
             # 有近邻点 → 数值比对判冲突；无近邻点 → 区间无法核验，fail-closed
             # （事件前后最近主链点均不可验证，保持保守语义）。
@@ -664,7 +673,7 @@ class CapitalHistoryUpdater:
                 batch_count += 1
                 if batch_cooldown_seconds > 0 and index < total:
                     time.sleep(batch_cooldown_seconds)
-            # P4-11 修复（reports/73）：per-stock 异常隔离，单股失败不中断整批
+            # P4-11 修复（依据 S3）：per-stock 异常隔离，单股失败不中断整批
             try:
                 outcome = self.update_stock(
                     code, cross_check=cross_check, cross_only=cross_only,
@@ -730,7 +739,7 @@ class CapitalHistoryUpdater:
         batch_cooldown_seconds: float = 0.0,
         progress_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        """有界续传（P4-2 修复，reports/73）：只处理"缺失/陈旧"的上市股票。
+        """有界续传（P4-2 修复，依据 S3）：只处理"缺失/陈旧"的上市股票。
 
         陈旧判定：无股本链记录，或最新锚点早于该股最新价格日（价格史尚未被
         股本覆盖）——已成功的股票下一轮自然不再入选，实现真正游标续传，

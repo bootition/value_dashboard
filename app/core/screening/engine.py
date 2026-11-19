@@ -9,6 +9,20 @@ PRD §12.3 (SC11): 排名分母只由基础股票池预设决定，
 用户添加的筛选条件不得重新计算或缩小排名分母。
 """
 
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/68 P3 / §5 / §6 —— 国债基准与股息率利差（P3）；历史研究统计字段（P4 的 §5/§6）：
+#     只 join 已发布统计域的最新版本，不触碰快照主路径。
+# S2  reports/76 P3-4 —— save-time 字段校验。
+# S3  reports/122 §2.3 J9 / §2.6 J5 —— J9 字段级遮蔽（字段当前不可信 → 拒绝执行）；
+#     J5 `dividend_yield` 与 `ttm_dividend_yield` 口径分家，废弃字段仍可执行但结果必须自带警告。
+# S4  reports/124 —— 换列时的量纲倍数（新值 = 旧值 × 本倍数），2026-11-15 实测。
+# S5  reports/131 §9.2 P0-7 / P0-8 —— 跨年口径断点：派生字段与原始列都可引用，
+#     但必须带「引用跨年口径断点原始列」警告。
+# S6  reports/133 —— 列名必须与实际口径一致（`roce_latest` 不是 TTM）。
+# S7  reports/139 §5.1 CB-09 / §11.4 / D58 —— 字段白名单的唯一判定入口（R1 单一实现）；
+#     v48 补采科目登记后筛选可引用、空值原因可归因。
+
+
 from __future__ import annotations
 
 import logging
@@ -50,7 +64,7 @@ SNAPSHOT_COLUMNS: set[str] = {
     "total_market_cap", "circ_market_cap",
     "roe", "roa", "gross_margin", "net_margin", "roic", "cf_to_net_profit",
     # ROCE 暴露三个**窗口**（5/10/20 年），每个窗口都必须拿满对应年数才出值，
-    # 所以名字与实际口径一致（reports/133）。`roce_latest` 是详情页的现况对照；
+    # 所以名字与实际口径一致（依据 S6）。`roce_latest` 是详情页的现况对照；
     # `roce_*_years` / `roce_eligible` 是口径内部门禁，不暴露给用户选。
     "roce_5y_median", "roce_10y_median", "roce_20y_median",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
@@ -64,7 +78,7 @@ SNAPSHOT_COLUMNS: set[str] = {
     "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
     "latest_close", "turnover_rate", "avg_volume", "period_return",
     "annualized_volatility", "max_drawdown",
-    # 国债基准与股息率利差（P3，reports/68）
+    # 国债基准与股息率利差（P3，依据 S1）
     "ttm_dividend_yield",
     "div_yield_spread_0p25y", "div_yield_spread_0p5y", "div_yield_spread_1y",
     "div_yield_spread_2y", "div_yield_spread_3y", "div_yield_spread_5y",
@@ -72,7 +86,7 @@ SNAPSHOT_COLUMNS: set[str] = {
 }
 
 # ─── 废弃字段（仍可执行，但不再出现在指标列表里）─────────────────────────────
-# 2026-11-14（reports/122 §2.6 J5）：`dividend_yield` 与 `ttm_dividend_yield` 在
+# 2026-11-14（依据 S3 §2.6 J5）：`dividend_yield` 与 `ttm_dividend_yield` 在
 # 正式库实测 **3,605 只精确 100 倍关系** —— 同一口径、只是时点基准不同：
 #   dividend_yield     分母用 `now()`（今天）→ 分子分母跨期，非 TTM 口径；
 #   ttm_dividend_yield 分母用 `latest_price_date`（快照价日）→ 自洽可复现。
@@ -86,7 +100,7 @@ DEPRECATED_COLUMNS: dict[str, str] = {
     "dividend_yield": "ttm_dividend_yield",
 }
 
-# 换列时的**量纲倍数**（新值 = 旧值 × 本倍数）。2026-11-15（reports/124）实测：
+# 换列时的**量纲倍数**（新值 = 旧值 × 本倍数）。2026-11-15（依据 S4）实测：
 # `dividend_yield` 存小数（0.025 = 2.5%），`ttm_dividend_yield` 存百分数（2.5），
 # 正式库 3,735 行**全部恰为 100 倍**。若只提示"改用 ttm_dividend_yield"而不说倍数，
 # 用户把 `dividend_yield > 0.03` 直接换成 `ttm_dividend_yield > 0.03` 会命中几乎全市场。
@@ -115,7 +129,7 @@ def deprecated_field_warnings(fields: Any) -> list[str]:
 
 
 def series_break_field_warnings(fields: Any) -> list[str]:
-    """引用"跨年口径断点原始列"时的警告（reports/131 §9.2 P0-7 / P0-8）。
+    """引用"跨年口径断点原始列"时的警告（依据 S5 §9.2 P0-7 / P0-8）。
 
     与 :func:`deprecated_field_warnings` **刻意分开**：
     - ``field_deprecated:*`` 表示整列口径不可复现（分母用 today、量纲漂移）；
@@ -252,7 +266,7 @@ STATEMENT_FIELDS: dict[str, set[str]] = {
         "monetary_funds", "trading_financial_assets", "notes_receivable", "accounts_receivable",
         "prepayments", "other_receivables", "inventory", "contract_assets", "total_current_assets",
         "long_term_equity_investment", "fixed_assets", "construction_in_progress", "right_of_use_assets",
-        # v48 补采科目（reports/139 §11.4 / D58）：登记后筛选可引用、空值原因可归因。
+        # v48 补采科目（依据 S7 §11.4 / D58）：登记后筛选可引用、空值原因可归因。
         # 口径：金额单位元；`fixed_assets_gross − accumulated_depreciation − 减值准备 = fixed_assets`
         # （库内无减值准备列，所以勾稽允许残差；原值<净值的行已由 repair 脚本清空）。
         "fixed_assets_gross", "accumulated_depreciation", "other_current_assets",
@@ -285,7 +299,7 @@ STATEMENT_FIELDS: dict[str, set[str]] = {
 }
 NORMALIZED_FIELDS = {f"{table}.{field}" for table, fields in STATEMENT_FIELDS.items() for field in fields}
 
-# ─── 跨年口径断点派生字段（reports/131 §9.2 P0-7 / P0-8，2026-11-16）──────────
+# ─── 跨年口径断点派生字段（依据 S5 §9.2 P0-7 / P0-8，2026-11-16）──────────
 # 原始列一行不改，断点归一只发生在派生层。SQL 模板的唯一真源在
 # `app/core/dsl/derived_fields.py`，DSL 代码生成与这里共用同一份：
 #   income.impairment_loss_positive            资产减值损失（损失为正）
@@ -349,7 +363,7 @@ MAX_POOL_LISTING_YEARS = 100
 # 已发布 statement overrides 的 VALUES 上限；超过则拒绝执行而不是无限膨胀 SQL
 MAX_OVERRIDE_VALUES = 10_000
 
-# ─── 历史研究统计字段（P4，reports/68 §5/§6）────────────────────────────
+# ─── 历史研究统计字段（P4，依据 S1 §5/§6）────────────────────────────
 # 已发布统计域字段：<metric>_stat_<window>y_<method>；筛选引擎 join 最新版本。
 STAT_METRICS: tuple[str, ...] = ("pe_ttm", "pb_mrq", "ttm_dividend_yield", "spread_10y")
 STAT_WINDOWS: tuple[int, ...] = (1, 3, 5, 10, 99)
@@ -496,14 +510,14 @@ class ScreeningEngine:
             if base in SNAPSHOT_COLUMNS or base in NORMALIZED_FIELDS or base in self._custom_fields
         }
 
-        # 2.1 字段级遮蔽（reports/122 §2.3 J9）：字段当前不可信 → 拒绝执行。
+        # 2.1 字段级遮蔽（依据 S3 §2.3 J9）：字段当前不可信 → 拒绝执行。
         #     检查 rank 基名（`free_cash_flow_market_rank` 引用的是
         #     `free_cash_flow`），否则遮蔽会被排名列绕过。
         self._reject_masked_fields(referenced_fields, masked_fields)
 
-        # 2.2 废弃字段（reports/122 §2.6 J5）：仍可执行，但结果必须自带警告，
+        # 2.2 废弃字段（依据 S3 §2.6 J5）：仍可执行，但结果必须自带警告，
         #     否则用户不知道自己在用一个会随"今天"漂移的旧口径列。
-        # 2.2b 跨年口径断点原始列（reports/131 §9.2 P0-7 / P0-8）：同样仍可执行，
+        # 2.2b 跨年口径断点原始列（依据 S5 §9.2 P0-7 / P0-8）：同样仍可执行，
         #     但必须提示"跨断点不可直接比较"并指向归一化派生字段。
         deprecation_warnings = deprecated_field_warnings(referenced_fields)
         # 已发布 DSL 指标内部的原始列引用也要冒泡（指标名本身看不出用了哪一列）
@@ -779,7 +793,7 @@ base_pool AS (
             source_table = rank_source
 
         # ─── 阶段2.5: 历史研究统计字段 join（P4）──────────────────
-        # 只 join 已发布统计域的最新版本；不触碰快照主路径（reports/68 §6）。
+        # 只 join 已发布统计域的最新版本；不触碰快照主路径（依据 S1 §6）。
         stat_fields_used = self._collect_stat_fields(conditions, sort_spec, columns_spec, rank_fields)
         if stat_fields_used:
             stat_joins: list[str] = []
@@ -1678,7 +1692,7 @@ def _rank_base_for(field: str, custom_fields: set[str]) -> str | None:
 
 
 def _is_known_field_name(field: str, custom_fields: set[str]) -> bool:
-    """字段白名单的唯一判定入口（R1 单一实现，reports/139 §5.1 CB-09）。
+    """字段白名单的唯一判定入口（R1 单一实现，依据 S7 §5.1 CB-09）。
 
     运行期 `ScreeningEngine._is_known_field` 与保存期 `validate_rule_fields`
     都调用这里。此前保存期维护的是**第二份手工白名单**，漏了
@@ -1700,10 +1714,10 @@ def _is_known_field_name(field: str, custom_fields: set[str]) -> bool:
 
 
 def validate_rule_fields(rule: dict, custom_fields: set[str] = frozenset()) -> None:
-    """Save-time field validation (reports/76 P3-4).
+    """Save-time field validation (依据 S2 P3-4).
 
     与运行期 `ScreeningEngine._is_known_field` 共用 `_is_known_field_name()`
-    这一份白名单（reports/139 §5.1 CB-09 / AGENTS R1），因此未知字段/排序/
+    这一份白名单（依据 S7 §5.1 CB-09 / AGENTS R1），因此未知字段/排序/
     结果列在保存时就被拒，不会拖到运行才报错。Raises ValueError with the
     same messages the engine uses.
     """

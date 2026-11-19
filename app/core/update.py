@@ -11,6 +11,27 @@
 - 生成缺失列表
 """
 
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/67 —— 业务概览低频域：自动集成开关 + 间隔到期才执行；失败保留旧值并进独立 retry/missing。
+# S2  reports/68 P4 —— 历史股本链 + 统计域：有界续传，失败不阻断其他步骤。
+# S3  reports/73 —— 三处修复：P4-10 仅全部成功才持久化指纹；P4-5 历史股本链 retry 由回填器消费；
+#     P3-5 国债曲线 retry 按 extra_json 消费。
+# S4  reports/114 —— 全市场追赶一次要十几小时（2026-10-20 诊断）：低频域与追赶必须分轮有界。
+# S5  reports/119 D28 / D29 ①–⑦ / P1-3 —— 手工链自动接入：补采域（D29 ②③④）、扩展指标域重建
+#     （D28，P0）、ETF 行情 + 港股分红（D29 ⑤⑥）、PDF 域（⑦）；P1-3 固定资产净额补采
+#     （2026Q3 主链只剩 1.8%）。另：`*_last_success_at` 是与体检域约定的水位键名。
+# S6  reports/120 §3 事实 4 —— 价格步骤"成功"但该股 qfq 仍停在旧值，需并入技术指标待重算集合。
+# S7  reports/122 §2.2 J6 —— qfq<raw 的股票**无条件**并入技术指标重算；只有真正算过才清名单
+#     （rejected/skipped 与 failed_codes 都留着）。
+# S8  reports/126 —— `all_pending_in_cooldown` **不算追平**（冷却与"真的没得补"必须区分）。
+# S9  reports/130 —— ROCE 域重建入口（口径 C，历史序列来自 roce_history）。
+# S10 reports/131 K5 / §9.2 P0-5 / P0-9 —— qfq 写入成功即打 technical_pending（技术三列强制重算）；
+#     指纹新增 `share_capital_history` 段后必须重算判定。
+# S11 reports/139 §2.2 #13 —— 卖方一致预期每日快照（schema v48）。
+# S12 reports/140 §2.5 —— 拆成 `update_parts/{prices,retry}.py` 的第 1 块：本文件只留薄兼容壳（委托），
+#     不改任何判据；`_PriceReplaceBuffer` 私有名与时钟源语义保持不变。
+
+
 from __future__ import annotations
 
 import contextlib
@@ -42,6 +63,17 @@ from app.core.job_status import aggregate_job_status, merge_step_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.update_parts.prices import PriceReplaceBuffer
+from app.core.update_parts.retry import (
+    ERROR_KIND_REASON_CODE,
+    NON_RETRYABLE_ERROR_KINDS,
+    check_retry_tasks,
+    cleanup_unretryable_tasks,
+    mark_retry_failed,
+    persist_price_retry,
+    settle_non_retryable_error,
+    settle_non_retryable_retries,
+)
 from app.core.update_steps import STEP_NAMES
 
 logger = logging.getLogger(__name__)
@@ -113,14 +145,11 @@ def _merge_indicator_steps(*steps: dict[str, Any] | None) -> dict[str, Any]:
     return merged
 
 
-# 契约 §1：这两类"失败"不是故障——源正常但本来就没有数据 / 源根本不支持该票。
-# 它们不得占用 retry 次数，必须直接如实登记为 missing_list。
-_NON_RETRYABLE_ERROR_KINDS: frozenset[str] = frozenset({"legal_empty", "source_unsupported"})
-# legal_empty → source_empty；source_unsupported → source_unsupported（契约 §5）。
-_ERROR_KIND_REASON_CODE: dict[str, str] = {
-    "legal_empty": "source_empty",
-    "source_unsupported": "source_unsupported",
-}
+# 契约 §1/§5 的单一真相现在在 `app/core/update_parts/retry.py`；这里只转出旧私有名，
+# 供本文件其余方法（以及既有 `from app.core.update import _NON_RETRYABLE_ERROR_KINDS`
+# 的调用点）继续按原名使用。不要在本文件复制第二份内容。
+_NON_RETRYABLE_ERROR_KINDS = NON_RETRYABLE_ERROR_KINDS
+_ERROR_KIND_REASON_CODE = ERROR_KIND_REASON_CODE
 
 
 def _source_error_kind(result: Any) -> str:
@@ -198,71 +227,30 @@ def _announcement_step_result(check: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-class _PriceReplaceBuffer:
-    """Bounded buffer of full-history price responses awaiting one grouped write.
+class _PriceReplaceBuffer(PriceReplaceBuffer):
+    """全历史价格替换的攒批缓冲（类本体已搬到 ``app/core/update_parts/prices.py``）。
 
-    2026-11-12 P0（性能）：全历史响应走"逐股独立事务"时，正式库 17M 行表上
-    一份 DELETE+INSERT 就是一次 WAL 提交，日志里 144 处 ≥10s 全静默、共
-    96.5 分钟。改为攒批后一个事务写 N 只，提交次数下降一个量级。
+    依据 S12 §2.5 拆分的第 1 块。这里只留一个**薄兼容壳**，不改任何判据：
 
-    2026-11-13 P1：上一版的时间判据是"从缓冲开张算起 5 秒"，而全历史抓取
-    单只耗时 28~635 秒 —— 每次 add 完就立刻超时，生产 13 次落盘里 12 次
-    N=1，攒批名存实亡（此时"整批事务"等价一股一事务，持写锁时长 = 503 时长）。
-    现在的判据：
-
-    * ``len >= max_stocks`` 或 ``rows >= max_rows`` → 立刻落盘（硬上限）；
-    * 否则只在"距**上一次 add** 已空闲 ``max_seconds``"**且已攒到 ≥2 只** 时
-      落盘 —— 即流水线真的没再送新数据来（快收尾/空窗），而不是"开张久了"；
-    * 只有 1 只时永不按时限落盘，由调用方在流水线排空（``finally`` flush）时
-      一次性写掉，避免证据上出现"批量=1 只"。
-
-    注意行数据本身早已由抓取侧持有，本缓冲只多持有一小段时间，
-    且有只数/行数硬上限，不会把整表读进内存。
+    * 保留 ``_PriceReplaceBuffer`` 这个历史私有名，既有
+      ``from app.core.update import _PriceReplaceBuffer`` 调用点与测试一行都不用改；
+    * 时钟源仍是**本模块**的 ``time.monotonic()``。``tests/regression/test_price_batch_flush.py``
+      用 ``monkeypatch.setattr(update_module, "time", _FakeClock())`` 跳时间，若直接复用
+      ``prices`` 模块里的 ``time``，那套 monkeypatch 会静默失效（缓冲改看真实时钟）。
+      因此这里把时钟注入为对 ``self`` 所在模块全局 ``time`` 的**运行期**查找，
+      搬移前后时钟语义完全一致。
     """
 
+    __slots__ = ()
+
     def __init__(self, *, max_stocks: int, max_rows: int, max_seconds: float) -> None:
-        self.max_stocks = max(1, int(max_stocks))
-        self.max_rows = max(1, int(max_rows))
-        self.max_seconds = max(0.001, float(max_seconds))
-        self._items: list[tuple[str, Any, Any, bool, bool]] = []
-        self._rows = 0
-        self._last_add_at = time.monotonic()
-
-    def __len__(self) -> int:
-        return len(self._items)
-
-    @property
-    def rows(self) -> int:
-        return self._rows
-
-    def add(self, item: tuple[str, Any, Any, bool, bool]) -> None:
-        self._last_add_at = time.monotonic()
-        self._items.append(item)
-        _, raw_result, qfq_result, raw_full, qfq_full = item
-        if raw_full and raw_result is not None:
-            self._rows += len(raw_result.data or ())
-        if qfq_full and qfq_result is not None:
-            self._rows += len(qfq_result.data or ())
-
-    def should_flush(self) -> bool:
-        if not self._items:
-            return False
-        if len(self._items) >= self.max_stocks:
-            return True
-        if self._rows >= self.max_rows:
-            return True
-        # 时间判据：只看"距上次 add 的空闲时长"，且至少攒到 2 只。
-        # 单只时永不按时限 flush（否则慢抓取下永远只能 N=1）。
-        if len(self._items) < 2:
-            return False
-        return (time.monotonic() - self._last_add_at) >= self.max_seconds
-
-    def drain(self) -> list[tuple[str, Any, Any, bool, bool]]:
-        items = self._items
-        self._items = []
-        self._rows = 0
-        self._last_add_at = time.monotonic()
-        return items
+        super().__init__(
+            max_stocks=max_stocks,
+            max_rows=max_rows,
+            max_seconds=max_seconds,
+            # 必须是 lambda：``update.time`` 可能在构造之后被 monkeypatch 替换。
+            clock=lambda: time.monotonic(),
+        )
 
 
 class IncrementalUpdater:
@@ -397,7 +385,7 @@ class IncrementalUpdater:
             "universe_refresh_interval_days", default=1
         )
 
-        # ─── 手工链自动接入（2026-11-14，reports/119 D28/D29）───────────
+        # ─── 手工链自动接入（2026-11-14，依据 S5 D28/D29）───────────
         # 背景：7 条数据链路"功能完整、跑通过、有数据"，但唯一触发方式是人
         # 工敲命令，于是停在最后一次有人跑的那天（indicator_ext 停在
         # 2026-06-30 → 界面 55 个扩展筛选字段全部失效）。这里给每条链补上
@@ -457,7 +445,7 @@ class IncrementalUpdater:
         self.deducted_profit_missing_retry_days: int = self._load_update_config(
             "deducted_profit_missing_retry_days", default=7
         )
-        # 固定资产净额补采（reports/119 P1-3，2026Q3 主链只剩 1.8%）
+        # 固定资产净额补采（依据 S5 P1-3，2026Q3 主链只剩 1.8%）
         self.fixed_assets_auto_enabled: bool = self._load_update_flag(
             "fixed_assets_auto_enabled", default=True
         )
@@ -806,10 +794,10 @@ class IncrementalUpdater:
         updated_price_codes = price_step.pop("_updated_codes", [])
         price_xdxr_codes = price_step.pop("_xdxr_codes", [])
         price_raw_full_refetch = price_step.pop("_raw_full_refetch", False)
-        # reports/122 §2.2 J6：上一轮因 qfq 滞后进入待重算名单的股票，本轮**无条件**并入重算
+        # 依据 S7 §2.2 J6：上一轮因 qfq 滞后进入待重算名单的股票，本轮**无条件**并入重算
         # 集合（与指纹/价格是否变化无关），重算成功后从名单移除。
         tech_pending_codes = self._load_tech_recompute_pending()
-        # reports/131 §9.2 P0-5：价格步骤刚写入 qfq 的股票（含上一轮失败残留）
+        # 依据 S10 §9.2 P0-5：价格步骤刚写入 qfq 的股票（含上一轮失败残留）
         # 必须强制重算技术三列。走价格域增量即可，不升级为整股全量重算。
         technical_pending_codes = self._load_technical_pending()
 
@@ -1029,7 +1017,7 @@ class IncrementalUpdater:
             except Exception as error:
                 logger.warning("查询国债利差重算范围失败: %s", error)
 
-        # 5.2 手工链自动接入①：补采域（reports/119 D29 ②③④）。
+        # 5.2 手工链自动接入①：补采域（依据 S5 D29 ②③④）。
         #     折旧摊销/资本支出与资产负债表补充科目是 indicator_ext 的直接
         #     输入，扣非净利润是 income_statement 的列补全，金融监管指标是
         #     balance_sheet 的 6 列 —— 全部必须在指标快照/extension 重建之前
@@ -1064,12 +1052,12 @@ class IncrementalUpdater:
                     retries_step.get("recompute_codes", [])
                 )
 
-        # 5.3 手工链自动接入②：扩展指标域重建（reports/119 D28，P0）。
+        # 5.3 手工链自动接入②：扩展指标域重建（依据 S5 D28，P0）。
         #     必须排在快照指标之前：ext 落后于最新完整三表期时它就是死条件
         #     （界面 55 个扩展筛选字段全 NULL）。该步骤失败只让自己 failed，
         #     不动 indicator_snapshot，也不影响 readiness。
         report_step("indicator_ext", self._refresh_indicator_ext())
-        # 5.4 ROCE 域重建（2026-11-16，reports/130/131）。
+        # 5.4 ROCE 域重建（2026-11-16，依据 S9/S10）。
         #     与 indicator_ext 同样的 D28 约束：派生域没有重建触发就会冻结，
         #     而 indicator_snapshot 的 roce_* 五列在每次快照重发时会被重算
         #     （见 calculator._publish_snapshot），前提是 roce_history 是最新的。
@@ -1117,7 +1105,7 @@ class IncrementalUpdater:
             # 完整重算组：财务变化/明细回填/失败重试成功，输入域不确定，保
             # 守整股重算全部指标。价格变化组只重算价格域字段；回购/融资
             # 变化组只重算分红融资比三列（2026-09-08 提速计划）。
-            # reports/122 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
+            # 依据 S7 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
             # 全量重算（波动率/回撤/区间收益读 qfq 历史），而价格域增量路径
             # 会因为"最新价/最新日期没变"直接跳过（见 compute_price_sensitive）。
             full_codes = list(dict.fromkeys([
@@ -1131,7 +1119,7 @@ class IncrementalUpdater:
                 code for code in list(dict.fromkeys([
                     *updated_price_codes,
                     *price_stale_codes,
-                    # 2026-11-16 reports/131 §9.2 P0-5：qfq 写入成功但最新价未变
+                    # 2026-11-16 依据 S10 §9.2 P0-5：qfq 写入成功但最新价未变
                     # 的股票也要进价格域重算（force 绕过 skip），否则技术三列
                     # 永远停在补齐前写死的 NULL。
                     *technical_pending_codes,
@@ -1198,7 +1186,7 @@ class IncrementalUpdater:
                     snapshot_step = event_step
                 ran_indicator_step = True
             if ran_indicator_step:
-                # reports/122 §2.2 J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
+                # 依据 S7 §2.2 J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
                 # 里的股票继续保留，下一轮再强制重算。
                 if tech_pending_codes:
                     snapshot_step["tech_recompute_pending_cleared"] = (
@@ -1226,13 +1214,13 @@ class IncrementalUpdater:
                 else:
                     report_step("indicators", treasury_step)
 
-        # 3. 业务概览低频域（reports/67 独立域）：仅当自动集成启用且间隔到期
+        # 3. 业务概览低频域（依据 S1 独立域）：仅当自动集成启用且间隔到期
         #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
         report_step("business_overview", self._refresh_business_overview(detail_cb=detail_cb))
 
         # 4. 国债曲线已提前到指标快照重算之前执行。
 
-        # 5. 历史股本链 + 统计域（reports/68 P4）：有界续传；失败不阻断其他步骤
+        # 5. 历史股本链 + 统计域（依据 S2 P4）：有界续传；失败不阻断其他步骤
         report_step("capital_history", self._refresh_capital_history(detail_cb=detail_cb))
         report_step(
             "research_statistics",
@@ -1242,7 +1230,7 @@ class IncrementalUpdater:
             ),
         )
 
-        # 5.4 手工链自动接入③：ETF 行情 + 港股分红（reports/119 D29 ⑤⑥）。
+        # 5.4 手工链自动接入③：ETF 行情 + 港股分红（依据 S5 D29 ⑤⑥）。
         #     两者都是"独立低频域"：不进 A 股 readiness、不影响主链快照，
         #     只用各自的水位 + 每轮上限推进。放在统计域之后，避免它们的
         #     网络等待挤在价格/财务的临界路径上。
@@ -1253,7 +1241,7 @@ class IncrementalUpdater:
         #     指数估值每日 1 次低频域。失败保留旧值并进入独立 retry/missing。
         report_step("index_valuation", self._refresh_index_valuation())
 
-        # 5.5 卖方一致预期快照（schema v48，reports/139 §2.2 #13）。
+        # 5.5 卖方一致预期快照（schema v48，依据 S11 §2.2 #13）。
         #     接口只给**当期横截面**、无历史参数（source_probe §1.B6），所以「今天不打点，
         #     这一天就永远没有」——它必须每天都跑。低频纪律与 etf_prices 同款：
         #     data_refresh_state 水位每日最多 1 次（值 = 北京日期），失败只让本步骤
@@ -1419,7 +1407,7 @@ class IncrementalUpdater:
                     parallel=0,
                     progress_cb=stats_progress,
                 )
-            # P4-10 修复（reports/73）：仅全部成功才持久化指纹；
+            # P4-10 修复（依据 S3）：仅全部成功才持久化指纹；
             # partial（部分股票失败）不落指纹，下一轮自动重试失败股。
             if report["status"] == "success":
                 with self.sqlite.transaction() as conn:
@@ -1498,7 +1486,7 @@ class IncrementalUpdater:
             return {"status": "failed", "error": str(error)}
 
     def _refresh_analyst_forecast(self) -> dict[str, Any]:
-        """卖方一致预期每日快照（schema v48，reports/139 §2.2 #13）。
+        """卖方一致预期每日快照（schema v48，依据 S11 §2.2 #13）。
 
         唯一实现是 `app/core/analyst_forecast.py::refresh_daily()`：本方法只负责
         「拿水位读写函数 → 调用 → 异常降级」，不重复任何抓取/写库口径。
@@ -1519,7 +1507,7 @@ class IncrementalUpdater:
             logger.warning("一致预期快照失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
-    # ─── 手工链自动接入（2026-11-14，reports/119 D28/D29）────────────────────
+    # ─── 手工链自动接入（2026-11-14，依据 S5 D28/D29）────────────────────
     #
     # 下面 7 个步骤对应审计报告 119 里"功能完整、跑通过、有数据，但没接进每天
     # 自动跑的主流程"的链路（PDF 域不在本次范围）。统一约定：
@@ -1539,7 +1527,7 @@ class IncrementalUpdater:
     _HK_DIVIDENDS_STATE_KEY = "hk_dividends_last_refresh"
 
     #: 同一水位的第二个键名：`*_last_refresh` 是本文件历史命名
-    #: （buyback/csrc 同款）；`*_last_success_at` 是 reports/119 D29 与
+    #: （buyback/csrc 同款）；`*_last_success_at` 是 依据 S5 D29 与
     #: `app/core/quality/asset_health.py::MANUAL_CHAIN_STALE` 约定的键名。
     #: 两个都写，保证"水位/停摆探针"两套读取方都能看到同一事实。
     _DOMAIN_SUCCESS_ALIASES: dict[str, str] = {
@@ -1674,7 +1662,7 @@ class IncrementalUpdater:
             # 若还有残留（首次 Q3 追补就是这种：全市场 5,575 只一次跑不完），
             # 不推进会 7 天白等，续传进度就会卡死在第一轮。
             #
-            # 2026-11-16（reports/126）：`all_pending_in_cooldown` **不算追平**。
+            # 2026-11-16（依据 S8）：`all_pending_in_cooldown` **不算追平**。
             # 旧实现把"待补全在冷却"也报成 `no_pending_codes` 并推进水位，
             # 于是"水位前进、待补数不降"（balance_sheet_ext 105 只）永远不收敛，
             # 体检的 CHAIN_PROGRESS_STALLED 只能一直红着。
@@ -1699,7 +1687,7 @@ class IncrementalUpdater:
         return step
 
     def _refresh_cashflow_supplement(self) -> dict[str, Any]:
-        """折旧摊销/资本支出补采（reports/119 D29 ②，停在 2026-06-30）。
+        """折旧摊销/资本支出补采（依据 S5 D29 ②，停在 2026-06-30）。
 
         根因**不是没人跑，而是续传判据写错**：旧脚本用"本表有任意
         eastmoney_f10 行就跳过"，第一次跑完后再也补不到新报告期。判据已下沉
@@ -1734,7 +1722,7 @@ class IncrementalUpdater:
         )
 
     def _refresh_fixed_assets(self) -> dict[str, Any]:
-        """固定资产净额补采（reports/119 P1-3）。
+        """固定资产净额补采（依据 S5 P1-3）。
 
         2026Q3 主链 `balance_sheet.fixed_assets` 只剩 1.8%（上期 99.9%）：
         新浪 Q3 响应里没有「固定资产净额」这一项。东财 F10 资产负债表有该字段，
@@ -1752,7 +1740,7 @@ class IncrementalUpdater:
         )
 
     def _refresh_deducted_profit(self) -> dict[str, Any]:
-        """扣非净利润补采（reports/119 D29 ③，2026-06 起基本没数）。
+        """扣非净利润补采（依据 S5 D29 ③，2026-06 起基本没数）。
 
         只 UPDATE `income_statement.deducted_net_profit` 的 NULL 值：既有
         CSMAR/主链值保持不动；源字段缺失时结果是"没更新"而不会写坏三表。
@@ -1769,7 +1757,7 @@ class IncrementalUpdater:
         )
 
     def _refresh_regulatory_metrics(self) -> dict[str, Any]:
-        """6 个金融监管指标补采（reports/119 D29 ④，只到 2026-06-30）。
+        """6 个金融监管指标补采（依据 S5 D29 ④，只到 2026-06-30）。
 
         该域**每次到期全量重抓**（每只金融股 1 次请求、只取最新一期），没有
         "有没有本源行"的续传判据，所以不存在上面那个判据 bug；接入调度只需
@@ -1824,7 +1812,7 @@ class IncrementalUpdater:
         return step
 
     def _refresh_roce(self) -> dict[str, Any]:
-        """ROCE 域重建（reports/130/131）。
+        """ROCE 域重建（依据 S9/S10）。
 
         门控：`roce_history` 的最新年报期 < 三表最新年报期，或 `roce_history` 为空
         （从未构建）时重建。ROCE 只吃年报，季报更新不触发，一年最多重建一次。
@@ -1876,7 +1864,7 @@ class IncrementalUpdater:
         return step
 
     def _refresh_indicator_ext(self) -> dict[str, Any]:
-        """扩展指标域 indicator_ext 重建（reports/119 D28，P0）。
+        """扩展指标域 indicator_ext 重建（依据 S5 D28，P0）。
 
         门控（两条硬规则 + 一条兜底）：
         1. `max(indicator_ext.report_date) < 最新完整三表报告期` → **必须**重建；
@@ -1906,7 +1894,7 @@ class IncrementalUpdater:
                 "ext_max_period": decision.get("ext_max_period"),
                 "complete_trio_period": decision.get("complete_period"),
                 "ext_rows": decision.get("ext_rows", 0),
-                # 2026-11-17（reports/131 P0-9）：指纹新增 `share_capital_history` 段后，
+                # 2026-11-17（依据 S10 P0-9）：指纹新增 `share_capital_history` 段后，
                 # 归因能分清"全量重建"与"只有股本变了"。后者只重建受影响的少数股票
                 # （689009 的 unit_rescale:10 就是这一类），避免 36 万行整表重写。
                 "ext_scope": decision.get("scope"),
@@ -1956,7 +1944,7 @@ class IncrementalUpdater:
         return step
 
     def _refresh_etf_prices(self) -> dict[str, Any]:
-        """ETF 行情（reports/119 D29 ⑥，停在 2026-09-18）。
+        """ETF 行情（依据 S5 D29 ⑥，停在 2026-09-18）。
 
         此前 ETF 只在 `retry` 分支被碰到：没有 retry 记录就永远不刷新。
         现在按日到期 + 每轮上限 + 截止时间，只刷新 `etf_meta` 里登记的代码
@@ -2011,7 +1999,7 @@ class IncrementalUpdater:
         return step
 
     def _refresh_hk_dividends(self) -> dict[str, Any]:
-        """港股分红（reports/119 D29 ⑤，2026-09-04 导入后没再跑）。
+        """港股分红（依据 S5 D29 ⑤，2026-09-04 导入后没再跑）。
 
         只刷新映射表里的 A+H 股票（约 179 只），按"最久未刷新优先"分批，
         每批 20 只 + 总截止时间有界；源侧限速 ≤2 req/s，失败保留旧值并进入
@@ -2510,9 +2498,9 @@ class IncrementalUpdater:
         logger.info("[增量] %d 只 qfq 已完成全历史重拉，移出待重拉集合", cleared)
         return cleared
 
-    # ─── 技术指标待重算集合（2026-11-14 P0 J6，reports/122 §2.2：qfq 补齐后到不触发重算）──────
+    # ─── 技术指标待重算集合（2026-11-14 P0 J6，依据 S7 §2.2：qfq 补齐后到不触发重算）──────
     #
-    # 背景（reports/120 §3 事实 4）：价格步骤"成功"但该股 qfq 仍停在旧的
+    # 背景（依据 S6 §3 事实 4）：价格步骤"成功"但该股 qfq 仍停在旧的
     # 交易日（源侧 qfq 索引滞后 / 复权序列补齐晚一天）。此时 raw 已经推进，
     # 而价格域指标（annualized_volatility / period_return / max_drawdown /
     # MA 族）全都读 **qfq**：
@@ -2531,7 +2519,7 @@ class IncrementalUpdater:
     _TECH_RECOMPUTE_PENDING_LIMIT = 2000
     _TECH_RECOMPUTE_PENDING_TTL_DAYS = 3
 
-    # ─── 技术指标强制重算集合（2026-11-16，reports/131 §9.2 P0-5）──────────────
+    # ─── 技术指标强制重算集合（2026-11-16，依据 S10 §9.2 P0-5）──────────────
     #
     # `tech_recompute_pending` 只覆盖"qfq 最新日 < raw 最新日"的**滞后**形态；
     # 还有一种形态它永远抓不到：qfq 在历史上是事后补齐的（例如某轮只补到旧日期，
@@ -4469,77 +4457,12 @@ class IncrementalUpdater:
                 )
 
     def _settle_non_retryable_retries(self) -> int:
-        """Settle legal-empty / source-unsupported retries straight into missing_list.
-
-        ``announcements`` 除外：它的 retry 行是公告 pending 的持久化标记
-        （PRD §7.4），由财务刷新流程消费，不能被当成缺失结算掉。
-
-        2026-11-12 P1（契约 §5）：``legal_empty``（新股无分红、当日无公告…）与
-        ``source_unsupported``（BSE 无交叉源）不是故障。旧流程让它们和真故障
-        共用"重试 5 次 → retry_exhausted"通道，于是 301688/301689/601091/920201
-        在 retry_count=4/5 时就会被以假名义永久丢进 missing_list。
-        现在直接结算并删除 retry 行：不占重试次数、原因如实。
-        """
-        try:
-            rows = self.sqlite.query(
-                """SELECT id, stock_code, data_type,
-                          COALESCE(error_kind, 'unknown') AS error_kind
-                   FROM retry_list
-                   WHERE COALESCE(error_kind, 'unknown') IN ('legal_empty', 'source_unsupported')
-                     AND data_type != 'announcements'"""
-            )
-        except Exception as error:
-            logger.warning("读取不可重试任务失败: %s", error)
-            return 0
-        if not rows:
-            return 0
-        settled = 0
-        for row in rows:
-            kind = str(row["error_kind"] or "unknown")
-            reason_code = _ERROR_KIND_REASON_CODE.get(kind)
-            if reason_code is None:  # pragma: no cover - SQL 已过滤，防御性分支
-                continue
-            try:
-                with self.sqlite.transaction() as conn:
-                    conn.execute(
-                        """INSERT INTO missing_list (stock_code, field_name, reason_code)
-                           VALUES (?, ?, ?)
-                           ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
-                           DO UPDATE SET reason_code = excluded.reason_code,
-                                         detected_at = CURRENT_TIMESTAMP""",
-                        [row["stock_code"], row["data_type"], reason_code],
-                    )
-                    conn.execute("DELETE FROM retry_list WHERE id = ?", [row["id"]])
-                settled += 1
-            except Exception as error:
-                logger.warning(
-                    "结算不可重试任务失败 %s/%s: %s",
-                    row["stock_code"], row["data_type"], error,
-                )
-        if settled:
-            logger.info(
-                "[增量] %d 条合法空/源不支持任务已直接结算为 missing（不占重试次数）",
-                settled,
-            )
-        return settled
+        """批量结算 legal_empty / source_unsupported（实现已搬到 ``app/core/update_parts/retry.py``）。"""
+        return settle_non_retryable_retries(self.sqlite, logger=logger)
 
     def _check_retry_tasks(self) -> list[dict]:
-        """读取待重试任务列表（先结算不可重试种类，再排除它们）"""
-        # 契约 §5：legal_empty / source_unsupported 不再进入重试队列，直接结算。
-        self._settle_non_retryable_retries()
-        try:
-            rows = self.sqlite.query(
-                "SELECT id, stock_code, data_type, adapter, error, retry_count, extra_json, "
-                "COALESCE(error_kind, 'unknown') AS error_kind "
-                "FROM retry_list WHERE retry_count < max_retries "
-                "AND COALESCE(error_kind, 'unknown') NOT IN ('legal_empty', 'source_unsupported') "
-                "AND (next_retry_at IS NULL OR next_retry_at <= CURRENT_TIMESTAMP) "
-                "ORDER BY last_attempt ASC LIMIT 100"
-            )
-            return rows
-        except Exception as e:
-            logger.warning(f"读取重试列表失败: {e}")
-            return []
+        """读取待重试任务列表（实现已搬到 ``app/core/update_parts/retry.py``）。"""
+        return check_retry_tasks(self.sqlite, self._settle_non_retryable_retries, logger=logger)
 
     def _update_trading_dates(self) -> dict:
         """更新交易日历"""
@@ -4793,7 +4716,7 @@ class IncrementalUpdater:
         # 本地数据陈旧时默认仍走增量：从本地最新日期补缺口即可覆盖全部缺失
         # 交易日。整段重拉只作为显式数据修复手段（price_full_refetch_on_stale），
         # 因为它会把每股数千行历史 DELETE+INSERT 回 17M 行主表，实测单股 10s+，
-        # 全市场追赶一次要十几小时（2026-10-20 诊断，reports/114）。
+        # 全市场追赶一次要十几小时（2026-10-20 诊断，依据 S4）。
         raw_full_refetch = False
         if self.price_full_refetch_on_stale and latest_local:
             try:
@@ -5107,7 +5030,7 @@ class IncrementalUpdater:
                 qfq_lag_threshold,
                 ", ".join(qfq_lag["qfq_lag_codes"]),
             )
-        # 2026-11-14 P0 J6（reports/122 §2.2）：qfq 落后自己 raw 的股票必须写进"技术指标待重算
+        # 2026-11-14 P0 J6（依据 S7 §2.2）：qfq 落后自己 raw 的股票必须写进"技术指标待重算
         # 名单"。价格步骤"成功"只说明 raw 落库成功；价格域指标读的是 qfq，
         # 而下一轮补 qfq 时 raw 已最新 → 重算集合为空 → 指标永久停在旧值。
         tech_lag_watermarks = self._qfq_lag_watermarks(
@@ -5115,7 +5038,7 @@ class IncrementalUpdater:
         )
         tech_lag_codes = sorted(tech_lag_watermarks)
         tech_pending_marked = self._mark_tech_recompute_pending(tech_lag_watermarks)
-        # 2026-11-16（reports/131 §9.2 P0-5）：**qfq 写入成功**的每一只都打上
+        # 2026-11-16（依据 S10 §9.2 P0-5）：**qfq 写入成功**的每一只都打上
         # technical_pending 标记。这覆盖 tech_recompute_pending 抓不到的形态：
         # qfq 事后补齐后与 raw 齐平（滞后判据为假），但快照技术三列仍停在
         # 补齐前算出的 NULL。下一阶段（或下一轮）强制重算，成功后移出。
@@ -5148,11 +5071,11 @@ class IncrementalUpdater:
             "write_batch_sizes": write_batch_sizes[:50],
             "max_batch_stocks": max(write_batch_sizes) if write_batch_sizes else 0,
             "qfq_refetch_pending_cleared": cleared_qfq_pending,
-            # reports/122 §2.2 J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
+            # 依据 S7 §2.2 J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
             "tech_recompute_lag_count": len(tech_lag_codes),
             "tech_recompute_pending_marked": tech_pending_marked,
             "tech_recompute_lag_codes": tech_lag_codes[:20],
-            # reports/131 §9.2 P0-5：qfq 写入成功 → technical_pending（技术三列强制重算）
+            # 依据 S10 §9.2 P0-5：qfq 写入成功 → technical_pending（技术三列强制重算）
             "technical_pending_marked": technical_pending_marked,
             "technical_pending_codes": sorted(technical_watermarks)[:20],
             "_updated_codes": updated_codes,
@@ -5814,31 +5737,13 @@ class IncrementalUpdater:
         return len(ids)
 
     def _cleanup_unretryable_tasks(self) -> int:
-        """Drop retry entries whose data domain has no per-stock refetch path.
-
-        listing_info / stock_list / trading_dates etc. are maintained by the
-        universe step, not by refetch_one. Historical failures of those types
-        (e.g. the akshare outage window) would otherwise fail forever on every
-        retry round. Their remaining gaps stay visible in missing_list.
-        """
-        # 先给"一次都没真正尝试"的历史行一次干净重试，再清理无路径域。
-        self._recheck_zero_attempt_retries()
-        rows = self.sqlite.query(
-            f"""SELECT id FROM retry_list
-                WHERE data_type IN ({", ".join("?" for _ in self._CLEANUP_RETRY_DATA_TYPES)})""",
-            list(self._CLEANUP_RETRY_DATA_TYPES),
+        """清理无逐股重试路径域的死循环条目（实现已搬到 ``app/core/update_parts/retry.py``）。"""
+        return cleanup_unretryable_tasks(
+            self.sqlite,
+            self._CLEANUP_RETRY_DATA_TYPES,
+            self._recheck_zero_attempt_retries,
+            logger=logger,
         )
-        if not rows:
-            return 0
-        ids = [row["id"] for row in rows]
-        self.sqlite.execute(
-            "DELETE FROM retry_list WHERE id IN ({})".format(
-                ", ".join("?" for _ in ids)
-            ),
-            ids,
-        )
-        logger.info("[增量] 清理 %d 条无重试路径的失败任务", len(ids))
-        return len(ids)
 
     def _resolve_legal_empty_funding_missing(self) -> int:
         """Resolve A-share placement_funding source_empty markers.
@@ -5968,7 +5873,7 @@ class IncrementalUpdater:
                         self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
                     continue
                 if data_type == "share_capital_history":
-                    # P4-5 修复（reports/73）：历史股本链 retry 由回填器消费
+                    # P4-5 修复（依据 S3）：历史股本链 retry 由回填器消费
                     # 2026-08-14 红队 F1：单股异常（如 DuckDB FatalException
                     # "Failed to delete all rows from index"）曾逃逸到 run_once，
                     # 炸掉整轮更新且 retry_count 永不递增（永久死循环）。
@@ -5998,7 +5903,7 @@ class IncrementalUpdater:
                         self._mark_retry_failed(retry_id, outcome.get("error", "retry failed"))
                     continue
                 if data_type == "treasury_yield_curve":
-                    # P3-5 修复（reports/73）：国债曲线 retry 按 extra_json
+                    # P3-5 修复（依据 S3）：国债曲线 retry 按 extra_json
                     # 恢复对应模式（history=按期限回填，daily=按日期日终）
                     from app.core.treasury import TreasuryCurveUpdater
                     try:
@@ -6228,27 +6133,16 @@ class IncrementalUpdater:
         data_type: str,
         outcome: dict[str, Any],
     ) -> bool:
-        """Settle a retry whose re-fetch proved the failure is not retryable.
-
-        2026-11-12：`error_kind=legal_empty`（新股无已实施分红）与
-        `source_unsupported`（北交所/B 股无该源）不是故障。此前重试路径只看
-        ``status != success``，于是这些任务被反复重试直到 max_retries，最终以
-        ``retry_exhausted`` 的假名义永久写进 missing_list。现在直接按真实原因
-        登记 missing 并移除 retry 行，不消耗重试次数。
-
-        Returns: True 表示已结算（调用方不应再计为 still_failing）。
-        """
-        error_kind = str(outcome.get("error_kind") or "")
-        if error_kind not in _NON_RETRYABLE_ERROR_KINDS:
-            return False
-        reason_code = _ERROR_KIND_REASON_CODE.get(error_kind, "source_empty")
-        self._record_missing(stock_code, data_type, reason_code)
-        self.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
-        logger.info(
-            "[增量] %s %s 判定为 %s，直接登记 missing(%s) 并移出重试队列",
-            stock_code, data_type, error_kind, reason_code,
+        """单条"非故障失败"结算（实现已搬到 ``app/core/update_parts/retry.py``）。"""
+        return settle_non_retryable_error(
+            self.sqlite,
+            self._record_missing,
+            retry_id,
+            stock_code,
+            data_type,
+            outcome,
+            logger=logger,
         )
-        return True
 
     def refetch_one(self, stock_code: str, data_type: str, *, incremental: bool = False) -> dict[str, Any]:
         """Refetch one supported dataset through the same durable write paths as init.
@@ -6431,39 +6325,8 @@ class IncrementalUpdater:
         adjust: str,
         rows: list[dict[str, Any]],
     ) -> None:
-        """Persist a successful price retry before its queue item is removed."""
-        if adjust not in {"raw", "qfq"}:
-            raise ValueError(f"unsupported price adjustment: {adjust}")
-        table = "price_daily_raw" if adjust == "raw" else "price_daily_qfq"
-        with self.duck.transaction() as connection:
-            connection.executemany(
-                f"""INSERT INTO {table}
-                    (stock_code, trade_date, open, high, low, close, volume, turnover,
-                     turnover_rate)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(stock_code, trade_date) DO UPDATE SET
-                      open=COALESCE(excluded.open, {table}.open),
-                      high=COALESCE(excluded.high, {table}.high),
-                      low=COALESCE(excluded.low, {table}.low),
-                      close=COALESCE(excluded.close, {table}.close),
-                      volume=COALESCE(excluded.volume, {table}.volume),
-                      turnover=COALESCE(excluded.turnover, {table}.turnover),
-                      turnover_rate=COALESCE(excluded.turnover_rate, {table}.turnover_rate)""",
-                [
-                    (
-                        stock_code,
-                        row.get("trade_date"),
-                        row.get("open"),
-                        row.get("high"),
-                        row.get("low"),
-                        row.get("close"),
-                        row.get("volume"),
-                        row.get("turnover"),
-                        row.get("turnover_rate"),
-                    )
-                    for row in rows
-                ],
-            )
+        """价格重试成功后的先落值（实现已搬到 ``app/core/update_parts/retry.py``）。"""
+        persist_price_retry(self.duck, stock_code, adjust, rows)
 
     def _persist_price_with_lineage(self, stock_code: str, adjust: str, result: Any) -> None:
         """Commit a price response and its source evidence as one transaction."""
@@ -6513,51 +6376,12 @@ class IncrementalUpdater:
         )
 
     def _mark_retry_failed(self, retry_id: int, error: str) -> None:
-        """Retain a failed retry and update its diagnostic state.
+        """重试失败条目的落地与退避排期（实现已搬到 ``app/core/update_parts/retry.py``）。
 
-        达到 max_retries 后：除 announcements（是公告 pending 的持久化标记，
-        由财务刷新路径持续消费）外，把条目转记到 missing_list 并移出活跃
-        重试队列，避免永久滞留且页面不可见（2026-09-08 红队修复）。
+        搬走的是 46 行 SQL 与退避公式（``MIN(24, 1 << MIN(retry_count + 1, 5))`` 小时）；
+        本方法只做参数转发，签名、返回、异常与日志通道（``app.core.update``）都不变。
         """
-        now = datetime.now(UTC).isoformat()
-        with self.sqlite.transaction() as conn:
-            cursor = conn.execute(
-                """UPDATE retry_list
-                   SET retry_count = retry_count + 1, error = ?, last_attempt = ?,
-                       next_retry_at = datetime('now', '+' || MIN(24, 1 << MIN(retry_count + 1, 5)) || ' hours')
-                   WHERE id = ?""",
-                [error[:500], now, retry_id],
-            )
-            if cursor.rowcount != 1:
-                return
-            rows = conn.execute(
-                """SELECT stock_code, data_type, extra_json, retry_count, max_retries,
-                          COALESCE(error_kind, 'unknown') AS error_kind
-                   FROM retry_list WHERE id = ?""",
-                [retry_id],
-            ).fetchall()
-            if not rows:
-                return
-            row = rows[0]
-            stock_code = row["stock_code"]
-            data_type = row["data_type"]
-            if row["retry_count"] < row["max_retries"] or data_type == "announcements":
-                return
-            # 契约 §5：耗尽时 reason_code 保持 retry_exhausted，field_name 带上
-            # error_kind 便于追溯"为什么耗尽"（unknown 时不加后缀，兼容旧行）。
-            error_kind = str(row["error_kind"] or "unknown")
-            field_name = f"retry_exhausted:{data_type}"
-            if error_kind not in {"", "unknown", "none"}:
-                field_name = f"{field_name}:{error_kind}"
-            conn.execute(
-                """INSERT INTO missing_list (stock_code, field_name, reason_code)
-                   VALUES (?, ?, 'retry_exhausted')
-                   ON CONFLICT(stock_code, field_name) WHERE resolved_at IS NULL
-                   DO UPDATE SET reason_code = excluded.reason_code,
-                                 detected_at = CURRENT_TIMESTAMP""",
-                [stock_code, field_name],
-            )
-            conn.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+        mark_retry_failed(self.sqlite, retry_id, error, logger=logger)
 
     def _record_failure(
         self,

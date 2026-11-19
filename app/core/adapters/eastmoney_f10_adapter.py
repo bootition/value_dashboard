@@ -1,10 +1,10 @@
 """东财 F10 业务概览适配器（独立低频域）
 
-数据来源：东方财富 PC_HSF10 公开结构化接口（reports/67 首期主源）：
+数据来源：东方财富 PC_HSF10 公开结构化接口（依据 S2 首期主源）：
 - CompanySurvey/PageAjax  公司资料（公司简介 / 经营范围 / CSRC 行业 / 员工数）
 - BusinessAnalysis/PageAjax  主营构成（按产品 / 行业 / 地区，仅随定期报告更新）
 
-语义边界（reports/67 §4）：
+语义边界（依据 S2 §4）：
 - 每项数据 confidence="approximate"，必须显示报告期、来源与抓取时间。
 - 空 / 畸形响应（无 jbzl / zygcfx，或返回 {"status": ..., "message": ...}）
   如实返回 missing，不伪造值；北交所缺失同样自然返回 missing。
@@ -12,6 +12,13 @@
   不与其他数据源共享限速窗口，防止 F10 故障传染股票价格源。
 - 支持注入 httpx.Client（含 transport），便于离线 fixture 测试。
 """
+
+# 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，本块登记全部原文小节号）
+# S1  reports/61 —— 代理探测方法（127.0.0.1:10808 直连判定口径）。
+# S2  reports/67 / §4 / 产品裁决 —— 业务概览首期主源；语义边界见 §4；主营构成类型 1/2/3 的取舍。
+# S3  reports/68 §6 —— 架构安全门槛：单源限速不高于 2 req/s。
+# S4  reports/75 —— 纪律延续：缺必需参数时不发请求、不触发熔断。
+
 
 from __future__ import annotations
 
@@ -48,7 +55,7 @@ _DEFAULT_USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
-# 主营构成类型：1=产品 2=行业 3=地区（reports/67 产品裁决）
+# 主营构成类型：1=产品 2=行业 3=地区（依据 S2 产品裁决）
 BREAKDOWN_TYPE_LABELS: dict[int, str] = {1: "产品", 2: "行业", 3: "地区"}
 
 # 兼容代码前缀剥离：SH600519 / 600519.SH / 600519
@@ -96,7 +103,7 @@ class EastMoneyF10Adapter(BaseAdapter):
     """东财 F10 适配器（company_profile / business_breakdown / placement_funding）。
 
     独立限速实例：与其他数据源不共享请求间隔。默认 0.5s/请求，
-    保证不高于 2 req/s（reports/68 §6 架构安全门槛）。
+    保证不高于 2 req/s（依据 S3 §6 架构安全门槛）。
 
     用法::
 
@@ -181,7 +188,7 @@ class EastMoneyF10Adapter(BaseAdapter):
             self._owned_client = httpx.Client(
                 timeout=httpx.Timeout(self._timeout),
                 # 国内源直连：忽略 HTTP(S)_PROXY（本机代理常指向不可达的
-                # 127.0.0.1:10808），与 reports/61 探测方法一致
+                # 127.0.0.1:10808），与 依据 S1 探测方法一致
                 trust_env=False,
                 headers={
                     "User-Agent": _DEFAULT_USER_AGENT,
@@ -387,7 +394,7 @@ class EastMoneyF10Adapter(BaseAdapter):
 
         - 逐股接口；返回标准化 funding_events 行（event_type=a_placement/rights）。
         - 北交所无东财 F10 交叉源：BJ 代码直接返回合法 missing（no_cross_source:bse），
-          不发出请求、不触发熔断（reports/75 纪律延续）。
+          不发出请求、不触发熔断（依据 S4 纪律延续）。
         - 增发 TOTAL_RAISE_FUNDS 常为 null：以 ISSUE_NUM×ISSUE_PRICE 推算并
           derived=true 如实标注；任一缺失则 raise_funds 保持 null 不伪造。
         """
