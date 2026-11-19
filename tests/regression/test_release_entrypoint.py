@@ -222,7 +222,22 @@ def test_clean_release_builder_uses_locked_dependencies() -> None:
     package = (root / "frontend" / "package.json").read_text(encoding="utf-8")
     # 2026-08-14 红队 P2-10：单元测试 runner 防漂移——不再在 package.json
     # 硬编码测试文件名，改由 scripts/run-unit-tests.mjs 自动扫描 tests/*.test.ts。
-    assert '"test": "node scripts/run-unit-tests.mjs && vitest run"' in package
+    # 2026-11-19：`npm test` 现在多了一道 `typecheck:test`（前端测试代码此前三层门禁
+    # 都不做类型检查，导致死入参活了 3 个月）。所以**不要在这里钉死整条字符串** ——
+    # 那会把"给 npm test 加一道检查"变成一次红灯，从而逼人改这个断言而不是改代码。
+    # 改成断言**必须包含**的两步（防漂移的本意不变：不能被悄悄清空或换掉 runner）。
+    import json as _json
+
+    scripts = _json.loads(package)["scripts"]
+    test_script = scripts["test"]
+    assert "node scripts/run-unit-tests.mjs" in test_script, (
+        f"npm test 必须仍然调用自动扫描 runner（防回退成硬编码文件名）：{test_script}"
+    )
+    assert "vitest run" in test_script, f"npm test 必须仍然跑 vitest：{test_script}"
+    # 新加的那道检查也钉一下，防止被无声移除
+    assert "typecheck:test" in test_script, (
+        f"npm test 必须带上测试代码类型检查（2026-11-19 补的缺口）：{test_script}"
+    )
     runner = (root / "frontend" / "scripts" / "run-unit-tests.mjs").read_text(encoding="utf-8")
     assert "--experimental-strip-types" in runner
     assert "--test" in runner

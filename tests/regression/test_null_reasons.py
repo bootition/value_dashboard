@@ -40,10 +40,8 @@ from app.core.quality.null_reasons import (  # noqa: E402
     NullReasonRow,
     NullReasonTableMissing,
     domain_fields,
-    field_domain,
     null_reason_table_exists,
     reason_distribution,
-    reasons_for,
     upsert_reasons,
 )
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
@@ -99,10 +97,27 @@ def _insert_ext(store: DuckDBStore, stock_code: str, report_date: date, **values
     )
 
 
-def _reasons_map(store: DuckDBStore, **kwargs: Any) -> dict[tuple[str, str], str]:
+def _stored(store: DuckDBStore) -> list[dict[str, Any]]:
+    """稀疏表的全部行，按生产查询的稳定顺序。
+
+    生产侧只保留聚合读入口 `reason_distribution`（`reasons_for` 的逐行明细查询没有
+    消费方，已删除），所以这里直接读表 —— 这些用例验的是**写进库里的内容**，
+    不是查询层。
+    """
+    return store.read_query(
+        "SELECT stock_code, report_date, field_name, reason_code, detail "
+        "FROM indicator_null_reason ORDER BY report_date DESC, field_name, stock_code"
+    )
+
+
+def _stored_for(store: DuckDBStore, *field_names: str) -> list[dict[str, Any]]:
+    wanted = set(field_names)
+    return [row for row in _stored(store) if row["field_name"] in wanted]
+
+
+def _reasons_map(store: DuckDBStore) -> dict[tuple[str, str], str]:
     """(stock_code, field_name) → reason_code，方便断言。"""
-    rows = reasons_for(store, **kwargs)
-    return {(row["stock_code"], row["field_name"]): row["reason_code"] for row in rows}
+    return {(row["stock_code"], row["field_name"]): row["reason_code"] for row in _stored(store)}
 
 
 # ─── 1. 枚举与域映射 ───────────────────────────────────────────────
@@ -125,7 +140,7 @@ def test_screening_fields_map_to_disjoint_domains() -> None:
     2026-11-17（`reports/133` R1）：这里原来是 `== 61 / == 55` 两个硬编码计数，
     ROCE 落地加列后立刻变成 HEAD 上的假失败——"字段清单来自 engine 不硬编码"
     这句话在注释里写了，断言里却硬编码了。现在改成：
-    ① 两域都非空；② 已知锚点字段各自归域；③ 两域不相交；④ 反查自洽。
+    ① 两域都非空；② 已知锚点字段各自归域；③ 两域不相交。
     这样新增指标列不会再把测试打红，而"域划分被破坏"仍然会红。
     """
     snapshot_fields = domain_fields(DOMAIN_SNAPSHOT)
@@ -139,10 +154,7 @@ def test_screening_fields_map_to_disjoint_domains() -> None:
         "资格/年数列是内部门禁，不应对用户暴露；若要暴露需先改 engine.py 注释与产品口径"
     )
     assert {"free_cash_flow", "total_asset_turnover"} & ext_fields
-    assert not snapshot_fields & ext_fields, "同一字段名不许跨域，否则稀疏表无法反查域"
-    for name in snapshot_fields | ext_fields:
-        assert field_domain(name) in {DOMAIN_SNAPSHOT, DOMAIN_EXT}
-    assert field_domain("not_a_screening_field") is None
+    assert not snapshot_fields & ext_fields, "同一字段名不许跨域（域划分必须互不相交）"
 
 
 def test_unknown_domain_is_rejected() -> None:
@@ -161,14 +173,14 @@ def test_upsert_writes_only_given_cells_and_is_idempotent(duckdb_store: DuckDBSt
     assert upsert_reasons(duckdb_store, rows) == 2
     # 重复写同一批：不新增行（PK 幂等），也不报错
     assert upsert_reasons(duckdb_store, rows) == 2
-    stored = reasons_for(duckdb_store, report_date=SNAPSHOT_PERIOD)
+    stored = _stored(duckdb_store)
     assert len(stored) == 2
     assert {(row["stock_code"], row["reason_code"]) for row in stored} == {
         ("000001", "NOT_APPLICABLE"),
         ("000002", "NOT_APPLICABLE"),
     }
     # 稀疏：没有传进来的单元格一行也不写
-    assert reasons_for(duckdb_store, fields=["roe"]) == []
+    assert _stored_for(duckdb_store, "roe") == []
 
 
 def test_upsert_rejects_unknown_reason_code(duckdb_store: DuckDBStore) -> None:
@@ -190,7 +202,7 @@ def test_replace_scope_drops_stale_reasons(duckdb_store: DuckDBStore) -> None:
         [NullReasonRow("000002", SNAPSHOT_PERIOD, "goodwill_ratio", NullReason.NOT_APPLICABLE)],
         replace_scope=(SNAPSHOT_PERIOD, DOMAIN_SNAPSHOT),
     )
-    stored = reasons_for(duckdb_store, report_date=SNAPSHOT_PERIOD)
+    stored = _stored(duckdb_store)
     assert [(row["stock_code"], row["field_name"]) for row in stored] == [
         ("000002", "goodwill_ratio")
     ]
@@ -205,8 +217,6 @@ def test_missing_table_degrades_without_ddl(duckdb_store: DuckDBStore) -> None:
     payload = reason_distribution(duckdb_store)
     assert payload["table_ready"] is False
     assert payload["fields"] == {} and payload["total_cells"] == 0
-    assert reasons_for(duckdb_store) == []
-
     with pytest.raises(NullReasonTableMissing):
         upsert_reasons(
             duckdb_store,
@@ -246,7 +256,7 @@ def test_snapshot_sweep_classifies_with_evidence_and_skips_the_rest(
     assert dry.report_date == SNAPSHOT_PERIOD
     assert dry.dry_run is True
     assert dry.written_rows == 0, "dry-run 绝不写库"
-    assert reasons_for(duckdb_store) == [], "dry-run 不许留下任何一行"
+    assert _stored(duckdb_store) == [], "dry-run 不许留下任何一行"
     # 五只都没给 pe_ttm，但没有任何确定性证据 → 全部计入"判不出"
     assert dry.unclassified["pe_ttm"] == 5
 
@@ -334,7 +344,7 @@ def test_ext_sweep_classifies_leverage_denominator_and_missing_inputs(
     assert all(field != "bps" for _, field in reasons)
     # NOT_APPLICABLE 的 detail 说清"为什么对公司不适用"，而不是干巴巴一个码
     detail = {row["stock_code"]: row["detail"]
-              for row in reasons_for(duckdb_store, fields=["leverage_financial"])}
+              for row in _stored_for(duckdb_store, "leverage_financial")}
     assert "利润总额" in (detail["600001"] or "")
 
 
@@ -401,7 +411,7 @@ def test_not_dispatched_requires_previous_period_coverage(
 
     upserted = sweeper.sweep(duckdb_store, domain=DOMAIN_EXT, write=True)
     assert upserted.written_rows >= 4
-    rows = reasons_for(duckdb_store, fields=["employee_count"], report_date=EXT_PERIOD)
+    rows = _stored_for(duckdb_store, "employee_count")
     assert len(rows) == 4
     assert {row["reason_code"] for row in rows} == {"NOT_DISPATCHED"}
     assert all("参考期" in (row["detail"] or "") for row in rows)
@@ -542,10 +552,9 @@ def test_source_fields_have_their_own_domain_with_prefix() -> None:
     for name in ("income.deducted_net_profit", "balance.fixed_assets",
                  "balance.capital_adequacy_ratio", "cashflow.cf_from_operating"):
         prefix = name.split(".", 1)[0]
-        assert field_domain(name) == prefix
         assert name in domain_fields(prefix)
-    assert field_domain("income.not_a_real_field") is None
-    # 域之间互不重叠（稀疏表靠字段名反查域）
+    assert "income.not_a_real_field" not in domain_fields("income")
+    # 域之间互不重叠（字段名自带前缀，域内字段不跨域）
     all_fields = [name for domain in (DOMAIN_SNAPSHOT, DOMAIN_EXT, *SOURCE_DOMAINS)
                   for name in domain_fields(domain)]
     assert len(all_fields) == len(set(all_fields))
@@ -577,7 +586,7 @@ def test_deducted_net_profit_near_zero_coverage_is_not_dispatched(
     assert result.by_field["income.deducted_net_profit"] == {"NOT_DISPATCHED": 4}
     reasons = sweeper.sweep(duckdb_store, domain="income", write=True)
     assert reasons.written_rows >= 4
-    stored = reasons_for(duckdb_store, domain="income", fields=["income.deducted_net_profit"])
+    stored = _stored_for(duckdb_store, "income.deducted_net_profit")
     assert {row["reason_code"] for row in stored} == {"NOT_DISPATCHED"}
     assert all("参考期 2026-03-31" in (row["detail"] or "") for row in stored)
 
@@ -602,7 +611,7 @@ def test_fixed_assets_cliff_is_not_dispatched(duckdb_store: DuckDBStore) -> None
     assert result.by_field["balance.fixed_assets"] == {"NOT_DISPATCHED": 11}
     written = sweeper.sweep(duckdb_store, domain="balance", write=True)
     assert written.written_rows >= 11
-    rows = reasons_for(duckdb_store, domain="balance", fields=["balance.fixed_assets"])
+    rows = _stored_for(duckdb_store, "balance.fixed_assets")
     assert {row["reason_code"] for row in rows} == {"NOT_DISPATCHED"}
     assert all("断崖式塌陷" in (row["detail"] or "") for row in rows)
 
@@ -627,7 +636,7 @@ def test_regulatory_metrics_split_by_industry_and_history(duckdb_store: DuckDBSt
     result = sweeper.sweep(duckdb_store, domain="balance", write=True)
 
     assert field_name not in result.not_dispatched_fields, "整期级不该对稀疏字段下结论"
-    stored = {row["stock_code"]: row for row in reasons_for(duckdb_store, fields=[field_name])}
+    stored = {row["stock_code"]: row for row in _stored_for(duckdb_store, field_name)}
     assert stored["600001"]["reason_code"] == "NOT_APPLICABLE"
     assert stored["600002"]["reason_code"] == "NOT_DISPATCHED"
     assert "该股在 2026-06-30 有值" in (stored["600002"]["detail"] or "")
@@ -718,9 +727,7 @@ def test_undisclosed_depreciation_is_source_empty_not_missing_dispatch(
     for field_name in sweeper._DEPRECIATION_FIELDS:
         assert field_name not in result.not_dispatched_fields
         assert result.by_field[field_name] == {"SOURCE_EMPTY": len(codes)}
-    stored = reasons_for(
-        duckdb_store, domain=DOMAIN_EXT, fields=list(sweeper._DEPRECIATION_FIELDS)
-    )
+    stored = _stored_for(duckdb_store, *sweeper._DEPRECIATION_FIELDS)
     assert {row["reason_code"] for row in stored} == {"SOURCE_EMPTY"}
     assert all(
         row["detail"] == "该期现金流量表补充资料未披露折旧摊销（三季报常见）"
@@ -747,9 +754,7 @@ def test_depreciation_family_without_source_rows_is_not_dispatched(
     for field_name in sweeper._DEPRECIATION_FIELDS:
         assert field_name not in result.not_dispatched_fields
         assert result.by_field[field_name] == {"NOT_DISPATCHED": 2}
-    stored = reasons_for(
-        duckdb_store, domain=DOMAIN_EXT, fields=list(sweeper._DEPRECIATION_FIELDS)
-    )
+    stored = _stored_for(duckdb_store, *sweeper._DEPRECIATION_FIELDS)
     assert {row["reason_code"] for row in stored} == {"NOT_DISPATCHED"}
     assert all("cash_flow_indirect" in (row["detail"] or "") for row in stored)
 

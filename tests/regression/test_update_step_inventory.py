@@ -25,9 +25,19 @@ from pathlib import Path
 
 import pytest
 
-from app.core.update_steps import STEP_BY_NAME, STEP_NAMES, STEP_ORDER
+from app.core.update_steps import STEP_NAMES, STEP_ORDER
 
-_UPDATE_PY = Path(__file__).resolve().parents[2] / "app" / "core" / "update.py"
+#: 主流程的**源码集合**。
+#
+#: 2026-11-19：`_run_incremental_update_flow` 搬到了 `update_parts/flow.py`。
+#: 本文件原来只扫 `update.py` —— 搬走后那里 `report_step` 归零，于是：
+#:   ① `test_report_step_calls_are_found_at_all` 红（哨兵**正确**报警了）；
+#:   ② 更危险的是顺序断言变成 `[] == []` **真空通过** —— "顺序错要红"的能力静默消失。
+#: 所以扫描范围必须是"主流程可能所在的全部文件"，而不是某一个固定路径。
+_FLOW_SOURCES = (
+    Path(__file__).resolve().parents[2] / "app" / "core" / "update.py",
+    Path(__file__).resolve().parents[2] / "app" / "core" / "update_parts" / "flow.py",
+)
 
 #: 首参不是字符串字面量的 ``report_step(...)`` 调用，按行号登记（含原因）。
 #:
@@ -47,8 +57,18 @@ _CJK_CHAR = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
 
 
 def _report_step_calls() -> list[tuple[int, str | None]]:
-    """返回 ``update.py`` 里每处 ``report_step(...)`` 调用的 ``(行号, 首参字面量或 None)``。"""
-    tree = ast.parse(_UPDATE_PY.read_text(encoding="utf-8"), filename=str(_UPDATE_PY))
+    """返回**主流程源码集合**里每处 ``report_step(...)`` 调用的 ``(行号, 首参字面量或 None)``。"""
+    calls: list[tuple[int, str | None]] = []
+    for source in _FLOW_SOURCES:
+        if not source.is_file():
+            continue
+        calls.extend(_report_step_calls_in(source))
+    return calls
+
+
+def _report_step_calls_in(source: Path) -> list[tuple[int, str | None]]:
+    """扫描单个文件里的 ``report_step(...)`` 调用。"""
+    tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
     calls: list[tuple[int, str | None]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -103,7 +123,6 @@ def test_step_order_has_no_duplicate_names() -> None:
     names = [step.name for step in STEP_ORDER]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     assert not duplicates, f"STEP_ORDER 里有重复步骤名：{duplicates}"
-    assert len(STEP_BY_NAME) == len(STEP_ORDER)
 
 
 def test_step_order_covers_at_least_twenty_steps() -> None:

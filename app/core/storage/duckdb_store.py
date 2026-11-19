@@ -534,10 +534,24 @@ class DuckDBStore:
         with self._write_lock(timeout):
             self._revalidate()
             conn = self._connect_writer()
+            committed = False
             try:
                 yield conn
+                committed = True
             finally:
                 conn.close()
+                # 2026-11-19：写事务成功提交后把「内容纪元」+1（O(1)，一次 sqlite 写）。
+                # 目的是让**就地 UPDATE**（行数/最大时间都不变）也能让筛选就绪指纹失效——
+                # 价格表 1750 万行 × 2，做行级 checksum 要 +275ms（基线才 430–510ms），
+                # 而写入自己记账是 O(1)。详见 app/core/storage/content_epoch.py 的模块文档。
+                # 注意：只在**成功**路径记账；读操作完全不经过这里，所以不会误伤缓存。
+                if committed:
+                    with contextlib.suppress(Exception):
+                        from app.core.storage import content_epoch
+
+                        content_epoch.bump(
+                            self._path_set.sqlite_path, reason="duckdb_write"
+                        )
 
     def _connect_writer(self) -> duckdb.DuckDBPyConnection:
         """Open a read-write connection with bounded retry (caller holds the write lock).

@@ -23,13 +23,42 @@
 
 from __future__ import annotations
 
-import inspect
+import hashlib
 import json
 from datetime import UTC, datetime, timedelta
 
+from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
+from tests.support import source_guard
 
 PENDING_KEY = "tech_recompute_pending"
+
+# 行为接线守卫用的固定日历（与 test_qfq_lag_disclosure 同一套构造法：
+# 假适配器返回真的 FetchResult，不碰网络）。
+PRICE_TARGET_DATE = "2026-11-13"
+PRICE_LOCAL_DATE = "2026-11-12"
+
+
+def _price_result(adjust: str, trade_date: str, close: float = 10.0) -> FetchResult:
+    payload = f"{adjust}:{trade_date}".encode()
+    return FetchResult(
+        data=[{"trade_date": trade_date, "close": close, "volume": 100.0}],
+        metadata=SourceMetadata(
+            source="local_cache",
+            fetch_time=datetime.now(UTC),
+            raw_response_hash=hashlib.sha256(payload).hexdigest(),
+            confidence="strict",
+        ),
+        raw_response=payload,
+    )
+
+
+class _LaggingQfqAdapter:
+    """raw 前进到目标交易日，qfq 只回到本地旧日期（源侧 qfq 滞后）。"""
+
+    def fetch(self, request):
+        trade_date = PRICE_TARGET_DATE if request.adjust == "raw" else PRICE_LOCAL_DATE
+        return _price_result(request.adjust, trade_date)
 
 
 def _seed_stock(duckdb_store, code: str = "600519") -> None:
@@ -128,21 +157,47 @@ def test_qfq_lag_codes_are_written_to_pending_state(
     assert stored[0]["marked_at"]
 
 
-def test_price_step_and_flow_are_wired_to_pending_set() -> None:
+def test_price_step_and_flow_are_wired_to_pending_set(
+    duckdb_store, sqlite_store,
+) -> None:
     """接线守卫：价格步骤收尾写名单、指标步骤读名单并清名单。
 
-    纯行为测试跑不到真实网络抓取，所以这里用源码守卫钉住"调用存在"，
-    防止后续重构把它悄悄删掉（删掉就等于 J6 复发，且测试全绿）。
-    """
-    price_source = inspect.getsource(IncrementalUpdater._update_prices_incremental)
-    assert "_qfq_lag_watermarks" in price_source
-    assert "_mark_tech_recompute_pending" in price_source
+    价格侧是**行为断言**：用假适配器真跑一轮 `_update_prices_incremental`
+    （raw 前进到目标日、qfq 停在昨天），然后只看"跑完之后 pending 名单里有没有
+    这只股票"。删掉 `_mark_tech_recompute_pending` 的调用链就必然变红，
+    而把这段逻辑搬进 `update_parts/` 不会。
 
-    flow_source = inspect.getsource(IncrementalUpdater._run_incremental_update_flow)
-    assert "_load_tech_recompute_pending" in flow_source
-    assert "_finalize_tech_recompute" in flow_source
-    # 强制并入的是**完整重算**集合，不是"价格域增量"集合
-    assert "*tech_pending_codes" in flow_source
+    流程侧仍需要结构守卫（`_run_incremental_update_flow` 有 500 行、真跑要
+    打网络），所以用 `assert_calls` 的 AST 调用节点 + `*` 展开断言，并且
+    `resolve_body` 会顺着委托壳追到真实实现——方法体搬家后依然指向实现。
+    """
+    _seed_stock(duckdb_store, "600519")
+    _seed_prices(
+        duckdb_store, "600519",
+        raw_dates=[PRICE_LOCAL_DATE], qfq_dates=[PRICE_LOCAL_DATE],
+    )
+    updater = IncrementalUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=_LaggingQfqAdapter(),
+    )
+    updater._latest_expected_trading_date = lambda today: PRICE_TARGET_DATE
+    updater._get_latest_local_price_date = lambda: PRICE_LOCAL_DATE
+    assert updater._load_tech_recompute_pending() == []
+
+    report = updater._update_prices_incremental(max_stocks=0)
+
+    assert report["failed"] == 0
+    assert report["tech_recompute_lag_count"] == 1
+    assert report["tech_recompute_pending_marked"] == 1
+    assert updater._load_tech_recompute_pending() == ["600519"], (
+        "价格步骤收尾没把 qfq 滞后股写进待重算名单 → J6 复发（指标永久停在旧值）"
+    )
+
+    source_guard.assert_calls(
+        IncrementalUpdater._run_incremental_update_flow,
+        "_load_tech_recompute_pending",
+        "_finalize_tech_recompute",
+        starred={"tech_pending_codes": 2},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

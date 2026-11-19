@@ -294,7 +294,7 @@ fail=0
 guards_ran=0
 ruff_ran=0
 
-# ---------------------------------------------------------------- 6. 检查 A：9 组静态护栏（RG1–RG9）
+# ---------------------------------------------------------------- 6. 检查 A：9 组静态护栏（RG1–RG10）
 if [ ! -f scripts/check_rework_guards.py ]; then
     say "⚠️  未找到 scripts/check_rework_guards.py，跳过护栏检查（fail-open）。" \
         "WARNING: scripts/check_rework_guards.py missing; skipping guard check."
@@ -311,7 +311,7 @@ else
             fail=1
             cat "$out" >&2 || true
             blank
-            say "❌ 反返工护栏未通过（RG1–RG9：时区/状态合并/单位/派生域/规则来源/编号/supersede/真相源/测试资产）" \
+            say "❌ 反返工护栏未通过（RG1–RG10：时区/状态合并/单位/派生域/规则来源/编号/supersede/真相源/测试资产）" \
                 "FAILED: static guard rules RG1-RG9"
             say "   上面每行都带「规则编号 + 文件:行号 + 原因」，按它改即可。" \
                 "   Each line above shows rule id + file:line + reason."
@@ -388,10 +388,10 @@ if [ "$fail" = 1 ]; then
     fail_rc=1
 else
     if [ "$guards_ran" = 1 ] && [ "$ruff_ran" = 1 ]; then
-        say "✅ 通过：护栏 RG1–RG9 + ruff（${N_PY} 个 .py），耗时 ${ELAPSED_MS}ms" \
+        say "✅ 通过：护栏 RG1–RG10 + ruff（${N_PY} 个 .py），耗时 ${ELAPSED_MS}ms" \
             "OK: guards RG1-RG9 + ruff ($N_PY py), ${ELAPSED_MS}ms"
     elif [ "$guards_ran" = 1 ]; then
-        say "✅ 通过：护栏 RG1–RG9，耗时 ${ELAPSED_MS}ms" "OK: guards RG1-RG9, ${ELAPSED_MS}ms"
+        say "✅ 通过：护栏 RG1–RG10，耗时 ${ELAPSED_MS}ms" "OK: guards RG1-RG9, ${ELAPSED_MS}ms"
     else
         # 什么都没真正跑起来（工具/环境缺失）→ 明说，别让人误以为"门禁通过了"。
         say "⚠️  本次提交没有任何门禁真正跑起来（见上），按 fail-open 放行。" \

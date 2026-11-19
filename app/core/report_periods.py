@@ -31,32 +31,12 @@ STANDARD_REPORT_PERIODS: Final[tuple[tuple[int, int], ...]] = (
     (12, 31),
 )
 
-#: 报告期中文口径名（月 → 名称）
-_PERIOD_NAMES: Final[dict[int, str]] = {
-    3: "一季报",
-    6: "半年报",
-    9: "三季报",
-    12: "年报",
-}
-
-
 def is_standard_report_date(value: object) -> bool:
     """`value` 是否为合法报告期（含类型校验，None/字符串/非法日期一律 False）。"""
     parsed = _as_date(value)
     if parsed is None:
         return False
     return (parsed.month, parsed.day) in STANDARD_REPORT_PERIODS
-
-
-def report_period_name(value: object) -> str:
-    """报告期 → 中文口径名（如「2026 半年报」）；非法日期返回「未知报告期」。"""
-    parsed = _as_date(value)
-    if parsed is None:
-        return "未知报告期"
-    name = _PERIOD_NAMES.get(parsed.month)
-    if name is None or not is_standard_report_date(parsed):
-        return f"{parsed.year}-{parsed.month:02d}-{parsed.day:02d}（非标准报告期）"
-    return f"{parsed.year} {name}"
 
 
 def canonical_year_start_target(value: object) -> date | None:

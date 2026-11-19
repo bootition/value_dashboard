@@ -38,6 +38,13 @@ def test_create_app_wires_explicit_database_state(
     assert app.state.sqlite is sqlite
 
 
+def _initialized_sqlite(paths: DatabasePathSet) -> SQLiteStore:
+    """建出真实的 sqlite（含 schema）——只读连接需要文件已存在。"""
+    store = SQLiteStore(paths=paths)
+    init_sqlite_schema(store)
+    return store
+
+
 def test_duckdb_read_locked_maps_to_friendly_503(
     database_paths: DatabasePathSet,
 ) -> None:
@@ -57,7 +64,13 @@ def test_duckdb_read_locked_maps_to_friendly_503(
         paths=database_paths,
         config=Config({}, paths=database_paths),
         duck=_LockedDuck(database_paths.duckdb_path),
-        sqlite=SQLiteStore(paths=database_paths),
+        # 2026-11-19 修正测试自身的 setup：`SQLiteStore.connection()` 用
+        # `file:...?mode=ro` 只读打开，**文件不存在时它抛 OperationalError 而不是
+        # 走到被测的 503 分支** —— 于是这条用例在 base commit 上就一直是红的
+        # （不是被测代码坏了，是它从没把 sqlite 建出来）。
+        # 断言（503 + reason_code）一个字没动，只是补上应有的前置：
+        # 用 `init_sqlite_schema` 建出真实的 sqlite，再让 DuckDB 保持"被锁"。
+        sqlite=_initialized_sqlite(database_paths),
     )
 
     response = TestClient(app).get("/api/stock/search", params={"query": "600519"})

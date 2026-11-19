@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from datetime import UTC, datetime, timedelta
 
@@ -585,7 +584,18 @@ def test_duckdb_migration_v8_and_sqlite_missing_index(
     index = sqlite.query(
         "SELECT name FROM sqlite_master WHERE type='index' AND name='uq_missing_list_stock_field_open'"
     )
-    assert index, "missing_list 未解决条目去重索引必须存在"
+    # 2026-11-19 审计 W5：原为裸 `assert index` —— 只证明"有这么个名字的 index"。
+    # 这个**部分唯一索引**是"未解决条目去重"的唯一防线：必须建在
+    # (stock_code, field_name) 上、且只覆盖 resolved_at IS NULL 的部分索引
+    # （少了 WHERE 会让历史已解决条目互相顶掉；缺一列会重复堆积待办）。
+    assert index == [{"name": "uq_missing_list_stock_field_open"}]
+    index_sql = sqlite.query(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name='uq_missing_list_stock_field_open'"
+    )[0]["sql"]
+    compact = "".join(str(index_sql).upper().split())
+    assert compact.startswith("CREATEUNIQUEINDEX"), index_sql
+    assert "ONMISSING_LIST(STOCK_CODE,FIELD_NAME)" in compact, index_sql
+    assert compact.endswith("WHERERESOLVED_ATISNULL"), index_sql
     migration_sqlite = sqlite.query(
         "SELECT description FROM schema_migrations WHERE version = 15"
     )
@@ -621,10 +631,28 @@ def test_readiness_unchanged_by_business_domain(
 
 
 def test_readiness_code_has_no_business_domain_reference() -> None:
+    """`data_quality` 不得引用业务概览域（负向耦合，用 import 图 + AST 符号表守）。
+
+    拦的事故：`minimum_data_readiness` 被"顺手"接上 `company_profile` /
+    `business_breakdown`（比如"业务概览数据不全也让整站不可筛"），
+    或者反过来在数据质量里写一份业务概览域的健康判定。
+
+    为什么不再是 `inspect.getsource(module)` + `"company_profile" not in source`：
+    那种写法拦的是**文本**不是**耦合**——把表名写进注释/迁移说明就假红（重构
+    最常见的动作），而函数体内的延迟 import 反而可能漏掉。这里断言的是：
+    ① import 图里没有 `app.core.business`（**含函数体内的延迟 import**）；
+    ② AST 符号表里没有这两张表的真实引用（注释/docstring 已排除）。
+    """
     from app.core import data_quality as module
-    source = inspect.getsource(module)
-    assert "company_profile" not in source
-    assert "business_breakdown" not in source
+    from tests.support import source_guard
+
+    source_guard.assert_no_coupling(
+        module,
+        forbidden_modules=("app.core.business",),
+        forbidden_symbols=("company_profile", "business_breakdown"),
+        why="A 股 readiness 只由行情/财报核心表判定；接进业务概览域会让"
+            "「业务概览抓不到」被误判成「整个库不可用」",
+    )
 
 
 # ─── /business-overview API ───────────────────────────────────────────
@@ -737,10 +765,39 @@ def test_manager_registers_independent_eastmoney_f10() -> None:
 def test_updater_defaults_to_manager_for_independent_circuit_breaker(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
+    """未注入 adapter 时必须经 AdapterManager 路由，且**熔断状态按实例隔离**。
+
+    2026-11-19 审计 W2：原来只有 `isinstance(updater.adapter, AdapterManager)`，
+    函数名承诺的 "independent_circuit_breaker" 一个字没验 —— 任何 AdapterManager
+    子类、全局单例、或别处共享的实例都能绿。
+
+    现在真把 first 的熔断桶打到熔断，second 必须毫发无伤：business_overview 与
+    treasury 共享熔断桶是 F10 域的历史事故形态（东财封禁时整站一起哑）。
+    """
     from app.core.adapters.manager import AdapterManager
 
-    updater = BusinessOverviewUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    assert isinstance(updater.adapter, AdapterManager)
+    first = BusinessOverviewUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    second = BusinessOverviewUpdater(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert isinstance(first.adapter, AdapterManager)
+    assert first.adapter is not second.adapter, "两个概览 updater 不得共享同一个 manager"
+    assert first.adapter._circuit_breaker is not second.adapter._circuit_breaker, (
+        "熔断桶字典被共享：改一处的熔断状态会影响另一处"
+    )
+
+    bucket = ("eastmoney_f10", "company_profile")
+    for _ in range(AdapterManager._CIRCUIT_FAILURE_THRESHOLD):
+        first.adapter._record_circuit_failure(*bucket)
+
+    assert first.adapter._is_circuit_tripped(*bucket) is True, (
+        f"连续 {AdapterManager._CIRCUIT_FAILURE_THRESHOLD} 次真源故障后必须熔断该桶"
+    )
+    assert second.adapter._is_circuit_tripped(*bucket) is False, (
+        "熔断状态跨实例串台：另一个 updater 的同一个 (adapter, data_type) 桶也被熔断了"
+    )
+    assert second.adapter._circuit_breaker == {}, (
+        f"另一个实例的熔断桶被写脏了: {second.adapter._circuit_breaker}"
+    )
 
 
 def test_update_many_concurrent_fetch_serial_persist(

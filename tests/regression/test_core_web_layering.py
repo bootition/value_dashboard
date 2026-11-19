@@ -74,7 +74,6 @@ def test_actionable_missing_condition_is_single_sourced_from_core() -> None:
     from app.web.api import data_status
 
     assert data_status._actionable_missing_condition is actionable_missing_condition
-    assert set(data_status._DISABLED_MISSING_FIELDS) == set(DISABLED_MISSING_FIELDS)
 
     condition, params = actionable_missing_condition()
     assert condition.count("?") == len(params) == len(DISABLED_MISSING_FIELDS)

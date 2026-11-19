@@ -1,11 +1,19 @@
 <script setup lang="ts">
 import { fieldDisplayName } from '../utils/screening-format.ts'
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert, NProgress } from 'naive-ui'
 import axios from 'axios'
 import type { DataQualityStatus } from '../types'
 import { warningCodeLabel } from '../types/data-quality'
 import { fmtStoredPercent } from '../utils/formatters.ts'
+import { usePollTimer } from '../composables/usePolling.ts'
+import { isPackaged } from '../helpers/runtime.ts'
+
+// 打包版 / 开发版的 CLI 前缀不同（见 helpers/runtime.ts）
+const packagedRuntime = ref(false)
+const cliPrefix = computed(() =>
+  packagedRuntime.value ? 'vd' : 'python -m app.cli.main',
+)
 
 interface RetryItem {
   stock_code: string
@@ -138,12 +146,15 @@ const missingList = ref<MissingItem[]>([])
 const autoUpdate = ref<AutoUpdateStatus | null>(null)
 const recompute = ref<IndicatorRecomputeStatus>({ status: 'idle', pending_codes: [] })
 const lastRefreshedAt = ref<string | null>(null)
-let recomputeTimer: ReturnType<typeof setTimeout> | undefined
 let recomputeStartInFlight = false
+// 三套轮询（自动更新状态 / 指标重算 / 重量摘要）各自一个 timer，
+// 生命周期（清旧+设新+卸载清理）统一由 composables/usePolling.ts 提供。
+const recomputePoll = usePollTimer()
+const autoPoll = usePollTimer()
+const heavyPoll = usePollTimer()
 // 运维级重算令牌：不再从 /api/session 下发，由用户输入并保存在会话内。
 const recomputeAdminToken = ref(sessionStorage.getItem('vd-admin-token') || '')
 // 轻量轮询：仅自动更新状态；in-flight guard + 递归定时，防堆积与卡死
-let pollTimer: ReturnType<typeof setTimeout> | undefined
 let autoInFlight = false
 const refreshing = ref(false)
 
@@ -276,43 +287,30 @@ async function startRecompute(): Promise<void> {
 }
 
 function scheduleRecomputePolling() {
-  if (recomputeTimer) {
-    clearTimeout(recomputeTimer)
-    recomputeTimer = undefined
-  }
-  recomputeTimer = setTimeout(async () => {
+  recomputePoll.schedule(4000, async () => {
     await fetchRecomputeStatus()
     if (recompute.value.status === 'running') {
       scheduleRecomputePolling()
     } else {
       void fetchHeavy(true)
     }
-  }, 4000)
+  })
 }
 
 function schedulePolling() {
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = undefined
-  }
   const running = effectiveRunning.value
-  pollTimer = setTimeout(() => void fetchAutoOverview(), running ? 4000 : 60000)
+  autoPoll.schedule(running ? 4000 : 60000, () => void fetchAutoOverview())
 }
 
 // 空闲时低频刷新重量摘要（stale 提示会在自动更新结束后自动消失）
-let heavyTimer: ReturnType<typeof setTimeout> | undefined
 function scheduleHeavyPolling() {
-  if (heavyTimer) {
-    clearTimeout(heavyTimer)
-    heavyTimer = undefined
-  }
   const running = effectiveRunning.value
   // 空闲态重量摘要每 5 分钟才刷一次（后端 TTL 同为 300s）；
   // 更新运行中仍 15s 一次，保证进度结束后页面能及时收敛。
-  heavyTimer = setTimeout(() => {
+  heavyPoll.schedule(running ? 15000 : 300000, () => {
     void fetchHeavy(true)
     scheduleHeavyPolling()
-  }, running ? 15000 : 300000)
+  })
 }
 
 // 重量级只读摘要：summary/retry/missing 设 15s 超时，失败仅出错误提示，不阻塞自动更新卡。
@@ -350,6 +348,9 @@ function handleRefresh() {
 }
 
 onMounted(() => {
+  // C3（报告41）：打包版 exe 的入口是 `vd`，开发版是 `python -m app.cli.main`。
+  // 以前这里硬编码了开发版命令，打包版用户照着敲会失败。
+  void isPackaged().then((p) => { packagedRuntime.value = p })
   void fetchAutoOverview()
   void fetchHeavy()
   scheduleHeavyPolling()
@@ -362,20 +363,8 @@ onMounted(() => {
     }
   })
 })
-onBeforeUnmount(() => {
-  if (recomputeTimer) {
-    clearTimeout(recomputeTimer)
-    recomputeTimer = undefined
-  }
-  if (pollTimer) {
-    clearTimeout(pollTimer)
-    pollTimer = undefined
-  }
-  if (heavyTimer) {
-    clearTimeout(heavyTimer)
-    heavyTimer = undefined
-  }
-})
+// 卸载清理不再写在这里：usePollTimer 内 onScopeDispose(cancel) 必然执行，
+// 三套 timer 一处收敛，避免"加第 4 套轮询时忘了在 onBeforeUnmount 里补一行"。
 
 function autoUpdateStateLabel(state: string): string {
   const labels: Record<string, string> = {
@@ -763,7 +752,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
         </n-card>
 
         <n-card v-if="summary.stock_count === 0">
-          <n-empty description="尚未初始化数据。请运行: python -m app.cli.main data init" />
+          <n-empty :description="`尚未初始化数据。请运行: ${cliPrefix} data init`" />
         </n-card>
         </template>
         </section>

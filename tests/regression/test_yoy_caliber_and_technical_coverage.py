@@ -383,9 +383,11 @@ def test_screening_indicators_hide_low_coverage_technical_fields(
 def test_technical_pending_roundtrip_and_source_wiring(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    import inspect
+    import hashlib
 
+    from app.core.adapters.base import FetchResult, SourceMetadata
     from app.core.update import IncrementalUpdater
+    from tests.support import source_guard
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     assert updater._mark_technical_pending({"000001": "2026-09-30"}) == 1
@@ -401,12 +403,58 @@ def test_technical_pending_roundtrip_and_source_wiring(
     ) == 1
     assert updater._load_technical_pending() == []
 
-    # 源码接线守卫：价格步骤收尾写、指标步骤读并清（删掉就等于 P0-5 复发）。
-    price_source = inspect.getsource(IncrementalUpdater._update_prices_incremental)
-    flow_source = inspect.getsource(IncrementalUpdater._run_incremental_update_flow)
-    assert "_mark_technical_pending" in price_source
-    assert "_load_technical_pending" in flow_source
-    assert "_finalize_technical_pending" in flow_source
+    # ── 价格侧接线：行为断言（真跑一轮价格步骤，见 qfq 回归同一套假适配器）──
+    target_date, local_date = "2026-11-13", "2026-11-12"
+    _seed_stock(duckdb_store, "600519")
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES (?, ?, 9.0)",
+            ["600519", local_date],
+        )
+
+    def _result(adjust: str, trade_date: str) -> FetchResult:
+        payload = f"{adjust}:{trade_date}".encode()
+        return FetchResult(
+            data=[{"trade_date": trade_date, "close": 10.0, "volume": 100.0}],
+            metadata=SourceMetadata(
+                source="local_cache",
+                fetch_time=datetime.now(UTC),
+                raw_response_hash=hashlib.sha256(payload).hexdigest(),
+                confidence="strict",
+            ),
+            raw_response=payload,
+        )
+
+    class _Adapter:
+        def fetch(self, request):
+            return _result(
+                request.adjust,
+                target_date if request.adjust == "raw" else local_date,
+            )
+
+    price_updater = IncrementalUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=_Adapter(),
+    )
+    price_updater._latest_expected_trading_date = lambda today: target_date
+    price_updater._get_latest_local_price_date = lambda: local_date
+
+    report = price_updater._update_prices_incremental(max_stocks=0)
+
+    assert report["success"] == 1
+    assert report["technical_pending_marked"] == 1
+    assert price_updater._load_technical_pending() == ["600519"], (
+        "价格步骤没给 qfq 写入成功的股票打 technical_pending → 技术三列永久 NULL"
+    )
+
+    # ── 指标侧接线：流程函数体太大、真跑要打网络，只能结构守卫 ──
+    # AST 调用节点（注释/日志里的同名文字不算数）+ `*` 展开断言
+    # （"读了名单却没并进重算集合"必须被拦住）；resolve_body 会顺委托壳追实现。
+    source_guard.assert_calls(
+        IncrementalUpdater._run_incremental_update_flow,
+        "_load_technical_pending",
+        "_finalize_technical_pending",
+        starred={"technical_pending_codes": 2},
+    )
 
 
 def test_ttm_yoy_uses_abs_denominator_on_negative_base(

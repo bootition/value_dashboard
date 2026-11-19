@@ -1953,8 +1953,6 @@ P1_CODES: frozenset[str] = frozenset(spec[0] for spec in _RULES if spec[1] == P1
 EXPENSIVE_RULE_CODES: frozenset[str] = frozenset(
     spec[0] for spec in _RULES if spec[3] == TIER_EXPENSIVE
 )
-RULE_SEVERITIES: dict[str, str] = {spec[0]: spec[4] for spec in _RULES}
-RULE_TIERS: dict[str, str] = {spec[0]: spec[3] for spec in _RULES}
 
 
 def run_asset_health(

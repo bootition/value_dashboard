@@ -39,8 +39,6 @@ from app.core.data_quality import (
 from app.core.quality import asset_health
 from app.core.quality.asset_health import (
     RULE_CODES,
-    RULE_SEVERITIES,
-    RULE_TIERS,
     SEVERITY_BLOCK,
     SEVERITY_DISCLOSE,
     SEVERITY_INVENTORY,
@@ -170,17 +168,21 @@ def _seed_screenable(duck: DuckDBStore, values: dict[str, Any] | None = None) ->
 
 
 def test_every_rule_declares_tier_and_severity() -> None:
-    """每条规则（当前 14 条，以 RULE_CODES 为准）都不能漏登记调度/分级。"""
-    assert set(RULE_SEVERITIES) == set(RULE_CODES)
-    assert set(RULE_TIERS) == set(RULE_CODES)
-    assert set(RULE_SEVERITIES.values()) <= {
+    """每条规则（当前 14 条，以 RULE_CODES 为准）都不能漏登记调度/分级。
+
+    断言直接对着 ``_RULES`` 元组表（唯一真源，``spec[3]``=tier、``spec[4]``=severity），
+    不经过 name→tier/severity 的派生映射 —— 那两个映射没有消费方。
+    """
+    specs = {spec[0]: spec for spec in asset_health._RULES}
+    assert set(specs) == set(RULE_CODES)
+    assert {spec[4] for spec in asset_health._RULES} <= {
         SEVERITY_BLOCK, SEVERITY_DISCLOSE, SEVERITY_INVENTORY,
     }
-    assert set(RULE_TIERS.values()) <= {"cheap", "expensive"}
-    assert RULE_SEVERITIES["EXT_PERIOD_MISMATCH"] == SEVERITY_BLOCK
-    assert RULE_SEVERITIES["DEDUCTED_PROFIT_GAP"] == SEVERITY_BLOCK
-    assert RULE_SEVERITIES["ZERO_REFERENCE_ASSET"] == SEVERITY_INVENTORY
-    assert RULE_TIERS["CROSSCHECK_BELOW_THRESHOLD"] == "expensive"
+    assert {spec[3] for spec in asset_health._RULES} <= {"cheap", "expensive"}
+    assert specs["EXT_PERIOD_MISMATCH"][4] == SEVERITY_BLOCK
+    assert specs["DEDUCTED_PROFIT_GAP"][4] == SEVERITY_BLOCK
+    assert specs["ZERO_REFERENCE_ASSET"][4] == SEVERITY_INVENTORY
+    assert specs["CROSSCHECK_BELOW_THRESHOLD"][3] == "expensive"
 
 
 def test_structural_null_allowlist_covers_documented_fields() -> None:

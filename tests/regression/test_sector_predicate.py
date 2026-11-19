@@ -31,12 +31,11 @@ import duckdb
 import pytest
 
 from app.core.quality import null_reason_sweeper as sweeper
-from app.core.quality.null_reasons import NullReason, reasons_for
+from app.core.quality.null_reasons import NullReason
 from app.core.sector import (
     FINANCIAL_CSRC_L1,
     FINANCIAL_SW_LEVEL1,
     is_financial_sql,
-    is_financial_sw_level1,
     is_non_financial_sql,
 )
 from app.core.storage.duckdb_store import DuckDBStore
@@ -190,11 +189,8 @@ def test_sector_predicates_are_mutually_exclusive_and_keep_null_industry_rows() 
         else:
             assert by_code[code][1] is True, f"{code}: NULL 行业行必须被 is_non_financial_sql 保留"
 
-    # Python 侧判定与 SQL 侧同口径（只覆盖申万命中，不含 csrc 兜底——见 sector 文档）
-    assert is_financial_sw_level1(SW_LEVEL1_BANK) is True
-    assert is_financial_sw_level1(SW_LEVEL1_NONBANK_FINANCE) is True
-    assert is_financial_sw_level1("计算机") is False
-    assert is_financial_sw_level1(None) is False
+    # SQL 侧「金融/非金融」判据与 `FINANCIAL_SW_LEVEL1` 名单是同口径（只覆盖申万命中，
+    # 不含 csrc 兜底——见 sector 文档）
     assert set(FINANCIAL_SW_LEVEL1) == {SW_LEVEL1_BANK, SW_LEVEL1_NONBANK_FINANCE}
 
 
@@ -349,10 +345,10 @@ def test_history_repair_writes_nulls_and_not_applicable_reasons(duckdb_store: Du
     )
     assert [row["stock_code"] for row in remaining] == ["000002"]
 
-    reasons = reasons_for(
-        duckdb_store,
-        domain="balance",
-        fields=[history_repair.TARGET_FIELD_NAME],
+    reasons = duckdb_store.read_query(
+        "SELECT report_date, reason_code, detail FROM indicator_null_reason "
+        "WHERE field_name = ? ORDER BY report_date",
+        [history_repair.TARGET_FIELD_NAME],
     )
     assert len(reasons) == 3
     assert {row["reason_code"] for row in reasons} == {NullReason.NOT_APPLICABLE.value}

@@ -187,19 +187,6 @@ def domain_fields(domain: str) -> frozenset[str]:
     return fields[domain]
 
 
-def field_domain(field_name: str) -> str | None:
-    """字段名 → 域。
-
-    稀疏表没有 domain 列（同一字段不会跨域重复），因此域由字段名反查：
-    裸列名属于 `snapshot`/`ext`，`income./balance./cashflow.` 前缀属于对应源表。
-    未登记字段返回 None —— 调用方应把它当作「历史遗留/越界码」而不是静默归类。
-    """
-    for domain, fields in _domain_fields().items():
-        if field_name in fields:
-            return domain
-    return None
-
-
 @dataclass(frozen=True)
 class NullReasonRow:
     """一条空值原因记录 = 一个 (股票, 报告期, 字段) 单元格。"""
@@ -323,59 +310,6 @@ def upsert_reasons(
             connection.unregister("_null_reason_rows")
     logger.info("null reasons written: %s rows (report_date filter: %s)", len(payload), replace_scope)
     return len(payload)
-
-
-def reasons_for(
-    store: DuckDBStore,
-    *,
-    stock_codes: Sequence[str] | None = None,
-    report_date: date | str | None = None,
-    fields: Sequence[str] | None = None,
-    reasons: Sequence[str | NullReason] | None = None,
-    domain: str | None = None,
-    limit: int | None = None,
-) -> list[dict[str, Any]]:
-    """按维度查询空值原因（只读）。
-
-    返回 `[{stock_code, report_date, field_name, reason_code, detail, computed_at}]`。
-    `domain` 过滤在内存里做（字段名 → 域需要 engine 的字段集合，SQL 里没法表达）。
-    """
-    clauses: list[str] = []
-    params: list[Any] = []
-    if stock_codes:
-        clauses.append(f"stock_code IN ({', '.join('?' for _ in stock_codes)})")
-        params.extend(stock_codes)
-    if report_date is not None:
-        clauses.append("report_date = ?")
-        params.append(report_date)
-    if fields:
-        clauses.append(f"field_name IN ({', '.join('?' for _ in fields)})")
-        params.extend(fields)
-    if reasons:
-        codes = [coerce_reason(reason).value for reason in reasons]
-        clauses.append(f"reason_code IN ({', '.join('?' for _ in codes)})")
-        params.extend(codes)
-    if domain is not None:
-        domain_field_list = sorted(domain_fields(domain))
-        clauses.append(f"field_name IN ({', '.join('?' for _ in domain_field_list)})")
-        params.extend(domain_field_list)
-
-    if not null_reason_table_exists(store):
-        logger.warning("%s 尚未创建（schema 未迁移），按「暂无原因记录」返回空集", NULL_REASON_TABLE)
-        return []
-    where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = (
-        f"SELECT stock_code, report_date, field_name, reason_code, detail, computed_at "
-        f"FROM {NULL_REASON_TABLE}{where} ORDER BY report_date DESC, field_name, stock_code"
-    )
-    if limit is not None:
-        sql += " LIMIT ?"
-        params.append(int(limit))
-    rows = store.read_query(sql, params)
-    for row in rows:
-        if isinstance(row.get("reason_code"), NullReason):
-            row["reason_code"] = row["reason_code"].value
-    return rows
 
 
 def reason_distribution(

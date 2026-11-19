@@ -185,23 +185,44 @@ def test_rank_mode_matches_legacy_suffix_condition(
     assert new_rows == old_rows == ["000001", "000002"], "PE 最低的两只"
 
 
-def test_indicators_endpoint_stops_emitting_rank_fields() -> None:
-    """`/indicators` 不得再下发 930 条排名派生字段。
+def test_indicators_endpoint_stops_emitting_rank_fields(
+    duckdb_store: DuckDBStore, sqlite_store: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/indicators` 不得再下发 930 条排名派生字段（行为断言，不读源码）。
 
-    只断言源码层面的生成块已移除（真正调用端点需要 Request 对象，
-    由 test_screening_api_regressions 覆盖）。
+    拦的事故：有人把"为每个可排名指标铺 6 条扁平派生字段"的生成块加回端点
+    ——155 个可排名指标 × 6 = 930 条，ROCE 一个指标占 21 条，主指标被埋在
+    下拉中间根本选不到（用户 2026-11-16 的原始反馈）。
+
+    做法：真跑 `list_available_indicators`（fake request 只带 duck/sqlite），
+    断言返回的指标名里**没有任何** `_{RANK_MODES}` 后缀的派生字段，
+    并且响应体确实下发了 `rank_modes` 供前端渲染条件级下拉。
+    替代旧写法 `"for col in sorted(RANKABLE_INDICATORS)" not in getsource(...)`
+    ——那既绑死代码落点（换个 for 变量名就假绿），又在函数体搬家时假红。
     """
-    import inspect
+    from types import SimpleNamespace
 
-    from app.web.api import screening as screening_api
+    import app.core.data_quality as data_quality_module
+    from app.web.api.screening import list_available_indicators
 
-    source = inspect.getsource(screening_api.list_available_indicators)
-    # 只检查**生成块**（遍历 RANKABLE_INDICATORS 铺后缀），
-    # 不能简单 grep `market_rank`——注释里说明方案 C 时也会出现这个词。
-    assert "for col in sorted(RANKABLE_INDICATORS)" not in source, (
-        "list_available_indicators 仍在为每个可排名指标铺排名字段"
+    monkeypatch.setattr(  # 单测不跑全量数据质量构建
+        data_quality_module, "read_warning_codes", lambda *a, **k: [],
     )
-    assert "rank_modes" in source, "响应体必须下发 rank_modes 供前端渲染下拉"
+    request = SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(duck=duckdb_store, sqlite=sqlite_store))
+    )
+    payload = list_available_indicators(request)
+    names = [item["name"] for item in payload["indicators"]]
+    derived = sorted(name for name in names if any(name.endswith(s) for s in RANK_SUFFIXES))
+
+    assert derived == [], (
+        f"/indicators 又下发了 {len(derived)} 条排名派生字段（样例 {derived[:6]}）："
+        "排名口径必须走条件级下拉（rank_modes），不能铺成扁平字段把主指标埋掉"
+    )
+    assert payload["rank_modes"], "响应体必须下发 rank_modes 供前端渲染下拉"
+    assert {mode["value"] for mode in payload["rank_modes"]} == set(RANK_MODES), (
+        "rank_modes 必须覆盖全部排名口径，否则前端下拉会少口径（能力静默消失）"
+    )
 
 
 # ─── 排序与结果列也支持排名口径（方案 C 的另外两块，2026-11-16）────────────

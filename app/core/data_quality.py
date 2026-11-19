@@ -295,6 +295,113 @@ def _manual_overrides_fingerprint(sqlite: SQLiteStore) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# 盲区 2/3/4 修复（2026-11-19 复审续修）
+#
+# 上一轮修好了日历 / 人工覆盖 / 财务表，但审查实测点名仍留 4 个盲区：
+#   ① `source_audit`（正式库实测 22,421,205 行）**就地翻标记**：旧信号只有
+#      COUNT(*) + MAX(fetch_time)/MAX(created_at)。改某行的 confidence（标记列，
+#      也是 LINEAGE_INVALID 一类阻断码的判定输入）行数与时间戳全不变 →
+#      指纹不变 → 缓存命中 → 对外 `ready=True`（假绿）。
+#   ② 归档系（`source_audit_archive` / `fetch_batch`）同理。
+#   ③ 价格两表**从未进过外层指纹**（只在内层门禁用 COUNT/MIN/MAX）：
+#      外层一命中缓存，内层根本没机会跑 → 价格数据怎么变外层都不动。
+#   ④ 超过 `_CONTENT_CHECKSUM_ROW_BUDGET` 时**静默**退回 count-only。
+#
+# 为什么**不**做全表行级 checksum（正式库只读实测，5 次取中位数，单条 SQL 的
+# 增量成本；"锚点"= 一条 `SELECT 1` 的 92ms 连接开销已扣除）：
+#   bit_xor(hash(struct_pack(*COLUMNS(*)))) on source_audit   ≈ +854ms
+#   SUM(hash(confidence))                      22.4M 行      ≈ +300ms
+#   bit_xor(hash(confidence))                                 ≈  +2ms,但**不可用**
+#   GROUP BY confidence 的分布拼接（本方案）                  ≈  +69ms
+# `bit_xor(hash(col))` 虽然最便宜，却是**奇偶敏感**的：偶数列的同值会完全抵消
+# 成 0 —— 实测 `price_daily_qfq` 整列 close 相同、行数为偶数时摘要恒为 0，
+# 整列改动也看不出来（等于给了一个假安全感）。所以改用**分布级**信号：
+# 按字典编码列分组 + 按 key 排序拼接，翻标记必然改变分布、重复值不抵消、
+# 且不需要把每行的值物化后逐个 hash。
+#
+# 语义边界（不夸大，报告里同样登记）：
+#   * 只覆盖列出的列。改未列出的列（value / source / api_version /
+#     raw_response_hash / reason_code）不改变外层指纹 —— raw_response_hash 是
+#     64 字符高基数列，`SUM(hash())` 实测 +300ms、`bit_xor` 又会抵消，都不可用；
+#     reason_code 同为自由文本。
+#   * 分布只看 (key, 行数) 这一对面：把两行的 key **互换**不改变分布。
+_DISTRIBUTION_SIGNALS: dict[str, str] = {
+    # 表 → 「分布级」标量子查询 SQL。**分组聚合**（几十个组）而不是行级摘要：
+    #   ① 翻标记（confidence 由 high→low）一定改变分布 → 指纹变化；
+    #   ② 代价是"按字典编码列分组"，比逐行 hash 便宜（正式库实测 +35ms）；
+    #   ③ 结果按 key 排序拼接 ⇒ 与行序无关、重复值不抵消。
+    # ⚠️ 不要用 `SUM(hash(col))` / `bit_xor(hash(col))` 代替：
+    #   - SUM(hash()) 在 22.4M 行上实测 +300ms 以上（要把每行的值都物化再算哈希）；
+    #   - bit_xor 更是**奇偶敏感**的：偶数列的同值会完全抵消成 0
+    #     （实测 price_daily_qfq 整列 close 相同、行数为偶数时
+    #     `bit_xor(hash(close))` 恒为 0，整列改动也看不出来）。
+    # 拼接只发生在**分组结果**上（组数个位到几十个），所以 `||` 不产生行级开销。
+    "source_audit": """(SELECT string_agg(k || '=' || n, '|' ORDER BY k) FROM
+        (SELECT CAST(confidence AS VARCHAR) AS k, COUNT(*) AS n
+           FROM source_audit GROUP BY confidence))""",
+    "source_audit_archive": """(SELECT string_agg(k || '=' || n, '|' ORDER BY k) FROM
+        (SELECT CAST(confidence AS VARCHAR) AS k, COUNT(*) AS n
+           FROM source_audit_archive GROUP BY confidence))""",
+    "fetch_batch": """(SELECT string_agg(k || '=' || n, '|' ORDER BY k) FROM
+        (SELECT CAST(data_type AS VARCHAR) AS k, COUNT(*) AS n
+           FROM fetch_batch GROUP BY data_type))""",
+}
+# 价格表：外层指纹此前**一张都没有**（只在内层门禁用 COUNT/MIN/MAX，而外层
+# 一旦命中缓存，内层根本没机会跑）。现在补 COUNT(*)。
+#
+# 被性能红线砍掉的候选信号（正式库实测，read_only，5 次中位数，单条 SQL 的
+# 增量成本）：`MAX(trade_date)` +180ms（primary key 是 (stock_code, trade_date)，
+# trade_date 不在排序前缀上，zone map 帮不上忙）；按年分桶 COUNT +204ms；
+# 按年 COUNT + `SUM(round(close*100)::BIGINT)`（能看见"就地重算"的内容信号）
+# +275ms。三者任一都会把就绪判断的耗时翻倍（见报告的成绩对比表），故全部不进
+# 常态路径 —— **残余盲区：qfq 就地重算（不新增行）外层仍然看不见**，已登记。
+_PRICE_FINGERPRINT_TABLES: tuple[str, ...] = ("price_daily_raw", "price_daily_qfq")
+
+# 降级可见性（盲区 4）：指纹 → 本次就绪判定是否降级。
+_FINGERPRINT_DEGRADATION_LIMIT = 8
+_fingerprint_degradation: dict[str, dict] = {}
+_fingerprint_degradation_lock = threading.Lock()
+_last_degraded_logged: tuple | None = None
+
+
+def _remember_fingerprint_degradation(fingerprint: str, degraded: dict) -> None:
+    """Record + log the degradation of one fingerprint (never raises)."""
+    global _last_degraded_logged
+    with _fingerprint_degradation_lock:
+        _fingerprint_degradation[fingerprint] = degraded
+        while len(_fingerprint_degradation) > _FINGERPRINT_DEGRADATION_LIMIT:
+            _fingerprint_degradation.pop(next(iter(_fingerprint_degradation)))
+        signature = (fingerprint, tuple(degraded.get("count_only_tables") or ()))
+        already_logged = _last_degraded_logged == signature
+        _last_degraded_logged = signature
+    if not already_logged:
+        # 静默降级 = 假绿的另一种形态。每次降级**首次**出现时留一条 WARNING，
+        # 让运维在日志里能看出"这次就绪判断是降级的"。
+        logger.warning(
+            "筛选就绪指纹降级为 count-only（这些表的就地改动不再可见）: "
+            "tables=%s reasons=%s fingerprint=%s",
+            degraded.get("count_only_tables"),
+            degraded.get("reasons"),
+            fingerprint[:12],
+        )
+
+
+def fingerprint_degradation(fingerprint: str | None) -> dict | None:
+    """Return how the given readiness fingerprint degraded, or ``None``.
+
+    盲区 4 的对外出口：调用方（web 门禁 / CLI）拿到的指纹若降级，这里能查到
+    ``{"active": True, "count_only_tables": [...], "reasons": {...}}``。
+    进程重启后历史指纹的降级记录会丢——降级信息本身**每次重算都会重新产生**，
+    不需要持久化。
+    """
+    if not fingerprint:
+        return None
+    with _fingerprint_degradation_lock:
+        recorded = _fingerprint_degradation.get(fingerprint)
+        return dict(recorded) if recorded else None
+
+
 def _duck_content_checksums(
     duck: DuckDBStore, row_counts: dict[str, int],
 ) -> dict[str, dict]:
@@ -304,9 +411,13 @@ def _duck_content_checksums(
     （就地 UPDATE 也改变），且只需一次列扫描。
 
     关键成本事实（本机实测，正式库同量级）：`DuckDBStore.read_query` 每次
-    都要新开连接，单次约 24ms，**连接数才是指纹的主要成本**（旧公式 6 次
-    ≈120-140ms）。所以这里把所有被保护的表并成一条 `UNION ALL` 查询，按
-    行数预算决定哪些表走内容摘要、哪些表退回纯 COUNT。
+    都要新开连接，单次约 24ms（28GB 正式库上实测 60-140ms），**连接数才是
+    指纹的主要成本**。所以这里把所有被保护的表并成一条 `UNION ALL` 查询，
+    按行数预算决定哪些表走内容摘要、哪些表退回纯 COUNT。
+
+    盲区 4 修复：退回 count-only 的表会带 `degraded_reason`
+    （``row_budget_exceeded`` / ``checksum_error``），供上层汇总成 payload 里的
+    ``degraded`` 字段并落一条 WARNING —— 不再静默降级。
     """
     payload: dict[str, dict] = {}
     targets: list[str] = []
@@ -315,6 +426,7 @@ def _duck_content_checksums(
         payload[table] = {"c": count}
         if count > _CONTENT_CHECKSUM_ROW_BUDGET:
             payload[table]["mode"] = "count-only"
+            payload[table]["degraded_reason"] = "row_budget_exceeded"
         else:
             targets.append(table)
     if not targets:
@@ -331,13 +443,31 @@ def _duck_content_checksums(
         rows = duck.read_query(" UNION ALL ".join(statements))
     except Exception:
         # 任何 schema 意外都退回 COUNT（指纹仍然可用，只是退化到旧粒度）。
+        # 但**必须**标出来：这正是盲区 4 说的"静默降级"。
+        logger.warning("行内容摘要查询失败，退回 count-only", exc_info=True)
         for table in targets:
             payload[table]["mode"] = "count-only"
+            payload[table]["degraded_reason"] = "checksum_error"
         return payload
     for row in rows:
         payload.setdefault(str(row["tbl"]), {})["mode"] = "content"
         payload[str(row["tbl"])]["xor"] = str(row["h"])
     return payload
+
+
+def _degradation_summary(content: dict[str, dict]) -> dict:
+    """Summarise which tables fell back to count-only (盲区 4 的 payload 字段)."""
+    count_only = sorted(
+        table for table, info in content.items() if info.get("mode") != "content"
+    )
+    return {
+        "active": bool(count_only),
+        "count_only_tables": count_only,
+        "reasons": {
+            table: content[table].get("degraded_reason") or "row_budget_exceeded"
+            for table in count_only
+        },
+    }
 
 
 def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str | None:
@@ -351,20 +481,42 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
     COUNT + MAX(时间戳)。这保证命中路径的开销仍在毫秒量级，同时让"日历内部
     替换 / 财务就地重述 / 人工覆盖改 payload"这几类真实修复动作一定会改变
     指纹（详见本文件顶部缺陷 A 说明）。
+
+    盲区 2/3/4 续修：大表（source_audit / 归档 / price_daily_qfq）追加**逐列
+    hash 的 XOR**（对就地翻标记敏感，代价 +2~63ms 而不是整行摘要的 +854ms）；
+    价格两表进入外层指纹；超出预算的降级写进 payload 的 ``degraded`` 并落
+    WARNING，也可用 :func:`fingerprint_degradation` 查。
+    """
+    fingerprint, _payload = screening_readiness_fingerprint(duck, sqlite)
+    return fingerprint
+
+
+def screening_readiness_fingerprint(
+    duck: DuckDBStore, sqlite: SQLiteStore,
+) -> tuple[str | None, dict]:
+    """Fingerprint **plus** the payload it was computed from (for diagnostics).
+
+    返回 ``(fingerprint, payload)``；``payload["degraded"]`` 标明本次就绪判定
+    有没有退化成 count-only（盲区 4）。指纹把 ``degraded`` 也一起吃进哈希，
+    所以"降级态"与"非降级态"永远不会命中彼此的缓存行。
     """
     try:
-        snap = duck.read_query(
-            """SELECT MAX(calculated_at) AS c, MAX(latest_price_date) AS p,
-                      MAX(report_date) AS r, COUNT(*) AS n
-               FROM indicator_snapshot"""
-        )[0]
-        # source_audit 是 LINEAGE_INVALID 阻断码的来源。4300 万行做内容摘要
-        # 太贵；schema 确认它有 fetch_time/created_at：追加可见，就地翻标记
-        # 不可见（残余盲区已登记在缺陷 A 说明里）。
-        # 全部聚合塞进**一条** SQL：DuckDB 单次 read_query ≈24ms 的连接开销
-        # 才是指纹的主要成本，比聚合本身贵一个量级。
+        distribution_columns = ", ".join(
+            f"{sql} AS dist_{table}"
+            for table, sql in _DISTRIBUTION_SIGNALS.items()
+        )
+        price_columns = ", ".join(
+            f"(SELECT COUNT(*) FROM {_quote_ident(table)}) AS {table}_c"
+            for table in _PRICE_FINGERPRINT_TABLES
+        )
+        # 全部聚合塞进**一条** SQL：DuckDB 单次 read_query 的连接开销（正式库
+        # 60-140ms）才是指纹的主要成本，比单个聚合本身贵一个量级。快照聚合
+        # 本轮并进这条查询，省掉一次连接，抵掉新增信号的一部分开销。
         counts = duck.read_query(
-            """SELECT
+            f"""SELECT
+                 (SELECT MAX(calculated_at) FROM indicator_snapshot) AS snap_c_at,
+                 (SELECT MAX(latest_price_date) FROM indicator_snapshot) AS snap_p,
+                 (SELECT MAX(report_date) FROM indicator_snapshot) AS snap_r,
                  (SELECT COUNT(*) FROM source_audit) AS source_audit_c,
                  (SELECT COUNT(*) FROM source_audit_archive) AS source_audit_archive_c,
                  (SELECT COUNT(*) FROM fetch_batch) AS fetch_batch_c,
@@ -376,7 +528,9 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
                  (SELECT COUNT(*) FROM dividends) AS dividends,
                  (SELECT COUNT(*) FROM xdxr) AS xdxr,
                  (SELECT MAX(fetch_time) FROM source_audit) AS source_audit_fetch_max,
-                 (SELECT MAX(created_at) FROM source_audit) AS source_audit_created_max"""
+                 (SELECT MAX(created_at) FROM source_audit) AS source_audit_created_max,
+                 {price_columns},
+                 {distribution_columns}"""
         )[0]
         # 财务三表/分红/除权除息会改变 readiness 与筛选结果，且它们的
         # "就地重述"不改变 COUNT/MAX(date)：行数有界时改做行内容摘要。
@@ -385,22 +539,52 @@ def screening_readiness_cache_key(duck: DuckDBStore, sqlite: SQLiteStore) -> str
         )
         overrides = _manual_overrides_fingerprint(sqlite)
         calendar_fp = _trading_calendar_fingerprint(sqlite)
+        degraded = _degradation_summary(content)
+        # 读不到（表未建 / 文件缺失 / 任何错误）时返回 0，指纹退化成与旧行为等价。
+        from app.core.storage import content_epoch as _content_epoch
+
+        content_epoch = _content_epoch.current(sqlite.paths.sqlite_path)
         payload = {
-            "snap": snap,
+            "snap": {
+                "c": counts.get("snap_c_at"),
+                "p": counts.get("snap_p"),
+                "r": counts.get("snap_r"),
+                "n": counts.get("snapshot_c"),
+            },
             "counts": {k: v for k, v in counts.items() if k.endswith("_c")},
             "audit": {
                 "fetch_max": counts.get("source_audit_fetch_max"),
                 "created_max": counts.get("source_audit_created_max"),
             },
+            "price": {
+                table: {"c": counts.get(f"{table}_c")}
+                for table in _PRICE_FINGERPRINT_TABLES
+            },
+            "distribution": {
+                table: str(counts.get(f"dist_{table}"))
+                for table in _DISTRIBUTION_SIGNALS
+            },
             "content": content,
+            # 内容纪元：由 DuckDBStore 在每个**成功的写事务**后 +1（O(1)，见
+            # app/core/storage/content_epoch.py）。价格表 1750 万行做行级摘要要 +275ms
+            # （指纹基线才 430–510ms），所以"就地重算"改用"写入自己记账"来暴露：
+            # 只要有人改过库，纪元就不同 → 缓存不命中 → 不会拿旧结论假装已就绪。
+            "content_epoch": content_epoch,
+            "degraded": degraded,
             "published_overrides": overrides,
             "trading_calendar": calendar_fp,
         }
-        return hashlib.sha256(
+        fingerprint = hashlib.sha256(
             json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()
+        if degraded["active"]:
+            _remember_fingerprint_degradation(fingerprint, degraded)
+        return fingerprint, payload
     except Exception:
-        return None
+        # 绝不让指纹异常变成"永久命中旧决策"：返回 None，调用方同步重算。
+        # 但**留痕**，避免又一次静默退化（盲区 4 的精神）。
+        logger.warning("筛选就绪指纹计算失败，将退回同步重算", exc_info=True)
+        return None, {}
 
 
 def load_screening_readiness_entry(
@@ -460,6 +644,9 @@ def load_screening_readiness_entry(
                 age_seconds is not None
                 and age_seconds > SCREENING_READINESS_CACHE_TTL_SECONDS
             ),
+            # 盲区 4：这条决策当初算的时候指纹是否降级。旧缓存行没有该字段
+            # → None（不是"未降级"的断言，只是"当时没记录"）。
+            "fingerprint_degraded": payload.get("fingerprint_degraded"),
         }
     except Exception:
         return None
@@ -610,7 +797,13 @@ def _screening_readiness_refresh_worker(
 def store_screening_readiness_cache(
     sqlite: SQLiteStore, fingerprint: str, decision: dict,
 ) -> None:
-    """Persist a completed screening decision atomically (best-effort)."""
+    """Persist a completed screening decision atomically (best-effort).
+
+    盲区 4：把**本次判定用的指纹的降级情况**一起落盘
+    （``fingerprint_degraded``），这样读过这条缓存的人（web 门禁 / CLI）
+    通过 :func:`load_screening_readiness_entry` 就能看出"这次就绪判断是
+    降级的"，而不是只有日志里才有。
+    """
     try:
         sqlite.execute(
             """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -622,6 +815,7 @@ def store_screening_readiness_cache(
                 json.dumps({
                     "fingerprint": fingerprint,
                     "decision": decision,
+                    "fingerprint_degraded": fingerprint_degradation(fingerprint),
                     "updated_at": datetime.now(UTC).isoformat(),
                 }, default=str),
                 datetime.now(UTC).isoformat(),
@@ -892,11 +1086,6 @@ def share_capital_hard_block(violation_count: int, listed_count: int) -> bool:
         violation_count > gate_hard_block_threshold(listed_count)
         or gate_hard_blocks_by_share(violation_count, listed_count)
     )
-
-
-def share_capital_violations(duck: DuckDBStore) -> list[str]:
-    """Deprecated alias — kept so existing callers keep one implementation (§3)."""
-    return listed_share_capital_gap_codes(duck)
 
 
 def snapshot_publish_gate(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:

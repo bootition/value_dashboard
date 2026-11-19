@@ -41,6 +41,12 @@ def test_policy_module_has_only_allowed_imports() -> None:
         "dataclasses",
         "enum",
         "pathlib",
+        # 2026-11-19：reports/147 让 path_policy 能算出"同一仓库所有工作树共用的 data/"
+        # （`shared_data_roots()` 走 `git rev-parse --git-common-dir`），需要 subprocess。
+        # 白名单不是"不准有副作用"，而是"不准引入重依赖/循环依赖" —— subprocess 属标准库。
+        # 但**副作用必须就地封死**：下面 test_subprocess_is_confined_to_shared_data_roots
+        # 会断言它只能出现在那一个函数里。
+        "subprocess",
     }
     imported: set[str] = set()
     for node in ast.walk(tree):
@@ -49,6 +55,41 @@ def test_policy_module_has_only_allowed_imports() -> None:
         elif isinstance(node, ast.ImportFrom):
             imported.add(node.module or "<relative>")
     assert imported <= allowed
+
+
+def test_subprocess_is_confined_to_shared_data_roots() -> None:
+    """`subprocess` 只准在 `shared_data_roots()` 里用（2026-11-19）。
+
+    白名单放开 `subprocess` 是为了 reports/147 的"跨工作树共享 data/"探测；
+    但 `path_policy` 是**路径策略模块**，一旦别处也开始起子进程，
+    它就会从"纯计算"退化成"有副作用、依赖外部环境"的模块 ——
+    这正是这条守卫最初要防的事。所以：允许 import，但**锁死使用位置**。
+    """
+    policy_path = Path(__file__).parents[2] / "app" / "core" / "storage" / "path_policy.py"
+    tree = ast.parse(policy_path.read_text(encoding="utf-8"))
+
+    def uses_subprocess(node: ast.AST) -> bool:
+        for child in ast.walk(node):
+            if isinstance(child, ast.Attribute):
+                base = child
+                while isinstance(base, ast.Attribute):
+                    base = base.value
+                if isinstance(base, ast.Name) and base.id == "subprocess":
+                    return True
+            if isinstance(child, ast.Name) and child.id == "subprocess":
+                return True
+        return False
+
+    offenders = [
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name != "shared_data_roots"
+        and uses_subprocess(node)
+    ]
+    assert offenders == [], (
+        f"subprocess 只能在 shared_data_roots() 里用，这些函数也在用：{offenders}"
+    )
 
 
 def test_direct_construction_requires_every_field(tmp_path: Path) -> None:

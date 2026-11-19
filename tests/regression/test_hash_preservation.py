@@ -82,11 +82,32 @@ def test_capture_records_missing_file_as_absent(sentinel_env):
 
 
 def test_capture_skips_when_evidence_root_unset(sentinel_env, monkeypatch):
-    formal_root, _ = sentinel_env
-    (formal_root / _SENTINEL_NAME).write_bytes(b"x")
+    """未设 evidence root 时：不抛错，且**一个字节都不许写**。
+
+    2026-11-19 审计 W4：原来写了哨兵文件却从不检查它 —— 即使
+    `_capture_inner_evidence` 把证据写进正式 data/ 目录也照样绿。
+    现在钉住三件事：① 不抛错（非 wrapper 手工 pytest 同样合法）；
+    ② 证据目录没被创建；③ 正式目录内容逐字节不变。
+    """
+    formal_root, evidence_root = sentinel_env
+    sentinel = formal_root / _SENTINEL_NAME
+    sentinel.write_bytes(b"x")
+    formal_before = {path.name: path.read_bytes() for path in formal_root.iterdir()}
     monkeypatch.delenv("VD_TEST_EVIDENCE_ROOT", raising=False)
+
     # 不应抛错：非 wrapper 手工 pytest 运行同样合法，门禁判断归 wrapper
     _capture_inner_evidence(None, phase="pre")
+    _capture_inner_evidence(None, phase="post")
+
+    assert not evidence_root.exists(), "未设 evidence root 时不得创建证据目录"
+    assert not list(formal_root.glob("inner-formal-fingerprint-*.json")), (
+        "证据指纹被写进了正式数据目录"
+    )
+    assert sorted(p.name for p in formal_root.parent.iterdir()) == [formal_root.name], (
+        "正式目录之外（tmp 根下）出现了新文件/目录，说明证据被写到别处去了"
+    )
+    assert {path.name: path.read_bytes() for path in formal_root.iterdir()} == formal_before
+    assert sentinel.read_bytes() == b"x", "哨兵文件被改写了"
 
 
 def test_fingerprints_equal_field_sensitivity():

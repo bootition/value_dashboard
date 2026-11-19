@@ -210,10 +210,13 @@ def test_invalid_denominator_keeps_null_roce_but_preserves_ce(
         """SELECT report_date, roce, status FROM roce_history
            WHERE stock_code = '000004' ORDER BY report_date"""
     )
-    assert rows, "资本占用为负的行必须仍然入库"
+    # 2026-11-19 审计 W5：原为裸 `assert rows` —— "入库了几行、状态对不对"全靠猜。
+    # 5 年报表必须 5 行都入库（旧值不隐藏），且状态逐行钉死。
+    assert [r["status"] for r in rows] == [
+        STATUS_NO_PRIOR_PERIOD,
+        *[STATUS_INVALID_DENOMINATOR] * (len(YEARS) - 1),
+    ], f"资本占用为负的行状态不对: {[r['status'] for r in rows]}"
     assert all(r["roce"] is None for r in rows)
-    assert rows[0]["status"] == STATUS_NO_PRIOR_PERIOD
-    assert all(r["status"] == STATUS_INVALID_DENOMINATOR for r in rows[1:])
 
     row = duckdb_store.read_query(
         """SELECT ce FROM roce_history
@@ -243,11 +246,14 @@ def test_missing_financial_expenses_marks_missing_ebit(duckdb_store: DuckDBStore
         """SELECT report_date, roce, status FROM roce_history
            WHERE stock_code = '000005' ORDER BY report_date"""
     )
-    assert rows
+    # 2026-11-19 审计 W5：原为裸 `assert rows`。
+    # 序列首年（2019）没有上年报表 → NO_PRIOR_PERIOD；其余 4 年必须是
+    # MISSING_EBIT —— 把财务费用当成 0 会算出一个"看起来正常"的 ROCE。
+    assert [r["status"] for r in rows] == [
+        STATUS_NO_PRIOR_PERIOD,
+        *[STATUS_MISSING_EBIT] * (len(YEARS) - 1),
+    ], f"缺财务费用的行状态不对: {[r['status'] for r in rows]}"
     assert all(r["roce"] is None for r in rows)
-    # 序列首年（2019）没有上年报表 → NO_PRIOR_PERIOD；其余年份是财务费用缺失
-    assert rows[0]["status"] == STATUS_NO_PRIOR_PERIOD
-    assert all(r["status"] == STATUS_MISSING_EBIT for r in rows[1:])
 
 
 def _seed_n_years(duck: DuckDBStore, code: str, n_reports: int) -> None:
@@ -620,7 +626,7 @@ def test_registry_and_rebuild_sql_agree_column_for_column(
     from app.core.indicators.roce import SNAPSHOT_DERIVED_COLUMNS, SNAPSHOT_UPDATE_SQL
 
     set_clause = re.search(r"\bSET\b(.*?)\bFROM\b", SNAPSHOT_UPDATE_SQL, re.S | re.I)
-    assert set_clause, "SNAPSHOT_UPDATE_SQL 里找不到 UPDATE ... SET ... FROM"
+    assert set_clause is not None, "SNAPSHOT_UPDATE_SQL 里找不到 UPDATE ... SET ... FROM"
     sql_columns = set(re.findall(r"([a-z_][a-z0-9_]*)\s*=", set_clause.group(1)))
     registered = set(SNAPSHOT_DERIVED_COLUMNS)
 

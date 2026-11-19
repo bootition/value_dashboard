@@ -82,7 +82,7 @@ def _importing_files(root: Path, module: str) -> list[str]:
 
 
 def _constant_true_write_calls(root: Path) -> list[str]:
-    """`sweep(..., write=True)` / `sweep_all(..., write=True)` 的硬编码调用点。"""
+    """`sweep(..., write=True)` 的硬编码调用点。"""
     hits: list[str] = []
     for path in _python_files(root):
         for node in ast.walk(_parse(path)):
@@ -90,7 +90,7 @@ def _constant_true_write_calls(root: Path) -> list[str]:
                 continue
             func = node.func
             name = func.id if isinstance(func, ast.Name) else None
-            if name not in {"sweep", "sweep_all"}:
+            if name != "sweep":
                 continue
             for keyword in node.keywords:
                 if (
@@ -111,22 +111,20 @@ def test_sweep_defaults_to_dry_run() -> None:
     拦：①有人把默认翻成 `True`，CLI 的"预演绝不写库"承诺立刻失效；
     ②`domain` 拿到默认值，"只清扫 ext 域"退化成扫全库（分钟级 → 十几分钟级）。
     """
-    for func in (sweeper.sweep, sweeper.sweep_all):
-        params = inspect.signature(func).parameters
-        write = params["write"]
-        assert write.kind is inspect.Parameter.KEYWORD_ONLY, (
-            f"{func.__name__}.write 必须是 keyword-only：位置参数会被误传"
-        )
-        assert write.default is False, (
-            f"{func.__name__}.write 默认值必须是 False（dry-run）——"
-            "否则任何一次调用都在未加 --yes、未持写锁的情况下写正式库"
-        )
+    params = inspect.signature(sweeper.sweep).parameters
+    write = params["write"]
+    assert write.kind is inspect.Parameter.KEYWORD_ONLY, (
+        f"{sweeper.sweep.__name__}.write 必须是 keyword-only：位置参数会被误传"
+    )
+    assert write.default is False, (
+        f"{sweeper.sweep.__name__}.write 默认值必须是 False（dry-run）——"
+        "否则任何一次调用都在未加 --yes、未持写锁的情况下写正式库"
+    )
 
     domain = inspect.signature(sweeper.sweep).parameters["domain"]
     assert domain.default is inspect.Parameter.empty, (
-        "sweep.domain 不应有默认值：全库清扫必须是调用方显式要求（sweep_all）"
+        "sweep.domain 不应有默认值：全库清扫必须是调用方逐域显式要求"
     )
-    assert inspect.signature(sweeper.sweep_all).parameters["write"].default is False
 
 
 # ─── 2. 唯一写库入口：`app/` 里没有别的调用点 ─────────────────────
@@ -200,24 +198,88 @@ def test_readiness_guard_path_keys_point_at_real_importers() -> None:
 
 # ─── 4. 读路径仍在：端点 → reason_distribution → 稀疏表 ────────────
 
+# 诱饵表：与稀疏表同结构、不同数据。`reason_distribution()` 若读了"别的表"，
+# 结果就会变成这上面的字段 —— 用它把"读错表"变成可观测的行为差异。
+_DECOY_TABLE = "indicator_null_reason_decoy"
+_SPARSE_REPORT_DATE = "2025-12-31"
 
-def test_read_path_still_reads_the_sparse_table() -> None:
-    """`GET /api/data-status/null-reasons` → `reason_distribution()` → 稀疏表。
 
-    拦：端点被删/改名、或换成别的数据源（CLI 写进去的原因没人消费）；
-    也拦 `reason_distribution()` 丢掉 `NULL_REASON_TABLE` 改为写死别的表名。
+def _seed_rows(store, table: str, rows: list[tuple[str, str, str]]) -> None:
+    """往 `table` 塞 `(field_name, reason_code, n)` 形态的行（稀疏表结构）。"""
+    store.write_query(
+        f"""CREATE TABLE IF NOT EXISTS {table} (
+               stock_code VARCHAR NOT NULL, report_date DATE NOT NULL,
+               field_name VARCHAR NOT NULL, reason_code VARCHAR NOT NULL,
+               detail VARCHAR, computed_at TIMESTAMP NOT NULL,
+               PRIMARY KEY (stock_code, report_date, field_name))"""
+    )
+    for field_name, reason_code, count in rows:
+        for index in range(count):
+            store.write_query(
+                f"""INSERT INTO {table}
+                       (stock_code, report_date, field_name, reason_code, detail, computed_at)
+                   VALUES (?, CAST(? AS DATE), ?, ?, NULL, now())""",
+                [f"60051{index}", _SPARSE_REPORT_DATE, field_name, reason_code],
+            )
+
+
+def test_reason_distribution_reads_the_sparse_table(duckdb_store) -> None:
+    """`reason_distribution()` **真读**稀疏表 `indicator_null_reason`（行为断言）。
+
+    拦的事故：读端改了数据源（读别的表 / 写死表名），于是 CLI 清扫器写进稀疏表的
+    原因没人消费，回到"清扫了但没人看"的原始状态（`reports/136` 的原始缺口）。
+
+    做法（不再是 `inspect.getsource(...)` 里搜 `NULL_REASON_TABLE` 这个**名字**）：
+    1. **空表形态**：表存在但没数据 → `table_ready is True` 且计数为 0
+       （"表在但没数据" 不能和 "表不存在" 混为一谈）；
+    2. **有数据形态**：稀疏表塞 3 行，诱饵表塞 2 行**不同字段**；
+       返回值必须逐字段等于稀疏表那 3 行，且诱饵字段一条都不出现。
+    读错表的实现拿不到稀疏表的数据 → 结果为空集或诱饵字段 → 断言红。
     """
     assert null_reasons.NULL_REASON_TABLE == "indicator_null_reason", (
         f"稀疏表名被改成 {null_reasons.NULL_REASON_TABLE!r}：清扫器写入目标与读端查询目标已分叉"
     )
-    distribution_ast = ast.parse(
-        inspect.getsource(null_reasons.reason_distribution)
+    assert null_reasons.NULL_REASON_TABLE != _DECOY_TABLE
+
+    # 1) 空表：表已迁移、还没清扫过
+    empty = null_reasons.reason_distribution(duckdb_store)
+    assert empty["table_ready"] is True, "稀疏表存在时 table_ready 必须为 True"
+    assert empty["total_cells"] == 0
+    assert empty["fields"] == {}
+    assert empty["report_date"] is None, "空表没有最新报告期，不能编一个出来"
+
+    # 2) 有数据 + 诱饵表：只反映稀疏表
+    _seed_rows(duckdb_store, null_reasons.NULL_REASON_TABLE, [
+        ("roe", "SOURCE_EMPTY", 2),
+        ("balance.fixed_assets", "NOT_COMPUTED", 1),
+    ])
+    _seed_rows(duckdb_store, _DECOY_TABLE, [
+        ("pe_ttm", "NOT_APPLICABLE", 2),
+    ])
+
+    distribution = null_reasons.reason_distribution(duckdb_store)
+
+    assert distribution["report_date"] == _SPARSE_REPORT_DATE, (
+        "最新报告期必须取自稀疏表：取到别的值说明读端换了表"
     )
-    names = {node.id for node in ast.walk(distribution_ast) if isinstance(node, ast.Name)}
-    assert "NULL_REASON_TABLE" in names, (
-        "reason_distribution() 不再引用 NULL_REASON_TABLE：读端已脱离清扫器的写入目标"
+    assert distribution["fields"] == {
+        "balance.fixed_assets": {"NOT_COMPUTED": 1},
+        "roe": {"SOURCE_EMPTY": 2},
+    }, f"分布不是稀疏表的内容：{distribution['fields']}"
+    assert distribution["totals"] == {"SOURCE_EMPTY": 2, "NOT_COMPUTED": 1}
+    assert distribution["total_cells"] == 3
+    assert "pe_ttm" not in distribution["fields"], (
+        "读到了诱饵表（indicator_null_reason_decoy）的数据："
+        "reason_distribution() 已脱离清扫器的写入目标"
     )
 
+
+def test_null_reasons_endpoint_still_calls_reason_distribution() -> None:
+    """`GET /api/data-status/null-reasons` 必须调用 `reason_distribution()`。
+
+    拦：端点被删/改名，或换成别的数据源（前端因此永远看不到清扫结果）。
+    这是**接线事实**（端点 → 服务函数）的 AST 级守卫，不读函数体文本。
+    """
     api = _parse(REPO_ROOT / "app/web/api/data_status.py")
     endpoints: dict[str, ast.FunctionDef] = {}
     for node in ast.walk(api):

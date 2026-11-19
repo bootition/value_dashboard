@@ -553,14 +553,29 @@ def test_supplement_refresh_writes_source_rows_and_respects_deadline(
         """SELECT report_date, fixed_asset_depreciation, intangible_asset_amortization
            FROM cash_flow_indirect WHERE stock_code = '000001' AND source = 'eastmoney_f10'"""
     )
-    assert len(rows) == 1, "按股票先删同源再插，不能留下 06-30 的旧同源行"
+    # 2026-11-19 修正**过时断言**：这里原来写 `len(rows) == 1`，注释是
+    # "按股票先删同源再插，不能留下 06-30 的旧同源行"—— 那是 reports/147 事故
+    # **之前**的语义。147 之后 `delete_scope='all'` 的删除范围被**限制在本轮真正
+    # 写入的期次**内（`t.report_date IN (SELECT report_date FROM _supp_rows)`），
+    # 因为旧实现只按 stock_code 匹配，一次误删了 5,575 行 2025 年报 + 5,579 行
+    # 2026 半年报，只能全量重采救回。
+    # 本批只返回了 LATEST_PERIOD 的行 → OLD_PERIOD 的同源旧行**必须原样保留**。
+    # 所以这里从"断言它被删掉"改成"断言它没被动"（与
+    # test_cashflow_row_replacement.py::test_partial_period_backfill_keeps_other_periods 同口径）。
+    assert len(rows) == 1, "本轮期次只应有 1 行（cash_flow_indirect 的 06-30 旧行不属于本源）"
     assert str(rows[0]["report_date"])[:10] == LATEST_PERIOD
     assert rows[0]["fixed_asset_depreciation"] == pytest.approx(12.0)
     capex = duckdb_store.read_query(
-        """SELECT capex FROM cash_flow_activity
-           WHERE stock_code = '000001' AND source = 'eastmoney_f10'"""
+        """SELECT CAST(report_date AS VARCHAR) AS period, capex FROM cash_flow_activity
+           WHERE stock_code = '000001' AND source = 'eastmoney_f10'
+           ORDER BY report_date"""
     )
-    assert [row["capex"] for row in capex] == [pytest.approx(40.0)]
+    # 两行：OLD_PERIOD 的**同源旧行必须留着**（本轮没请求到它的新数据），
+    # LATEST_PERIOD 是本轮新写入的。旧行数值 50 不能被 40 覆盖。
+    assert [str(row["period"])[:10] for row in capex] == [OLD_PERIOD, LATEST_PERIOD], (
+        "部分期次补采把其他期次的同源旧行删掉了 —— reports/147 那次误删 11,154 行的形态"
+    )
+    assert [row["capex"] for row in capex] == [pytest.approx(50.0), pytest.approx(40.0)]
 
 
 def test_deducted_profit_never_inserts_or_overwrites_existing_values(

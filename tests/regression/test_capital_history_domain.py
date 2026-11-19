@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from datetime import UTC, date, datetime, timedelta
 
@@ -329,10 +328,6 @@ def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     )
 
 
-def test_series_pe_pb_dividend_spread() -> None:
-    from tests.conftest import database_paths as _  # noqa: F401
-
-
 def test_statistics_build_and_window_stats(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
@@ -446,6 +441,20 @@ def test_stat_field_whitelist_and_known_gate() -> None:
 def test_readiness_unchanged_and_no_data_quality_reference(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
+    """股本链 + 研究统计域不得改变 A 股 readiness，也不得被数据质量引用。
+
+    前半段是**行为断言**（写一行股本链，readiness 必须逐字段不变）；
+    后半段是**负向耦合**断言，改成 import 图 + AST 符号表：
+
+    拦的事故：`data_quality` 被接上 `app.core.capital` / `app.core.statistics`
+    （例如"股本链缺失 → 整站不可筛"），或直接在数据质量里查
+    `share_capital_history` / `research_statistics`。
+    旧写法 `"share_capital_history" not in inspect.getsource(module)` 拦的是文本：
+    写进注释就假红，函数体内延迟 import 反而可能躲过。
+    """
+    from app.core import data_quality as module
+    from tests.support import source_guard
+
     _seed_stock(duckdb_store)
     before = minimum_data_readiness(duckdb_store, sqlite_store)
     assert before["schema_compatibility"]["compatible"] is True
@@ -453,10 +462,12 @@ def test_readiness_unchanged_and_no_data_quality_reference(
     after = minimum_data_readiness(duckdb_store, sqlite_store)
     assert after == before
 
-    from app.core import data_quality as module
-    source = inspect.getsource(module)
-    assert "share_capital_history" not in source
-    assert "research_statistics" not in source
+    source_guard.assert_no_coupling(
+        module,
+        forbidden_modules=("app.core.capital", "app.core.statistics"),
+        forbidden_symbols=("share_capital_history", "research_statistics"),
+        why="这两个域缺失只该让对应指标为 NULL，不该把 A 股 readiness 判成不可用",
+    )
 
 
 # ─── API ─────────────────────────────────────────────────────────────────
@@ -939,7 +950,14 @@ def test_update_many_aborts_on_consecutive_cross_errors(
 
     assert report.get("aborted") is True
     assert len(report["results"]) == updater.CROSS_ERROR_ABORT_THRESHOLD
-    assert report["abort_reason"]
+    # 2026-11-19 审计 W5：原为裸 `assert report["abort_reason"]`。
+    # 文案必须指出**是哪一类**中止（真源错误 vs 空响应疑似风控）与次数，
+    # 否则运维看到"aborted"分不清该查源封禁还是该查解析。
+    assert report["abort_reason"] == (
+        f"连续 {updater.CROSS_ERROR_ABORT_THRESHOLD} 次交叉源错误，中止剩余批次"
+    ), report["abort_reason"]
+    # 中止后剩余批次必须真的没跑（不许"中止了还继续轰炸风控源"）
+    assert report["remaining_skipped"] == len(codes) - updater.CROSS_ERROR_ABORT_THRESHOLD
 
 
 def test_cross_audit_view(

@@ -25,6 +25,13 @@ MEASURED_RUNS = 10
 
 
 def _rule() -> dict:
+    """主路径规则：只由 columns 驱动展示列。
+
+    2026-11-19 `a0bc1e3`（reports/143 §10）起"结果排序"整体移出筛选页，
+    新品规则 `rule_json` 不再产出 `sort`；`41181e1` 删掉了前端残留的排序入参。
+    性能基准测的是这条**当前**路径，所以这里不再构造 `sort`。
+    老规则带 `sort` 的兼容性单独由 `test_legacy_rule_with_sort_still_runs` 覆盖。
+    """
     return {
         "conditions": {
             "logic": "AND",
@@ -37,7 +44,6 @@ def _rule() -> dict:
                 ]
             ),
         },
-        "sort": [{"field": "pe_ttm_industry_rank", "direction": "asc"}],
         "columns": [
             "stock_code", "name", "pe_ttm", "roe", "debt_ratio",
             COMPOSITE_NAME, "pe_ttm_industry_rank",
@@ -45,8 +51,16 @@ def _rule() -> dict:
     }
 
 
-def _seed_synthetic_pool(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore) -> dict:
-    """5000 只合成股票 + 快照 + 已发布复合指标（20 条件规则所需）。"""
+def _seed_synthetic_pool(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    count: int = TARGET_STOCKS,
+) -> dict:
+    """合成股票 + 快照 + 已发布复合指标（20 条件规则所需）。
+
+    `count` 默认造满 5000 只（性能 SLA 用）；legacy 兼容用例只需少量行，
+    避免为一条形状断言重复播种 5000 行。
+    """
     industries = ["制造业", "金融业", "房地产业", "信息技术业", "批发零售业"]
     listed_date = (date.today() - timedelta(days=365 * 8)).isoformat()
     snapshot_date = "2026-06-30"
@@ -54,7 +68,7 @@ def _seed_synthetic_pool(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore) -
 
     meta_rows: list[tuple] = []
     snapshot_rows: list[tuple] = []
-    for i in range(TARGET_STOCKS):
+    for i in range(count):
         code = f"{600000 + i:06d}"
         industry = industries[i % len(industries)]
         meta_rows.append((
@@ -126,4 +140,34 @@ def test_screening_performance_sla_on_5000_stock_pool(
     assert passing >= 9, (
         f"PRD 19.1 SLA failed: {passing}/{MEASURED_RUNS} runs within "
         f"{THRESHOLD_MS}ms; durations_ms={durations}"
+    )
+
+
+def test_legacy_rule_with_sort_still_runs(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """老 rule_json 带 sort 仍必须能跑通（兼容期口径，reports/143 §10.2）。
+
+    2026-11-19 `a0bc1e3` 之后新品规则不再产出 `sort`，但历史已保存规则里还有；
+    引擎必须继续按 `sort` 排序，而不是报错或静默丢行。这条用例是上一条
+    （columns 驱动的主路径）的对照：**形状兼容**留在这里，不让它污染主基准。
+    """
+    _seed_synthetic_pool(duckdb_store, sqlite_store, count=3)
+    legacy_rule = {
+        "conditions": {
+            "logic": "AND",
+            "rules": [{"field": "pe_ttm", "op": ">", "value": 0}],
+        },
+        "sort": [{"field": "pe_ttm", "direction": "desc"}],
+        "columns": ["stock_code", "pe_ttm"],
+    }
+
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+    result = engine.run(legacy_rule)
+
+    assert result["total"] == 3
+    pe_values = [row["pe_ttm"] for row in result["results"]]
+    assert pe_values == sorted(pe_values, reverse=True), (
+        f"legacy sort 未生效；结果顺序={pe_values}"
     )

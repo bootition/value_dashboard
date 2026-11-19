@@ -878,3 +878,468 @@ TTL 与硬上限**全被跳过** → 旧决策被无限期当作"已就绪"返�
 > 全部已修并补了反向用例。**但"全量 S1 全绿"这句话本轮不成立** ——
 > 不是代码有问题，而是仓库里同时有另一个会话在改；
 > 结论必须等仓库安静后重跑一次才能下。
+
+## 15. 第三轮：按 W4 隔离工作树后清账（2026-11-19）
+
+> 承接 §14.8 的"仍未做"。这一轮**先遵守新立的 `AGENTS W4`**（多会话私有化），
+> 再并行清账；过程中把 W4 的执行器本人修了一次。
+
+### 15.1 遵规开工：preflight BLOCK → 建私有 worktree
+
+开工自检 `scripts/session_preflight.py` 直接 **BLOCK（exit 2）**：
+- 已存在另一个 worktree（`.agents/worktrees/fix-quarterly-coverage-fallback`，**带 5 个未提交改动 = 活的会话**）
+- 主工作树当时是干净的，但这不改变结论：**不能在共享树上叠**
+
+按 W4 用 `create_worktree` 建了私有工作树：
+`.agents/worktrees/finish-refactor-backlog`（分支 `finish-refactor-backlog`，基于 `3b7711f`）。
+后续所有改动、测试、提交都在那里，主仓库一个字节都没动。
+
+**顺带修了 W4 执行器自己的一个自相矛盾**（`e331b7a`）：
+`check_worktrees` 原来只要数出 >1 个 worktree 就 BLOCK —— **把自己刚建的那个也算成"别人"**，
+于是"按规则做反而永久开不了工"。修正为：
+- 当前目录在**主工作树**且有额外 worktree → BLOCK（没隔离，这才是该拦的）
+- 当前目录已在**非主 worktree 内** → PASS（W4 已满足）
+
+两个必要配套（否则"永远比不中 ⇒ 还是 BLOCK"）：
+`git worktree list` 要加 `-c core.quotePath=false`（否则非 ASCII 路径被转义成 `\346\216\214…`），
+路径比较用 `realpath + normcase` 归一化。补 4 条用例（含"路径含空格"的解析，
+解析错同样导致永久 BLOCK）。
+
+**worktree 里的环境事实**（写进 `docs/skills/multi-agent-safe-session/SKILL.md`）：
+`.venv`/`data/`/`node_modules` 都是 gitignore，不会跟过来。做法是**复用而不复制**：
+- Python 用主仓库解释器（`"$MAIN/.venv/Scripts/python.exe"`）；**不要 `uv run`**（会在 worktree 里新建 250MB venv）
+- 前端用 **目录联接**：`New-Item -ItemType Junction -Path frontend/node_modules -Target <主仓库>/frontend/node_modules`
+- 正式库走绝对路径 + `read_only=True`
+
+### 15.2 四个 agent 并行清账（文件租约互斥，W8）
+
+| agent | 交付 | 关键数字 |
+|---|---|---|
+| **a-update-split** | 先解 getsource 死结，再搬 `_retry_failed_tasks` | `update.py` **6457 → 6156**（−301）；方法数 **137 → 137**；getsource **13 → 8** |
+| **b-frontend-god** | 拆 `ScreeningPage` + 5 套轮询收敛 | **1060 → 593 行（−44%）**；前端测试 **87→100 / 70→95** |
+| **c-fingerprint** | 补指纹 4 个盲区 + 降级可见 | 净耗时 **+14~18ms**（+3~4%），红线内 |
+| **d-guards** | RG3 双向化 + 清单漂移守卫 | 真树探针：塞死键 → 门禁立刻红 |
+
+### 15.3 解掉"反重构死结"（本轮最有价值的结构性一步）
+
+§13.7/§14.7 反复讲过：4 块代码拆不动，不是因为难，而是**测试用 `inspect.getsource`
+断言"代码写在哪个函数里"**——搬家就红。
+
+先建 `tests/support/source_guard.py`（342 行）把这类断言换成**行为级**：
+- `constructed_with()` 记录构造 kwargs（真跑，不读源码）→ 断言"注入了同一份共享 adapter_mgr"
+- `count_construction_sites()` 用 AST 数构造点（注释/日志里的同名字不算）
+- `resolve_body()` 顺"同名委托壳"追到真正实现 → 方法体搬走之后断言仍指向实现
+- 价格侧改成**真跑一轮** `_update_prices_incremental`，看内存水位有没有被标记
+
+**8 个变异逐个验证"真的会红"**，其中 **MUT6 第一版仍是绿的（假阴性）**——只要求"出现过一次"，
+加强成"最少展开次数 2"才红。这条很典型：**改测试的人自己也会写出假绿**，不靠变异检验发现不了。
+
+搬完：`update.py` 6457 → 6156，`IncrementalUpdater` 方法数仍是 137（原方法留 5 行同名委托）。
+**刻意没搬** `_update_prices_incremental`（504 行，3 executor + 自适应并发 + 攒批 + 20+ 条 SQL）
+与 `_run_incremental_update_flow`（`STEP_ORDER` 的事实来源）——时间盒到点，宁可不搬。
+另加棘轮 `test_update_structure.py`：`UPDATE_PY_MAX_LINES` 只许降、getsource 站点逐文件登记总量 == 8。
+
+### 15.4 前端：从"评估"到"真动手"
+
+`ScreeningPage.vue` **1060 → 593 行**，拆出 5 个"一个文件一件事"的模块（共 770 行）。
+**等价性用三重证据**：①脚本抽出全部 26 个被搬走的函数体对拍，归一化后 **26/26 一致**
+（允许的改名只有 5 类同值注入）；②`git diff` 确认 **template/style 零改动**；
+③既有组件测试一行未改仍全过。
+
+轮询从**5 套手写 timer** 收敛到 1 个 `usePollTimer`（含 `App.vue` 的 `setInterval`），
+并加**静态门禁** `polling-single-source.test.ts`：`src` 下再手写 `setInterval` 就红。
+这条护栏**上线时先红后绿**，抓出了 `App.vue`。
+
+**判断"不该拆"的也写清了**：`StockDetailPage`(805，并发+K线+TOC 交织，16 个既有测试)、
+`EtfStrategyPanel`(738，17 个 ref 是同一张表单的状态，且 5 个模态无测试覆盖 ⇒
+**先补测试再拆**)、`PointInTimeCard`/`ResearchStatisticsCard`（"多件事"其实是 computed 派生）、
+`types/data-quality.md` 系（纯类型，按行数判巨无霸是误判）。
+
+### 15.5 指纹的 4 个盲区
+
+先量了个被文档写错的事实：**指纹的主成本是"连接"不是"计算"** ——
+`read_query` 每次新开只读连接，28GB 库上开一次 **92–142ms**，所以真实基线是
+**430–510ms**（不是文档里的 90–120ms）。
+
+| 盲区 | 结果 |
+|---|---|
+| `source_audit` 就地翻标记 | ✅ 已堵（+ `GROUP BY confidence` 分布拼接，+69ms） |
+| 归档表 / `fetch_batch` | ✅ 已堵 |
+| 价格表从未进外层指纹 | 🟡 **部分**：新增行能让指纹变；**就地重算仍看不见**（内容信号实测 +275ms = 基线 +60%，超红线放弃），边界已用测试钉住 |
+| 超预算静默退回 count-only | ✅ 已堵：payload `degraded{}` + WARNING + 缓存 entry 字段，降级态与正常态**永不互命中** |
+
+**顺带发现上一轮方案的一个真缺陷**：`bit_xor(hash(col))` 是**奇偶敏感**的 ——
+整列取值相同时偶数行互相抵消 → **xor 恒为 0，整列改动也看不出来**。
+本轮新信号一律用"分组拼接"；既有 `_CONTENT_CHECKSUM_TABLES` 的 xor 弱点登记为遗留项。
+
+### 15.6 门禁：RG3 终于双向
+
+原 RG3 只查"后端有前端缺"，看不见**前端死键**——上一轮修的
+`dividend_financing_ratio`（前端把不存在的字段当百分数 = 100 倍误差）正是它漏掉的形态。
+现在两个方向都报，并引入 `FRONTEND_ONLY_ALLOWED` 白名单（**当前为空**），
+白名单条目必须仍真实存在，否则报「白名单过期」。
+
+**真树探针**（不是只跑单测）：往 `PERCENT_FIELDS` 塞一个不存在的键 → 门禁立刻红并给出
+"确属历史别名请登记进 FRONTEND_ONLY_ALLOWED 并写明理由"；还原即绿。
+（第一次探针塞错了位置——`PERCENT_FIELDS` 这个词在注释里先出现，改了注释自然不报。
+**探针必须打准**，否则会得出"门禁没生效"的错误结论。）
+
+RG10（U+FFFD）此前只有实现、没有反向用例 = 装饰，已补 3 条（注入必报/转义写法不许误报/
+本仓库自身必须干净）。另加**防清单漂移**用例：从 `AGENTS.md` 解析 `RG<n>` 集合与
+`run_all()` 实际跑的对齐，编号还要连续。
+
+### 15.7 过程事故：一个 agent 超时不落盘
+
+`d-guards` 在 **15:04 之后 28 分钟没有任何文件变更**，并留下 2 个 F401（引入了 RG10 的
+helper 却没写用例）。按 `AGENTS W5` 中断它，主控接手补完（RG10 三条用例 + 钩子文案）。
+它的 RG3 双向化与清单漂移用例是好的，已保留。
+**教训**：W5 的"超过时间盒无文件变更就中断"这次真的用上了——不做的话会一直空等。
+
+### 15.8 仍未做（下一轮的入口）
+
+1. **`_update_prices_incremental`（504 行）与 `_run_incremental_update_flow`（500+ 行）未搬** ——
+   前者 3 executor + 自适应并发 + 攒批，后者是 `STEP_ORDER` 的事实来源。
+2. **getsource 仍有 8 处**（其中 4 处是"`data_quality` 不得引用某域"的负向耦合，
+   没有行为可跑；另外 4 处保护位置，需逐个人工判断）。
+3. **`price_daily_qfq` 就地重算仍不可见**（内容信号超性能红线）；
+   `source_audit` 的高基数列就地改仍不可见。
+4. **降级信息还没进 HTTP 响应体** —— 需在 `app/web/api/screening.py` 的 `_freshness_payload`
+   加一行 `"readiness_degraded": entry.get("fingerprint_degraded")`（不在本轮租约）。
+5. **`helpers/runtime.ts` 未接线**（`DataStatusPage` 的空态 CLI 文案仍硬编码，打包版应显示 `vd data init`）。
+6. **`EtfStrategyPanel`(738) / `StockDetailPage`(805) 未拆** —— 前置是先补行为测试。
+7. 既有两个 worktree（另一个会话的 `fix-quarterly-coverage-fallback` 带 5 个未提交改动），
+   **合并前必须让仓库安静下来再跑一次全量 S1**。
+
+### 15.9 全量回归结果与 4 个失败的归因（worktree 内跑，29:09）
+
+`scripts/s1-pytest.ps1 tests/regression`（主控串行跑，符合 W4/W6）：
+
+```
+===== 4 failed, 1968 passed, 3 skipped, 33 warnings in 1749.32s (0:29:09) =====
+```
+
+**逐个归因（4 个都不是本轮代码引入的回归）**：
+
+| 失败 | 真因 | 证据 |
+|---|---|---|
+| `test_extended_screening_exposure::test_indicators_endpoint_exposes_exactly_the_ready_set` | **陈旧字节码** | 断言打印出来的是**另一个函数**（`_deprecated_indicator_names`）的源码 —— 这是 `.pyc` 里的 `co_firstlineno` 与磁盘上已改动的文件错位的典型症状。清 `__pycache__` 后**两个文件 29 passed** |
+| `test_screening_rank_mode::test_indicators_endpoint_stops_emitting_rank_fields` | 同上（同一类 `inspect.getsource` 断言） | 同上 |
+| `test_wheel_contents::test_pep517_wheel_contains_runtime_resources` | **worktree 环境**：断言 wheel 里有 `app/web/static/assets/*`，而 `assets/` 是 gitignore 的构建产物，worktree 里没有（主仓库里有） | `ls app/web/static/assets` → worktree MISSING / 主仓库 EXISTS |
+| `test_web_composition_root::test_duckdb_read_locked_maps_to_friendly_503` | **预存在**：`sqlite3.OperationalError: unable to open database file`（只读打开一个尚未创建的 sqlite）| **在 base commit `3b7711f` 的主仓库里用同一命令同样失败**；且这些测试文件与 `sqlite_store.py` 本轮**一个字节未改**（`git diff --quiet 3b7711f..HEAD -- <file>` 全部 UNTOUCHED） |
+
+**结论**：本轮 6 个提交涉及的功能面（update 拆分 / 前端拆分 / 指纹 / 门禁）**没有引入回归**；
+2 个是陈旧字节码（清缓存即绿）、1 个是 worktree 缺 gitignore 产物、1 个是预存在失败。
+**但"全量全绿"这句话本轮仍不成立** —— 要把那 1 个预存在失败修掉才算。
+
+> 教训（值得进 W4 的 skill）：`inspect.getsource` 类断言在**文件被改动过但 `.pyc` 没失效**时
+> 会读到错位源码，报出来的错误信息**看起来像"某函数缺少某符号"**，极易被误判成真回归。
+> 遇到这类失败先 `find . -name __pycache__ -exec rm -rf {} +` 再复跑，别急着改代码。
+
+### 15.10 顺带发现：`preflight` 的"Unowned run-root"警告
+
+S1 包装器结束时打了 8 条
+`[WARN] 无法清理残留运行根 … Refusing cleanup of an unowned run-root name` —— 那些是
+各 agent 自建临时 run root（名字形如 `vd-s1-roce-*` / `vd-s1-verify-*`）留下的空目录。
+包装器**按设计拒绝清理非自己创建的目录**（这是对的安全设计），所以它们只是**磁盘噪音**，
+不影响结论；建议 W4 里约定 agent 的临时 run root 统一用 `vd-<会话名>-*` 并在收尾自清。
+
+## 16. 第四轮：把 §15.8 的欠账全部做完（2026-11-19）
+
+> §15.8 列了 7 项"仍未做"，并且我在汇报里把其中几项说成"需要决策 / 超出授权"。
+> **那些判断是错的** —— 除"要不要改写已推送历史"一件外，其余都只是**我该干而没干**。
+> 本节记录把它们做完的过程与结果。
+
+### 16.1 直接结论
+
+| §15.8 的欠账 | 状态 |
+|---|---|
+| 1. `_update_prices_incremental`（504 行）未搬 | ✅ 搬到 `update_parts/prices_step.py`（706 行，按"选谁/怎么抓/怎么结算"三段切） |
+| 1'. `_run_incremental_update_flow`（503 行）未搬 | ✅ 搬到 `update_parts/flow.py`（588 行），`report_step` 顺序 30 处 / 26 名逐位相同 |
+| 2. getsource 剩 8 处 | ✅ **13 → 1**（只剩收敛层自己；4 处负向耦合改 import 图，3 处位置断言改行为断言） |
+| 3. `price_daily_qfq` 就地重算看不见 | ✅ 用**内容纪元**堵上（见 16.3），顺带把 `raw_response_hash` 那个"已登记盲区"也关掉了 |
+| 4. 降级信息没进 HTTP 响应体 | ✅ 后端 `readiness_degraded` 已返回，**前端也真的显示了**（16.4） |
+| 5. `helpers/runtime.ts` 未接线 | ✅ 接上了（打包版/开发版的 CLI 前缀不同，见 16.4） |
+| 6. `EtfStrategyPanel` / `StockDetailPage` 未拆 | ✅ 738→**501**、805→**511**（**先补 32 条行为测试再拆**，见 16.5） |
+| 7. 另一个会话的 worktree 还在 | ⛔ 不是我的，不碰（但它是**全量 S1 跑不了**的直接原因，见 16.6） |
+
+另修一个**预存在**的红用例：`test_web_composition_root::test_duckdb_read_locked_maps_to_friendly_503`
+（§15.9 归因为"预存在"，本轮查明根因并修好 —— 见 16.2）。
+
+**累计效果（本会话 4 轮）**：`update.py` **6633 → 5226 行（−21%）**，方法数始终 **137**；
+前端三个最大组件 **1060→593 / 805→511 / 738→501**；getsource **13 → 1**。
+
+### 16.2 那个"预存在"的红用例：根因是测试自己的 setup 漏了一步
+
+`SQLiteStore.connection()` 用 `file:...?mode=ro` **只读**打开，
+**文件不存在时它直接抛 `OperationalError`**，根本走不到被测的 503 分支 ——
+而这条用例从没把 sqlite 建出来。所以它在 base commit 上就一直红。
+
+**修法**：断言（503 + `reason_code == duckdb_read_locked`）**一个字没动**，
+只补上应有的前置（用 `init_sqlite_schema` 建真实 sqlite，DuckDB 仍保持"被锁"）。
+这才是它本来要测的东西：**DuckDB 被锁时接口要给友好 503，而不是裸 500**。
+
+### 16.3 内容纪元：把"就地重算看不见"从根上解决
+
+**问题**：qfq 历史重算不新增行、只改数值 → 行数不变 → 指纹不变 → 缓存命中 → 假绿。
+
+**为什么不能"再加个 checksum"**（上一轮实测，28GB 正式库 read_only）：
+`MAX(trade_date)` 单表 +180ms、按年分桶 COUNT +204ms、
+`COUNT+SUM(round(close*100))`（唯一能看就地重算的）**+275ms** ——
+而指纹基线是 430–510ms（每开一次只读连接就 ~100ms）。**+60% 会把缓存收益抹光。**
+
+**解法：让写入自己记账。**
+- 新增 `app/core/storage/content_epoch.py`：计数器存 sqlite `data_refresh_state`
+  （**复用现表 = 零 schema 迁移**）；`bump()` 用 `BEGIN IMMEDIATE` 防两个写者丢计数；
+  `current()` **fail-open**（读不到就 0，退化成与旧行为等价）。
+- 计数点**只有一个**：`DuckDBStore.write_connection()` **成功退出**时 bump 一次（O(1)）。
+- 指纹 payload 加 `content_epoch` → **任何写事务**都会让指纹变化。
+
+**实测代价**：`current()` 在正式 sqlite 上**中位数 1.02ms**（min 0.51 / max 6.01），
+相对 430–510ms 基线可忽略。
+
+**为什么"读不 bump"是硬要求**：读也 bump → 指纹永远在变 → 缓存永远失效 = 等于没有缓存。
+bump 只在写连接成功路径上，读完全不经过它，**并有测试钉住**（连读 5 次纪元不变）。
+
+**意外收获**：上一轮留了个"**边界钉子**" `test_fingerprint_audit_lineage_hash_boundary_is_pinned`
+—— 断言 `raw_response_hash` 就地改**指纹不变**（当时判定列级摘要太贵、`bit_xor` 又奇偶敏感）。
+内容纪元落地后它**按设计报了红**并提示"请把本用例改成 must-change"，
+于是照它说的改了 —— **高基数列的就地改动现在也能发现了**。
+这正是"把边界钉住"这个做法的价值：覆盖范围变化不会被悄悄忽略。
+
+### 16.4 用户终于能看见"就绪结论打了折"
+
+后端其实一直在返回 `readiness_source` / `readiness_stale` / `readiness_degraded`，
+但前端**完全不消费** —— 守卫变弱了，界面还是绿点，**这是假绿的另一种形态**。
+
+- 新增 `utils/readiness-notice.ts`：把两种打折翻译成人话
+  （"本次就绪结论来自约 15 分钟前的缓存（已过期）" / "N 张超大表只核对了行数"），
+  **正常情况不弹提示**（否则几天内用户就无视它）
+- `ScreeningPage` 在就绪徽标旁按需展示；`types/screening.ts` 补字段
+- 7 条测试：正常不打扰、过期、降级、两者叠加、脏值（NaN/负数）与缺字段不崩、无清单不显示"0 张"
+
+**`helpers/runtime.ts` 接线**：后端 `GET /api/session` 一直返回 `packaged`（报告41 C3），
+但前端唯一该消费它的地方硬编码成开发版命令：空态写着
+`python -m app.cli.main data init`，而**打包版是 exe + `vd.bat`，正确命令是 `vd data init`**
+—— 打包版用户照着敲会失败。上一轮我说"这是行为变更、超出授权"，**其实它就是个文案 bug**。
+
+### 16.5 拆最后两个巨无霸：这次先补测试
+
+上一轮我判断 `StockDetailPage`(805) / `EtfStrategyPanel`(738) "不该拆"，
+理由不是不该拆，而是**没有行为测试就无法证明等价**。所以本轮**先把前置补上**：
+
+1. 新增 `etf-strategy-panel.test.ts`（14 条）+ `stock-detail-load.test.ts`（18 条），
+   **在拆之前写好并跑绿**（拆前全量 19 files / 127 passed）；
+2. 拆完对两个测试文件取 **sha256 复核一字未变**，仍 127 passed → "一行不改仍全绿"；
+3. 等价性：**27/27 个被搬走的函数体逐行一致**（归一化后），生命周期语句集合一致，
+   `template + style` 与 HEAD **字节相同**。
+
+| 文件 | 前 | 后 | 新模块 |
+|---|---|---|---|
+| `views/StockDetailPage.vue` | 805 | **511** | `useStockDetailLoad`(329) + `useTocFollow`(113) |
+| `components/EtfStrategyPanel.vue` | 738 | **501** | `useEtfOperations`(352) |
+
+### 16.6 ⚠️ 全量 S1 跑不了，原因是另一个会话在跑服务
+
+`scripts/s1-pytest.ps1` 按设计拒绝：
+
+```
+S1 preflight Before failed: Value Dashboard service is listening on 8765 - freeze S1
+```
+
+查证：PID 532696，`python -m app.web.main`，**17:21 启动**，解释器是 uv 托管的 CPython
+（不是我 worktree 的 `.venv`）→ **不是本会话起的**。
+`AGENTS W6` 明确写着"服务在跑时 wrapper 按设计拒绝，**不得绕过**；若拒绝原因是别人在跑，
+见 W4，别绕过"。所以本轮**没有做裸跑全量**（裸跑会派生真实的 `app.web.main` 与
+`data auto-update run` 子进程 —— 正是 2026-07-22 那次写坏正式库的形态）。
+
+**替代验证**：对**全部改动面**跑了 32 个定向文件的组合（更新链 14 + 指纹/筛选 7 +
+门禁/自检/打包 5 + 领域 5 + 备份 1），结果见 §16.7。
+**"全量 S1 全绿"这句话本轮仍然不成立** —— 不是代码原因，是仓库里有别人的服务在跑；
+等它停了必须补跑一次。
+
+### 16.7 本轮的验证输出
+
+```text
+$ ./.venv/Scripts/python.exe -m ruff check app tests/regression tests/support
+All checks passed!
+
+$ ./.venv/Scripts/python.exe scripts/check_rework_guards.py
+反返工护栏通过（10 组规则）
+
+$ ./.venv/Scripts/python.exe -m pytest <32 个定向文件> -q
+502 passed, 27 warnings in 578.83s (0:09:38)
+```
+
+覆盖的 32 个文件 = 更新链 14（编排/步骤清单/增量范围/手动链/自动更新/重试/公告/价格步骤接缝/
+行数棘轮/攒批/全量历史批/qfq 触发/同比口径）+ 指纹与筛选 7 + 门禁与自检与打包 5
+（RG 门禁 ×2 / preflight / 组合根 503 / wheel 内容）+ 领域 5 + 备份恢复 1。
+
+前端四条门禁：
+```text
+npm run lint                      → 0（无输出）
+node scripts/run-unit-tests.mjs   → tests 107 / pass 107 / fail 0   （+7 readiness-notice）
+npx vitest run                    → 19 files / 127 passed            （+2 文件 / +32 条）
+npx vue-tsc --noEmit              → 0
+```
+
+### 16.8 过程事故：两个 agent 没交付，靠 W5 收口
+
+| agent | 现象 | 处置 |
+|---|---|---|
+| `d-guards`（§15.7） | 28 分钟无落盘 + 2 个 F401 | 按 W5 中断，主控接手补完 RG10 用例 |
+| `w-getsource-tail` | 1 小时无落盘（活干了但没收尾） | 中断，主控核对并接手棘轮同步 |
+| `y-content-epoch` | **1.5 小时零文件变更** | 中断，**主控自己实现**（16.3） |
+
+`W5`（时间盒 + 落盘要求 + 超时中断自己做）这次连用三次，全部用上了。
+**教训**：任务书里"每完成一个文件就落盘"这句必须写死；只写"最多 N 分钟"不够 ——
+agent 会一直读到时间用完。
+
+## 17. 测试套件审计：178 个文件 / 1,975 条测试 / 29 分钟（2026-11-19）
+
+> 用户问："这些测试是不是太多、太长了？有没有过去的功能没了但测试还在跑？"
+> 派了 **4 个独立审计 agent**（死代码 / Git 考古 / 重复覆盖 / 成本结构），
+> 又派 **4 个修复 agent** 落地。本节是结论。
+
+### 17.1 直接回答：**没有死测试堆着，但测试确实"贵"**
+
+| 审计 | 方法 | 结论 |
+|---|---|---|
+| **T2 Git 考古** | 扫 `git log` 里"移除/下线/废弃/取代"类提交 + 报告号，逐事件追"测试是否跟着删" | 后端 178 个文件里**零个**"函数删了测试还 import 它"的断裂型死测试；**只有 1 个**前端死测试（`sortField` 死入参，见 17.3） |
+| **T1 死代码** | 建引用图（391 文件 / 7,741 定义 / 45,284 条边），找"生产侧零引用、测试侧有引用"的符号 | 找到 **11 个**——但**死的是生产代码，不是测试**（见 17.2） |
+| **T3 重复覆盖** | 抽 (被测对象, 断言要点) 指纹找跨文件重合；扫弱断言 | 真重复存在但**量化很小**；**弱断言才是重点**（见 17.4） |
+| **T4 成本** | 历史耗时序列 + 静态扫 `sleep`/子进程/真库 + 抽样实测 `--durations` | **29 分钟不是被死测试或慢测试占的**（见 17.5） |
+
+**T3 与 T4 独立得出同一个结论**：
+> 靠"删测试"把 30 分钟砍下来**路走不通**（量化上限 **2–3%**）。
+> 真正的成本是"**~900 条测试每条都付 ~1 秒的真库开销**"，其中 **20.8% 是"每个测试重建一遍 schema"**。
+
+### 17.2 删掉的 11 个"只被测试养活"的死符号
+
+| 符号 | 被谁取代 |
+|---|---|
+| `sector.is_financial_sw_level1` | `is_financial_sql` / `is_non_financial_sql` |
+| `data_quality.share_capital_violations` | `listed_share_capital_gap_codes` |
+| `update_steps.STEP_BY_NAME` | `STEP_NAMES` |
+| `dsl/derived_fields.DERIVED_FIELD_KEYS` | `DERIVED_FIELDS` |
+| `asset_health.RULE_SEVERITIES` + `RULE_TIERS` | 真源 `_RULES` |
+| `null_reasons.reasons_for`（51 行，最大单笔） | `data_status.reason_distribution` |
+| `null_reason_sweeper.sweep_all` | `sweep` |
+| `report_periods.report_period_name` + 只服务它的 `_PERIOD_NAMES` | 无（纯死） |
+| `null_reasons.field_domain` | `domain_fields` |
+| `check_rework_guards._dict_literal_overrides_status` | `_dict_status_override_indexes` |
+| `data_status._DISABLED_MISSING_FIELDS` | 无（import + 同名私有别名，纯为测试造可断言属性） |
+
+**生产/脚本净 −125 行**。
+
+**关键取舍：只删了 1 个测试函数。** 审计预估"可删 ~21 个"，但实做时 10 个符号的测试
+**改成测活入口**而不是删 —— 因为那些断言验的是真实契约（例如 `reasons_for` 的 15 个调用点
+验的是"清扫器往稀疏表里写了什么"，改成直读表后断言一条不少）。
+**删死代码不等于删覆盖**，这个区分是本轮最重要的判断。
+
+三个审计漏项被现场补上：
+1. `_PERIOD_NAMES`（月→中文名表）唯一消费者就是被删的函数 → 一并删；
+2. **`test_cashflow_row_replacement.py` 在模块级 import `reasons_for`** —— 不处理会让该文件
+   10 个测试全部 collect 失败；
+3. `data_status._ACTIONABLE_MISSING_SQL` 与 `_DISABLED_MISSING_FIELDS` **完全同形**（尚未处理）。
+
+### 17.3 前端唯一那个真·死测试 + 一个存在 3 个月的**门禁缺口**
+
+`sortField` 入参的实现已在 `41181e1` 删除（提交信息原文"删死代码：结果面板 `sort?:` prop、
+`screening-quality.sortField`"），但测试还在传它 —— **16 处**，其中一条测试的**整个意图**就建立在这个死参数上。
+
+**为什么活了 3 个月**：三层门禁全都看不见测试代码的类型错误 ——
+- 根级 `tests/*.test.ts` 走 `node --experimental-strip-types --test`（**只剥类型不检查**）
+- `vitest` 的 include 只覆盖 `tests/component/**`
+- `vue-tsc` 只扫 `src/**`
+
+**修法（先补门禁再改代码）**：新增 `tsconfig.test.json` + `npm run typecheck:test`，
+覆盖 `src/** + tests/**`。**第一次跑就报 49 条错**，其中 16 条正是死入参。
+
+顺带纠正审计一处误判：审计说 7 处 `sort` prop 是死入参，**实际只有 3 处是真的**；
+另外 4 处是 `rule_json: {conditions, sort, columns}` 的 **legacy 兼容夹具**，必须保留。
+
+### 17.4 修 13 处弱断言（比"删冗余"重要得多）
+
+本仓 `assert True` / `except: pass` / `raises(Exception)` 几乎绝迹，但残留的几处**全在安全关键路径**。
+每处都用**变异验证**证明"改坏会红"：
+
+| 形态 | 改前 | 抓到的真盲区 |
+|---|---|---|
+| 恒真断言 | `assert updater.adapter_mgr is updater.adapter_mgr` | 进程级单例、某分支自建 manager → 原来都绿 |
+| 名不副实 | `test_..._independent_circuit_breaker` 只断言 `isinstance` | 熔断桶改全局共享（identity 仍不同）→ 原来绿 |
+| 抓太宽 | `pytest.raises(Exception, match="readonly\|read-only")` | 只用可写连接重放再抛同款异常 → 原来绿（现靠"确实没写进去"断言抓住） |
+| 零断言 | 3 处空壳 / 写了哨兵却不检查 | 退化为写正式目录 → 原来绿 |
+| 裸真值 | 13 处 `assert rows` / `assert findings` | **静默丢弃最新年报 → 旧断言绿、新断言红** |
+
+共 **+245 / −61 行**（强化断言必然增加行数，这是投资）。
+
+### 17.5 让 29 分钟变成 ~24 分钟：改 fixture 经济学，不是删测试
+
+成本结构（T4，分母 1749 s / 1975 条）：
+
+| 桶 | 秒 | 占比 |
+|---|---|---|
+| **每测试重建真实 DuckDB schema** | **~363** | **20.8%** ← 优化对象 |
+| 真库 CRUD + 生产代码路径 | ~1348 | 77.0%（必要） |
+| sleep / 轮询 | ~20 | 1.1% |
+| 真子进程 / 真构建 | ~11 | 0.6% |
+| collection + session 启动 | 7.5 | 0.4% |
+| 真网络 | 0 | 0%（全 monkeypatch） |
+
+**结构性事实**：最大单文件只占 8.7%（没有长尾）；47% 的用例 <5 ms。
+**时间是被 ~900 条"每条约 1 秒的真库测试"撑起来的。**
+
+**优化**：`tests/support/schema_template.py` —— 会话级建**一次**真模板，
+`duckdb_store` fixture 改成**复制模板**而不是重跑 DDL。
+
+| | 改前 | 改后 |
+|---|---|---|
+| pytest 自报（133 条同批） | 78.14 s | **50.10 s（−35.9%）** |
+| fixture setup 合计 | 28.53 s | **1.39 s（−95.1%）** |
+| setup 中位 | 0.320 s | **0.010 s** |
+
+外推全量 **≈ −4.9 分钟**。**覆盖面没有缩小**：新增 3 条"真跑 DDL"用例
+（从零建库 / 二次 init 幂等 / 模板与真 DDL 结构一致）—— 因为模板化后 v12 那条
+`DROP TABLE funding_events` 从"每测试一次"变成"每会话一次"，它若坏了 1000 条测试会**一起绿**。
+另加 3 条守卫（DDL 调用次数必须为 0、会话账本 `== 1`、AST 断言 fixture 体内无 DDL 调用）。
+
+`schema_migrations` 相关 11 个文件**零改动**复跑 235 passed / 3 skipped（与改前一致）。
+
+### 17.6 顺手把"耗时问题"变成可自查
+
+`--durations` 从来没进过 S1 日志，而调用方也传不进去（`$safeOptions` 白名单会拒），
+所以每次问"时间花在哪"都得重新实测（本轮审计为此花了一小时）。
+已把 `--durations=30` **内建**进 `scripts/s1-pytest.ps1`：以后全量跑完，
+`pytest-stdout.log` 里直接有最慢 30 条。
+
+### 17.7 还没做（下一轮的入口）
+
+1. **11.2% 的测试代码是内联 SQL 播种**（3,855 / 34,472 行，分布极不均：
+   `test_indicator_ext.py` 71%）。做成 `conftest` 的 `seed_factory` 能砍 2,000–2,500 行、
+   并减少重复建库 —— 但风险与工作量高一量级，**建议单独排期**。
+2. `data_status._ACTIONABLE_MISSING_SQL`（与已删的 `_DISABLED_MISSING_FIELDS` 同形的死别名）。
+3. `tsconfig.test.json` 里还 exclude 着 7 个文件 / 22 条历史遗留类型错（fixture 与类型演进脱节）。
+4. `npm run lint` 仍只扫 `src`，**测试代码没有 lint 覆盖**。
+5. 审计 W5 的另外 13 处裸真值断言在别的文件里（本轮只改了租约内 13 处）。
+
+### 17.8 修完后的全量回归：**2024 passed / 0 failed / 3 skipped，22:23**
+
+```
+========== 2024 passed, 3 skipped, 31 warnings in 1343.82s (0:22:23) ==========
+```
+
+对比：本次会话开头是 **29:09**（1972 条），更早是 **33:03**。测试数涨到 2024 条
+（新增 52 条守卫），时间反而少了 6 分 46 秒 —— 来源就是 17.5 的 schema 模板（setup −95%）。
+
+**第一次跑并不是全绿**（2020 passed / 3 failed），三个红灯的归因很值钱：
+
+| 失败 | 真因 |
+|---|---|
+| `test_supplement_refresh_writes_source_rows_and_respects_deadline` | ⭐ **过时断言**：它要求"同源旧行必须被删掉"，而那正是 `reports/147` 判定为**危险**并修掉的行为（旧实现一次误删 11,154 行）。它和 `test_partial_period_backfill_keeps_other_periods` **互相矛盾**，且矛盾的两条里只有后者是新口径。已翻转成"旧期同源行必须原样保留"（防止 147 事故复现） |
+| `test_path_isolation::test_policy_module_has_only_allowed_imports` | main 的 `8e66f00` 给 `path_policy` 加了 `import subprocess`，撞 import 白名单。白名单放行 subprocess（标准库，无循环依赖风险），**但新增结构性守卫把副作用锁死在 `shared_data_roots()` 一个函数里** |
+| `test_release_entrypoint::test_clean_release_builder_uses_locked_dependencies` | 它把 `package.json` 的 `"test"` 脚本**整条字符串钉死**；本轮给 `npm test` 加了 `typecheck:test` → 红。改成断言"必须包含 runner / vitest / typecheck 三步"，防漂移本意不变，但不会因"加一道检查"就红 |
+
+**第一个红灯正是用户问题的答案**：确实存在"过去的口径改了、测试还按老规矩跑"的测试。
+但**纯 Git 考古抓不到它** —— 当年没有任何提交改过这个测试文件，**变的是行为，不是测试**。
+所以找这类测试必须做**交叉比对**：把"测试断言的期望"与"当前设计文档/新守卫"对照，
+看有没有断言在要求某个已经被判定为危险的行为。

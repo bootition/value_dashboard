@@ -618,11 +618,22 @@ def test_readiness_unchanged_by_treasury_domain(
 
 
 def test_readiness_code_has_no_treasury_reference() -> None:
-    import inspect
+    """`data_quality` 不得引用国债曲线域（负向耦合，import 图 + AST 符号表）。
 
+    拦的事故：曲线域被接进 readiness/数据质量判定（曲线缺一天 → 整站不可筛），
+    或把 `app.core.treasury` 的 import 藏进某个函数体里绕过模块级依赖审查。
+    旧写法 `"treasury_yield_curve" not in inspect.getsource(module)` 拦的是文本，
+    重构（搬函数、改注释、加 docstring）会假红，真耦合未必拦住。
+    """
     from app.core import data_quality as module
-    source = inspect.getsource(module)
-    assert "treasury_yield_curve" not in source
+    from tests.support import source_guard
+
+    source_guard.assert_no_coupling(
+        module,
+        forbidden_modules=("app.core.treasury",),
+        forbidden_symbols=("treasury_yield_curve",),
+        why="国债曲线是可选参照系：它缺失时利差列留 NULL，不该改变 A 股 readiness",
+    )
 
 
 # ─── 快照计算：TTM 股息率与利差列 ───────────────────────────────────────

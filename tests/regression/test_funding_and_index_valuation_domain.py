@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import hashlib
-import inspect
 import json
 from datetime import UTC, datetime
 
@@ -828,11 +827,22 @@ def test_schema_v11_creates_new_tables(database_paths) -> None:
 def test_readiness_unchanged_by_new_domains(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    from app.core import data_quality as module
+    """融资/指数估值域不得被 `data_quality` 引用（负向耦合，import 图 + AST 符号表）。
 
-    source = inspect.getsource(module)
-    assert "funding_events" not in source
-    assert "index_valuation" not in source
+    拦的事故：有人把 `funding_events` / `index_valuation` 接进数据质量判定
+    （"这两张表没数据 → 整站不可筛"），或者把这两个域的 import 塞进
+    `data_quality` 的某个函数体里（延迟 import 一样是耦合）。
+    旧写法读 `inspect.getsource(module)` 文本：搬函数/改注释会假红，真耦合未必拦住。
+    """
+    from app.core import data_quality as module
+    from tests.support import source_guard
+
+    source_guard.assert_no_coupling(
+        module,
+        forbidden_modules=("app.core.funding", "app.core.index_valuation"),
+        forbidden_symbols=("funding_events", "index_valuation"),
+        why="新增两域的数据缺失只影响各自指标，不得把 A 股 readiness 拉红",
+    )
 
 
 # ─── manager 注册与限速 ───────────────────────────────────────────────

@@ -1,19 +1,14 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NAlert, NButton, NResult, NSpace, NSpin, NTag,
   useDialog, useMessage,
 } from 'naive-ui'
-import axios, { isAxiosError } from 'axios'
-import { isIndicatorUntrusted } from '../types/data-quality.ts'
-import { friendlyErrorMessage } from '../helpers/api-error.ts'
-import { isBlacklistedDetail } from '../types/blacklist.ts'
-import type { BlacklistCheckResponse } from '../types/blacklist.ts'
+import type { KlinePeriod } from '../types/stock-detail.ts'
 import KlineChartCard from '../components/KlineChartCard.vue'
 import IndicatorGroupSection from '../components/IndicatorGroupSection.vue'
 import StockTocNav from '../components/StockTocNav.vue'
-import type { TocItem } from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
 import PointInTimeCard from '../components/PointInTimeCard.vue'
@@ -21,15 +16,12 @@ import AnnouncementTimelineCard from '../components/AnnouncementTimelineCard.vue
 import MetricHistoryChart from '../components/MetricHistoryChart.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
 import { fmt } from '../utils/formatters.ts'
-import { loadKlineSettings, pageStorage, saveKlineSettings } from '../utils/kline-settings.ts'
-import type {
-  StockInfo,
-  IndicatorsResponse,
-  KlineResponse,
-  KlinePeriod,
-  BusinessOverviewResponse,
-} from '../types/stock-detail.ts'
-import type { WarningCode } from '../types/data-quality.ts'
+import { loadKlineSettings, pageStorage } from '../utils/kline-settings.ts'
+// 2026-11-23 重构：本组件 805 行里「5 路并发 + 降级 + 黑名单操作」与
+// 「粘性目录滚动跟随」两部分原样抽成 composable（函数体逐字未改）。
+// 组件只剩：路由代码 → ref 绑定 → 模板。详见两个 composable 的头注释。
+import { useStockDetailLoad } from '../composables/useStockDetailLoad.ts'
+import { useTocFollow } from '../composables/useTocFollow.ts'
 
 const route = useRoute()
 const message = useMessage()
@@ -40,222 +32,32 @@ const stockCode = computed(() => {
   return typeof code === 'string' ? code.trim() : ''
 })
 const hasStockCodeError = computed(() => !stockCode.value)
-const loading = ref(false)
-// L0-7（报告42）: 无效股票/无数据时呈现友好结果态，而非一页横线
-const stockUnavailable = ref(false)
-// 黑名单屏蔽态：与「股票不存在」分开——这个状态带移出按钮，是自救入口。
-const stockBlacklisted = ref(false)
-const blacklistBusy = ref(false)
-const generation = ref(0)
-const stockInfo = ref<StockInfo | null>(null)
-const indicators = ref<IndicatorsResponse | null>(null)
-const klineData = ref<KlineResponse>({ candles: [] })
-const businessOverview = ref<BusinessOverviewResponse | null>(null)
-const warningCodes = ref<readonly WarningCode[]>([])
 
 // K线配置（localStorage 全局记忆，非法值回退默认）
 const initialKlineSettings = loadKlineSettings(pageStorage())
 const klinePeriod = ref<KlinePeriod>(initialKlineSettings.period)
 const adjustMode = ref<'raw' | 'qfq'>(initialKlineSettings.adjust)
-const klineAbortController = ref<AbortController | null>(null)
 
-// 财务趋势配置
-
-const hasUntrustedIndicators = computed(
-  () => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value),
-)
-
-// reports/76 P1-2: 自动更新窗口由服务端标注（避免把窗口误读为数据不可信）
-const autoUpdateInProgress = computed(
-  () => indicators.value?.auto_update_in_progress === true,
-)
+// ─── 粘性目录与滚动监听 ─────────────────────────────────────────────────
+const {
+  tocItems, activeSection, tocShift, setSectionRef, scrollToSection, updateActiveSection,
+} = useTocFollow()
 
 // ─── 数据获取 ───────────────────────────────────────────────────────────
-async function fetchAll() {
-  if (hasStockCodeError.value) return
-  const gen = ++generation.value
-  loading.value = true
-  stockUnavailable.value = false
-  stockBlacklisted.value = false
-  try {
-    // 先问一句「是不是被屏蔽了」：命中就直接渲染屏蔽态，不再打 4 个必然 404
-    // 的详情请求（否则一次进入会留下 4 条无意义错误日志）。
-    if (await isBlacklisted(gen)) return
-    await Promise.all([
-      fetchStockInfo(gen),
-      fetchIndicators(gen),
-      fetchKline(gen),
-      fetchBusinessOverview(gen),
-    ])
-  } finally {
-    loading.value = false
-    nextTick(updateActiveSection)
-  }
-}
-
-/**
- * 黑名单判定。
- *
- * 判定失败（网络/服务重启）时**退回正常加载**而不是把页面判定为可用：
- * 单股端点自己也有守卫，真被屏蔽会返回结构化 404，由 `fetchStockInfo` 兜底。
- */
-async function isBlacklisted(gen: number): Promise<boolean> {
-  try {
-    const resp = await axios.get<BlacklistCheckResponse>(
-      `/api/blacklist/check/${stockCode.value}`,
-    )
-    if (gen !== generation.value) return true
-    stockBlacklisted.value = resp.data.blacklisted
-    return resp.data.blacklisted
-  } catch {
-    return false
-  }
-}
-
-async function fetchStockInfo(gen: number) {
-  try {
-    const resp = await axios.get<StockInfo>(`/api/stock/${stockCode.value}/info`)
-    if (gen !== generation.value) return
-    stockInfo.value = resp.data
-  } catch (e) {
-    if (gen !== generation.value) return
-    stockInfo.value = null
-    if (isAxiosError(e) && e.response?.status === 404) {
-      // 结构化 404：区分「代码不存在」（终态）与「被黑名单屏蔽」（可撤销）
-      if (isBlacklistedDetail(e.response.data?.detail)) {
-        stockBlacklisted.value = true
-        return
-      }
-      stockUnavailable.value = true
-      return
-    }
-    message.warning(friendlyErrorMessage(e, '加载股票信息失败'))
-  }
-}
-
-async function fetchIndicators(gen: number) {
-  try {
-    const resp = await axios.get<IndicatorsResponse>(`/api/stock/${stockCode.value}/indicators`)
-    if (gen !== generation.value) return
-    indicators.value = resp.data
-    // 服务端权威信任信号优先；缺失时回退到数据状态页轮询
-    if (resp.data.trust) {
-      warningCodes.value = resp.data.trust.warning_codes
-      return
-    }
-  } catch (e) {
-    if (gen !== generation.value) return
-    indicators.value = null
-    if (isAxiosError(e) && e.response?.status === 404) {
-      stockUnavailable.value = true
-      return
-    }
-    message.warning(friendlyErrorMessage(e, '加载指标数据失败'))
-  }
-  await fetchWarningCodes(gen)
-}
-
-async function fetchKline(gen: number) {
-  if (klineAbortController.value) {
-    klineAbortController.value.abort()
-  }
-  klineAbortController.value = new AbortController()
-  try {
-    const resp = await axios.get<KlineResponse>(`/api/stock/${stockCode.value}/kline`, {
-      params: {
-        adjust: adjustMode.value,
-        period: klinePeriod.value,
-      },
-      signal: klineAbortController.value.signal,
-    })
-    if (gen !== generation.value) return
-    klineData.value = resp.data
-  } catch (e) {
-    if (axios.isCancel(e) || gen !== generation.value) return
-    klineData.value = { candles: [] }
-    message.warning(friendlyErrorMessage(e, '加载K线数据失败'))
-  }
-}
-
-async function fetchBusinessOverview(gen: number) {
-  try {
-    const resp = await axios.get<BusinessOverviewResponse>(
-      `/api/stock/${stockCode.value}/business-overview`,
-    )
-    if (gen !== generation.value) return
-    businessOverview.value = resp.data
-  } catch (e) {
-    if (gen !== generation.value) return
-    businessOverview.value = null
-    // 局部缺失（profile/breakdown status=missing）在组件内就地空态，不升页面级
-    if (isAxiosError(e) && e.response?.status === 404) {
-      stockUnavailable.value = true
-      return
-    }
-    message.warning(friendlyErrorMessage(e, '加载业务概览失败'))
-  }
-}
-
-// ─── 黑名单操作 ────────────────────────────────────────────────────────────
-// 产品裁定：加入前必须二次确认（防误点）；加入后原地渲染屏蔽态，
-// 屏蔽态本身带「移出黑名单」按钮，所以误加也当场救得回来。
-
-function confirmAddToBlacklist() {
-  const label = stockInfo.value?.name || stockCode.value
-  dialog.warning({
-    title: '加入黑名单',
-    content:
-      `加入后「${label}」不会再出现在筛选、搜索、自选、个股详情和导出结果里。\n`
-      + '它的行情与财报数据会保留、自动更新照常抓取，随时可以在「黑名单」页移出。',
-    positiveText: '确认加入',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      await addToBlacklist()
-    },
-  })
-}
-
-async function addToBlacklist() {
-  if (blacklistBusy.value) return
-  blacklistBusy.value = true
-  try {
-    await axios.post('/api/blacklist/add', { stock_code: stockCode.value })
-    message.success('已加入黑名单')
-    stockBlacklisted.value = true
-  } catch (e) {
-    message.error(friendlyErrorMessage(e, '加入黑名单失败'))
-  } finally {
-    blacklistBusy.value = false
-  }
-}
-
-async function removeFromBlacklist() {
-  if (blacklistBusy.value) return
-  blacklistBusy.value = true
-  try {
-    await axios.delete('/api/blacklist/remove', { data: { stock_code: stockCode.value } })
-    message.success('已移出黑名单')
-    // 重新拉一次全量数据，而不是只翻个 flag——否则页面会停在一堆空卡片上
-    await fetchAll()
-  } catch (e) {
-    message.error(friendlyErrorMessage(e, '移出黑名单失败'))
-  } finally {
-    blacklistBusy.value = false
-  }
-}
-
-async function fetchWarningCodes(gen: number) {
-  try {
-    const resp = await axios.get<{ data_quality: { warning_codes: readonly WarningCode[] } }>(
-      '/api/data-status/summary',
-    )
-    if (gen !== generation.value) return
-    warningCodes.value = resp.data.data_quality.warning_codes
-  } catch {
-    if (gen !== generation.value) return
-    warningCodes.value = ['LINEAGE_INVALID']
-  }
-}
+const {
+  loading, stockUnavailable, stockBlacklisted, blacklistBusy,
+  stockInfo, indicators, klineData, businessOverview,
+  hasUntrustedIndicators, autoUpdateInProgress,
+  confirmAddToBlacklist, removeFromBlacklist,
+} = useStockDetailLoad({
+  stockCode,
+  hasStockCodeError,
+  klinePeriod,
+  adjustMode,
+  message,
+  dialog,
+  updateActiveSection,
+})
 
 // ─── 图表指标下拉（一处一图，只保留有历史意义的指标）──────────────────
 const operationsMetricOptions = [
@@ -274,102 +76,6 @@ const safetyMetricOptions = [
   { label: '速动比率', value: 'quick_ratio' },
   { label: 'CF/净利润', value: 'cf_to_net_profit' },
 ]
-
-// ─── 粘性目录与滚动监听 ─────────────────────────────────────────────────
-const tocItems: readonly TocItem[] = [
-  { id: 'overview', label: '概览' },
-  { id: 'valuation', label: '估值与市场' },
-  { id: 'point-in-time', label: '当时可见' },
-  { id: 'announcements', label: '公告时间线' },
-  { id: 'operations', label: '经营与成长' },
-  { id: 'safety', label: '财务安全' },
-  { id: 'return', label: '股东回报' },
-]
-const activeSection = ref('overview')
-const sectionEls = ref<Record<string, HTMLElement | null>>({})
-// Naive UI 的实际滚动容器是 .n-layout-scroll-container，不是 window；
-// 粘性目录的高亮与滚动监听必须挂到该容器，否则 window.scrollY 恒为 0。
-const scrollContainer = ref<HTMLElement | null>(null)
-// 嵌套 n-layout-scroll-container 会让 CSS sticky 失效，因此用 scroll 监听
-// 手动 translateY，把目录固定在视口顶部附近（仅桌面宽度生效）。
-const tocNaturalTop = ref(0)
-const tocShift = ref(0)
-
-function setSectionRef(id: string) {
-  return (el: unknown) => {
-    const node =
-      el instanceof HTMLElement
-        ? el
-        : ((el as { $el?: HTMLElement } | null)?.$el ?? null)
-    sectionEls.value[id] = node
-  }
-}
-
-function scrollToSection(id: string) {
-  const el = sectionEls.value[id]
-  if (el) {
-    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-    el.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' })
-  }
-  activeSection.value = id
-}
-
-function updateActiveSection() {
-  const container = scrollContainer.value
-  const scrollTop = container
-    ? container.scrollTop
-    : (window.scrollY || document.documentElement.scrollTop || 0)
-  if (window.matchMedia('(min-width: 1025px)').matches && tocNaturalTop.value > 0) {
-    tocShift.value = Math.max(0, scrollTop - (tocNaturalTop.value - 24))
-  } else {
-    tocShift.value = 0
-  }
-  if (scrollTop <= 0) {
-    activeSection.value = tocItems[0].id
-    return
-  }
-  const probe = scrollTop + 96
-  let current = tocItems[0].id
-  for (const item of tocItems) {
-    const el = sectionEls.value[item.id]
-    if (el && el.getBoundingClientRect().top + scrollTop <= probe) {
-      current = item.id
-    }
-  }
-  activeSection.value = current
-}
-
-// ─── 监听变化 ───────────────────────────────────────────────────────────
-watch([klinePeriod, adjustMode], () => {
-  saveKlineSettings(
-    {
-      period: klinePeriod.value,
-      adjust: adjustMode.value,
-    },
-    pageStorage(),
-  )
-  fetchKline(generation.value)
-})
-watch(stockCode, fetchAll)
-
-onMounted(() => {
-  scrollContainer.value = document.querySelector<HTMLElement>('.n-layout-scroll-container')
-  const tocEl = document.querySelector<HTMLElement>('.stock-toc-wrap')
-  if (tocEl) tocNaturalTop.value = tocEl.getBoundingClientRect().top + (scrollContainer.value?.scrollTop ?? 0)
-  scrollContainer.value?.addEventListener('scroll', updateActiveSection, { passive: true })
-  window.addEventListener('scroll', updateActiveSection, { passive: true })
-  updateActiveSection()
-  fetchAll()
-})
-
-onUnmounted(() => {
-  scrollContainer.value?.removeEventListener('scroll', updateActiveSection)
-  window.removeEventListener('scroll', updateActiveSection)
-  // 2026-08-14 红队 P3：卸载时中止在途请求，避免离开页面后
-  // 响应落地写入已卸载组件状态 / 触发无意义告警。
-  klineAbortController.value?.abort()
-  klineAbortController.value = null
-})
 </script>
 
 <template>

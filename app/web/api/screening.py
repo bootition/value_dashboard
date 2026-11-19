@@ -198,6 +198,10 @@ def _freshness_payload(entry: dict | None, *, source: str) -> dict:
     返回 ``readiness_source``（cache/stale_cache/computed）、``readiness_cached_at``、
     ``readiness_stale``、``readiness_age_seconds``。
     新增字段对前端是纯向后兼容的（旧客户端只读 lock_active/data_as_of）。
+
+    2026-11-19 追加 `readiness_degraded`：指纹对超大表会退回 `count-only`（只看行数、
+    不看内容），此时"就绪"判断的**可信度下降**。降级以前只写日志，调用方看不到 ——
+    那本身就是"假绿"的另一种形态（看起来正常，其实守卫变弱了）。现在随响应透出。
     """
     entry = entry or {}
     return {
@@ -205,6 +209,7 @@ def _freshness_payload(entry: dict | None, *, source: str) -> dict:
         "readiness_cached_at": entry.get("cached_at"),
         "readiness_stale": bool(entry.get("stale", False)),
         "readiness_age_seconds": entry.get("age_seconds"),
+        "readiness_degraded": entry.get("fingerprint_degraded"),
     }
 
 

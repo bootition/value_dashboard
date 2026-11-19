@@ -26,7 +26,6 @@ from app.core.data_quality import (
     actionable_missing_count,
     listed_share_capital_gap_codes,
     minimum_data_readiness,
-    share_capital_violations,
     snapshot_publish_gate,
 )
 from app.core.indicators.calculator import IndicatorCalculator
@@ -234,8 +233,6 @@ def test_readiness_share_capital_set_is_identical_to_the_gate_violation_set(
 
     assert gate["quarantined_codes"] == expected
     assert listed_share_capital_gap_codes(duckdb_store) == expected
-    # 旧函数名继续可用（薄封装，不是第二份 SQL）
-    assert share_capital_violations(duckdb_store) == expected
     assert readiness["missing"]["share_capital"] == expected
     assert readiness["missing_counts"]["share_capital"] == len(expected)
 

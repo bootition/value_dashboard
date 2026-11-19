@@ -35,7 +35,6 @@ from app.core.dsl.ast_nodes import FIELD_METADATA
 from app.core.dsl.codegen import CodeGen
 from app.core.dsl.derived_fields import (
     ADVANCE_RECLASS_CUTOFF,
-    DERIVED_FIELD_KEYS,
     DERIVED_FIELDS,
     IMPAIRMENT_SIGN_CUTOFF,
     SERIES_BREAKS,
@@ -460,7 +459,7 @@ def test_series_break_fields_are_not_marked_deprecated() -> None:
     for field, brk in SERIES_BREAKS.items():
         assert field in FIELD_METADATA
         assert FIELD_METADATA[field]["series_break"]["prefer"] == brk.prefer
-        assert brk.prefer in DERIVED_FIELD_KEYS
+        assert brk.prefer in DERIVED_FIELDS
     assert series_break_field_warnings(["income.asset_impairment_loss"]) == [
         SERIES_BREAKS["income.asset_impairment_loss"].warning()
     ]
@@ -469,7 +468,7 @@ def test_series_break_fields_are_not_marked_deprecated() -> None:
 
 def test_derived_fields_registered_in_screening_surface() -> None:
     """派生字段进筛选白名单/可排名集合（否则"能看不能筛"）。"""
-    for key in DERIVED_FIELD_KEYS:
+    for key in DERIVED_FIELDS:
         assert key in NORMALIZED_FIELDS
         assert key in RANKABLE_INDICATORS
         assert f"{key}_market_rank" not in NORMALIZED_FIELDS
@@ -499,7 +498,7 @@ def test_indicators_endpoint_lists_derived_fields(
     # 不再写死 "plain"：`balance.advance_from_customers_ratio` 是倍数口径，
     # 一刀切断言"金额类"会让新增派生字段时立刻假红（reports/133 R1）。
     unit_expectation = {"CNY": "plain", "ratio": "ratio", "percent": "percent"}
-    for key in DERIVED_FIELD_KEYS:
+    for key in DERIVED_FIELDS:
         assert key in by_name, f"{key} 必须出现在可选指标里"
         assert by_name[key]["rankable"] is True
         declared = DERIVED_FIELDS[key].unit

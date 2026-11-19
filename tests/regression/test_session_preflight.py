@@ -80,6 +80,50 @@ def test_额外_worktree_必须_block() -> None:
     assert "agent-2" in check.detail
 
 
+def test_已经在私有_worktree_内时必须_pass() -> None:
+    """2026-11-22 修正：原实现只要 worktree 数 > 1 就 BLOCK ——
+
+    于是**一旦按 W4 真的建了自己的私有 worktree，执行器就永久 BLOCK 你**（把自己也算成别人）。
+    照做反而开不了工，是典型的"执行器自相矛盾"，会把人逼去 `--no-verify` 式绕过。
+    """
+    listing = (
+        "/repo  abc1234 [main]\n"
+        "/repo/.worktrees/agent-2  def5678 [feat/x]\n"
+    )
+    check = preflight.check_worktrees(listing, current_root="/repo/.worktrees/agent-2")
+    assert check.status == preflight.PASS, "已在私有 worktree 内 = W4 已满足，不该 BLOCK"
+    assert "私有 worktree" in check.detail
+
+
+def test_仍在主工作树时看见额外_worktree_必须_block() -> None:
+    """隔离没做就开工 —— 这才是真正该拦的情形。"""
+    listing = (
+        "/repo  abc1234 [main]\n"
+        "/repo/.worktrees/agent-2  def5678 [feat/x]\n"
+    )
+    check = preflight.check_worktrees(listing, current_root="/repo")
+    assert check.status == preflight.BLOCK
+
+
+def test_worktree_路径带空格也能解析() -> None:
+    """`git worktree list` 是「路径 + 两个以上空格 + sha」；路径本身可能含空格。
+
+    解析错了会导致"当前目录永远比不中"→ 永久 BLOCK，所以这条也要钉住。
+    """
+    listing = (
+        "/d/Mr.Q/my repo  abc1234 [main]\n"
+        "/d/Mr.Q/my repo/.worktrees/agent-2  def5678 [feat/x]\n"
+    )
+    assert preflight._worktree_paths(listing) == [
+        "/d/Mr.Q/my repo",
+        "/d/Mr.Q/my repo/.worktrees/agent-2",
+    ]
+    check = preflight.check_worktrees(
+        listing, current_root="/d/Mr.Q/my repo/.worktrees/agent-2"
+    )
+    assert check.status == preflight.PASS
+
+
 # ─── 3. 端口 ───────────────────────────────────────────────────────
 
 

@@ -678,3 +678,38 @@ export function fieldOptionLabel(field: string, baseLabel: string): string {
   const unit = fieldInputUnit(field).label
   return unit ? `${baseLabel}(${unit})` : baseLabel
 }
+
+/**
+ * 指标（含 DSL 复合指标）在筛选下拉里显示的**全中文**名称。
+ *
+ * 2026-11-22：从 `views/ScreeningPage.vue` 抽出（纯函数，无响应式依赖）。
+ * 优先级：display_name（后端给的权威中文名）→ FIELD_LABELS/STATEMENT 映射
+ * → 后端 label → 字段名兜底，最后统一追加单位。
+ *
+ * 2026-11-16：DSL 复合指标曾经直接显示 `dividend_financing_ratio (DSL v2)`
+ * 这种纯英文标签，违反 PRD §12.1「用户可见名称必须全中文」。
+ */
+export function indicatorDisplayName(indicator: {
+  readonly name: string
+  readonly label?: string
+  readonly display_name?: string
+  readonly dsl?: boolean
+  readonly basis_label?: string
+  readonly basis_report_date?: string
+  readonly latest_report_date?: string
+}): string {
+  const baseLabel = indicator.dsl
+    ? (indicator.display_name && indicator.display_name !== indicator.name
+        ? `${indicator.display_name}`
+        : fieldDisplayName(indicator.name, indicator.label ?? indicator.name))
+    : fieldDisplayName(indicator.name, indicator.label)
+  // 2026-11-19（合并 main 的 reports/145）：字段的可算基准期早于最新报告期时，
+  // 必须在下拉里标出用的是哪一期 —— 季报不披露折旧摊销，
+  // EBITDA 族实际基于最近半年报/年报。这段逻辑原本在页面的 indicatorLabelOf 里，
+  // 本轮已并入这个单一实现（避免"抽出后丢了 main 的新行为"）。
+  const basisNote =
+    indicator.basis_label && indicator.basis_report_date !== indicator.latest_report_date
+      ? `（${indicator.basis_label}口径）`
+      : ''
+  return fieldOptionLabel(indicator.name, `${baseLabel}${basisNote}`)
+}
