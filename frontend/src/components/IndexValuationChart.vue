@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton, NRadioButton, NRadioGroup } from 'naive-ui'
 import type { IndexBands, MetricPoint } from '../types/index-dashboard.ts'
+import { fmtStoredPercent } from '../utils/formatters.ts'
 
 const props = withDefaults(
   defineProps<{
@@ -309,7 +310,7 @@ function fmtAxis(value: number): string {
       <p class="ivc-foot">
         样本 {{ windowValues.length }} ·
         区间 {{ windowRows[0].date }} ~ {{ windowRows[windowRows.length - 1].date }}
-        <template v-if="currentPercentile != null"> · 当前分位 {{ currentPercentile.toFixed(0) }}%</template>
+        <template v-if="currentPercentile != null"> · 当前分位 {{ fmtStoredPercent(currentPercentile, 0) }}</template>
       </p>
     </div>
 

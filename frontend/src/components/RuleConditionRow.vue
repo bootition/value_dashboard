@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed } from 'vue'
-import { NSelect, NInputNumber } from 'naive-ui'
-import type { ScreeningRuleCondition } from '../types/screening.ts'
+import { computed, h } from 'vue'
+import { NEllipsis, NInputNumber, NSelect } from 'naive-ui'
+import type { VNode } from 'vue'
+import type { IndicatorOption, ScreeningRuleCondition } from '../types/screening.ts'
 import { fieldInputUnit } from '../utils/screening-format.ts'
 
 const props = defineProps<{
   condition: ScreeningRuleCondition
   ordinal: number
-  indicatorOptions: Array<{ label: string; value: string }>
+  indicatorOptions: IndicatorOption[]
   opOptions: Array<{ label: string; value: string }>
 }>()
 
@@ -57,8 +58,33 @@ function updateRange(index: number, value: number): void {
   emit('update:value', next)
 }
 
+/**
+ * 指标下拉的标签渲染（2026-11-16）。
+ *
+ * 指标名（尤其派生字段如 `roce_5y_median_market_percentile 全市场分位`）远超
+ * 下拉宽度，原生 select 会直接截断且**无法查看全称**。这里用 NEllipsis 的
+ * tooltip 模式：截断处仍有省略号，鼠标悬浮即弹出完整名称。
+ */
+function renderIndicatorLabel(option: { label?: string }): VNode {
+  return h(
+    NEllipsis,
+    { tooltip: { placement: 'right', contentStyle: 'max-width: 520px; white-space: normal;' }, style: 'max-width: 100%' },
+    { default: () => option.label ?? '' },
+  )
+}
+
+/** 取第一个**叶子**选项的 value（分组选项本身没有 value）。 */
+function firstIndicatorValue(): string | undefined {
+  for (const option of props.indicatorOptions) {
+    if ('value' in option) return option.value
+    const child = option.children[0]
+    if (child) return child.value
+  }
+  return undefined
+}
+
 function toggleFieldComparison(): void {
-  emit('update:rightField', compareByField.value ? undefined : props.indicatorOptions[0]?.value)
+  emit('update:rightField', compareByField.value ? undefined : firstIndicatorValue())
 }
 </script>
 
@@ -72,6 +98,7 @@ function toggleFieldComparison(): void {
         :options="indicatorOptions"
         size="small"
         filterable
+        :render-label="renderIndicatorLabel"
         aria-label="观察指标"
         @update:value="emit('update:field', $event)"
       />
@@ -98,7 +125,7 @@ function toggleFieldComparison(): void {
     </div>
     <label v-else-if="compareByField && hasValue" class="condition-control condition-control--value">
       <span>比较指标</span>
-      <n-select :value="condition.right_field" :options="indicatorOptions" size="small" filterable aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
+      <n-select :value="condition.right_field" :options="indicatorOptions" size="small" filterable :render-label="renderIndicatorLabel" aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
     </label>
     <label v-else-if="hasValue" class="condition-control condition-control--value">
       <span>目标值{{ inputHint ? '（' + inputHint + '）' : '' }}</span>
@@ -123,7 +150,7 @@ function toggleFieldComparison(): void {
 <style scoped>
 .condition-line {
   display: grid;
-  grid-template-columns: 42px minmax(190px, 1.6fr) minmax(120px, .72fr) minmax(170px, 1fr) 92px;
+  grid-template-columns: 42px minmax(260px, 2.2fr) minmax(110px, .6fr) minmax(150px, .9fr) 88px;
   align-items: stretch;
   min-height: 74px;
   margin: 0 18px;

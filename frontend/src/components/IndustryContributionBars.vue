@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { NButton } from 'naive-ui'
 import type { IndustryContribution } from '../types/etf-strategy.ts'
+import { fmtStoredPercent } from '../utils/formatters.ts'
 
 const props = withDefaults(
   defineProps<{ items: IndustryContribution[]; mode?: 'yoy' | 'qoq' }>(),
@@ -64,7 +65,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onZoomKeydown))
           </div>
           <span class="ic-value" :class="{ negative: item.delta < 0 }">
             {{ item.delta >= 0 ? '+' : '' }}{{ item.delta.toFixed(0) }} 亿
-            · {{ item.contribution_pct >= 0 ? '+' : '' }}{{ item.contribution_pct.toFixed(1) }}%
+            · {{ item.contribution_pct >= 0 ? '+' : '' }}{{ fmtStoredPercent(item.contribution_pct, 1) }}
           </span>
         </div>
       </div>

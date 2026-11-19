@@ -4,6 +4,7 @@ import { useRoute, RouterLink } from 'vue-router'
 import { NAlert, NButton, NCard, NDescriptions, NDescriptionsItem, NEmpty, NRadioButton, NRadioGroup, NSpin, NTag } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fmtFixed, fmtStoredPercent } from '../utils/formatters.ts'
 import IndexValuationChart from '../components/IndexValuationChart.vue'
 import FundamentalChart from '../components/FundamentalChart.vue'
 import IndustryContributionBars from '../components/IndustryContributionBars.vue'
@@ -37,11 +38,6 @@ const contributionItems = computed(() =>
     ? (fundamentals.value?.industry_contribution_qoq ?? [])
     : (fundamentals.value?.industry_contribution ?? []),
 )
-
-function fmt(value: number | null | undefined, digits = 2, suffix = ''): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return `${value.toFixed(digits)}${suffix}`
-}
 
 const erpSeries = computed(() => (erp.value?.series ?? []).map((p) => ({ trade_date: p.trade_date, value: p.erp })))
 const peSeries = computed(() => valuation.value?.pe_series ?? [])
@@ -136,22 +132,22 @@ onBeforeUnmount(() => {
         <NCard size="small" class="stats-card">
           <NDescriptions :column="4" label-placement="top" size="small">
             <NDescriptionsItem label="当前 ERP">
-              <strong class="big">{{ erp.erp == null ? '—' : `${erp.erp.toFixed(2)}%` }}</strong>
+              <strong class="big">{{ fmtStoredPercent(erp.erp) }}</strong>
             </NDescriptionsItem>
             <NDescriptionsItem label="ERP 近10年分位">
-              {{ fmt(erp.erp_percentile, 0, '%') }}
+              {{ fmtStoredPercent(erp.erp_percentile, 0) }}
             </NDescriptionsItem>
             <NDescriptionsItem label="PE（TTM/口径）">
-              {{ fmt(erp.pe) }} <span class="muted">{{ erp.pe_metric }}</span>
+              {{ fmtFixed(erp.pe) }} <span class="muted">{{ erp.pe_metric }}</span>
             </NDescriptionsItem>
             <NDescriptionsItem label="PE 近10年分位">
-              {{ fmt(erp.pe_percentile, 0, '%') }}
+              {{ fmtStoredPercent(erp.pe_percentile, 0) }}
             </NDescriptionsItem>
             <NDescriptionsItem label="PB">
-              {{ fmt(erp.pb) }}
+              {{ fmtFixed(erp.pb) }}
             </NDescriptionsItem>
             <NDescriptionsItem label="PB 近10年分位">
-              {{ fmt(erp.pb_percentile, 0, '%') }}
+              {{ fmtStoredPercent(erp.pb_percentile, 0) }}
             </NDescriptionsItem>
             <NDescriptionsItem label="数据截至">
               {{ erp.latest_date ?? '—' }}

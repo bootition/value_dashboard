@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { NEmpty, NRadioButton, NRadioGroup, NSelect, NSpin } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fmtStoredPercent } from '../utils/formatters.ts'
 import type { ResearchStatisticsResponse } from '../types/stock-detail.ts'
 
 /**
@@ -347,7 +348,7 @@ onMounted(fetchData)
         </div>
         <p class="stat-foot">
           样本 {{ activeStats.samples ?? '—' }} ·
-          覆盖 {{ activeStats.coverage_pct != null ? `${activeStats.coverage_pct.toFixed(1)}%` : '—' }} ·
+          覆盖 {{ fmtStoredPercent(activeStats.coverage_pct, 1) }} ·
           当前 {{ statRow('', activeStats.current) }}
           <template v-if="activeStats.zscore != null"> · z-score {{ activeStats.zscore.toFixed(2) }}</template>
           <template v-if="activeStats.reason"> · {{ activeStats.reason }}</template>

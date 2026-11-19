@@ -10,11 +10,28 @@
 import type { DataQualityStatus, WarningCode } from './data-quality.ts'
 
 /** Indicator entry from GET /api/screening/indicators. */
+/** 指标下拉的选项（2026-11-16 起支持分组）。 */
+export type IndicatorOption =
+  | { readonly label: string; readonly value: string }
+  | {
+      readonly type: 'group'
+      readonly label: string
+      readonly key: string
+      readonly children: ReadonlyArray<{ readonly label: string; readonly value: string }>
+    }
+
 export interface ScreeningIndicator {
   readonly name: string
   readonly rankable: boolean
   /** 单位口径（pct|percent|price|ratio|plain），2026-08-14 红队 F3 后端下发 */
   readonly unit?: string
+  /**
+   * 派生字段的母指标（2026-11-16）。
+   * 每个可排名指标会派生 6 条排名/分位字段，加上统计域还有 percentile/zscore，
+   * ROCE 三个窗口因此膨胀成 21 条。带此标记的默认折叠。
+   */
+  readonly derived_from?: string
+  readonly derived_kind?: 'rank' | 'stat'
 }
 
 /** Leaf condition in a screening rule tree. */

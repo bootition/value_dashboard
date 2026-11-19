@@ -18,7 +18,7 @@
  * unit 字段，优先级高于下方静态集合——静态集合只是无后端元数据时的回退。
  */
 
-import { fmtPct, fmtStoredPercent } from './formatters.ts'
+import { fmt, fmtPct, fmtStoredPercent } from './formatters.ts'
 
 export type FieldFormat = 'pct' | 'percent' | 'ratio' | 'price' | 'plain'
 
@@ -560,9 +560,8 @@ export function formatFieldValue(field: string, value: unknown): string {
     default: {
       const abs = Math.abs(value)
       if (abs < 0.01 && value !== 0) return value.toExponential(2)
-      if (abs >= 1e8) return (value / 1e8).toFixed(2) + '亿'
-      if (abs >= 1e4) return (value / 1e4).toFixed(2) + '万'
-      return value.toFixed(2)
+      // 亿/万 阈值 + 两位小数的单一来源在 formatters.ts（与 StockDetailPage 同口径）
+      return fmt(value)
     }
   }
 }

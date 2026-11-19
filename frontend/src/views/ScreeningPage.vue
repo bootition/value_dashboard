@@ -17,6 +17,7 @@ import { cloneScreeningRule, generateRuleId } from '../types/screening.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import { applyIndicatorUnits, fieldDisplayName, fieldOptionLabel } from '../utils/screening-format.ts'
+import { fmtStoredPercent } from '../utils/formatters.ts'
 
 const message = useMessage()
 const dialog = useDialog()
@@ -145,10 +146,12 @@ const selectedResultColumns = ref<string[]>([])
 const resultColumnOptions = computed(() => {
   const seen = new Set(RESULT_METADATA_COLUMNS.map(item => item.value))
   const options = [...RESULT_METADATA_COLUMNS]
+  // indicatorOptions 展开派生字段时会返回分组结构，结果列只接受叶子选项
   for (const indicator of indicatorOptions.value) {
+    if (!('value' in indicator)) continue
     if (seen.has(indicator.value)) continue
     seen.add(indicator.value)
-    options.push(indicator)
+    options.push({ label: indicator.label, value: indicator.value })
   }
   return options
 })
@@ -162,20 +165,55 @@ const readinessCopy = computed(() => {
   return { state: 'blocked', label: '数据尚未就绪' }
 })
 
-const indicatorOptions = computed(() =>
-  indicators.value.map((i) => {
-    const meta = i as ScreeningIndicator & { label?: string; display_name?: string; dsl?: boolean }
-    // 复合指标在筛选条件里保留英文表达式名（规则 JSON 稳定口径）；
-    // 内置字段仍显示中文+英文缩写。管理界面用 display_name 显示中文。
-    const baseLabel = meta.dsl
-      ? (meta.label ?? meta.name)
-      : fieldDisplayName(i.name, meta.label)
-    return {
-      label: fieldOptionLabel(i.name, baseLabel),
-      value: i.name,
-    }
-  }),
+// 派生字段（排名/分位/统计）默认折叠（2026-11-16）。
+// 每个可排名指标派生 6 条排名字段，ROCE 三个窗口因此变成 3+18=21 条，
+// 主指标被埋在中间根本选不到。折叠后主指标只留 3 条，需要时再展开。
+const showDerivedFields = ref(false)
+
+const derivedFieldCount = computed(
+  () => indicators.value.filter((i) => (i as ScreeningIndicator).derived_from).length,
 )
+
+function indicatorLabelOf(i: ScreeningIndicator): string {
+  const meta = i as ScreeningIndicator & { label?: string; display_name?: string; dsl?: boolean }
+  // 复合指标在筛选条件里保留英文表达式名（规则 JSON 稳定口径）；
+  // 内置字段仍显示中文+英文缩写。管理界面用 display_name 显示中文。
+  const baseLabel = meta.dsl
+    ? (meta.label ?? meta.name)
+    : fieldDisplayName(i.name, meta.label)
+  return fieldOptionLabel(i.name, baseLabel)
+}
+
+const indicatorOptions = computed(() => {
+  const base: Array<{ label: string; value: string }> = []
+  const derived: Array<{ label: string; value: string }> = []
+  for (const i of indicators.value) {
+    const option = { label: indicatorLabelOf(i), value: i.name }
+    if ((i as ScreeningIndicator).derived_from) derived.push(option)
+    else base.push(option)
+  }
+  if (!showDerivedFields.value) return base
+  // 展开时用分组标题隔开，避免"主指标 / 排名派生"混在一起
+  return [
+    { type: 'group' as const, label: `常用指标（${base.length}）`, key: 'base', children: base },
+    {
+      type: 'group' as const,
+      label: `排名与统计派生（${derived.length}）`,
+      key: 'derived',
+      children: derived,
+    },
+  ]
+})
+
+/** 取第一个**叶子**选项的 value（分组选项本身没有 value）。 */
+function firstIndicatorValue(): string | undefined {
+  for (const option of indicatorOptions.value) {
+    if ('value' in option) return option.value
+    const child = option.children[0]
+    if (child) return child.value
+  }
+  return undefined
+}
 
 const resultColumns = computed(() => {
   if (!results.value.length) return []
@@ -207,7 +245,7 @@ function unavailableReasonText(item: UnavailableIndicator): string {
 function unavailableCoverageText(item: UnavailableIndicator): string {
   const coverage = item.coverage_pct
   if (typeof coverage === 'number' && Number.isFinite(coverage)) {
-    return `覆盖率 ${coverage.toFixed(1)}%`
+    return `覆盖率 ${fmtStoredPercent(coverage, 1)}`
   }
   return '覆盖率未知'
 }
@@ -232,7 +270,7 @@ function addSortRule() {
     message.warning('最多支持5个排序规则')
     return
   }
-  sortRules.value.push({ field: indicatorOptions.value[0]?.value || '', direction: 'asc' })
+  sortRules.value.push({ field: firstIndicatorValue() || '', direction: 'asc' })
 }
 
 function removeSortRule(index: number) {
@@ -756,6 +794,20 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
+          <div class="derived-toggle-row">
+            <n-switch v-model:value="showDerivedFields" size="small" aria-label="显示派生字段" />
+            <span>
+              显示派生字段（排名 / 分位 / 统计，共 {{ derivedFieldCount }} 条）
+            </span>
+            <n-tooltip trigger="hover" placement="top">
+              <template #trigger>
+                <span class="derived-toggle-hint">?</span>
+              </template>
+              每个可排名指标会自动派生「全市场排名 / 全市场分位 / 证监会一级排名 / 一级分位 /
+              二级排名 / 二级分位」6 条字段（如 ROCE 三个窗口共 18 条）。
+              默认隐藏，避免主指标被淹没。
+            </n-tooltip>
+          </div>
           <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" @warn="(msg: string) => message.warning(msg)" />
           <div v-if="unavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
             <div class="unavailable-indicators-heading">
@@ -945,4 +997,7 @@ onUnmounted(() => {
 .first-screening-help ol { margin: 13px 0; padding-left: 20px; }
 @media (max-width: 1060px) { .screening-workspace { grid-template-columns: 1fr; }.screening-run-panel { position: static; }.rule-load-row { grid-template-columns: 1fr; }.screening-section-title--conditions { display: block; }.screening-section-title--conditions p { max-width: none; text-align: left; }.standing-condition-line { grid-template-columns: 1fr minmax(150px, .7fr); }.standing-condition-line p { grid-column: 1 / -1; margin: -6px 0 10px; } }
 @media (max-width: 620px) { .screening-editor-card { padding: 20px 14px; }.standing-condition-line { grid-template-columns: 1fr; gap: 8px; padding-top: 12px; padding-bottom: 12px; }.standing-condition-line p { grid-column: 1; margin: 0; }.standing-conditions-heading div span { display: none; } }
+
+.derived-toggle-row { display: flex; align-items: center; gap: 8px; margin: 12px 0 8px; color: #6b7a70; font-size: 12px; }
+.derived-toggle-hint { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; border-radius: 50%; background: #eef4ef; color: #5c7a63; font-size: 10px; font-weight: 700; cursor: help; }
 </style>

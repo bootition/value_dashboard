@@ -47,6 +47,24 @@ export function fmtPct(value: unknown): string {
 }
 
 /**
+ * Format a number with a fixed number of decimals (no 亿/万 scaling).
+ *
+ * 与 `fmt` 的区别：`fmt` 会做亿/万换算（适合"金额"），本函数只做定点小数
+ * （适合"PE / 分位 / 倍数 / 覆盖率"这类无量纲数）。
+ *
+ * - null/undefined/非有限数 → '—'
+ * - number → `toFixed(digits)` + suffix
+ *
+ * @param value - The value to format
+ * @param digits - Number of decimal places (default 2)
+ * @param suffix - Appended verbatim after the number (e.g. '%')
+ */
+export function fmtFixed(value: number | null | undefined, digits = 2, suffix = ''): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  return `${value.toFixed(digits)}${suffix}`
+}
+
+/**
  * Format a value that is **already stored as a percentage** (5.29 = 5.29%).
  *
  * 两类百分比存储口径（见 `app/core/screening/field_units.py`）的展示实现都在
@@ -55,15 +73,21 @@ export function fmtPct(value: unknown): string {
  * - 百分数原值（percent）→ `fmtStoredPercent`：原样加 %，**不再 ×100**
  *
  * - null/undefined → '—'
- * - number → fixed 2 digits, append '%'（不做 ×100 换算）
+ * - number → `toFixed(digits)` + '%'（不做 ×100 换算）
  * - non-number → String(value)
  *
+ * 前端**唯一**的"百分数原值 → 带 % 文本"出口：任何 `xxx.toFixed(n) + '%'`
+ * 都应改为调用本函数（护栏测试 `tests/percent-render-single-source.test.ts`）。
+ *
  * @param value - The percent-stored value to format (e.g. 5.29 → '5.29%')
+ * @param digits - Number of decimal places (default 2)
  */
-export function fmtStoredPercent(value: unknown): string {
+export function fmtStoredPercent(value: unknown, digits = 2): string {
   if (value === null || value === undefined) return '—'
   if (typeof value === 'number') {
-    return value.toFixed(2) + '%'
+    // NaN/Infinity 不可能来自 JSON，但要挡住算术中间态，避免渲染 "Infinity%"
+    if (!Number.isFinite(value)) return '—'
+    return value.toFixed(digits) + '%'
   }
   return String(value)
 }

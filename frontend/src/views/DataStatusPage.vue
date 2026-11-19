@@ -4,6 +4,7 @@ import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions
 import axios from 'axios'
 import type { DataQualityStatus } from '../types'
 import { warningCodeLabel } from '../types/data-quality'
+import { fmtStoredPercent } from '../utils/formatters.ts'
 
 interface RetryItem {
   stock_code: string
@@ -154,7 +155,7 @@ const pct = (value: number, total: number) => {
   if (!total || total === 0) return '0%'
   // Detail tables contain multiple report periods per company. Coverage is capped
   // at the listed-stock universe rather than rendering misleading values >100%.
-  return (Math.min(value, total) / total * 100).toFixed(1) + '%'
+  return fmtStoredPercent(Math.min(value, total) / total * 100, 1)
 }
 
 const priceRawPct = computed(() => summary.value ? pct(summary.value.price_raw_count, summary.value.stock_count) : '0%')

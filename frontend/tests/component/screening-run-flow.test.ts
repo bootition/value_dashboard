@@ -316,9 +316,13 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
       expect(wrapper.text()).toContain('600519')
 
       // 打开"仅使用严格可信数据"开关（watch 防抖 400ms 后自动重跑）
-      const strictSwitch = wrapper.findComponent({ name: 'Switch' })
-      expect(strictSwitch.exists()).toBe(true)
-      await strictSwitch.vm.$emit('update:value', true)
+      // 2026-11-16：页面新增了「显示派生字段」开关，Switch 不再只有一个，
+      // 必须按文案定位到「严格可信」那一个（原来的 findComponent 取到的是第一个）。
+      const strictSwitch = wrapper
+        .findAllComponents({ name: 'Switch' })
+        .find((c) => c.text().includes('严格可信'))
+      expect(strictSwitch?.exists()).toBe(true)
+      await strictSwitch!.vm.$emit('update:value', true)
       await vi.advanceTimersByTimeAsync(500)
       await flushPromises()
 

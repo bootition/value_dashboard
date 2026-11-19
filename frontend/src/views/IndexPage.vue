@@ -4,6 +4,7 @@ import { NAlert, NButton, NCard, NDataTable, NEmpty, NGrid, NGridItem, NSkeleton
 import { RouterLink } from 'vue-router'
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fmtFixed, fmtStoredPercent } from '../utils/formatters.ts'
 import type { DataTableColumns } from 'naive-ui'
 import type { IndexOverviewItem } from '../types/index-dashboard.ts'
 import EtfStrategyPanel from '../components/EtfStrategyPanel.vue'
@@ -108,25 +109,20 @@ const dataAsOf = computed(() => {
 
 function zone(percentile: number | null): { type: 'success' | 'warning' | 'default' | 'error'; label: string } {
   if (percentile == null) return { type: 'default', label: '—' }
-  if (percentile < 20) return { type: 'success', label: `低估 ${percentile.toFixed(0)}%` }
-  if (percentile > 80) return { type: 'error', label: `高估 ${percentile.toFixed(0)}%` }
-  return { type: 'warning', label: `中性 ${percentile.toFixed(0)}%` }
-}
-
-function fmt(value: number | null, digits = 2): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return value.toFixed(digits)
+  if (percentile < 20) return { type: 'success', label: `低估 ${fmtStoredPercent(percentile, 0)}` }
+  if (percentile > 80) return { type: 'error', label: `高估 ${fmtStoredPercent(percentile, 0)}` }
+  return { type: 'warning', label: `中性 ${fmtStoredPercent(percentile, 0)}` }
 }
 
 const columns: DataTableColumns<IndexOverviewItem> = [
   { title: '指数', key: 'name', render: (row) => `${row.name}（${row.code}）` },
   { title: '类型', key: 'category', render: (row) => (row.category === 'broad' ? '宽基/红利' : '申万一级') },
-  { title: 'PE', key: 'pe', render: (row) => fmt(row.pe) },
-  { title: 'PE分位', key: 'pe_percentile', render: (row) => `${fmt(row.pe_percentile, 0)}%` },
-  { title: 'PB', key: 'pb', render: (row) => fmt(row.pb) },
-  { title: 'PB分位', key: 'pb_percentile', render: (row) => `${fmt(row.pb_percentile, 0)}%` },
-  { title: 'ERP', key: 'erp', render: (row) => (row.erp == null ? '—' : `${row.erp.toFixed(2)}%`) },
-  { title: 'ERP分位', key: 'erp_percentile', render: (row) => `${fmt(row.erp_percentile, 0)}%` },
+  { title: 'PE', key: 'pe', render: (row) => fmtFixed(row.pe) },
+  { title: 'PE分位', key: 'pe_percentile', render: (row) => fmtStoredPercent(row.pe_percentile, 0) },
+  { title: 'PB', key: 'pb', render: (row) => fmtFixed(row.pb) },
+  { title: 'PB分位', key: 'pb_percentile', render: (row) => fmtStoredPercent(row.pb_percentile, 0) },
+  { title: 'ERP', key: 'erp', render: (row) => fmtStoredPercent(row.erp) },
+  { title: 'ERP分位', key: 'erp_percentile', render: (row) => fmtStoredPercent(row.erp_percentile, 0) },
   { title: '数据截至', key: 'latest_date' },
 ]
 
@@ -248,10 +244,10 @@ onBeforeUnmount(() => {
                   </NTag>
                 </div>
                 <div class="card-grid">
-                  <div class="metric"><span class="metric-label">PE</span><span class="metric-value">{{ fmt(item.pe) }}</span></div>
-                  <div class="metric"><span class="metric-label">PB</span><span class="metric-value">{{ fmt(item.pb) }}</span></div>
-                  <div class="metric"><span class="metric-label">ERP</span><span class="metric-value">{{ item.erp == null ? '—' : `${fmt(item.erp)}%` }}</span></div>
-                  <div class="metric"><span class="metric-label">ERP分位</span><span class="metric-value">{{ `${fmt(item.erp_percentile, 0)}%` }}</span></div>
+                  <div class="metric"><span class="metric-label">PE</span><span class="metric-value">{{ fmtFixed(item.pe) }}</span></div>
+                  <div class="metric"><span class="metric-label">PB</span><span class="metric-value">{{ fmtFixed(item.pb) }}</span></div>
+                  <div class="metric"><span class="metric-label">ERP</span><span class="metric-value">{{ fmtStoredPercent(item.erp) }}</span></div>
+                  <div class="metric"><span class="metric-label">ERP分位</span><span class="metric-value">{{ fmtStoredPercent(item.erp_percentile, 0) }}</span></div>
                 </div>
                 <div class="card-foot">
                   <span>{{ item.cadence === 'monthly' ? '月度序列' : '日度序列' }} · {{ item.samples }} 样本</span>

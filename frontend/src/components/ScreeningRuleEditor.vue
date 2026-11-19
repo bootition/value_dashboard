@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import { isRuleNode, generateRuleId } from '../types/screening.ts'
-import type { ScreeningRuleNode } from '../types/screening.ts'
+import type { IndicatorOption, ScreeningRuleNode } from '../types/screening.ts'
 import RuleConditionRow from './RuleConditionRow.vue'
 
 // Self-import for recursive rendering in the template.
@@ -14,7 +14,7 @@ const props = defineProps<{
   maxDepth: number
   maxConditions: number
   isRoot: boolean
-  indicatorOptions: Array<{ label: string; value: string }>
+  indicatorOptions: IndicatorOption[]
   opOptions: Array<{ label: string; value: string }>
 }>()
 

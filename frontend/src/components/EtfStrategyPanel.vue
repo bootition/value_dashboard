@@ -7,6 +7,7 @@ import {
 } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
+import { fmtFixed, fmtStoredPercent } from '../utils/formatters.ts'
 import type { DataTableColumns } from 'naive-ui'
 import type { EtfCategory, EtfDetail, EtfFundamentals, EtfOverviewItem, EtfOverviewResponse } from '../types/etf-strategy.ts'
 import IndexValuationChart from './IndexValuationChart.vue'
@@ -45,11 +46,6 @@ const signalMeta: Record<string, { type: 'success' | 'error' | 'warning' | 'defa
   unavailable: { type: 'default', label: '分位不可得' },
 }
 
-function fmt(value: number | null | undefined, digits = 2, suffix = ''): string {
-  if (value == null || !Number.isFinite(value)) return '—'
-  return `${value.toFixed(digits)}${suffix}`
-}
-
 const columns: DataTableColumns<EtfOverviewItem> = [
   { title: 'ETF', key: 'name', render: (row) => `${row.name}（${row.etf_code}）` },
   {
@@ -66,15 +62,15 @@ const columns: DataTableColumns<EtfOverviewItem> = [
   },
   {
     title: '主指标分位', key: 'percentile',
-    render: (row) => `${row.percentile_label} ${fmt(row.percentile, 0, '%')}`,
+    render: (row) => `${row.percentile_label} ${fmtStoredPercent(row.percentile, 0)}`,
   },
-  { title: '现价', key: 'current_price', render: (row) => fmt(row.current_price, 3) },
-  { title: '持仓市值', key: 'market_value', render: (row) => fmt(row.market_value) },
-  { title: '浮动盈亏', key: 'unrealized_pnl', render: (row) => fmt(row.unrealized_pnl) },
-  { title: '下档买入价', key: 'next_buy_price', render: (row) => fmt(row.next_buy_price, 3) },
+  { title: '现价', key: 'current_price', render: (row) => fmtFixed(row.current_price, 3) },
+  { title: '持仓市值', key: 'market_value', render: (row) => fmtFixed(row.market_value) },
+  { title: '浮动盈亏', key: 'unrealized_pnl', render: (row) => fmtFixed(row.unrealized_pnl) },
+  { title: '下档买入价', key: 'next_buy_price', render: (row) => fmtFixed(row.next_buy_price, 3) },
   { title: '剩余买入', key: 'remaining_buys', render: (row) => (row.remaining_buys > 0 ? `${row.remaining_buys} 档` : '已用尽') },
-  { title: '预算剩余', key: 'budget_left', render: (row) => fmt(row.budget_left) },
-  { title: '下档卖出价', key: 'next_sell_price', render: (row) => fmt(row.next_sell_price, 3) },
+  { title: '预算剩余', key: 'budget_left', render: (row) => fmtFixed(row.budget_left) },
+  { title: '下档卖出价', key: 'next_sell_price', render: (row) => fmtFixed(row.next_sell_price, 3) },
   { title: '卖出进度', key: 'sell_progress', render: (row) => (row.clear_tail ? '清尾仓' : `${row.sell_tranches_done}/10 档`) },
   {
     title: '操作', key: 'actions',
@@ -481,10 +477,10 @@ onBeforeUnmount(() => {
         <div class="etf-toolbar">
           <NDescriptions :column="5" label-placement="top" size="small" class="etf-summary">
             <NDescriptionsItem label="策略总资产（手填）">{{ data.total_assets ?? '未设置' }}</NDescriptionsItem>
-            <NDescriptionsItem label="持仓市值">{{ fmt(data.market_value) }}</NDescriptionsItem>
-            <NDescriptionsItem label="浮动盈亏">{{ fmt(data.unrealized_pnl) }}</NDescriptionsItem>
-            <NDescriptionsItem label="已实现盈亏">{{ fmt(data.realized_pnl) }}</NDescriptionsItem>
-            <NDescriptionsItem label="累计净入金">{{ fmt(data.cash_net_in) }}</NDescriptionsItem>
+            <NDescriptionsItem label="持仓市值">{{ fmtFixed(data.market_value) }}</NDescriptionsItem>
+            <NDescriptionsItem label="浮动盈亏">{{ fmtFixed(data.unrealized_pnl) }}</NDescriptionsItem>
+            <NDescriptionsItem label="已实现盈亏">{{ fmtFixed(data.realized_pnl) }}</NDescriptionsItem>
+            <NDescriptionsItem label="累计净入金">{{ fmtFixed(data.cash_net_in) }}</NDescriptionsItem>
           </NDescriptions>
           <div class="etf-actions">
             <NButton size="small" @click="openCapitalModal">设置总资产</NButton>
@@ -523,12 +519,12 @@ onBeforeUnmount(() => {
                 {{ (signalMeta[detail.signal] ?? signalMeta.unavailable).label }}
               </NTag>
             </NDescriptionsItem>
-            <NDescriptionsItem label="主指标分位">{{ detail.percentile_label }} {{ fmt(detail.percentile, 0, '%') }}</NDescriptionsItem>
-            <NDescriptionsItem label="持仓成本">{{ fmt(detail.position.avg_cost, 3) }}</NDescriptionsItem>
-            <NDescriptionsItem label="已实现盈亏">{{ fmt(detail.position.realized_pnl) }}</NDescriptionsItem>
-            <NDescriptionsItem label="PE（TTM/口径）">{{ fmt(detail.valuation?.pe) }}</NDescriptionsItem>
-            <NDescriptionsItem label="PB">{{ fmt(detail.valuation?.pb) }}</NDescriptionsItem>
-            <NDescriptionsItem label="ERP">{{ detail.valuation?.erp == null ? '—' : `${detail.valuation.erp.toFixed(2)}%` }}</NDescriptionsItem>
+            <NDescriptionsItem label="主指标分位">{{ detail.percentile_label }} {{ fmtStoredPercent(detail.percentile, 0) }}</NDescriptionsItem>
+            <NDescriptionsItem label="持仓成本">{{ fmtFixed(detail.position.avg_cost, 3) }}</NDescriptionsItem>
+            <NDescriptionsItem label="已实现盈亏">{{ fmtFixed(detail.position.realized_pnl) }}</NDescriptionsItem>
+            <NDescriptionsItem label="PE（TTM/口径）">{{ fmtFixed(detail.valuation?.pe) }}</NDescriptionsItem>
+            <NDescriptionsItem label="PB">{{ fmtFixed(detail.valuation?.pb) }}</NDescriptionsItem>
+            <NDescriptionsItem label="ERP">{{ fmtStoredPercent(detail.valuation?.erp) }}</NDescriptionsItem>
             <NDescriptionsItem label="估值截至">{{ detail.valuation?.latest_date ?? '—' }}</NDescriptionsItem>
           </NDescriptions>
           <template v-if="detail.track_valuation">
