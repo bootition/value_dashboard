@@ -1343,3 +1343,73 @@ agent 会一直读到时间用完。
 但**纯 Git 考古抓不到它** —— 当年没有任何提交改过这个测试文件，**变的是行为，不是测试**。
 所以找这类测试必须做**交叉比对**：把"测试断言的期望"与"当前设计文档/新守卫"对照，
 看有没有断言在要求某个已经被判定为危险的行为。
+
+## 18. 收掉 §17.7 的全部欠账（2026-11-23）
+
+### 18.1 测试播种工厂：−353 行，**断言 0 改动**
+
+§17.7 第 1 条说"11.2% 的测试代码是内联 SQL 播种（755 处 `INSERT INTO`）"。
+建了 `tests/support/seed.py`（按域分 17 个方法），改造 5 个头部文件：
+
+| 文件 | 行数 | `INSERT INTO` |
+|---|---|---|
+| `test_indicator_ext.py` | 877 → **693** | 62 → **0** |
+| `test_update_job_and_progress.py` | 947 → **888** | 30 → 4 |
+| `test_incremental_price_lineage.py` | 582 → **551** | 22 → 2 |
+| `test_snapshot_atomicity.py` | 401 → **348** | 21 → **0** |
+| `test_data_quality_status.py` | 378 → **352** | 22 → 14 |
+| **合计** | **−353 行** | **157 → 20** |
+
+测试函数数逐个文件不变（函数名集合 diff 全等）；**assert 用 AST unparse 逐条比对，0 条改动**。
+
+**为什么不写成万能 `insert_row(table, **kw)`**：那样只是把 SQL 换个地方写，而且它**唯一挡不住
+的那类 bug 正好最致命** —— 拼错列名会静默写成"业务列全 NULL"的一行；而本仓"缺失→NULL
+不得估算"是**明确正确**的行为，于是用例照绿、什么都没覆盖。工厂用 `DESCRIBE` 拿真实 schema
+校验列名（不维护第二份清单），拼错当场抛 `UnknownSeedColumn`，**这个设计立刻抓到了写它的人
+自己的两处错**（`share_capital_history` 没有 `confidence` 列、`funding_events` 用 `raw_hash`
+而不是 `raw_response_hash`）。
+
+契约测试 `test_seed_factory.py`（21 用例）钉住 8 条不变式；**变异验证**：把工厂改成
+"静默丢弃未知列"（万能口假绿本体）→ 6/6 参数化用例全红。另做 **16 个生产逻辑变异**，16/16 变红。
+
+### 18.2 前端 22 条类型债：全部真修，`exclude` 整个删掉
+
+| 档 | 条数 | 性质 |
+|---|---|---|
+| A | 8 | fixture 过时（生产契约变了，fixture 没跟） |
+| B | 8 | **测试真的写错了**（当年就没在验它声称要验的东西） |
+| C | 3 | 联合类型未收窄（用 `isRuleNode()` 收窄，不用 `as any`） |
+| D | 3 | 生产类型过窄（`typeof axios` → `AxiosInstance`，纯注解、运行时零变化） |
+
+**B 档最值钱的一条**：`stock-detail.test.ts` 的 fixture 写了 `sw_level1`/`sw_level2`，
+而 `GET /api/stock/{code}/info` **从来不返回这两个字段**；该文件头注释还写着
+"证明只读接口接受后端返回的确切形状" —— **它从第一天起就没在验这句话**，
+因为测试代码从不做类型检查，一直没人发现。
+
+**lint 扩到 `tests/`**：首次 11 条错全部真修（7 个 `no-explicit-any` 换成真实类型、
+4 个未使用变量删绑定），**行内 `eslint-disable` 新增 0 条**。现在覆盖 84 个文件。
+
+新增 4 条防回退守卫（`frontend/tests/tsconfig-guards.test.ts`）：
+`tsconfig.test.json` 不许有 `exclude`、`include` 必须覆盖 src+tests、lint 必须扫 tests、
+`npm test` 必须串 `typecheck:test`。
+
+### 18.3 最后一个死别名
+
+`data_status._ACTIONABLE_MISSING_SQL`（与上轮删掉的 `_DISABLED_MISSING_FIELDS` 完全同形：
+import core 常量 → 包一层同名私有别名 → 唯一效果是"让测试能断言一个名字"）。零导入方，已删。
+
+### 18.4 全量回归
+
+```
+========== 2045 passed, 3 skipped, 31 warnings in 1384.25s (0:23:04) ==========
+```
+
+测试数从 1972（本会话开始）涨到 **2045**（+73 条守卫），时间从 **29:09** 降到 **23:04**。
+
+### 18.5 仍然没做（诚实清单，已无阻塞项）
+
+1. 种子工厂只改造了 **5 个文件 / 157 处**，全仓还有 **598 处 `INSERT INTO`** 分布在其余文件里
+   （次批目标已测绘：`test_asset_health.py` 22、`test_roce.py` 20、`test_minimum_data_readiness.py` 16…）。
+2. `seed.py` 只管 DuckDB；SQLite 侧（`job_logs`/`retry_list`/`trading_dates`/`watchlist`）
+   按设计没做，需要时另立 `seed_sqlite.py`（不要合并成一个"跨库万能口"）。
+3. 出厂 `seed.snapshot()` 与 `prices(table=...)` 的非默认用法还没被大量使用，属预留。

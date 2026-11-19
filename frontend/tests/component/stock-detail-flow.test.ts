@@ -373,7 +373,7 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
       JSON.stringify({ period: 'week', adjust: 'qfq' }),
     )
     const klineRequests = setupAxiosMock()
-    const { wrapper } = await mountDetailWithCode('600519')
+    await mountDetailWithCode('600519')
     await flushPromises()
 
     expect(klineRequests[0]).toMatchObject({ period: 'week', adjust: 'qfq' })
@@ -385,7 +385,7 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
       JSON.stringify({ period: 'invalid', adjust: 'bad' }),
     )
     const klineRequests = setupAxiosMock()
-    const { wrapper } = await mountDetailWithCode('600519')
+    await mountDetailWithCode('600519')
     await flushPromises()
 
     expect(klineRequests[0]).toMatchObject({ period: 'day', adjust: 'raw' })
@@ -464,8 +464,10 @@ describe('StockDetailPage 业务概览（reports/67/68）', () => {
 
     expect(wrapper.find('#return').text()).toContain('历史研究统计')
     expect(wrapper.find('#valuation').text()).toContain('国债比较已合并进“股息率-国债10年利差”序列')
-    const requests = (axios.get as Mock).mock.calls
-      .filter(([url]: [string]) => String(url).includes('/treasury-comparison'))
+    // `Mock` 的 mock.calls 是 any[][]（每次调用是「参数数组」），旧写法把元素注解成
+    // 元组 `[string]`，参数类型比 any[] 更窄 → 谓词签名不兼容。按调用元组标注后解构。
+    const getCalls = (axios.get as Mock).mock.calls as Array<[string, ...unknown[]]>
+    const requests = getCalls.filter(([url]) => String(url).includes('/treasury-comparison'))
     expect(requests).toEqual([])
   })
 
@@ -508,7 +510,8 @@ describe('StockDetailPage 黑名单（2026-11-22，用户需求）', () => {
     expect(wrapper.text()).toContain('已加入黑名单')
     expect(wrapper.text()).toContain('移出黑名单')
 
-    const urls = (axios.get as Mock).mock.calls.map(([url]: [string]) => String(url))
+    const getCalls = (axios.get as Mock).mock.calls as Array<[string, ...unknown[]]>
+    const urls = getCalls.map(([url]) => String(url))
     expect(urls.some((url) => url.includes('/info'))).toBe(false)
     expect(urls.some((url) => url.includes('/indicators'))).toBe(false)
     expect(urls.some((url) => url.includes('/kline'))).toBe(false)

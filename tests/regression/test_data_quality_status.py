@@ -8,6 +8,7 @@ from app.core.data_quality import _data_dates, build_data_quality_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 def test_data_quality_status_exposes_untrusted_and_stale_data(
@@ -75,15 +76,12 @@ def test_data_dates_supports_snapshot_schema_before_freshness_migration(
 def test_data_dates_price_uses_latest_available_date(
     duckdb_store: DuckDBStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES
-           ('000001', 'A', 'SZSE', TRUE), ('000002', 'B', 'SZSE', TRUE)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="A", exchange="SZSE", is_listed=True)
+    seed.stock("000002", name="B", exchange="SZSE", is_listed=True)
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"""INSERT INTO {table} (stock_code, trade_date, close) VALUES
-                ('000001', '2026-08-05', 10), ('000002', '2026-08-04', 20)"""
-        )
+        seed.prices("000001", [("2026-08-05", 10)], table=table)
+        seed.prices("000002", [("2026-08-04", 20)], table=table)
 
     dates = _data_dates(duckdb_store)
 
@@ -98,9 +96,9 @@ def test_quality_status_flags_missing_inputs_for_a_currently_listed_stock(
     # 本用例的语义是"一只老股完全没有数据 → 必须被标记"；而 readiness 现在把
     # `listing_date IS NULL` 当作"上市日期未知 = 按新股豁免"（否则一只新股就能
     # 让 /api/ready 永久 503，实测 920309）。留空会让本用例变成"新股豁免"场景。
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, listing_date)
-           VALUES ('000001', 'incomplete', 'SZSE', TRUE, DATE '2010-01-04')"""
+    Seed(duckdb_store).stock(
+        "000001", name="incomplete", exchange="SZSE", is_listed=True,
+        listing_date="2010-01-04",
     )
 
     status = build_data_quality_status(duckdb_store, sqlite_store)
@@ -307,43 +305,19 @@ def test_archive_hash_check_fails_closed_when_archive_is_unreadable(
 
 
 def _insert_quality_fixture(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
+    seed = Seed(duck)
+    seed.prices("600519", [("2026-07-17", 1500)])
+    # 完整期 vs "壳行"（三列全 NULL）必须逐字构造：工厂不给业务列默认值，
+    # 少写哪一列就是哪一列缺失，这正是 FINANCIAL_SHELL_ROWS 的判据。
+    seed.balance("600519", "2025-03-31", total_assets=1000, total_liabilities=300, total_equity=700)
+    seed.balance("600519", "2026-03-31")
+    seed.income("600519", "2025-03-31", revenue=500, parent_net_profit=100)
+    # 最新期只有 parent_net_profit：revenue 缺失是低覆盖构造本身
+    seed.income("600519", "2026-03-31", parent_net_profit=110)
+    seed.cash_flow("600519", "2025-03-31", cf_from_operating=120)
+    seed.snapshot("600519", "2025-03-31", latest_price_date="2026-07-01")
+
     with duck.write_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO price_daily_raw (stock_code, trade_date, close)
-            VALUES ('600519', '2026-07-17', 1500)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO balance_sheet
-                (stock_code, report_date, total_assets, total_liabilities, total_equity)
-            VALUES
-                ('600519', '2025-03-31', 1000, 300, 700),
-                ('600519', '2026-03-31', NULL, NULL, NULL)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO income_statement
-                (stock_code, report_date, revenue, parent_net_profit)
-            VALUES
-                ('600519', '2025-03-31', 500, 100),
-                ('600519', '2026-03-31', NULL, 110)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-            VALUES ('600519', '2025-03-31', 120)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO indicator_snapshot (stock_code, report_date, latest_price_date)
-            VALUES ('600519', '2025-03-31', '2026-07-01')
-            """
-        )
         connection.execute(
             """
             INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)

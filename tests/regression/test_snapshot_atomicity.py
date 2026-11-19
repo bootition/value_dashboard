@@ -7,12 +7,14 @@ import pytest
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
+
+#: 本文件所有财务/价格种子共用的报告期。
+REPORT_DATE = "2025-03-31"
 
 
 def test_duckdb_transaction_rolls_back_on_exception(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600519', 'old', 'SSE')"
-    )
+    Seed(duckdb_store).stock("600519", name="old", exchange="SSE")
 
     with pytest.raises(RuntimeError, match="injected failure"), duckdb_store.transaction() as connection:
         connection.execute("UPDATE stock_meta SET name = 'new' WHERE stock_code = '600519'")
@@ -30,12 +32,8 @@ def test_snapshot_failure_preserves_published_rows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _insert_snapshot_sources(duckdb_store)
-    duckdb_store.write_query(
-        """
-        INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-        VALUES ('OLD001', '2024-12-31', 10.0)
-        """
-    )
+    # 上一代已发布的快照：失败时它必须原样留着。
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
 
     def calculate(stock_code: str) -> dict[str, str | float]:
@@ -62,12 +60,7 @@ def test_successful_snapshot_replaces_published_rows_atomically(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _insert_snapshot_sources(duckdb_store)
-    duckdb_store.write_query(
-        """
-        INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-        VALUES ('OLD001', '2024-12-31', 10.0)
-        """
-    )
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
 
     def calculate(stock_code: str) -> dict[str, str | float]:
@@ -88,60 +81,33 @@ def test_successful_snapshot_replaces_published_rows_atomically(
 
 
 def _insert_snapshot_sources(store: DuckDBStore) -> None:
-    with store.write_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO stock_meta (stock_code, name, exchange, total_shares, circ_shares)
-            VALUES ('000001', 'one', 'SSE', 100, 80), ('000002', 'two', 'SSE', 100, 80)
-            """
+    """两只「指标算得出来」的股票：元数据 + 三表 + 原始/前复权同日收盘价。
+
+    两只股票的各项数值刻意**完全一样**（资产 100 / 负债 20 / 权益 80、收入 100、
+    归母净利 10、收盘 10）：本文件的用例只关心「发布是整体成功还是整体不发布」，
+    个股之间的差异只会给失败信息加噪音。
+    """
+    seed = Seed(store)
+    for code, name in (("000001", "one"), ("000002", "two")):
+        seed.stock(code, name=name, exchange="SSE", total_shares=100, circ_shares=80)
+        seed.balance(
+            code, REPORT_DATE, total_assets=100.0, total_liabilities=20.0, total_equity=80.0
         )
-        connection.execute(
-            """
-            INSERT INTO balance_sheet
-                (stock_code, report_date, total_assets, total_liabilities, total_equity)
-            VALUES
-                ('000001', '2025-03-31', 100.0, 20.0, 80.0),
-                ('000002', '2025-03-31', 100.0, 20.0, 80.0)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-            VALUES ('000001', '2025-03-31', 100.0, 10.0), ('000002', '2025-03-31', 100.0, 10.0)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-            VALUES ('000001', '2025-03-31', 1.0), ('000002', '2025-03-31', 1.0)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO price_daily_raw (stock_code, trade_date, close)
-            VALUES ('000001', '2025-03-31', 10.0), ('000002', '2025-03-31', 10.0)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-            VALUES ('000001', '2025-03-31', 10.0), ('000002', '2025-03-31', 10.0)
-            """
-        )
+        seed.income(code, REPORT_DATE, revenue=100.0, parent_net_profit=10.0)
+        seed.cash_flow(code, REPORT_DATE, cf_from_operating=1.0)
+        # 原始/前复权是同一逻辑对两张表各跑一遍：只换表名，行内容逐字相同。
+        for table in ("price_daily_raw", "price_daily_qfq"):
+            seed.prices(code, [(REPORT_DATE, 10.0)], table=table)
 
 
 def test_snapshot_refuses_to_publish_when_the_universe_lacks_minimum_data(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, total_shares, circ_shares)
-           VALUES ('000001', 'one', 'SSE', 100, 80)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('OLD001', '2024-12-31', 10.0)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="one", exchange="SSE", total_shares=100, circ_shares=80)
+    # 上一代已发布的快照：门禁不放行时必须原样留着。
+    seed.snapshot("OLD001", "2024-12-31", latest_close=10.0)
 
     report = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
 
@@ -157,10 +123,9 @@ def test_incremental_snapshot_replaces_only_changed_stock_atomically(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close) VALUES
-           ('000001', '2025-03-31', 10), ('000002', '2025-03-31', 20)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.snapshot("000001", REPORT_DATE, latest_close=10)
+    seed.snapshot("000002", REPORT_DATE, latest_close=20)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -186,10 +151,9 @@ def test_incremental_snapshot_keeps_old_row_for_failed_stock(
     sqlite_store: SQLiteStore,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close) VALUES
-           ('000001', '2025-03-31', 10), ('000002', '2025-03-31', 20)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.snapshot("000001", REPORT_DATE, latest_close=10)
+    seed.snapshot("000002", REPORT_DATE, latest_close=20)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
 
     def calculate(stock_code: str) -> dict[str, str | float]:
@@ -232,10 +196,7 @@ def test_snapshot_readiness_gate_covers_each_required_input(
     should_publish: bool,
 ) -> None:
     _insert_ready_stock(duckdb_store, exchange=exchange, omit=missing)
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('OLD001', '2024-12-31', 10.0)"""
-    )
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -280,10 +241,7 @@ def test_snapshot_hard_blocks_when_the_whole_small_library_is_broken(
     duckdb_store.write_query(
         "UPDATE stock_meta SET circ_shares = 200 WHERE stock_code = '000001'"
     )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('OLD001', '2024-12-31', 10.0)"""
-    )
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -369,33 +327,22 @@ def test_snapshot_publish_gate_is_injectable(
 
 
 def _insert_ready_stock(store: DuckDBStore, *, exchange: str, omit: str) -> None:
-    with store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO stock_meta (stock_code, name, exchange, total_shares, circ_shares)
-               VALUES ('000001', 'one', ?, 100, 80)""",
-            [exchange],
+    """一只「就绪输入齐全」的股票，按 ``omit`` 精确地**只**缺掉一类输入。
+
+    ``omit`` ∈ {``""``, ``financial``, ``raw``, ``qfq``}：财务三表按「一张缺」
+    处理（三表同进同退是就绪判据本身的口径），而 `raw` / `qfq` 必须能
+    **各自单独**缺 —— 所以这两张表的播种刻意留成两个独立分支，
+    不合并成一个循环。
+    """
+    seed = Seed(store)
+    seed.stock("000001", name="one", exchange=exchange, total_shares=100, circ_shares=80)
+    if omit != "financial":
+        seed.balance(
+            "000001", REPORT_DATE, total_assets=100.0, total_liabilities=20.0, total_equity=80.0
         )
-        if omit != "financial":
-            connection.execute(
-                """INSERT INTO balance_sheet
-                       (stock_code, report_date, total_assets, total_liabilities, total_equity)
-                   VALUES ('000001', '2025-03-31', 100.0, 20.0, 80.0)"""
-            )
-            connection.execute(
-                """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-                   VALUES ('000001', '2025-03-31', 100.0, 10.0)"""
-            )
-            connection.execute(
-                """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-                   VALUES ('000001', '2025-03-31', 1.0)"""
-            )
-        if omit != "raw":
-            connection.execute(
-                """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-                   VALUES ('000001', '2025-03-31', 10.0)"""
-            )
-        if omit != "qfq":
-            connection.execute(
-                """INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-                   VALUES ('000001', '2025-03-31', 10.0)"""
-            )
+        seed.income("000001", REPORT_DATE, revenue=100.0, parent_net_profit=10.0)
+        seed.cash_flow("000001", REPORT_DATE, cf_from_operating=1.0)
+    if omit != "raw":
+        seed.prices("000001", [(REPORT_DATE, 10.0)], table="price_daily_raw")
+    if omit != "qfq":
+        seed.prices("000001", [(REPORT_DATE, 10.0)], table="price_daily_qfq")

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import axios from 'axios'
+import type { AxiosAdapter, AxiosRequestHeaders, AxiosResponse, InternalAxiosRequestConfig } from 'axios'
 import { installWriteTokenInterceptor, resetWriteToken } from '../../src/http'
 
 interface RecordedRequest {
@@ -8,20 +9,39 @@ interface RecordedRequest {
   token: string | null
 }
 
+// 与 src/http.ts 里拦截器写入的头名保持一致。
+const TOKEN_HEADER = 'X-VD-Write-Token'
+
+/** 拦截器会往重放的 config 上打自己的标记（src/http.ts 的 `_vdRetried`）。 */
+type RetryableTestConfig = InternalAxiosRequestConfig & { _vdRetried?: boolean }
+
+/**
+ * 取请求头里的写令牌。axios 在调用 adapter 之前已把 headers 归一成 `AxiosHeaders`
+ * 实例，所以这里直接走 `.get()`；取不到（未携带）一律视作 null。
+ */
+function readWriteToken(headers: AxiosRequestHeaders): string | null {
+  const raw = headers.get?.(TOKEN_HEADER)
+  return typeof raw === 'string' ? raw : null
+}
+
+/** 形状完整的假响应（jsdom 里不落地网络，adapter 直接返回）。 */
+function response<T>(config: InternalAxiosRequestConfig, data: T): AxiosResponse<T> {
+  return { data, status: 200, statusText: 'OK', headers: {}, config }
+}
+
 function makeClient(records: RecordedRequest[]) {
   let sessionCalls = 0
-  const adapter = async (config: any) => {
-    const headers = config.headers as any
+  const adapter: AxiosAdapter = async (config) => {
     if (config.url === '/api/session') {
       sessionCalls += 1
-      return { data: { write_token: 'tok-1' }, status: 200, statusText: 'OK', headers: {}, config }
+      return response(config, { write_token: 'tok-1' })
     }
     records.push({
-      url: config.url,
+      url: String(config.url),
       method: (config.method ?? 'get').toLowerCase(),
-      token: headers?.get ? headers.get('X-VD-Write-Token') ?? null : null,
+      token: readWriteToken(config.headers),
     })
-    return { data: {}, status: 200, statusText: 'OK', headers: {}, config }
+    return response(config, {})
   }
   const client = axios.create({ adapter })
   installWriteTokenInterceptor(client)
@@ -53,19 +73,18 @@ describe('write-token interceptor（PRD §4 本地威胁模型）', () => {
   it('重试会话失败后再次写请求会重新拉取令牌', async () => {
     const records: RecordedRequest[] = []
     let sessionCalls = 0
-    const adapter = async (config: any) => {
+    const adapter: AxiosAdapter = async (config) => {
       if (config.url === '/api/session') {
         sessionCalls += 1
         if (sessionCalls === 1) throw new Error('session unavailable')
-        return { data: { write_token: 'tok-2' }, status: 200, statusText: 'OK', headers: {}, config }
+        return response(config, { write_token: 'tok-2' })
       }
-      const headers = config.headers as any
       records.push({
-        url: config.url,
+        url: String(config.url),
         method: 'post',
-        token: headers?.get ? headers.get('X-VD-Write-Token') ?? null : null,
+        token: readWriteToken(config.headers),
       })
-      return { data: {}, status: 200, statusText: 'OK', headers: {}, config }
+      return response(config, {})
     }
     const client = axios.create({ adapter })
     installWriteTokenInterceptor(client)
@@ -80,21 +99,29 @@ describe('write-token interceptor（PRD §4 本地威胁模型）', () => {
   it('C4: 写令牌失效(403)后自动重新拉取并重放一次', async () => {
     const records: RecordedRequest[] = []
     let sessionCalls = 0
-    const adapter = async (config: any) => {
+    const adapter: AxiosAdapter = async (config) => {
       if (config.url === '/api/session') {
         sessionCalls += 1
-        return { data: { write_token: `tok-${sessionCalls}` }, status: 200, statusText: 'OK', headers: {}, config }
+        return response(config, { write_token: `tok-${sessionCalls}` })
       }
-      const headers = config.headers as any
-      const token = headers?.get ? headers.get('X-VD-Write-Token') ?? null : null
-      records.push({ url: config.url, method: 'post', token })
-      if (token === 'tok-1' && config._vdRetried !== true) {
-        const err: any = new Error('token invalid')
-        err.response = { status: 403, data: { detail: 'local write token required' } }
-        err.config = config
-        throw err
+      const token = readWriteToken(config.headers)
+      records.push({ url: String(config.url), method: 'post', token })
+      if (token === 'tok-1' && (config as RetryableTestConfig)._vdRetried !== true) {
+        // 403 令牌失效：必须按 axios 的错误形状抛出（`response` + `config` 两个字段都在），
+        // 拦截器才会重放请求。这里用 Object.assign 拼出该形状，避免 `as any`。
+        throw Object.assign(new Error('token invalid'), {
+          isAxiosError: true,
+          config,
+          response: {
+            status: 403,
+            statusText: 'Forbidden',
+            headers: {},
+            data: { detail: 'local write token required' },
+            config,
+          },
+        })
       }
-      return { data: {}, status: 200, statusText: 'OK', headers: {}, config }
+      return response(config, {})
     }
     const client = axios.create({ adapter })
     installWriteTokenInterceptor(client)

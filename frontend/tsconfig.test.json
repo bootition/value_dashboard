@@ -9,11 +9,14 @@
    * 本配置把 src/** + tests/** 一起纳入检查。用 vue-tsc 而不是 tsc：
    * tests/component/** 直接 import `.vue` 单文件组件，tsc 解析不了 .vue。
    *
-   * 尾巴（历史遗留类型错误，**非**本次死入参导致，未修，见 exclude）：
-   * 首次开门禁共报 49 条，其中 27 条在本文件修复/已删（16 条 sortField 死入参 +
-   * 11 条 ScreeningRuleCondition/ScreeningRuleNode 缺 id 的 fixture 形状问题，见 screening-quality.test.ts）；
-   * 余下 22 条分布在 7 个文件、与本次无关，整文件 exclude 掉并在此登记。修它们属于各自的 fixture 口径问题，
-   * 不在"删死入参"的租约里；逐个修风险大于收益，先挡在门外并登记，等各自负责人收口。
+   * 历史（2026-11-23 收口）：门禁首次开门报 49 条。27 条在 2026-11-19 当场修完
+   * （16 条 sortField 死入参 + 11 条 ScreeningRuleCondition/ScreeningRuleNode 缺 id 的
+   * fixture 形状问题）。余下 22 条分布在 7 个文件，当时整文件 `exclude` 掉并登记；
+   * 2026-11-23 这 22 条已逐条真修（fixture 过时补字段 / 测试写错改测试 /
+   * 生产类型过窄修生产类型），**exclude 已清空**。
+   *
+   * 现在这里保持零 exclude：新增测试文件一旦引入类型错误，门禁立即变红，
+   * 不允许再用整文件 exclude 把债藏起来（见 reports/140 §17.7 第 3 条）。
    */
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
@@ -21,21 +24,5 @@
     "types": ["vite/client", "node"],
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "tests/**/*.ts"],
-  "exclude": [
-    /* 3 条：IndicatorTrust fixture 缺 masked_fields（字段后来新增，测试没跟） */
-    "tests/indicator-trust.test.ts",
-    /* 2 条：StockInfo 无 sw_level1；GrowthIndicators 缺 deducted_profit_cagr3/5 */
-    "tests/stock-detail.test.ts",
-    /* 4 条：RESULT_ROWS 不满足 ScreeningResult 必填列；ruleTree 条件缺 id */
-    "tests/component/screening-persist-flow.test.ts",
-    /* 4 条：ScreeningRuleNode/ScreeningRuleCondition 缺 id；direction 'desc' 不在字面量类型里 */
-    "tests/component/screening-rule-clone.test.ts",
-    /* 3 条：axios 实例被当成 AxiosStatic 传进 mock 辅助函数 */
-    "tests/component/write-token.test.ts",
-    /* 4 条：2 条未使用变量（noUnusedLocals）+ 1 条元组解构 + 1 条竖排数组谓词 */
-    "tests/component/stock-detail-flow.test.ts",
-    /* 2 条：未使用变量（noUnusedLocals） */
-    "tests/component/etf-strategy-panel.test.ts"
-  ]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "src/**/*.vue", "tests/**/*.ts"]
 }

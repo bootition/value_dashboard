@@ -7,6 +7,11 @@
 - P1 自动更新状态不是可操作的进度模型
 - P1（三轮回测新发现）universe 刷新股本后未触发快照重算
 - P1 CSRC 初始化性能（分块 + 断点续传）
+
+播种统一走 `tests/support/seed.py` 的**按域工厂**（`reports/140` §17.7 第 1 条）：
+`stock_meta` 的 `name/exchange/is_listed` 形状、财务三表的主键与必填列口径由工厂
+负责；**股票名单、报告期、数值一律逐字写在用例里** —— 哪几只股票、哪张表缺，
+才是这些用例的本意。
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from app.core.adapters.tdx_adapter import TDXAdapter
 from app.core.init import CSRC_BATCH_SIZE, DataInitializer
 from app.core.storage.update_lock import exclusive_update
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
 
 
 def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
@@ -366,10 +372,7 @@ def test_buyback_funding_treasury_refresh_before_indicators(
     回购/融资/国债曲线任一域变化都会改变快照字段；旧流程中融资与国债
     位于指标重算之后，会整轮陈旧。
     """
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES ('000001', 'a', 'SZSE', true)"
-    )
+    Seed(duckdb_store).stock("000001", name="a", exchange="SZSE", is_listed=True)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     _stub_update_network_steps(updater)
     order: list[str] = []
@@ -429,10 +432,7 @@ def test_retry_success_runs_before_indicators_and_triggers_recompute(
     旧流程把 retries 放在统计域之后，价格/财务/分红/融资/曲线的重试成果
     要再等一整轮才反映到 indicator_snapshot。
     """
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES ('000001', 'a', 'SZSE', true)"
-    )
+    Seed(duckdb_store).stock("000001", name="a", exchange="SZSE", is_listed=True)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     _stub_update_network_steps(updater)
     updater.run_incremental_check = lambda **kwargs: {
@@ -507,25 +507,15 @@ def test_financial_detail_gap_excludes_b_shares_in_sql(
     duckdb_store, sqlite_store, monkeypatch,
 ) -> None:
     """B 股过滤必须在 SQL 内完成；旧实现逐代码查库，5000 缺口会放大到分钟级。"""
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'sparse', 'SZSE', true),
-                  ('200001', 'sparseB', 'SZSE', true),
-                  ('900001', 'sparseB股', 'SSE', true)"""
-    )
+    seed = Seed(duckdb_store)
+    # name 里的 "B"/"B股" 与代码段正是过滤条件本身，逐字保留。
+    seed.stock("000001", name="sparse", exchange="SZSE", is_listed=True)
+    seed.stock("200001", name="sparseB", exchange="SZSE", is_listed=True)
+    seed.stock("900001", name="sparseB股", exchange="SSE", is_listed=True)
+    # 循环保留：三只股票都只有"核心三列、明细全空"的行，这才是缺口语义。
     for code in ("000001", "200001", "900001"):
-        duckdb_store.write_query(
-            f"""INSERT INTO balance_sheet (stock_code, report_date, total_assets)
-               VALUES ('{code}', '2026-06-30', 100)"""
-        )
-        duckdb_store.write_query(
-            f"""INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES ('{code}', '2026-06-30', 10)"""
-        )
-        duckdb_store.write_query(
-            f"""INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-               VALUES ('{code}', '2026-06-30', 3)"""
-        )
+        seed.screenable(code, "2026-06-30", income={"revenue": 10},
+                        balance={"total_assets": 100}, cash_flow={"cf_from_operating": 3})
 
     def fail_if_called(stock_code: str) -> bool:
         raise AssertionError("B 股判断不得在缺口查询中对每只股票逐次查库")
@@ -539,22 +529,10 @@ def test_financial_detail_source_missing_blocks_recent_retry(
     duckdb_store, sqlite_store,
 ) -> None:
     """快速源确认无数据的股票 7 天内出队，之后允许重新尝试。"""
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'sparse', 'SZSE', true)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
-           VALUES ('000001', '2026-06-30', 100)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue)
-           VALUES ('000001', '2026-06-30', 10)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES ('000001', '2026-06-30', 3)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="sparse", exchange="SZSE", is_listed=True)
+    seed.screenable("000001", "2026-06-30", income={"revenue": 10},
+                    balance={"total_assets": 100}, cash_flow={"cf_from_operating": 3})
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     updater._record_financial_detail_missing("000001", "sina: source_empty")
     assert updater._financial_detail_gap_codes() == []
@@ -571,12 +549,10 @@ def test_financial_detail_source_missing_blocks_recent_retry(
 
 def test_csrc_fetch_only_targets_missing_classifications(duckdb_store, sqlite_store, monkeypatch) -> None:
     """P1: CSRC 只补抓缺失分类的股票（断点续传）。"""
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1)
-           VALUES ('000001', 'a', 'SZSE', true, '制造业'),
-                  ('000002', 'b', 'SZSE', true, NULL),
-                  ('000003', 'c', 'SZSE', true, NULL)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="a", exchange="SZSE", is_listed=True, csrc_l1="制造业")
+    seed.stock("000002", name="b", exchange="SZSE", is_listed=True, csrc_l1=None)
+    seed.stock("000003", name="c", exchange="SZSE", is_listed=True, csrc_l1=None)
     requested: list[list[str]] = []
 
     class FakeAdapter:
@@ -615,10 +591,7 @@ def test_csrc_fetch_only_targets_missing_classifications(duckdb_store, sqlite_st
 
 
 def test_csrc_fetch_skips_when_all_classified(duckdb_store, sqlite_store) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1)
-           VALUES ('000001', 'a', 'SZSE', true, '制造业')"""
-    )
+    Seed(duckdb_store).stock("000001", name="a", exchange="SZSE", is_listed=True, csrc_l1="制造业")
 
     class FailingAdapter:
         def fetch(self, request):
@@ -632,10 +605,9 @@ def test_csrc_fetch_skips_when_all_classified(duckdb_store, sqlite_store) -> Non
 
 
 def test_csrc_fetch_records_resume_progress(duckdb_store, sqlite_store) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'a', 'SZSE', true), ('000002', 'b', 'SZSE', true)"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="a", exchange="SZSE", is_listed=True)
+    seed.stock("000002", name="b", exchange="SZSE", is_listed=True)
 
     initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=_ChunkAdapter())
     result = initializer._fetch_csrc_industry()
@@ -653,10 +625,7 @@ def test_csrc_fetch_records_resume_progress(duckdb_store, sqlite_store) -> None:
 def test_csrc_fetch_handles_empty_success_without_executemany(duckdb_store, sqlite_store) -> None:
     from types import SimpleNamespace
 
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1)
-           VALUES ('600519', 'TEST', 'SSE', TRUE, NULL)"""
-    )
+    Seed(duckdb_store).stock("600519", name="TEST", exchange="SSE", is_listed=True, csrc_l1=None)
 
     class EmptyAdapterManager:
         def fetch(self, request):
@@ -736,13 +705,12 @@ class _SimulatedPriceManager:
 
 def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store) -> None:
     """价格逐股原子提交：图 B 抓取失败（等价于中断）后，下次只补缺失股票，不重抓已提交的图 A。"""
+    seed = Seed(duckdb_store)
     for code, listing in (("000001", "2020-01-01"), ("600519", "2020-01-01")):
-        with duckdb_store.write_connection() as conn:
-            conn.execute(
-                """INSERT INTO stock_meta (stock_code, exchange, name, is_listed, is_suspended, listing_date)
-                   VALUES (?, ?, ?, TRUE, FALSE, ?) ON CONFLICT DO NOTHING""",
-                [code, "SZ" if code == "000001" else "SH", code, listing],
-            )
+        # 循环保留："两只股票"是要测的语义；exchange 仍按旧写法的 SZ/SH 逐字传入。
+        seed.stock(code, exchange="SZ" if code == "000001" else "SH", name=code,
+                   is_listed=True, is_suspended=False, listing_date=listing,
+                   if_exists="ignore")
     with sqlite_store.transaction() as conn:
         conn.execute("INSERT INTO trading_dates (trade_date) VALUES ('2026-08-06')")
 
@@ -779,11 +747,9 @@ def test_price_update_resumes_from_committed_progress(duckdb_store, sqlite_store
 def test_csrc_full_refresh_replaces_legacy_non_csrc_values(
     duckdb_store, sqlite_store,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, csrc_l1, csrc_l2)
-           VALUES ('000001', 'a', 'SZSE', true, '金融', '银行'),
-                  ('000002', 'b', 'SZSE', true, '主要消费', '饮料')"""
-    )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="a", exchange="SZSE", is_listed=True, csrc_l1="金融", csrc_l2="银行")
+    seed.stock("000002", name="b", exchange="SZSE", is_listed=True, csrc_l1="主要消费", csrc_l2="饮料")
 
     class FullAdapter:
         def fetch(self, request):
@@ -823,21 +789,15 @@ def test_csrc_full_refresh_replaces_legacy_non_csrc_values(
 
 
 def test_financial_detail_gap_detects_sparse_core_rows(duckdb_store, sqlite_store) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'sparse', 'SZSE', true)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities, total_equity)
-           VALUES ('000001', '2026-06-30', 100, 20, 80)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-           VALUES ('000001', '2026-06-30', 10, 2)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES ('000001', '2026-06-30', 3)"""
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="sparse", exchange="SZSE", is_listed=True)
+    # 缺明细列的最小核心行：明细字段一个字都不写（工厂不给业务列默认值）。
+    seed.screenable(
+        "000001",
+        "2026-06-30",
+        income={"revenue": 10, "parent_net_profit": 2},
+        balance={"total_assets": 100, "total_liabilities": 20, "total_equity": 80},
+        cash_flow={"cf_from_operating": 3},
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -864,27 +824,17 @@ def test_financial_detail_gap_uses_sector_universal_probes(
     缺口检测必须改用 paid_in_capital/interest_income/cash_paid_employees
     等跨行业通用字段，否则这些股票会永久占据回填队列头部。
     """
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'bank', 'SZSE', true)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_liabilities, total_equity,
-                monetary_funds, paid_in_capital, undistributed_profit)
-           VALUES ('000001', '2026-06-30', 100, 20, 80, 5, 10, 1)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO income_statement
-               (stock_code, report_date, revenue, parent_net_profit,
-                interest_income, interest_expense, administrative_expenses)
-           VALUES ('000001', '2026-06-30', 10, 2, 8, 4, 1)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO cash_flow
-               (stock_code, report_date, cf_from_operating,
-                cash_paid_employees, cash_paid_taxes)
-           VALUES ('000001', '2026-06-30', 3, 1, 0.5)"""
+    seed = Seed(duckdb_store)
+    seed.stock("000001", name="bank", exchange="SZSE", is_listed=True)
+    # 银行回填成功后的正确形态：明细齐备，但没有营业成本/销售收现。
+    seed.screenable(
+        "000001",
+        "2026-06-30",
+        income={"revenue": 10, "parent_net_profit": 2, "interest_income": 8,
+                "interest_expense": 4, "administrative_expenses": 1},
+        balance={"total_assets": 100, "total_liabilities": 20, "total_equity": 80,
+                 "monetary_funds": 5, "paid_in_capital": 10, "undistributed_profit": 1},
+        cash_flow={"cf_from_operating": 3, "cash_paid_employees": 1, "cash_paid_taxes": 0.5},
     )
 
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -899,20 +849,11 @@ def test_price_retry_without_adjust_refreshes_raw_and_qfq(
     旧逻辑 extra_json={} 时 adjust 默认 raw，raw 重试成功后删除 retry，
     qfq 永久停在旧日期，readiness 的 price_freshness 持续失败。
     """
-    with duckdb_store.write_connection() as conn:
-        conn.execute(
-            """INSERT INTO stock_meta
-                   (stock_code, exchange, name, is_listed, is_suspended, listing_date)
-               VALUES ('000001', 'SZSE', 'fixture', TRUE, FALSE, '2020-01-01')
-               ON CONFLICT DO NOTHING"""
-        )
-        for table in ("price_daily_raw", "price_daily_qfq"):
-            conn.execute(
-                f"""INSERT INTO {table}
-                        (stock_code, trade_date, close)
-                    VALUES ('000001', '2026-08-05', 1.0)
-                    ON CONFLICT DO NOTHING"""
-            )
+    seed = Seed(duckdb_store)
+    seed.stock("000001", exchange="SZSE", name="fixture", is_listed=True,
+               is_suspended=False, listing_date="2020-01-01", if_exists="ignore")
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        seed.prices("000001", [("2026-08-05", 1.0)], table=table)
     with sqlite_store.transaction() as conn:
         conn.execute(
             """INSERT INTO retry_list
