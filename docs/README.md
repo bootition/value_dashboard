@@ -3,13 +3,13 @@ title: 文档地图（Documentation Map）
 status: approved
 category: decisions
 created: 2026-07-31
-last-reviewed: 2026-11-17
+last-reviewed: 2026-11-18
 ---
 
 # 文档地图（Documentation Map）
 
 本目录按 **docs-as-code 规范**（Diátaxis 四象限 + ADR + ISO/IEC 26511 生命周期）组织。
-**阅读顺序：先读 `STATUS.md`，再按需进入各分类。** 历史文档一律不构成当前结论。
+**阅读顺序以 `AGENTS.md` §1 为准：`reference/CODE_MAP.md` → `STATUS.md` → 本文件 → `runbooks/ops-knowledge-base.md`（按需 grep）。** 历史文档一律不构成当前结论。
 
 ## 目录结构
 
@@ -20,7 +20,7 @@ last-reviewed: 2026-11-17
 | `reports/` | 报告 | 审计/验收/审查等事件型快照 | 当前结论以 `STATUS.md` 所列报告为准；其余仅为发现/修复事实 |
 | `runbooks/` | 手册 | 运维/证据保全操作手册 | ✅ 是（首次使用指南 + O2 运维四册） |
 | `contracts/` | 合同 | 正式签署的设计合同 | ✅ 是 |
-| `skills/` | 技能 | 可加载的操作流程（如 `composite-indicator`：复合指标 10 步清单） | ✅ 是（新增/改口径前必读） |
+| `skills/` | 技能 | 可加载的操作流程：`composite-indicator`（复合指标 10 步清单）、`hard-facts-registry`（硬数字发布：不要手抄数字，见 `reports/140` §2） | ✅ 是（新增/改口径/写数字前必读） |
 | `reference/` | 索引 | 代码地图（`CODE_MAP.md`：想改 X 就读 Y）、认知成本基线 JSON | ✅ 是（**新人第一天先读 CODE_MAP**）；`reports/136` 的可移除清单是删除动作的唯一依据 |
 | `evidence/` | 证据 | 机器生成的证据 JSON（evidence-*.json、evidence-s0/s1 事故证据） | 证据，非结论 |
 | `archive/` | 归档 | 已废弃/完成的研究快照、执行计划（含 superpowers/） | ❌ 否（只读） |
@@ -61,7 +61,7 @@ superseded-by: ...        # 可选：被谁取代（相对 docs/ 的路径）
 | 状态唯一权威 | `STATUS.md` — Verdict / 剩余缺口 / 进行中工作 / 当前有效文档表 |
 | 产品需求 | `decisions/01_PRODUCT_REQUIREMENTS_V1.md`（活文档） |
 | 技术约束 | `decisions/02_TECH_CONSTRAINTS.md` |
-| 报告（事件型） | `reports/` — **以 STATUS 表为准**；当前已登记至 102（2026-09-01 数据库治理执行状态），82–102 为 2026-08-25 以后的当前进展 |
+| 报告（事件型） | `reports/` — **以 STATUS 表为准**；当前已登记至 **141**（实测 `ls docs/reports/*.md | wc -l` = 141，2026-11-18）；新增前先 `ls` 取下一个空号 |
 | 运行手册 | `runbooks/` — user-first-use、ops-backup-restore、ops-auto-update-retry、ops-data-rebuild、ops-build-release-s1、ops-duckdb-rebuild、ops-knowledge-base（`s0-evidence-preservation` 已 `historical`，仅作 07-22 事故证据口径留档） |
 | 合同 | `contracts/path-isolation-contract.md` |
 

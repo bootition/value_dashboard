@@ -1,0 +1,30 @@
+{
+  "_note": "全量 S1 隔离回归结果登记。存在的理由：`scripts/s1-pytest.ps1` 用 Start-Process -NoNewWindow 启动 pytest 且**不重定向输出**，evidence-s1/<runid>/ 只存正式库指纹，不存 passed/failed 计数 —— 导致一次 27 分钟的结论无法事后复核（reports/140 §12.5 第 7 条）。本文件补上计数，provenance 见下。",
+  "generated_at": "2026-11-19T01:45:00+08:00",
+  "generator": "manual: orchestrating agent captured the wrapper's stdout tail",
+  "provenance": {
+    "captured_from": "scripts/s1-pytest.ps1 tests/regression 的标准输出最后一行（pytest summary）",
+    "run_id": "c8f33e6f63c541eeb0cc665dbc2c638d",
+    "evidence_dir": "docs/evidence/evidence-s1/c8f33e6f63c541eeb0cc665dbc2c638d/",
+    "caveat": "计数来自运行时的终端输出，非 pytest 自己写的报告文件；若要 100% 可复现，应给 s1-pytest.ps1 加 -RedirectStandardOutput（未做，属已知缺口）"
+  },
+  "command": "pwsh -NoProfile -File scripts/s1-pytest.ps1 tests/regression",
+  "result": {
+    "passed": 1864,
+    "skipped": 3,
+    "failed": 0,
+    "warnings": 29,
+    "duration_seconds": 1629.78,
+    "duration_human": "27:09",
+    "exit_code": 0
+  },
+  "safety_proof": {
+    "formal_db_unchanged": true,
+    "how_verified": "evidence-s1/c8f33e6f63c541eeb0cc665dbc2c638d/inner-formal-fingerprint-pre.json 与 -post.json 的 files 字段逐项相等（实测 pre == post 为 True）",
+    "why_it_matters": "S1 的意义不只是'测试通过'，更是'跑测试没有污染正式数据库'（incident-2026-07-22 的教训）"
+  },
+  "context": {
+    "what_this_run_covers": "2026-11-18 修复批次：RG1 正则→AST（53 处时区违规清零）、RG2/RG4 加固、STEP_LABELS 单源化、前端单位表死键修复、删 11 个零引用脚本、STATUS.md 重构",
+    "note": "此后仅追加了文档改动（reports/140 §12、AGENTS/docs/README/CODE_MAP 入口修补），未再改运行期代码，故本结论仍适用"
+  }
+}

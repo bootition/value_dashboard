@@ -1,0 +1,71 @@
+{
+  "_note": "硬数字单一来源（AGENTS R2 / docs/skills/hard-facts-registry/SKILL.md）。正文只允许引用本文件的 key，不许手抄数字。每条都必须带可复算的 query 与只读连接方式。",
+  "generated_at": "2026-11-19T01:40:00+08:00",
+  "generator": "manual:read-only DuckDB query by lead agent (uv run --locked python -c ...)",
+  "database": "data/valuedashboard.duckdb",
+  "access_mode": "read_only=True（必须；正式库禁止写连接）",
+  "facts": {
+    "schema.version": {
+      "value": 49,
+      "unit": "version",
+      "query": "SELECT MAX(version) FROM schema_migrations",
+      "verified_at": "2026-11-18"
+    },
+    "indicator_snapshot.rows": {
+      "value": 5575,
+      "unit": "rows",
+      "query": "SELECT COUNT(*) FROM indicator_snapshot",
+      "verified_at": "2026-11-18"
+    },
+    "institution_holdings.rows": {
+      "value": 432523,
+      "unit": "rows",
+      "query": "SELECT COUNT(*) FROM institution_holdings",
+      "verified_at": "2026-11-18",
+      "_history": "2026-11-18 曾同时错写为 432,343 于 STATUS + KB + reports/139 三处，次次提交才更正 → 本文件即为此建立的单一来源"
+    },
+    "institution_holdings.report_periods": {
+      "value": 86,
+      "unit": "periods",
+      "query": "SELECT COUNT(DISTINCT report_date) FROM institution_holdings",
+      "verified_at": "2026-11-18",
+      "_history": "此前文档写 79，实测 86（2005-06-30 → 2026-09-30 恰为 86 个季末）"
+    },
+    "institution_holdings.stocks": {
+      "value": 5934,
+      "unit": "stocks",
+      "query": "SELECT COUNT(DISTINCT stock_code) FROM institution_holdings",
+      "verified_at": "2026-11-18",
+      "_history": "此前文档写 5,666，实测 5,934"
+    },
+    "institution_holdings.date_range": {
+      "value": "2005-06-30..2026-09-30",
+      "unit": "date_range",
+      "query": "SELECT MIN(report_date), MAX(report_date) FROM institution_holdings",
+      "verified_at": "2026-11-18"
+    },
+    "roce.eligible_5y": {
+      "value": 5338,
+      "unit": "stocks",
+      "query": "SELECT COUNT(*) FROM indicator_snapshot WHERE roce_5y_median IS NOT NULL",
+      "verified_at": "2026-11-18"
+    },
+    "roce.eligible_10y": {
+      "value": 4214,
+      "unit": "stocks",
+      "query": "SELECT COUNT(*) FROM indicator_snapshot WHERE roce_10y_median IS NOT NULL",
+      "verified_at": "2026-11-18"
+    },
+    "roce.eligible_20y": {
+      "value": 1404,
+      "unit": "stocks",
+      "query": "SELECT COUNT(*) FROM indicator_snapshot WHERE roce_20y_median IS NOT NULL",
+      "verified_at": "2026-11-18"
+    }
+  },
+  "_usage": {
+    "cite_in_docs": "行数见 `docs/evidence/evidence-facts-2026-11-18.json#institution_holdings.rows`",
+    "rerun": "uv run --locked python -c \"import duckdb;print(duckdb.connect('data/valuedashboard.duckdb',read_only=True).execute('<query>').fetchone()[0])\"",
+    "rule": "数字变了就新增一条带新日期的记录，不要改旧记录（保留'曾经错过'的证据）"
+  }
+}

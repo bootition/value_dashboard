@@ -21,8 +21,8 @@
 引用时必须写 `AGENTS R3` / `KB R5`。
 
 **容量**：本文件 ≤ 300 行（`RG5` 强制）。超限按文末「规则维护」降级，不许无限追加。
-**执行现实**：本仓库**没有 CI、没有 git hook**（`reports/140` 实测）——所有门禁都靠人记得跑。
-这就是为什么规则必须配"一个字就能跑"的检查器，也是为什么 §常用命令 里每条都必须是可复制的一行。
+**执行现实**：远端**没有 CI**；本地**已装** `pre-commit` 钩子（`core.hooksPath=.githooks`，2026-11-18 起）跑
+RG1–RG9 + 暂存 `.py` 的 ruff。`--no-verify` 能绕过，但**绕过的就是唯一自动防线**——除非确有理由，别用。
 
 ## 项目一句话
 
@@ -80,6 +80,7 @@ scripts/s1-pytest.ps1 tests/regression
 uv run --locked ruff check app tests/regression
 # 全部门禁一条命令：RG1–RG9（时区/状态合并/单位/派生域/规则来源/编号/supersede/真相源/测试资产）
 uv run --locked python scripts/check_rework_guards.py
+# 提交门禁钩子（已装）：sh scripts/install-git-hooks.sh 安装 / bash .githooks/pre-commit 试跑
 # 认知成本度量（不做门禁；改结构/拆文件后用它证明"真的变简单了"）
 uv run --locked python scripts/onboarding_metrics.py --compare docs/reference/onboarding-baseline-2026-11-17.json
 # 前端门禁
@@ -88,7 +89,7 @@ cd frontend; npm run lint; npm run test; npm run build
 uv lock --locked
 ```
 
-## 执行纪律（W1–W7，2026-11-17 会话实测 `reports/138`）
+## 执行纪律（W1–W8，2026-11-17 实测 `reports/138`；W8 见 `reports/140`）
 
 > 这一节管的是"AI 怎么干活"，不是"产品怎么工作"。复盘来源：一次会话光 `sleep` 就等掉约 2.5 小时、
 > 两次全量回归 57 分钟且失败与改动无关、一个 agent 两小时零落盘（`reports/138`）；并行写同一文件见 `reports/140`。
@@ -285,9 +286,8 @@ uv lock --locked
 
 ## 工作区边界
 
-- `data/` — 正式数据库（只读！所有写操作必须经 CLI/维护脚本 + 单写者串行）
-- `.planning/` — 会话计划与进度（AI 私有工作区）
-- `docs/evidence/` — 证据只增不改
+- `data/` — 正式数据库（**只读**！写操作必须经 CLI/维护脚本 + 单写者串行）；`docs/evidence/` — 证据只增不改
+- `.planning/` — 会话计划与进度（AI 私有工作区，**gitignore**：放这里的东西新克隆看不到，结论必须回写 `docs/`）
 
 ## 规则维护（新增 / 合并 / 降级）
 

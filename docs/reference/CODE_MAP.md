@@ -56,9 +56,10 @@ last-reviewed: 2026-11-17
 
 | 顺序 | 文件 | 看什么 |
 |---|---|---|
-| 1 | `app/core/update.py` | `IncrementalUpdater`（6,575 行 / 136 方法，**先只看 `_run_incremental_update_flow` 里的 `report_step(...)` 序列**，那 25 行就是完整步骤清单） |
+| 1 | `app/core/update.py` | `IncrementalUpdater`（6,633 行 / 137 方法，**先只看 `_run_incremental_update_flow` 里的 `report_step(...)` 序列**，那 26 行就是完整步骤清单） |
 | 2 | `app/core/adapters/manager.py` | 多源回退、熔断、错误分类 |
-| 3 | `app/core/job_status.py` | 状态怎么归并（80 行，先读它比读 update 划算） |
+| 3 | `app/core/job_status.py` | 状态怎么归并（107 行，先读它比读 update 划算） |
+| 4 | `app/core/update_steps.py` | **`STEP_ORDER`（26 步）是步骤清单的唯一来源**（每步带 `label`）；`auto_update.py` 的 `STEP_LABELS` 由它派生，不要再手写第二份 |
 
 > 反直觉：`auto_update.py` 只负责**调度与子进程生命周期**，不负责更新内容；内容全在 `update.py`。
 
@@ -124,10 +125,10 @@ last-reviewed: 2026-11-17
 
 | 现象 | 事实 |
 |---|---|
-| `data_quality.py` vs `quality/` | 前者是**门禁/告警/可信判定**（2,017 行）；后者是**体检规则 + 空值原因 + 归档核验**（4,275 行）。两者不是父子关系，是两套并行的"质量"概念 |
+| `data_quality.py` vs `quality/` | 前者是**门禁/告警/可信判定**（2,039 行）；后者是**体检规则 + 空值原因 + 归档核验**（4,471 行）。两者不是父子关系，是两套并行的"质量"概念 |
 | `masked_fields_for_codes()` vs `masked_indicator_fields()` | 曾**同一个函数两个名字**（别名）。2026-11-17 已删除别名（`reports/137`），现在只有 `masked_fields_for_codes()` 一个公开入口，由 `test_trust_gate_single_entry.py` 守护 |
 | `app/core/pdf/` | `reports/123` 说"PDF 方案已删除"——删的是**分红除权日 PDF 解析链**；`pdf/manager.py` 是**公告 PDF 下载/归档**，仍然活着（CLI `vd data download_pdf`） |
-| `scripts/` vs `app/core/` 里的同名能力 | 75 个脚本里有 66 个**直接连 DuckDB**；它们承载了"一次性/维护"逻辑，不在运行时主链上。改运行时要看 `app/`，改历史数据要看 `scripts/`，两者**没有共享的仓储层** |
+| `scripts/` vs `app/core/` 里的同名能力 | 81 个脚本里有 66 个**直接连 DuckDB**；它们承载了"一次性/维护"逻辑，不在运行时主链上。改运行时要看 `app/`，改历史数据要看 `scripts/`，两者**没有共享的仓储层** |
 | `update.py` vs `init.py` vs `backfill.py` | 三个都能写行情/财务：`init`=首次全量、`backfill`=补历史缺口、`update`=日常增量。**同一个数据可能有三条写入路径**，改口径要三处一起看 |
 | `domain` | 至少三种用法：①数据域（treasury/business）②DSL 字段域（`balance.`/`income.`）③空值原因域（`snapshot`/`ext`）。看上下文判断 |
 
@@ -139,7 +140,7 @@ last-reviewed: 2026-11-17
 
 - **运行时**（`app.web.main` ∪ `app.cli.main` ∪ `core.auto_update` 可达）：**88 模块 / 60,130 行**
 - **维护面**（只被 `scripts/` 或测试调用）：**17 模块 / 3,055 行**
-  - `quality/null_reason_sweeper.py` 1,279 行（只由 `scripts/classify_null_reasons.py` 使用）
+  - `quality/null_reason_sweeper.py` 1,441 行（只由 `scripts/classify_null_reasons.py` 使用）
   - `ah_metrics.py` 935 行（只由 `scripts/refresh_ah_market_snapshot.py` 使用）
   - `adapters/hk_price_adapter.py` 496 行、`storage/cold_archive_guard.py` 115 行
   - （`csmar_formulas.py` 198 行已于 2026-11-17 迁到 `tests/support/csmar_field_verdicts.py`，见 `reports/137`）
@@ -164,6 +165,10 @@ last-reviewed: 2026-11-17
 **第 1 周（按任务深入）**
 8. `screening/engine.py` + `dsl/`（如果要做指标/筛选）
 9. `codegraph`/import 图：`uv run python scripts/onboarding_metrics.py --compare <baseline>`
+10. **门禁**：`scripts/check_rework_guards.py`（一条命令跑 RG1–RG9）——代码语义 5 组 + 仓库完整性 4 组
+    （编号唯一 / supersede 闭环 / 真相源不引用作废结论 / 测试资产必须入库）；仓库完整性部分在 `scripts/repo_integrity_guards.py`，带基线棘轮 `docs/evidence/repo-integrity-baseline.json`
+11. **提交钩子**：`.githooks/pre-commit`（已装，`core.hooksPath=.githooks`）提交时自动跑上面 9 组 + 暂存 `.py` 的 ruff
+12. **写硬数字前**：读 `docs/skills/hard-facts-registry/SKILL.md`（数字必须可复算、只引用不手抄，见 `AGENTS R2`）
 10. 需要历史时再按 §3 查 `docs/reports/NNN`（**注意 59/134 已 superseded（44%），先看 front-matter**）；
     要找某个测试测什么，先看 `tests/regression/README.md` 的旧名→新名映射表
 
