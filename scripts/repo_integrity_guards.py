@@ -183,11 +183,24 @@ def check_report_identity(root: Path) -> list[Finding]:
             ))
 
     for number, names in sorted(by_number.items()):
-        if len(names) > 1:
-            findings.append(Finding(
-                "RG6", f"{REPORTS_DIR.as_posix()}/{number}_*", f"dup-{number}",
-                f"报告编号 {number} 重复 {len(names)} 份（引用产生二义）：{', '.join(names)}",
-            ))
+        if len(names) <= 1:
+            continue
+        # 编号重复本身不可避免（历史命名 + 改名会打断全仓 400+ 处引用），
+        # 真正要防的是**沉默的二义**。所以：若该编号下**每一份**都写了
+        # `number-collision-note` front-matter 说明彼此关系，就视为已消歧、不再报红；
+        # 只要有一份没写 → 仍然是沉默二义 → 报。
+        noted = [
+            name for name in names
+            if "number-collision-note" in (parse_front_matter(reports_dir / name) or {})
+        ]
+        if len(noted) == len(names):
+            continue
+        missing = sorted(set(names) - set(noted))
+        findings.append(Finding(
+            "RG6", f"{REPORTS_DIR.as_posix()}/{number}_*", f"dup-{number}",
+            f"报告编号 {number} 重复 {len(names)} 份且未全部消歧（引用产生二义）："
+            f"{', '.join(names)}；缺少 `number-collision-note` 的：{', '.join(missing)}",
+        ))
     return findings
 
 
@@ -359,13 +372,19 @@ def check_test_assets_tracked(root: Path) -> list[Finding]:
                 continue
             if rel in tracked:
                 continue
-            ignored = _git(root, "check-ignore", "-q", rel).returncode == 0
-            findings.append(Finding(
-                "RG9", rel, "ignored" if ignored else "untracked",
-                "被 .gitignore 吞掉 → 新克隆缺失，本机却全绿（必红测试资产）"
-                if ignored else
-                "存在于工作区但未入库 → 新克隆缺失",
-            ))
+            # 只报「被 .gitignore 吞掉」这一种 —— 那才是 fixtures 事故的形态：
+            # 文件在盘上、测试能跑、本机全绿，但**新克隆永久缺失**，且 `git status` 看不见它。
+            #
+            # 刻意**不报**「存在于工作区但未入库」：那种情况 `git status` 本来就列着，
+            # 而 RG9 按索引判断时，`git commit -- <paths>` 的临时索引会让**别人正在写的**
+            # 新测试文件被误判成"未入库"，从而拦掉一切合法的分主题提交
+            # （2026-11-19 实测：本门禁把主控自己的按主题提交全拦了）。
+            # 一个会拦正常工作的门禁，几天内必然被 --no-verify 永久绕过 —— 比不装更糟。
+            if _git(root, "check-ignore", "-q", rel).returncode == 0:
+                findings.append(Finding(
+                    "RG9", rel, "ignored",
+                    "被 .gitignore 吞掉 → 新克隆缺失，本机却全绿（必红测试资产）",
+                ))
     return findings
 
 

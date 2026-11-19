@@ -39,6 +39,17 @@ else {
 $runDir = Join-Path $evidenceRoot $runId
 $runRoot = Join-Path ([System.IO.Path]::GetTempPath()) "vd-s1-$runId"
 
+# 2026-11-19 留证加固（本会话实测的缺陷）：一次 27 分钟的全量回归跑出了
+# `1864 passed / 3 skipped / 0 failed / 27:09`，跑完之后 $runDir 里**只有数据库指纹**，
+# passed/failed 计数一个都没有 —— 那个数字只能靠人手抄进 docs/evidence/*.json
+# （本轮就是这么干的，还专门写了 provenance 说明"这是手抄的"）。
+# **一次无法事后复核的验证等于不可复现**，"我跑过、全绿"这种结论不能靠记忆。
+# 所以：① pytest 的 stdout/stderr 一律落盘到本轮证据目录（Tee-Object：控制台照旧可见）；
+# ② 从日志尾部的 pytest summary 行解析出结构化计数写 pytest-summary.json（成功失败都写）。
+$pytestStdoutLog = Join-Path $runDir "pytest-stdout.log"
+$pytestStderrLog = Join-Path $runDir "pytest-stderr.log"
+$pytestSummaryPath = Join-Path $runDir "pytest-summary.json"
+
 # 2026-11-15（reports/125）**临时目录泄漏修复**：
 # 原实现只在 pytestExit == 0 时删除 $runRoot，于是"测试失败 / 被中断 / delta-98-99"
 # 都会把整个运行根目录永久留在 %TEMP%（每个测试还各拷一份 10–30MB 的库快照，
@@ -340,6 +351,161 @@ function Restore-Environment {
     }
 }
 
+function Get-PytestSummaryFromLog {
+    param([Parameter(Mandatory = $true)][string]$StdoutLog)
+
+    # 只解析 pytest 自己打的 summary 行（形如
+    #   `===== 1864 passed, 3 skipped in 1629.78s (0:27:09) =====`
+    #   `1864 passed, 3 skipped in 1629.78s`     （-q）
+    #   `===== no tests ran in 0.01s =====`      （全被 skip/deselect 掉）
+    #   `===== 1234 tests collected in 0.50s =====`（--collect-only）
+    # **解析不到就明说解析不到**：counts 一律 $null + parse_status/parse_error，
+    # 绝不把"没解析出来"写成 0 —— `0 failed` 和"不知道"是两回事，混起来就是假绿。
+    $summary = [ordered]@{
+        parse_status    = "summary_line_not_found"
+        parse_error     = $null
+        summary_line    = $null
+        passed          = $null
+        failed          = $null
+        skipped         = $null
+        errors          = $null
+        xfailed         = $null
+        xpassed         = $null
+        deselected      = $null
+        warnings        = $null
+        collected       = $null
+        duration_seconds = $null
+        counters_seen   = @()
+    }
+    if (-not (Test-Path -LiteralPath $StdoutLog -PathType Leaf)) {
+        $summary.parse_status = "stdout_log_missing"
+        $summary.parse_error = "pytest stdout 日志不存在：$StdoutLog（pytest 可能根本没启动）"
+        return $summary
+    }
+
+    $durationPattern = '(?i)\bin\s+([0-9]+(?:\.[0-9]+)?)s\s*(?:\([0-9:]+\)\s*)?=*\s*$'
+    $counterPattern = '(?i)\b[0-9]+\s+(?:passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)\b'
+    $verdictOnlyPattern = '(?i)(no tests ran|tests? collected)'
+    # 只扫尾部 400 行：summary 行永远在最后，扫全文件在 27 分钟的日志上纯属浪费。
+    $tail = @(Get-Content -LiteralPath $StdoutLog -Tail 400 -ErrorAction Stop)
+    $candidates = @(
+        $tail | Where-Object {
+            ($_ -match $durationPattern) -and
+            (($_ -match $counterPattern) -or ($_ -match $verdictOnlyPattern))
+        }
+    )
+    if ($candidates.Count -eq 0) {
+        $summary.parse_error = (
+            "未在 pytest-stdout.log 尾部 400 行内找到 pytest summary 行。" +
+            "判定依据：含 'in <秒>s' 且含 passed/failed/error/skipped/'no tests ran'/'collected'。" +
+            "常见原因：pytest 崩溃 / 被中断 / 没跑到 summary 行。"
+        )
+        return $summary
+    }
+
+    $line = [string]$candidates[-1]
+    $summary.summary_line = $line.Trim()
+
+    $counters = [ordered]@{}
+    foreach ($match in [regex]::Matches($line, '(?i)([0-9]+)\s+(passed|failed|errors?|skipped|deselected|xfailed|xpassed|warnings?)')) {
+        $count = [int]$match.Groups[1].Value
+        $name = $match.Groups[2].Value.ToLowerInvariant()
+        switch -Regex ($name) {
+            '^error' { $name = "errors" }
+            '^warning' { $name = "warnings" }
+        }
+        $counters[$name] = $count
+    }
+    # pytest 的语义里"没出现的类别计数就是 0"，所以只有**确认在 summary 行**时才补 0。
+    foreach ($name in @("passed", "failed", "skipped", "errors", "xfailed", "xpassed", "deselected", "warnings")) {
+        $summary[$name] = if ($counters.Contains($name)) { $counters[$name] } else { 0 }
+    }
+    $summary.counters_seen = @($counters.Keys | ForEach-Object { [string]$_ })
+
+    $collectedMatch = [regex]::Match($line, '(?i)([0-9]+)\s+tests? collected')
+    if ($collectedMatch.Success) {
+        $summary.collected = [int]$collectedMatch.Groups[1].Value
+    }
+    $durationMatch = [regex]::Match($line, $durationPattern)
+    if ($durationMatch.Success) {
+        $summary.duration_seconds = [double]::Parse(
+            $durationMatch.Groups[1].Value,
+            [System.Globalization.CultureInfo]::InvariantCulture
+        )
+    }
+    $summary.parse_status = "ok"
+    return $summary
+}
+
+function Write-PytestRunEvidence {
+    param(
+        [Parameter(Mandatory = $true)][string]$RunDir,
+        [Parameter(Mandatory = $true)][string]$RunId,
+        [Parameter(Mandatory = $true)][string]$StdoutLog,
+        [Parameter(Mandatory = $true)][string]$StderrLog,
+        [Parameter(Mandatory = $true)][int]$ExitCode,
+        [string[]]$TestTargets = @(),
+        [string]$PythonExe = "unknown",
+        [switch]$PolicyOnly,
+        [double]$WallClockSeconds = -1,
+        [string]$Stage = "after-pytest"
+    )
+
+    $summary = Get-PytestSummaryFromLog -StdoutLog $StdoutLog
+    $stdoutBytes = $null
+    $stderrBytes = $null
+    if (Test-Path -LiteralPath $StdoutLog -PathType Leaf) {
+        $stdoutBytes = (Get-Item -LiteralPath $StdoutLog).Length
+    }
+    if (Test-Path -LiteralPath $StderrLog -PathType Leaf) {
+        $stderrBytes = (Get-Item -LiteralPath $StderrLog).Length
+    }
+    $outcome = if ($ExitCode -eq 0) { "passed" } else { "failed" }
+    $wallClock = if ($WallClockSeconds -ge 0) {
+        [Math]::Round($WallClockSeconds, 3)
+    }
+    else {
+        $null
+    }
+
+    $payload = [ordered]@{
+        schema_version    = 1
+        kind              = "s1-pytest-summary"
+        why               = "27 分钟级的全量回归必须留下 passed/failed 计数；否则结论事后无法复核（=不可复现）"
+        generated_at      = [DateTimeOffset]::Now.ToString("o")
+        run_id            = $RunId
+        written_stage     = $Stage
+        policy_only       = [bool]$PolicyOnly
+        exit_code         = $ExitCode
+        outcome           = $outcome
+        passed            = $summary.passed
+        failed            = $summary.failed
+        skipped           = $summary.skipped
+        errors            = $summary.errors
+        xfailed           = $summary.xfailed
+        xpassed           = $summary.xpassed
+        deselected        = $summary.deselected
+        warnings          = $summary.warnings
+        collected         = $summary.collected
+        duration_seconds  = $summary.duration_seconds
+        wall_clock_seconds = $wallClock
+        summary_line      = $summary.summary_line
+        parse_status      = $summary.parse_status
+        parse_error       = $summary.parse_error
+        counters_seen     = @($summary.counters_seen)
+        test_targets      = @($TestTargets)
+        python_exe        = $PythonExe
+        log_stdout        = [System.IO.Path]::GetFileName($StdoutLog)
+        log_stderr        = [System.IO.Path]::GetFileName($StderrLog)
+        stdout_log_bytes  = $stdoutBytes
+        stderr_log_bytes  = $stderrBytes
+    }
+    Write-NewUtf8File `
+        -Path (Join-Path $RunDir "pytest-summary.json") `
+        -Content (($payload | ConvertTo-Json -Depth 6) + [Environment]::NewLine)
+    $script:pytestSummaryWritten = $true
+}
+
 $finalExit = 97
 $beforeCaptured = $false
 $beforeParsed = $false
@@ -355,6 +521,13 @@ $nativePreferenceWasDefined = Test-Path Variable:PSNativeCommandUseErrorActionPr
 if ($nativePreferenceWasDefined) {
     $savedNativePreference = $PSNativeCommandUseErrorActionPreference
 }
+# 2026-11-19 留证状态（见脚本开头 $pytestStdoutLog 的说明）。
+# 先全部初始化到"没发生过"，因为 finally 里的兜底留证要在 StrictMode 下安全读取。
+$pytestInvoked = $false
+$pytestSummaryWritten = $false
+$pytestWallClockSeconds = -1.0
+$effectiveArgs = @()
+$pythonExe = "unknown"
 
 try {
     # 2026-11-15（reports/125）：开跑前先清扫 24h 前的 vd-s1-* 残留（硬杀/断电也不会累积）。
@@ -450,13 +623,67 @@ try {
             if ($nativeArgs | Where-Object { $_ -match "\s" }) {
                 throw "Whitespace-bearing pytest arguments are forbidden by the process-tree runner"
             }
-            $pythonProcess = Start-Process `
-                -FilePath $pythonExe `
-                -ArgumentList $nativeArgs `
-                -NoNewWindow `
-                -Wait `
-                -PassThru
-            $pytestExit = $pythonProcess.ExitCode
+            # 2026-11-19 留证加固（本会话实测缺陷，详见脚本开头 $pytestStdoutLog 注释）：
+            # 原来这里是 `Start-Process -NoNewWindow -Wait` 且**不重定向输出**，
+            # 于是 27 分钟的全量回归跑完，$runDir 里只有数据库指纹，passed/failed 计数
+            # 一个都没留下（本轮那个 `1864 passed / 3 skipped / 0 failed / 27:09` 只能手抄）。
+            # 现在改成"直连 + Tee-Object"：
+            #   · stdout → 控制台（照旧可见，逐行输出，不是攒到最后） + pytest-stdout.log
+            #   · stderr → pytest-stderr.log，跑完再回显到控制台（保证控制台仍能看到全部输出）
+            # 退出码仍取原生进程的 $LASTEXITCODE（不再经 Start-Process 的 ExitCode，语义相同）；
+            # freeze 门禁（下面的 python 存活进程检查）**一行未改**；进程树等待由
+            # "管道读到 stdout EOF"（子进程继承句柄，孙进程没退出 EOF 不会来）+
+            # 存活进程检查共同保证。
+            # ⚠️ 注意：stdout 一旦是管道/文件，pytest 就不再认为自己是 TTY
+            # （无 ANSI 颜色、无 \r 进度刷新）—— 这是"必须留证"的必然代价，已记入报告。
+            $pytestInvoked = $true
+            $pytestStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+            try {
+                & $pythonExe @nativeArgs 2> $pytestStderrLog |
+                    Tee-Object -FilePath $pytestStdoutLog |
+                    Out-Host
+                if (Test-Path Variable:LASTEXITCODE) {
+                    $pytestExit = [int]$LASTEXITCODE
+                }
+            }
+            finally {
+                $pytestStopwatch.Stop()
+                $pytestWallClockSeconds = $pytestStopwatch.Elapsed.TotalSeconds
+            }
+            # stderr 单独落盘，跑完补回显：控制台"仍能看到输出"这条不变。
+            if (Test-Path -LiteralPath $pytestStderrLog -PathType Leaf) {
+                $stderrLength = (Get-Item -LiteralPath $pytestStderrLog).Length
+                if ($stderrLength -gt 0) {
+                    try {
+                        [Console]::Error.WriteLine("--- pytest stderr（已落盘：$pytestStderrLog）---")
+                        Get-Content -LiteralPath $pytestStderrLog | Out-Host
+                        [Console]::Error.WriteLine("--- pytest stderr 结束 ---")
+                    }
+                    catch {}
+                }
+            }
+            # 先落证、再做冻结检查：这样即使下面抛错，本轮结论也已经可以事后复核。
+            try {
+                Write-PytestRunEvidence `
+                    -RunDir $runDir `
+                    -RunId $runId `
+                    -StdoutLog $pytestStdoutLog `
+                    -StderrLog $pytestStderrLog `
+                    -ExitCode $pytestExit `
+                    -TestTargets $effectiveArgs `
+                    -PythonExe $pythonExe `
+                    -PolicyOnly:$PolicyOnly `
+                    -WallClockSeconds $pytestWallClockSeconds `
+                    -Stage "after-pytest"
+            }
+            catch {
+                # 留证失败不改退出码（与 Write-InnerPostFingerprint 的既有约定一致），但必须喊出来。
+                try {
+                    [Console]::Error.WriteLine(
+                        "[WARN] pytest-summary.json 写入失败（本轮结论将没有机器可读证据，日志仍在 $runDir）: $($_.Exception.Message)")
+                }
+                catch {}
+            }
             $pythonProcessesAfter = @(Get-PythonProcessIds)
             $survivors = @(
                 $pythonProcessesAfter |
@@ -606,6 +833,30 @@ catch {
     }
 }
 finally {
+    # 2026-11-19 兜底留证：正常路径已在 pytest 退出后立即写过 summary；这里覆盖
+    # "pytest 确实跑过、但中途抛错"（如存活进程检查、证据写入异常）的情形，
+    # 保证不会出现"跑了 27 分钟却什么都没留下"的空档。
+    if ((-not $pytestSummaryWritten) -and $pytestInvoked -and (Test-Path -LiteralPath $runDir -PathType Container)) {
+        try {
+            Write-PytestRunEvidence `
+                -RunDir $runDir `
+                -RunId $runId `
+                -StdoutLog $pytestStdoutLog `
+                -StderrLog $pytestStderrLog `
+                -ExitCode $pytestExit `
+                -TestTargets $effectiveArgs `
+                -PythonExe $pythonExe `
+                -PolicyOnly:$PolicyOnly `
+                -WallClockSeconds $pytestWallClockSeconds `
+                -Stage "finally-safety-net"
+        }
+        catch {
+            try {
+                [Console]::Error.WriteLine("[WARN] pytest-summary.json 兜底写入失败: $($_.Exception.Message)")
+            }
+            catch {}
+        }
+    }
     # 2026-11-15（reports/125）：**无条件**清理本轮运行根目录（除非 -KeepRunRoot）。
     # 之前只有 pytestExit -eq 0 才删，失败/中断就会永久留在 %TEMP%。
     if (-not $KeepRunRoot -and (Test-Path -LiteralPath $runRoot)) {

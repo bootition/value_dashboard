@@ -5,6 +5,7 @@ category: reports
 created: 2026-11-18
 last-reviewed: 2026-11-18
 supplements: reports/139
+number-collision-note: 本文件是 reports/139 的**附录**（第一波 6 个指标的构建规格与已跑通 SQL）。同编号主报告是 139_INVESTMENT_INDICATOR_FIELD_AUDIT_2026-11-18.md（42 个大师指标对照复审）；两份是「主报告 + 附录」关系，引用时请写全文件名。
 ---
 
 # 第一波 6 个指标 · 构建规格（字段 / SQL / 实测 / 落地清单）

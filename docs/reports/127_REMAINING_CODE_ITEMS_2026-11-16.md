@@ -4,6 +4,7 @@ category: reports
 created: 2026-11-16
 last-reviewed: 2026-11-16
 related: reports/126
+number-collision-note: 本文件是「reports/126 §8 剩余代码项收尾」（股本链对齐/打包配置同步/注释引用/覆盖率测试）。同编号另有 127_S1_STALE_SWEEP_FIX_2026-11-16.md（S1 陈旧运行根清扫修复），二者无关；引用时请写全文件名，勿只写 reports/127。
 ---
 
 # 收尾：把 reports/126 §8 剩下的代码项全部做掉（2026-11-16）

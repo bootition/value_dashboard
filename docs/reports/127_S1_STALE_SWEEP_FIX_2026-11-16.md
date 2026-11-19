@@ -4,6 +4,7 @@ category: reports
 created: 2026-11-16
 last-reviewed: 2026-11-16
 related: reports/125, reports/126
+number-collision-note: 本文件是「S1 陈旧运行根清扫修复」（scripts/s1-pytest.ps1 的 Remove-StaleS1RunRoots 空转）。同编号另有 127_REMAINING_CODE_ITEMS_2026-11-16.md（reports/126 §8 剩余代码项收尾），二者无关；引用时请写全文件名，勿只写 reports/127。
 ---
 
 # S1 启动清扫从未生效：陈旧运行根仍会无限累积（reports/125 的第二道保险是空转）

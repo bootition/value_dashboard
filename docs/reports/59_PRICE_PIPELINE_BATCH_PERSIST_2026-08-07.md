@@ -5,6 +5,7 @@ category: reports
 created: 2026-08-07
 last-reviewed: 2026-09-01
 superseded-by: reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md
+number-collision-note: 本文件是 2026-08-07 的「价格流水线实证与批量持久化」。同编号另有 59_STARTUP_READINESS_AND_PRICE_THROUGHPUT_2026-08-08.md（次日，启动 readiness 与吞吐自适应），二者是**不同主题**；两份均已 superseded，引用时请写全文件名。
 ---
 
 # 价格更新流水线实证与批量持久化报告（2026-08-07）

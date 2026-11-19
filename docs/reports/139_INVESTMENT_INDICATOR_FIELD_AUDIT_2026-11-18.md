@@ -5,6 +5,7 @@ category: reports
 created: 2026-11-18
 last-reviewed: 2026-11-18
 supplements: reports/131
+number-collision-note: 本文件是 reports/139 的**主报告**（42 个大师指标 × 本库科目对照与可构建性复审）。同编号另有 139_APPENDIX_FIRST_WAVE_BUILD_SPEC_2026-11-18.md（第一波构建规格附录）；两份是「主报告 + 附录」关系，引用时请写全文件名。
 ---
 
 # 42 个大师指标 × 本库科目对照与可构建性复审

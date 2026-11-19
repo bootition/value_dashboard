@@ -64,6 +64,35 @@ def test_rg6_detects_duplicate_report_numbers(tmp_path: Path) -> None:
     assert any("dup-133" in f.key for f in findings), "133 重号必须被抓到"
 
 
+def test_rg6_accepts_collision_when_every_file_has_disambiguation_note(
+    tmp_path: Path,
+) -> None:
+    """编号重复不可避免（改名会打断全仓 400+ 处引用）；显式消歧后不应再报红。"""
+    for name in ("139_A_2026-11-18.md", "139_B_2026-11-18.md"):
+        _report(
+            tmp_path / "docs/reports" / name,
+            extra=f"number-collision-note: 同编号另有另一份（{name}）\n",
+        )
+
+    assert check_report_identity(tmp_path) == [], "两份都消歧了就不该报 dup"
+
+
+def test_rg6_still_flags_partially_disambiguated_collision(tmp_path: Path) -> None:
+    """只写了一份注释 = 仍然是沉默二义，必须报（防止加个注释就混过去）。"""
+    _report(
+        tmp_path / "docs/reports/59_A_2026-08-07.md",
+        extra="number-collision-note: 同编号另有另一份\n",
+    )
+    _report(tmp_path / "docs/reports/59_B_2026-08-08.md")
+
+    findings = check_report_identity(tmp_path)
+
+    assert any("dup-59" in f.key for f in findings), "缺注释的那份必须让整组报红"
+    assert any(
+        "59_B_2026-08-08.md" in f.message for f in findings
+    ), "消息要指出是哪一份没写注释"
+
+
 def test_rg6_detects_missing_front_matter(tmp_path: Path) -> None:
     path = tmp_path / "docs/reports/112_NO_META_2026-09-08.md"
     path.parent.mkdir(parents=True)

@@ -92,6 +92,16 @@ count_lines() {
 #   guards 的 finding 一定带 [RG6] / [RG1] 这类前缀（见 scripts/check_rework_guards.py finding.render）
 #   ruff   的 finding 一定是 path.py:行:列: CODE（--output-format=concise 默认样子）
 # classify_rc <rc> <输出文件> <guards|ruff>  → pass | block | timeout | env
+#
+# 「环境错误」的识别模式（2026-11-19 收窄，reports/140 §11.6 的续修）：
+#   · 必须出现在**行首**（异常类）或**真正来自 shell 的 "command not found" 行**，
+#     不允许只凭"消息正文里恰好有这几个词"就放行。
+#   · 旧写法 `command not found|No module named|failed to (spawn|launch)` 没有行首锚定，
+#     于是 ruff 报的 `F821 undefined name 'No module named ...'` 这类**真实 finding**
+#     会被误判成环境问题而**放行** —— 门禁自己制造假绿。同 §11.6 是同一个坑，只是窄口没堵完。
+#   · `command not found` 只认 shell 自己打的那一行（`bash: line 1: uv: command not found`），
+#     因为那是"工具没装"的唯一可靠指纹；行首裸的 `bash:/sh:/dash:/zsh:/ash:/cmd:` 前缀也认。
+ENV_PATTERN='^((Traceback \(most recent call last\):)|(ModuleNotFoundError:)|(ImportError:)|(No module named)|(Failed to (spawn|launch)))|^([^:]*/)?(bash|sh|dash|zsh|ash|cmd)(\.exe)?: .*: command not found$'
 classify_rc() {
     case "$1" in
         0) printf 'pass' ;;
@@ -100,7 +110,7 @@ classify_rc() {
             # 2026-11-18 加固（reports/140 §11.6）：Exception 类关键字必须**行首锚定**。
             # 否则 ruff 报的某条消息里恰好含 "ImportError" 之类字样时，真实 finding 会被
             # 误判成"环境问题"而**放行**——即门禁自己制造假绿。
-            if grep -qiE '^(Traceback \(most recent call last\):|ModuleNotFoundError:|ImportError:)|command not found|No module named|failed to (spawn|launch)' "$2" 2>/dev/null; then
+            if grep -qiE "$ENV_PATTERN" "$2" 2>/dev/null; then
                 printf 'env'
                 return 0
             fi

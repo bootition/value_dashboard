@@ -1,9 +1,4 @@
 {
-  "note": "RG6–RG9 存量违规基线（棘轮）。只允许减少：修好一条就删一行。新增违规不受基线保护，门禁会红。生成：--update-baseline",
-  "known": [
-    "RG6|docs/reports/127_*|dup-127",
-    "RG6|docs/reports/133_*|dup-133",
-    "RG6|docs/reports/139_*|dup-139",
-    "RG6|docs/reports/59_*|dup-59"
-  ]
+  "note": "RG6–RG9 存量违规基线（棘轮）。只允许减少：修好一条就删一行。2026-11-19：4 组报告编号重复已全部加 number-collision-note 显式消歧，RG6 改为「已全部消歧则不报红」，故基线清空。新增的**未消歧**重号仍会红。",
+  "known": []
 }

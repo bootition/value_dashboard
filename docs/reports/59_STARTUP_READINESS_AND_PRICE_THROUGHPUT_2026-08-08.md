@@ -6,6 +6,7 @@ created: 2026-08-08
 last-reviewed: 2026-08-08
 superseded-by: reports/60_THROUGHPUT_RED_TEAM_AND_FORMAL_PRACTICE_2026-08-08.md
 supersedes: reports/56_LAUNCH_FIX_AND_STARTUP_ANALYSIS_2026-08-07.md, reports/58_SOURCE_CALIBRATION_AND_CONCURRENCY_2026-08-07.md
+number-collision-note: 本文件是 2026-08-08 的「启动 readiness 与价格吞吐自适应」。同编号另有 59_PRICE_PIPELINE_BATCH_PERSIST_2026-08-07.md（前一日，价格流水线实证），二者是**不同主题**；两份均已 superseded，引用时请写全文件名。
 ---
 
 # 启动 readiness 与价格吞吐自适应实施报告
