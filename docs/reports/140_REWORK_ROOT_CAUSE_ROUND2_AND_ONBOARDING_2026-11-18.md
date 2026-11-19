@@ -878,3 +878,134 @@ TTL 与硬上限**全被跳过** → 旧决策被无限期当作"已就绪"返�
 > 全部已修并补了反向用例。**但"全量 S1 全绿"这句话本轮不成立** ——
 > 不是代码有问题，而是仓库里同时有另一个会话在改；
 > 结论必须等仓库安静后重跑一次才能下。
+
+## 15. 第三轮：按 W4 隔离工作树后清账（2026-11-19）
+
+> 承接 §14.8 的"仍未做"。这一轮**先遵守新立的 `AGENTS W4`**（多会话私有化），
+> 再并行清账；过程中把 W4 的执行器本人修了一次。
+
+### 15.1 遵规开工：preflight BLOCK → 建私有 worktree
+
+开工自检 `scripts/session_preflight.py` 直接 **BLOCK（exit 2）**：
+- 已存在另一个 worktree（`.agents/worktrees/fix-quarterly-coverage-fallback`，**带 5 个未提交改动 = 活的会话**）
+- 主工作树当时是干净的，但这不改变结论：**不能在共享树上叠**
+
+按 W4 用 `create_worktree` 建了私有工作树：
+`.agents/worktrees/finish-refactor-backlog`（分支 `finish-refactor-backlog`，基于 `3b7711f`）。
+后续所有改动、测试、提交都在那里，主仓库一个字节都没动。
+
+**顺带修了 W4 执行器自己的一个自相矛盾**（`e331b7a`）：
+`check_worktrees` 原来只要数出 >1 个 worktree 就 BLOCK —— **把自己刚建的那个也算成"别人"**，
+于是"按规则做反而永久开不了工"。修正为：
+- 当前目录在**主工作树**且有额外 worktree → BLOCK（没隔离，这才是该拦的）
+- 当前目录已在**非主 worktree 内** → PASS（W4 已满足）
+
+两个必要配套（否则"永远比不中 ⇒ 还是 BLOCK"）：
+`git worktree list` 要加 `-c core.quotePath=false`（否则非 ASCII 路径被转义成 `\346\216\214…`），
+路径比较用 `realpath + normcase` 归一化。补 4 条用例（含"路径含空格"的解析，
+解析错同样导致永久 BLOCK）。
+
+**worktree 里的环境事实**（写进 `docs/skills/multi-agent-safe-session/SKILL.md`）：
+`.venv`/`data/`/`node_modules` 都是 gitignore，不会跟过来。做法是**复用而不复制**：
+- Python 用主仓库解释器（`"$MAIN/.venv/Scripts/python.exe"`）；**不要 `uv run`**（会在 worktree 里新建 250MB venv）
+- 前端用 **目录联接**：`New-Item -ItemType Junction -Path frontend/node_modules -Target <主仓库>/frontend/node_modules`
+- 正式库走绝对路径 + `read_only=True`
+
+### 15.2 四个 agent 并行清账（文件租约互斥，W8）
+
+| agent | 交付 | 关键数字 |
+|---|---|---|
+| **a-update-split** | 先解 getsource 死结，再搬 `_retry_failed_tasks` | `update.py` **6457 → 6156**（−301）；方法数 **137 → 137**；getsource **13 → 8** |
+| **b-frontend-god** | 拆 `ScreeningPage` + 5 套轮询收敛 | **1060 → 593 行（−44%）**；前端测试 **87→100 / 70→95** |
+| **c-fingerprint** | 补指纹 4 个盲区 + 降级可见 | 净耗时 **+14~18ms**（+3~4%），红线内 |
+| **d-guards** | RG3 双向化 + 清单漂移守卫 | 真树探针：塞死键 → 门禁立刻红 |
+
+### 15.3 解掉"反重构死结"（本轮最有价值的结构性一步）
+
+§13.7/§14.7 反复讲过：4 块代码拆不动，不是因为难，而是**测试用 `inspect.getsource`
+断言"代码写在哪个函数里"**——搬家就红。
+
+先建 `tests/support/source_guard.py`（342 行）把这类断言换成**行为级**：
+- `constructed_with()` 记录构造 kwargs（真跑，不读源码）→ 断言"注入了同一份共享 adapter_mgr"
+- `count_construction_sites()` 用 AST 数构造点（注释/日志里的同名字不算）
+- `resolve_body()` 顺"同名委托壳"追到真正实现 → 方法体搬走之后断言仍指向实现
+- 价格侧改成**真跑一轮** `_update_prices_incremental`，看内存水位有没有被标记
+
+**8 个变异逐个验证"真的会红"**，其中 **MUT6 第一版仍是绿的（假阴性）**——只要求"出现过一次"，
+加强成"最少展开次数 2"才红。这条很典型：**改测试的人自己也会写出假绿**，不靠变异检验发现不了。
+
+搬完：`update.py` 6457 → 6156，`IncrementalUpdater` 方法数仍是 137（原方法留 5 行同名委托）。
+**刻意没搬** `_update_prices_incremental`（504 行，3 executor + 自适应并发 + 攒批 + 20+ 条 SQL）
+与 `_run_incremental_update_flow`（`STEP_ORDER` 的事实来源）——时间盒到点，宁可不搬。
+另加棘轮 `test_update_structure.py`：`UPDATE_PY_MAX_LINES` 只许降、getsource 站点逐文件登记总量 == 8。
+
+### 15.4 前端：从"评估"到"真动手"
+
+`ScreeningPage.vue` **1060 → 593 行**，拆出 5 个"一个文件一件事"的模块（共 770 行）。
+**等价性用三重证据**：①脚本抽出全部 26 个被搬走的函数体对拍，归一化后 **26/26 一致**
+（允许的改名只有 5 类同值注入）；②`git diff` 确认 **template/style 零改动**；
+③既有组件测试一行未改仍全过。
+
+轮询从**5 套手写 timer** 收敛到 1 个 `usePollTimer`（含 `App.vue` 的 `setInterval`），
+并加**静态门禁** `polling-single-source.test.ts`：`src` 下再手写 `setInterval` 就红。
+这条护栏**上线时先红后绿**，抓出了 `App.vue`。
+
+**判断"不该拆"的也写清了**：`StockDetailPage`(805，并发+K线+TOC 交织，16 个既有测试)、
+`EtfStrategyPanel`(738，17 个 ref 是同一张表单的状态，且 5 个模态无测试覆盖 ⇒
+**先补测试再拆**)、`PointInTimeCard`/`ResearchStatisticsCard`（"多件事"其实是 computed 派生）、
+`types/data-quality.md` 系（纯类型，按行数判巨无霸是误判）。
+
+### 15.5 指纹的 4 个盲区
+
+先量了个被文档写错的事实：**指纹的主成本是"连接"不是"计算"** ——
+`read_query` 每次新开只读连接，28GB 库上开一次 **92–142ms**，所以真实基线是
+**430–510ms**（不是文档里的 90–120ms）。
+
+| 盲区 | 结果 |
+|---|---|
+| `source_audit` 就地翻标记 | ✅ 已堵（+ `GROUP BY confidence` 分布拼接，+69ms） |
+| 归档表 / `fetch_batch` | ✅ 已堵 |
+| 价格表从未进外层指纹 | 🟡 **部分**：新增行能让指纹变；**就地重算仍看不见**（内容信号实测 +275ms = 基线 +60%，超红线放弃），边界已用测试钉住 |
+| 超预算静默退回 count-only | ✅ 已堵：payload `degraded{}` + WARNING + 缓存 entry 字段，降级态与正常态**永不互命中** |
+
+**顺带发现上一轮方案的一个真缺陷**：`bit_xor(hash(col))` 是**奇偶敏感**的 ——
+整列取值相同时偶数行互相抵消 → **xor 恒为 0，整列改动也看不出来**。
+本轮新信号一律用"分组拼接"；既有 `_CONTENT_CHECKSUM_TABLES` 的 xor 弱点登记为遗留项。
+
+### 15.6 门禁：RG3 终于双向
+
+原 RG3 只查"后端有前端缺"，看不见**前端死键**——上一轮修的
+`dividend_financing_ratio`（前端把不存在的字段当百分数 = 100 倍误差）正是它漏掉的形态。
+现在两个方向都报，并引入 `FRONTEND_ONLY_ALLOWED` 白名单（**当前为空**），
+白名单条目必须仍真实存在，否则报「白名单过期」。
+
+**真树探针**（不是只跑单测）：往 `PERCENT_FIELDS` 塞一个不存在的键 → 门禁立刻红并给出
+"确属历史别名请登记进 FRONTEND_ONLY_ALLOWED 并写明理由"；还原即绿。
+（第一次探针塞错了位置——`PERCENT_FIELDS` 这个词在注释里先出现，改了注释自然不报。
+**探针必须打准**，否则会得出"门禁没生效"的错误结论。）
+
+RG10（U+FFFD）此前只有实现、没有反向用例 = 装饰，已补 3 条（注入必报/转义写法不许误报/
+本仓库自身必须干净）。另加**防清单漂移**用例：从 `AGENTS.md` 解析 `RG<n>` 集合与
+`run_all()` 实际跑的对齐，编号还要连续。
+
+### 15.7 过程事故：一个 agent 超时不落盘
+
+`d-guards` 在 **15:04 之后 28 分钟没有任何文件变更**，并留下 2 个 F401（引入了 RG10 的
+helper 却没写用例）。按 `AGENTS W5` 中断它，主控接手补完（RG10 三条用例 + 钩子文案）。
+它的 RG3 双向化与清单漂移用例是好的，已保留。
+**教训**：W5 的"超过时间盒无文件变更就中断"这次真的用上了——不做的话会一直空等。
+
+### 15.8 仍未做（下一轮的入口）
+
+1. **`_update_prices_incremental`（504 行）与 `_run_incremental_update_flow`（500+ 行）未搬** ——
+   前者 3 executor + 自适应并发 + 攒批，后者是 `STEP_ORDER` 的事实来源。
+2. **getsource 仍有 8 处**（其中 4 处是"`data_quality` 不得引用某域"的负向耦合，
+   没有行为可跑；另外 4 处保护位置，需逐个人工判断）。
+3. **`price_daily_qfq` 就地重算仍不可见**（内容信号超性能红线）；
+   `source_audit` 的高基数列就地改仍不可见。
+4. **降级信息还没进 HTTP 响应体** —— 需在 `app/web/api/screening.py` 的 `_freshness_payload`
+   加一行 `"readiness_degraded": entry.get("fingerprint_degraded")`（不在本轮租约）。
+5. **`helpers/runtime.ts` 未接线**（`DataStatusPage` 的空态 CLI 文案仍硬编码，打包版应显示 `vd data init`）。
+6. **`EtfStrategyPanel`(738) / `StockDetailPage`(805) 未拆** —— 前置是先补行为测试。
+7. 既有两个 worktree（另一个会话的 `fix-quarterly-coverage-fallback` 带 5 个未提交改动），
+   **合并前必须让仓库安静下来再跑一次全量 S1**。

@@ -70,11 +70,29 @@ git worktree lock ../vd-<topic> --reason "session <topic>"
 cd ../vd-<topic>
 ```
 
-**必须知道的两条环境事实**（详见 `docs/runbooks/ops-knowledge-base.md` §21）：
+**必须知道的四条环境事实**（详见 `docs/runbooks/ops-knowledge-base.md` §21）：
 
 1. `data/` 是 gitignore 的，**不会出现在 worktree 里**。只读正式库要走**绝对路径**；
    要跑回归则走 `scripts/s1-pytest.ps1`（它本来就用 `VD_ENV=test` 的临时库，不受影响）。
-2. 端口不会跟着 worktree 走。起服务前先改端口：
+2. **`.venv` 也不会跟过来，而 `s1-pytest.ps1` 硬编码 `<worktree>/.venv/Scripts/python.exe`**
+   —— 2026-11-19 实测：worktree 里若被 `uv run` 留下一个**没有 pytest 的 stub venv**，
+   全量回归会直接 `No module named pytest` 失败（看起来像代码坏了，其实是环境）。
+   **做法：用目录联接复用主仓库的 venv，不要复制、也不要 `uv run` 重建**：
+   ```powershell
+   # PowerShell（Git Bash 的 mklink 参数容易被吃掉）
+   Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
+   New-Item -ItemType Junction -Path .venv -Target "D:\...\value-dashboard\.venv"
+   ```
+   ```bash
+   # 之后一律用她，别写 uv run（uv run 会在 worktree 里新建 250MB 且缺 dev 依赖）
+   ./.venv/Scripts/python.exe -m pytest ...      # cwd = worktree 根，import 的 app 就是这一份
+   ```
+3. **`frontend/node_modules` 同样不跟过来**，用同样的联接复用：
+   ```powershell
+   New-Item -ItemType Junction -Path frontend\node_modules -Target "D:\...\value-dashboard\frontend\node_modules"
+   ```
+   联接是**只读复用**：不要在这个 worktree 里 `npm install`（会写穿到主仓库，影响别的会话）。
+4. 端口不会跟着 worktree 走。起服务前先改端口：
 
 ```bash
 # config/default.yaml 的 web.port（默认 8765）；或环境变量覆盖（见 config.py）
