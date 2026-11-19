@@ -19,12 +19,20 @@ const props = withDefaults(defineProps<{
   rankModes?: Array<{ label: string; value: string }>
   /** 判定某字段是否支持排名口径；缺省一律 false */
   rankableOf?: (field: string) => boolean
+  /** 取某字段的参数规格（如 CAGR 年数）；缺省一律 null */
+  paramSpecOf?: (field: string) => {
+    kind: string
+    key: string
+    label: string
+    options: ReadonlyArray<string | number>
+  } | null
   opOptions: Array<{ label: string; value: string }>
 }>(), {
   // 排名口径是可选能力（方案 C）：缺省时不渲染该下拉，
   // 让只关心规则语义的单测可以不带这些 props 挂载。
   rankModes: () => [],
   rankableOf: () => false,
+  paramSpecOf: () => null,
 })
 
 const emit = defineEmits<{
@@ -87,6 +95,13 @@ function updateField(index: number, field: string): void {
   // 换到不支持排名的字段时，必须清掉 rank_mode，
   // 否则后端会收到 `xxx_market_rank` 这种不存在的字段。
   if (!props.rankableOf(field)) item.rank_mode = undefined
+  // 参数化字段换了 → 旧参数（cagr_years / tenor）必须清掉，
+  // 否则后端会收到「roe 不支持 cagr_years」这类错误。
+  if (!props.paramSpecOf(field)) {
+    const target = item as unknown as Record<string, unknown>
+    delete target.cagr_years
+    delete target.tenor
+  }
 }
 
 function updateOp(index: number, op: string): void {
@@ -110,6 +125,15 @@ function updateValue(index: number, value: number | [number, number]): void {
 function updateRightField(index: number, value: string | undefined): void {
   const item = props.node.rules[index]
   if (item && !isRuleNode(item)) item.right_field = value
+}
+
+/** 参数化字段取值（reports/143 §2）：如 CAGR 年数、国债期限。 */
+function updateParam(index: number, key: string, value: string | number | undefined): void {
+  const item = props.node.rules[index]
+  if (!item || isRuleNode(item)) return
+  const target = item as unknown as Record<string, unknown>
+  if (value === undefined) delete target[key]
+  else target[key] = value
 }
 
 /** 排名口径（方案 C）：空 = 原始值。 */
@@ -155,6 +179,7 @@ function updateRankMode(index: number, value: string | undefined): void {
           :op-options="opOptions"
           :rank-modes="rankModes"
           :rankable-of="rankableOf"
+          :param-spec-of="paramSpecOf"
           @delete="removeAt(index)"
           @warn="(message: string) => emit('warn', message)"
         />
@@ -166,7 +191,9 @@ function updateRankMode(index: number, value: string | undefined): void {
           :op-options="opOptions"
           :rank-modes="rankModes"
           :rankable="rankableOf(item.field)"
+          :param-spec="paramSpecOf(item.field)"
           @update:rank-mode="updateRankMode(index, $event)"
+          @update:param="(key: string, value: string | number | undefined) => updateParam(index, key, value)"
           @update:field="updateField(index, $event)"
           @update:op="updateOp(index, $event)"
           @update:value="updateValue(index, $event)"

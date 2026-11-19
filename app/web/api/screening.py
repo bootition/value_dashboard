@@ -942,6 +942,25 @@ def _masked_indicator_fields(request: Request) -> list[str]:
     return list(_indicator_trust_or_empty(request)["masked_fields"])
 
 
+def _masked_param_columns(base: str, masked: set[str]) -> list[str]:
+    """参数化基名下**被遮蔽的具体列**（如 `deducted_profit_cagr3`）。
+
+    基名本身不是真实列，不会被数据质量规则直接判遮蔽；
+    必须把它展开成具体列后再看哪些落在 masked 里。
+    """
+    from app.core.screening.engine import PARAM_FAMILIES
+
+    out: list[str] = []
+    for spec in PARAM_FAMILIES.values():
+        if base not in spec["bases"]:
+            continue
+        for value in spec["options"]:
+            concrete = str(spec["format"]).format(base=base, value=value)
+            if concrete in masked:
+                out.append(concrete)
+    return out
+
+
 def _dsl_indicator_label(expression: dict) -> str:
     """复合指标的用户可见标签：中文名优先，无中文名时加「复合指标」前缀。
 
@@ -986,11 +1005,14 @@ def list_available_indicators(request: Request) -> dict:
     from app.core.screening.engine import (  # noqa: F401
         EXTENDED_SCREENING_READY,
         NORMALIZED_FIELDS,
+        PARAM_FAMILIES,
         RANKABLE_INDICATORS,
         SNAPSHOT_COLUMNS,
         STAT_METHODS,
         STAT_METRICS,
         STAT_WINDOWS,
+        param_field_names,
+        param_spec_for,
     )
     from app.core.screening.field_units import field_unit
 
@@ -1000,7 +1022,14 @@ def list_available_indicators(request: Request) -> dict:
     # 只影响这三个字段，绝不触碰下面的信任门禁（masked_untrusted/deprecated）。
     technical_coverage = _technical_field_coverage(request)
     technical_limit = technical_coverage_threshold()
+    # 参数化字段（reports/143 §2）：`div_yield_spread_10y`、`revenue_cagr5` 这类
+    # 「同一指标 + 参数后缀」不再逐个下发，改为只下发基名 + 参数规格，
+    # 由条件/排序/结果列上的参数下拉选择（9 + 6 = 15 个字段 → 4 个入口）。
+    _param_columns = param_field_names()
+
     for col in sorted(SNAPSHOT_COLUMNS):
+        if col in _param_columns:
+            continue
         coverage = technical_coverage.get(col)
         if (
             col in TECHNICAL_COVERAGE_FIELDS
@@ -1019,19 +1048,46 @@ def list_available_indicators(request: Request) -> dict:
                 ),
             })
             continue
+        _spec = param_spec_for(col)
         indicators.append({
             "name": col,
             "rankable": col in RANKABLE_INDICATORS,
             # 2026-08-14 红队 F3：单位元数据单一来源，前端据此做输入换算与展示
             "unit": field_unit(col),
             **({"coverage_pct": round(coverage, 2)} if coverage is not None else {}),
+            # 参数化字段（如 revenue_cagr 需要选 3/5 年）→ 前端渲染参数下拉
+            **({"param_spec": _spec} if _spec else {}),
         })
     for field in sorted(NORMALIZED_FIELDS):
+        if field in _param_columns:
+            continue
+        _spec = param_spec_for(field)
         indicators.append({
             "name": field,
             "rankable": field in RANKABLE_INDICATORS,
             "unit": field_unit(field),
+            **({"param_spec": _spec} if _spec else {}),
         })
+    # 参数化字段的**基名入口**（reports/143 §2）：库里只有 `revenue_cagr3/5` 这类
+    # 带后缀的真实列，但下拉里只暴露基名 + 参数下拉。
+    # 单位沿用同族真实列（CAGR 存小数比例用 pct，国债利差存百分数用 percent）。
+    _unit_samples = {
+        "cagr": "revenue_cagr3",
+        "tenor": "div_yield_spread_10y",
+    }
+    for kind, spec in PARAM_FAMILIES.items():
+        sample_unit = field_unit(_unit_samples[kind])
+        for base in spec["bases"]:
+            indicators.append({
+                "name": base,
+                "rankable": any(
+                    str(spec["format"]).format(base=base, value=v) in RANKABLE_INDICATORS
+                    for v in spec["options"]
+                ),
+                "unit": sample_unit,
+                "param_spec": param_spec_for(base),
+            })
+
     # 扩展指标域（schema v25）：按**当前报告期实测覆盖率**动态放行。
     #
     # 2026-11-14（依据 S6 P0）：`EXTENDED_SCREENING_READY` 是 2026-09-19 的静态
@@ -1147,7 +1203,12 @@ def list_available_indicators(request: Request) -> dict:
                 ),
             })
             continue
-        if name in masked:
+        # 参数化字段的遮蔽要**向上传播**（reports/143 §2）：
+        # 库里只有 `deducted_profit_cagr3/5` 这些真实列，下拉里只暴露基名
+        # `deducted_profit_cagr`。若具体列被判为不可信，基名也必须进 unavailable，
+        # 否则用户能选中一个实际会被 409 拒绝的入口。
+        masked_concrete = _masked_param_columns(name, masked)
+        if name in masked or masked_concrete:
             unavailable.append({
                 "name": name,
                 "domain": entry.get("domain") or "snapshot",
@@ -1155,6 +1216,10 @@ def list_available_indicators(request: Request) -> dict:
                 "message": (
                     "字段当前不可信（数据质量规则判定为遮蔽状态），"
                     "已从可选指标中移除；引用它的规则运行会被拒绝（409）"
+                    + (
+                        f"（遮蔽的具体列：{', '.join(masked_concrete)}）"
+                        if masked_concrete else ""
+                    )
                 ),
             })
             continue

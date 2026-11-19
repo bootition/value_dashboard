@@ -137,7 +137,10 @@ const hasAnyContent = computed(() => hasProfile.value || hasBreakdown.value)
       <dl v-if="hasProfile" class="biz-meta">
         <div v-if="profile?.csrc_industry">
           <dt>所属行业</dt>
-          <dd>{{ profile.csrc_industry }}</dd>
+          <!-- 2026-11-16：CSRC 行业名最长 30 字（「居民服务、修理和其他服务业-机动车、
+               电子产品和日用产品修理业」≈360px），格子只有 ~174px 且 nowrap 省略号，
+               没有 title 就只能看到前半截。 -->
+          <dd :title="profile.csrc_industry">{{ profile.csrc_industry }}</dd>
         </div>
         <div v-if="profile?.trade_market">
           <dt>上市板块</dt>

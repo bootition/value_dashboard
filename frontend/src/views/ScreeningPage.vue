@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, h } from 'vue'
+import type { VNode } from 'vue'
 import { NButton, NSwitch, NInput, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
+import { NEllipsis } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
@@ -111,6 +113,9 @@ interface SortRule {
   direction: 'asc' | 'desc'
   /** 排名口径（方案 C）：空 = 原始值 */
   rank_mode?: string
+  /** 参数化字段取值（如 cagr_years / tenor） */
+  cagr_years?: number
+  tenor?: string
 }
 
 const sortRules = ref<SortRule[]>([
@@ -149,6 +154,9 @@ const DEFAULT_RESULT_COLUMNS = [
   'csrc_l1', 'csrc_l2', 'latest_close', 'total_market_cap',
 ]
 const selectedResultColumns = ref<string[]>([])
+/** 结果列合成值里的参数分隔符（与 decodeResultColumn 保持一致）。 */
+const PARAM_COLUMN_SEP = '@'
+
 const resultColumnOptions = computed(() => {
   const seen = new Set(RESULT_METADATA_COLUMNS.map(item => item.value))
   const options: Array<{ label: string; value: string }> = [...RESULT_METADATA_COLUMNS]
@@ -157,6 +165,19 @@ const resultColumnOptions = computed(() => {
     if (seen.has(indicator.value)) continue
     seen.add(indicator.value)
     options.push({ label: indicator.label, value: indicator.value })
+  }
+  // 参数化字段（reports/143 §2）：一个基名 + 多个参数取值各占一个选项，
+  // 避免把 `revenue_cagr3` / `revenue_cagr5` 这类后缀字段铺进下拉。
+  for (const indicator of indicators.value) {
+    const spec = indicator.param_spec
+    if (!spec) continue
+    const base = fieldDisplayName(indicator.name, indicator.name)
+    for (const value of spec.options) {
+      options.push({
+        label: `${base} · ${spec.label} ${String(value)}`,
+        value: `${indicator.name}${PARAM_COLUMN_SEP}${spec.key}=${String(value)}`,
+      })
+    }
   }
   // 方案 C（2026-11-16）：可排名指标额外提供 6 个「排名口径」列。
   // 用一个合成值编码（`{field}::rank::{mode}`），避免 n-select 多选里
@@ -174,19 +195,43 @@ const resultColumnOptions = computed(() => {
   return options
 })
 
-/** 结果列的合成取值：`字段::rank::口径`，与纯字段名互不冲突。 */
+/**
+ * 结果列的合成取值（2026-11-16）：
+ *   `字段`                        纯字段
+ *   `字段@参数=值`                 参数化字段（如 revenue_cagr@cagr_years=5）
+ *   `字段@参数=值::rank::口径`     参数化 + 排名口径
+ * 合成值让 n-select 多选里「同名不同参数」的选项互不冲突。
+ */
 const RANK_COLUMN_SEP = '::rank::'
+
 function rankColumnValue(field: string, mode: string): string {
   return `${field}${RANK_COLUMN_SEP}${mode}`
 }
-/** 合成取值 → 后端列定义（纯字段名或 {field, rank_mode}）。 */
+
+/** 合成取值 → 后端列定义（字符串或 {field, rank_mode?, cagr_years?, tenor?}）。 */
 function decodeResultColumn(value: string): ResultColumn {
-  const at = value.indexOf(RANK_COLUMN_SEP)
-  if (at < 0) return value
-  return {
-    field: value.slice(0, at),
-    rank_mode: value.slice(at + RANK_COLUMN_SEP.length) as RankMode,
+  let rest = value
+  let rankMode: string | undefined
+  const at = rest.indexOf(RANK_COLUMN_SEP)
+  if (at >= 0) {
+    rankMode = rest.slice(at + RANK_COLUMN_SEP.length)
+    rest = rest.slice(0, at)
   }
+  let field = rest
+  const extra: Record<string, unknown> = {}
+  const pAt = rest.indexOf(PARAM_COLUMN_SEP)
+  if (pAt >= 0) {
+    field = rest.slice(0, pAt)
+    const matched = rest.slice(pAt).match(/^@([A-Za-z_]+)=(.*)$/)
+    if (matched) {
+      const [, key, raw] = matched
+      extra[key] = key === 'cagr_years' ? Number(raw) : raw
+    }
+  }
+  if (!rankMode && Object.keys(extra).length === 0) return field
+  const out: Record<string, unknown> = { field, ...extra }
+  if (rankMode) out.rank_mode = rankMode as RankMode
+  return out as unknown as ResultColumn
 }
 /**
  * 提交给后端的 columns（方案 C）：把合成取值解码成 `{field, rank_mode}`。
@@ -201,7 +246,52 @@ function selectedColumnsForRequest(): ResultColumn[] {
 /** 后端列定义 → 合成取值（载入草稿/已保存规则时用）。 */
 function encodeResultColumn(column: ResultColumn): string {
   if (typeof column === 'string') return column
-  return rankColumnValue(column.field, column.rank_mode)
+  const anyCol = column as unknown as Record<string, unknown>
+  const paramKey = anyCol.cagr_years !== undefined
+    ? 'cagr_years'
+    : anyCol.tenor !== undefined ? 'tenor' : ''
+  let out = String(anyCol.field ?? '')
+  if (paramKey) out += `${PARAM_COLUMN_SEP}${paramKey}=${String(anyCol[paramKey])}`
+  if (anyCol.rank_mode) out += `${RANK_COLUMN_SEP}${String(anyCol.rank_mode)}`
+  return out
+}
+
+/**
+ * 下拉选项统一渲染（2026-11-16）。
+ *
+ * naive-ui 的 n-select 会把超长选项截成省略号且**没有 tooltip**，
+ * 用户看到「原…」「全…」「证…」只能猜。这里用 NEllipsis 的 tooltip 模式：
+ * 截断处仍显示省略号，鼠标悬浮弹出完整名称。
+ */
+function renderOptionLabel(option: { label?: string }): VNode {
+  return h(
+    NEllipsis,
+    { tooltip: { placement: 'right', contentStyle: 'max-width: 520px; white-space: normal;' } },
+    { default: () => option.label ?? '' },
+  )
+}
+
+/** 排序行的参数化字段取值（如 CAGR 年数）。 */
+function sortParamValue(rule: SortRule): string | number | undefined {
+  const spec = paramSpecOf(rule.field)
+  if (!spec) return undefined
+  const raw = (rule as unknown as Record<string, unknown>)[spec.key]
+  return typeof raw === 'string' || typeof raw === 'number' ? raw : undefined
+}
+
+function sortParamOptions(field: string) {
+  const spec = paramSpecOf(field)
+  return (spec?.options ?? []).map((v) => ({ label: String(v), value: v }))
+}
+
+/** 切换排序字段的参数值，并清掉另一个家族的旧参数。 */
+function setSortParam(rule: SortRule, value: string | number): void {
+  const spec = paramSpecOf(rule.field)
+  if (!spec) return
+  const target = rule as unknown as Record<string, unknown>
+  delete target.cagr_years
+  delete target.tenor
+  target[spec.key] = value
 }
 
 /** 排序行的排名口径选项：首项「原始值」表示不带排名。 */
@@ -239,6 +329,11 @@ function indicatorLabelOf(i: ScreeningIndicator): string {
 const indicatorOptions = computed(() =>
   indicators.value.map((i) => ({ label: indicatorLabelOf(i), value: i.name })),
 )
+
+/** 某字段的参数规格（如 CAGR 年数）；无参数返回 null。 */
+function paramSpecOf(field: string) {
+  return indicators.value.find((i) => i.name === field)?.param_spec ?? null
+}
 
 /** 某字段是否支持排名口径：后端 `rankable` 标记。 */
 function rankableOf(field: string): boolean {
@@ -800,7 +895,13 @@ onUnmounted(() => {
         </div>
         <div class="rule-load-row">
           <span>已保存规则</span>
-          <n-select :value="selectedRuleId" :options="ruleOptions" size="small" @update:value="loadRule" />
+          <n-select
+            :value="selectedRuleId"
+            :options="ruleOptions"
+            size="small"
+            :render-label="renderOptionLabel"
+            @update:value="loadRule"
+          />
           <n-input v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称" />
           <n-button size="small" @click="saveRule">保存新版本</n-button>
           <n-button v-if="selectedRuleId > 0" size="small" quaternary type="error" @click="deleteSelectedRule">删除选中规则</n-button>
@@ -830,7 +931,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
-          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" :rank-modes="rankModes" :rankable-of="rankableOf" @warn="(msg: string) => message.warning(msg)" />
+          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" :rank-modes="rankModes" :rankable-of="rankableOf" :param-spec-of="paramSpecOf" @warn="(msg: string) => message.warning(msg)" />
           <div v-if="unavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
             <div class="unavailable-indicators-heading">
               <strong>当前报告期不可用指标（{{ unavailableIndicators.length }}）</strong>
@@ -866,13 +967,31 @@ onUnmounted(() => {
           <n-space vertical>
             <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
               <span class="control-label">优先级 {{ index + 1 }}</span>
-              <n-select v-model:value="rule.field" :options="indicatorOptions" size="small" style="width: 200px" filterable />
+              <n-select
+                v-model:value="rule.field"
+                :options="indicatorOptions"
+                size="small"
+                style="width: 220px"
+                filterable
+                :render-label="renderOptionLabel"
+              />
+              <n-select
+                v-if="paramSpecOf(rule.field)"
+                :value="sortParamValue(rule)"
+                :options="sortParamOptions(rule.field)"
+                size="small"
+                style="width: 110px"
+                :render-label="renderOptionLabel"
+                :aria-label="paramSpecOf(rule.field)?.label"
+                @update:value="(v: string | number) => setSortParam(rule, v)"
+              />
               <n-select
                 v-if="rankableOf(rule.field)"
                 v-model:value="rule.rank_mode"
                 :options="rankModeOptionsForSort"
                 size="small"
-                style="width: 130px"
+                style="width: 170px"
+                :render-label="renderOptionLabel"
                 aria-label="排序排名口径"
               />
               <n-select v-model:value="rule.direction" :options="[{ label: '升序', value: 'asc' }, { label: '降序', value: 'desc' }]" size="small" style="width: 90px" />
@@ -890,6 +1009,7 @@ onUnmounted(() => {
             multiple
             filterable
             clearable
+            :render-label="renderOptionLabel"
             size="small"
             placeholder="选择要在结果表展示的信息"
           />

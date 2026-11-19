@@ -333,3 +333,119 @@ def test_every_indicator_label_contains_chinese() -> None:
         assert any("\u4e00" <= ch <= "\u9fff" for ch in label), (
             f"复合指标标签无中文：{label}"
         )
+
+
+# ─── 参数化字段：国债期限 / CAGR 年数（reports/143 §2）────────────────────
+
+
+def test_param_families_hide_suffixed_fields() -> None:
+    """15 个带参数后缀的字段不再出现在指标下拉里，只留 4 个基名入口。"""
+    from app.core.screening.engine import (
+        PARAM_FAMILIES,
+        SNAPSHOT_COLUMNS,
+        param_field_names,
+    )
+
+    hidden = param_field_names()
+    assert len(hidden) == 15, f"应为 9 个期限 + 6 个 CAGR，实际 {len(hidden)}"
+    assert hidden <= SNAPSHOT_COLUMNS, "隐藏的应都是快照真实列"
+
+    bases = {b for spec in PARAM_FAMILIES.values() for b in spec["bases"]}
+    assert bases == {
+        "revenue_cagr", "net_profit_cagr", "deducted_profit_cagr", "div_yield_spread",
+    }
+    # 基名本身不是真实列，必须靠参数展开才能用
+    assert not (bases & SNAPSHOT_COLUMNS)
+
+
+def test_expand_param_cagr_and_tenor() -> None:
+    out = expand_rank_modes({
+        "logic": "AND",
+        "rules": [
+            {"field": "revenue_cagr", "cagr_years": 5, "op": ">", "value": 0.2},
+            {"field": "div_yield_spread", "tenor": "10y", "op": ">", "value": 0},
+        ],
+    })
+    assert out["rules"][0]["field"] == "revenue_cagr5"
+    assert out["rules"][1]["field"] == "div_yield_spread_10y"
+    assert "cagr_years" not in out["rules"][0]
+    assert "tenor" not in out["rules"][1]
+
+
+def test_param_value_must_be_in_options() -> None:
+    """库里 CAGR 只有 3/5 年 → 传 8 必须显式报错，而不是静默变成未知字段。"""
+    with pytest.raises(ValueError, match="cagr_years 取值必须是"):
+        expand_rank_modes({"logic": "AND", "rules": [
+            {"field": "revenue_cagr", "cagr_years": 8},
+        ]})
+    with pytest.raises(ValueError, match="tenor 取值必须是"):
+        expand_rank_modes({"logic": "AND", "rules": [
+            {"field": "div_yield_spread", "tenor": "12y"},
+        ]})
+
+
+def test_param_base_without_value_is_rejected() -> None:
+    """基名不带参数 → 必须提示需要指定参数（基名不是真实列）。"""
+    with pytest.raises(ValueError, match="需要指定 cagr_years"):
+        expand_rank_modes({"logic": "AND", "rules": [{"field": "revenue_cagr"}]})
+
+
+def test_param_on_wrong_field_is_rejected() -> None:
+    with pytest.raises(ValueError, match="不支持 cagr_years"):
+        expand_rank_modes({"logic": "AND", "rules": [
+            {"field": "roe", "cagr_years": 5},
+        ]})
+
+
+def test_param_and_rank_mode_compose_when_rankable() -> None:
+    """参数展开在排名后缀之前：`div_yield_spread` + 10y + market_rank。"""
+    out = expand_rank_modes({"logic": "AND", "rules": [
+        {"field": "div_yield_spread", "tenor": "10y", "rank_mode": "market_rank"},
+    ]})
+    assert out["rules"][0]["field"] == "div_yield_spread_10y_market_rank"
+
+
+def test_unrankable_base_gives_actionable_error() -> None:
+    """CAGR 不在可排名清单 → 报「不支持排名口径」，不能只说「未知字段」。"""
+    from app.core.screening.engine import unrankable_rank_base
+
+    assert unrankable_rank_base("revenue_cagr3_market_rank", set()) == "revenue_cagr3"
+    # 可排名基名不该走这个分支
+    assert unrankable_rank_base("pe_ttm_market_rank", set()) is None
+    # 完全不存在的字段也不是这条错误
+    assert unrankable_rank_base("nonsense_market_rank", set()) is None
+
+
+def test_param_works_in_conditions_sort_and_columns(
+    duckdb_store: DuckDBStore, sqlite_store: Any,
+) -> None:
+    """参数化字段在条件、排序、结果列三处都能用。"""
+    from app.core.screening.engine import ScreeningEngine
+
+    duckdb_store.write_query(
+        "INSERT INTO stock_meta "
+        "(stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended, listing_date) "
+        "VALUES ('000001','A','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
+        "       ('000002','B','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE))"
+    )
+    for code, cagr in (("000001", 0.30), ("000002", 0.10)):
+        duckdb_store.write_query(
+            """INSERT INTO indicator_snapshot
+                   (stock_code, report_date, calculated_at, data_version,
+                    revenue_cagr3, div_yield_spread_10y)
+               VALUES (?, CAST('2025-12-31' AS DATE), now(), 'fixture', ?, 1.5)""",
+            [code, cagr],
+        )
+
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+    rule = {
+        "conditions": {"logic": "AND", "rules": [
+            {"field": "revenue_cagr", "cagr_years": 3, "op": ">", "value": 0},
+        ]},
+        "sort": [{"field": "revenue_cagr", "cagr_years": 3, "direction": "desc"}],
+        "columns": ["stock_code", {"field": "div_yield_spread", "tenor": "10y"}],
+    }
+    rows = engine.run(rule, min_listing_years=0)["results"]
+
+    assert [r["stock_code"] for r in rows] == ["000001", "000002"], "按 CAGR 降序"
+    assert rows[0]["div_yield_spread_10y"] == 1.5, "结果列参数展开正确"

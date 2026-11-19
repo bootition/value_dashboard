@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { VNode } from 'vue'
+import { NEllipsis } from 'naive-ui'
 import { computed, h, ref, watch } from 'vue'
 import { RouterLink } from 'vue-router'
 import {
@@ -123,6 +125,21 @@ async function copyStockCode(code: string) {
   } catch {
     message.warning('复制失败，请手动选择复制')
   }
+}
+
+/**
+ * 结果列下拉的标签渲染（2026-11-16）。
+ *
+ * 指标名可能很长（如「已动用资本回报率（ROCE·20年中位）」+ 排名口径后缀），
+ * n-select 会截断且默认**没有 tooltip**；用 NEllipsis 的 tooltip 模式
+ * 让鼠标悬浮能看到完整名称（与筛选页 renderOptionLabel 保持一致）。
+ */
+function renderColumnLabel(option: { label?: string }): VNode {
+  return h(
+    NEllipsis,
+    { tooltip: { placement: 'right', contentStyle: 'max-width: 520px; white-space: normal;' } },
+    { default: () => option.label ?? '' },
+  )
 }
 
 const columnOptions = computed(() => {
@@ -382,6 +399,7 @@ async function addToWatchlist() {
           multiple
           size="small"
           style="width: min(400px, 100%)"
+          :render-label="renderColumnLabel"
           placeholder="选择要显示的列"
         />
       </div>

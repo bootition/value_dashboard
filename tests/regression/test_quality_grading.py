@@ -322,9 +322,18 @@ def test_indicators_endpoint_masks_deducted_profit_only(
 
     names = {item["name"] for item in payload["indicators"]}
     unavailable = {item["name"]: item for item in payload["unavailable"]}
-    for field in ("deducted_profit_yoy", "deducted_profit_cagr3", "deducted_profit_cagr5"):
-        assert field not in names
-        assert unavailable[field]["reason"] == "masked_untrusted"
+    # reports/143 §2：CAGR 不再逐个暴露 `*_cagr3` / `*_cagr5`，
+    # 只暴露基名 `deducted_profit_cagr`（参数下拉选 3/5 年）。
+    # 遮蔽必须**向上传播**到基名，否则用户能选中一个实际会被 409 拒绝的入口。
+    assert "deducted_profit_yoy" not in names
+    assert unavailable["deducted_profit_yoy"]["reason"] == "masked_untrusted"
+
+    for concrete in ("deducted_profit_cagr3", "deducted_profit_cagr5"):
+        assert concrete not in names, f"{concrete} 不应再单独暴露"
+    assert "deducted_profit_cagr" not in names, "基名必须随具体列一起被遮蔽"
+    assert unavailable["deducted_profit_cagr"]["reason"] == "masked_untrusted"
+    assert "deducted_profit_cagr3" in unavailable["deducted_profit_cagr"]["message"]
+
     assert "roe" in names and "revenue_yoy" in names
 
 

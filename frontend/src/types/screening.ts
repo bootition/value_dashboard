@@ -32,6 +32,17 @@ export interface ScreeningIndicator {
    */
   readonly derived_from?: string
   readonly derived_kind?: 'rank' | 'stat'
+  /**
+   * 参数化字段规格（reports/143 §2）。
+   * 例：`revenue_cagr` → {kind:'cagr', key:'cagr_years', label:'年数', options:[3,5]}
+   * 库里只有 `revenue_cagr3/5` 这类带后缀的真实列，前端让用户选参数后由后端展开。
+   */
+  readonly param_spec?: {
+    readonly kind: string
+    readonly key: string
+    readonly label: string
+    readonly options: ReadonlyArray<string | number>
+  }
 }
 
 /** Leaf condition in a screening rule tree. */
@@ -52,6 +63,9 @@ export interface ScreeningSortSpec {
   field: string
   direction: 'asc' | 'desc'
   rank_mode?: RankMode
+  /** 参数化字段的取值，如 cagr_years: 5 或 tenor: '10y'。 */
+  cagr_years?: number
+  tenor?: string
 }
 
 export interface ScreeningRuleCondition {

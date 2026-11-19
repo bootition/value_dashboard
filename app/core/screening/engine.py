@@ -375,6 +375,63 @@ RANK_MODE_LABELS: dict[str, str] = {
 }
 
 
+#: 参数化字段家族（2026-11-16，`reports/143` §2 过耦合审计的落地）。
+#:
+#: 下列字段原本按「同一指标 + 参数后缀」铺成 N 个独立字段，属于过耦合：
+#:
+#:   div_yield_spread_{0p25y,0p5y,1y,2y,3y,5y,7y,10y,30y}   9 个 → 1 个入口 + 期限参数
+#:   {revenue,net_profit,deducted_profit}_cagr{3,5}           6 个 → 3 个入口 + 年数参数
+#:
+#: 现在只在指标列表里暴露**基名**（`div_yield_spread` / `revenue_cagr` …），
+#: 用户在条件/排序/结果列上选一个参数值即可。旧的带后缀字段名仍然可用
+#: （向后兼容已保存规则），只是不再出现在下拉里。
+#:
+#: 为什么不把「统计域 40」和「均线 6」也收进来：
+#: - 统计域（`*_stat_{window}y_{method}`）对应 PRD §10.7 的独立研究统计域，
+#:   每条条件必须显式保存序列、股息率口径、国债期限、窗口、方法与阈值；收成下拉会丢审计元数据。
+#: - 均线（`ma5/10/20/60/120/250`）的典型用法是**跨窗口比较**（MA20 上穿 MA60），
+#:   收成参数后同一条件里就无法比较两条均线。
+PARAM_FAMILIES: dict[str, dict[str, object]] = {
+    "cagr": {
+        "bases": ("revenue_cagr", "net_profit_cagr", "deducted_profit_cagr"),
+        "key": "cagr_years",
+        "label": "年数",
+        "options": (3, 5),
+        "format": "{base}{value}",
+    },
+    "tenor": {
+        "bases": ("div_yield_spread",),
+        "key": "tenor",
+        "label": "国债期限",
+        "options": ("0p25y", "0p5y", "1y", "2y", "3y", "5y", "7y", "10y", "30y"),
+        "format": "{base}_{value}",
+    },
+}
+
+
+def param_spec_for(field: str) -> dict[str, object] | None:
+    """某**基名**字段的参数规格（供 API 下发、前端渲染参数下拉）。"""
+    for kind, spec in PARAM_FAMILIES.items():
+        if field in spec["bases"]:
+            return {
+                "kind": kind,
+                "key": spec["key"],
+                "label": spec["label"],
+                "options": list(spec["options"]),
+            }
+    return None
+
+
+def param_field_names() -> set[str]:
+    """所有「带参数后缀」的字段名（这些不再出现在指标下拉里）。"""
+    out: set[str] = set()
+    for spec in PARAM_FAMILIES.values():
+        for base in spec["bases"]:
+            for value in spec["options"]:
+                out.add(str(spec["format"]).format(base=base, value=value))
+    return out
+
+
 def expand_rank_modes(node: object) -> object:
     """把条件树里的 `rank_mode` 展开成字段后缀（原地返回新结构）。
 
@@ -396,6 +453,37 @@ def expand_rank_modes(node: object) -> object:
     out: dict[str, object] = {
         key: expand_rank_modes(value) for key, value in node.items()
     }
+
+    # 参数化字段（`reports/143` §2）：先展开参数，再展开排名口径，
+    # 因为排名字段名是「参数展开后 + 排名后缀」（`revenue_cagr5_market_rank`）。
+    for spec in PARAM_FAMILIES.values():
+        key = str(spec["key"])
+        value = out.pop(key, None)
+        if value is None:
+            continue
+        field = out.get("field")
+        if not isinstance(field, str) or not field:
+            raise ValueError(f"{key} 只能用在带 field 的条件上")
+        if field not in spec["bases"]:
+            raise ValueError(
+                f"{field} 不支持 {key}；只有 {', '.join(str(b) for b in spec['bases'])} 支持"
+            )
+        allowed = [str(v) for v in spec["options"]]
+        if str(value) not in allowed:
+            raise ValueError(f"{key} 取值必须是 {', '.join(allowed)}，收到 {value!r}")
+        out["field"] = str(spec["format"]).format(base=field, value=value)
+
+    # 参数化字段的基名必须带参数，否则它不是一个真实列，会落成"未知字段"。
+    # 这里给出可读错误（PRD §12.2 的错误必须能指导用户怎么改）。
+    _field_now = out.get("field")
+    if isinstance(_field_now, str):
+        for spec in PARAM_FAMILIES.values():
+            if _field_now in spec["bases"]:
+                raise ValueError(
+                    f"{_field_now} 需要指定 {spec['key']}（可选："
+                    f"{', '.join(str(v) for v in spec['options'])}）"
+                )
+
     mode = out.pop("rank_mode", None)
     if isinstance(mode, str) and mode:
         if mode not in RANK_MODES:
@@ -1027,6 +1115,14 @@ LIMIT {MAX_RESULT_ROWS}
 
         # 验证字段名安全（防注入）
         if not self._is_known_field(field):
+            # 2026-11-16：区分「名字拼错」与「该字段不支持排名口径」。
+            # 后者典型是 `revenue_cagr3_market_rank`——基名存在但不在可排名清单，
+            # 只报"未知筛选字段"会让用户以为自己拼错了。
+            base = unrankable_rank_base(field, self._custom_fields)
+            if base is not None:
+                raise ValueError(
+                    f"该字段不支持排名口径（不在可排名清单里）: {field}（基名 {base}）"
+                )
             raise ValueError(f"未知筛选字段: {field}")
         if right_field is not None:
             if op in {"between", "in", "is_null", "is_not_null"}:
@@ -1159,6 +1255,18 @@ LIMIT {MAX_RESULT_ROWS}
                 if column not in cols:
                     cols.append(column)
             if rejected:
+                # 2026-11-16：区分「字段不存在」与「该字段不支持排名口径」。
+                # 后者典型是 `revenue_cagr3_market_rank` —— 基名真实存在但不在
+                # 可排名清单里；只报"未知结果字段"会让用户以为自己拼错了名字。
+                not_rankable = [
+                    (item, base) for item in rejected
+                    if (base := unrankable_rank_base(item, self._custom_fields)) is not None
+                ]
+                if not_rankable:
+                    raise ValueError(
+                        "该字段不支持排名口径（不在可排名清单里）: "
+                        + ", ".join(f"{item}（基名 {base}）" for item, base in not_rankable)
+                    )
                 raise ValueError(
                     f"未知结果字段: {', '.join(repr(item) for item in rejected)}"
                 )
@@ -1816,6 +1924,30 @@ def _rank_base_for(field: str, custom_fields: set[str]) -> str | None:
         if field.endswith(suffix):
             base = field.removesuffix(suffix)
             return base if base in RANKABLE_INDICATORS or base in custom_fields else None
+    return None
+
+
+def unrankable_rank_base(field: str, custom_fields: set[str]) -> str | None:
+    """`xxx_market_rank` 这类字段若基名存在**但不在可排名清单**，返回基名。
+
+    为什么需要它：`_rank_base_for()` 只在基名可排名时才返回基名，
+    所以「基名存在但不可排名」会被它判成 None，最终落到"未知字段"——
+    而真实原因是"该字段不支持排名口径"。两者对用户是完全不同的信息：
+    前者说自己拼错了，后者说要换个字段。
+
+    典型例子：`revenue_cagr3_market_rank`（CAGR 不在 RANKABLE_INDICATORS 里）。
+    """
+    for suffix in RANK_SUFFIXES:
+        if not field.endswith(suffix):
+            continue
+        base = field.removesuffix(suffix)
+        if not base:
+            continue
+        if base in RANKABLE_INDICATORS or base in custom_fields:
+            return None          # 可排名 → 不是本函数的事
+        if base in SNAPSHOT_COLUMNS or base in NORMALIZED_FIELDS or base in custom_fields:
+            return base          # 基名真实存在，只是不可排名
+        return None
     return None
 
 

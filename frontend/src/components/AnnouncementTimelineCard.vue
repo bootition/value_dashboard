@@ -169,7 +169,9 @@ onMounted(() => {
             <n-tag size="small" :type="categoryTagType(item.category)" :bordered="false">
               {{ categoryLabel(item.category) }}
             </n-tag>
-            <span class="timeline-title">{{ item.title || '（无标题）' }}</span>
+            <!-- 2026-11-16：公告标题最长 101 字（announcement_registry 实测），
+                 实际可用约 50 字，必须给 title 才能看全。 -->
+            <span class="timeline-title" :title="item.title || '（无标题）'">{{ item.title || '（无标题）' }}</span>
           </li>
         </ol>
         <div class="timeline-footer">

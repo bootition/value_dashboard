@@ -13,6 +13,13 @@ const props = defineProps<{
   rankModes?: Array<{ label: string; value: string }>
   /** 当前字段是否支持排名口径 */
   rankable?: boolean
+  /** 当前字段的参数规格（如 CAGR 需要选年数）；空表示无参数 */
+  paramSpec?: {
+    readonly kind: string
+    readonly key: string
+    readonly label: string
+    readonly options: ReadonlyArray<string | number>
+  } | null
   opOptions: Array<{ label: string; value: string }>
 }>()
 
@@ -22,6 +29,7 @@ const emit = defineEmits<{
   'update:value': [value: number | [number, number]]
   'update:rightField': [value: string | undefined]
   'update:rankMode': [value: string | undefined]
+  'update:param': [key: string, value: string | number | undefined]
   'delete': []
 }>()
 
@@ -99,6 +107,24 @@ const rankModeOptions = computed(() => [
   ...(props.rankModes ?? []),
 ])
 
+/** 参数化字段的取值选项（reports/143 §2）：如 CAGR 的 3/5 年、国债期限 9 档。 */
+const paramOptions = computed(() =>
+  (props.paramSpec?.options ?? []).map((v) => ({ label: String(v), value: v })),
+)
+
+function paramValue(): string | number | undefined {
+  const spec = props.paramSpec
+  if (!spec) return undefined
+  const raw = (props.condition as unknown as Record<string, unknown>)[spec.key]
+  return typeof raw === 'string' || typeof raw === 'number' ? raw : undefined
+}
+
+function onParamChange(value: string | number | null): void {
+  const spec = props.paramSpec
+  if (!spec) return
+  emit('update:param', spec.key, value === null ? undefined : value)
+}
+
 async function onRankModeChange(value: string): Promise<void> {
   emit('update:rankMode', value === '' ? undefined : value)
 }
@@ -114,6 +140,7 @@ function toggleFieldComparison(): void {
     <label class="condition-control condition-control--field">
       <span>观察指标</span>
       <n-select
+        :consistent-menu-width="false"
         :value="condition.field"
         :options="indicatorOptions"
         size="small"
@@ -123,12 +150,26 @@ function toggleFieldComparison(): void {
         @update:value="emit('update:field', $event)"
       />
     </label>
+    <label v-if="paramSpec" class="condition-control condition-control--param">
+      <span>{{ paramSpec.label }}</span>
+      <n-select
+        :consistent-menu-width="false"
+        :value="paramValue()"
+        :options="paramOptions"
+        size="small"
+        :render-label="renderIndicatorLabel"
+        :aria-label="paramSpec.label"
+        @update:value="onParamChange"
+      />
+    </label>
     <label v-if="rankable" class="condition-control condition-control--rank">
       <span>排名口径</span>
       <n-select
+        :consistent-menu-width="false"
         :value="condition.rank_mode ?? ''"
         :options="rankModeOptions"
         size="small"
+        :render-label="renderIndicatorLabel"
         aria-label="排名口径"
         @update:value="onRankModeChange"
       />
@@ -155,7 +196,7 @@ function toggleFieldComparison(): void {
     </div>
     <label v-else-if="compareByField && hasValue" class="condition-control condition-control--value">
       <span>比较指标</span>
-      <n-select :value="condition.right_field" :options="indicatorOptions" size="small" filterable :render-label="renderIndicatorLabel" aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
+      <n-select :consistent-menu-width="false" :value="condition.right_field" :options="indicatorOptions" size="small" filterable :render-label="renderIndicatorLabel" aria-label="比较指标" @update:value="emit('update:rightField', $event)" />
     </label>
     <label v-else-if="hasValue" class="condition-control condition-control--value">
       <span>目标值{{ inputHint ? '（' + inputHint + '）' : '' }}</span>
@@ -180,7 +221,18 @@ function toggleFieldComparison(): void {
 <style scoped>
 .condition-line {
   display: grid;
-  grid-template-columns: 42px minmax(240px, 2fr) minmax(96px, .55fr) minmax(112px, .68fr) minmax(130px, .8fr) 84px;
+  /* 7 轨：序号 + 指标 + 参数 + 排名口径 + 关系 + 目标值 + 操作。
+     2026-11-16：参数/排名口径两个下拉是 v-if 的，靠自动放置会让后续控件
+     逐个左移一轨（排名口径掉进 88px 的参数轨 → 只显示「证…」，
+     操作按钮掉进 40px 的序号轨）。所以每条轨道都必须显式指定列位。 */
+  grid-template-columns:
+    40px                  /* 1 序号 */
+    minmax(200px, 1.7fr)  /* 2 观察指标 */
+    minmax(104px, .6fr)   /* 3 参数（CAGR 年数 / 国债期限） */
+    minmax(148px, .9fr)   /* 4 排名口径 */
+    minmax(96px, .55fr)   /* 5 判断关系 */
+    minmax(120px, .7fr)   /* 6 目标值 */
+    76px;                 /* 7 操作 */
   align-items: stretch;
   min-height: 74px;
   margin: 0 18px;
@@ -189,6 +241,15 @@ function toggleFieldComparison(): void {
   background: #fff;
   overflow: hidden;
 }
+
+/* 显式列位：v-if 缺省时空出该轨，不让后面的控件前移 */
+.condition-index { grid-column: 1; }
+.condition-control--field { grid-column: 2; }
+.condition-control--param { grid-column: 3; }
+.condition-control--rank { grid-column: 4; }
+.condition-control--operator { grid-column: 5; }
+.condition-control--value { grid-column: 6; }
+.condition-tools { grid-column: 7; }
 
 .condition-index {
   display: grid;
@@ -252,7 +313,10 @@ function toggleFieldComparison(): void {
 
 @media (max-width: 900px) {
   .condition-line { grid-template-columns: 36px 1fr 1fr; }
-  .condition-index { grid-row: 1 / 3; }
+  /* 小屏回到自动放置：先解除上面写死的列位，否则会挤在同一列 */
+  .condition-control--field, .condition-control--param, .condition-control--rank,
+  .condition-control--operator { grid-column: auto; }
+  .condition-index { grid-row: 1 / 3; grid-column: auto; }
   .condition-control--value { grid-column: 2 / 4; border-top: 1px solid #e1e5e1; }
   .condition-tools { grid-column: 2 / 4; flex-direction: row; justify-content: flex-end; border-top: 1px solid #e1e5e1; }
 }

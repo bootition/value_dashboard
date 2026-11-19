@@ -181,3 +181,157 @@ rolling / lag 等时序运算（PRD §11.2）。
 
 我倾向**做**：`div_yield_spread` 的 9 个期限里，实际常用的只有 10 年期，
 剩下 8 个基本是噪音；`cagr8` 这类需求反而真实存在。
+
+
+---
+
+## 7. 落地：把 15 个参数化字段收成条件参数（用户裁定「查出来就直接修复」）
+
+§2.3 建议收的 15 个字段已落地。机制与 `rank_mode` 一致：**库里仍是真实列，
+但下拉里只暴露基名 + 参数下拉**。
+
+| 家族 | 收起前 | 收起后 |
+|---|---|---|
+| 国债期限利差 | 9 个字段（`div_yield_spread_0p25y` … `_30y`） | **1 个入口** `div_yield_spread` + 期限下拉（9 档） |
+| CAGR 年数 | 6 个字段（`{revenue,net_profit,deducted_profit}_cagr{3,5}`） | **3 个入口** + 年数下拉（3 / 5） |
+| 合计 | **15** | **4** |
+
+写法：
+
+```json
+{"field": "revenue_cagr", "cagr_years": 3, "op": ">=", "value": 0.15}
+{"field": "div_yield_spread", "tenor": "10y", "op": ">=", "value": 0}
+```
+
+`expand_rank_modes()` 在入口按 **参数 → 排名** 的顺序展开：
+`div_yield_spread` + `10y` + `market_rank` → `div_yield_spread_10y_market_rank`。
+旧的带后缀字段名仍然兼容（已保存规则继续可跑），只是不再出现在下拉里。
+
+### 7.1 四类错误都给可执行提示（不是「未知字段」）
+
+| 输入 | 提示 |
+|---|---|
+| `cagr_years: 8` | `cagr_years 取值必须是 3, 5，收到 8` |
+| 只给 `revenue_cagr` 不给参数 | `revenue_cagr 需要指定 cagr_years（可选：3, 5）` |
+| `roe` + `cagr_years` | `roe 不支持 cagr_years；只有 revenue_cagr, net_profit_cagr, deducted_profit_cagr 支持` |
+| CAGR + 排名（CAGR 不在可排名清单） | `该字段不支持排名口径（不在可排名清单里）: revenue_cagr3_market_rank（基名 revenue_cagr3）` |
+
+最后一条要特别说明：`_rank_base_for()` 只在基名**可排名**时才返回基名，
+所以「基名存在但不可排名」会被它判成 `None`，最终落到含糊的「未知字段」。
+新增 `unrankable_rank_base()` 专门区分这两种情况 —— 用户拼错名字 vs 换字段。
+
+### 7.2 遮蔽要向上传播（施工中发现的坑）
+
+`deducted_profit_cagr3/5` 会因为 `DEDUCTED_PROFIT_GAP` 被判 `masked_untrusted`。
+收起后下拉里只剩基名 `deducted_profit_cagr`，若不传播遮蔽，
+用户能选中一个**实际会被 409 拒绝**的入口。已加 `_masked_param_columns()`
+把遮蔽传播到基名，并在提示里列出被遮蔽的具体列。
+
+### 7.3 三个入口都支持参数
+
+| 位置 | 交互 |
+|---|---|
+| 筛选条件 | 指标后面出现「年数」/「国债期限」下拉 |
+| 排序规则 | 同上，字段旁出现参数下拉 |
+| 结果展示列 | 每个参数取值一个选项（`营收3年复合增速 · 年数 3`） |
+
+结果列的合成值编码扩展为 `字段@参数=值::rank::口径`（`decodeResultColumn` / `encodeResultColumn`）。
+
+### 7.4 测试
+
+`test_screening_rank_mode.py` 从 16 条扩到 **24 条**，新增 8 条：
+
+| 用例 | 契约 |
+|---|---|
+| `test_param_families_hide_suffixed_fields` | 15 个后缀字段被隐藏，4 个基名保留且基名不是真实列 |
+| `test_expand_param_cagr_and_tenor` | 参数展开成真实列名并移除参数键 |
+| `test_param_value_must_be_in_options` | 8 年 / 12 年期显式报错 |
+| `test_param_base_without_value_is_rejected` | 基名不带参数 → 提示需要指定参数 |
+| `test_param_on_wrong_field_is_rejected` | `roe` + `cagr_years` → 报不支持 |
+| `test_param_and_rank_mode_compose_when_rankable` | 参数先于排名展开 |
+| `test_unrankable_base_gives_actionable_error` | 可排名/不可排名/不存在三种分类正确 |
+| `test_param_works_in_conditions_sort_and_columns` | 三个入口联用 |
+
+**端到端实测（正式库）**：条件 `revenue_cagr3 >= 15%` + `div_yield_spread_10y >= 0`
+按 CAGR 降序 → 命中 251 只，结果列 `div_yield_spread_10y` 正确带出。
+
+门禁：24 passed、10 个回归文件 **145 passed**、Ruff 与前端 lint/build/70 vitest 全绿。
+
+---
+
+## 8. UI 截断全项目审计（2 个 Agent）与修复
+
+用户反馈「排名口径下拉根本看不全，只能看到『原…』『全…』『证…』」，
+要求全项目排查同类问题。两个 Agent 分别做了「下拉/文本截断」与「排序能力」审计。
+
+### 8.1 真根因不是缺 tooltip，是 **grid 轨道动态错位**
+
+`RuleConditionRow` 用 CSS Grid，6 条轨道靠**自动放置**排布。加入参数下拉后：
+
+| 字段有参数时 | 子元素 | 落到的轨道 |
+|---|---|---|
+| 无参数（如 `pe_ttm`） | 序号、指标、**排名口径**、关系、值、操作 | 排名口径掉进第 3 轨（参数轨，88px） |
+| 有参数 | 序号、指标、参数、排名口径、关系、值、**操作** | 第 7 个元素掉进第 1 轨（序号轨，40px） |
+
+排名口径落在 88px 轨道 → 文本区约 27px → **只能装 1 个字 + 省略号**。
+更糟的是 naive-ui `consistentMenuWidth` 默认 `true`，
+**弹层宽度被锁成触发器宽度**，所以「点开也看不到全名」。
+
+**修法**：轨道改为 7 条并给每个控件**显式 `grid-column`**（v-if 缺省时空出该轨，
+不后移）；4 个 `n-select` 全部加 `:consistent-menu-width="false"`；保留 `NEllipsis` tooltip。
+
+### 8.2 其他修复
+
+| 位置 | 问题 | 修法 |
+|---|---|---|
+| `BusinessOverviewSection.vue:140` | 所属行业 CSRC 名最长 30 字（≈360px），格子 174px + nowrap 省略号，无 title | 加 `:title` |
+| `AnnouncementTimelineCard.vue:172` | 公告标题最长 101 字，无 title | 加 `:title` |
+| `ScreeningPage.vue:898` | 已保存规则下拉，本页唯一既无 `render-label` 也无 `consistent-menu-width` | 挂 `renderOptionLabel` |
+| `ScreeningResultsPanel.vue:379` | 结果列多选无 `render-label`（同页另一处有，不一致） | 新增 `renderColumnLabel` |
+
+### 8.3 Agent 排除的假阳性（记下来防下一轮返工）
+
+- `width: 90px` 的升序/降序、130px 公告时间窗、96px 窗口选择 —— **宽度窄但内容更短，不要一起改**
+- `IndustryContributionBars.vue` 150px + ellipsis 无 tooltip —— 但数据源 `sw_level1` 实测 31 个行业名**全是 4 字**，完全富裕
+- 数据状态页/黑名单/ETF/指数页的窄列装长英文 —— naive-ui 表格 `word-break: break-word`，**换行不截断**
+- 全项目 `ellipsis: true`（不带 tooltip）**0 处** —— 4 处 ellipsis 全是 `{ tooltip: true }`
+
+---
+
+## 9. 排序架构审计：PRD 与实现漂移（待决策）
+
+Agent 查清了用户质疑「为什么在筛选的时候就让它排序」：
+
+### 9.1 现状：排序确实是**规则版本的一部分**，而且有副作用
+
+| 事实 | 证据 |
+|---|---|
+| 排序存进 `rule_json` | `ScreeningPage.vue` 保存时 `rule_json: { conditions, sort, columns }` |
+| 改排序会**新建规则版本** | `/rules/save` 是追加式（`version = existing + 1`），而运行前若脏会自动保存 |
+| 对比：`columns` 可随 `/run` 覆盖 | `ScreeningRequest` 有 `columns`，**没有** `sort` |
+| 服务端 `ORDER BY` 后 `LIMIT 5000` | 排序不同 → **被保留的 5000 只股票不同** → 冻结进结果快照与 CSV |
+| 严格模式下排序字段进 strict 断言 | 仅改排序字段**就可能过滤掉行** |
+
+### 9.2 结果表其实已经能点表头排序
+
+`ScreeningResultsPanel` 每列都有 `sorter: 'default'`，纯客户端本地排序、不落库。
+**但它与导出是两套顺序**：CSV 走 `/export_csv` 按 `result_json` 顺序写，界面无任何提示。
+
+### 9.3 PRD 怎么说
+
+- §12.5：「明确多字段排序」与「明确列配置」并列在**结果展示**
+- `:576`：保存结果必须保留排序
+- `:764`：**「结果页可配置列、多字段排序」**
+
+→ **PRD 从未要求排序属于规则版本**，现状是实现漂移。
+
+### 9.4 建议（待用户批准，涉及 API 语义变更）
+
+把 `sort` 像 `columns` 一样改成**运行参数**（去版本化）：
+
+1. `/run` 请求体新增 `sort`，`rule_json` 不再强制含 sort；
+2. 服务端 `ORDER BY` 保留（保住「截断可复现」与「导出同序」）；
+3. 结果页表头 sorter 保留，但补提示「仅影响当前视图，保存/导出按规则排序」并显示当前服务端排序字段；
+4. 截断提示改为「按 <排序字段> 取前 5000 条，调整排序会改变被保留的股票」。
+
+**不推荐纯前端排序**：那会让「截断保留谁」退回不可控的 `stock_code` 兜底序。
