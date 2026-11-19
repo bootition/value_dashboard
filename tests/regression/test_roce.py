@@ -795,3 +795,39 @@ def test_ineligible_when_sw_missing_but_csrc_is_financial(
     )
     RoceBuilder(duck=duckdb_store).build()
     assert _eligible(duckdb_store, "100006")["roce_eligible"] is False
+
+
+def test_eligible_is_false_not_null_without_roce_history(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """没有 ROCE 历史的股票（新股/金融股）必须是 `false`，不能停在 NULL（reports/146）。
+
+    事故：`SNAPSHOT_UPDATE_SQL` 的聚合左表是 `roce_history`，没有历史的股票在
+    agg 里没有行，`UPDATE ... FROM` 碰不到 → `roce_eligible` 保持 INSERT 时的
+    NULL。后果是 `WHERE roce_eligible` 和 `WHERE NOT roce_eligible` **都不命中**
+    这些股票，用户按「非金融·市值≥100亿·有效年数≥5」筛会静默漏公司。
+
+    实测（正式库）：115 行曾是 NULL。
+    """
+    # 只建快照、不建任何 roce_history（模拟 2024 年后上市的新股）
+    duckdb_store.write_query(
+        """INSERT INTO stock_meta
+               (stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended,
+                listing_date)
+           VALUES ('100099', '新股', 'SZSE', true, '制造业', false, false,
+                   CAST('2025-01-01' AS DATE))"""
+    )
+    # 市值住在 indicator_snapshot（不是 stock_meta）
+    duckdb_store.write_query(
+        """INSERT INTO indicator_snapshot
+               (stock_code, report_date, calculated_at, data_version, total_market_cap)
+           VALUES ('100099', CAST('2025-12-31' AS DATE), now(), 'fixture', 5e9)"""
+    )
+    RoceBuilder(duck=duckdb_store).build()
+
+    row = duckdb_store.read_query(
+        "SELECT roce_eligible FROM indicator_snapshot WHERE stock_code = '100099'"
+    )[0]
+    assert row["roce_eligible"] is False, (
+        "无 ROCE 历史必须是 false（可筛掉），不能是 NULL（两种筛选都不命中）"
+    )

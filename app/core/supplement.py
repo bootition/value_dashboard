@@ -892,6 +892,10 @@ class SupplementFetcher:
     ) -> None:
         self.duck = duck
         self.sqlite = sqlite
+        # 2026-11-16（reports/146）：非标准报告期被写库守卫丢弃的计数与样例。
+        # 与 `last_skipped_empty_rows` 同类，供上层日志 / 资产体检使用。
+        self._dropped_nonstandard_periods = 0
+        self._dropped_nonstandard_sample: list[dict[str, Any]] = []
 
     # ─── 目标报告期 ────────────────────────────────────────────────
 
@@ -1496,6 +1500,50 @@ class SupplementFetcher:
 
     # ─── 落库 ─────────────────────────────────────────────────────
 
+    @property
+    def last_dropped_nonstandard_periods(self) -> int:
+        """最近一次落库时被丢弃的「非标准报告期」行数（reports/146）。"""
+        return self._dropped_nonstandard_periods
+
+    @property
+    def last_dropped_nonstandard_sample(self) -> list[dict[str, Any]]:
+        """被丢弃行的样例（最多 10 条），用于日志定位。"""
+        return list(self._dropped_nonstandard_sample)
+
+    def _drop_nonstandard_periods(
+        self, frame: pd.DataFrame, *, table: str,
+    ) -> pd.DataFrame:
+        """丢掉 `report_date` 不是标准期末（03-31/06-30/09-30/12-31）的行。
+
+        为什么必须挡住（reports/146）：CSMAR 历史批次把「上年年报」重复记成
+        「次年 01-01」，全库因此多出 116,109 行重复 + 8,630 行错期。
+        报告期只有四种形态，任何其它日期都意味着**解析或口径有错**——
+        与其带着伪期次入库让下游 `ORDER BY report_date` / LAG / TTM 全算歪，
+        不如在这里丢弃并记数。
+
+        丢弃而不是抛错：一次补采里个别行的日期畸形不该让整批失败；
+        计数量挂在 `last_dropped_nonstandard_periods` 供上层日志与体检使用。
+        """
+        from app.core.report_periods import is_standard_report_date
+
+        if frame.empty:
+            return frame
+        mask = frame["report_date"].map(
+            lambda value: is_standard_report_date(value.date() if hasattr(value, "date") else value)
+        )
+        dropped = int((~mask).sum())
+        self._dropped_nonstandard_periods += dropped
+        if dropped and len(self._dropped_nonstandard_sample) < 10:
+            for _, row in frame.loc[~mask].head(
+                10 - len(self._dropped_nonstandard_sample)
+            ).iterrows():
+                self._dropped_nonstandard_sample.append({
+                    "table": table,
+                    "stock_code": str(row.get("stock_code")),
+                    "report_date": str(row.get("report_date"))[:10],
+                })
+        return frame.loc[mask]
+
     def _strip_insurer_contract_liabilities(
         self, frame: pd.DataFrame, *, table: str,
     ) -> int:
@@ -1580,6 +1628,12 @@ class SupplementFetcher:
                 frame = pd.DataFrame(rows, columns=list(columns))
                 if "report_date" in frame.columns:
                     frame["report_date"] = pd.to_datetime(frame["report_date"])
+                    # 2026-11-16（reports/146）：非标准报告期一律不落库。
+                    # 历史事故：CSMAR 批次把「上年年报」重复记成「次年 01-01」，
+                    # 全库留下 116,109 行重复 + 8,630 行错期（详见
+                    # scripts/repair_nonstandard_report_dates.py）。这里是
+                    # **新数据**的入口守卫，存量由该脚本清理。
+                    frame = self._drop_nonstandard_periods(frame, table=table)
                 if CONTRACT_LIABILITIES_COLUMN in frame.columns:
                     self._strip_insurer_contract_liabilities(frame, table=table)
                 empty_frame = frame.iloc[0:0]
