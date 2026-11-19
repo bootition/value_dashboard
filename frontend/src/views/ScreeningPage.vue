@@ -20,6 +20,8 @@ import { useAutoUpdateRunning } from '../composables/useAutoUpdatePolling.ts'
 import { useScreeningColumns, DEFAULT_RESULT_COLUMNS, encodeResultColumn } from '../composables/useScreeningColumns.ts'
 import { useScreeningDraft } from '../composables/useScreeningDraft.ts'
 import { useScreeningRules } from '../composables/useScreeningRules.ts'
+import { readinessNotice } from '../utils/readiness-notice.ts'
+import type { ReadinessNotice } from '../utils/readiness-notice.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 import { apiErrorText } from '../helpers/api-error.ts'
 import { applyIndicatorUnits, indicatorDisplayName } from '../utils/screening-format.ts'
@@ -121,6 +123,9 @@ function renderOptionLabel(option: { label?: string }): VNode {
 
 /** 切换排序字段的参数值，并清掉另一个家族的旧参数。 */
 
+
+// 后端就绪结论的新鲜度/降级提示（readiness_* 字段，reports/140 §15.5）
+const readinessHint = ref<ReadinessNotice | null>(null)
 
 const readinessCopy = computed(() => {
   if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
@@ -234,6 +239,7 @@ async function runScreening() {
     totalMatched.value = resp.data.total
     // reports/79 方案 A: 更新窗口内基于快照的运行，明确告知口径
     autoUpdateSnapshot.value = resp.data.auto_update_in_progress === true
+    readinessHint.value = readinessNotice(resp.data)
     snapshotAsOf.value = resp.data.data_as_of ?? null
     // 2026-08-14 红队 P2-4：严格模式空结果的原因反馈（无 strict 血缘等）
     strictModeWarning.value = resp.data.strict_mode_warning ?? null
@@ -462,6 +468,14 @@ onMounted(async () => {
 
       <aside class="screening-run-panel">
         <div class="screening-ready" :data-state="readinessCopy.state"><i></i>{{ readinessCopy.label }}</div>
+        <!-- reports/140 §15.5：就绪结论打折时必须让人看见，别只写日志 -->
+        <n-alert
+          v-if="readinessHint"
+          class="screening-readiness-hint"
+          :type="readinessHint.level === 'degraded' ? 'warning' : 'info'"
+          :bordered="false"
+          size="small"
+        >{{ readinessHint.text }}</n-alert>
         <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
         <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
         <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>

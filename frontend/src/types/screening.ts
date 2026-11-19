@@ -128,6 +128,15 @@ export interface ScreeningRunResponse {
   readonly data_as_of?: string | null
   // 2026-08-14 红队 P2-4：strict_only 空结果的原因反馈
   readonly strict_mode_warning?: string | null
+  // reports/140 §13.4/§15.5：本次「就绪」判断的来源与可信度（纯增量，旧客户端可忽略）
+  readonly readiness_source?: string | null
+  readonly readiness_stale?: boolean | null
+  readonly readiness_age_seconds?: number | null
+  readonly readiness_degraded?: {
+    readonly active?: boolean
+    readonly count_only_tables?: ReadonlyArray<string>
+    readonly reasons?: ReadonlyArray<string>
+  } | null
 }
 
 /** Response from GET /api/data-status/summary (only the quality slice we need). */

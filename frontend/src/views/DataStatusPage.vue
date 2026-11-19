@@ -6,6 +6,13 @@ import type { DataQualityStatus } from '../types'
 import { warningCodeLabel } from '../types/data-quality'
 import { fmtStoredPercent } from '../utils/formatters.ts'
 import { usePollTimer } from '../composables/usePolling.ts'
+import { isPackaged } from '../helpers/runtime.ts'
+
+// 打包版 / 开发版的 CLI 前缀不同（见 helpers/runtime.ts）
+const packagedRuntime = ref(false)
+const cliPrefix = computed(() =>
+  packagedRuntime.value ? 'vd' : 'python -m app.cli.main',
+)
 
 interface RetryItem {
   stock_code: string
@@ -340,6 +347,9 @@ function handleRefresh() {
 }
 
 onMounted(() => {
+  // C3（报告41）：打包版 exe 的入口是 `vd`，开发版是 `python -m app.cli.main`。
+  // 以前这里硬编码了开发版命令，打包版用户照着敲会失败。
+  void isPackaged().then((p) => { packagedRuntime.value = p })
   void fetchAutoOverview()
   void fetchHeavy()
   scheduleHeavyPolling()
@@ -738,7 +748,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
         </n-card>
 
         <n-card v-if="summary.stock_count === 0">
-          <n-empty description="尚未初始化数据。请运行: python -m app.cli.main data init" />
+          <n-empty :description="`尚未初始化数据。请运行: ${cliPrefix} data init`" />
         </n-card>
         </template>
         </section>
