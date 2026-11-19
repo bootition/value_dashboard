@@ -37,8 +37,24 @@ def _cjk(text: str) -> bool:
 
 
 def _all_indicator_names() -> list[str]:
-    """API 可能下发的全部指标名（与 `/api/screening/indicators` 的口径对齐）。"""
+    """API 可能下发的全部指标名（与 `/api/screening/indicators` 的 append 站点一一对齐）。
+
+    2026-11-16 审查发现前一版有盲区：漏了 `EXTENDED_SCREENING_READY`（55 个）
+    与 `METADATA_COLUMNS`（结果表头列），且 `STAT_FIELDS` 整段被 `continue` 跳过。
+    现在按 append 站点逐个补全：
+
+    | 站点 | 来源 |
+    |---|---|
+    | 1 | SNAPSHOT_COLUMNS（去参数后缀） |
+    | 2 | NORMALIZED_FIELDS（去参数后缀） |
+    | 3 | PARAM_FAMILIES 基名 |
+    | 4 | EXTENDED_SCREENING_READY |
+    | 5 | STAT_FIELDS |
+    | 6 | METADATA_COLUMNS（结果表头，用户同样看得到） |
+    """
     from app.core.screening.engine import (
+        EXTENDED_SCREENING_READY,
+        METADATA_COLUMNS,
         NORMALIZED_FIELDS,
         PARAM_FAMILIES,
         SNAPSHOT_COLUMNS,
@@ -51,6 +67,8 @@ def _all_indicator_names() -> list[str]:
     names |= {c for c in SNAPSHOT_COLUMNS if c not in hidden}
     names |= {c for c in NORMALIZED_FIELDS if c not in hidden}
     names |= set(STAT_FIELDS)
+    names |= set(EXTENDED_SCREENING_READY)
+    names |= set(METADATA_COLUMNS)
     # 参数化字段的**基名**入口（不是真实列，但会出现在下拉里）
     for spec in PARAM_FAMILIES.values():
         names |= set(spec["bases"])
@@ -93,11 +111,14 @@ def test_no_indicator_name_is_english_only() -> None:
     labels = _label_map_from_source()
     missing: list[str] = []
 
+    stat_metric_labels = _stat_metric_labels_from_source()
     for name in _all_indicator_names():
-        # 统计域靠模板拼中文（STAT_METRIC_LABELS + 窗口 + 方法），单独判定
+        # 统计域靠模板拼中文（STAT_METRIC_LABELS + 窗口 + 方法）。
+        # **不能整段跳过**：2026-11-16 审查实测，删掉 STAT_METRIC_LABELS 里的
+        # `spread_10y` 后界面会变成「spread_10y · 10年 · 历史分位」，而旧版测试照样通过。
         if name in STAT_FIELD_NAMES_CACHE():
             metric = name.split("_stat_")[0]
-            if metric in STAT_METRICS:
+            if metric in STAT_METRICS and _cjk(stat_metric_labels.get(metric, "")):
                 continue
             missing.append(name)
             continue
@@ -111,6 +132,14 @@ def test_no_indicator_name_is_english_only() -> None:
         + "\n  ".join(missing)
         + "\n\n修法：在 FIELD_LABELS（或对应的 *_FIELD_LABELS）里补中文名。"
     )
+
+
+def _stat_metric_labels_from_source() -> dict[str, str]:
+    """抽前端 `STAT_METRIC_LABELS`（统计域指标名的中文模板）。"""
+    text = FORMAT_TS.read_text(encoding="utf-8")
+    matched = re.search("STAT_METRIC_LABELS[^=]*=\s*\{(.*?)\n\}", text, re.S)
+    block = matched.group(1) if matched else ""
+    return dict(re.findall("^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*'([^']*)'", block, re.M))
 
 
 _STAT_NAMES: set[str] | None = None

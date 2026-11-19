@@ -163,8 +163,12 @@ const resultColumnOptions = computed(() => {
     if (!spec) continue
     const base = fieldDisplayName(indicator.name, indicator.name)
     for (const value of spec.options) {
+      // 库里存 `0p25y`（避免字段名里的小数点），界面显示「0.25 年」
+      const shown = spec.kind === 'tenor'
+        ? `${String(value).replace('p', '.')} 年`
+        : `${String(value)} 年`
       options.push({
-        label: `${base} · ${spec.label} ${String(value)}`,
+        label: `${base} · ${shown}`,
         value: `${indicator.name}${PARAM_COLUMN_SEP}${spec.key}=${String(value)}`,
       })
     }

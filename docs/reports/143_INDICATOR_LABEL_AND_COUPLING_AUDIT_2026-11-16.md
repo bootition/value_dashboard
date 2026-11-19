@@ -379,3 +379,70 @@ Agent 查清了用户质疑「为什么在筛选的时候就让它排序」：
 - 后端 `test_screening_draft` / `test_screening_api_regressions` /
   `test_screening_rank_mode` / `test_screening_engine_regressions` **58 passed**
 - 全项目已无 `sortRules` / 「结果排序」残留（grep 确认）
+
+---
+
+## 11. 二次中断：我又漏了 4 个基名，用户第三次看到纯英文
+
+用户截图（第二张）显示下拉里仍有：
+
+```
+revenue_cagr(%)
+net_profit_cagr(%)
+deducted_profit_cagr(%)
+div_yield_spread(%)
+```
+
+**这是我 §7 自己造成的新遗漏**：把 15 个参数化字段收成基名后，
+前端 `FIELD_LABELS` 里只有带后缀的 `revenue_cagr3/5`，**基名没有中文名**。
+而 §1 写进知识库的 `I-LABELCN` 讲的正是这件事 —— 自己违反了。
+
+已补：`营收复合增速` / `净利润复合增速` / `扣非净利复合增速` / `股息率-国债利差`。
+
+## 12. 派 Agent 独立审查我的修复（用户要求）
+
+用户明确要求：「你修复问题的时候，记得派一个agent去审查一下你到底搞得怎么样？」
+审查员独立枚举（**不复用我的守卫测试逻辑**，避免继承同样的盲区）后给出 `pass_with_fixes`：
+
+### 12.1 修好的部分（审查员实测确认）
+
+| 项 | 结论 |
+|---|---|
+| 4 个基名中文名 | ✅ 修好（`f6d043d` 前后对照） |
+| 独立枚举 242 个指标名 → 纯英文 | **0 个** |
+| 排序残留 `sortRules`/`SortRule`/「结果排序」/「排序方式」 | **0 处** |
+| `rule_json` 是否仍含 sort | 否，只剩 `{conditions, columns}` |
+| 引擎无 sort 时行为 | `ORDER BY stock_code`（确定性） |
+| 表头排序是否真可用 | 实测点两次：降序→[30,20,5]，升序→[5,20,30] ✅ |
+| 后端是否仍认旧后缀字段 | ✅（`revenue_cagr3` 等继续可用） |
+| 遮蔽向上传播是否生效 | ✅（把 `_masked_param_columns` 改成 `return []` 后对应测试立刻失败） |
+
+### 12.2 审查员抓到的真问题（已全部修复）
+
+| # | 严重度 | 问题 | 修法 |
+|---|---|---|---|
+| 1 | **P0（守卫盲区）** | 守卫只枚举 185 个，**漏了 `EXTENDED_SCREENING_READY` 55 个**；实测删掉 `tobin_q` 的中文名，测试照样通过 | 枚举补到 6 个 append 站点（含扩展域 + `METADATA_COLUMNS`） |
+| 2 | **P0（守卫盲区）** | `STAT_FIELDS` 整段被 `continue` 跳过，三张 stat 模板表从未校验；实测删掉 `STAT_METRIC_LABELS.spread_10y` 测试仍通过 | 改为校验 `STAT_METRIC_LABELS` 必须含中文，不再跳过 |
+| 3 | **P1（真 bug）** | 结果表头显示 `listing_date` 等纯英文（默认结果列里就有） | 补 7 个元数据列中文名：上市日期/是否 ST/是否停牌/总股本/流通股本/申万一二三级行业 |
+| 4 | **P1（真 bug）** | `STAT_METRIC_LABELS` 的 `pe_ttm`/`pb_mrq` 值是 `PE-TTM`/`PB-MRQ` —— **纯英文**，统计域字段显示成「PE-TTM · 5年 · 历史分位」 | 改为 `市盈率（PE-TTM）`/`市净率（PB-MRQ）`（这条是**守卫补强后立刻抓出来的**） |
+| 5 | P2 | 导出提示「导出按当前顺序」不准 —— 导出实际读服务端 `result_json` 顺序 | 改为「导出按服务器保存的顺序」 |
+| 6 | P2 | 参数值未本地化：国债期限下拉显示 `0p25y` | 显示 `0.25 年`；CAGR 显示 `3 年`（条件行 + 结果列两处） |
+| 7 | P2 | 死代码：结果面板 `sort?:` prop、`screening-quality.sortField` | 删除 |
+| 8 | P2 | `DslIndicatorManager` 主标题对未登记中文名的复合指标仍是纯英文 | 加「复合指标」前缀兜底 |
+
+### 12.3 变异测试（证明守卫现在真有牙齿）
+
+| 变异 | 旧守卫 | 新守卫 |
+|---|---|---|
+| 删 `pe_ttm` 中文名 | ❌ 1 failed（有牙齿） | ✅ 1 failed |
+| 删 `tobin_q`（扩展域） | ✅ **5 passed 盲区** | ❌ 1 failed |
+| 删 `STAT_METRIC_LABELS.spread_10y` | ✅ **5 passed 盲区** | ❌ 1 failed |
+
+每次变异后均已 `git checkout` 还原，工作区干净。
+
+### 12.4 门禁
+
+- `test_indicator_label_coverage.py` **5 passed**（补强后仍全绿）
+- 后端 4 个回归文件 **66 passed**
+- 前端 lint + build + **70 vitest** 全绿
+- 全量枚举（6 个 append 站点）缺中文名 **0 个**

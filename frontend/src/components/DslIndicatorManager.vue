@@ -69,6 +69,14 @@ function statusTagType(s: string) {
   return 'default' as const
 }
 
+/** 复合指标的中文展示名：有中文名用中文名，否则加「复合指标」前缀。 */
+function displayNameOf(name: string): string {
+  const resolved = fieldDisplayName(name, '')
+  if (resolved && resolved !== name) return resolved
+  const hasCjk = /[一-鿿]/.test(resolved || name)
+  return hasCjk ? (resolved || name) : `复合指标 ${name}`
+}
+
 const columns: DataTableColumns<DslExpression> = [
   {
     title: '名称',
@@ -79,7 +87,9 @@ const columns: DataTableColumns<DslExpression> = [
         // 同名多版本必须一眼分得清（2026-11-16：分红融资比 v1/v2 并列，
         // 两条都显示「已发布」，用户以为重复建了两个指标）。
         h('b', null, [
-          fieldDisplayName(row.name, row.name),
+          // 未登记中文名的复合指标不能只显示英文名（PRD §12.1），
+          // 统一加「复合指标」前缀，与后端 `_dsl_indicator_label` 保持一致。
+          displayNameOf(row.name),
           h('span', { class: 'dsl-version-badge' }, ` v${row.version}`),
         ]),
         h('small', null, row.name),

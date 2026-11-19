@@ -47,11 +47,6 @@ export function collectRuleFields(node: ScreeningRuleNode): Set<string> {
  */
 export interface ComputeUntrustedInputs {
   readonly ruleFields: Iterable<string>
-  /**
-   * 已废弃（2026-11-16：排序移到结果页，筛选侧不再有排序字段）。
-   * 保留为可选，兼容仍有排序概念的调用方。
-   */
-  readonly sortField?: string | null
   readonly resultColumns: Iterable<string>
   readonly warningCodes: readonly WarningCode[]
 }
@@ -78,9 +73,6 @@ export function computeUntrustedFields(inputs: ComputeUntrustedInputs): string[]
 
   for (const f of inputs.ruleFields) {
     if (f && !f.startsWith('_')) candidateFields.add(f)
-  }
-  if (inputs.sortField && !inputs.sortField.startsWith('_')) {
-    candidateFields.add(inputs.sortField)
   }
   for (const f of inputs.resultColumns) {
     if (f && !f.startsWith('_')) candidateFields.add(f)

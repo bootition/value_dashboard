@@ -107,9 +107,22 @@ const rankModeOptions = computed(() => [
   ...(props.rankModes ?? []),
 ])
 
+/**
+ * 参数值的**中文展示**（2026-11-16 审查 P2）：
+ * 库里存 `0p25y`（小数点转 p 避免字段名非法），直接显示会让人看不懂。
+ */
+function paramOptionLabel(kind: string, value: string | number): string {
+  if (kind === 'cagr') return `${value} 年`
+  if (kind === 'tenor') return `${String(value).replace('p', '.')} 年`
+  return String(value)
+}
+
 /** 参数化字段的取值选项（reports/143 §2）：如 CAGR 的 3/5 年、国债期限 9 档。 */
 const paramOptions = computed(() =>
-  (props.paramSpec?.options ?? []).map((v) => ({ label: String(v), value: v })),
+  (props.paramSpec?.options ?? []).map((v) => ({
+    label: paramOptionLabel(props.paramSpec?.kind ?? '', v),
+    value: v,
+  })),
 )
 
 function paramValue(): string | number | undefined {

@@ -118,6 +118,14 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   // 参数化基名（reports/143 §2）：年数由条件行的「年数」下拉选择，
   // 所以名字里不再写死 3/5 年。**新增字段必须同时补这里**，
   // 否则界面会出现纯英文（reports/143 §1 的 I-LABELCN 教训）。
+  // 结果表头里的元数据列（2026-11-16：用户截图看到表头是 listing_date 这种纯英文）
+  listing_date: '上市日期',
+  is_st: '是否 ST',
+  is_suspended: '是否停牌',
+  total_shares: '总股本',
+  circ_shares: '流通股本',
+  sw_level1: '申万一级行业',
+  sw_level2: '申万二级行业',
   revenue_cagr: '营收复合增速',
   net_profit_cagr: '净利润复合增速',
   deducted_profit_cagr: '扣非净利复合增速',
@@ -180,8 +188,8 @@ const RANK_SUFFIX_LABELS: Readonly<Record<string, string>> = {
 
 /** P4 历史统计字段（已发布统计域）指标与窗口中文名。 */
 const STAT_METRIC_LABELS: Readonly<Record<string, string>> = {
-  pe_ttm: 'PE-TTM',
-  pb_mrq: 'PB-MRQ',
+  pe_ttm: '市盈率（PE-TTM）',
+  pb_mrq: '市净率（PB-MRQ）',
   ttm_dividend_yield: '股息率（TTM）',
   spread_10y: '股息率-国债10年利差',
 }

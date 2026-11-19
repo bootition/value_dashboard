@@ -334,7 +334,7 @@ supersedes: null
 | U6 | **黑名单股票在被屏蔽期间不删除 `watchlist` 行**，只在其上过滤显示：移出黑名单后原来自选的股票自动回来（避免"加错黑名单顺手毁掉自选"）。同理，已保存筛选结果（`screening_results.result_json` 冻结 JSON）与 CSV 导出在读取时用 `filter_rows()` 内存剔除 | `app/web/api/watchlist.py::list_watchlist`；`app/web/api/screening.py::get_saved_result` / `export_csv` |
 | U7 | **「数据状态」页的重试/缺失列表按用户裁定保持照常显示**（那是运维诊断面，不是研究面）。因此 `/api/data-status/*`、`/api/readiness`、`summary` 的 `missing` 代码清单**故意不含**黑名单过滤——排查数据问题时黑名单股票必须仍然可见 | 用户 2026-11-22 裁定（详见第四问） |
 
-| I-LABELCN | **用户可见指标名必须含中文，且后端 `display_name` 与前端 `label` 不能各说一套**（`reports/143`）：复合指标曾显示纯英文 `dividend_financing_ratio (DSL v2)`——后端 `label` 拼英文、前端 DSL 分支只读 `label`，把后端的中文 `display_name` 和前端 `FIELD_LABELS` 全绕过了。修复后优先级固定为 `display_name` → `fieldDisplayName` → label → 字段名；无中文名的复合指标统一加「复合指标」前缀。**新增字段时必须同步补中文名**，否则界面出现「资产负债表 · accumulated_depreciation」半英文。现有基础字段中文覆盖 156/156 | `reports/143` §1 |
+| I-LABELCN | **用户可见指标名必须含中文，且后端 `display_name` 与前端 `label` 不能各说一套**（`reports/143`）：复合指标曾显示纯英文 `dividend_financing_ratio (DSL v2)`——后端 `label` 拼英文、前端 DSL 分支只读 `label`，把后端的中文 `display_name` 和前端 `FIELD_LABELS` 全绕过了。修复后优先级固定为 `display_name` → `fieldDisplayName` → label → 字段名；无中文名的复合指标统一加「复合指标」前缀。**新增字段时必须同步补中文名**，否则界面出现「资产负债表 · accumulated_depreciation」半英文。现有基础字段中文覆盖 156/156 | `reports/143` §1 |。**2026-11-16 二次复发**：把参数化字段收成基名后又漏了 4 个基名的中文名；且首版守卫测试自身有盲区（只枚举 185 个、漏 `EXTENDED_SCREENING_READY` 55 个、`STAT_FIELDS` 整段跳过）——**守卫的枚举口径必须等于实际暴露面**，否则「测试全绿但界面英文」。修法：按 `list_available_indicators` 的每个 append 站点逐一对齐，并用**变异测试**验证守卫有牙齿（删掉某条中文名必须让测试变红）
 | I-COUPLING | **「同一指标 + 参数后缀」是过耦合的信号**：排名曾铺 930 个字段（155 指标 × 6），改条件级 `rank_mode` 后归零。2026-11-16 全量审计仍有 **61 个**：统计域 40 / 国债期限利差 9 / CAGR 6 / 均线 6。判据——**纯参数**（期限、年数）应收成条件参数；**需要跨值比较或有元数据审计要求**的（均线、PRD §10.7 统计域）应保留字段 | `reports/143` §2 |
 | I-COMPOSE | **新需求优先用 DSL 复合指标，不要新增字段**：`app/core/dsl/` 已支持 `rank()`/`rank_industry()`/`percentile()`/`zscore()`/`normalize()`/`TTM`/`YoY`/`QoQ`/`CAGR`/rolling/lag。发布后自动出现在指标下拉且带版本与哈希锁定，筛选条件可直接引用（实测 `pe_rank = rank(pe_ttm)` 可用）。想筛「ROCE 高但 PB 低」→ 发布 `roce_5y_median / pb_mrq`，不必让后端加列 | `reports/143` §4 |
 
@@ -342,6 +342,23 @@ supersedes: null
 | I-GRIDAUTO | **CSS Grid 自动放置 + v-if 控件 = 轨道错位事故**（`reports/143` §8.1）：条件行有 6 条轨道但子元素数量随 v-if 变化，参数下拉缺省时「排名口径」掉进 88px 轨（文本区 27px，只显示 1 字 + 省略号），第 7 个元素还会掉进 40px 序号轨。**修法**：轨道数按最大子元素数定，每个控件显式 `grid-column`，小屏断点里再解除。**另**：naive-ui `n-select` 的 `consistentMenuWidth` 默认 `true`，弹层宽度锁死为触发器宽度——窄下拉必须加 `:consistent-menu-width="false"`，否则「点开也看不全」 | `reports/143` §8.1 |
 | I-SORTUI | **排序不属于筛选规则，放在结果页点表头**（`reports/143` §10，2026-11-16 用户裁定）：筛选侧已删「结果排序」区块。曾经排序写在 `rule_json` 里有三个看不见的副作用——①改排序 = 新建规则版本；②服务端 `ORDER BY` 在 `LIMIT 5000` **之前**，换排序会改变「留下哪 5000 家」；③严格模式下排序字段会被并进 strict 断言、可能过滤掉行。**筛选只负责选公司，排序只负责显示**。结果页每列 `sorter: 'default'` 为纯前端排序；导出走服务端顺序，界面已加提示 | `reports/143` §10 |
 | I-SORTVER（历史） | 排序曾混进规则版本（PRD §12.5/:764 把排序定位在结果页，属实现漂移）；已于 2026-11-16 按用户裁定改为结果页表头排序，详见 I-SORTUI
+
+## 21. 2026-11-22 多会话同仓并发：机器级环境事实（`reports/144`）
+
+> 来源：两个 AI 会话在**同一个工作树、同一个分支**上并行开工，一次踩出 6 类冲突
+> （`reports/144` §2）。规则本体在 `AGENTS W4`/`W8`，命令清单在
+> `docs/skills/multi-agent-safe-session/SKILL.md`。这里只登记**硬事实**——
+> 哪些东西 worktree 隔不开、哪个判据是硬编码的，免得后人当 bug 改掉。
+
+| # | 硬约束/事实 | 出处 |
+|---|---|---|
+| E8 | **`git worktree` 只隔离「文件 + 分支」，隔不开「端口 / Python 进程表 / 正式库」。** 端口与进程表是机器级的；`data/` 是 gitignore 的，**worktree 里根本没有**（只读正式库要走绝对路径，跑回归走 `s1-pytest.ps1` 的临时库不受影响）。因此：①一个 worktree 一个 `web.port`，绝不两个会话抢 8765；②**全量 S1 天然机器级串行**，只能由主控跑一次 | `reports/144` §3 表；`config/default.yaml:6` |
+| E9 | **S1 包装器的 preflight 是机器级判据，会被「别人的进程」拖红**，三种报错各有出处：`Python process state changed during formal capture`（`scripts/s1-path-preflight.ps1:329`，采样窗口内 Python 进程集合变了）、`Value Dashboard service is listening on 8765 - freeze S1`（同文件 `:362`）、`Process(es) survived into After capture`（存活进程不一定是本会话派生的）。**看到这三条先查是不是别人在跑，不要绕过** | `reports/144` §2 C3/C4；`AGENTS W6` |
+| E10 | **`s1-path-preflight.ps1:362` 的 8765 是硬编码，而 `web.port` 可配——这是故意的**。改成读配置会让「别人把服务起在 8766 读正式库」漏网。宁可误拦不可漏拦；同一段还有正式 DuckDB 写锁检查作第二道腿 | `reports/144` §6 T3（**不动**） |
+| E11 | **`.planning/` 是 gitignore 的**：任何写在里面的会话产物、租约、计划，**新克隆看不到、另一台机器看不到**。所以「文件租约」若要跨机生效，不能只落 `.planning/`（这也是 `reports/144` §6 T1 未做的原因之一）；反过来，会话结论必须回写 `docs/` | `AGENTS` 工作区边界；`.gitignore` |
+| E12 | **提交边界要自洽**：`73bb498..3726e5f` 连续 5 个提交里 `app/web/api/screening.py` 都 `import app.core.blacklist`，而该模块到 `79f15e4` 才入库 → 这 5 个提交 `git archive` 出来直接 `ModuleNotFoundError`（HEAD 自洽，只影响 `git bisect`/考古）。**新建模块必须先进库，再让别人 import** | `reports/140` §14.5；`reports/144` §2 C2 |
+| C10 | **多会话开工自检有执行器了**：`uv run --locked python scripts/session_preflight.py`（`AGENTS W4` 的执行器，退出码 2 = BLOCK）。查 4 项：脏工作区 / 额外 worktree / 别人的 pytest / 8765 被占。**fail-open**：探测本身失败只降级 WARN，不锁死 | `scripts/session_preflight.py`；`tests/regression/test_session_preflight.py` |
+| C11 | **编码事故有门禁了（RG10）**：仓库内 `.py/.md/.vue/.ts/.yaml/.json/…` 不得含 `U+FFFD` 替换字符。零误报——它不是任何人会故意敲进源码的字符；**要演示乱码请用文字 `U+FFFD` 描述，别留字面字符**（本文件与 `reports/144` 都踩过这个自伤）。扫描跳过 `.venv`/`node_modules`/`dist` 等 | `scripts/repo_integrity_guards.py::check_no_replacement_char`；`AGENTS W1` |
 
 ---
 

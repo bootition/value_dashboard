@@ -38,8 +38,6 @@ const props = defineProps<{
   // L1-4（报告42）: 导出文件名使用规则名，用户可复现/归档
   ruleName?: string
   lockedIndicators: Record<string, unknown>
-  /** 已废弃（2026-11-16：排序改由表头点击完成，不再由筛选侧传入）。 */
-  sort?: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>
   basePoolConfig: Record<string, unknown>
   // P1-C: 匹配数超过 5000 行上限时服务端显式标记，前端必须警示而非静默丢尾
   truncated?: boolean
