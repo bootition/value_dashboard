@@ -47,7 +47,11 @@ export function collectRuleFields(node: ScreeningRuleNode): Set<string> {
  */
 export interface ComputeUntrustedInputs {
   readonly ruleFields: Iterable<string>
-  readonly sortField: string | null
+  /**
+   * 已废弃（2026-11-16：排序移到结果页，筛选侧不再有排序字段）。
+   * 保留为可选，兼容仍有排序概念的调用方。
+   */
+  readonly sortField?: string | null
   readonly resultColumns: Iterable<string>
   readonly warningCodes: readonly WarningCode[]
 }

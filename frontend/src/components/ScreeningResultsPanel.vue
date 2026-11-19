@@ -38,7 +38,8 @@ const props = defineProps<{
   // L1-4（报告42）: 导出文件名使用规则名，用户可复现/归档
   ruleName?: string
   lockedIndicators: Record<string, unknown>
-  sort: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>
+  /** 已废弃（2026-11-16：排序改由表头点击完成，不再由筛选侧传入）。 */
+  sort?: ReadonlyArray<{ field: string; direction: 'asc' | 'desc' }>
   basePoolConfig: Record<string, unknown>
   // P1-C: 匹配数超过 5000 行上限时服务端显式标记，前端必须警示而非静默丢尾
   truncated?: boolean
@@ -391,7 +392,7 @@ async function addToWatchlist() {
 
     <section class="screening-results-card">
       <div class="results-heading"><div><p>SCREENING RESULTS</p><h2>筛选结果</h2><span>{{ totalMatched || displayedResults.length }} 家公司符合当前规则</span></div><div><n-button id="save-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button><n-button id="export-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="exportCSV">导出 CSV</n-button><n-button id="watchlist-btn" size="small" type="primary" :disabled="watchlistDisabled" :aria-describedby="watchlistDisabled ? 'quality-alert' : undefined" @click="addToWatchlist">保存到自选列表</n-button></div></div>
-      <div class="result-meta"><span><b>{{ displayedResults.length }}</b> 家已展示</span><span>执行规则 <b>{{ ruleName }} v{{ ruleVersion }}</b></span><span>基础股票池 <b>{{ basePoolSize }}</b></span><span>耗时 <b>{{ executionTime }} ms</b></span><span>数据日期 <b>{{ dataDate || '—' }}</b></span></div>
+      <div class="result-meta"><span><b>{{ displayedResults.length }}</b> 家已展示</span><span>执行规则 <b>{{ ruleName }} v{{ ruleVersion }}</b></span><span>基础股票池 <b>{{ basePoolSize }}</b></span><span>耗时 <b>{{ executionTime }} ms</b></span><span>数据日期 <b>{{ dataDate || '—' }}</b></span><span class="sort-hint">点列头可升序/降序排列（只影响当前视图，导出按当前顺序）</span></div>
       <div class="column-config">
         <n-select
           v-model:value="selectedColumns"
@@ -440,7 +441,7 @@ async function addToWatchlist() {
 </template>
 
 <style scoped>
-.screening-results-card { margin-top: 21px; padding: 27px 29px 29px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.results-heading { display: flex; justify-content: space-between; gap: 20px; }.results-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.results-heading h2 { margin: 7px 0 5px; font-size: 19px; }.results-heading span { color: #829087; font-size: 11px; }.results-heading > div:last-child { display: flex; align-items: start; gap: 8px; }.result-meta { display: flex; gap: 22px; margin: 21px 0 15px; color: #8b978f; font-size: 10px; }.result-meta b { color: #536359; }.column-config { margin: 0 0 15px; padding: 12px; border-radius: 8px; background: #fafcf9; }
+.screening-results-card { margin-top: 21px; padding: 27px 29px 29px; border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.results-heading { display: flex; justify-content: space-between; gap: 20px; }.results-heading p { margin: 0; color: #91a097; font-size: 9px; font-weight: 800; letter-spacing: .13em; }.results-heading h2 { margin: 7px 0 5px; font-size: 19px; }.results-heading span { color: #829087; font-size: 11px; }.results-heading > div:last-child { display: flex; align-items: start; gap: 8px; }.result-meta { display: flex; gap: 22px; margin: 21px 0 15px; color: #8b978f; font-size: 10px; }.result-meta b { color: #536359; }.result-meta .sort-hint { color: #a4b0a7; }.column-config { margin: 0 0 15px; padding: 12px; border-radius: 8px; background: #fafcf9; }
 /* 空值原因可通过 title 悬停查看：给个下划线提示"这格有话说"，但不改颜色，
    保持与真正缺失（无原因码的「—」）同一视觉层级。 */
 .null-reason-cell { border-bottom: 1px dashed #b9c5bd; cursor: help; }

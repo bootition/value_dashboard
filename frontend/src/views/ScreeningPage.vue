@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, h } from 'vue'
 import type { VNode } from 'vue'
-import { NButton, NSwitch, NInput, NInputNumber, NSelect, NSpace, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
+import { NButton, NSwitch, NInput, NInputNumber, NSelect, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
 import { NEllipsis } from 'naive-ui'
 import axios, { isAxiosError } from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
@@ -91,7 +91,7 @@ interface SavedRule {
   id: number
   name: string
   version: number
-  rule_json: { conditions: ScreeningRuleNode; sort?: SortRule[]; columns?: string[] }
+  rule_json: { conditions: ScreeningRuleNode; columns?: string[] }
   locked_indicators: Record<string, any>
   status: string
   created_at: string
@@ -108,19 +108,9 @@ const ruleTree = reactive<ScreeningRuleNode>({
   rules: [],
 })
 
-interface SortRule {
-  field: string
-  direction: 'asc' | 'desc'
-  /** 排名口径（方案 C）：空 = 原始值 */
-  rank_mode?: string
-  /** 参数化字段取值（如 cagr_years / tenor） */
-  cagr_years?: number
-  tenor?: string
-}
-
-const sortRules = ref<SortRule[]>([
-  { field: 'pe_ttm', direction: 'asc' },
-])
+// 2026-11-16 用户裁定：**筛选阶段不再设置排序**。
+// 排序是"看结果"的事——结果页每列表头都能点（ScreeningResultsPanel 的 sorter），
+// 点一下升序、再点降序即可。这里不再保留任何排序状态。
 
 const opOptions = [
   { label: '高于', value: '>' },
@@ -272,33 +262,10 @@ function renderOptionLabel(option: { label?: string }): VNode {
 }
 
 /** 排序行的参数化字段取值（如 CAGR 年数）。 */
-function sortParamValue(rule: SortRule): string | number | undefined {
-  const spec = paramSpecOf(rule.field)
-  if (!spec) return undefined
-  const raw = (rule as unknown as Record<string, unknown>)[spec.key]
-  return typeof raw === 'string' || typeof raw === 'number' ? raw : undefined
-}
 
-function sortParamOptions(field: string) {
-  const spec = paramSpecOf(field)
-  return (spec?.options ?? []).map((v) => ({ label: String(v), value: v }))
-}
 
 /** 切换排序字段的参数值，并清掉另一个家族的旧参数。 */
-function setSortParam(rule: SortRule, value: string | number): void {
-  const spec = paramSpecOf(rule.field)
-  if (!spec) return
-  const target = rule as unknown as Record<string, unknown>
-  delete target.cagr_years
-  delete target.tenor
-  target[spec.key] = value
-}
 
-/** 排序行的排名口径选项：首项「原始值」表示不带排名。 */
-const rankModeOptionsForSort = computed(() => [
-  { label: '原始值', value: '' },
-  ...rankModes.value,
-])
 
 const readinessCopy = computed(() => {
   if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
@@ -340,10 +307,6 @@ function rankableOf(field: string): boolean {
   return indicators.value.some((i) => i.name === field && i.rankable)
 }
 
-/** 取第一个指标的 value（方案 C 后下拉不再有分组，直接取首项）。 */
-function firstIndicatorValue(): string | undefined {
-  return indicatorOptions.value[0]?.value
-}
 
 const resultColumns = computed(() => {
   if (!results.value.length) return []
@@ -389,23 +352,12 @@ const ruleFields = computed(() => collectRuleFields(ruleTree))
 const untrustedFields = computed(() =>
   computeUntrustedFields({
     ruleFields: ruleFields.value,
-    sortField: sortRules.value[0]?.field || '',
     resultColumns: resultColumns.value,
     warningCodes: warningCodes.value,
   }),
 )
 
-function addSortRule() {
-  if (sortRules.value.length >= 5) {
-    message.warning('最多支持5个排序规则')
-    return
-  }
-  sortRules.value.push({ field: firstIndicatorValue() || '', direction: 'asc' })
-}
 
-function removeSortRule(index: number) {
-  sortRules.value.splice(index, 1)
-}
 
 // 2026-08-14 红队 P2-20：运行始终按已保存版本（rule_id/version）执行；
 // 此前用户选择规则后再改条件/排序会继续运行却静默忽略编辑。
@@ -429,10 +381,8 @@ function isDraftDirty(): boolean {
   const rule = activeRule.value
   if (!rule) return false
   const savedConditions = (rule.rule_json.conditions ?? null) as unknown
-  const savedSort = (rule.rule_json.sort ?? null) as unknown
   const conditionsDirty = JSON.stringify(stripRuleIds(ruleTree)) !== JSON.stringify(stripRuleIds(savedConditions))
-  const sortDirty = JSON.stringify(sortRules.value) !== JSON.stringify(savedSort)
-  return conditionsDirty || sortDirty
+  return conditionsDirty
 }
 
 function scrollToResults(): void {
@@ -542,7 +492,9 @@ const showDraftConflictModal = ref(false)
 // 比较——加载目标几乎必然不同，旧逻辑会误弹覆盖确认。
 let lastSyncedSnapshot = ''
 function editorSnapshot(): string {
-  return JSON.stringify({ conditions: ruleTree, sort: sortRules.value })
+  // 排序已移到结果页（2026-11-16），编辑器快照只含条件；
+  // 否则残留的 sort 会让『改排序也算未保存修改』。
+  return JSON.stringify({ conditions: ruleTree })
 }
 function syncEditorSnapshot() {
   lastSyncedSnapshot = editorSnapshot()
@@ -554,7 +506,6 @@ function hasUnsavedEdits(): boolean {
 function draftPayload() {
   return {
     conditions: ruleTree,
-    sort: sortRules.value,
     base_pool: { ...basePool },
     strict_only: strictOnly.value,
     result_columns: selectedResultColumns.value,
@@ -632,7 +583,7 @@ function saveDraftSoon() {
 }
 
 watch(
-  [ruleTree, sortRules, basePool, strictOnly, selectedResultColumns],
+  [ruleTree, basePool, strictOnly, selectedResultColumns],
   saveDraftSoon,
   { deep: true },
 )
@@ -641,7 +592,6 @@ async function restoreDraft() {
   try {
     const response = await axios.get<{ draft: {
       conditions?: ScreeningRuleNode
-      sort?: SortRule[]
       base_pool?: Partial<typeof basePool>
       strict_only?: boolean
       result_columns?: string[]
@@ -653,7 +603,6 @@ async function restoreDraft() {
       return
     }
     if (draft.conditions) Object.assign(ruleTree, draft.conditions)
-    if (draft.sort) sortRules.value = draft.sort
     if (draft.base_pool) Object.assign(basePool, draft.base_pool)
     if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
     if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
@@ -679,7 +628,6 @@ async function persistRule(name: string): Promise<{ rule_id: number; version: nu
       name,
       rule_json: {
         conditions: ruleTree,
-        sort: sortRules.value,
         columns: selectedColumnsForRequest(),
       },
       locked_indicators: {},
@@ -728,7 +676,7 @@ function deleteSelectedRule(): void {
 }
 
 function applyLoadedRule(rule: SavedRule) {
-  // 先重置编辑区再覆盖，确保目标规则不含 conditions/sort 时不残留旧内容。
+  // 先重置编辑区再覆盖，确保目标规则不含 conditions 时不残留旧内容。
   // 必须深拷贝：Object.assign(ruleTree, saved.conditions) 会把 conditions.rules
   // 数组引用共享给编辑区；用户一改条件值，savedRules 里的“已保存版本”会同步
   // 被改掉，isDraftDirty() 随即判定“无修改”，于是永远按旧版本号运行。
@@ -741,11 +689,6 @@ function applyLoadedRule(rule: SavedRule) {
   ruleTree.logic = 'AND'
   ruleTree.rules.splice(0, ruleTree.rules.length)
   Object.assign(ruleTree, clone)
-
-  // Load sort rules（同样深拷贝，避免 UI 修改污染 savedRules）
-  sortRules.value = (rule.rule_json.sort && rule.rule_json.sort.length > 0)
-    ? cloneScreeningRule(rule.rule_json.sort)
-    : []
 
   selectedResultColumns.value = (rule.rule_json.columns && rule.rule_json.columns.length > 0)
     ? [...rule.rule_json.columns]
@@ -819,13 +762,6 @@ onMounted(async () => {
       if (indicator.unit) units[indicator.name] = indicator.unit
     }
     applyIndicatorUnits(units)
-    // 确保 sortRules 的第一个字段在可用指标列表中
-    if (indicators.value.length > 0 && sortRules.value.length > 0) {
-      const firstField = sortRules.value[0].field
-      if (!indicators.value.find(i => i.name === firstField)) {
-        sortRules.value[0].field = indicators.value[0].name
-      }
-    }
   } catch {
     message.warning('无法加载指标列表')
   }
@@ -963,46 +899,7 @@ onUnmounted(() => {
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>02</b><h3>结果排序</h3></div></div>
-          <n-space vertical>
-            <n-space v-for="(rule, index) in sortRules" :key="index" align="center">
-              <span class="control-label">优先级 {{ index + 1 }}</span>
-              <n-select
-                v-model:value="rule.field"
-                :options="indicatorOptions"
-                size="small"
-                style="width: 220px"
-                filterable
-                :render-label="renderOptionLabel"
-              />
-              <n-select
-                v-if="paramSpecOf(rule.field)"
-                :value="sortParamValue(rule)"
-                :options="sortParamOptions(rule.field)"
-                size="small"
-                style="width: 110px"
-                :render-label="renderOptionLabel"
-                :aria-label="paramSpecOf(rule.field)?.label"
-                @update:value="(v: string | number) => setSortParam(rule, v)"
-              />
-              <n-select
-                v-if="rankableOf(rule.field)"
-                v-model:value="rule.rank_mode"
-                :options="rankModeOptionsForSort"
-                size="small"
-                style="width: 170px"
-                :render-label="renderOptionLabel"
-                aria-label="排序排名口径"
-              />
-              <n-select v-model:value="rule.direction" :options="[{ label: '升序', value: 'asc' }, { label: '降序', value: 'desc' }]" size="small" style="width: 90px" />
-              <n-button size="tiny" quaternary type="error" @click="removeSortRule(index)">删除</n-button>
-            </n-space>
-            <n-button size="tiny" @click="addSortRule">+ 添加排序规则</n-button>
-          </n-space>
-        </div>
-
-        <div class="screening-section">
-          <div class="screening-section-title"><div><b>03</b><h3>结果展示列</h3></div><p>运行前可自由增加或删减展示信息；修改展示列不会产生新的规则版本。</p></div>
+          <div class="screening-section-title"><div><b>02</b><h3>结果展示列</h3></div><p>运行前可自由增加或删减展示信息；修改展示列不会产生新的规则版本。</p></div>
           <n-select
             v-model:value="selectedResultColumns"
             :options="resultColumnOptions"
@@ -1021,7 +918,7 @@ onUnmounted(() => {
       <aside class="screening-run-panel">
         <div class="screening-ready" :data-state="readinessCopy.state"><i></i>{{ readinessCopy.label }}</div>
         <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
-        <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>排序方式</span><b>{{ sortRules.length }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
+        <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
         <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
         <n-button type="primary" block :loading="loading" :disabled="!runEnabled" @click="runScreening">运行筛选 →</n-button>
         <n-button v-if="results.length > 0" text type="primary" block style="margin-top: 8px" @click="scrollToResults">
@@ -1036,7 +933,7 @@ onUnmounted(() => {
       数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
     </n-alert>
     <div ref="resultsAnchor" class="screening-results-anchor">
-      <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :sort="sortRules" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
+      <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
     </div>
 
     <section v-if="results.length === 0" class="screening-empty-card">
