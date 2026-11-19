@@ -573,3 +573,167 @@ bash 算术把**前导 0 当八进制**：
 > 真正的欠账不是"没写文档"，而是**方案多、落地少**；
 > 而本轮最有价值的三个交付物（钩子 / RG6–RG9 / 硬数字 Skill）一开始**全都没有入口** ——
 > 这正是 V3 那句「新人找不到的交付物等于没交付」。
+
+## 13. 第二轮修复落地（2026-11-19，7 个 agent 并行 + 独立审查）
+
+> 承接 §12.5 的"仍未做"清单。本轮把能并行的全部派给 7 个 agent（**按文件租约互斥并行**，
+> 见 `AGENTS W8`），主控只做评审、集成与验证。所有数字均为主控复算值，不采信 agent 自述。
+
+### 13.1 已完成的（对照 §12.5 欠账逐项）
+
+| §12.5 欠账 | 结果 | 证据 |
+|---|---|---|
+| ① `update.py` 拆分（6,633 行 / 137 方法） | **部分且安全**：6,633 → **6,457 行**；搬出 `_PriceReplaceBuffer`（→ `update_parts/prices.py`）与 `retry_list` 全套（→ `update_parts/retry.py`），合计 **440 行新模块**。**方法数刻意保持 137**（原方法留同名委托，签名/返回/异常/日志通道全不变） | 逐行等价性检查：6 个搬走的函数体与改前 **IDENTICAL**；定向 109 passed（改前 109 / 285s，改后 109 / 282s） |
+| ② `reports/NNN` 引用 420 处（"必须读报告才懂代码"的税） | **420 → 240（−43%）**。手法：同一模块内多处引用收敛成模块头「`# 依据索引` S1…Sn」，行内只留 `依据 S5 §2.2`；**小节号一个没删**，只是从 N 行搬到 1 行 | 2 个 agent 接力：146→61（10 文件）、162→18（9 文件）；`grep -roE "reports/[0-9]{1,3}" --include=*.py app/ \| wc -l` = **240** |
+| ③ `null_reason_sweeper` 迁出（`reports/136` L2） | **裁决变更为「不迁」**（见 13.2） | docstring 新增「归属与调用面」+ 5 条守卫测试 |
+| ④ `build/` + `_legacy/`（4.5MB + 583KB） | `build/` **5.3MB → 0**；`_legacy/` **583KB → 530KB**（删 13 个 git 已有副本的退役脚本；**89 个证据 + `check_stage.py` 保留**，见 13.3） | `du -sh` 前后；13/13 文件与 `6c3481b^` blob 逐字节相同才删 |
+| ⑤ `screening_readiness_cache` 实测 | **实测完成并修掉一个真缺陷**（见 13.4） | 新增 6 个用例，含"日历内部替换必须让指纹变化" |
+| ⑥ 前端认知成本未评估 | **首次评估完成**，并删死代码 **616 行**、把 **9 处手写百分比**收敛为 1 处、新增反返工护栏 | `frontend/src` 12,219 → **11,370 行**；lint / 87 node / 67 vitest / vue-tsc 全绿 |
+
+### 13.2 裁决变更：`null_reason_sweeper` **不迁出**（推翻 `reports/136` L2）
+
+`reports/136` 的判据是"`app/` 内无调用点 ⇒ 无人调用"。复核发现**判据本身错了**：
+
+- 唯一写库入口在**脚本侧**：`scripts/classify_null_reasons.py`（默认 dry-run，`--yes` 才写，
+  写前查 `any_write_lock_active`、写窗口 `exclusive_update`）。
+- **读端在生产在线侧**：`GET /api/data-status/null-reasons` → `data_status.py::get_null_reasons`
+  → `null_reasons.reason_distribution()` → 前端 `ScreeningResultsPanel.vue`；
+  体检侧 `asset_health.py::_rule_null_reason_missing` 也依赖这张表。
+- `app/core/quality/` 在 `CODE_MAP` 里的定位就是「体检规则 + 空值原因 + 归档核验」——
+  **它本来就属于这个域**。迁到 `scripts/lib/` 会把同一域劈成两包，
+  还会打断 `check_indicator_readiness.py::_SECTOR_CONSUMERS` 里按 `app/` 路径键做的
+  `is_bank_sql` 收口检查（该检查对文件缺失**直接判 BLOCK**）。
+
+**处理**：留在原处，但把"它是谁、谁调它、为什么不接线、为什么不搬家"写进模块 docstring，
+并加 **5 条守卫测试**（`tests/regression/test_null_reason_placement.py`）：
+①`write` 默认必须 False ②`app/` 里不许出现对它的 import 或 `write=True` 调用
+③`_SECTOR_CONSUMERS` 每条路径键必须指向真实存在且真 import 了该符号的文件
+④读路径仍在读 `indicator_null_reason` ⑤docstring 的「归属与调用面」不许被删。
+4 个变异全部被 killed。
+
+> 顺带纠正一个**主控自己的 grep 误判**：上一轮以为 `null_reason_sweeper.py:59`
+> 是"自己 import 自己"的死代码，其实那行在**模块 docstring 的用法示例**里。
+> 教训：这类判断一律走 AST，不按行 grep。
+
+### 13.3 `_legacy/` 鉴定：**我上一轮的假设是错的**
+
+§12.5 与多轮报告都担心"`_legacy/` 可能是 2026-07-22 事故期唯一机器证据"。实测**推翻**：
+
+- `_legacy/` 的 131 个文件 = 89 个 S1 证据 JSON + 13 个退役脚本 + README。
+- 那 89 个 JSON **全部是 2026-08-01 09:53–13:17** 的整改期合规取证
+  （每次跑测试前后对正式库取 sha256，`delta_detected:false`）。
+- `grep -ril "incident" _legacy/` → **0**；`grep -rl "2026-07-22" _legacy/` → **0**。
+- **真正的事故证据在别处且完好**：git tag `incident-2026-07-22`（`80b9a87`）+
+  历史 commit `f4517d2` 下的 `docs/evidence-s1/baseline-commit/`（10 个文件）。
+
+**新问题**：那批事故证据**被 `.gitignore:64` 挡在 git 之外**
+（`AGENTS` §Git 纪律 2 规定 `docs/evidence/evidence-s0|s1/` 永不提交）。
+`evidence-s1` 现在 **24MB** —— 那条规则本身是对的。
+**处理**：新增 **`docs/evidence/INCIDENT-EVIDENCE-INDEX.md`**（入库），写清
+"证据在哪儿 / 怎么用 `git show f4517d2:...` 从历史取回 / 为什么不在 git 里 / 要入库的三个方案与代价"。
+**没有** force-add（那会违反现行规则），也没有改 `.gitignore`（会重演 `[0-9a-f]*` 吞 fixtures 那类事故）。
+
+`_legacy/README.md` 也被实测证明**严重漂移**（声称有 26 个 `legacy_tests/`、42 个 `raw_source_data/`、
+2 个 `uat_archives/` —— 全都不存在；而占 96% 体积的证据目录一字未提）。
+已在文末追加「勘误与现状」节，**不删原文**（保留历史记录）。
+
+### 13.4 真缺陷：筛选就绪缓存会"假绿"（本轮最有价值的发现）
+
+`reports/136` 把它列为 L3「需实测」。实测结论：**不是性能问题，是正确性问题**。
+
+**缺陷 A：指纹对"就地 UPDATE / 内部替换"完全透明。**
+指纹公式原为 12 张表的 `COUNT(*) + MAX/MIN` 聚合。实测（把交易日历两个工作日换成两个周末）：
+
+```
+COUNT/MIN/MAX before: (20, '2026-03-02', '2026-03-27')
+COUNT/MIN/MAX after : (20, '2026-03-02', '2026-03-27')
+指纹 before/after   : 完全相同          ← 缓存命中，返回 ready=True
+```
+而判定函数 `_has_complete_trading_calendar()` **真的依赖日历的完整日期集合**，对
+"价格表有、日历里没有"的日期**零容忍 fail-closed** ⇒ 此刻应为 `False`。
+同型盲区还有：财务表就地重述、`source_audit` 就地翻标记（`LINEAGE_INVALID` 阻断码来源）、
+`manual_overrides` 改 payload。
+
+**缺陷 B：`allow_stale=True` 让 TTL 只当"刷新触发器"。** 过期决策可被**无限期**返回；
+后台刷新遇写锁**直接 return 不写缓存**、异常只 `logger.warning`；响应不暴露 `cached_at`/`stale`。
+
+**修复**（分层，不是无脑全表 checksum）：
+- `trading_dates` / `manual_overrides` → **精确内容摘要**（`group_concat` 有序拼接 / 含 payload 的 hash）
+- 财务三表 + `dividends` + `xdxr` → **DuckDB 行级 `bit_xor(hash(struct_pack(...)))`**（对行序不敏感、对任意列就地改动敏感），带 200 万行/表预算，超预算显式退回 `count-only`
+- `source_audit` / 归档表 / 价格表 → 保持 `COUNT + MAX(时间列)`（4300 万行做内容摘要会把缓存收益抹平；**残余风险已登记**）
+- 硬上限 **1200s（2×TTL）**：超过就不再返回旧决策，落同步重算
+- 响应新增 `readiness_source` / `readiness_cached_at` / `readiness_stale` / `readiness_age_seconds`（**纯增量，前端只读检查确认不破坏**）
+- 刷新失败/被写锁跳过**落盘留痕**（`data_refresh_state['screening_readiness_refresh_state']`）
+
+**性能反而是净改善**（实测同机同数据）：旧公式 median **117.5ms** → 新公式 **92.1ms**。
+原因是个反直觉发现：`DuckDBStore.read_query` 每次新开连接约 **24ms**，
+指纹的主成本是**连接往返次数**（旧 6 次），新实现把聚合合并成 **2 次**，
+内容摘要的计算开销被省下的 4 次连接抵消还有余。
+
+**测试**：新增 `tests/regression/test_screening_cache_freshness.py` 6 例；
+并**修正**一个把本缺陷写成期望行为的既有用例
+（`test_screening_readiness_cache_stale_while_revalidate_read` 原本断言"过期 20 年仍返回旧决策"，
+改为"硬上限内允许 stale 且必须暴露 `stale=True`，超限必须拒绝"——**断言更多更严，不是放宽**）。
+
+### 13.5 门禁与基础设施
+
+- **RG6 升级**（主控）：编号重复**不可避免**（改名会打断全仓 400+ 处引用），
+  真正要防的是**沉默的二义**。改为：编号下**每一份**都写了 `number-collision-note` front-matter
+  → 视为已消歧、不报红；只要有一份没写 → 仍报。4 组（127/133/139/59）已全部消歧，
+  **基线 4 → 0**，RG6/RG7 全绿。补 2 个反向用例（全消歧不报 / 部分消歧必须报）。
+- **`s1-pytest.ps1` 现在会留证**（此前 27 分钟的结论不可复核，只能手抄）：
+  stdout/stderr 落盘 + `pytest-summary.json`（passed/failed/skipped/errors/duration/exit_code/
+  `summary_line`/`parse_status`）。解析器对"只有 Traceback 没有 summary"的形态**写 null 而不是 0**，
+  避免把"解析失败"混成"没有失败"。**行为零变更**：仅删掉原 `Start-Process` 两行，
+  freeze 门禁 / 退出码语义 0·96·97·98·99 / `-KeepRunRoot` / PolicyOnly / 证据捕获 / 清理全部未动。
+  代价：stdout 变管道后 pytest 不再认为自己是 TTY（无 ANSI 颜色/进度刷新），控制台仍实时可见。
+- **`classify_rc` 收窄**：`command not found` / `No module named` 等改为不会误伤真实 finding
+  （原来 ruff 报 `F821 undefined name 'No module named x'` 会被判成环境问题而**放行**）。四种输入已实测。
+- **磁盘卫生**：删 `build/`（5.3MB）、`.tmp-test-run-{1,813}`、`tests/collection_probe/`（空）、
+  全仓 **67 个孤儿 `.pyc`**（源码已删的残留字节码，会污染 grep/AST —— 本轮它还真让一次测量失真）。
+
+### 13.6 前端首次评估（此前从未做过）
+
+- 规模：`frontend/src` 12,219 → **11,370 行**（−849，其中删死代码 616 行）
+- **7 个 god component**（>400 行）：`ScreeningPage.vue` 948 行/30 函数/**11 个 axios 调用点**，
+  塞了 **9 件事**；`DataStatusPage.vue` 775 行/3 套轮询调度；`EtfStrategyPanel.vue` 742 行/17 个 ref
+- **重复实现**：手写百分比渲染 **9 处** → 收敛为 `formatters.ts::fmtStoredPercent` 一处
+  （顺带修掉 5 处 null 渲染成 `—%` 的真 bug）；3 份逐字相同的 `fmt(value,digits,suffix)` → `fmtFixed`
+- 删除零引用组件 `FinancialTrendCard.vue`(295) / `TreasuryComparisonCard.vue`(321)
+- **新增反返工护栏** `tests/percent-render-single-source.test.ts`：静态扫 `src/**` 抓 3 种手写形态，
+  放行 `utils/formatters.ts`。**它当场抓到过一个真目标**（不是永远绿的假门禁）。
+- **返工热点归因**（纠正主控上一轮的说法）：`--follow` 的 26 次 vs 不带 `--follow` 的 7 次
+  **不是"被重写"的证据**，而是仓库有**两个根提交**（`f4517d2…` 与 `40ba9ff`）经 `f3747f5` 合并的历史断代伪影。
+  真实返工要按提交类型分解：`ScreeningPage.vue` 10/26 是 fix（交互+门禁口径反复，真返工）；
+  `screening-format.ts` 17/27 是 feat（**表驱动注册表的必然追加**，追加不改逻辑，不算返工），
+  其 6 次 fix **100% 落在"单位/百分比口径"** —— 这才是它反复的原因。
+
+### 13.7 被"改不动"挡住的部分（诚实清单）
+
+`update.py` 还有 4 块拆不动，原因不是难度，而是**测试用 `inspect.getsource` 钉住了"代码写在哪个函数里"**：
+
+| 想拆的 | 行数 | 卡点 |
+|---|---|---|
+| `_retry_failed_tasks` | **306** | `test_adapter_injection_shared_manager.py:122` 断言该方法源码里出现 4 处 `<Updater>(…adapter=self.adapter_mgr)` |
+| `_update_prices_incremental` | 大 | 2 个测试用 `getsource` 守卫 `_qfq_lag_watermarks` 等符号"出现在该方法源码里" |
+| `_refresh_index_valuation` | — | `getsource(update_module)` 里 `IndexValuationUpdater(` 必须**恰好 2 次** |
+| `_run_incremental_update_flow` | 500+ | 同上，且它是 `STEP_ORDER` 的事实来源 |
+
+**结论**：这些守卫断言的是「代码写在哪儿」而不是「行为对不对」，
+**是反重构的**（`reports/140 §12.3` 说"测试把当前实现固化成契约"的又一例）。
+要往下拆，必须先把这类断言改写成**符号级/行为级**（如 `inspect.signature`、对注入的 fake updater
+记录构造参数），这是一项**独立的测试资产变更**，不应夹在重构里做。
+
+### 13.8 本轮遗留（下一轮的入口）
+
+1. **`source_audit` 就地翻标记仍未进指纹**（4300 万行，做内容摘要会吃掉缓存收益）。
+   根治需 schema 加 `updated_at` 或引入统一 `bump_content_epoch()` 由修复脚本调用 —— 跨 `app/core/storage/**` 与 `scripts/**`。
+2. **价格表 `price_daily_raw/qfq` 从未进过指纹**（只在门禁内层用 COUNT/MIN/MAX）。
+3. **7 个 god component 未拆**。最小切口已定：先把 `ScreeningPage.vue` 的 5 个 `unavailable*` 纯函数
+   挪进 `utils/screening-format.ts`，再把规则草稿 CRUD 抽成 `useScreeningDraft()`。
+4. **`reports/NNN` 仍有 240 处**（多为模块头索引块登记项，属"有价值"）；
+   剩余可收敛面：`update_steps.py` 13 处 `note=` 属可执行字符串**必须保留**。
+5. **`helpers/runtime.ts`（22 行）整文件零引用**，疑似预留未接线，删或接需人决策。
+6. **`python -m pytest` 的冻结态 preflight 在多进程并发时会误红**
+   （"Python process state changed during formal capture"，本轮 9 次尝试 7 次命中）
+   —— 跑全量 S1 前应先降低并发。
