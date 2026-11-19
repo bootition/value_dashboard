@@ -103,4 +103,12 @@ def test_step_labels_cover_update_steps() -> None:
     from app.core.auto_update import STEP_LABELS
 
     for step in ("check", "trading_dates", "prices", "indicators", "universe", "financials"):
-        assert STEP_LABELS[step]
+        label = STEP_LABELS[step]
+        # 具体期望（`STEP_LABELS` 的实现是 `step.label or step.name`）：缺 label
+        # 会**静默退回英文 step 名**，只断言"非空"永远抓不到"忘了写标签"。
+        assert isinstance(label, str), f"{step} 的标签必须是 str，实际 {type(label).__name__}"
+        assert label != step, f"{step} 退回了英文 step 名 —— 缺中文标签"
+        assert label.strip() == label and label, f"{step} 标签为空或带首尾空白: {label!r}"
+        assert any("\u4e00" <= ch <= "\u9fff" for ch in label), (
+            f"{step} 的标签必须含中文（面向用户）: {label!r}"
+        )

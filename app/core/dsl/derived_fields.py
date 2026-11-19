@@ -280,11 +280,6 @@ SERIES_BREAKS: dict[str, SeriesBreak] = {
 }
 
 
-def is_derived_field(full_key: str) -> bool:
-    """``表.字段`` 是否是派生字段。"""
-    return full_key in DERIVED_FIELDS
-
-
 def field_metadata() -> dict[str, dict[str, Any]]:
     """所有派生字段的 DSL 元数据（供 ``ast_nodes.FIELD_METADATA`` 注入）。"""
     return {key: derived.metadata() for key, derived in DERIVED_FIELDS.items()}

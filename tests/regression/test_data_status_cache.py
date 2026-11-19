@@ -108,7 +108,24 @@ def test_summary_first_request_returns_placeholder_and_background_refreshes(
     refreshed = _wait_for_real_summary(client)
     assert refreshed is not None, "后台刷新应发布真实 summary"
     assert refreshed.get("checking") is not True
-    assert data_status._SUMMARY_CACHE
+    # 具体期望值（`_store_summary` / `_refresh_summary_worker` 的登记形状）：
+    # 键 = "duck路径|sqlite路径"，值 = {"at": monotonic float, "data": summary dict}；
+    # 且缓存的必须是**真值**而不是首帧那份 checking 占位。
+    cached_entries = list(data_status._SUMMARY_CACHE.values())
+    assert len(cached_entries) >= 1, "后台刷新必须把真实 summary 落进进程内缓存"
+    cached_entry = cached_entries[0]
+    assert isinstance(cached_entry["at"], float), (
+        f"缓存 entry 必须带 monotonic 时间戳，实际 {cached_entry.get('at')!r}"
+    )
+    cached_summary = cached_entry["data"]
+    assert isinstance(cached_summary, dict)
+    assert cached_summary.get("checking") is not True, "缓存里必须是真值，不是占位"
+    assert isinstance(cached_summary.get("summary_as_of"), str), (
+        "真值 summary 必带 summary_as_of（`_refresh_summary_worker` 落盘时打的时间戳）"
+    )
+    assert set(cached_summary) <= set(refreshed), (
+        "接口返回体必须就是缓存里那份 summary 的超集（不得缓存一份、返回另一份）"
+    )
 
 
 def test_summary_serves_stale_while_update_lock_active(

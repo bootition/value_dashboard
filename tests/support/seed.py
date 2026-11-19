@@ -67,6 +67,14 @@ provenance 的**形状**照生产代码取，不是随手编的短字符串：
 要钉**某一刻**（"未来时间戳""一天前的审计""比快照晚 1 秒"）就显式传
 `fetch_time=...`：调用点给的列**永远覆盖**工厂默认值，工厂不替你编。
 
+> ⚠️ **迁移守则（2026-11-23 审查发现的坑）**：把一处内联 `INSERT` 改成工厂调用时，
+> 若原 SQL 里有 `CURRENT_TIMESTAMP` / `CURRENT_DATE` / `datetime('now', ...)`，
+> **必须**显式换成 `trace_now=True`（或传 `fetch_time=...` / SQL 哨兵），
+> 否则"刚抓的"会**静默变成**默认的固定过去时间 —— 而**现有断言通常不读那一列**，
+> 于是测试照绿，等哪天有人加了新鲜度断言才会莫名其妙地红。
+> 实测确实发生过 3 处这种漂移（`test_dividend_financing_ratio` 的 `funding_events` 等），
+> 断言不读它、实跑全绿，属"静默语义漂移"。迁移时请 `grep -n "CURRENT_TIMESTAMP" <file>` 过一遍。
+
 ### `overwrite=True` ≠ `if_exists="ignore"`（语义相反，不能互换）
 
 * `overwrite=True` → `INSERT OR REPLACE`（DuckDB 的 upsert）：**覆盖**已有主键行，

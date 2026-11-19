@@ -726,24 +726,6 @@ def record_screening_readiness_refresh_outcome(
         logger.warning("screening readiness 刷新结果落盘失败(非致命)", exc_info=True)
 
 
-def read_screening_readiness_refresh_state(sqlite: SQLiteStore) -> dict:
-    """Read the persisted background-refresh outcome ({} when never recorded)."""
-    try:
-        rows = sqlite.query(
-            "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
-            [SCREENING_READINESS_REFRESH_STATE_KEY],
-        )
-        if not rows:
-            return {}
-        payload = json.loads(rows[0].get("value") or "{}")
-        if not isinstance(payload, dict):
-            return {}
-        payload.setdefault("updated_at", rows[0].get("updated_at"))
-        return payload
-    except Exception:
-        return {}
-
-
 _screening_readiness_refresh_lock = threading.Lock()
 _screening_readiness_refreshing: set[str] = set()
 

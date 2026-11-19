@@ -82,7 +82,13 @@ def test_source_classes_cover_all_tables() -> None:
         assert spec.source_class in exporter.SOURCE_CLASSES, (
             f"{spec.table} 来源类别非法: {spec.source_class}"
         )
-        assert spec.note, f"{spec.table} 缺少说明"
+        # 具体期望（TableSpec 的 docstring：note 是给人看的"这张表是什么"）：
+        # 非空 str、无首尾空白、且不能直接把输出表名抄一遍。
+        assert isinstance(spec.note, str), f"{spec.table} 的说明必须是 str"
+        assert spec.note.strip() == spec.note and spec.note, (
+            f"{spec.table} 缺少说明或带首尾空白: {spec.note!r}"
+        )
+        assert spec.note != spec.output, f"{spec.table} 的说明不得直接抄表名"
 
 
 def test_history_archived_tables_are_marked() -> None:
