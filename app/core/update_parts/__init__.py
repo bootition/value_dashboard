@@ -24,4 +24,12 @@
   ``check_retry_tasks`` / ``settle_non_retryable_*`` / ``cleanup_unretryable_tasks``）。
 - ``retry_tasks`` — ``_retry_failed_tasks`` 的重试编排（306 行按 ``data_type``
   分派到各域 updater）；``update.py`` 只留同名薄委托。
+- ``prices_step`` — ``_update_prices_incremental`` 的增量价格管道（502 行按
+  "选谁 / 怎么抓 / 怎么结算"切成三段：``_plan_price_scope`` /
+  ``_run_price_pipeline`` / ``_finalize_price_step``）；``update.py`` 只留同名薄委托。
+- ``flow`` — ``_run_incremental_update_flow`` 的单次更新主流程编排（493 行，**不**
+  再切分：步骤顺序就是它的语义）。30 处 ``report_step`` 的首次出现顺序是
+  ``update_steps.STEP_ORDER`` 的运行时来源，故逐行平移搬运；``logger`` 与四个
+  ``update.py`` 私有依赖（``_announcement_step_result`` / ``_merge_indicator_steps`` /
+  ``classify_announcement`` / ``_ANNOUNCEMENT_DIVIDEND_CATEGORY``）经入参注入同一对象。
 """

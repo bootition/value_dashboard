@@ -30,6 +30,13 @@
 # S11 reports/139 §2.2 #13 —— 卖方一致预期每日快照（schema v48）。
 # S12 reports/140 §2.5 —— 拆成 `update_parts/{prices,retry}.py` 的第 1 块：本文件只留薄兼容壳（委托），
 #     不改任何判据；`_PriceReplaceBuffer` 私有名与时钟源语义保持不变。
+# S13 reports/140 §2.5 —— 第 4 块：`_update_prices_incremental`(502 行) 切成
+#     `update_parts/prices_step.py` 的"选谁 / 怎么抓 / 怎么结算"三段，本文件只留同名委托；
+#     SQL、日志文案、超时/并发公式、`finally` 排空顺序与时钟源（`update.time`）全部原样。
+# S14 reports/140 §2.5 —— 第 5 块（最后一块）：`_run_incremental_update_flow`(493 行) 整体搬到
+#     `update_parts/flow.py`，本文件只留同名委托。该方法是**步骤清单的事实来源**（30 处
+#     `report_step` / 26 个步骤名的首次出现顺序），故按逐行平移搬移：调用点顺序、SQL 与日志
+#     字符串常量、`*..._pending_codes` 展开形态逐条对拍，四个私有依赖经入参注入同一对象。
 
 
 from __future__ import annotations
@@ -40,7 +47,7 @@ import logging
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -58,11 +65,14 @@ from app.core.financial_guards import (
 from app.core.financial_period import CN_TZ as _CN_TZ
 
 # 契约 §2：多子步骤状态归并按严重度取最坏值，rejected 不得被 success 覆盖。
+# 步骤状态汇总（`aggregate_job_status`）与步骤名登记表（`STEP_NAMES`）随主流程搬到
+# `update_parts/flow.py`（S14），本文件不再直接引用，避免两处各持一份"步骤清单入口"。
 from app.core.financial_period import cn_now, cn_today, expected_financial_period
-from app.core.job_status import aggregate_job_status, merge_step_status
+from app.core.job_status import merge_step_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.update_parts import flow, prices_step
 from app.core.update_parts.prices import PriceReplaceBuffer
 from app.core.update_parts.retry import (
     ERROR_KIND_REASON_CODE,
@@ -75,7 +85,6 @@ from app.core.update_parts.retry import (
     settle_non_retryable_retries,
 )
 from app.core.update_parts.retry_tasks import retry_failed_tasks
-from app.core.update_steps import STEP_NAMES
 
 logger = logging.getLogger(__name__)
 
@@ -760,500 +769,38 @@ class IncrementalUpdater:
         started_at: str,
         detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
-        """更新主流程（调用方已持有跨进程更新锁）。"""
-        # 先检查
-        # 公告会在价格步骤之后以 persist=True 抓取。前置阶段只判断本地
-        # 价格/重试状态，避免一次更新重复抓公告并阻塞每日价格新鲜度。
-        check_report = self.run_incremental_check(include_announcements=False)
+        """更新主流程（调用方已持有跨进程更新锁）——实现已搬到 ``update_parts/flow.py``。
 
-        report: dict[str, Any] = {
-            "check": check_report,
-            "started_at": started_at,
-            "job_id": job_id,
-            "steps": {},
-        }
+        依据 S14（reports/140 §2.5 拆分的第 5 块，也是最后一块）：493 行的顺序编排
+        整体搬到 ``app.core.update_parts.flow``，本方法只留同名委托——签名、返回值、
+        异常、日志通道与**步骤顺序**一字不改。四个"只有一份实现"的私有依赖仍从本
+        模块注入（同一个对象，不复制第二份实现）：
 
-        def report_step(name: str, step: dict[str, Any]) -> dict[str, Any]:
-            # 步骤名必须登记在 update_steps.STEP_ORDER（更新步骤的唯一可读索引）；只告警不改行为。
-            if name not in STEP_NAMES:
-                logger.warning("步骤 %r 未登记在 app/core/update_steps.py::STEP_ORDER", name)
-            report["steps"][name] = step
-            if progress_cb is not None:
-                progress_cb(name, step)
-            return step
+        * ``logger``：仍是本模块的 logger（日志通道 ``app.core.update`` 不变）；
+        * ``announcement_step_result``：仍是本模块的 ``_announcement_step_result``；
+        * ``merge_indicator_steps``：仍是本模块的 ``_merge_indicator_steps``
+          （契约 §2 多子步骤状态归并的唯一实现）；
+        * ``classify_announcement`` / ``announcement_dividend_category``：仍是本模块
+          公告分类关键词的唯一实现。
 
-        def indicator_progress(info: dict[str, Any]) -> None:
-            """把指标重算的细粒度进度转成状态页可展示的 live 进度。"""
-            if detail_cb is not None:
-                detail_cb("indicators", info)
-
-        # 1. 价格新鲜度是每日启动的首要目标。低频股票池/行业或公告源
-        # 变慢时，不应阻塞已上市股票的日线补齐。
-        if check_report["new_trading_days"]:
-            report_step("trading_dates", self._update_trading_dates())
-        price_step = report_step("prices", self._update_prices_incremental(max_stocks, detail_cb))
-        updated_price_codes = price_step.pop("_updated_codes", [])
-        price_xdxr_codes = price_step.pop("_xdxr_codes", [])
-        price_raw_full_refetch = price_step.pop("_raw_full_refetch", False)
-        # 依据 S7 §2.2 J6：上一轮因 qfq 滞后进入待重算名单的股票，本轮**无条件**并入重算
-        # 集合（与指纹/价格是否变化无关），重算成功后从名单移除。
-        tech_pending_codes = self._load_tech_recompute_pending()
-        # 依据 S10 §9.2 P0-5：价格步骤刚写入 qfq 的股票（含上一轮失败残留）
-        # 必须强制重算技术三列。走价格域增量即可，不升级为整股全量重算。
-        technical_pending_codes = self._load_technical_pending()
-
-        if max_stocks > 0:
-            if (
-                price_step["status"] == "success"
-                and (
-                    price_step.get("success", 0) > 0
-                    or tech_pending_codes
-                    or technical_pending_codes
-                )
-            ):
-                from app.core.indicators.calculator import IndicatorCalculator
-
-                calculator = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite)
-                price_force_codes = (
-                    set(price_xdxr_codes)
-                    | set(tech_pending_codes)
-                    | set(technical_pending_codes)
-                )
-                if price_raw_full_refetch:
-                    price_force_codes.update(updated_price_codes)
-                bounded_codes = list(
-                    dict.fromkeys([
-                        *updated_price_codes,
-                        *tech_pending_codes,
-                        *technical_pending_codes,
-                    ])
-                )
-                price_method = getattr(
-                    calculator, "compute_price_sensitive_for_codes", None,
-                )
-                snapshot_step = (
-                    price_method(
-                        bounded_codes,
-                        force_codes=price_force_codes,
-                        progress_cb=indicator_progress,
-                    )
-                    if price_method is not None
-                    else calculator.compute_snapshot_for_codes(
-                        bounded_codes, progress_cb=indicator_progress,
-                    )
-                )
-                if tech_pending_codes:
-                    snapshot_step["tech_recompute_pending_cleared"] = (
-                        self._finalize_tech_recompute(snapshot_step, tech_pending_codes)
-                    )
-                if technical_pending_codes:
-                    snapshot_step["technical_pending_cleared"] = (
-                        self._finalize_technical_pending(
-                            snapshot_step, technical_pending_codes,
-                        )
-                    )
-                report_step("indicators", snapshot_step)
-            # 2026-11-14 清理：早先这里有一个"blocked 时先写 partial"的兜底，
-            # 而主流程随后会用 `_announcement_step_result()` 覆盖它（写两次、
-            # 后者覆盖前者）。已删除死写；有界更新（--max-stocks）按既有契约
-            # 只跑价格 + 指标两段，不在此处塞入公告步骤。
-            report["status"] = aggregate_job_status(report["steps"])
-            report["finished_at"] = datetime.now(UTC).isoformat()
-            logger.info("有界价格更新完成: %s", report["status"])
-            return report
-
-        # PRD §7.7 第 4 项: 股本与上市名单（新股/退市/股本变化），
-        # 以及 PRD §24 CSRC 行业分类（低频刷新）。
-        # P1: 股本变化后必须触发快照重算，否则 total_market_cap 等
-        # 市值类指标仍使用旧快照（口径过期风险）。
-        shares_before = self._share_capital_fingerprint()
-        report_step("universe", self._refresh_universe_metadata())
-        shares_after = self._share_capital_fingerprint()
-        share_capital_changed = shares_before != shares_after
-        report["share_capital_changed"] = share_capital_changed
-
-        # 2026-11-12 P1：公告检查无论 available/partial/unavailable/truncated
-        # 都必须入册——旧实现只在 check_report["blocked"] 分支 report_step，
-        # 当天两轮的截断/失败在 job_logs 里完全不可见。
-        try:
-            announcement_check = self._check_new_announcements(
-                persist=True, detail_cb=detail_cb,
-            )
-        except Exception as error:  # noqa: BLE001 - 公告失败不得炸掉整轮更新
-            logger.warning("公告检查异常: %s", error)
-            announcement_check = {
-                "status": "unavailable",
-                "reason": "announcement_check_exception",
-                "checked_remote": False,
-                "affected_stock_codes": [],
-                "affected_announcements": {},
-                "all_new_announcements": {},
-                "errors": [str(error)],
-                "truncated": False,
-            }
-        report_step("announcements", _announcement_step_result(announcement_check))
-        report["check"]["announcement_check"] = announcement_check
-        # 上一轮财务刷新失败/pending 的公告已持久化在 retry_list。把它们
-        # 并入本轮待刷新集合：游标推进后不再重复翻 45 天公告，pending 也不丢。
-        pending_items = self._pending_announcement_items()
-        pending_codes = sorted({str(item["stock_code"]) for item in pending_items})
-        for item in pending_items:
-            code = str(item["stock_code"])
-            announcement_check.setdefault("affected_announcements", {}).setdefault(code, [])
-            existing_ids = {
-                str(existing.get("announcement_id"))
-                for existing in announcement_check["affected_announcements"][code]
-            }
-            if item.get("announcement_id") not in existing_ids:
-                announcement_check["affected_announcements"][code].append(item)
-        announcement_codes = sorted(set(announcement_check.get("affected_stock_codes", [])) | set(pending_codes))
-        announcement_check["affected_stock_codes"] = announcement_codes
-        # B 股（200/900）不在任何免费财务主源覆盖范围，重复 retry 只会产生
-        # 永续失败。与不可补字段同策略：直接入册为已处理、清理 retry，
-        # 不进入财务刷新，也不在页面制造噪音。
-        unsupported_codes = {
-            code for code in announcement_codes
-            if self._is_b_share_stock(code)
-        }
-        if unsupported_codes:
-            for code in sorted(unsupported_codes):
-                self._mark_announcements_seen(
-                    code,
-                    announcement_check.get("affected_announcements", {}).get(code, []),
-                )
-                self._resolve_announcement_retries(code)
-            announcement_codes = [
-                code for code in announcement_codes
-                if code not in unsupported_codes
-            ]
-            announcement_check["affected_stock_codes"] = announcement_codes
-        financials: dict[str, Any] | None = None
-        if announcement_codes:
-            financials = self._refresh_financials(announcement_codes, detail_cb=detail_cb)
-            report_step("financials", financials)
-            # 只有同一批公告里出现“权益分派实施”等分红除权公告时，才刷新
-            # dividends/xdxr。中报季每天上千份财报公告，逐股重拉分红域会
-            # 白白增加数小时请求；非分红财报不需要该步骤。
-            market_action_codes = sorted({
-                code
-                for code, items in announcement_check.get("all_new_announcements", {}).items()
-                if any(
-                    item.get("_announcement_category") == _ANNOUNCEMENT_DIVIDEND_CATEGORY
-                    or classify_announcement(item.get("title")) == "dividend"
-                    for item in items
-                )
-            })
-            if market_action_codes:
-                actions = self._refresh_market_actions(
-                    market_action_codes, detail_cb=detail_cb,
-                )
-                report_step("market_actions", actions)
-            # 只有真正写入新报告期的股票才登记公告；
-            # 数据源延迟（pending）或刷新失败（failed）保持公告 pending 并记录重试
-            refreshed_codes = set(financials["succeeded_codes"])
-            for code, announcements in announcement_check["affected_announcements"].items():
-                if code in refreshed_codes:
-                    self._mark_announcements_seen(code, announcements)
-                    self._resolve_announcement_retries(code)
-                else:
-                    reason = (
-                        "financial data source not yet ready; announcement remains pending"
-                        if code in set(financials.get("pending_codes", []))
-                        else "financial refresh failed; announcement remains pending"
-                    )
-                    self._record_failure(
-                        code,
-                        "announcements",
-                        "cninfo",
-                        reason,
-                        extra_json=json.dumps({"announcement_ids": [item["announcement_id"] for item in announcements]}),
-                    )
-
-        # 非财务类公告只登记入册，不触发财务刷新（PRD §7.7）
-        all_new = announcement_check.get("all_new_announcements", {})
-        financial_set = set(announcement_codes)
-        for code, announcements in all_new.items():
-            if code in financial_set:
-                continue
-            self._mark_announcements_seen(code, announcements)
-
-        # 财务公告处理完即推进公告检查游标。失败/pending 已写入
-        # retry_list，下一轮直接从 retry_list 续传，不必再翻 45 天公告。
-        if (
-            announcement_check.get("status") == "available"
-            and not announcement_check.get("errors")
-        ):
-            self._save_announcement_cursor()
-            self._resolve_announcement_source_retries()
-
-        financial_step = report["steps"].get("financials", {"status": "success"})
-        # 财报明细缺口有界续传：只重抓“核心字段齐全但明细字段缺失”的股票。
-        # 该步骤不参与 readiness 阻断，只负责逐步补齐详情页字段。
-        detail_backfill = report_step(
-            "financial_detail_backfill",
-            self._refresh_financial_detail_backfill(detail_cb=detail_cb),
+        搬移是逐行平移：30 处 ``report_step(...)`` 的调用点与首次出现顺序、每个 SQL /
+        日志文案字符串常量、每个 ``*..._pending_codes`` 展开形态全部对拍一致。
+        ``tests/support/source_guard.py::resolve_body`` 会顺着这个委托壳追到
+        ``flow.run_incremental_update_flow``，结构守卫仍指向真正的实现。
+        """
+        return flow.run_incremental_update_flow(
+            self,
+            max_stocks,
+            progress_cb,
+            job_id,
+            started_at,
+            detail_cb,
+            logger=logger,
+            announcement_step_result=_announcement_step_result,
+            merge_indicator_steps=_merge_indicator_steps,
+            classify_announcement=classify_announcement,
+            announcement_dividend_category=_ANNOUNCEMENT_DIVIDEND_CATEGORY,
         )
-        detail_backfilled_codes = list(detail_backfill.get("succeeded_codes", []))
-        # 回购注销事件是“分红融资比（含回购注销）”的输入。此前只在 CLI
-        # 手动刷新，自动更新从未调度，指标会随回购进度持续过期。
-        buyback_step = report_step("buyback", self._refresh_buyback())
-        buyback_changed_codes = list(buyback_step.get("changed_codes", []))
-        # 融资事件同样影响 cumulative_financing_amount / 分红融资比，必须在
-        # 指标快照重算之前刷新；旧位置（统计域之后）会让新融资数据迟到一轮。
-        funding_step = report_step("funding", self._refresh_funding())
-        self._resolve_legal_empty_funding_missing()
-        funding_changed_codes = list(funding_step.get("changed_codes", []))
-        # 国债曲线变化会改变所有股票快照中的 div_yield_spread_*。旧流程在
-        # 指标重算之后才刷曲线，利差字段会整轮陈旧；现在提前并触发全量重算。
-        treasury_step = report_step("treasury_curve", self._refresh_treasury_curve())
-        treasury_changed_codes = []
-        if treasury_step.get("curve_changed"):
-            try:
-                treasury_changed_codes = [
-                    row["stock_code"]
-                    for row in self.duck.read_query(
-                        "SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE ORDER BY stock_code"
-                    )
-                ]
-            except Exception as error:
-                logger.warning("查询国债利差重算范围失败: %s", error)
-
-        # 5.2 手工链自动接入①：补采域（依据 S5 D29 ②③④）。
-        #     折旧摊销/资本支出与资产负债表补充科目是 indicator_ext 的直接
-        #     输入，扣非净利润是 income_statement 的列补全，金融监管指标是
-        #     balance_sheet 的 6 列 —— 全部必须在指标快照/extension 重建之前
-        #     落地，否则这轮重建又用旧输入算一遍。
-        #     顺序敏感：补采 → 扣非/监管，再进 indicator_ext。
-        report_step("cashflow_supplement", self._refresh_cashflow_supplement())
-        report_step("balance_sheet_ext", self._refresh_balance_sheet_ext())
-        report_step("deducted_profit", self._refresh_deducted_profit())
-        report_step("fixed_assets", self._refresh_fixed_assets())
-        report_step("regulatory_metrics", self._refresh_regulatory_metrics())
-
-        # 6. 重试失败任务（先清理已达标的历史冗余与无重试路径的死循环条目）。
-        #    旧位置在统计域之后：重试成功的价格/财务/分红/融资/曲线数据会
-        #    再等一整轮才进入快照。现在移到指标重算之前，并把影响快照的
-        #    重试成功代码并入本轮重算集合。
-        retry_recompute_codes: list[str] = []
-        self._cleanup_unretryable_tasks()
-        self._cleanup_completed_announcement_retries()
-        self._cleanup_redundant_index_valuation_retries()
-        self._resolve_complete_missing_records()
-        if check_report["retry_tasks"]:
-            expected_date = self._latest_expected_trading_date(
-                cn_today().strftime("%Y-%m-%d")
-            )
-            self._cleanup_redundant_retries(expected_date)
-            refreshed_tasks = self._check_retry_tasks()
-            if refreshed_tasks:
-                retries_step = report_step(
-                    "retries", self._retry_failed_tasks(refreshed_tasks),
-                )
-                retry_recompute_codes = list(
-                    retries_step.get("recompute_codes", [])
-                )
-
-        # 5.3 手工链自动接入②：扩展指标域重建（依据 S5 D28，P0）。
-        #     必须排在快照指标之前：ext 落后于最新完整三表期时它就是死条件
-        #     （界面 55 个扩展筛选字段全 NULL）。该步骤失败只让自己 failed，
-        #     不动 indicator_snapshot，也不影响 readiness。
-        report_step("indicator_ext", self._refresh_indicator_ext())
-        # 5.4 ROCE 域重建（2026-11-16，依据 S9/S10）。
-        #     与 indicator_ext 同样的 D28 约束：派生域没有重建触发就会冻结，
-        #     而 indicator_snapshot 的 roce_* 五列在每次快照重发时会被重算
-        #     （见 calculator._publish_snapshot），前提是 roce_history 是最新的。
-        #     失败只让本步骤 failed，不影响主链与 readiness。
-        report_step("roce", self._refresh_roce())
-
-        if share_capital_changed:
-            # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
-            # 该路径低频，且与自动更新同锁，不会再现"重算与抓取并发"的竞争。
-            from app.core.indicators.calculator import IndicatorCalculator
-
-            snapshot_step = IndicatorCalculator(
-                duck=self.duck, sqlite=self.sqlite,
-            ).compute_snapshot_for_all(progress_cb=indicator_progress)
-            if tech_pending_codes:
-                # 全量重算已覆盖名单里的每一只 → 成功即清空（rejected 不清）。
-                snapshot_step["tech_recompute_pending_cleared"] = (
-                    self._finalize_tech_recompute(snapshot_step, tech_pending_codes)
-                )
-            if technical_pending_codes:
-                # 全量重算同样覆盖技术三列 → 成功即清空。
-                snapshot_step["technical_pending_cleared"] = (
-                    self._finalize_technical_pending(
-                        snapshot_step, technical_pending_codes,
-                    )
-                )
-            report_step("indicators", snapshot_step)
-            if snapshot_step["status"] != "success":
-                snapshot_step["reason"] = "price update retained; snapshot publication not ready"
-        elif (
-            financial_step["status"] in {"success", "partial"}
-            or retry_recompute_codes
-            or tech_pending_codes
-            or technical_pending_codes
-        ):
-            from app.core.indicators.calculator import IndicatorCalculator
-
-            calculator = IndicatorCalculator(duck=self.duck, sqlite=self.sqlite)
-            refreshed_financial_codes = list(
-                financials.get("succeeded_codes", []) if financials else []
-            )
-            financial_stale_codes = self._stale_financial_snapshot_codes()
-            price_stale_codes = self._stale_price_snapshot_codes()
-
-            # 完整重算组：财务变化/明细回填/失败重试成功，输入域不确定，保
-            # 守整股重算全部指标。价格变化组只重算价格域字段；回购/融资
-            # 变化组只重算分红融资比三列（2026-09-08 提速计划）。
-            # 依据 S7 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
-            # 全量重算（波动率/回撤/区间收益读 qfq 历史），而价格域增量路径
-            # 会因为"最新价/最新日期没变"直接跳过（见 compute_price_sensitive）。
-            full_codes = list(dict.fromkeys([
-                *refreshed_financial_codes,
-                *financial_stale_codes,
-                *detail_backfilled_codes,
-                *retry_recompute_codes,
-                *tech_pending_codes,
-            ]))
-            price_codes = [
-                code for code in list(dict.fromkeys([
-                    *updated_price_codes,
-                    *price_stale_codes,
-                    # 2026-11-16 依据 S10 §9.2 P0-5：qfq 写入成功但最新价未变
-                    # 的股票也要进价格域重算（force 绕过 skip），否则技术三列
-                    # 永远停在补齐前写死的 NULL。
-                    *technical_pending_codes,
-                ]))
-                if code not in full_codes
-            ]
-            event_codes = [
-                code for code in list(dict.fromkeys([
-                    *buyback_changed_codes,
-                    *funding_changed_codes,
-                ]))
-                if code not in full_codes
-            ]
-            price_force_codes = (
-                set(full_codes) | set(price_xdxr_codes) | set(technical_pending_codes)
-            )
-            if price_raw_full_refetch:
-                price_force_codes.update(updated_price_codes)
-
-            snapshot_step: dict[str, Any] = {
-                "status": "skipped",
-                "reason": "no_changed_stocks",
-                "success": 0,
-                "failed": 0,
-            }
-            ran_indicator_step = False
-            if full_codes:
-                snapshot_step = calculator.compute_snapshot_for_codes(
-                    full_codes, progress_cb=indicator_progress,
-                )
-                ran_indicator_step = True
-            if price_codes:
-                price_method = getattr(
-                    calculator, "compute_price_sensitive_for_codes", None,
-                )
-                if price_method is None:
-                    price_step = calculator.compute_snapshot_for_codes(
-                        price_codes, progress_cb=indicator_progress,
-                    )
-                else:
-                    price_step = price_method(
-                        price_codes,
-                        force_codes=price_force_codes,
-                        progress_cb=indicator_progress,
-                    )
-                if ran_indicator_step:
-                    snapshot_step = _merge_indicator_steps(snapshot_step, price_step)
-                else:
-                    snapshot_step = price_step
-                ran_indicator_step = True
-            if event_codes:
-                event_method = getattr(
-                    calculator, "refresh_funding_dividend_fields", None,
-                )
-                if event_method is None:
-                    event_step = calculator.compute_snapshot_for_codes(
-                        event_codes, progress_cb=indicator_progress,
-                    )
-                else:
-                    event_step = event_method(event_codes)
-                if ran_indicator_step:
-                    snapshot_step = _merge_indicator_steps(snapshot_step, event_step)
-                else:
-                    snapshot_step = event_step
-                ran_indicator_step = True
-            if ran_indicator_step:
-                # 依据 S7 §2.2 J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
-                # 里的股票继续保留，下一轮再强制重算。
-                if tech_pending_codes:
-                    snapshot_step["tech_recompute_pending_cleared"] = (
-                        self._finalize_tech_recompute(snapshot_step, tech_pending_codes)
-                    )
-                if technical_pending_codes:
-                    snapshot_step["technical_pending_cleared"] = (
-                        self._finalize_technical_pending(
-                            snapshot_step, technical_pending_codes,
-                        )
-                    )
-                report_step("indicators", snapshot_step)
-
-            if treasury_changed_codes:
-                # 国债曲线变化只影响 ttm_dividend_yield / div_yield_spread_*，
-                # 无需对全市场完整重算 PE/PB/成长/技术指标；专用批量刷新
-                # 在正式库为秒级，取代旧的约 12 分钟全量重算。
-                treasury_step = calculator.refresh_treasury_spreads(treasury_changed_codes)
-                if ran_indicator_step:
-                    # rejected/partial 绝不能被国债利差刷新的 success 覆盖。
-                    report_step(
-                        "indicators",
-                        _merge_indicator_steps(snapshot_step, treasury_step),
-                    )
-                else:
-                    report_step("indicators", treasury_step)
-
-        # 3. 业务概览低频域（依据 S1 独立域）：仅当自动集成启用且间隔到期
-        #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
-        report_step("business_overview", self._refresh_business_overview(detail_cb=detail_cb))
-
-        # 4. 国债曲线已提前到指标快照重算之前执行。
-
-        # 5. 历史股本链 + 统计域（依据 S2 P4）：有界续传；失败不阻断其他步骤
-        report_step("capital_history", self._refresh_capital_history(detail_cb=detail_cb))
-        report_step(
-            "research_statistics",
-            self._refresh_research_statistics(
-                parallel_workers=max(1, int(self.research_statistics_parallel_workers)),
-                detail_cb=detail_cb,
-            ),
-        )
-
-        # 5.4 手工链自动接入③：ETF 行情 + 港股分红（依据 S5 D29 ⑤⑥）。
-        #     两者都是"独立低频域"：不进 A 股 readiness、不影响主链快照，
-        #     只用各自的水位 + 每轮上限推进。放在统计域之后，避免它们的
-        #     网络等待挤在价格/财务的临界路径上。
-        report_step("etf_prices", self._refresh_etf_prices())
-        report_step("hk_dividends", self._refresh_hk_dividends())
-
-        # 5.1 融资事件/失败重试已提前到指标快照重算之前执行；这里只保留
-        #     指数估值每日 1 次低频域。失败保留旧值并进入独立 retry/missing。
-        report_step("index_valuation", self._refresh_index_valuation())
-
-        # 5.5 卖方一致预期快照（schema v48，依据 S11 §2.2 #13）。
-        #     接口只给**当期横截面**、无历史参数（source_probe §1.B6），所以「今天不打点，
-        #     这一天就永远没有」——它必须每天都跑。低频纪律与 etf_prices 同款：
-        #     data_refresh_state 水位每日最多 1 次（值 = 北京日期），失败只让本步骤
-        #     failed/partial，不影响主链快照与 readiness。
-        report_step("analyst_forecast", self._refresh_analyst_forecast())
-
-        report["status"] = aggregate_job_status(report["steps"])
-        report["finished_at"] = datetime.now(UTC).isoformat()
-
-        logger.info(f"增量更新完成: {report['status']}")
-        return report
 
     def _refresh_business_overview(
         self,
@@ -4586,503 +4133,26 @@ class IncrementalUpdater:
         self, max_stocks: int,
         detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict:
-        """增量更新价格——只更新有新数据的股票。
+        """增量更新价格——只更新有新数据的股票（实现已搬到 ``update_parts/prices_step.py``）。
 
-        - 普通股票：按 latest_local → today 增量补齐 raw + qfq
-        - 发生除权除息（xdxr）的股票：qfq 全历史重拉，保证复权口径一致
-        - 本地价格陈旧：默认仍从本地最新日期增量补缺口；
-          仅 price_full_refetch_on_stale=true 时才整段重拉（数据修复用）
+        依据 S12/S13（reports/140 §2.5 拆分的第 4 块）：选股 / 抓取管道 / 结算已切成
+        三段放进 ``app.core.update_parts.prices_step``，本方法只留同名委托——签名、
+        返回值、异常与日志通道一字不改。三个"只有一份实现"的依赖仍从本模块注入：
 
-        detail_cb: 每只股票处理完后的细粒度回调 (step_name, {done, total,
-            current, label})，供前端实时进度条使用。
+        * ``logger``：仍是本模块的 logger（日志通道不变）；
+        * ``source_error_kind``：仍是本模块的 ``_source_error_kind``（契约 §1 唯一实现）；
+        * ``clock``：仍是**本模块**的 ``time.monotonic()``，运行期查找，
+          ``test_price_batch_flush.py`` 对 ``update.time`` 的 monkeypatch 语义逐字保留
+          （攒批缓冲的时间判据也走这个时钟）。
         """
-        logger.info("[增量] 检查需要价格更新的股票...")
-
-        latest_local = self._get_latest_local_price_date()
-        today = cn_today().strftime("%Y-%m-%d")
-        target_date = self._latest_expected_trading_date(today)
-
-        # 2026-11-13 P0（B）：待重拉 qfq 的股票必须强制进入本轮目标集，
-        # 否则它们"价格已最新"就不会被选中，xdxr_codes 也就无从生效。
-        pending_qfq_codes = self._load_qfq_refetch_pending()
-        pending_filter = ""
-        query_params: list[Any] = [target_date, target_date]
-        if pending_qfq_codes:
-            pending_slots = ", ".join("?" for _ in pending_qfq_codes)
-            pending_filter = f" OR stock.stock_code IN ({pending_slots})"
-            query_params.extend(pending_qfq_codes)
-            logger.warning(
-                "[增量] %d 只股票在 qfq 待重拉集合中（新写入除权事件），本轮强制全历史重拉: %s",
-                len(pending_qfq_codes), ", ".join(pending_qfq_codes[:20]),
-            )
-
-        # 按股票自己的最新日期选择缺口，不能用全库 MAX 代表全部股票。
-        # 每只成功股票立即提交，进程中断后下一轮可从剩余缺口继续。
-        try:
-            stocks = self.duck.read_query(
-                f"""SELECT stock.stock_code, stock.exchange,
-                          raw.latest_raw_date, qfq.latest_qfq_date
-                   FROM stock_meta stock
-                   LEFT JOIN (
-                     SELECT stock_code, MAX(trade_date) AS latest_raw_date
-                     FROM price_daily_raw GROUP BY stock_code
-                   ) raw ON raw.stock_code = stock.stock_code
-                   LEFT JOIN (
-                     SELECT stock_code, MAX(trade_date) AS latest_qfq_date
-                     FROM price_daily_qfq GROUP BY stock_code
-                   ) qfq ON qfq.stock_code = stock.stock_code
-                   WHERE stock.is_listed IS TRUE AND COALESCE(stock.is_suspended, FALSE) IS FALSE
-                      AND (raw.latest_raw_date IS NULL OR qfq.latest_qfq_date IS NULL
-                           OR raw.latest_raw_date < ? OR qfq.latest_qfq_date < ?
-                           OR NOT EXISTS (
-                               SELECT 1 FROM source_audit audit
-                               JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
-                               WHERE audit.stock_code = stock.stock_code
-                                 AND audit.field_name = 'latest_close'
-                                 AND audit.report_date = raw.latest_raw_date
-                                 AND batch.data_type = 'price_daily_raw'
-                           )
-                           OR NOT EXISTS (
-                               SELECT 1 FROM source_audit audit
-                               JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
-                               WHERE audit.stock_code = stock.stock_code
-                                 AND audit.field_name = 'latest_close'
-                                 AND audit.report_date = qfq.latest_qfq_date
-                                 AND batch.data_type = 'price_daily_qfq'
-                           ){pending_filter})
-                   ORDER BY stock.stock_code""",
-                query_params,
-            )
-        except Exception:
-            return {"status": "skipped", "reason": "no_stock_meta"}
-
-        if not stocks:
-            logger.info("[增量] 所有非停牌股票价格已是最新，无需更新")
-            return {"status": "skipped", "reason": "prices_up_to_date"}
-
-        target_stocks = stocks
-        try:
-            priority_codes = {
-                row["stock_code"]
-                for row in self.sqlite.query("SELECT DISTINCT stock_code FROM watchlist")
-            }
-        except Exception as error:
-            priority_codes = set()
-            logger.warning("读取研究优先名单失败，保持代码顺序: %s", error)
-        pending_set = set(pending_qfq_codes)
-        if priority_codes or pending_set:
-            # 待重拉 qfq = 复权因子已过期（正确性），必须排在研究名单之前。
-            target_stocks = sorted(
-                target_stocks,
-                key=lambda stock: (
-                    stock["stock_code"] not in pending_set,
-                    stock["stock_code"] not in priority_codes,
-                    stock["stock_code"],
-                ),
-            )
-        if max_stocks > 0:
-            # C10修复(报告41): 取前 N 只必须稳定排序（ORDER BY stock_code），
-            # 否则每次运行取到的子集随机漂移
-            target_stocks = target_stocks[:max_stocks]
-
-        fallback_start = latest_local or (cn_today() - timedelta(days=30)).strftime("%Y-%m-%d")
-        end_date = target_date
-
-        # 增量窗口内发生除权除息的股票：qfq 需要全历史重拉。
-        # 2026-11-12 P0：窗口按**每只股票自己**的本地最新 raw/qfq 计算。
-        # 旧实现取全市场 min(target_dates)，一只 qfq 停在旧日期的股票就
-        # 会把全体窗口拉回数年前——除权窗口越退越早、xdxr_full_refetch
-        # 32 → 293、价格步骤 143.5 分钟的根因之一。
-        stock_windows = {
-            str(stock["stock_code"]): self._local_price_window_start(
-                stock, fallback_start,
-            )
-            for stock in target_stocks
-        }
-        xdxr_codes = self._get_xdxr_codes_since(
-            fallback_start, stock_windows=stock_windows,
+        return prices_step.update_prices_incremental(
+            self,
+            max_stocks,
+            detail_cb,
+            logger=logger,
+            source_error_kind=_source_error_kind,
+            clock=lambda: time.monotonic(),
         )
-        # 2026-11-13 P0（B）：新写入除权事件的股票无条件全历史重拉 qfq，
-        # 不参与任何日期比较（覆盖"事件晚于价格推进"的死角）。
-        pending_in_targets = pending_set & {str(stock["stock_code"]) for stock in target_stocks}
-        if pending_in_targets:
-            xdxr_codes |= pending_in_targets
-            logger.warning(
-                "[增量] %d 只股票因新写入除权事件强制全历史重拉 qfq: %s",
-                len(pending_in_targets), ", ".join(sorted(pending_in_targets)[:20]),
-            )
-        if xdxr_codes:
-            logger.info(f"[增量] {len(xdxr_codes)} 只股票在各自窗口内发生除权除息，qfq 将全历史重拉")
-
-        # 本地数据陈旧时默认仍走增量：从本地最新日期补缺口即可覆盖全部缺失
-        # 交易日。整段重拉只作为显式数据修复手段（price_full_refetch_on_stale），
-        # 因为它会把每股数千行历史 DELETE+INSERT 回 17M 行主表，实测单股 10s+，
-        # 全市场追赶一次要十几小时（2026-10-20 诊断，依据 S4）。
-        raw_full_refetch = False
-        if self.price_full_refetch_on_stale and latest_local:
-            try:
-                latest_date = datetime.strptime(latest_local, "%Y-%m-%d").date()
-                gap_days = (cn_today() - latest_date).days
-                raw_full_refetch = gap_days > self.incremental_window_days
-            except ValueError:
-                raw_full_refetch = False
-        if raw_full_refetch:
-            logger.info(f"[增量] 本地价格陈旧超过 {self.incremental_window_days} 天，raw 整段重拉")
-        elif latest_local:
-            logger.info(f"[增量] 本地价格截至 {latest_local}，从该日期增量补缺口（不整段重拉）")
-
-        success_count = 0
-        fail_count = 0
-        updated_codes: list[str] = []
-        # 2026-11-12 P1：失败代码必须可追溯（旧实现只有汇总行，DB/日志都查不到）。
-        failed_codes: list[str] = []
-        completed: list[int] = [0]
-        concurrency = max(1, int(self.price_fetch_concurrency))
-        max_concurrency = max(concurrency, int(self.price_fetch_max_concurrency))
-        concurrency_step = max(1, int(self.price_fetch_concurrency_step))
-        scale_up_seconds = max(1, int(self.price_fetch_scale_up_seconds))
-        fetch_timeout = max(1, int(self.price_fetch_timeout_seconds))
-        batch_size = max(1, int(self.price_fetch_batch_size))
-        # 全历史替换的攒批缓冲（硬上限：只数 / 行数 / 存活秒数，见 _PriceReplaceBuffer）。
-        write_buffer = _PriceReplaceBuffer(
-            max_stocks=self._PRICE_WRITE_BUFFER_STOCKS,
-            max_rows=self._PRICE_WRITE_BUFFER_ROWS,
-            max_seconds=self._PRICE_WRITE_BUFFER_SECONDS,
-        )
-        # 每次落盘的真实批大小（验收证据：复盘要求能证明 N>1 而不是"N=1 也算批量"）。
-        write_batch_sizes: list[int] = []
-        update_started = time.monotonic()
-
-        request_executor = ThreadPoolExecutor(
-            max_workers=max_concurrency * 2,
-            thread_name_prefix="vd-price-request",
-        )
-
-        def fetch_one(
-            stock: dict,
-        ) -> tuple[str, Any, Any, str | None, bool, bool, bool, str]:
-            """在 worker 线程网络抓取 raw+qfq；不碰共享写连接。
-
-            增量原则：raw 与 qfq 各自以本地最新日期为起点，仅缺失的一侧
-            才全量拉取。绝不用全局最老日期拖低另一侧的起点——历史已完整的
-            股票每次只拉缺口（通常几行），避免无意义的全历史重拉。
-
-            返回最后三个值表示 raw/qfq 本次是否为"全历史请求"以及失败时的
-            ``error_kind``（契约 §1：只有 source_unavailable 计入重试消耗）。
-            只有全历史请求才允许走 DELETE+INSERT 全量替换（2026-09-08 红队）。
-            """
-            code = stock["stock_code"]
-            need_qfq_full = code in xdxr_codes
-            raw_full_requested = bool(raw_full_refetch)
-            qfq_full_requested = bool(need_qfq_full or raw_full_refetch)
-            raw_latest = stock.get("latest_raw_date")
-            qfq_latest = stock.get("latest_qfq_date")
-            raw_from = None if raw_full_requested else (str(raw_latest) if raw_latest else None)
-            qfq_from = None if qfq_full_requested else (str(qfq_latest) if qfq_latest else None)
-            def fetch_adjust(adjust: str, start: str | None) -> tuple[Any, float]:
-                started = time.monotonic()
-                result = self.adapter_mgr.fetch(FetchRequest(
-                    data_type="price_daily", stock_codes=[code],
-                    start_date=start, end_date=end_date, adjust=adjust,
-                    extra_params={
-                        "deadline_monotonic": started + fetch_timeout,
-                    },
-                ))
-                return result, time.monotonic() - started
-
-            futures = {
-                request_executor.submit(fetch_adjust, "raw", raw_from): "raw",
-                request_executor.submit(fetch_adjust, "qfq", qfq_from): "qfq",
-            }
-            done, pending = wait(futures, timeout=fetch_timeout)
-            if pending:
-                recover = getattr(self.adapter_mgr, "recover_after_timeout", None)
-                if callable(recover):
-                    recover()
-                return (
-                    code, None, None, f"fetch timeout after {fetch_timeout}s",
-                    True, raw_full_requested, qfq_full_requested, "source_unavailable",
-                )
-            results: dict[str, Any] = {}
-            slow = False
-            try:
-                for future in done:
-                    result, elapsed = future.result()
-                    results[futures[future]] = result
-                    slow = slow or elapsed > 30
-            except Exception as exc:
-                return (
-                    code, None, None, f"fetch exception: {exc}",
-                    False, raw_full_requested, qfq_full_requested, "source_unavailable",
-                )
-            raw_result = results["raw"]
-            qfq_result = results["qfq"]
-            if raw_result.metadata.error or not raw_result.data:
-                return (
-                    code, None, None, raw_result.metadata.error or "empty raw",
-                    slow, raw_full_requested, qfq_full_requested,
-                    _source_error_kind(raw_result),
-                )
-            if qfq_result.metadata.error or not qfq_result.data:
-                return (
-                    code, None, None,
-                    qfq_result.metadata.error or "empty qfq",
-                    slow, raw_full_requested, qfq_full_requested,
-                    _source_error_kind(qfq_result),
-                )
-            return (
-                code, raw_result, qfq_result, None,
-                slow, raw_full_requested, qfq_full_requested, "none",
-            )
-
-        batch: list[tuple[str, Any, Any, bool, bool]] = []
-        stable_since = time.monotonic()
-        observed_concurrency = concurrency
-        # 连续流水线：在途任务 = 股票执行器队列深度。慢股票只占用一个槽位，
-        # 其余槽位继续完成后面的股票；固定窗口实现会被单只 45s 长尾股票拖住
-        # 整窗（2026-08-28 提速计划）。
-        pipeline_depth = max(concurrency * 4, int(self.price_fetch_pipeline_depth))
-        stock_executor = ThreadPoolExecutor(
-            max_workers=concurrency,
-            thread_name_prefix="vd-price-stock",
-        )
-        outstanding: dict[Future, dict] = {}
-        next_index = 0
-
-        def fill_pipeline() -> None:
-            nonlocal next_index
-            while len(outstanding) < pipeline_depth and next_index < len(target_stocks):
-                stock = target_stocks[next_index]
-                next_index += 1
-                outstanding[stock_executor.submit(fetch_one, stock)] = stock
-
-        def flush_write_buffer() -> None:
-            """Write the pending full-history buffer in one transaction.
-
-            ``before_write`` 先补满流水线：写库期间主线程被占住，工作线程
-            必须已经在跑下一批抓取，否则它们会空等（2026-11-12 P0 ③）。
-            """
-            nonlocal success_count, updated_codes, fail_count
-            success_count, updated_codes, fail_count = self._persist_price_batch(
-                [], success_count, updated_codes, fail_count,
-                buffer=write_buffer, flush_buffer=True,
-                failed_codes=failed_codes, before_write=fill_pipeline,
-                batch_sizes=write_batch_sizes,
-            )
-
-        def handle_price_result(
-            code: str,
-            raw_result: Any,
-            qfq_result: Any,
-            err: str | None,
-            raw_full_requested: bool,
-            qfq_full_requested: bool,
-            error_kind: str = "source_unavailable",
-        ) -> None:
-            nonlocal success_count, updated_codes, fail_count
-            if err is not None or raw_result is None:
-                fail_count += 1
-                failed_codes.append(code)
-                # 2026-11-12 P1：逐只 WARNING，DB 与日志都能回答"今天哪几只失败"。
-                logger.warning(
-                    "[增量] 价格失败 %s: %s (error_kind=%s)",
-                    code, err or "empty", error_kind,
-                )
-                self._record_failure_or_missing(
-                    code, "price_daily", "manager", err or "empty",
-                    extra_json=json.dumps({"adjust": "both"}),
-                    error_kind=error_kind,
-                )
-            else:
-                batch.append((code, raw_result, qfq_result, raw_full_requested, qfq_full_requested))
-            if len(batch) >= batch_size:
-                success_count, updated_codes, fail_count = self._persist_price_batch(
-                    batch, success_count, updated_codes, fail_count,
-                    buffer=write_buffer, before_write=fill_pipeline,
-                    failed_codes=failed_codes, batch_sizes=write_batch_sizes,
-                )
-                batch.clear()
-            elif write_buffer.should_flush():
-                flush_write_buffer()
-
-        try:
-            fill_pipeline()
-            while outstanding:
-                done, _ = wait(
-                    tuple(outstanding.keys()),
-                    timeout=fetch_timeout + 5,
-                    return_when=FIRST_COMPLETED,
-                )
-                if not done:
-                    # fetch_one 自身有 deadline，这里只是防御 executor 线程异常退出。
-                    logger.warning(
-                        "价格流水线 %d 秒无任何股票完成（在途 %d），继续等待",
-                        fetch_timeout + 5,
-                        len(outstanding),
-                    )
-                    # 流水线进入空窗：已攒 ≥2 只且空闲超过阈值时先把缓冲写掉，
-                    # 不必等到整轮结束（写库前 before_write 会先补满流水线）。
-                    if write_buffer.should_flush():
-                        flush_write_buffer()
-                    continue
-                window_penalty = False
-                for future in done:
-                    stock = outstanding.pop(future)
-                    code = stock["stock_code"]
-                    try:
-                        (
-                            code, raw_result, qfq_result, err, slow,
-                            raw_full_requested, qfq_full_requested, error_kind,
-                        ) = future.result()
-                        window_penalty = window_penalty or slow or err is not None
-                        handle_price_result(
-                            code, raw_result, qfq_result, err,
-                            raw_full_requested, qfq_full_requested, error_kind,
-                        )
-                    except Exception as exc:
-                        window_penalty = True
-                        handle_price_result(
-                            code, None, None, f"price pipeline exception: {exc}",
-                            False, False, "source_unavailable",
-                        )
-                    completed[0] += 1
-                    if detail_cb is not None:
-                        detail_cb("price", {
-                            "done": completed[0],
-                            "total": len(target_stocks),
-                            "current": code,
-                            "label": "股票价格",
-                        })
-                if window_penalty:
-                    new_concurrency = max(
-                        int(self.price_fetch_concurrency),
-                        concurrency - concurrency_step,
-                    )
-                    stable_since = time.monotonic()
-                elif time.monotonic() - stable_since >= scale_up_seconds:
-                    new_concurrency = min(max_concurrency, concurrency + concurrency_step)
-                    stable_since = time.monotonic()
-                else:
-                    new_concurrency = concurrency
-                if new_concurrency != concurrency:
-                    logger.warning(
-                        "价格抓取自适应并发 %d -> %d", concurrency, new_concurrency,
-                    )
-                    concurrency = new_concurrency
-                    # ThreadPoolExecutor 支持运行时调整 worker 数；流水线只按
-                    # 队列深度提交，不会创建不可控的海量线程。
-                    stock_executor._max_workers = concurrency
-                    observed_concurrency = max(observed_concurrency, concurrency)
-                fill_pipeline()
-            if batch:
-                success_count, updated_codes, fail_count = self._persist_price_batch(
-                    batch, success_count, updated_codes, fail_count,
-                    buffer=write_buffer, before_write=fill_pipeline,
-                    failed_codes=failed_codes, batch_sizes=write_batch_sizes,
-                )
-                batch.clear()
-        finally:
-            # ② 循环正常结束或抛异常都必须把剩余数据落盘：既包括未满一批的
-            #    暂存项（batch），也包括攒批缓冲（write_buffer）。已 DELETE 的
-            #    股票更不能停在"删了没插"的中间态。
-            try:
-                if batch:
-                    success_count, updated_codes, fail_count = self._persist_price_batch(
-                        list(batch), success_count, updated_codes, fail_count,
-                        buffer=write_buffer, failed_codes=failed_codes,
-                        batch_sizes=write_batch_sizes,
-                    )
-                    batch.clear()
-                if len(write_buffer):
-                    flush_write_buffer()
-            except Exception as error:  # noqa: BLE001 - 收尾写入失败必须留痕
-                logger.error(
-                    "价格收尾写入失败（暂存 %d 只 / 缓冲 %d 只）: %s",
-                    len(batch), len(write_buffer), error,
-                )
-            request_executor.shutdown(wait=False, cancel_futures=True)
-            stock_executor.shutdown(wait=False, cancel_futures=True)
-
-        # 只有真正落库成功的才移出待重拉集合；失败的继续保留，下一轮再试。
-        cleared_qfq_pending = self._clear_qfq_refetch_pending(
-            [code for code in updated_codes if code in pending_in_targets]
-        )
-        logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
-        if failed_codes:
-            logger.warning(
-                "[增量] 价格失败代码 %d 只: %s",
-                len(failed_codes), ", ".join(failed_codes[:20]),
-            )
-        # 2026-11-13 P1（1）：raw 全成功但 qfq 大面积滞后 → 必须降级 partial，
-        # 不能让"0 失败"掩盖 4,613 只 qfq 停在昨天的假绿。
-        qfq_lag = self._qfq_lag_summary(
-            [str(stock["stock_code"]) for stock in target_stocks], target_date,
-        )
-        qfq_lag_threshold = max(5, int(len(target_stocks) * 0.01))
-        step_status = "success" if fail_count == 0 else "partial"
-        step_reason: str | None = None
-        if fail_count == 0 and qfq_lag["qfq_lag_count"] > qfq_lag_threshold:
-            step_status = "partial"
-            step_reason = "qfq_lagged"
-            logger.warning(
-                "[增量] qfq 滞后 %d/%d 只（阈值 %d）→ 价格步骤降级 partial(qfq_lagged): %s",
-                qfq_lag["qfq_lag_count"],
-                len(target_stocks),
-                qfq_lag_threshold,
-                ", ".join(qfq_lag["qfq_lag_codes"]),
-            )
-        # 2026-11-14 P0 J6（依据 S7 §2.2）：qfq 落后自己 raw 的股票必须写进"技术指标待重算
-        # 名单"。价格步骤"成功"只说明 raw 落库成功；价格域指标读的是 qfq，
-        # 而下一轮补 qfq 时 raw 已最新 → 重算集合为空 → 指标永久停在旧值。
-        tech_lag_watermarks = self._qfq_lag_watermarks(
-            [str(stock["stock_code"]) for stock in target_stocks]
-        )
-        tech_lag_codes = sorted(tech_lag_watermarks)
-        tech_pending_marked = self._mark_tech_recompute_pending(tech_lag_watermarks)
-        # 2026-11-16（依据 S10 §9.2 P0-5）：**qfq 写入成功**的每一只都打上
-        # technical_pending 标记。这覆盖 tech_recompute_pending 抓不到的形态：
-        # qfq 事后补齐后与 raw 齐平（滞后判据为假），但快照技术三列仍停在
-        # 补齐前算出的 NULL。下一阶段（或下一轮）强制重算，成功后移出。
-        technical_watermarks = self._qfq_watermarks(updated_codes)
-        technical_pending_marked = self._mark_technical_pending(technical_watermarks)
-        elapsed_seconds = max(time.monotonic() - update_started, 0.001)
-        return {
-            "status": step_status,
-            "reason": step_reason,
-            "total": len(target_stocks),
-            "success": success_count,
-            "failed": fail_count,
-            "failed_codes": failed_codes[:20],
-            # qfq 滞后可观测性（job_logs 可见）
-            "qfq_lag_count": qfq_lag["qfq_lag_count"],
-            "qfq_lag_ratio": qfq_lag["qfq_lag_ratio"],
-            "qfq_lag_threshold": qfq_lag_threshold,
-            "qfq_lag_codes": qfq_lag["qfq_lag_codes"],
-            **({"qfq_lag_error": qfq_lag["qfq_lag_error"]} if "qfq_lag_error" in qfq_lag else {}),
-            "xdxr_full_refetch": len(xdxr_codes),
-            "raw_full_refetch": raw_full_refetch,
-            "elapsed_seconds": round(elapsed_seconds, 3),
-            "rate_per_minute": round(completed[0] * 60 / elapsed_seconds, 2),
-            "max_concurrency_used": observed_concurrency,
-            "priority_count": sum(
-                stock["stock_code"] in priority_codes for stock in target_stocks
-            ),
-            # 落盘批次证据：复盘要求能证明"批量"不是 N=1 的措辞。
-            "write_batches": len(write_batch_sizes),
-            "write_batch_sizes": write_batch_sizes[:50],
-            "max_batch_stocks": max(write_batch_sizes) if write_batch_sizes else 0,
-            "qfq_refetch_pending_cleared": cleared_qfq_pending,
-            # 依据 S7 §2.2 J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
-            "tech_recompute_lag_count": len(tech_lag_codes),
-            "tech_recompute_pending_marked": tech_pending_marked,
-            "tech_recompute_lag_codes": tech_lag_codes[:20],
-            # 依据 S10 §9.2 P0-5：qfq 写入成功 → technical_pending（技术三列强制重算）
-            "technical_pending_marked": technical_pending_marked,
-            "technical_pending_codes": sorted(technical_watermarks)[:20],
-            "_updated_codes": updated_codes,
-            "_xdxr_codes": sorted(xdxr_codes),
-            "_raw_full_refetch": raw_full_refetch,
-        }
 
     def _latest_expected_trading_date(self, today: str, *, now: datetime | None = None) -> str:
         """Use the latest closed session, not today's still-open trading date."""
