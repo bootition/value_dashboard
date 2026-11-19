@@ -21,10 +21,7 @@ from datetime import UTC, datetime
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from app.core.financial_period import CN_TZ
-from app.core.missing_conditions import (
-    ACTIONABLE_MISSING_SQL,
-    actionable_missing_condition,
-)
+from app.core.missing_conditions import actionable_missing_condition
 from app.core.quality.null_reasons import DOMAINS, reason_distribution
 
 logger = logging.getLogger(__name__)
@@ -41,9 +38,14 @@ _SUMMARY_TTL_SECONDS = 300
 # core 需要同一口径的 actionable_missing_count()，此前靠
 # `from app.web.api.data_status import _actionable_missing_condition`
 # 惰性导入绕环，是本仓唯一一处 core→web 层反转。现在真源只有一个方向：
-# web → core（`app/core/missing_conditions.py`）。下面这个私有名保留为
-# 向后兼容别名，历史测试/脚本仍可照旧导入。
-_ACTIONABLE_MISSING_SQL = ACTIONABLE_MISSING_SQL
+# web → core（`app/core/missing_conditions.py`）。
+#
+# 2026-11-19 删：这里原本还有 `_ACTIONABLE_MISSING_SQL = ACTIONABLE_MISSING_SQL`
+# 的"向后兼容别名"，注释称"历史测试/脚本仍可照旧导入" —— 但全仓 grep 零个导入方。
+# 它与同时删掉的 `_DISABLED_MISSING_FIELDS` 完全同形（import 一个 core 常量 →
+# 模块内包一层同名私有别名），存在的唯一效果是让测试能断言一个名字。
+# 删除后 `ACTIONABLE_MISSING_SQL` 的 import 也随之失效（F401），一并去掉；
+# 真源仍在 `app/core/missing_conditions.py`，`actionable_missing_condition()` 照常用。
 
 _SUMMARY_CACHE: dict[str, dict[str, object]] = {}
 _SUMMARY_CACHE_LOCK = threading.Lock()
