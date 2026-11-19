@@ -431,20 +431,27 @@ def load_screening_readiness_entry(
         if payload.get("fingerprint") != fingerprint:
             return None
         updated = payload.get("updated_at")
-        age_seconds: float | None = None
-        if updated:
+        # ⚠️ fail-closed（2026-11-19 审查修）：缓存行**缺 updated_at 或解析失败**时，
+        # 年龄无法判定 ⇒ 绝不能当作"新鲜"放行。原实现把年龄闸门整块写在
+        # `if age_seconds is not None:` 里，于是 `age_seconds=None` 会**同时跳过
+        # TTL 与 1200s 硬上限**，直接返回旧决策 —— 等于给"没有时间戳的行"开了
+        # 一个永久豁免（缺陷 B 只对写了时间戳的行成立）。宁可重算一次 20s。
+        if not updated:
+            return None
+        try:
             updated_dt = datetime.fromisoformat(updated)
-            if updated_dt.tzinfo is None:
-                updated_dt = updated_dt.replace(tzinfo=UTC)
-            age_seconds = (datetime.now(UTC) - updated_dt).total_seconds()
-        if age_seconds is not None:
-            max_age = (
-                SCREENING_READINESS_STALE_MAX_AGE_SECONDS
-                if allow_stale
-                else SCREENING_READINESS_CACHE_TTL_SECONDS
-            )
-            if age_seconds > max_age:
-                return None
+        except (TypeError, ValueError):
+            return None
+        if updated_dt.tzinfo is None:
+            updated_dt = updated_dt.replace(tzinfo=UTC)
+        age_seconds = (datetime.now(UTC) - updated_dt).total_seconds()
+        max_age = (
+            SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+            if allow_stale
+            else SCREENING_READINESS_CACHE_TTL_SECONDS
+        )
+        if age_seconds > max_age:
+            return None
         return {
             "decision": payload.get("decision"),
             "cached_at": updated,

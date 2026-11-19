@@ -264,6 +264,65 @@ def test_gate_refuses_stale_ready_decision_beyond_hard_limit(
     assert calls == [1]
 
 
+def test_missing_updated_at_fails_closed_instead_of_bypassing_the_cap(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """缺 `updated_at` 的缓存行不得被当作新鲜放行（2026-11-19 审查拍到的一个真洞）。
+
+    原实现把年龄闸门整块写在 `if age_seconds is not None:` 里，于是：
+    缓存行**没有** `updated_at`（旧格式 / 迁移残留）→ `age_seconds=None`
+    → **TTL 与 2×TTL 硬上限同时被跳过** → 旧决策被无限期当作"已就绪"返回。
+    即"stale 有硬上限"只对写了时间戳的行成立。
+
+    修复后：时间戳缺失或解析失败一律 fail-closed（返回 None，让调用方重算）。
+    """
+    _seed_screenable(duckdb_store, sqlite_store)
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert fingerprint is not None
+
+    # 注意：`data_refresh_state.updated_at` 列是 NOT NULL，所以"缺时间戳"的真实
+    # 形态是**JSON payload 里没有 `updated_at` 字段**（旧版本写下的行 / 迁移残留），
+    # 而列上的值另有其用。原实现只看 payload → `age_seconds=None` → 闸门整块跳过。
+    fresh_col = datetime.now(UTC).isoformat()
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                         updated_at=excluded.updated_at""",
+        [
+            SCREENING_READINESS_CACHE_KEY,
+            json.dumps({"fingerprint": fingerprint, "decision": _READY_DECISION}),
+            fresh_col,
+        ],
+    )
+
+    assert load_screening_readiness_entry(sqlite_store, fingerprint) is None
+    assert load_screening_readiness_cache(sqlite_store, fingerprint) is None
+    assert (
+        load_screening_readiness_entry(sqlite_store, fingerprint, allow_stale=True)
+        is None
+    ), "没有时间戳 = 无法判定年龄 = 不得以 stale 名义放行"
+
+    # payload 里写了但无法解析，同样必须 fail-closed
+    sqlite_store.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                         updated_at=excluded.updated_at""",
+        [
+            SCREENING_READINESS_CACHE_KEY,
+            json.dumps({
+                "fingerprint": fingerprint,
+                "decision": _READY_DECISION,
+                "updated_at": "not-a-timestamp",
+            }),
+            fresh_col,
+        ],
+    )
+
+    assert load_screening_readiness_entry(sqlite_store, fingerprint, allow_stale=True) is None
+
+
 def test_background_refresh_failure_is_persisted_and_not_infinite_stale(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -323,3 +382,20 @@ def test_background_refresh_failure_is_persisted_and_not_infinite_stale(
     assert state["last_success_at"]
     assert state["last_failure_at"], "失败历史不应被成功刷新抹掉"
     assert SCREENING_READINESS_REFRESH_STATE_KEY == "screening_readiness_refresh_state"
+
+
+def test_stale_hard_limit_value_is_bounded_and_anchored() -> None:
+    """硬上限的**数值**必须被绝对断言锚住（2026-11-19 审查欠账 ①）。
+
+    变异实测：把 `STALE_MAX_AGE` 从 2×TTL 改成「10 年」，原有用例**仍然全绿** ——
+    因为夹具是用同一个常量构造的（自证）。这里加与实现无关的绝对边界：
+    上限必须 > TTL（否则 stale-while-revalidate 失去意义），且 ≤ 4×TTL
+    （否则一次后台刷新坏掉就会把过期几小时的决策当"就绪"返回）。
+    """
+    assert SCREENING_READINESS_STALE_MAX_AGE_SECONDS > SCREENING_READINESS_CACHE_TTL_SECONDS
+    assert (
+        SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+        <= 4 * SCREENING_READINESS_CACHE_TTL_SECONDS
+    ), "硬上限不得超过 4×TTL，否则 stale 窗口长到等于没有上限"
+    # 与 DESIGN 决策一致：当前取值 2×TTL
+    assert SCREENING_READINESS_STALE_MAX_AGE_SECONDS == 2 * SCREENING_READINESS_CACHE_TTL_SECONDS
