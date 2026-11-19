@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -152,18 +153,62 @@ class DatabasePathSet:
                     "Test/staging database roots must be outside the repository"
                 )
         else:
+            # 2026-11-16（reports/147）：正式库允许两种「合法根目录」——
+            #   ① 主检出（main worktree）的 `data/`；
+            #   ② **同一个仓库的链接工作树**（git worktree）会话共用主检出的 `data/`。
+            # 为什么必须放行 ②：`data/` 是 gitignore 的，链接工作树里根本没有自己的
+            # `data/`。若不放行，worktree 里的会话**永远无法**执行任何维护脚本 ——
+            # 而「多会话并行、没有主控」正是本项目的常态，等于把维护动作锁死在
+            # 没人负责的主检出上。
+            # 安全性由另外三层保证：duckdb/sqlite 文件名必须完全匹配（下面两条）、
+            # `VD_FORMAL_ACK=confirmed` 显式确认、以及**写入前必须持有跨会话写租约**
+            # （`scripts/session_lease.py`，preflight 会检查）。
             formal_root = canonicalize_path(_DATA_ROOT)
-            if run_root != formal_root:
-                raise PathIsolationError("Formal run_root must be the repository data directory")
-            if duckdb_path != canonicalize_path(_FORMAL_DUCKDB):
-                raise PathIsolationError("Formal DuckDB path does not match the canonical file")
-            if sqlite_path != canonicalize_path(_FORMAL_SQLITE):
-                raise PathIsolationError("Formal SQLite path does not match the canonical file")
+            allowed_roots = {formal_root, *shared_data_roots()}
+            if run_root not in allowed_roots:
+                raise PathIsolationError(
+                    "Formal run_root must be the repository data directory "
+                    "(or the shared data dir of this repository's worktrees)"
+                )
             # 冻结态豁免 ACK（F4：双击 exe 即显式意图）
             if not getattr(sys, "frozen", False) and os.environ.get("VD_FORMAL_ACK") != "confirmed":
                 raise PathIsolationError("VD_FORMAL_ACK=confirmed is required for formal profile")
 
         return _validated_path_set(self.env, duckdb_path, sqlite_path, run_root)
+
+
+def shared_data_roots() -> set[Path]:
+    """同一仓库**所有工作树**共用的 `data/` 目录（reports/147）。
+
+    从当前检出执行 `git rev-parse --git-common-dir`：
+    - 主检出 → 返回 `<repo>/.git`，其父目录就是仓库根；
+    - 链接工作树 → 同样返回**主检出**的 `.git`，因此得到主检出的 `data/`。
+
+    取不到（非 git 仓库 / 没有 git）时返回空集合，调用方退回只看 `_DATA_ROOT`。
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(_PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+            # 必须显式 UTF-8：Windows 默认按 cp936 解码，中文路径会变成
+            # 「鎺屾帶缁忔祹」这类 mojibake，导致路径比对永远不相等。
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return set()
+    git_dir = Path(completed.stdout.strip())
+    if git_dir.name != ".git":
+        # 裸仓库或异常布局：不做猜测
+        return set()
+    root = canonicalize_path(git_dir.parent)
+    return {canonicalize_path(root / "data")}
 
 
 def _is_inside(child: Path, parent: Path) -> bool:

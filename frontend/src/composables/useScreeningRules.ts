@@ -61,6 +61,8 @@ export interface ScreeningRulesDeps {
   hasUnsavedEdits: () => boolean
   notify: RulesNotifier
   dialog: ConfirmDialog
+  /** 迁移历史规则里的旧排名字段名（reports/148）；由页面注入。 */
+  migrateConditions?: (node: unknown) => void
 }
 
 export function useScreeningRules(deps: ScreeningRulesDeps) {
@@ -172,6 +174,8 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
         ? conditions
         : { logic: 'AND', rules: [] },
     )
+    // 库里的旧规则可能存着方案 C 之前的旧排名字段名（reports/148）→ 装载时迁移
+    deps.migrateConditions?.(clone)
     ruleTree.logic = 'AND'
     ruleTree.rules.splice(0, ruleTree.rules.length)
     Object.assign(ruleTree, clone)

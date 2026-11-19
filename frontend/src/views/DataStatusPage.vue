@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { fieldDisplayName } from '../utils/screening-format.ts'
 import { ref, onMounted, computed } from 'vue'
 import { NCard, NStatistic, NGrid, NGridItem, NSpin, NEmpty, NTag, NDescriptions, NDescriptionsItem, NButton, NSpace, NDataTable, NAlert, NProgress } from 'naive-ui'
 import axios from 'axios'
@@ -739,7 +740,10 @@ function skipReasonLabel(reason: string | null | undefined): string {
             striped
             :columns="[
               {title:'股票',key:'stock_code',width:100},
-              {title:'字段',key:'field_name',width:150},
+              // 2026-11-16（reports/148）：缺失字段列表必须显示中文名，
+              // 否则用户看到的是 `cf_from_operating_indirect` 这种英文列名。
+              {title:'字段',key:'field_name',width:220,
+               render: (row: MissingItem) => fieldDisplayName(row.field_name, row.field_name)},
               {title:'原因码',key:'reason_code',width:120},
             ]"
             :data="missingList"

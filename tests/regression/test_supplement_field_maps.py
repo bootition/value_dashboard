@@ -453,27 +453,34 @@ def test_refresh_keeps_csmar_rows_and_only_writes_own_source(
     assert own_rows[0]["operating_payable_increase"] == pytest.approx(-6_806_428_089.04)
 
 
-def test_refresh_rewrites_own_stale_source_row(duckdb_store, monkeypatch) -> None:
-    """上一轮的「半空壳」本源行会被本轮整行重写（幂等），旧同源行不残留。
+def test_refresh_keeps_out_of_window_source_rows(duckdb_store, monkeypatch) -> None:
+    """补采只清理**本轮请求的期次**，窗口外的同源真实行必须保留。
 
-    `delete_scope='all'`：按股票删掉**全部** `eastmoney_f10` 行再插本轮结果。
-    这条纪律保证"半空壳"不会因为主键冲突而留在库里；代价是抓取窗口之外的
-    旧本源行会一并消失（窗口 = 最近 `backfill_periods` 个季末）。
+    2026-11-16（reports/147 事故）修正的旧契约：旧实现 `delete_scope='all'`
+    按**股票**整删，把"抓取窗口之外的旧本源行会一并消失"当成可接受的代价。
+    实测这个代价是：只补 `2025-06-30` 一期时，一次丢掉 5,575 行 2025 年报 +
+    5,579 行 2026 半年报，只能靠全量重采救回来。
+
+    新契约：删除范围加 `report_date IN (本轮请求期次)`。
     """
     _seed_stock(
         duckdb_store, "600519", "贵州茅台",
         sw_level1="食品饮料", sw_level2="白酒", csrc_l1="制造业",
     )
     _seed_trio(duckdb_store, "600519")
-    # 上一轮本源行：只有 capex，其余列全空（正是 P0-3 的"半空壳"形态）
-    duckdb_store.write_query(
-        """INSERT INTO cash_flow_activity
-               (stock_code, report_date, report_type, capex, source, fetch_time,
-                raw_response_hash, confidence, batch_id)
-           VALUES ('600519', CAST(? AS DATE), 'quarterly', 1, 'eastmoney_f10',
-                   TIMESTAMP '2026-09-20 00:00:00', 'h', 'strict', 'b')""",
-        [OLD],
-    )
+    # 窗口外的两条真实本源行：半空壳（OLD）+ 更早的年报
+    for report_date, report_type, capex in (
+        (OLD, "semi_annual", 1),
+        ("2025-12-31", "annual", 999),
+    ):
+        duckdb_store.write_query(
+            """INSERT INTO cash_flow_activity
+                   (stock_code, report_date, report_type, capex, source, fetch_time,
+                    raw_response_hash, confidence, batch_id)
+               VALUES ('600519', CAST(? AS DATE), ?, ?, 'eastmoney_f10',
+                       TIMESTAMP '2026-09-20 00:00:00', 'h', 'strict', 'b')""",
+            [report_date, report_type, capex],
+        )
     fetcher = SupplementFetcher(duck=duckdb_store)
     monkeypatch.setattr(
         SupplementFetcher, "_fetch_rows",
@@ -482,23 +489,27 @@ def test_refresh_rewrites_own_stale_source_row(duckdb_store, monkeypatch) -> Non
     report = fetcher.refresh(CASHFLOW_SUPPLEMENT, periods=[LATEST], deadline_seconds=30)
     assert report["status"] == "success", report
 
-    stale = duckdb_store.read_query(
-        """SELECT COUNT(*) AS n FROM cash_flow_activity
-           WHERE stock_code = '600519' AND source = 'eastmoney_f10'
-             AND report_date <> CAST(? AS DATE)""",
-        [LATEST],
-    )
-    assert stale[0]["n"] == 0, "旧同源行必须被删掉（否则与新行并存，主键冲突/脏数据）"
-    rows = duckdb_store.read_query(
+    # 本轮期次：写入且只有一行
+    written = duckdb_store.read_query(
         """SELECT capex, dividend_interest_paid, investing_inflow_total
            FROM cash_flow_activity
            WHERE stock_code = '600519' AND report_date = CAST(? AS DATE)""",
         [LATEST],
     )
-    assert len(rows) == 1, "同源同主键只能有一行"
-    assert rows[0]["capex"] == pytest.approx(3_127_594_916.41)
-    assert rows[0]["dividend_interest_paid"] == pytest.approx(67_241_733_345.45)
-    assert rows[0]["investing_inflow_total"] == pytest.approx(33_591_725_908.79)
+    assert len(written) == 1, "同源同主键只能有一行"
+    assert written[0]["capex"] == pytest.approx(3_127_594_916.41)
+    assert written[0]["dividend_interest_paid"] == pytest.approx(67_241_733_345.45)
+    assert written[0]["investing_inflow_total"] == pytest.approx(33_591_725_908.79)
+
+    # 窗口外期次：必须原样保留
+    for report_date, expected_capex in ((OLD, 1), ("2025-12-31", 999)):
+        kept = duckdb_store.read_query(
+            """SELECT capex FROM cash_flow_activity
+               WHERE stock_code = '600519' AND report_date = CAST(? AS DATE)""",
+            [report_date],
+        )
+        assert len(kept) == 1, f"{report_date} 的窗口外真实数据被误删 —— reports/147 事故"
+        assert kept[0]["capex"] == pytest.approx(expected_capex)
 
 
 # ─── P0-6：保险股守卫 ─────────────────────────────────────────────────

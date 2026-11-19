@@ -217,9 +217,18 @@ SNAPSHOT_UPDATE_SQL = f"""
                 AND COALESCE(snap.total_market_cap, 0) >= ?
                 AND {is_non_financial_sql('meta')}) AS eligible
         FROM (
-            SELECT r.stock_code, r.latest, r.med5, r.n5, r.med10, r.n10,
-                   r.min10, r.sd10, r.med20, r.n20
-            FROM (
+            -- 2026-11-16（reports/146）：聚合的**左表是 indicator_snapshot**，
+            -- 不是 roce_history。旧实现从 roce_history 出发，没有 ROCE 历史的
+            -- 股票（新股 / 金融股 / 年报不足 1 期）在 agg 里没有行，
+            -- `UPDATE ... FROM` 就碰不到它们 → `roce_eligible` 停在 NULL。
+            -- 后果：`WHERE roce_eligible` 与 `WHERE NOT roce_eligible` 都不命中，
+            -- 用户按「非金融·市值≥100亿·有效年数≥5」筛会漏掉这些股票。
+            SELECT snap.stock_code AS stock_code,
+                   r.latest, r.med5, COALESCE(r.n5, 0) AS n5,
+                   r.med10, COALESCE(r.n10, 0) AS n10,
+                   r.min10, r.sd10, r.med20, COALESCE(r.n20, 0) AS n20
+            FROM indicator_snapshot snap
+            LEFT JOIN (
                 SELECT stock_code,
                        MAX(CASE WHEN rn = 1  THEN roce END)        AS latest,
                        MEDIAN(roce) FILTER (WHERE rn <= 5)          AS med5,
@@ -238,7 +247,7 @@ SNAPSHOT_UPDATE_SQL = f"""
                     WHERE roce IS NOT NULL
                 ) ranked
                 GROUP BY stock_code
-            ) r
+            ) r ON r.stock_code = snap.stock_code
         ) w
         LEFT JOIN stock_meta meta USING (stock_code)
         LEFT JOIN indicator_snapshot snap USING (stock_code)

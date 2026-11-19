@@ -17,6 +17,7 @@
  */
 
 import { ref, watch } from 'vue'
+import { cloneScreeningRule } from '../types/screening.ts'
 import type { Ref } from 'vue'
 import axios, { isAxiosError } from 'axios'
 import type { ResultColumn, ScreeningRuleNode } from '../types/screening.ts'
@@ -47,6 +48,14 @@ export interface ScreeningDraftDeps {
   /** 后端列定义 → 结果列合成取值。 */
   encodeResultColumn: (column: ResultColumn) => string
   notify: DraftNotifier
+  /**
+   * 迁移历史规则/草稿里的旧排名字段名（reports/148）。
+   *
+   * 方案 C 之后 `/indicators` 不再下发 `*_rank` 扁平字段，但库里的草稿仍可能存着
+   * `roce_10y_median_industry_rank` 这类名字 → 下拉里找不到 → 界面显示英文。
+   * 由页面注入（它持有 indicators / rankModes 的事实），本模块只负责在**正确时机**调用。
+   */
+  migrateConditions?: (node: unknown) => void
   /** 冲突里选「刷新页面」时执行；默认整页重载。 */
   reloadPage?: () => void
 }
@@ -191,7 +200,12 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
         syncEditorSnapshot()
         return
       }
-      if (draft.conditions) Object.assign(ruleTree, draft.conditions)
+      if (draft.conditions) {
+        // 草稿同样可能存着方案 C 之前的旧排名字段名 → 载入时迁移（reports/148）
+        const draftConditions = cloneScreeningRule(draft.conditions)
+        deps.migrateConditions?.(draftConditions)
+        Object.assign(ruleTree, draftConditions)
+      }
       if (draft.base_pool) Object.assign(basePool, draft.base_pool)
       if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
       if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {

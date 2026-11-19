@@ -16,6 +16,7 @@ import contextlib
 import contextvars
 import ctypes
 import os
+import sys
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -191,6 +192,56 @@ def any_write_lock_active(database_path: Path) -> bool:
 
 
 @contextlib.contextmanager
+def _lease_path(database_path: Path) -> Path:
+    return database_path.parent / ".locks" / "db-write.lease.json"
+
+
+def _write_session_lease(database_path: Path) -> bool:
+    """把当前进程登记成「正式库写租约」持有者（供其他会话看到）。
+
+    与 `session_lease.py` 共用同一个文件格式；这里只写不抢占 —— 能走到这一步
+    说明单写者锁已经拿到了。写失败（目录不可写等）只返回 False，不影响更新。
+    """
+    try:
+        import json
+        import socket
+        from datetime import datetime, timedelta
+
+        lease = _lease_path(database_path)
+        lease.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now().astimezone()
+        payload = {
+            "owner": "auto-update",
+            "purpose": os.environ.get("VD_LEASE_PURPOSE", "自动更新（data auto-update run）"),
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "acquired_at": now.isoformat(),
+            # 自动更新可能跑很久；给 2 小时，宁宽勿窄（它随时可被 PID 判定回收）
+            "expires_at": (now + timedelta(hours=2)).isoformat(),
+            "ttl_seconds": 7200,
+            "command": " ".join(sys.argv)[:400],
+        }
+        lease.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def _clear_session_lease(database_path: Path) -> None:
+    """更新结束：删掉自己写的租约（只删 owner=auto-update 且 pid 是自己的）。"""
+    try:
+        import json
+
+        lease = _lease_path(database_path)
+        if not lease.exists():
+            return
+        payload = json.loads(lease.read_text(encoding="utf-8"))
+        if payload.get("owner") == "auto-update" and int(payload.get("pid") or 0) == os.getpid():
+            lease.unlink(missing_ok=True)
+    except (OSError, ValueError):
+        return
+
+
 def exclusive_update(
     database_path: Path,
     *,
@@ -222,10 +273,18 @@ def exclusive_update(
             handle.write(f"pid={os.getpid()}\ntime={time.time()}\n{created_line}")
         if reclaimed_stale_lock and on_stale_lock is not None:
             on_stale_lock()
+        # 2026-11-16（reports/147）：单写者锁同时写一份**跨会话可见的租约**。
+        # 为什么：`exclusive_update` 只让「同机进程之间」互斥，别的 AI 会话
+        # 看不到「现在有人在写库」——它们只会看到 `session_preflight` 说 PASS，
+        # 然后 start 自己的一轮写入。租约文件让 `session_lease.py status` 与
+        # preflight 都能看见「auto-update 正在写库」。
+        lease_written = _write_session_lease(database_path)
         token = _held.set(True)
         try:
             yield
         finally:
             _held.reset(token)
+            if lease_written:
+                _clear_session_lease(database_path)
     finally:
         lock_path.unlink(missing_ok=True)
