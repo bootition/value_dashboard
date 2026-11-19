@@ -82,7 +82,7 @@ NULL 能被解释），也看反例（字段有值却满足同一条件 ⇒ 说�
   会把同一个域劈成两个包，还会打断
   `scripts/check_indicator_readiness.py::_SECTOR_CONSUMERS` 按 `app/` 路径键做的
   `is_bank_sql` 收口检查（文件缺失该检查直接判 BLOCK）。
-  依据 S3 L2 的「迁出到 scripts/lib」建议基于「`app/` 内无调用点 ⇒ 无人调用」的
+  依据 S3（`reports/136`）L2 的「迁出到 scripts/lib」建议基于「`app/` 内无调用点 ⇒ 无人调用」的
   误判——调用点在脚本侧、读端在生产侧；**2026-11-19 复核后改为不迁**。
 
 用法
