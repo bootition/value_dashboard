@@ -14,10 +14,11 @@ import { fieldDisplayName } from '../src/utils/screening-format.ts'
 
 test('collectRuleFields: flat AND node returns all condition fields', () => {
   const node: ScreeningRuleNode = {
+    id: 'n1',
     logic: 'AND',
     rules: [
-      { field: 'pe_ttm', op: '>', value: 0 },
-      { field: 'roe', op: '>', value: 0.1 },
+      { id: 'c1', field: 'pe_ttm', op: '>', value: 0 },
+      { id: 'c2', field: 'roe', op: '>', value: 0.1 },
     ],
   }
   const fields = collectRuleFields(node)
@@ -26,14 +27,16 @@ test('collectRuleFields: flat AND node returns all condition fields', () => {
 
 test('collectRuleFields: nested OR node collects from all depths', () => {
   const node: ScreeningRuleNode = {
+    id: 'n1',
     logic: 'AND',
     rules: [
-      { field: 'pe_ttm', op: '>', value: 0 },
+      { id: 'c1', field: 'pe_ttm', op: '>', value: 0 },
       {
+        id: 'n2',
         logic: 'OR',
         rules: [
-          { field: 'roe', op: '>', value: 0.1 },
-          { field: 'dividend_yield', op: '>', value: 0.02 },
+          { id: 'c2', field: 'roe', op: '>', value: 0.1 },
+          { id: 'c3', field: 'dividend_yield', op: '>', value: 0.02 },
         ],
       },
     ],
@@ -44,16 +47,19 @@ test('collectRuleFields: nested OR node collects from all depths', () => {
 
 test('collectRuleFields: deeply nested (3 levels) collects all fields', () => {
   const node: ScreeningRuleNode = {
+    id: 'n1',
     logic: 'AND',
     rules: [
       {
+        id: 'n2',
         logic: 'OR',
         rules: [
           {
+            id: 'n3',
             logic: 'AND',
-            rules: [{ field: 'pb_mrq', op: '<', value: 2 }],
+            rules: [{ id: 'c1', field: 'pb_mrq', op: '<', value: 2 }],
           },
-          { field: 'pe_ttm', op: '>', value: 0 },
+          { id: 'c2', field: 'pe_ttm', op: '>', value: 0 },
         ],
       },
     ],
@@ -64,11 +70,14 @@ test('collectRuleFields: deeply nested (3 levels) collects all fields', () => {
 
 test('collectRuleFields: right_field is collected for untrusted warnings', () => {
   const node: ScreeningRuleNode = {
+    id: 'n1',
     logic: 'AND',
     rules: [
       {
+        id: 'c1',
         field: 'pe_ttm',
         op: '>',
+        value: null,
         right_field: 'dividend_yield',
       },
     ],
@@ -78,7 +87,7 @@ test('collectRuleFields: right_field is collected for untrusted warnings', () =>
 })
 
 test('collectRuleFields: empty rules returns empty set', () => {
-  const node: ScreeningRuleNode = { logic: 'AND', rules: [] }
+  const node: ScreeningRuleNode = { id: 'n1', logic: 'AND', rules: [] }
   assert.deepEqual([...collectRuleFields(node)], [])
 })
 
@@ -89,7 +98,6 @@ test('collectRuleFields: empty rules returns empty set', () => {
 test('computeUntrustedFields: no warnings => empty', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm', 'roe'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'roe', 'dividend_yield'],
     warningCodes: [],
   })
@@ -99,7 +107,6 @@ test('computeUntrustedFields: no warnings => empty', () => {
 test('computeUntrustedFields: DIVIDEND_DATES_UNVERIFIED + dividend_yield in result columns => blocks', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'dividend_yield'],
     warningCodes: ['DIVIDEND_DATES_UNVERIFIED'],
   })
@@ -109,7 +116,6 @@ test('computeUntrustedFields: DIVIDEND_DATES_UNVERIFIED + dividend_yield in resu
 test('computeUntrustedFields: DIVIDEND_DATES_UNVERIFIED + no dividend column in results => no block', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'roe'],
     warningCodes: ['DIVIDEND_DATES_UNVERIFIED'],
   })
@@ -119,7 +125,6 @@ test('computeUntrustedFields: DIVIDEND_DATES_UNVERIFIED + no dividend column in 
 test('computeUntrustedFields: STALE_RUNNING_JOBS alone does NOT block save/export', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'roe'],
     warningCodes: ['STALE_RUNNING_JOBS'],
   })
@@ -129,7 +134,6 @@ test('computeUntrustedFields: STALE_RUNNING_JOBS alone does NOT block save/expor
 test('computeUntrustedFields: UNPUBLISHED_OVERRIDES alone does NOT block save/export', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'roe'],
     warningCodes: ['UNPUBLISHED_OVERRIDES'],
   })
@@ -139,7 +143,6 @@ test('computeUntrustedFields: UNPUBLISHED_OVERRIDES alone does NOT block save/ex
 test('computeUntrustedFields: LINEAGE_INVALID blocks all snapshot-dependent result columns', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'roe', 'dividend_yield'],
     warningCodes: ['LINEAGE_INVALID'],
   })
@@ -149,22 +152,11 @@ test('computeUntrustedFields: LINEAGE_INVALID blocks all snapshot-dependent resu
   assert.deepEqual(result.sort(), ['dividend_yield', 'pe_ttm', 'roe'])
 })
 
-test('computeUntrustedFields: sort field is untrusted => included', () => {
-  const result = computeUntrustedFields({
-    ruleFields: [],
-    sortField: 'dividend_yield',
-    resultColumns: ['stock_code', 'name', 'dividend_yield'],
-    warningCodes: ['DIVIDEND_DATES_UNVERIFIED'],
-  })
-  assert.deepEqual(result, ['dividend_yield'])
-})
-
 test('computeUntrustedFields: rule field not in result columns still included if untrusted', () => {
   // Rule references dividend_yield but it's not in result columns.
   // The helper should still flag it because the rule depends on it.
   const result = computeUntrustedFields({
     ruleFields: ['dividend_yield'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm'],
     warningCodes: ['DIVIDEND_DATES_UNVERIFIED'],
   })
@@ -176,7 +168,6 @@ test('computeUntrustedFields: metadata columns starting with _ are excluded from
   // it should not appear in the durable column list.
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', '_entry_explanation', '_data_date'],
     warningCodes: ['LINEAGE_INVALID'],
   })
@@ -189,7 +180,6 @@ test('computeUntrustedFields: metadata columns starting with _ are excluded from
 test('computeUntrustedFields: csrc_l2 不会被误判；MINIMUM_DATA_NOT_READY 不再让全部指标不可信', () => {
   const result = computeUntrustedFields({
     ruleFields: ['csrc_l2', 'total_market_cap', 'dividend_financing_ratio_pct'],
-    sortField: 'csrc_l2',
     resultColumns: ['stock_code', 'name', 'csrc_l2', 'total_market_cap', 'dividend_financing_ratio_pct'],
     warningCodes: ['MINIMUM_DATA_NOT_READY', 'DIVIDEND_DATES_UNVERIFIED'],
   })
@@ -200,7 +190,6 @@ test('computeUntrustedFields: csrc_l2 不会被误判；MINIMUM_DATA_NOT_READY �
 test('computeUntrustedFields: empty results => empty', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: [],
     warningCodes: ['DIVIDEND_DATES_UNVERIFIED'],
   })
@@ -212,7 +201,6 @@ test('computeUntrustedFields: empty results => empty', () => {
 test('computeUntrustedFields: unknown future warning code does NOT block', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm'],
     warningCodes: ['SOME_FUTURE_WARNING'],
   })
@@ -222,7 +210,6 @@ test('computeUntrustedFields: unknown future warning code does NOT block', () =>
 test('computeUntrustedFields: combined operations warnings do NOT block', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm', 'dividend_yield'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'dividend_yield'],
     warningCodes: ['STALE_RUNNING_JOBS', 'UNPUBLISHED_OVERRIDES'],
   })
@@ -231,19 +218,20 @@ test('computeUntrustedFields: combined operations warnings do NOT block', () => 
 
 test('computeUntrustedFields: nested dividend rule + dividend in results => blocks', () => {
   const node: ScreeningRuleNode = {
+    id: 'n1',
     logic: 'AND',
     rules: [
-      { field: 'pe_ttm', op: '>', value: 0 },
+      { id: 'c1', field: 'pe_ttm', op: '>', value: 0 },
       {
+        id: 'n2',
         logic: 'OR',
-        rules: [{ field: 'dividend_yield', op: '>', value: 0.02 }],
+        rules: [{ id: 'c2', field: 'dividend_yield', op: '>', value: 0.02 }],
       },
     ],
   }
   const ruleFields = collectRuleFields(node)
   const result = computeUntrustedFields({
     ruleFields,
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'dividend_yield'],
     warningCodes: ['DIVIDEND_DATES_UNVERIFIED'],
   })
@@ -253,7 +241,6 @@ test('computeUntrustedFields: nested dividend rule + dividend in results => bloc
 test('computeUntrustedFields: global all-indicator warning (FINANCIAL_SHELL_ROWS) blocks all result indicator columns', () => {
   const result = computeUntrustedFields({
     ruleFields: ['pe_ttm'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm', 'roe', 'dividend_yield'],
     warningCodes: ['FINANCIAL_SHELL_ROWS'],
   })
@@ -272,7 +259,6 @@ test('computeUntrustedFields: union of sources — field in rule but not in resu
   // But sort field pe_ttm is affected by LINEAGE_INVALID.
   const result = computeUntrustedFields({
     ruleFields: ['dividend_yield'],
-    sortField: 'pe_ttm',
     resultColumns: ['stock_code', 'name', 'pe_ttm'],
     warningCodes: ['DIVIDEND_DATES_UNVERIFIED', 'LINEAGE_INVALID'],
   })
