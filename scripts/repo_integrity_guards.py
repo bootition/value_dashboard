@@ -1,4 +1,4 @@
-"""RG6–RG9 仓库完整性门禁（`reports/140`，承 `reports/133` §7 升级条款）。
+"""RG6–RG10 仓库完整性门禁（`reports/140`，承 `reports/133` §7 升级条款）。
 
 为什么需要这一组
 ----------------
@@ -356,6 +356,66 @@ def check_truth_source_cites(root: Path) -> list[Finding]:
     return findings
 
 
+# --------------------------------------------------------------------- RG10
+
+#: 只扫文本类后缀：二进制里出现 U+FFFD 是正常的（它本来就是解码产物）。
+UFFFD_SUFFIXES = frozenset({
+    ".py", ".md", ".vue", ".ts", ".js", ".mjs", ".css", ".yaml", ".yml",
+    ".json", ".ps1", ".sh", ".bat", ".spec", ".toml", ".html",
+})
+#: 第三方/构建/缓存/会话私有目录：不是本仓库维护的源码。
+UFFFD_SKIP_DIRS = frozenset({
+    ".git", ".venv", "node_modules", "dist", "build", "__pycache__",
+    ".opencode", ".omo", ".planning", "test-results", ".ruff_cache",
+    ".pytest_cache", ".vite", ".codegraph", "_legacy",
+})
+#: 单文件扫描上限（字节）。超过就不扫，避免有人把 19GB 的库副本放进仓库把门禁拖死。
+UFFFD_MAX_BYTES = 4 * 1024 * 1024
+
+REPLACEMENT_CHAR = chr(0xFFFD)  # 写成转义，本文件自身必须能通过 RG10
+
+
+def check_no_replacement_char(root: Path) -> list[Finding]:
+    """RG10：源码与文档不得含 `U+FFFD` 替换字符。
+
+    背景（`reports/144` §4）：`AGENTS W1` 早就写着「改文件只用精确字面量替换，
+    不用 sed / 内联 heredoc 拼中文」，但它**没有执行器**。2026-11-22 会话里
+    再犯一次：bash heredoc 传中文时 `·` 与 `—` 被控制台编码写成 `U+FFFD`，
+    注释分隔线 `// ─── 黑名单操作 ───` 中间嵌了两个替换符——ruff/tsc **都不会报**，
+    靠人工全仓扫才发现。
+
+    为什么这条几乎零误报：`U+FFFD` 不是任何人会故意敲进源码的字符，
+    它只在「按某种编码解码了不符该编码的字节」时产生。
+    唯一例外是**故意演示乱码**的文档——那种情况请用文字描述（如 `U+FFFD`），
+    不要把字面字符留在文件里（本报告的 §4 就是这么处理的）。
+    """
+    findings: list[Finding] = []
+    scanned = 0
+    for base, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in UFFFD_SKIP_DIRS)
+        for filename in sorted(filenames):
+            if Path(filename).suffix.lower() not in UFFFD_SUFFIXES:
+                continue
+            path = Path(base) / filename
+            try:
+                if path.stat().st_size > UFFFD_MAX_BYTES:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            scanned += 1
+            if REPLACEMENT_CHAR not in text:
+                continue
+            first = text.index(REPLACEMENT_CHAR)
+            line_no = text.count(chr(10), 0, first) + 1
+            findings.append(Finding(
+                "RG10", _rel(root, path), f"replacement-char-L{line_no}",
+                f"第 {line_no} 行含 U+FFFD 替换字符（编码事故遗迹）；"
+                "请用精确字面量编辑重写该行，若是有意演示乱码，改用文字描述 U+FFFD",
+            ))
+    return findings
+
+
 # --------------------------------------------------------------------- RG9
 
 
@@ -459,6 +519,7 @@ CHECKS = (
     ("RG7 supersede 双向闭合", check_supersede_closure),
     ("RG8 真相源不引用作废结论", check_truth_source_cites),
     ("RG9 测试资产必须入库", check_test_assets_tracked),
+    ("RG10 源码/文档不含 U+FFFD 替换字符", check_no_replacement_char),
 )
 
 
@@ -484,7 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     with contextlib.suppress(AttributeError, OSError):
         sys.stdout.reconfigure(encoding="utf-8")
 
-    parser = argparse.ArgumentParser(description="RG6–RG9 仓库完整性门禁（reports/140）")
+    parser = argparse.ArgumentParser(description="RG6–RG10 仓库完整性门禁（reports/140）")
     parser.add_argument("--root", default=str(PROJECT_ROOT))
     parser.add_argument("--json", action="store_true")
     parser.add_argument(

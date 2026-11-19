@@ -33,10 +33,9 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 ### 1. 必读顺序（任何任务开始时）
 
 1. `docs/reference/CODE_MAP.md` — **代码地图**：想改 X 就读 Y（含 7 本词汇表 + 同名陷阱）
-2. `docs/STATUS.md` — **当前状态唯一权威**，含当前裁决、剩余缺口、进行中工作
-3. `docs/README.md` — 文档地图与生命周期规则
+2. `docs/STATUS.md` — **当前状态唯一权威**（当前裁决、剩余缺口、进行中工作）；`docs/README.md` — 文档地图与生命周期
 4. `docs/runbooks/ops-knowledge-base.md` — **域知识/运行期硬约束**（`D*/S*/E*/I*/C*` 定义处）。**不必通读**：
-   改数据/更新/存储/口径前先 `grep -n "<关键词或编号>"` 定位；域事实一律以它为准
+   改数据/更新/存储/口径前先 `grep -n "<关键词或编号>"` 定位，域事实以它为准
 5. 任务相关代码/文档；做指标/筛选时读 `docs/skills/composite-indicator/SKILL.md`
 
 ### 2. 文档状态语义（front-matter `status` 字段）
@@ -74,84 +73,89 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 ## 常用命令
 
 ```bash
+# 会话开工自检（W4 执行器：脏工作区/别的 worktree/别人的 pytest/8765；退出码 2 = 先别动手）
+uv run --locked python scripts/session_preflight.py
 # 测试（S1 隔离回归，保护正式数据库）
 scripts/s1-pytest.ps1 tests/regression
-# 静态检查
-uv run --locked ruff check app tests/regression
-# 全部门禁一条命令：RG1–RG9（时区/状态合并/单位/派生域/规则来源/编号/supersede/真相源/测试资产）
+uv run --locked ruff check app tests/regression          # 静态检查
+# 全部门禁一条命令：RG1–RG10（时区/状态合并/单位/派生域/规则来源/编号/supersede/真相源/测试资产/编码）
 uv run --locked python scripts/check_rework_guards.py
 # 提交门禁钩子（已装）：sh scripts/install-git-hooks.sh 安装 / bash .githooks/pre-commit 试跑
 # 认知成本度量（不做门禁；改结构/拆文件后用它证明"真的变简单了"）
 uv run --locked python scripts/onboarding_metrics.py --compare docs/reference/onboarding-baseline-2026-11-17.json
-# 前端门禁
+# 前端门禁（cd frontend 后）；锁文件
 cd frontend; npm run lint; npm run test; npm run build
-# 锁文件
 uv lock --locked
 ```
 
 ## 执行纪律（W1–W8，2026-11-17 实测 `reports/138`；W8 见 `reports/140`）
 
-> 这一节管的是"AI 怎么干活"，不是"产品怎么工作"。复盘来源：一次会话光 `sleep` 就等掉约 2.5 小时、
-> 两次全量回归 57 分钟且失败与改动无关、一个 agent 两小时零落盘（`reports/138`）；并行写同一文件见 `reports/140`。
+> 这一节管的是"AI 怎么干活"，不是"产品怎么工作"。复盘来源：`reports/138`（sleep 2.5 小时、两次全量 57 分钟且失败与改动无关、一个 agent 两小时零落盘）、`reports/140`（并行写同一文件）、`reports/144`（多会话同仓）。
 
 ### W1 改文件只用"精确匹配、不匹配就报错"的编辑，不用 sed / 内联 heredoc 拼中文或 SQL
 
 - 规则：改文件用精确字面量替换（替换前后各校验一次）；批量生成内容先写临时文件再落盘；
   每次改完立刻 `ruff check <单文件>`。
-- 为什么：`reports/138` §3.1 —— 3 次替换静默没生效、2 次控制台编码把中文写成 mojibake 直接
-  `SyntaxError`、1 次写入真实换行把文件写成语法错误（29 个 ruff 报错），每次都要重读整块重写。
+- 为什么：`reports/138` §3.1 —— 3 次替换静默没生效、2 次控制台编码写成 mojibake 直接 `SyntaxError`、
+  1 次写入真实换行写成语法错误（29 个 ruff 报错），每次都要重读整块重写。
 
 ### W2 后台任务用作业工具等待，不用 `sleep N` + `tail`
 
 - 规则：起后台任务后用 `job_output(wait=true, timeout_ms=…)` 阻塞等待；禁止用 `sleep` 轮询日志。
-- 为什么：`reports/138` §2 —— 单会话纯 sleep ≈ **2.5 小时**，是最大单项浪费；工具本身不是瓶颈
-  （python 启动 151ms、开库+聚合 329ms）。
+- 为什么：`reports/138` §2 —— 单会话纯 sleep ≈ **2.5 小时**，是最大单项浪费；工具本身不是瓶颈（python 启动 151ms、开库+聚合 329ms）。
 
 ### W3 查证类查询先聚合后取样，禁止无 `LIMIT` 的明细 dump
 
 - 规则：先 `COUNT(*) GROUP BY 桶`；需要样本再 `LIMIT 10`；扫大表前先想"能否用主键/索引缩成区间"。
-- 为什么：`reports/138` §1 —— 未加 LIMIT 的明细 dump 一次吐 14KB 被截断进 spill 文件，关键信息淹没；
-  同一个聚合对 14 万行表重复跑了 3 次。
+- 为什么：`reports/138` §1 —— 未加 LIMIT 的明细 dump 一次吐 14KB 被截断进 spill 文件，关键信息淹没；同一个聚合对 14 万行表重复跑了 3 次。
 
-### W4 agent 在跑时不动共享资源
+### W4 并行会话的共享可变状态一律私有化，开工前先侦察
 
-- 规则：任何 agent/后台任务在跑时，不重启 Web 服务、不写正式库；要验证接口就在临时库上起临时实例。
-- 为什么：`reports/138` §3.3 —— 两次重启 Web 服务把 DuckDB 变成独占锁，所有只读审计/修复连接失败，
-  白等两轮。
+- 规则：**开工前**先跑 `uv run --locked python scripts/session_preflight.py`（查他人未提交改动 / 其他
+  worktree / 8765 端口 / 别人的 pytest 进程）。BLOCK 就换私有资源：工作树 `git worktree`（本环境可用
+  `create_worktree`）、分支独立、Web 端口按 `web.port` 分配、**全量 S1 只由主控串行跑**（端口与 Python
+  进程表是机器级的，worktree 隔不开）；agent 在跑时不重启共享 Web 服务、不写正式库，验证接口只在
+  临时库起临时实例。命令级流程见 `docs/skills/multi-agent-safe-session/SKILL.md`。
+- 为什么：`reports/144` §2 —— 同工作树两写者一次踩出 6 类冲突：改动被对方 `commit` 吸走两次、5 个历史
+  提交因「新模块未入库就被 import」而 `ModuleNotFoundError`、裸 pytest 让 S1 preflight 反复失败、
+  8765 被占触发 `freeze S1`、对方中途写文件造出假失败。靠"大家小心"是概率性的，私有化是结构性的。
 
 ### W5 派活三件套：时间盒 + 落盘要求 + 失败退出路径
 
-- 规则：给 agent 的任务书必须写死「最多 N 分钟」「每完成一个文件就落盘」「做不完交现状 + 卡点」；
-  判据类任务由主控先用一条 SQL/一次复现**自证判据成立**再派出去；空闲 agent 先用 `send_message`
-  催一次进度；超过时间盒仍没有文件变更就中断它、自己做。
-- 为什么：`reports/138` §4 —— 一个 agent 两小时零落盘：判据本身是错的，任务书又写了"建议先 copy
-  28GB 库彩排"这种没有时间盒的前置动作。
+- 规则：任务书必须写死「最多 N 分钟」「每完成一个文件就落盘」「做不完交现状 + 卡点」；判据类任务由主控
+  先用一条 SQL/一次复现**自证判据成立**再派出去；空闲 agent 先用 `send_message` 催一次进度；
+  超过时间盒仍无文件变更就中断它、自己做。
+- 为什么：`reports/138` §4 —— 一个 agent 两小时零落盘：判据本身是错的，任务书又写了"建议先 copy 28GB 库彩排"这种没有时间盒的前置动作。
 
 ### W6 测试范围：定向优先；全量 S1 只走包装器，禁止裸跑
 
-- 规则：改动 <5 个文件先跑定向用例；全量只在合并前跑**一次**，且必须
-  `scripts/s1-pytest.ps1 tests/regression`。服务在跑时 wrapper 按设计拒绝（"freeze S1"），不得绕过。
+- 规则：改动 <5 个文件先跑定向用例；全量只在合并前跑**一次**，且必须 `scripts/s1-pytest.ps1 tests/regression`。
+  服务在跑时 wrapper 按设计拒绝（"freeze S1"），不得绕过——**若拒绝原因是别人在跑，见 W4，别绕过**。
 - 为什么：`reports/138` §1/§6.4 —— 两次全量共 57 分钟且失败原因都与改动无关；**裸跑全量会派生真实的
-  `app.web.main` 与 `data auto-update run` 子进程**（本轮实测留下 4 个孤儿进程，已清理）。
-- 附带：新增测试按 `tests/regression/README.md` 的命名约定（`test_<域>_<行为>.py`，事故编号进 docstring）。
+  `app.web.main` 与 `data auto-update run` 子进程**（实测留下 4 个孤儿进程，已清理）。`reports/144` §2 C3：
+  别人的裸 pytest 会让本会话的 S1 preflight 反复失败，反之亦然。
+- 附带：新增测试按 `tests/regression/README.md` 命名约定（`test_<域>_<行为>.py`，事故编号进 docstring）。
 
 ### W7 删除 / 取消跟踪前先 grep 契约测试
 
 - 规则：`reports/136` §7 这类"可移除清单"只是**候选**；动手前先
   `grep -rn "<路径>" tests/ scripts/ *.spec docs/runbooks/`，有存在性断言或**运维指引**就不能删，
   并回来更正清单。
-- 为什么：`reports/137` §3 —— `legacy_dangerous/` 被两条门禁当固定 fixture；`index.html` 的"必须跟踪"
-  又被误读成 wheel 测试要求（实际要求的是构建后产物）。两条都差点按清单误删/误改。
-  `reports/140` 又抓到一次同型：`populate_csrc_industry.py` 在代码里零引用，却是
-  `docs/runbooks/ops-data-rebuild.md` 的运维步骤 —— **grep 范围漏了 runbooks 就等于漏了使用者**。
+- 为什么：`reports/137` §3 —— `legacy_dangerous/` 被两条门禁当固定 fixture；`index.html` 的"必须跟踪"被误读成
+  wheel 测试要求（实际要求的是构建后产物），两条都差点误删/误改。`reports/140` 又抓到同型：
+  `populate_csrc_industry.py` 代码零引用却是 `docs/runbooks/ops-data-rebuild.md` 的运维步骤
+  —— **grep 漏了 runbooks 就等于漏了使用者**。
 
 ### W8 并行 agent 必须有文件租约，写同一文件先认领
 
-- 规则：同时跑多个 agent 时，先按文件/目录划分**互斥的写域**并写进任务书；跨域修改走主控串行
-  合入。每份任务书必须列出「你只准写这 N 个文件」，越界即停。
-- 为什么：`reports/140` §R9 —— `0024586` 标题自带「并发会话产出」，与 `f6e9cd2` 在
-  `calculator.py`/`update.py` 上重叠 5.5 小时；`reports/135` §1 P0-2 记录"另一个会话已修"。
-  静态门禁只能事后抓，管不了同时写；`W1–W7` 原本**没有一条**涉及文件所有权。
+- 规则：同时跑多个 agent 时，先按文件/目录划分**互斥的写域**写进任务书（「你只准写这 N 个文件」），
+  跨域修改走主控串行合入。**提交只按显式路径**：`git add <file>…` / `git commit -- <file>…`，
+  禁止 `git add -A`、`git add .`、`git commit -a`，提交前 `git diff --cached --stat` 核有无跨主题文件混入。
+  **新建模块必须先单独入库**再让别人 `import`——「未跟踪的新文件 + 已被引用」会让历史提交在新克隆上崩。
+- 为什么：`reports/140` §R9 —— `0024586` 与 `f6e9cd2` 在 `calculator.py`/`update.py` 上重叠 5.5 小时；
+  `W1–W7` 原本**没有一条**涉及文件所有权，而静态门禁只能事后抓、管不了同时写。`reports/144` §2 C1/C2
+  是同一事故的**被撞方视角**：双方都写了"只改这 N 个文件"、也都按路径 `git add`，仍被对方 `commit -a`
+  吸走两次并留下 5 个 `import` 不通的历史提交。`reports/140` §14.4 是对方自查（违反 W8 三次）。
 
 ## Git 纪律（强制，防止工作丢失）
 
@@ -165,7 +169,7 @@ uv lock --locked
 
 ### 2. 提交边界（哪些永不提交）
 
-- `data/`（正式数据库）、`*.whl`、`app/web/static/assets/`（构建产物）、`tests/regression/<hash>/`、`docs/evidence/evidence-s0|s1/`、`_legacy/`、`.omo/`、`.opencode/`、`.planning/`、`frontend/test-results/` —— 见 `.gitignore`，如有遗漏先补 `.gitignore` 而非硬提交
+- `data/`（正式数据库）、`*.whl`、`app/web/static/assets/`（构建产物）、`tests/regression/<hash>/`、`docs/evidence/evidence-s0|s1/`、`_legacy/`、`.omo/`、`.opencode/`、`.planning/`、`frontend/test-results/` —— 见 `.gitignore`；有遗漏先补 `.gitignore`，不硬提交
 
 ### 3. Push 纪律
 
@@ -189,13 +193,11 @@ uv lock --locked
 
 ## 反返工硬规则（强制，2026-11-17 复盘 `reports/133`）
 
-**背景教训（2026-10-18 ~ 11-17）：** 46 次提交里 23 次是 `fix`；25 次 `fix`+`chore` 中
-**15 次（60%）在 96 小时内又改到上一份提交改过的同一批文件**；19 份报告里 5 份在同日/次日
-被 `superseded`；ROCE 一个指标 40 小时内返工四次（4,322 行），PDF 除权日方案 26 小时建成
-又被整体删除（1,769 行）。根因不是能力，是 7 类**固定生成机制**（详见 `reports/133` §4）。
+**背景教训（2026-10-18 ~ 11-17）：** 46 次提交里 23 次是 `fix`；25 次 `fix`+`chore` 中 **15 次（60%）
+在 96 小时内又改到同一批文件**；19 份报告 5 份被自己人取代；ROCE 一个指标 40 小时内返工四次（4,322 行），
+PDF 除权日方案 26 小时建成又被整体删除（1,769 行）。根因不是能力，是 7 类**固定生成机制**（`reports/133` §4）。
 
-> **总判据（先问这一句）**：这次修复有没有改变"下一次同类事故的生成条件"？
-> 只改出口表现 = 延期付款，不算修完。
+> **总判据（先问这一句）**：这次修复有没有改变"下一次同类事故的生成条件"？只改出口表现 = 延期付款，不算修完。
 
 ### R1 一个事实，只能有一个实现
 
@@ -256,14 +258,13 @@ uv lock --locked
 
 ### R7 口径变更必须走 Skill 清单，且必须在报告里写"为什么不选另一个口径"
 
-- ✅ 报告必须有一节"外部核验 + 反例"（书里的标杆、手算 1 家、行业常识）
-- ✅ 口径被推翻时，新报告 `supersedes` 旧报告并把旧报告 front-matter 标 `superseded`
-- ✅ 结论必须附依据路径 + `last-reviewed` 日期（见文档规则 §4）
+- ✅ 报告必须有一节"外部核验 + 反例"（书里的标杆、手算 1 家、行业常识）；口径被推翻时，新报告
+  `supersedes` 旧报告并把旧报告 front-matter 标 `superseded`；结论必须附依据路径 + `last-reviewed`（§4）
 - 📎 依据：`reports/128 → 129 → 130 → 132`（同一指标 40 小时内四次返工，全是口径没定死）
 
 ## 不要删清单（reports/136 §8，强制）
 
-**用法**：要删任何"看起来多余"的结构前，先在这张表里查一遍，并先做 W7 的契约测试 grep（含 `docs/runbooks/`）。
+**用法**：要删任何"看起来多余"的结构前，先查这张表 + 做 W7 的契约测试 grep（含 `docs/runbooks/`）。
 判据是 **"能指出它防的是哪次事故，就不算过度设计"**——下表每项都对应一次已发生的事故，永久保留。
 
 | 项 | 看起来可删的理由 | 删了会重演的事故 |
@@ -286,8 +287,7 @@ uv lock --locked
 
 ## 工作区边界
 
-- `data/` — 正式数据库（**只读**！写操作必须经 CLI/维护脚本 + 单写者串行）；`docs/evidence/` — 证据只增不改
-- `.planning/` — 会话计划与进度（AI 私有工作区，**gitignore**：放这里的东西新克隆看不到，结论必须回写 `docs/`）
+- `data/` — 正式数据库（**只读**！写操作必须经 CLI/维护脚本 + 单写者串行）；`docs/evidence/` — 证据只增不改；`.planning/` — 会话私有工作区（**gitignore**，结论必须回写 `docs/`）
 
 ## 规则维护（新增 / 合并 / 降级）
 
