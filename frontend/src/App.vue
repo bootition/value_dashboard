@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
 import { RouterLink, RouterView } from 'vue-router'
 import axios from 'axios'
 import type { DataQualityStatus } from './types/data-quality.ts'
+import { usePollTimer } from './composables/usePolling.ts'
 
 const route = useRoute()
 
@@ -17,7 +18,9 @@ type AutoUpdateStatus = {
 const quality = ref<DataQualityStatus | null>(null)
 const qualityFailed = ref(false)
 const autoUpdateRunning = ref(false)
-let autoUpdateTimer: number | undefined
+// 自动更新状态轮询：30s 固定节奏（2026-11-22 收敛到 composables/usePolling.ts，
+// 卸载清理由 usePollTimer 的 onScopeDispose 负责，页面不再自己 maintain timer）。
+const autoUpdatePoll = usePollTimer()
 
 async function refreshAutoUpdateStatus() {
   try {
@@ -41,12 +44,24 @@ onMounted(async () => {
     qualityFailed.value = true
   }
   await refreshAutoUpdateStatus()
-  autoUpdateTimer = window.setInterval(refreshAutoUpdateStatus, 30000)
+  startAutoUpdatePolling()
 })
 
-onBeforeUnmount(() => {
-  if (autoUpdateTimer !== undefined) window.clearInterval(autoUpdateTimer)
-})
+/**
+ * 30s 固定节奏轮询。用"跑完再排下一次"的递归链取代 setInterval：
+ * 语义等价（固定间隔、链不断），但天然不会在慢请求时叠加并发请求。
+ * try/finally 保证即使 refreshAutoUpdateStatus 抛错，轮询链也不会断
+ * （这一点与原先 setInterval 一致）。
+ */
+function startAutoUpdatePolling() {
+  autoUpdatePoll.schedule(30000, async () => {
+    try {
+      await refreshAutoUpdateStatus()
+    } finally {
+      startAutoUpdatePolling()
+    }
+  })
+}
 
 const statusTag = computed(() => {
   const q = quality.value

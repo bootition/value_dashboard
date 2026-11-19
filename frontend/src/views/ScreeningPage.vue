@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick, h } from 'vue'
+import { ref, reactive, onMounted, computed, watch, nextTick, h } from 'vue'
 import type { VNode } from 'vue'
 import { NButton, NSwitch, NInput, NInputNumber, NSelect, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
 import { NEllipsis } from 'naive-ui'
-import axios, { isAxiosError } from 'axios'
+import axios from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
 import ScreeningRuleEditor from '../components/ScreeningRuleEditor.vue'
 import DslIndicatorManager from '../components/DslIndicatorManager.vue'
@@ -14,42 +14,33 @@ import type {
   ScreeningRunResponse,
   DataStatusSummaryResponse,
   WarningCode,
-  ResultColumn,
-  RankMode,
 } from '../types/screening.ts'
-import { cloneScreeningRule, generateRuleId } from '../types/screening.ts'
+import { generateRuleId } from '../types/screening.ts'
+import { useAutoUpdateRunning } from '../composables/useAutoUpdatePolling.ts'
+import { useScreeningColumns, DEFAULT_RESULT_COLUMNS, encodeResultColumn } from '../composables/useScreeningColumns.ts'
+import { useScreeningDraft } from '../composables/useScreeningDraft.ts'
+import { useScreeningRules } from '../composables/useScreeningRules.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
-import { friendlyErrorMessage } from '../helpers/api-error.ts'
-import { applyIndicatorUnits, fieldDisplayName, fieldOptionLabel } from '../utils/screening-format.ts'
-import { fmtStoredPercent } from '../utils/formatters.ts'
+import { apiErrorText } from '../helpers/api-error.ts'
+import { applyIndicatorUnits, indicatorDisplayName } from '../utils/screening-format.ts'
+import {
+  unavailableCoverageText,
+  unavailableKey,
+  unavailableLabel,
+  unavailableReasonText,
+} from '../utils/screening-unavailable.ts'
+import type { UnavailableIndicator } from '../utils/screening-unavailable.ts'
 
 const message = useMessage()
 const dialog = useDialog()
 
-// 后端 400 detail 通常是可直接展示的校验消息（如“排序项必须是对象”、
-// “min_listing_years 必须在 0-100 之间”），优先展示原文；其余错误走统一映射。
-function apiErrorText(e: unknown, fallback: string): string {
-  if (isAxiosError(e) && e.response?.status === 400) {
-    const detail = e.response.data?.detail
-    if (typeof detail === 'string' && detail.trim()) return detail.trim()
-  }
-  return friendlyErrorMessage(e, fallback)
-}
 const indicators = ref<readonly ScreeningIndicator[]>([])
 /** 条件级排名口径（方案 C，后端 /indicators 下发）：空 = 原始值 */
 const rankModes = ref<Array<{ label: string; value: string }>>([])
 // 2026-11-14（reports/120 §5 J5/J9）：后端把「当前报告期不可用/被遮蔽」的字段
 // 从 indicators 移到 unavailable（字段名 + reason + coverage_pct）。
 // 只让字段消失不给理由，用户会以为功能没了——这里在指标选择区灰显并给 tooltip。
-interface UnavailableIndicator {
-  readonly name?: string
-  readonly field?: string
-  readonly domain?: string
-  readonly reason?: string
-  readonly coverage_pct?: number | null
-  readonly message?: string
-  readonly replaced_by?: string
-}
+// 2026-11-22：类型与 5 个纯展示函数已抽到 utils/screening-unavailable.ts。
 const unavailableIndicators = ref<readonly UnavailableIndicator[]>([])
 const loading = ref(false)
 const results = ref<readonly ScreeningResult[]>([])
@@ -63,7 +54,8 @@ const resultsAnchor = ref<HTMLElement | null>(null)
 // reports/79 方案 A: 更新窗口内快照口径运行标注
 const autoUpdateSnapshot = ref(false)
 const snapshotAsOf = ref<string | null>(null)
-const autoUpdateRunning = ref(false)
+// 自动更新状态轮询（更新中 → 10s，空闲 → 60s；卸载时清 timer）
+const { autoUpdateRunning, refreshAutoUpdate, startAutoUpdatePolling } = useAutoUpdateRunning()
 
 // 2026-08-27：运行按钮不再被少数股票的数据缺口全局禁用。
 // 引擎会排除缺口股，后端只拦截真正的全库硬性阻断。
@@ -87,21 +79,6 @@ function setSuspendedHandling(value: string) {
   basePool.exclude_suspended = value !== 'include'
 }
 
-interface SavedRule {
-  id: number
-  name: string
-  version: number
-  rule_json: { conditions: ScreeningRuleNode; columns?: string[] }
-  locked_indicators: Record<string, any>
-  status: string
-  created_at: string
-}
-
-const savedRules = ref<SavedRule[]>([])
-const selectedRuleId = ref<number>(0)
-const activeRule = computed(() => savedRules.value.find(rule => rule.id === selectedRuleId.value) || null)
-const ruleName = ref('')
-
 const ruleTree = reactive<ScreeningRuleNode>({
   id: generateRuleId(),
   logic: 'AND',
@@ -123,132 +100,6 @@ const opOptions = [
   { label: '有数据', value: 'is_not_null' },
   { label: '无数据', value: 'is_null' },
 ]
-
-// 结果展示列：运行前可自由增删；本次运行通过 /run 的 columns 参数生效，
-// 并持久化到 draft.result_columns。这里只放 stock_meta 基础信息，
-// 指标列复用 /api/screening/indicators 的 indicatorOptions。
-const RESULT_METADATA_COLUMNS: Array<{ label: string; value: string }> = [
-  { label: '股票代码', value: 'stock_code' },
-  { label: '股票名称', value: 'name' },
-  { label: '交易所', value: 'exchange' },
-  { label: '上市日期', value: 'listing_date' },
-  { label: 'ST 状态', value: 'is_st' },
-  { label: '停牌状态', value: 'is_suspended' },
-  { label: '总股本', value: 'total_shares' },
-  { label: '流通股本', value: 'circ_shares' },
-  { label: '证监会一级行业', value: 'csrc_l1' },
-  { label: '证监会二级行业', value: 'csrc_l2' },
-]
-const DEFAULT_RESULT_COLUMNS = [
-  'stock_code', 'name', 'exchange', 'listing_date',
-  'csrc_l1', 'csrc_l2', 'latest_close', 'total_market_cap',
-]
-const selectedResultColumns = ref<string[]>([])
-/** 结果列合成值里的参数分隔符（与 decodeResultColumn 保持一致）。 */
-const PARAM_COLUMN_SEP = '@'
-
-const resultColumnOptions = computed(() => {
-  const seen = new Set(RESULT_METADATA_COLUMNS.map(item => item.value))
-  const options: Array<{ label: string; value: string }> = [...RESULT_METADATA_COLUMNS]
-  for (const indicator of indicatorOptions.value) {
-    if (!('value' in indicator)) continue
-    if (seen.has(indicator.value)) continue
-    seen.add(indicator.value)
-    options.push({ label: indicator.label, value: indicator.value })
-  }
-  // 参数化字段（reports/143 §2）：一个基名 + 多个参数取值各占一个选项，
-  // 避免把 `revenue_cagr3` / `revenue_cagr5` 这类后缀字段铺进下拉。
-  for (const indicator of indicators.value) {
-    const spec = indicator.param_spec
-    if (!spec) continue
-    const base = fieldDisplayName(indicator.name, indicator.name)
-    for (const value of spec.options) {
-      // 库里存 `0p25y`（避免字段名里的小数点），界面显示「0.25 年」
-      const shown = spec.kind === 'tenor'
-        ? `${String(value).replace('p', '.')} 年`
-        : `${String(value)} 年`
-      options.push({
-        label: `${base} · ${shown}`,
-        value: `${indicator.name}${PARAM_COLUMN_SEP}${spec.key}=${String(value)}`,
-      })
-    }
-  }
-  // 方案 C（2026-11-16）：可排名指标额外提供 6 个「排名口径」列。
-  // 用一个合成值编码（`{field}::rank::{mode}`），避免 n-select 多选里
-  // 同名字段无法区分；提交给后端时再 decode 成 {field, rank_mode}。
-  for (const indicator of indicators.value) {
-    if (!indicator.rankable) continue
-    const base = fieldDisplayName(indicator.name, indicator.name)
-    for (const mode of rankModes.value) {
-      options.push({
-        label: `${base} · ${mode.label}`,
-        value: rankColumnValue(indicator.name, mode.value),
-      })
-    }
-  }
-  return options
-})
-
-/**
- * 结果列的合成取值（2026-11-16）：
- *   `字段`                        纯字段
- *   `字段@参数=值`                 参数化字段（如 revenue_cagr@cagr_years=5）
- *   `字段@参数=值::rank::口径`     参数化 + 排名口径
- * 合成值让 n-select 多选里「同名不同参数」的选项互不冲突。
- */
-const RANK_COLUMN_SEP = '::rank::'
-
-function rankColumnValue(field: string, mode: string): string {
-  return `${field}${RANK_COLUMN_SEP}${mode}`
-}
-
-/** 合成取值 → 后端列定义（字符串或 {field, rank_mode?, cagr_years?, tenor?}）。 */
-function decodeResultColumn(value: string): ResultColumn {
-  let rest = value
-  let rankMode: string | undefined
-  const at = rest.indexOf(RANK_COLUMN_SEP)
-  if (at >= 0) {
-    rankMode = rest.slice(at + RANK_COLUMN_SEP.length)
-    rest = rest.slice(0, at)
-  }
-  let field = rest
-  const extra: Record<string, unknown> = {}
-  const pAt = rest.indexOf(PARAM_COLUMN_SEP)
-  if (pAt >= 0) {
-    field = rest.slice(0, pAt)
-    const matched = rest.slice(pAt).match(/^@([A-Za-z_]+)=(.*)$/)
-    if (matched) {
-      const [, key, raw] = matched
-      extra[key] = key === 'cagr_years' ? Number(raw) : raw
-    }
-  }
-  if (!rankMode && Object.keys(extra).length === 0) return field
-  const out: Record<string, unknown> = { field, ...extra }
-  if (rankMode) out.rank_mode = rankMode as RankMode
-  return out as unknown as ResultColumn
-}
-/**
- * 提交给后端的 columns（方案 C）：把合成取值解码成 `{field, rank_mode}`。
- * 空选择时回落到默认列，保证结果表不会只剩代码。
- */
-function selectedColumnsForRequest(): ResultColumn[] {
-  const picked = selectedResultColumns.value
-  if (picked.length === 0) return [...DEFAULT_RESULT_COLUMNS]
-  return picked.map(decodeResultColumn)
-}
-
-/** 后端列定义 → 合成取值（载入草稿/已保存规则时用）。 */
-function encodeResultColumn(column: ResultColumn): string {
-  if (typeof column === 'string') return column
-  const anyCol = column as unknown as Record<string, unknown>
-  const paramKey = anyCol.cagr_years !== undefined
-    ? 'cagr_years'
-    : anyCol.tenor !== undefined ? 'tenor' : ''
-  let out = String(anyCol.field ?? '')
-  if (paramKey) out += `${PARAM_COLUMN_SEP}${paramKey}=${String(anyCol[paramKey])}`
-  if (anyCol.rank_mode) out += `${RANK_COLUMN_SEP}${String(anyCol.rank_mode)}`
-  return out
-}
 
 /**
  * 下拉选项统一渲染（2026-11-16）。
@@ -283,23 +134,16 @@ const readinessCopy = computed(() => {
 // 方案 C（2026-11-16）：后端不再下发 930 条排名派生字段（`pe_ttm_market_rank` …），
 // 改为条件行上的「排名口径」下拉（rankModes）。下拉里只剩主指标 + 统计域。
 
-function indicatorLabelOf(i: ScreeningIndicator): string {
-  const meta = i as ScreeningIndicator & { label?: string; display_name?: string; dsl?: boolean }
-  // 2026-11-16：DSL 复合指标曾经直接显示 `dividend_financing_ratio (DSL v2)`
-  // 这种纯英文标签（PRD §12.1 要求用户可见名称必须全中文）。
-  // 现在优先级：display_name（后端给的权威中文名）→ FIELD_LABELS/STATEMENT 映射
-  // → 后端 label → 字段名兜底。
-  const baseLabel = meta.dsl
-    ? (meta.display_name && meta.display_name !== i.name
-        ? `${meta.display_name}`
-        : fieldDisplayName(i.name, meta.label ?? i.name))
-    : fieldDisplayName(i.name, meta.label)
-  return fieldOptionLabel(i.name, baseLabel)
-}
-
+// 指标全中文名（规则：display_name → FIELD_LABELS → 后端 label → 字段名 + 单位）
+// 2026-11-22：纯函数已抽到 utils/screening-format.ts 的 indicatorDisplayName。
 const indicatorOptions = computed(() =>
-  indicators.value.map((i) => ({ label: indicatorLabelOf(i), value: i.name })),
+  indicators.value.map((i) => ({ label: indicatorDisplayName(i), value: i.name })),
 )
+
+// ─── 结果展示列（合成值编解码 / 下拉选项）────────────────────────────────
+// 2026-11-22：列定义、合成值编解码、下拉选项整块抽到 composables/useScreeningColumns.ts。
+const { selectedResultColumns, resultColumnOptions, selectedColumnsForRequest } =
+  useScreeningColumns({ indicators, rankModes, indicatorOptions })
 
 /** 某字段的参数规格（如 CAGR 年数）；无参数返回 null。 */
 function paramSpecOf(field: string) {
@@ -318,46 +162,8 @@ const resultColumns = computed(() => {
 })
 
 // ─── 当前报告期不可用指标（unavailable）────────────────────────────────
-const UNAVAILABLE_REASON_LABELS: Readonly<Record<string, string>> = {
-  not_available_for_latest_period: '当前报告期不可用（该期覆盖率不足）',
-  masked_untrusted: '数据质量遮蔽（当前不可信）',
-  // 2026-11-16：旧列与新列是**同一个指标**，只是存储单位不同（小数 vs 百分数），
-  // 说成「口径不可复现」会让用户以为数算错了。
-  deprecated: '同一指标已统一单位，请改用新字段',
-}
-
-function unavailableName(item: UnavailableIndicator): string {
-  return item.name ?? item.field ?? '未命名字段'
-}
-
-function unavailableLabel(item: UnavailableIndicator): string {
-  const name = unavailableName(item)
-  return name === '未命名字段' ? name : fieldDisplayName(name)
-}
-
-function unavailableReasonText(item: UnavailableIndicator): string {
-  const reason = item.reason?.trim()
-  if (!reason) return '原因未标注'
-  return `${UNAVAILABLE_REASON_LABELS[reason] ?? '当前不可用'}（reason: ${reason}）`
-}
-
-function unavailableCoverageText(item: UnavailableIndicator): string {
-  const coverage = item.coverage_pct
-  if (typeof coverage === 'number' && Number.isFinite(coverage)) {
-    return `覆盖率 ${fmtStoredPercent(coverage, 1)}`
-  }
-  // 2026-11-16：废弃字段（如 dividend_yield → ttm_dividend_yield）与覆盖率无关，
-  // 以前统一写「覆盖率未知」，用户会以为"数据没采到"，其实是口径已统一。
-  if (item.reason === 'deprecated') {
-    return item.replaced_by ? `已改名为 ${fieldDisplayName(item.replaced_by)}` : '口径已统一'
-  }
-  if (item.reason === 'masked_untrusted') return '数据质量遮蔽'
-  return '覆盖率未知'
-}
-
-function unavailableKey(item: UnavailableIndicator): string {
-  return `${unavailableName(item)}:${item.reason ?? ''}`
-}
+// 5 个展示函数（unavailableName/Label/ReasonText/CoverageText/Key）与
+// UNAVAILABLE_REASON_LABELS 已抽到 utils/screening-unavailable.ts（纯函数，可单测）。
 
 const ruleFields = computed(() => collectRuleFields(ruleTree))
 
@@ -371,31 +177,8 @@ const untrustedFields = computed(() =>
 
 
 
-// 2026-08-14 红队 P2-20：运行始终按已保存版本（rule_id/version）执行；
-// 此前用户选择规则后再改条件/排序会继续运行却静默忽略编辑。
-// 运行前检测草稿与已保存版本的差异并明确告知。
-// 2026-08-26：比较时忽略条件节点的 id（id 只用于 UI 渲染/删除定位，不影响筛选语义），
-// 避免加载旧版无 id 的规则被误判为“已修改”。
-function stripRuleIds(node: unknown): unknown {
-  if (Array.isArray(node)) return node.map(stripRuleIds)
-  if (node && typeof node === 'object') {
-    const result: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
-      if (key === 'id') continue
-      result[key] = stripRuleIds(value)
-    }
-    return result
-  }
-  return node
-}
-
-function isDraftDirty(): boolean {
-  const rule = activeRule.value
-  if (!rule) return false
-  const savedConditions = (rule.rule_json.conditions ?? null) as unknown
-  const conditionsDirty = JSON.stringify(stripRuleIds(ruleTree)) !== JSON.stringify(stripRuleIds(savedConditions))
-  return conditionsDirty
-}
+// 2026-08-14 红队 P2-20 / 2026-08-26：运行前检测「编辑区 vs 已保存版本」差异
+// （比较时忽略条件节点 id）。实现已随规则 CRUD 抽到 useScreeningRules。
 
 function scrollToResults(): void {
   resultsAnchor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -482,275 +265,53 @@ watch(strictOnly, () => {
   }, 400)
 })
 
-async function loadSavedRules() {
-  try {
-    const resp = await axios.get<{ rules: SavedRule[] }>('/api/screening/rules')
-    savedRules.value = resp.data.rules
-  } catch {
-    message.warning('无法加载已保存的规则')
-  }
-}
+// ─── 筛选草稿（/api/screening/draft）────────────────────────────────────
+// 2026-11-22：草稿状态机（快照脏检查 / 单飞保存 / 409 冲突弹窗 / 防抖 400ms）
+// 整块抽到 composables/useScreeningDraft.ts，行为逐字等价（有单测）。
+const {
+  showDraftConflictModal,
+  syncEditorSnapshot,
+  hasUnsavedEdits,
+  resolveDraftConflict,
+  restoreDraft,
+  markDraftHydrated,
+} = useScreeningDraft({
+  ruleTree,
+  basePool,
+  strictOnly,
+  selectedResultColumns,
+  defaultResultColumns: DEFAULT_RESULT_COLUMNS,
+  encodeResultColumn,
+  notify: message,
+})
 
-let draftTimer: ReturnType<typeof setTimeout> | undefined
-let draftHydrated = false
-const draftRevision = ref(0)
-let draftSaveInFlight = false
-let draftSaveQueued = false
-// L0-4（报告42）: 草稿 409 冲突后不再永久停用自动保存，而是给出明确选项
-const showDraftConflictModal = ref(false)
-
-// 2026-08-14 红队 P3：未保存修改判定基于"上次已同步的编辑区快照"
-// （草稿恢复/自动保存/规则加载/保存新版本时刷新），而不是与目标规则
-// 比较——加载目标几乎必然不同，旧逻辑会误弹覆盖确认。
-let lastSyncedSnapshot = ''
-function editorSnapshot(): string {
-  // 排序已移到结果页（2026-11-16），编辑器快照只含条件；
-  // 否则残留的 sort 会让『改排序也算未保存修改』。
-  return JSON.stringify({ conditions: ruleTree })
-}
-function syncEditorSnapshot() {
-  lastSyncedSnapshot = editorSnapshot()
-}
-function hasUnsavedEdits(): boolean {
-  return lastSyncedSnapshot !== '' && editorSnapshot() !== lastSyncedSnapshot
-}
-
-function draftPayload() {
-  return {
-    conditions: ruleTree,
-    base_pool: { ...basePool },
-    strict_only: strictOnly.value,
-    result_columns: selectedResultColumns.value,
-  }
-}
-
-async function persistDraft() {
-  if (!draftHydrated) return
-  if (draftSaveInFlight) {
-    draftSaveQueued = true
-    return
-  }
-  draftSaveInFlight = true
-  try {
-    const response = await axios.put<{ revision: number }>('/api/screening/draft', {
-      draft: draftPayload(),
-      revision: draftRevision.value,
-    })
-    draftRevision.value = response.data.revision
-    syncEditorSnapshot()
-  } catch (error) {
-    if (isAxiosError(error) && error.response?.status === 409) {
-      draftHydrated = false
-      draftSaveQueued = false
-      showDraftConflictModal.value = true
-    } else {
-      message.warning('筛选草稿自动保存失败')
-    }
-  } finally {
-    draftSaveInFlight = false
-    if (draftSaveQueued && draftHydrated) {
-      draftSaveQueued = false
-      void persistDraft()
-    }
-  }
-}
-
-async function resolveDraftConflict(choice: 'server' | 'local' | 'refresh') {
-  showDraftConflictModal.value = false
-  if (choice === 'refresh') {
-    window.location.reload()
-    return
-  }
-  if (choice === 'server') {
-    try {
-      await restoreDraft()
-      draftHydrated = true
-      message.success('已加载服务器草稿，自动保存已恢复')
-    } catch {
-      message.error('加载服务器草稿失败，请刷新页面')
-    }
-    return
-  }
-  try {
-    // 保留本地：以服务器当前 revision 覆盖服务器草稿（本地编辑优先）
-    const current = await axios.get<{ draft: unknown; revision?: number }>('/api/screening/draft')
-    const revision = current.data.revision ?? 0
-    const resp = await axios.put<{ revision: number }>('/api/screening/draft', {
-      draft: draftPayload(),
-      revision,
-    })
-    draftRevision.value = resp.data.revision
-    draftHydrated = true
-    syncEditorSnapshot()
-    message.success('已保留本地草稿（覆盖服务器版本），自动保存已恢复')
-  } catch {
-    message.error('保留本地草稿失败，请刷新页面')
-  }
-}
-
-function saveDraftSoon() {
-  if (!draftHydrated) return
-  if (draftTimer) clearTimeout(draftTimer)
-  draftTimer = setTimeout(() => void persistDraft(), 400)
-}
-
-watch(
-  [ruleTree, basePool, strictOnly, selectedResultColumns],
-  saveDraftSoon,
-  { deep: true },
-)
-
-async function restoreDraft() {
-  try {
-    const response = await axios.get<{ draft: {
-      conditions?: ScreeningRuleNode
-      base_pool?: Partial<typeof basePool>
-      strict_only?: boolean
-      result_columns?: string[]
-    } | null; revision?: number }>('/api/screening/draft')
-    const draft = response.data.draft
-    draftRevision.value = response.data.revision ?? 0
-    if (!draft) {
-      syncEditorSnapshot()
-      return
-    }
-    if (draft.conditions) Object.assign(ruleTree, draft.conditions)
-    if (draft.base_pool) Object.assign(basePool, draft.base_pool)
-    if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
-    if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
-      selectedResultColumns.value = draft.result_columns.map(encodeResultColumn)
-    } else if (selectedResultColumns.value.length === 0) {
-      selectedResultColumns.value = [...DEFAULT_RESULT_COLUMNS]
-    }
-    syncEditorSnapshot()
-  } catch {
-    message.warning('无法恢复最近筛选草稿')
-  }
-}
-
-function autoRuleName(): string {
-  const now = new Date()
-  const pad = (n: number) => String(n).padStart(2, '0')
-  return `未命名规则 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
-}
-
-async function persistRule(name: string): Promise<{ rule_id: number; version: number } | null> {
-  try {
-    const resp = await axios.post<{ rule_id: number; version: number }>('/api/screening/rules/save', {
-      name,
-      rule_json: {
-        conditions: ruleTree,
-        columns: selectedColumnsForRequest(),
-      },
-      locked_indicators: {},
-      status: 'saved',
-    })
-    await loadSavedRules()
-    selectedRuleId.value = resp.data.rule_id
-    syncEditorSnapshot()
-    message.success(`规则已保存为 v${resp.data.version}`)
-    return resp.data
-  } catch (e: unknown) {
-    message.error(apiErrorText(e, '保存规则失败'))
-    return null
-  }
-}
-
-async function saveRule(): Promise<{ rule_id: number; version: number } | null> {
-  const name = ruleName.value.trim()
-  if (!name) {
-    message.warning('请输入规则名称')
-    return null
-  }
-  return persistRule(name)
-}
-
-function deleteSelectedRule(): void {
-  const rule = activeRule.value
-  if (!rule) return
-  dialog.warning({
-    title: '删除选中的规则？',
-    content: `将删除「${rule.name} v${rule.version}」。已有保存结果或自选来源的规则不能删除。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        await axios.delete(`/api/screening/rules/${rule.id}`)
-        const wasSelected = selectedRuleId.value === rule.id
-        await loadSavedRules()
-        if (wasSelected) selectedRuleId.value = 0
-        message.success('规则已删除')
-      } catch (e: unknown) {
-        message.error(friendlyErrorMessage(e, '删除规则失败'))
-      }
-    },
-  })
-}
-
-function applyLoadedRule(rule: SavedRule) {
-  // 先重置编辑区再覆盖，确保目标规则不含 conditions 时不残留旧内容。
-  // 必须深拷贝：Object.assign(ruleTree, saved.conditions) 会把 conditions.rules
-  // 数组引用共享给编辑区；用户一改条件值，savedRules 里的“已保存版本”会同步
-  // 被改掉，isDraftDirty() 随即判定“无修改”，于是永远按旧版本号运行。
-  const conditions = rule.rule_json.conditions
-  const clone = cloneScreeningRule(
-    conditions && conditions.rules
-      ? conditions
-      : { logic: 'AND', rules: [] },
-  )
-  ruleTree.logic = 'AND'
-  ruleTree.rules.splice(0, ruleTree.rules.length)
-  Object.assign(ruleTree, clone)
-
-  selectedResultColumns.value = (rule.rule_json.columns && rule.rule_json.columns.length > 0)
-    ? [...rule.rule_json.columns]
-    : [...DEFAULT_RESULT_COLUMNS]
-
-  message.success(`已加载规则: ${rule.name} v${rule.version}`)
-}
-
-function loadRule(ruleId: number) {
-  if (!ruleId || ruleId === 0) return
-
-  const rule = savedRules.value.find(r => r.id === ruleId)
-  if (!rule) return
-
-  // 2026-08-14 红队 P3：加载已保存规则会覆盖编辑区草稿；仅当编辑区有
-  // 未保存修改（相对上次已同步快照）时确认，取消保持原选中项不变。
-  const apply = () => {
-    selectedRuleId.value = ruleId
-    applyLoadedRule(rule)
-    syncEditorSnapshot()
-  }
-  if (!hasUnsavedEdits()) {
-    apply()
-    return
-  }
-  dialog.warning({
-    title: '覆盖未保存的草稿？',
-    content: `加载「${rule.name} v${rule.version}」将覆盖编辑区里未保存的修改。`,
-    positiveText: '覆盖并加载',
-    negativeText: '取消',
-    onPositiveClick: apply,
-  })
-}
-
-const ruleOptions = computed(() => {
-  const options: Array<{ label: string; value: number }> = [
-    { label: '选择已保存的规则...', value: 0 },
-  ]
-  for (const r of savedRules.value) {
-    options.push({
-      label: `${r.name} v${r.version}`,
-      value: r.id,
-    })
-  }
-  return options
+// ─── 已保存规则 CRUD / 装载 ────────────────────────────────────────────
+// 2026-11-22：整块抽到 composables/useScreeningRules.ts（行为逐字等价，有单测）。
+const {
+  selectedRuleId,
+  activeRule,
+  ruleName,
+  ruleOptions,
+  loadSavedRules,
+  isDraftDirty,
+  autoRuleName,
+  saveRule,
+  deleteSelectedRule,
+  loadRule,
+} = useScreeningRules({
+  ruleTree,
+  selectedResultColumns,
+  defaultResultColumns: DEFAULT_RESULT_COLUMNS,
+  selectedColumnsForRequest,
+  syncEditorSnapshot,
+  hasUnsavedEdits,
+  notify: message,
+  dialog,
 })
 
 onMounted(async () => {
   await restoreDraft()
-  draftHydrated = true
+  markDraftHydrated()
   await loadSavedRules()
   
   try {
@@ -793,36 +354,8 @@ onMounted(async () => {
   refreshAutoUpdate()
   // 2026-08-14 红队 P3：自动更新状态不再只在挂载时读一次——
   // 更新窗口（数分钟级）内运行按钮会随状态自动切换可用性。
-  autoUpdateTimer = window.setTimeout(function pollAutoUpdate() {
-    refreshAutoUpdate()
-    autoUpdateTimer = window.setTimeout(pollAutoUpdate, autoUpdateRunning.value ? 10000 : 60000)
-  }, 10000)
-})
-
-// 单飞 guard：避免上一次查询未返回时堆积请求
-let autoUpdateInFlight = false
-let autoUpdateTimer: number | undefined
-
-async function refreshAutoUpdate(): Promise<void> {
-  if (autoUpdateInFlight) return
-  autoUpdateInFlight = true
-  try {
-    const au = await axios.get<{ state: string; current_stage: string }>(
-      '/api/data-status/auto-update',
-    )
-    autoUpdateRunning.value = au.data.state === 'enabled' && au.data.current_stage === 'running'
-  } catch {
-    autoUpdateRunning.value = false
-  } finally {
-    autoUpdateInFlight = false
-  }
-}
-
-onUnmounted(() => {
-  if (autoUpdateTimer !== undefined) {
-    window.clearTimeout(autoUpdateTimer)
-    autoUpdateTimer = undefined
-  }
+  // 2026-11-22：轮询+单飞+卸载清理已抽到 composables/useAutoUpdatePolling.ts。
+  startAutoUpdatePolling(10000)
 })
 </script>
 

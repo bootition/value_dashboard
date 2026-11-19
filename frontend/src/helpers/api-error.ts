@@ -85,3 +85,17 @@ export function friendlyErrorMessage(e: unknown, fallback = '操作失败'): str
   const guidance = describeApiError(e, fallback)
   return guidance.action ? `${guidance.title}；${guidance.action}` : guidance.title
 }
+/**
+ * 后端 400 detail 通常是可直接展示的校验消息（如"排序项必须是对象"、
+ * "min_listing_years 必须在 0-100 之间"），优先展示原文；其余错误走统一映射。
+ *
+ * 2026-11-22：原为 `views/ScreeningPage.vue` 内的私有函数，随规则 CRUD 抽到
+ * `composables/useScreeningRules.ts` 后成为两处共用，故上收到本文件（单一来源）。
+ */
+export function apiErrorText(e: unknown, fallback: string): string {
+  if (isAxiosError(e) && e.response?.status === 400) {
+    const detail = e.response.data?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail.trim()
+  }
+  return friendlyErrorMessage(e, fallback)
+}

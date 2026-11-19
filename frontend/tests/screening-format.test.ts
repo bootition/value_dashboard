@@ -25,6 +25,7 @@ import {
   fieldTitleWithUnit,
   formatFieldValue,
   applyIndicatorUnits,
+  indicatorDisplayName,
 } from '../src/utils/screening-format.ts'
 
 test('百分数存储字段归类为 percent（不 ÷100、不 ×100）', () => {
@@ -281,4 +282,23 @@ test('百分比展示只有一处实现：小数比例 ×100、百分数原值�
   assert.equal(formatFieldValue('roe', 0.0529), '5.29%')
   assert.equal(formatFieldValue('turnover_rate', 5.29), '5.29%')
   assert.equal(formatFieldValue('dividend_financing_ratio_pct', 5.29), '5.29%')
+})
+
+// 2026-11-22：`indicatorDisplayName` 从 views/ScreeningPage.vue 抽到本模块
+// （指标下拉的全中文名）。抽文件时最容易把优先级顺序改掉，所以逐档钉死。
+test('指标全中文名：display_name（DSL）优先于 FIELD_LABELS，再退后端 label', () => {
+  // DSL 复合指标：后端 display_name 是权威中文名
+  assert.equal(
+    indicatorDisplayName({ name: 'dividend_financing_ratio', dsl: true, display_name: '股息融资比' }),
+    '股息融资比',
+  )
+  // DSL 但 display_name 与字段名相同 → 退回 FIELD_LABELS/字段名映射
+  assert.equal(
+    indicatorDisplayName({ name: 'pe_ttm', dsl: true, display_name: 'pe_ttm' }),
+    '市盈率（PE-TTM）(倍)',
+  )
+  // 普通指标只认字段名映射，不认后端 label（label 是英文兜底）
+  assert.equal(indicatorDisplayName({ name: 'pe_ttm', label: 'PE TTM' }), '市盈率（PE-TTM）(倍)')
+  // 完全未知字段：回落 label，并追加单位后缀（若有）
+  assert.equal(indicatorDisplayName({ name: 'not_a_real_field', label: '未知指标' }), '未知指标')
 })

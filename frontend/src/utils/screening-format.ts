@@ -672,3 +672,27 @@ export function fieldOptionLabel(field: string, baseLabel: string): string {
   const unit = fieldInputUnit(field).label
   return unit ? `${baseLabel}(${unit})` : baseLabel
 }
+
+/**
+ * 指标（含 DSL 复合指标）在筛选下拉里显示的**全中文**名称。
+ *
+ * 2026-11-22：从 `views/ScreeningPage.vue` 抽出（纯函数，无响应式依赖）。
+ * 优先级：display_name（后端给的权威中文名）→ FIELD_LABELS/STATEMENT 映射
+ * → 后端 label → 字段名兜底，最后统一追加单位。
+ *
+ * 2026-11-16：DSL 复合指标曾经直接显示 `dividend_financing_ratio (DSL v2)`
+ * 这种纯英文标签，违反 PRD §12.1「用户可见名称必须全中文」。
+ */
+export function indicatorDisplayName(indicator: {
+  readonly name: string
+  readonly label?: string
+  readonly display_name?: string
+  readonly dsl?: boolean
+}): string {
+  const baseLabel = indicator.dsl
+    ? (indicator.display_name && indicator.display_name !== indicator.name
+        ? `${indicator.display_name}`
+        : fieldDisplayName(indicator.name, indicator.label ?? indicator.name))
+    : fieldDisplayName(indicator.name, indicator.label)
+  return fieldOptionLabel(indicator.name, baseLabel)
+}
