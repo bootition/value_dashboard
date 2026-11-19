@@ -46,7 +46,11 @@ from scripts.repo_integrity_guards import (  # noqa: E402
 
 def test_repository_passes_all_rework_guards() -> None:
     report = run_all(PROJECT_ROOT)
-    assert report.ok, "\n".join(finding.render() for finding in report.findings)
+    # 2026-11-19 审计 W5：裸 `assert report.ok` 只说"没红"；补上"确实一条都没有"
+    # 与"规则真的跑过"，否则 run_all 返回空 checked 也会绿。
+    assert report.findings == [], [finding.render() for finding in report.findings]
+    assert report.ok is True
+    assert report.checked, "run_all() 一条规则都没跑（checked 为空）"
     # RG1–RG5（reports/133）+ RG6–RG10 仓库完整性（reports/140 / reports/144）
     expected = {
         "RG1 时区单源",
@@ -98,7 +102,8 @@ def test_guard_inventory_matches_agents_md() -> None:
     implemented: list[int] = []
     for name in report.checked:
         match = _RG_TOKEN.match(name)
-        assert match, f"门禁名字必须以 RG<n> 开头，否则无法对拍：{name!r}"
+        assert match is not None, f"门禁名字必须以 RG<n> 开头，否则无法对拍：{name!r}"
+        assert match.group(1).isdigit(), f"RG 编号不是数字：{name!r}"
         implemented.append(int(match.group(1)))
     assert len(implemented) == len(set(implemented)), f"同一 RG 编号被挂了多遍：{report.checked}"
 
@@ -131,7 +136,16 @@ def test_every_roce_snapshot_column_is_registered() -> None:
         for domain in derived_snapshot_domains()
         for column in domain.columns
     }
-    assert roce_columns, "解析不到 roce_* 列，schema DDL 可能改名"
+    # 2026-11-19 审计 W5：原为裸 `assert roce_columns`（非空即绿）。
+    # 钉死"解析确实覆盖 ROCE 完整列族"：三个窗口 + 两个标量列族必须都在，
+    # 且每个窗口都要有 median/years 两列。**不写死总数**（窗口会扩容，
+    # 写死数量只会脆），改用形状断言。
+    assert {"roce_latest", "roce_eligible", "roce_5y_median", "roce_10y_median"} <= roce_columns, (
+        f"解析到的 roce_* 列不全: {sorted(roce_columns)}"
+    )
+    for window in ("5y", "10y", "20y"):
+        assert {f"roce_{window}_median", f"roce_{window}_years"} <= roce_columns, window
+    assert all(name.startswith("roce_") for name in roce_columns), sorted(roce_columns)
     assert roce_columns <= registered, sorted(roce_columns - registered)
     assert schema is not None  # 保证 schema 模块可导入（DDL 单一来源）
 
@@ -270,22 +284,22 @@ def _dict_literal(source: str) -> ast.Dict:
 
 
 def test_rg2_flags_status_overriding_unpack() -> None:
-    from scripts.check_rework_guards import _dict_literal_overrides_status
+    from scripts.check_rework_guards import _dict_status_override_indexes
 
-    assert _dict_literal_overrides_status(
+    assert _dict_status_override_indexes(
         _dict_literal('{"full_recompute": later, **sub_step, "status": "success"}')
     )
 
 
 def test_rg2_allows_status_before_unpack() -> None:
-    from scripts.check_rework_guards import _dict_literal_overrides_status
+    from scripts.check_rework_guards import _dict_status_override_indexes
 
     # update.py 里的合法写法：先定 status，再用 ** 追加可选字段
-    assert not _dict_literal_overrides_status(
+    assert not _dict_status_override_indexes(
         _dict_literal('{"status": step_status, **({"x": 1} if cond else {})}')
     )
-    assert not _dict_literal_overrides_status(_dict_literal('{"status": "ok", "n": 1}'))
-    assert not _dict_literal_overrides_status(_dict_literal("{**base}"))
+    assert not _dict_status_override_indexes(_dict_literal('{"status": "ok", "n": 1}'))
+    assert not _dict_status_override_indexes(_dict_literal("{**base}"))
 
 
 def test_rg2_ignores_the_single_exit_implementation() -> None:
@@ -302,10 +316,12 @@ def test_rg2_flags_status_inside_dict_update(tmp_path: Path) -> None:
         "    return step\n",
     )
     findings = check_status_merge_single_exit(tmp_path)
-    assert findings, "app/core 子目录里的聚合点没被扫到"
-    assert any("step.update" in finding.message for finding in findings), [
-        f.message for f in findings
-    ]
+    # 2026-11-19 审计 W5：裸 `assert findings` 挡不住"抓到的是别的规则/别的地方"。
+    # 必须恰好 1 条、规则码是 RG2、命中文件就是刚写的那个。
+    assert [(f.rule, f.path) for f in findings] == [
+        ("RG2", "app/core/aggregate/steps_demo.py")
+    ], [(f.rule, f.path, f.message) for f in findings]
+    assert "step.update" in findings[0].message, findings[0].message
 
 
 def test_rg2_flags_second_layer_unpack_of_status(tmp_path: Path) -> None:
@@ -316,8 +332,11 @@ def test_rg2_flags_second_layer_unpack_of_status(tmp_path: Path) -> None:
         "    return {**step, **{'status': 'success'}}\n",
     )
     findings = check_status_merge_single_exit(tmp_path)
-    assert findings
-    assert any("字典解包后又覆盖" in finding.message for finding in findings)
+    # 2026-11-19 审计 W5：见上一条，断言到 (规则码, 文件, 文案) 三元组。
+    assert [(f.rule, f.path) for f in findings] == [
+        ("RG2", "app/core/steps_demo.py")
+    ], [(f.rule, f.path, f.message) for f in findings]
+    assert "字典解包后又覆盖" in findings[0].message, findings[0].message
 
 
 def test_rg2_allows_result_write_into_fresh_skeleton(tmp_path: Path) -> None:

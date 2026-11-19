@@ -43,8 +43,10 @@ def test_review_threshold_is_meaningful() -> None:
 def test_crosscheck_against_empty_database_does_not_raise(duckdb_store) -> None:
     """归档域为空时应跳过而不是崩溃（归档是可选层）。"""
     report = run_crosscheck(duckdb_store)
-    assert report.results, "应返回逐概念的结果占位"
+    # 逐个概念都要有占位结果，且顺序与登记表一致（漏概念 = 核验面缩水）
+    assert [r.concept for r in report.results] == [p.concept for p in DEFAULT_PAIRS]
     assert all(r.compared == 0 for r in report.results)
+    assert report.flagged == []
 
 
 def test_crosscheck_computes_agreement_for_seeded_pair(duckdb_store) -> None:
@@ -92,7 +94,10 @@ def test_crosscheck_flags_large_disagreement(duckdb_store) -> None:
     report = run_crosscheck(duckdb_store, pairs=(pair,))
     assert report.results[0].within_tolerance == 0.0
     assert report.results[0].needs_review is True
-    assert report.flagged
+    # 必须**恰好**标记这一个概念 —— 否则"误报 100 条"也会让裸真值断言变绿
+    assert [r.concept for r in report.flagged] == ["测试指标"], (
+        f"flagged 集合不对: {[r.concept for r in report.flagged]}"
+    )
 
 
 def test_crosscheck_covers_all_usable_archive_domains() -> None:

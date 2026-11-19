@@ -328,10 +328,6 @@ def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     )
 
 
-def test_series_pe_pb_dividend_spread() -> None:
-    from tests.conftest import database_paths as _  # noqa: F401
-
-
 def test_statistics_build_and_window_stats(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
@@ -954,7 +950,14 @@ def test_update_many_aborts_on_consecutive_cross_errors(
 
     assert report.get("aborted") is True
     assert len(report["results"]) == updater.CROSS_ERROR_ABORT_THRESHOLD
-    assert report["abort_reason"]
+    # 2026-11-19 审计 W5：原为裸 `assert report["abort_reason"]`。
+    # 文案必须指出**是哪一类**中止（真源错误 vs 空响应疑似风控）与次数，
+    # 否则运维看到"aborted"分不清该查源封禁还是该查解析。
+    assert report["abort_reason"] == (
+        f"连续 {updater.CROSS_ERROR_ABORT_THRESHOLD} 次交叉源错误，中止剩余批次"
+    ), report["abort_reason"]
+    # 中止后剩余批次必须真的没跑（不许"中止了还继续轰炸风控源"）
+    assert report["remaining_skipped"] == len(codes) - updater.CROSS_ERROR_ABORT_THRESHOLD
 
 
 def test_cross_audit_view(

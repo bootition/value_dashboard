@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -70,8 +71,14 @@ def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
     store = SQLiteStore(paths=paths)
     store.execute("CREATE TABLE query_boundary (id INTEGER PRIMARY KEY)")
     assert store.query("SELECT COUNT(*) AS count FROM query_boundary") == [{"count": 0}]
-    with pytest.raises(Exception, match="readonly|read-only"), store.connection() as conn:
+    # 收窄到具体异常类型 + 具体文案：`AttributeError` / `TypeError` /
+    # `ProgrammingError` 只要文本碰巧带 "readonly" 就绿的写法已不可接受
+    # （2026-11-19 审计 W3）。
+    with pytest.raises(sqlite3.OperationalError, match="attempt to write a readonly database"), store.connection() as conn:
         conn.execute("INSERT INTO query_boundary (id) VALUES (1)")
+    # 光看"抛了什么异常"不够：必须实证副作用没发生（只读边界真的没写进去）
+    assert store.query("SELECT COUNT(*) AS count FROM query_boundary") == [{"count": 0}]
+    assert paths.sqlite_path.stat().st_size > 0
 
 
 @pytest.mark.parametrize("store_type", [DuckDBStore, SQLiteStore])

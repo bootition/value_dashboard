@@ -111,12 +111,49 @@ def test_treasury_updater_receives_shared_adapter_manager(
     assert captured.get("adapter") is shared
 
 
-def test_default_adapter_mgr_is_single_instance(duckdb_store, sqlite_store) -> None:
-    """未注入时必须只创建一份 manager，且同一 updater 复用同一实例。"""
-    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+def test_default_adapter_mgr_is_single_instance(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """未注入时每个 updater 只创建**一份** manager，且该 updater 全分支共用它。
 
-    assert isinstance(updater.adapter_mgr, AdapterManager)
-    assert updater.adapter_mgr is updater.adapter_mgr
+    2026-11-19 审计 W1：原断言是 `updater.adapter_mgr is updater.adapter_mgr`
+    —— 对任何对象恒真（只要取属性不抛异常），信息量为零，却冒充"单实例"守卫。
+    真正要钉的两条性质：
+
+    1. **同一 updater 内**：三条互不相干的刷新分支下发给子 updater 的必须是
+       **同一个**实例。写成 `AdapterManager()` 会让熔断桶按域分叉，死源永不熔断
+       （reports/118 P1(3) 的原始事故）。
+    2. **不同 updater 之间**必须是**不同**实例。若有人把 manager 改成进程级
+       单例，一只票的源封禁会把全市场一起熔断 —— 第 2 条断言会红。
+    """
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    sibling = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    manager = updater.adapter_mgr
+
+    assert isinstance(manager, AdapterManager)
+    # 同一 updater 多次取用必须是同一个实例（"每次访问都新建"→ 红）
+    assert updater.adapter_mgr is manager
+
+    # 三条不同刷新分支下发的必须是同一个实例（"某分支自建 AdapterManager"→ 红）
+    injected: list[Any] = []
+    for target, refresh in (
+        ("app.core.buyback.BuybackUpdater", updater._refresh_buyback),
+        ("app.core.capital.CapitalHistoryUpdater", updater._refresh_capital_history),
+        ("app.core.business.BusinessOverviewUpdater", updater._refresh_business_overview),
+    ):
+        captured: dict[str, Any] = {}
+        monkeypatch.setattr(target, _Recorder(captured))
+        refresh()
+        injected.append(captured.get("adapter"))
+    assert [item is manager for item in injected] == [True, True, True], (
+        f"三条刷新分支下发的 manager 必须是同一实例，实际 {[item is manager for item in injected]}"
+    )
+
+    # 不同 updater 不得共享熔断状态（"进程级单例"→ 红）
+    assert sibling.adapter_mgr is not manager, (
+        "两个 updater 共用了同一个 AdapterManager = 熔断状态全局串台"
+        "（事故：一只票的源封禁把全市场一起熔断）"
+    )
 
 
 def test_retry_path_updater_constructions_inject_shared_manager(

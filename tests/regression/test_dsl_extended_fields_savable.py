@@ -31,6 +31,15 @@ from app.core.screening.engine import (
 from app.core.storage.duckdb_store import DuckDBStore
 
 
+def _accepts(rule: dict) -> bool:
+    """保存期校验是否放行该规则（不抛 `ValueError`）。"""
+    try:
+        validate_rule_fields(rule)
+    except ValueError:
+        return False
+    return True
+
+
 def _rule_for(field: str) -> dict:
     """一条只引用 `field` 的最小规则（conditions + sort + columns）。"""
     return {
@@ -43,32 +52,35 @@ def _rule_for(field: str) -> dict:
     }
 
 
+def _mixed_rule(field: str) -> dict:
+    """`field` 同时出现在四个位点：条件左值、`right_field` 字段间比较、排序、结果列。
+
+    搬自已删除的 `test_extended_only_rule_is_savable`（2026-11-19 审计 W4/P3：
+    那条用例只调用不 assert）。参数化版原本只造单字段条件，`right_field`
+    的保存期校验**一行都没覆盖** —— 这里把它并进参数化，覆盖全部扩展列。
+    """
+    return {
+        "conditions": {
+            "logic": "AND",
+            "rules": [
+                {"field": "free_cash_flow", "op": ">", "value": 0},
+                {"field": field, "op": ">", "right_field": "inventory_turnover"},
+            ],
+        },
+        "sort": [{"field": field, "direction": "desc"}],
+        "columns": ["free_cash_flow", "inventory_turnover", field],
+    }
+
+
 # ─── 正向：只含扩展字段的规则可以保存 ─────────────────────────────────────
-
-
-def test_extended_only_rule_is_savable() -> None:
-    validate_rule_fields(
-        {
-            "conditions": {
-                "logic": "AND",
-                "rules": [
-                    {"field": "free_cash_flow", "op": ">", "value": 0},
-                    {
-                        "field": "receivables_turnover",
-                        "op": ">",
-                        "right_field": "inventory_turnover",
-                    },
-                ],
-            },
-            "sort": [{"field": "market_cap_at_report", "direction": "desc"}],
-            "columns": ["free_cash_flow", "inventory_turnover", "market_cap_at_report"],
-        }
-    )
 
 
 @pytest.mark.parametrize("field", sorted(EXTENDED_COLUMNS))
 def test_every_extended_column_is_savable(field: str) -> None:
-    validate_rule_fields(_rule_for(field))
+    # 单字段规则（条件 + sort + columns）必须全部放行
+    assert _accepts(_rule_for(field)) is True, f"扩展列 {field} 能跑不能存"
+    # 字段间比较（`right_field`）+ 四处同时出现时也必须放行
+    assert _accepts(_mixed_rule(field)) is True, f"扩展列 {field} 作 right_field/排序/结果列时被拒"
 
 
 # ─── 反向：虚构字段仍然被拒，异常文案不变 ─────────────────────────────────
@@ -81,6 +93,23 @@ def test_unknown_field_still_rejected_with_same_error_messages() -> None:
         validate_rule_fields({"sort": [{"field": "not_a_field", "direction": "asc"}]})
     with pytest.raises(ValueError, match="^未知结果字段: not_a_field$"):
         validate_rule_fields({"columns": ["not_a_field"]})
+    # `right_field`（字段间比较）必须**在保存期**就被校验：只校验左值不校验
+    # 右值等于放一条运行期才炸的规则过去（"能跑不能存"的镜像形态）。
+    with pytest.raises(ValueError, match="^未知比较字段: not_a_field$"):
+        validate_rule_fields(
+            {
+                "conditions": {
+                    "logic": "AND",
+                    "rules": [
+                        {
+                            "field": "receivables_turnover",
+                            "op": ">",
+                            "right_field": "not_a_field",
+                        },
+                    ],
+                },
+            }
+        )
 
 
 # ─── 一致性：运行期判定 == 保存期判定 ─────────────────────────────────────

@@ -1121,6 +1121,9 @@ def test_run_doctor_attaches_history_block(duckdb_store: DuckDBStore) -> None:
 
 
 def test_write_history_persists_baseline(duckdb_store: DuckDBStore) -> None:
+    from app.core.quality.asset_health import SNAPSHOT_DOMAIN
+    from app.core.screening.engine import SNAPSHOT_COLUMNS
+
     _insert_snapshot(duckdb_store, date(2026, 9, 30), ["000001"])
 
     result = write_field_coverage_history(duckdb_store, now=NOW, run_id="doctor-run-1")
@@ -1130,7 +1133,21 @@ def test_write_history_persists_baseline(duckdb_store: DuckDBStore) -> None:
         "SELECT domain, field_name, coverage_pct FROM field_coverage_history WHERE run_id = ?",
         ["doctor-run-1"],
     )
-    assert rows
+    # 2026-11-19 审计 W5：原为裸 `assert rows` —— 写了几行、内容对不对全靠猜。
+    assert rows, "基线必须真的写进 field_coverage_history"
+    # 报告给 CLI 的 rows 数必须等于库里实际行数（"写了几行"不许撒谎）
+    assert result["rows"] == len(rows), (
+        f"doctor 报告 rows={result['rows']}，库里实际 {len(rows)} 行"
+    )
+    # ON CONFLICT 键是 (run_id, domain, field_name)：本轮内不得有重复键
+    assert len({(row["domain"], row["field_name"]) for row in rows}) == len(rows)
+    # 本轮只播种了快照域，扩域无数据 → 只应出现快照域，且**列全集**都要有基线
+    assert {row["domain"] for row in rows} == {SNAPSHOT_DOMAIN}
+    assert {row["field_name"] for row in rows} == set(SNAPSHOT_COLUMNS), (
+        "基线列集合与 SNAPSHOT_COLUMNS 不一致："
+        f"多={sorted({row['field_name'] for row in rows} - set(SNAPSHOT_COLUMNS))}、"
+        f"少={sorted(set(SNAPSHOT_COLUMNS) - {row['field_name'] for row in rows})}"
+    )
     assert all(row["coverage_pct"] == 100.0 for row in rows)
 
 
