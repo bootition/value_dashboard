@@ -2,8 +2,13 @@
  * Screening quality helpers.
  *
  * Pure functions that derive which indicator fields are untrusted for the
- * current screening result, given the rule tree, active sort field, actual
- * result columns, and the warning codes reported by the backend.
+ * current screening result, given the rule tree, the actual result columns,
+ * and the warning codes reported by the backend.
+ *
+ * 2026-11-23 更正：这里原本还承诺了一个「活动排序字段」入参。`sortField` 已在
+ * 2026-11-19（`41181e1`，reports/143 §10）随"结果排序移出筛选页"一起删除 ——
+ * 文档没跟着改，于是**注释承诺了一个不存在的入参**。
+ * 这正是测试代码不做类型检查时容易积累的那类漂移（见 reports/140 §17.3）。
  *
  * These helpers never touch Vue state or the DOM. They are unit-tested.
  */
@@ -57,8 +62,9 @@ export interface ComputeUntrustedInputs {
  *
  * A field is "relevant" if it appears in any of:
  *   - the rule tree (referenced by a condition)
- *   - the active sort field
  *   - the actual visible result columns
+ *
+ * （原来还有一项「活动排序字段」，已随 `sortField` 的删除一并去掉。）
  *
  * A field is "untrusted" if isIndicatorUntrusted returns true for it given
  * the current warning codes.
