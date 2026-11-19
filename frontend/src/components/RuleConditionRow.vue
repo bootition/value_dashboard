@@ -10,9 +10,9 @@ const props = defineProps<{
   ordinal: number
   indicatorOptions: IndicatorOption[]
   /** 可用的排名口径（方案 C）；空数组则不显示该下拉 */
-  rankModes: Array<{ label: string; value: string }>
+  rankModes?: Array<{ label: string; value: string }>
   /** 当前字段是否支持排名口径 */
-  rankable: boolean
+  rankable?: boolean
   opOptions: Array<{ label: string; value: string }>
 }>()
 
@@ -96,7 +96,7 @@ function firstIndicatorValue(): string | undefined {
  */
 const rankModeOptions = computed(() => [
   { label: '原始值', value: '' },
-  ...props.rankModes,
+  ...(props.rankModes ?? []),
 ])
 
 async function onRankModeChange(value: string): Promise<void> {

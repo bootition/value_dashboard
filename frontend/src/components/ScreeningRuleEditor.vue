@@ -8,19 +8,24 @@ import RuleConditionRow from './RuleConditionRow.vue'
 // Self-import for recursive rendering in the template.
 import ScreeningRuleEditor from './ScreeningRuleEditor.vue'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   node: ScreeningRuleNode
   depth: number
   maxDepth: number
   maxConditions: number
   isRoot: boolean
   indicatorOptions: IndicatorOption[]
-  /** 可用排名口径（方案 C），透传给条件行 */
-  rankModes: Array<{ label: string; value: string }>
-  /** 判定某字段是否支持排名口径 */
-  rankableOf: (field: string) => boolean
+  /** 可用排名口径（方案 C），透传给条件行；缺省视为不可用 */
+  rankModes?: Array<{ label: string; value: string }>
+  /** 判定某字段是否支持排名口径；缺省一律 false */
+  rankableOf?: (field: string) => boolean
   opOptions: Array<{ label: string; value: string }>
-}>()
+}>(), {
+  // 排名口径是可选能力（方案 C）：缺省时不渲染该下拉，
+  // 让只关心规则语义的单测可以不带这些 props 挂载。
+  rankModes: () => [],
+  rankableOf: () => false,
+})
 
 const emit = defineEmits<{
   delete: []
