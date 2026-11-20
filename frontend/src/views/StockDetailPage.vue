@@ -48,6 +48,7 @@ const {
   loading, stockUnavailable, stockBlacklisted, blacklistBusy,
   stockInfo, indicators, klineData, businessOverview,
   hasUntrustedIndicators, autoUpdateInProgress,
+  servedFromCache, cacheAsOf,
   confirmAddToBlacklist, removeFromBlacklist,
 } = useStockDetailLoad({
   stockCode,
@@ -79,7 +80,7 @@ const safetyMetricOptions = [
 </script>
 
 <template>
-  <section class="stock-detail-page">
+  <section class="stock-detail-page" :data-detail-loading="loading ? '1' : '0'" :data-detail-cached="servedFromCache ? '1' : '0'">
     <n-result
       v-if="hasStockCodeError"
       status="error"
@@ -121,6 +122,11 @@ const safetyMetricOptions = [
       <div class="detail-topbar">
         <router-link to="/stock" class="stock-search-back">← 返回个股搜索</router-link>
       </div>
+      <!-- stale-while-revalidate 标注（2026-11-20）：首帧来自上一次成功响应时
+           必须把「数据截至」摆出来，不能让旧快照冒充刚取到的新数据。 -->
+      <p v-if="servedFromCache" id="detail-cache-note" class="detail-cache-note">
+        已即时显示上次成功加载的内容{{ cacheAsOf ? `（数据截至 ${cacheAsOf}）` : '' }}，正在后台刷新…
+      </p>
       <p class="caliber-note">
         口径提示：本页默认是重述回看口径（最新重述值），回测请用『当时可见』。
       </p>
@@ -270,6 +276,15 @@ const safetyMetricOptions = [
 </template>
 
 <style scoped>
+/* stale-while-revalidate 说明条（首帧来自缓存时才出现） */
+.detail-cache-note {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #f2f7f3;
+  color: #4b6b57;
+  font-size: 12px;
+}
 .stock-detail-page {
   max-width: 1380px;
 }

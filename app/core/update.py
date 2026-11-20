@@ -720,6 +720,15 @@ class IncrementalUpdater:
             self._finish_job(job_row_id, "failed", {"error": str(error)})
             raise
         self._finish_job(job_row_id, report["status"], report)
+        # 2026-11-20（reports/151）：更新成功后重作物化「筛选快照」。
+        # 写锁窗口里的筛选靠它做第二数据源，否则用户换个条件就必须 409。
+        # 快照是**兜底手段**，失败只能记日志，绝不反过来阻断更新收尾。
+        if report.get("status") in {"success", "partial"}:
+            from app.core.storage import screening_snapshot
+
+            screening_snapshot.build_screening_snapshot(
+                self.duck, reason="update_finished",
+            )
         return report
 
     def _start_job(self, job_id: str, max_stocks: int, started_at: str) -> int:

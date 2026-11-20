@@ -30,6 +30,10 @@ import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import { isBlacklistedDetail } from '../types/blacklist.ts'
 import type { BlacklistCheckResponse } from '../types/blacklist.ts'
 import { saveKlineSettings, pageStorage } from '../utils/kline-settings.ts'
+import {
+  hydrateRefFromCache,
+  writeStockDetailCache,
+} from './useStockDetailCache.ts'
 import type {
   StockInfo,
   IndicatorsResponse,
@@ -76,7 +80,19 @@ export interface StockDetailLoadDeps {
 export function useStockDetailLoad(deps: StockDetailLoadDeps) {
   const { stockCode, hasStockCodeError, klinePeriod, adjustMode, message, dialog, updateActiveSection } = deps
 
+  /**
+   * 加载态 = **这只股票从来没有成功响应过**才为真（stale-while-revalidate）。
+   *
+   * 旧实现每次挂载都置 true，模板又把整页包在 `<n-spin :show="loading">` 里，
+   * 于是"刚看过同一只股票再点回来"也要先转一圈圈才显示内容。现在先同步回填上一次
+   * 成功响应，`loading` 保持 false，后台照旧 revalidate —— 用户看到的是"内容立刻在，
+   * 数字稍后原地变新"。
+   */
   const loading = ref(false)
+  /** 首帧内容来自缓存（→ 页面顶部显示「数据截至 …（正在后台刷新）」）。 */
+  const servedFromCache = ref(false)
+  /** 缓存里的数据截至日期（`as_of` 标注的唯一来源）。 */
+  const cacheAsOf = ref<string | null>(null)
   // L0-7（报告42）: 无效股票/无数据时呈现友好结果态，而非一页横线
   const stockUnavailable = ref(false)
   // 黑名单屏蔽态：与「股票不存在」分开——这个状态带移出按钮，是自救入口。
@@ -89,6 +105,8 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
   const businessOverview = ref<BusinessOverviewResponse | null>(null)
   const warningCodes = ref<readonly WarningCode[]>([])
   const klineAbortController = ref<AbortController | null>(null)
+  /** 本次 fetchAll 是否属于"后台刷新已有内容"：为真时失败不清空已显示的数据。 */
+  let revalidating = false
 
   const hasUntrustedIndicators = computed(
     () => warningCodes.value.length > 0 && isIndicatorUntrusted('*', warningCodes.value),
@@ -99,11 +117,44 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
     () => indicators.value?.auto_update_in_progress === true,
   )
 
+  /**
+   * 把上一次成功的响应同步回填到各个 ref（首帧就有内容，不转圈）。
+   *
+   * 只回填**这只股票**（+ 当前 K 线周期/复权）确实成功过的部分；返回是否有任何命中。
+   * `asOf` 取自动态数据（指标/行情）那一份，作为页面「数据截至」的唯一来源。
+   */
+  function hydrateFromCache(code: string): boolean {
+    let hit = false
+    const info = hydrateRefFromCache(stockInfo, code, 'info')
+    if (info) hit = true
+    const ind = hydrateRefFromCache(indicators, code, 'indicators')
+    if (ind) {
+      hit = true
+      cacheAsOf.value = ind.asOf
+      const trust = ind.data?.trust
+      if (trust) warningCodes.value = trust.warning_codes
+    }
+    if (hydrateRefFromCache(businessOverview, code, 'business-overview')) hit = true
+    if (hydrateRefFromCache(klineData, code, klineKey())) hit = true
+    return hit
+  }
+
+  /** K 线缓存的 kind（周期/复权都影响响应体，必须进键）。 */
+  function klineKey(): string {
+    return `kline:${klinePeriod.value}:${adjustMode.value}`
+  }
+
   // ─── 数据获取 ───────────────────────────────────────────────────────────
-  async function fetchAll() {
+  /**
+   * @param options.silent `true` = 首帧已有缓存内容，本次只做后台刷新：
+   *   **不置 loading**（不遮挡页面、不转圈），失败也不清空已显示的内容。
+   */
+  async function fetchAll(options: { silent?: boolean } = {}) {
     if (hasStockCodeError.value) return
     const gen = ++generation.value
-    loading.value = true
+    const silent = options.silent === true
+    revalidating = silent
+    if (!silent) loading.value = true
     stockUnavailable.value = false
     stockBlacklisted.value = false
     try {
@@ -116,7 +167,10 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
         fetchKline(gen),
         fetchBusinessOverview(gen),
       ])
+      // 后台刷新成功落地 → 内容已经是新的，「上次加载」标注可以撤掉了。
+      if (gen === generation.value) servedFromCache.value = false
     } finally {
+      revalidating = false
       loading.value = false
       nextTick(updateActiveSection)
     }
@@ -146,9 +200,10 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       const resp = await axios.get<StockInfo>(`/api/stock/${stockCode.value}/info`)
       if (gen !== generation.value) return
       stockInfo.value = resp.data
+      writeStockDetailCache(stockCode.value, 'info', resp.data, null)
     } catch (e) {
       if (gen !== generation.value) return
-      stockInfo.value = null
+      if (!revalidating) stockInfo.value = null
       if (isAxiosError(e) && e.response?.status === 404) {
         // 结构化 404：区分「代码不存在」（终态）与「被黑名单屏蔽」（可撤销）
         if (isBlacklistedDetail(e.response.data?.detail)) {
@@ -167,6 +222,10 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       const resp = await axios.get<IndicatorsResponse>(`/api/stock/${stockCode.value}/indicators`)
       if (gen !== generation.value) return
       indicators.value = resp.data
+      // `as_of` = 后端标注的数据截至（旧端点没有该字段时退回最新行情日/报告期）。
+      const asOf = resp.data.latest_price_date ?? resp.data.report_date ?? null
+      cacheAsOf.value = asOf
+      writeStockDetailCache(stockCode.value, 'indicators', resp.data, asOf)
       // 服务端权威信任信号优先；缺失时回退到数据状态页轮询
       if (resp.data.trust) {
         warningCodes.value = resp.data.trust.warning_codes
@@ -174,7 +233,7 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       }
     } catch (e) {
       if (gen !== generation.value) return
-      indicators.value = null
+      if (!revalidating) indicators.value = null
       if (isAxiosError(e) && e.response?.status === 404) {
         stockUnavailable.value = true
         return
@@ -199,9 +258,11 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       })
       if (gen !== generation.value) return
       klineData.value = resp.data
+      writeStockDetailCache(stockCode.value, klineKey(), resp.data, cacheAsOf.value)
     } catch (e) {
       if (axios.isCancel(e) || gen !== generation.value) return
-      klineData.value = { candles: [] }
+      // 后台 revalidate 失败不动已经显示出来的图（旧快照仍然可读）。
+      if (!revalidating) klineData.value = { candles: [] }
       message.warning(friendlyErrorMessage(e, '加载K线数据失败'))
     }
   }
@@ -213,9 +274,10 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       )
       if (gen !== generation.value) return
       businessOverview.value = resp.data
+      writeStockDetailCache(stockCode.value, 'business-overview', resp.data, cacheAsOf.value)
     } catch (e) {
       if (gen !== generation.value) return
-      businessOverview.value = null
+      if (!revalidating) businessOverview.value = null
       // 局部缺失（profile/breakdown status=missing）在组件内就地空态，不升页面级
       if (isAxiosError(e) && e.response?.status === 404) {
         stockUnavailable.value = true
@@ -295,12 +357,23 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       },
       pageStorage(),
     )
+    // 切换周期/复权：先回填同一 key 上一次成功的 K 线（有就立刻显示），再 revalidate。
+    hydrateRefFromCache(klineData, stockCode.value, klineKey())
     fetchKline(generation.value)
   })
-  watch(stockCode, fetchAll)
+  watch(stockCode, (code) => {
+    // 换股票：先把这只股票的旧响应顶上去（有就覆盖，没有就保持空），再无阻塞刷新。
+    const hit = !!code && !hasStockCodeError.value && hydrateFromCache(code)
+    servedFromCache.value = hit
+    fetchAll({ silent: hit })
+  })
 
   onMounted(() => {
-    fetchAll()
+    // stale-while-revalidate：同步回填上一次成功响应 → 首帧就有内容 → 后台刷新。
+    const code = stockCode.value
+    const hit = !!code && !hasStockCodeError.value && hydrateFromCache(code)
+    servedFromCache.value = hit
+    fetchAll({ silent: hit })
   })
 
   onUnmounted(() => {
@@ -312,6 +385,10 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
 
   return {
     loading,
+    /** 首帧内容来自上一次成功响应（页面据此显示「数据截至 …（正在后台刷新）」）。 */
+    servedFromCache,
+    /** 缓存里的数据截至日期（`as_of` 标注）。 */
+    cacheAsOf,
     stockUnavailable,
     stockBlacklisted,
     blacklistBusy,

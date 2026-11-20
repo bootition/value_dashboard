@@ -476,11 +476,29 @@ def _run_startup_maintenance(
     return current
 
 
+def _backfill_screening_snapshot(duck: DuckDBStore) -> None:
+    """启动时补一次「筛选快照」（2026-11-20，reports/151）。
+
+    写锁窗口里 `/api/screening/run` 回放 miss 时靠这份独立快照库照常真跑
+    任何条件；它缺失/过旧就等于用户换个条件只能 409。快照已新鲜时这一步是
+    一次读 meta 的常数开销（`ensure_screening_snapshot` 自己判过期）。
+    失败必须**非致命**：慢/坏只能记日志，绝不能挡住服务起来。
+    """
+    try:
+        from app.core.storage import screening_snapshot
+
+        screening_snapshot.ensure_screening_snapshot(duck, reason="startup_backfill")
+    except Exception as error:  # noqa: BLE001 - 补建失败不影响服务可用性
+        logger.warning("启动补建筛选快照失败(非致命): %s", error)
+
+
 def _start_startup_maintenance(
     app: FastAPI, duck: DuckDBStore, sqlite: SQLiteStore, startup_readiness: dict,
 ) -> None:
     """Publish an immediately responsive server before slow remote work begins."""
     def worker() -> None:
+        # 先补筛选快照（写锁窗口里的第二数据源），再做慢启动维护。
+        _backfill_screening_snapshot(duck)
         try:
             current = _run_startup_maintenance(
                 duck,

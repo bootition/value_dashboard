@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, nextTick, h, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, nextTick, h, watch } from 'vue'
 import type { VNode } from 'vue'
 import { NButton, NInput, NInputNumber, NSelect, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
 import { NEllipsis } from 'naive-ui'
@@ -24,6 +24,7 @@ import {
   clearRunSnapshot,
   markRunExpired,
   refreshRunExpiry,
+  rememberEditorBinding,
   saveRunSnapshot,
   screeningSession,
 } from '../stores/screening-session.ts'
@@ -254,6 +255,41 @@ function handleRunInvalidated(reason: string): void {
   void nextTick(() => scrollToResults())
 }
 
+/**
+ * 这次 `/run` **根本没执行成功**（= 旧结果没有被任何新结果取代，不能说它作废）。
+ *
+ * 2026-11-20 二次事故的修复点。此前 `catch` 无条件 `clearRunArtifacts()`，于是
+ * 下面这些"没跑成"的失败也会把用户上一次的结果（连模块级会话快照）整份清掉：
+ * - `409` + `DATA_UPDATE_IN_PROGRESS` / 写锁：后端明确说"现在不能跑"
+ *   （`app/web/api/screening.py::run_screening` 的第三步，`reports/151`）。
+ *   **服务端日志实证**（`data/logs/start.log`，用户实测窗口 19:42–19:46）：
+ *   `筛选运行被写锁挡住且无上次成功结果` 连发 5 次，当时自动更新子进程正持 DuckDB 写锁。
+ *   用户的操作就是"切回来 → 点运行 → 报错 → 结果全没了"。
+ * - 网络中断 / 超时 / 主动取消：请求体都没走完，谈不上"本次结果作废"。
+ *
+ * 只有真正执行了、却产出不可信结果的失败（400 规则错误 / 500 / 质量门禁拒绝 /
+ * 后端判 `saved result ... not found`）才继续走"失败即清空"。
+ */
+function isRunNotExecuted(e: unknown): boolean {
+  if (!e || typeof e !== 'object') return false
+  const record = e as { response?: { status?: unknown }; code?: unknown }
+  const status = typeof record.response?.status === 'number' ? record.response.status : null
+  // 409 = 数据更新中 / 写锁挡住 / 并发冲突：本次没执行（后端如实拒绝，不是"结果无效"）。
+  if (status === 409 || status === 423 || status === 429) return true
+  const code = typeof record.code === 'string' ? record.code : ''
+  return code === 'ERR_NETWORK' || code === 'ECONNABORTED' || code === 'ERR_CANCELED' || code === 'ETIMEDOUT'
+}
+
+/**
+ * 本次运行没跑成的**用户可见提示**（页面级，不动结果区）。
+ *
+ * 结果区继续原样显示上一次成功运行的结果，保存/导出/加入自选也照常可用——
+ * 因为那份结果的 `run_id` + 规则溯源都仍然有效，后端照样认（与"结果过期"不同）。
+ */
+const runAttemptNotice = ref<string | null>(null)
+/** 挂载期标记：用来判定"失败落地时用户是不是已经离开这一页"（切页导致的失败）。 */
+let pageUnmounted = false
+
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
 /**
  * 用户裁定：**去掉「仅使用严格可信数据」开关**，筛选口径固定为「包含近似数据」。
@@ -474,9 +510,12 @@ async function runScreening() {
   }
   loading.value = true
   // 进入 running：旧结果暂时留在屏幕上，但会由面板显式标注「上一次运行的结果」
-  // 并禁用保存/导出/加入自选；本次一旦失败则整体清空（见 catch）。
+  // 并禁用保存/导出/加入自选；本次**真跑坏**才整体清空，**没跑成**（409 写锁 /
+  // 网络中断 / 切页中断）保留旧结果 —— 见 catch 里的 isRunNotExecuted()。
   runState.value = 'running'
   lastRunError.value = null
+  // 新一次尝试开始：上一次"没跑成"的提示作废（成功与真失败都会重写它）。
+  runAttemptNotice.value = null
   // g5：在飞的运行也要跨挂载保住 —— 切走再切回来时按钮仍是 loading，
   // 且不会因为重新挂载而再发一次 /run。
   screeningSession.running = true
@@ -562,15 +601,29 @@ async function runScreening() {
     await nextTick()
     scrollToResults()
   } catch (e: unknown) {
-    // P0：失败 = 上一次结果作废。不清空的话面板会继续写「N 家符合当前规则」，
-    // 「保存到自选」也照旧可点 → 用户把旧股票按新规则写进自选（数据污染）。
+    // P0：**真正跑坏了**（后端执行过、但产物不可信）才算"上一次结果作废"。
+    // 2026-11-20 二次事故：这里原先无条件清空，于是 409「数据正在自动更新/写锁被挡住」
+    // 这种"根本没执行"的拒绝也会把用户上一次的结果连同会话快照一起清掉 —— 用户切页
+    // 回来点一次运行就整页变空，读到的就是「切页把结果弄没了」。见 isRunNotExecuted()。
     const reason = apiErrorText(e, '筛选失败')
-    clearRunArtifacts()
-    runState.value = 'failed'
-    lastRunError.value = reason
-    message.error(reason)
-    await nextTick()
-    scrollToResults()
+    const keepPrevious = results.value.length > 0 && (pageUnmounted || isRunNotExecuted(e))
+    if (keepPrevious) {
+      // 结果原样保留：runState 回到"这批结果仍然有效"的态（那份 runId 与规则溯源
+      // 仍然被后端承认，保存/导出/加入自选照旧可用），失败只用页面级提示讲清楚"这次没跑"。
+      runState.value = results.value.length > 0 ? 'ok' : 'empty'
+      runAttemptNotice.value = `${reason}。本次运行没有执行，下面仍然是上一次成功运行的结果（可照常保存/导出），稍后重试即可。`
+      if (!pageUnmounted) message.warning(runAttemptNotice.value)
+    } else {
+      clearRunArtifacts()
+      runState.value = 'failed'
+      lastRunError.value = reason
+      runAttemptNotice.value = null
+      if (!pageUnmounted) message.error(reason)
+    }
+    if (!pageUnmounted) {
+      await nextTick()
+      scrollToResults()
+    }
   } finally {
     loading.value = false
     screeningSession.running = false
@@ -712,8 +765,13 @@ onMounted(async () => {
 })
 
 // 编辑区绑定（当前规则 / 规则名）随会话保存：切走再回来，"当前规则"仍是同一个版本。
-watch(selectedRuleId, (id) => { screeningSession.activeRuleId = id })
-watch(ruleName, (name) => { screeningSession.ruleName = name })
+// 编辑区绑定随会话落盘：切页（含文档重新加载）回来仍是同一个规则版本。
+watch([selectedRuleId, ruleName], ([id, name]) => { rememberEditorBinding(id, name) })
+
+// 切页标记：用于区分"用户在别的页面时请求才失败"（这类失败绝不清空结果）。
+onUnmounted(() => {
+  pageUnmounted = true
+})
 </script>
 
 <template>
@@ -860,6 +918,17 @@ watch(ruleName, (name) => { screeningSession.ruleName = name })
     <n-alert v-if="autoUpdateSnapshot" type="info" :show-icon="true" class="screening-snapshot-note">
       数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
     </n-alert>
+    <!-- 「这次没跑成，但结果还在」：409 数据更新中 / 写锁挡住 / 网络中断 / 切页中断。
+         绝不换掉结果区，只在它上面加一条说明（保存/导出/加入自选照旧可用）。 -->
+    <n-alert
+      v-if="runAttemptNotice"
+      id="run-attempt-notice"
+      type="warning"
+      :show-icon="true"
+      closable
+      class="screening-run-attempt-notice"
+      @close="runAttemptNotice = null"
+    >{{ runAttemptNotice }}</n-alert>
     <div ref="resultsAnchor" class="screening-results-anchor">
       <ScreeningResultsPanel
         :results="results"

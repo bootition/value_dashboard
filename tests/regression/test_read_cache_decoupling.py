@@ -358,7 +358,10 @@ def test_screening_run_reports_human_409_without_cache(
     assert detail["reason_code"] == "data_update_in_progress"
     assert "warning_codes" not in str(detail)
     assert "数据状态" not in detail["message"]
-    assert "已保存的筛选结果" in detail["message"]
+    # 2026-11-20（reports/151）：409 的语义从"没有可回放的结果"变成"连数据快照
+    # 都没有"——回放 miss 不再 409，由快照兜底。见
+    # `test_screening_snapshot_fallback.py`。
+    assert "快照" in detail["message"]
 
 
 # ─── 3b. 缓存键必须区分条件（否则回放就是"拿 A 的结果回答 B"） ────────
@@ -578,7 +581,7 @@ def test_screening_no_cache_409_message_has_no_bare_field_names(
     assert set(detail) == {"reason_code", "message"}
     message = detail["message"]
     assert "数据正在自动更新" in message
-    assert "这次规则还没有可复用的筛选结果" in message
+    assert "快照" in message
     assert "请稍后重试" in message
     assert "数据状态" not in message
     for bare in ("warning_codes", "reason_code", "served_from", "readiness", "stale", "as_of"):

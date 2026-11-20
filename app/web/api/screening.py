@@ -49,7 +49,7 @@ from app.core.quality.asset_health import (
     TECHNICAL_COVERAGE_FIELDS,
     technical_coverage_threshold,
 )
-from app.core.storage import read_cache
+from app.core.storage import read_cache, screening_snapshot
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
 logger = logging.getLogger(__name__)
@@ -428,9 +428,15 @@ REASON_DATA_UPDATE_IN_PROGRESS = "data_update_in_progress"
 #: 无缓存 409 的**人话**。只讲用户能做的事，不出现 `warning_codes` 这类裸字段名，
 #: 也不再把用户指去「数据状态」页看一个他一辈子不会看的告警列表。
 NO_CACHED_SCREENING_RESULT_MESSAGE = (
-    "数据正在自动更新，这次规则还没有可复用的筛选结果，请稍后重试。"
-    "更新结束后成功运行一次，这批条件就会有已保存的筛选结果可以回放。"
+    "数据正在自动更新，这台机器上还没有可用的完整数据快照，暂时无法运行筛选，"
+    "请稍后重试。更新结束时会自动生成快照，之后任何条件都能照常跑。"
 )
+
+#: 快照兜底成功时的原因码（与 `served_from="snapshot"` 配套）。
+REASON_SNAPSHOT_SERVED = "screening_snapshot"
+
+#: 随 200 结果下发的披露码：前端据此显示"这是更新前的完整快照"横幅。
+SNAPSHOT_DISCLOSED_WARNING = "screening_served_from_snapshot"
 
 
 def _prune_empty_containers(value: Any) -> Any:
@@ -598,10 +604,19 @@ def _saved_rule_row(request: Request, req: ScreeningRequest) -> dict[str, Any] |
 def run_screening(req: ScreeningRequest, request: Request) -> dict:
     """运行筛选 (PRD §12.2 SC8: 手动运行, 以最新完整快照为准)。
 
-    外层只做三件事：算缓存键 → `read_cache.serve` → 无缓存时把
-    `DuckDBReadLockedError` 翻成**人话 409**。真正的门禁/规则/引擎/落库在
-    `_execute_screening` 里——它同时是缓存 factory，只有**成功执行**才会被
-    `read_cache` 记下来。
+    写锁窗口内的执行顺序（2026-11-20 第二版，reports/151）：
+
+    1. **回放**（`read_cache.serve`）：同一批语义输入曾经成功跑过 → 直接回放，
+       最快，且与原行为逐字一致；
+    2. **快照**（`_run_screening_from_snapshot`）：回放 miss 时**不再 409**，
+       而是把引擎的数据源切到"上一次更新完成后物化的筛选快照库"（独立文件，
+       不受主库写锁影响），**照常把这次的条件真跑一遍**。响应带
+       `served_from="snapshot"` + `as_of` + `stale=True` + 中文 `notice`；
+    3. **409**：连快照都没有/打不开 → 如实说"现在不能跑"，绝不假装成功。
+
+    为什么必须走第 2 条而不是只做回放：回放的键含规则体，只有"完全相同的请求
+    曾经成功过"才命中；用户换个条件、或第一次在更新窗口里筛 → 必然 miss
+    （reports/151 §1 的日志实证）。
     """
     rule_row = _saved_rule_row(request, req)
     if rule_row is None:
@@ -623,9 +638,13 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
             lambda: _execute_screening(req, request, rule_row),
         )
     except DuckDBReadLockedError as error:
-        # 真的读不到 + 从来没有成功过 ⇒ 如实报"现在不能跑"，但说人话，
+        # 回放 miss + 主库被写锁挡住 → **快照兜底**（不再直接 409）。
+        served = _run_screening_from_snapshot(req, request, rule_row, lock_error=error)
+        if served is not None:
+            return served
+        # 连快照都没有 ⇒ 如实报"现在不能跑"，但说人话，
         # 不给用户抛 `warning_codes`/`reason_code` 这种字段名。
-        logger.warning("筛选运行被写锁挡住且无上次成功结果: %s", error)
+        logger.warning("筛选运行被写锁挡住且无快照可兜底: %s", error)
         raise HTTPException(
             status_code=409,
             detail={
@@ -638,20 +657,110 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
     return {**payload, **meta}
 
 
+def _screening_snapshot_gate(store: Any, info: dict[str, Any]) -> dict[str, Any]:
+    """快照路径的门禁结果：只用**快照库**能回答的事，逐项如实标注。
+
+    与 `_require_current_screenability()` 的区别是**不假装**做了实时判定：
+    写锁窗口里主库读不到，trust/readiness 不可能现算，所以
+    `readiness_source="screening_snapshot"`、`readiness_stale=True`，
+    并把 `screening_served_from_snapshot` 放进 `disclosed_warnings`
+    让前端显示成提示横幅（不是错误）。
+    """
+    data_as_of: str | None = None
+    try:
+        rows = store.read_query(
+            "SELECT MAX(latest_price_date) AS d FROM indicator_snapshot"
+        )
+        if rows and rows[0].get("d") is not None:
+            data_as_of = str(rows[0]["d"])[:10]
+    except Exception:  # noqa: BLE001 - 快照里没有该列也不影响出结果
+        logger.debug("读取快照行情日期失败", exc_info=True)
+    age = screening_snapshot.snapshot_age_seconds(info)
+    return {
+        "lock_active": True,
+        "data_as_of": data_as_of,
+        "disclosed_warnings": [SNAPSHOT_DISCLOSED_WARNING],
+        "screening_warnings": [],
+        "readiness_source": screening_snapshot.SERVED_FROM_SNAPSHOT,
+        "readiness_cached_at": info.get("built_at"),
+        "readiness_stale": True,
+        "readiness_age_seconds": age,
+    }
+
+
+def _run_screening_from_snapshot(
+    req: ScreeningRequest,
+    request: Request,
+    rule_row: dict[str, Any],
+    *,
+    lock_error: Exception,
+) -> dict | None:
+    """回放 miss 时的兜底：把引擎数据源切到筛选快照库，**真跑**这次的条件。
+
+    返回可直接下发的响应体（已带陈旧标注）；快照缺失/损坏/跑不通 → `None`，
+    由调用方落回 409。**绝不**用"空结果集"冒充成功（那是一个错误的事实陈述）。
+    """
+    store = screening_snapshot.open_snapshot(request.app.state.duck)
+    if store is None:
+        logger.warning(
+            "筛选快照不可用（未生成或已损坏），无法兜底: %s",
+            screening_snapshot.snapshot_path(request.app.state.duck),
+        )
+        return None
+    logger.info(
+        "筛选主库被写锁挡住（%s），改用筛选快照 %s（as_of=%s）真跑本次条件",
+        lock_error, store.db_path, store.as_of,
+    )
+    try:
+        payload = _execute_screening(
+            req, request, rule_row, store=store, snapshot_info=store.info,
+        )
+    except HTTPException:
+        raise
+    except Exception as error:  # noqa: BLE001 - 快照跑不通 ⇒ 409，不当成功
+        logger.warning("从筛选快照执行失败，落回 409: %s", error, exc_info=True)
+        return None
+    finally:
+        store.close()
+    return {
+        **payload,
+        "served_from": screening_snapshot.SERVED_FROM_SNAPSHOT,
+        "as_of": store.as_of,
+        "stale": True,
+        "reason_code": REASON_SNAPSHOT_SERVED,
+        "notice": screening_snapshot.snapshot_notice(store.info),
+    }
+
+
 def _execute_screening(
     req: ScreeningRequest,
     request: Request,
     rule_row: dict[str, Any] | None,
+    *,
+    store: Any = None,
+    snapshot_info: dict[str, Any] | None = None,
 ) -> dict:
     """门禁 → 规则 → 引擎 → 落库。返回可直接回放的响应体（不含陈旧标记）。
 
     ⚠️ 顺序是被测试锁死的：**门禁先跑**（409 `minimum_data_not_ready` 等），
     之后才是"规则不存在 400"。把 400 提到门禁前面会让"更新中且没数据"变成
     "规则不存在"，用户被指去改规则——错的方向。
+
+    Args:
+        store: 引擎的数据源。`None` = 主库（默认）。写锁窗口里传
+            `SnapshotStore` —— **只换连接，SQL 一个字不改**。
+        snapshot_info: 快照 meta（`built_at`/`row_counts`）。非 `None` 表示
+            本次是快照口径：门禁改用 `_screening_snapshot_gate()`，
+            字段遮蔽改由引擎在快照库上现算（同一条实现，不抄第二份）。
     """
     from app.core.screening.engine import ScreeningEngine
 
-    gate = _require_current_screenability(request)
+    data_store = store if store is not None else request.app.state.duck
+    gate = (
+        _screening_snapshot_gate(data_store, snapshot_info)
+        if snapshot_info is not None
+        else _require_current_screenability(request)
+    )
 
     if not rule_row:
         raise HTTPException(status_code=400, detail="saved rule version not found")
@@ -664,7 +773,7 @@ def _execute_screening(
     locked_indicators = json.loads(rule_row["locked_indicators"] or "{}")
     from app.core.screening.engine import MaskedFieldError
 
-    engine = ScreeningEngine(duck=request.app.state.duck, sqlite=request.app.state.sqlite)
+    engine = ScreeningEngine(duck=data_store, sqlite=request.app.state.sqlite)
     try:
         result = engine.run(
             rule=rule,
@@ -675,14 +784,18 @@ def _execute_screening(
             locked_indicators=locked_indicators,
             # 字段级遮蔽（依据 S3 §2.3 J9）：显式传入与 /indicators 同源的
             # 不可信字段清单，命中即 409 —— 绝不静默返回空结果集。
-            masked_fields=_masked_indicator_fields(request),
+            # 快照口径下传 None：让引擎在**快照库**上用同一条探针
+            # （`masked_fields_for_database`）现算，不拿主库的清单套快照的数据。
+            masked_fields=(
+                None if snapshot_info is not None else _masked_indicator_fields(request)
+            ),
         )
     except MaskedFieldError as error:
         raise HTTPException(status_code=409, detail=error.as_detail()) from error
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    _attach_result_report_dates(request.app.state.duck, result["results"])
+    _attach_result_report_dates(data_store, result["results"])
 
     # P1-5修复: 惰性过期清理由单条原子 DELETE 完成, 只回收早于 TTL 的 run,
     # 不再删除其他页面尚在有效期内未保存的 run; 正常消费仍由 /save 负责删除。
