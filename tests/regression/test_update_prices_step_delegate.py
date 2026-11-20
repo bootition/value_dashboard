@@ -30,6 +30,8 @@ from __future__ import annotations
 import logging
 import time
 
+import pytest
+
 from app.core.update import IncrementalUpdater
 from app.core.update_parts import prices_step
 from tests.support import source_guard
@@ -107,6 +109,41 @@ def test_moved_function_takes_an_explicit_owner_not_self() -> None:
     assert list(params)[:2] == ["owner", "max_stocks"], (
         f"参数契约变了（{list(params)}）：owner + max_stocks 是搬移前的"
         "self + max_stocks，顺序不能动"
+    )
+
+
+# ── 2026-11-20：三个 qfq 探针也搬进 prices_step（update.py 行数棘轮的正路）──
+#
+# `test_update_structure.py` 的行数棘轮红了（5297 > 5226），按它自己的文档
+# 「搬函数出去 + 原地薄委托」交付：`_qfq_lag_summary` / `_qfq_watermarks` /
+# `_qfq_lag_watermarks` 的函数体（含 docstring）逐字搬进 `prices_step`，
+# `update.py` 只留同名 3 行委托。这里用 `resolve_body`（顺"单行委托"追一层）
+# 钉住"实现还在 prices_step"，防止有人把逻辑搬回 god class 又悄悄绕过行数棘轮
+# （把 156 行压成一行注释是能把行数做下来、但把方法体搬回去的典型走法）。
+_QFQ_PROBE_DELEGATES = (
+    ("_qfq_lag_summary", prices_step.qfq_lag_summary),
+    ("_qfq_watermarks", prices_step.qfq_watermarks),
+    ("_qfq_lag_watermarks", prices_step.qfq_lag_watermarks),
+)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "impl"),
+    _QFQ_PROBE_DELEGATES,
+    ids=[name for name, _ in _QFQ_PROBE_DELEGATES],
+)
+def test_qfq_probes_are_still_thin_delegates(method_name: str, impl) -> None:
+    """qfq 水位探针的实现体必须还在 `update_parts/prices_step.py`。"""
+    method = getattr(IncrementalUpdater, method_name)
+
+    assert source_guard.resolve_body(method) is impl, (
+        f"`{method_name}` 不再是『同名委托 → update_parts.prices_step.{impl.__name__}』："
+        "要么 156 行探针被搬回了 update.py（god class 反弹），要么委托被改坏"
+    )
+    # 委托壳必须真的把 owner 传下去（`owner.` 而不是 `self.` 语义）：
+    # 实现体的第一个参数就叫 owner —— 这是 `update_parts` 不反向 import 的前提。
+    assert list(source_guard.signature_of(impl))[0] == "owner", (
+        f"prices_step.{impl.__name__} 的第一个参数不再是 `owner`"
     )
 
 

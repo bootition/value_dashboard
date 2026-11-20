@@ -2365,77 +2365,12 @@ class IncrementalUpdater:
         return cleared
 
     def _qfq_lag_watermarks(self, target_codes: Iterable[str]) -> dict[str, str | None]:
-        """列出 **qfq 最新日 < raw 最新日** 的股票及其 qfq 水位（NULL 也算滞后）。
-
-        与 `_qfq_lag_summary` 的区别：那个比的是"目标交易日"，这里比的是
-        "同一只股票自己的 raw 最新日"。前者用于把价格步骤降级 partial（源侧
-        整体滞后），后者用于判定"这只股票的复权序列没跟上自己的日线"，
-        因为技术指标只读 qfq —— raw 到没到齐与指标可信与否是两件事。
-        """
-        codes = [str(code) for code in dict.fromkeys(target_codes) if code]
-        if not codes:
-            return {}
-        try:
-            rows = self.duck.read_query(
-                """WITH target AS (
-                       SELECT unnest(?::VARCHAR[]) AS stock_code
-                   ), raw AS (
-                       SELECT price.stock_code, MAX(price.trade_date) AS latest_raw
-                       FROM price_daily_raw price
-                       JOIN target ON target.stock_code = price.stock_code
-                       GROUP BY price.stock_code
-                   ), qfq AS (
-                       SELECT price.stock_code, MAX(price.trade_date) AS latest_qfq
-                       FROM price_daily_qfq price
-                       JOIN target ON target.stock_code = price.stock_code
-                       GROUP BY price.stock_code
-                   )
-                   SELECT raw.stock_code AS stock_code,
-                          CAST(qfq.latest_qfq AS VARCHAR) AS latest_qfq
-                   FROM raw
-                   LEFT JOIN qfq ON qfq.stock_code = raw.stock_code
-                   WHERE qfq.latest_qfq IS NULL OR qfq.latest_qfq < raw.latest_raw
-                   ORDER BY raw.stock_code""",
-                [codes],
-            )
-        except Exception as error:  # noqa: BLE001 - 探针失败不改变价格步骤状态
-            logger.warning("统计 qfq 相对 raw 滞后失败（不写待重算名单）: %s", error)
-            return {}
-        return {
-            str(row["stock_code"]): (
-                None if row.get("latest_qfq") is None else str(row["latest_qfq"])[:10]
-            )
-            for row in rows
-        }
+        """列出 **qfq 最新日 < raw 最新日** 的股票及其 qfq 水位（实现见 `prices_step`）。"""
+        return prices_step.qfq_lag_watermarks(self, target_codes, logger=logger)
 
     def _qfq_watermarks(self, codes: Iterable[str]) -> dict[str, str | None]:
-        """读取一批股票**落库后**的 qfq 最新日（technical_pending 的水位）。
-
-        与 `_qfq_lag_watermarks` 的区别：这里不比较 raw，只回答"这只股票
-        当前 qfq 写到哪一天"，供 `_mark_technical_pending` 做同水位去重。
-        """
-        requested = [str(code) for code in dict.fromkeys(codes) if code]
-        if not requested:
-            return {}
-        try:
-            rows = self.duck.read_query(
-                """SELECT stock_code, CAST(MAX(trade_date) AS VARCHAR) AS latest_qfq
-                   FROM price_daily_qfq
-                   WHERE stock_code IN (SELECT unnest(?::VARCHAR[]))
-                   GROUP BY stock_code""",
-                [requested],
-            )
-        except Exception as error:  # noqa: BLE001 - 水位探针失败不改变价格步骤状态
-            logger.warning("读取 qfq 水位失败（technical_pending 不写入）: %s", error)
-            return {}
-        found = {
-            str(row["stock_code"]): (
-                None if row.get("latest_qfq") is None else str(row["latest_qfq"])[:10]
-            )
-            for row in rows
-        }
-        # 没有 qfq 行的股票也入列（水位 None），确保下一轮会尝试重算。
-        return {code: found.get(code) for code in requested}
+        """读取一批股票**落库后**的 qfq 最新日（实现见 `prices_step`）。"""
+        return prices_step.qfq_watermarks(self, codes, logger=logger)
 
     def _qfq_lag_codes_vs_raw(self, target_codes: Iterable[str]) -> list[str]:
         """`_qfq_lag_watermarks` 的代码清单形态（只关心"有没有滞后"时用）。"""
@@ -2530,88 +2465,10 @@ class IncrementalUpdater:
     def _qfq_lag_summary(
         self, target_codes: list[str], target_date: str,
     ) -> dict[str, Any]:
-        """Count target stocks whose local qfq history still ends before **own raw**.
-
-        2026-11-13 P1（1）：生产 job 207 收尾 0 失败、却只有 959/5,572 只 qfq
-        到达当日（raw 已到 11-13）。因为 raw/qfq 是成对抓取的，两侧都可能
-        "成功但只到前一天"（源侧 qfq 滞后），步骤只按 fail_count 判定就会
-        报 success，下一轮又把 4,613 只重新选中，形成"每轮补 qfq"的稳态。
-
-        2026-11-20 P0（速度退化复盘，reports/151）：判据原先比的是**日历目标日**
-        （``MAX(qfq.trade_date) < target_date``），把「源侧今天整市场都还没发」
-        与「这只股票的复权序列没跟上自己的日线」混成一件事。两者必须分开：
-
-        * ``qfq_lag_*``（本函数的降级判据）= **qfq 落后自己的 raw**。这才是
-          "复权序列没跟上"的定义，也是 job 207 事故的真正形态（raw 已到
-          11-13、qfq 停在 11-12）。raw 尚未到达 target 时它不会误报。
-        * ``raw_lag_count`` / ``qfq_below_target_count`` = 相对日历目标日的
-          **源侧**水位，只做可观测性，不参与降级（否则"源侧还没发"整市场
-          97% 命中 → 每轮 partial(qfq_lagged) 假红）。
-
-        NULL qfq 与 NULL raw（连一行都没有）同样计入滞后，保持"缺数据必须
-        可见"的保守方向：本改动只去掉"raw 也没到却怪 qfq"的误判，不放宽
-        任何真实缺口。
-        """
-        codes = [str(code) for code in dict.fromkeys(target_codes) if code]
-        if not codes:
-            return {
-                "qfq_lag_count": 0, "qfq_lag_ratio": 0.0, "qfq_lag_codes": [],
-                "raw_lag_count": 0, "qfq_below_target_count": 0,
-            }
-        try:
-            rows = self.duck.read_query(
-                """WITH target AS (
-                       SELECT unnest(?::VARCHAR[]) AS stock_code
-                   ), raw AS (
-                       SELECT price.stock_code, MAX(price.trade_date) AS latest_raw
-                       FROM price_daily_raw price
-                       JOIN target ON target.stock_code = price.stock_code
-                       GROUP BY price.stock_code
-                   ), qfq AS (
-                       SELECT price.stock_code, MAX(price.trade_date) AS latest_qfq
-                       FROM price_daily_qfq price
-                       JOIN target ON target.stock_code = price.stock_code
-                       GROUP BY price.stock_code
-                   )
-                   SELECT target.stock_code AS stock_code,
-                          CAST(raw.latest_raw AS VARCHAR) AS latest_raw,
-                          CAST(qfq.latest_qfq AS VARCHAR) AS latest_qfq
-                   FROM target
-                   LEFT JOIN raw ON raw.stock_code = target.stock_code
-                   LEFT JOIN qfq ON qfq.stock_code = target.stock_code
-                   ORDER BY target.stock_code""",
-                [codes],
-            )
-        except Exception as error:
-            logger.warning("统计 qfq 滞后失败（不改变步骤状态）: %s", error)
-            return {
-                "qfq_lag_count": 0,
-                "qfq_lag_ratio": 0.0,
-                "qfq_lag_codes": [],
-                "qfq_lag_error": str(error),
-            }
-        lag_codes: list[str] = []
-        raw_lag = 0
-        qfq_below_target = 0
-        for row in rows:
-            code = str(row["stock_code"])
-            latest_raw = None if row.get("latest_raw") is None else str(row["latest_raw"])[:10]
-            latest_qfq = None if row.get("latest_qfq") is None else str(row["latest_qfq"])[:10]
-            # 真滞后：qfq 缺行，或与自己的 raw 相比没跟上。
-            if latest_qfq is None or latest_raw is None or latest_qfq < latest_raw:
-                lag_codes.append(code)
-            if latest_raw is None or latest_raw < target_date:
-                raw_lag += 1
-            if latest_qfq is None or latest_qfq < target_date:
-                qfq_below_target += 1
-        return {
-            "qfq_lag_count": len(lag_codes),
-            "qfq_lag_ratio": round(len(lag_codes) / len(codes), 4),
-            "qfq_lag_codes": lag_codes[:20],
-            # 源侧水位（可观测性，不参与降级）
-            "raw_lag_count": raw_lag,
-            "qfq_below_target_count": qfq_below_target,
-        }
+        """统计 qfq 落后自己 raw 的目标股（细节见 `prices_step.qfq_lag_summary`）。"""
+        return prices_step.qfq_lag_summary(
+            self, target_codes, target_date, logger=logger,
+        )
 
     def _xdxr_event_fingerprints(self, codes: list[str]) -> set[tuple[str, str, str, str]]:
         """Fingerprint existing xdxr events so new/changed ones can be detected.

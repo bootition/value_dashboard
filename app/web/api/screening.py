@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 import json
 import logging
@@ -34,6 +35,7 @@ from pydantic import BaseModel
 
 from app.core.blacklist import blacklisted_code_set, filter_rows
 from app.core.data_quality import (
+    SCREENING_READINESS_CACHE_KEY,
     ensure_screening_readiness_refresh,
     load_screening_readiness_entry,
     screening_readiness_cache_key,
@@ -47,6 +49,8 @@ from app.core.quality.asset_health import (
     TECHNICAL_COVERAGE_FIELDS,
     technical_coverage_threshold,
 )
+from app.core.storage import read_cache
+from app.core.storage.duckdb_store import DuckDBReadLockedError
 
 logger = logging.getLogger(__name__)
 
@@ -395,32 +399,269 @@ class ScreeningDraftRequest(BaseModel):
     revision: int = 0
 
 
+# ─── 更新窗口内的筛选只读回退（2026-11-20，reports/150） ────────────────
+#
+# 事故：自动更新子进程独占 DuckDB 文件句柄期间，`/api/screening/run` 里的每一次
+# `read_query()` 都是 `DuckDBReadLockedError` → 全局 handler 503。用户看到
+# `数据正在自动更新中，请稍后刷新`，可上一次跑成功的**同一批条件**明明还在。
+#
+# 做法与个股详情/黑名单同源（`app/core/storage/read_cache.py`）：
+# 键 = 本次运行的**全部语义输入**，值 = 上一次成功执行的完整响应体。写锁落下的
+# 那一刻起，只要"同一批条件 + 同一份数据快照"跑成功过，就把那份结果原样回放，
+# 并打上 `served_from="cache"` / `stale=True` / `notice`；从来没跑成功过 → 409 人话。
+#
+# 三条铁律：
+# 1. **键必须区分条件**：规则身份 + 规则体摘要 + 基础池 + 列 + strict + 数据快照。
+#    少一项就会"换了条件却回放上一次的结果"——那比 503 严重得多（用户会照着错
+#    的结论下单）。等价输入必须同键：空规则集 ≡ 无 conditions、columns=None ≡ []。
+# 2. **数据快照标识复用筛选就绪指纹**（`data_refresh_state` 的
+#    `screening_readiness_cache.fingerprint`），**不用 `content_epoch`**：epoch 在
+#    **每个写事务之后**都变，而写锁窗口恰恰是"更新还没提交、指纹不变"的那段时间，
+#    用 epoch 会让每一次回放都 miss —— 把要救的场景全打穿。
+# 3. **陈旧回放只读不写**：`screening_runs` 的 TTL 清理与 INSERT 都在
+#    `_execute_screening` 里（只有真执行路径才走到），回放路径一行都不碰。
+
+#: 无上次结果可回放时的稳定原因码。与 503 的 `duckdb_read_locked` 区分：
+#: 这个 409 是"等更新结束再点一次"的等待态，前端 `api-error.ts` 按原因码出文案。
+REASON_DATA_UPDATE_IN_PROGRESS = "data_update_in_progress"
+
+#: 无缓存 409 的**人话**。只讲用户能做的事，不出现 `warning_codes` 这类裸字段名，
+#: 也不再把用户指去「数据状态」页看一个他一辈子不会看的告警列表。
+NO_CACHED_SCREENING_RESULT_MESSAGE = (
+    "数据正在自动更新，这次规则还没有可复用的筛选结果，请稍后重试。"
+    "更新结束后成功运行一次，这批条件就会有已保存的筛选结果可以回放。"
+)
+
+
+def _prune_empty_containers(value: Any) -> Any:
+    """递归剪掉空容器/None：`{}`、`[]`、`None` 在筛选口径里都等价于"没写"。
+
+    为什么需要它：键是**语义**指纹而不是请求字面量。`columns: null` 与
+    `columns: []` 跑出来是同一份结果，若键不同就会出现"明明有缓存却 409"。
+    """
+    if isinstance(value, dict):
+        pruned: dict[str, Any] = {}
+        for key, item in value.items():
+            if item is None or item == {} or item == []:
+                continue
+            pruned[key] = _prune_empty_containers(item)
+        return pruned
+    if isinstance(value, (list, tuple)):
+        return [_prune_empty_containers(item) for item in value]
+    return value
+
+
+def _normalized_rule_body(rule: dict[str, Any] | None) -> dict[str, Any]:
+    """规则体的**语义**归一化：空规则集 ≡ 无 conditions，空容器一律剪掉。
+
+    `{"conditions": {"logic": "AND", "rules": []}}`（/rules/save 存下来的空规则）
+    与 `{}`（引擎眼里"全市场"）是同一个查询，必须落进同一个键，否则用户"什么都没
+    加就点运行"与"删掉全部条件再点运行"会拿到两份不同的缓存。
+    """
+    body = dict(rule) if isinstance(rule, dict) else {}
+    conditions = body.get("conditions")
+    rules = conditions.get("rules") if isinstance(conditions, dict) else None
+    if not rules:
+        # rules 缺失/`[]`/`None` 都是"没有条件"；连 logic 一起丢掉，
+        # 否则 `{"logic": "AND"}` 会让空规则集与无 conditions 分叉。
+        body.pop("conditions", None)
+    return _prune_empty_containers(body)
+
+
+def _rule_body_digest(
+    rule: dict[str, Any] | None,
+    locked_indicators: dict[str, Any] | None = None,
+) -> str:
+    """规则体摘要（含 DSL 锁版本）：条件/排序/列/指标锁任一变化 → 摘要必变。
+
+    `locked_indicators` 一起进摘要，是因为同一份 rule_json 在不同
+    `dsl_expressions` 版本下可能被锁到不同指标实现上（口径不同 → 结果不同）。
+    """
+    payload = {
+        "rule": _normalized_rule_body(rule),
+        "locked_indicators": _prune_empty_containers(locked_indicators or {}),
+    }
+    blob = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str,
+    )
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
+
+
+def _canonical_columns(columns: Any) -> tuple[str, ...]:
+    """结果列的规范化表示：`None ≡ []`，去重顺序与 `_execute_screening` 同义。
+
+    对象列（`{field, rank_mode}`）按规范化 JSON 串参与比较——列顺序会改变
+    响应里 `columns` 的顺序，所以**保留顺序**，只去掉完全重复的项。
+    """
+    out: list[str] = []
+    for item in columns or []:
+        if isinstance(item, dict):
+            token = json.dumps(
+                _prune_empty_containers(item),
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str,
+            )
+        else:
+            token = str(item)
+        if token not in out:
+            out.append(token)
+    return tuple(out)
+
+
+def _effective_columns(
+    req: ScreeningRequest, rule: dict[str, Any] | None,
+) -> tuple[str, ...]:
+    """本次运行**实际**用的结果列：请求显式传了就用请求的，否则用保存版本的。"""
+    if req.columns is not None:
+        return _canonical_columns(req.columns)
+    if isinstance(rule, dict):
+        return _canonical_columns(rule.get("columns"))
+    return ()
+
+
+def _screening_data_fingerprint(sqlite: Any) -> str | None:
+    """数据快照标识：复用筛选就绪指纹，绝不在锁窗口里现算。
+
+    指纹由门禁/预热器写进 `data_refresh_state['screening_readiness_cache']`；
+    这里只**读**那一行（SQLite，不受 DuckDB 写锁影响）。读不到就返回 `None`
+    （键里是"未知快照"，只会降命中率，绝不会误命中另一份快照）。
+    """
+    if sqlite is None:
+        return None
+    try:
+        rows = sqlite.query(
+            "SELECT value FROM data_refresh_state WHERE key = ?",
+            [SCREENING_READINESS_CACHE_KEY],
+        )
+        if not rows:
+            return None
+        payload = json.loads(rows[0]["value"] or "{}")
+    except Exception:  # noqa: BLE001 - 读不到状态行只影响命中率，不能挡住筛选
+        return None
+    if not isinstance(payload, dict):
+        return None
+    fingerprint = payload.get("fingerprint")
+    return str(fingerprint) if fingerprint else None
+
+
+def _screening_run_key(
+    req: ScreeningRequest,
+    *,
+    rule: dict[str, Any] | None = None,
+    locked_indicators: dict[str, Any] | None = None,
+    sqlite: Any = None,
+) -> tuple[Any, ...]:
+    """`/run` 的结果缓存键：**同一批语义输入 ⟺ 同一个键**。
+
+    组成（缺一项就会串结果）：
+
+    ==================  ====================================================
+    规则身份            `rule_id` + `rule_version`
+    规则体摘要          conditions/sort/columns + DSL 锁版本的 sha256 前 32 位
+    基础池              `include_st` / `include_suspended` / `min_listing_years`
+    列                  规范化结果列（`None ≡ []`，对象列按 JSON 规范化）
+    strict              `strict_only`（严格口径会改变入选集合）
+    数据快照标识        筛选就绪指纹（`None` = 当前没有可信指纹）
+    ==================  ====================================================
+
+    第一条 `"screening_run"` 是端点命名空间：`read_cache` 是进程级共享表，
+    不加这一项就可能与个股详情/黑名单的键撞上。
+    """
+    return (
+        "screening_run",
+        int(req.rule_id),
+        int(req.rule_version),
+        _rule_body_digest(rule, locked_indicators),
+        bool(req.include_st),
+        bool(req.include_suspended),
+        int(req.min_listing_years),
+        _effective_columns(req, rule),
+        bool(req.strict_only),
+        _screening_data_fingerprint(sqlite),
+    )
+
+
+def _saved_rule_row(request: Request, req: ScreeningRequest) -> dict[str, Any] | None:
+    """只读 SQLite 取本次要跑的规则版本（`None` = 这个版本不存在）。
+
+    **不算门禁**：门禁与"规则不存在 400"的先后顺序由 `_execute_screening`
+    保证（门禁永远先跑，既有回归锁着这条）。这里只为了在查缓存之前拿到
+    规则体——没有规则体就没法算"条件隔离"的键。
+    """
+    rows = request.app.state.sqlite.query(
+        "SELECT rule_json, locked_indicators FROM screening_rules WHERE id = ? AND version = ?",
+        [req.rule_id, req.rule_version],
+    )
+    return rows[0] if rows else None
+
+
 @router.post("/run")
 def run_screening(req: ScreeningRequest, request: Request) -> dict:
-    """运行筛选 (PRD §12.2 SC8: 手动运行, 以最新完整快照为准)"""
+    """运行筛选 (PRD §12.2 SC8: 手动运行, 以最新完整快照为准)。
+
+    外层只做三件事：算缓存键 → `read_cache.serve` → 无缓存时把
+    `DuckDBReadLockedError` 翻成**人话 409**。真正的门禁/规则/引擎/落库在
+    `_execute_screening` 里——它同时是缓存 factory，只有**成功执行**才会被
+    `read_cache` 记下来。
+    """
+    rule_row = _saved_rule_row(request, req)
+    if rule_row is None:
+        # 规则不存在：**绝不查缓存**。"空规则体"的键不能替一个不存在的规则担保
+        # （删掉规则后重跑会命中旧缓存，把 400 变成 200）。直接走内层：
+        # 门禁 → 400，顺序与改造前逐字一致。
+        return _execute_screening(req, request, None)
+
+    rule = json.loads(rule_row["rule_json"])
+    key = _screening_run_key(
+        req,
+        rule=rule,
+        locked_indicators=json.loads(rule_row["locked_indicators"] or "{}"),
+        sqlite=request.app.state.sqlite,
+    )
+    try:
+        payload, meta = read_cache.serve(
+            request.app.state.duck, key,
+            lambda: _execute_screening(req, request, rule_row),
+        )
+    except DuckDBReadLockedError as error:
+        # 真的读不到 + 从来没有成功过 ⇒ 如实报"现在不能跑"，但说人话，
+        # 不给用户抛 `warning_codes`/`reason_code` 这种字段名。
+        logger.warning("筛选运行被写锁挡住且无上次成功结果: %s", error)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "reason_code": REASON_DATA_UPDATE_IN_PROGRESS,
+                "message": NO_CACHED_SCREENING_RESULT_MESSAGE,
+            },
+        ) from error
+    # `served_from/as_of/stale/reason_code/notice` 与搜索/详情同一套字段；
+    # live 时 stale=False、notice=None，cache 时带更新提示。
+    return {**payload, **meta}
+
+
+def _execute_screening(
+    req: ScreeningRequest,
+    request: Request,
+    rule_row: dict[str, Any] | None,
+) -> dict:
+    """门禁 → 规则 → 引擎 → 落库。返回可直接回放的响应体（不含陈旧标记）。
+
+    ⚠️ 顺序是被测试锁死的：**门禁先跑**（409 `minimum_data_not_ready` 等），
+    之后才是"规则不存在 400"。把 400 提到门禁前面会让"更新中且没数据"变成
+    "规则不存在"，用户被指去改规则——错的方向。
+    """
     from app.core.screening.engine import ScreeningEngine
 
     gate = _require_current_screenability(request)
 
-    rule_rows = request.app.state.sqlite.query(
-        "SELECT rule_json, locked_indicators FROM screening_rules WHERE id = ? AND version = ?",
-        [req.rule_id, req.rule_version],
-    )
-    if not rule_rows:
+    if not rule_row:
         raise HTTPException(status_code=400, detail="saved rule version not found")
-    rule = json.loads(rule_rows[0]["rule_json"])
+    rule = json.loads(rule_row["rule_json"])
     # 2026-08-31：结果列可在运行前自由选择；本次运行覆盖保存版本的 columns，
     # 并随 screening_runs.columns_json 持久化，保证屏幕/保存/导出同口径。
     if req.columns is not None:
         rule = dict(rule)
         rule["columns"] = list(dict.fromkeys(req.columns))
-    # P1-5修复: 惰性过期清理由单条原子 DELETE 完成, 只回收早于 TTL 的 run,
-    # 不再删除其他页面尚在有效期内未保存的 run; 正常消费仍由 /save 负责删除
-    request.app.state.sqlite.execute(
-        "DELETE FROM screening_runs WHERE created_at < datetime('now', ?)",
-        [f"-{SCREENING_RUN_TTL_HOURS} hours"],
-    )
-    locked_indicators = json.loads(rule_rows[0]["locked_indicators"] or "{}")
+    locked_indicators = json.loads(rule_row["locked_indicators"] or "{}")
     from app.core.screening.engine import MaskedFieldError
 
     engine = ScreeningEngine(duck=request.app.state.duck, sqlite=request.app.state.sqlite)
@@ -442,6 +683,18 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     _attach_result_report_dates(request.app.state.duck, result["results"])
+
+    # P1-5修复: 惰性过期清理由单条原子 DELETE 完成, 只回收早于 TTL 的 run,
+    # 不再删除其他页面尚在有效期内未保存的 run; 正常消费仍由 /save 负责删除。
+    # 2026-11-20（reports/150）：清理**必须挪到引擎成功之后**。它原来在"开跑之前"，
+    # 于是写锁窗口里的**陈旧回放也会顺手删掉过期的 screening_runs 行** ——
+    # 回放是纯读语义，对库必须零副作用（连"顺便清理"都不行：那条旧 run 可能
+    # 正是用户马上要在前端点"保存结果"的那一份）。真执行路径才走到这里，
+    # 回放路径在引擎读库那一步就被 `read_cache` 接走了。
+    request.app.state.sqlite.execute(
+        "DELETE FROM screening_runs WHERE created_at < datetime('now', ?)",
+        [f"-{SCREENING_RUN_TTL_HOURS} hours"],
+    )
 
     run_id = str(uuid.uuid4())
     columns = rule.get("columns", [])
