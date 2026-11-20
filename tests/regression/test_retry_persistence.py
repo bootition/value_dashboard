@@ -156,18 +156,11 @@ def test_price_retry_refetches_incrementally_from_local_latest(
                 raw_response=payload,
             )
 
-    # 本函数三行种子（stock_meta / price_daily_qfq / retry_list）在账本里同属
-    # "所在函数用 lastrowid 回捞"一组：`retry_list` 的 id 靠 `cursor.lastrowid`
-    # 回捞，这两行是它的前置数据，故整组保留、不单独拆。
-    # 留（第 2 类·lastrowid 回捞）：`stock_meta` —— 见上一行的整组口径。
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) VALUES ('600519', 'MT', 'SHSE')"
-    )
-    # 留（第 2 类·lastrowid 回捞）：`price_daily_qfq` —— 见上面的整组口径。
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES "
-        "('600519', '2026-08-01', 10)"
-    )
+    # 前置数据用工厂：这两行与 `retry_list` 的 id 回捞无关，只是"这只股票 + 这条
+    # 本地日线存在"的脚手架；数值（MT / SHSE / 2026-08-01 / 10）仍是本用例的输入。
+    seed = Seed(duckdb_store)
+    seed.stock("600519", name="MT", exchange="SHSE")
+    seed.prices("600519", [("2026-08-01", 10)], table="price_daily_qfq")
     # 留（第 2 类·lastrowid 回捞）：下面这条 `retry_list` 的 id 也是靠
     # `cursor.lastrowid` 拿到后才断言"已删除"的。
     with sqlite_store.transaction() as connection:

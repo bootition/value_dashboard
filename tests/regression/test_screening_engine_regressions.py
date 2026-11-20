@@ -10,6 +10,7 @@ from app.core.screening.engine import (
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite, sql_now
 
 # ─── 1a: overrides VALUES / mixed_report_date NOT IN / WHERE 参数顺序 ───────
 
@@ -26,13 +27,14 @@ def test_run_binds_overrides_before_mixed_codes_and_where(
     seed.snapshot("000001", "2025-12-31", latest_close=10)
     # 报表原值 100，勘误覆盖 200：`> 150` 只可能命中被覆盖后的值。
     seed.balance("000001", "2025-12-31", total_assets=100)
-    # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库。
-    # 留（第 4 类·多站点缺口）：`manual_overrides` 一次写多组不同
-    # 留（第 4 类·多站点缺口）：`manual_overrides` 一次写多组不同
-    sqlite_store.execute(
-        """INSERT INTO manual_overrides
-           (stock_code, field_name, report_date, override_value, reason, status)
-           VALUES ('000001', 'total_assets', '2025-12-31', 200, 'verified', 'published')"""
+    # `manual_overrides` 住在 SQLite（与 `Seed` 持有的 DuckDBStore 不是同一个库），
+    # 所以走 SQLite 侧工厂。`status` 必须逐字写 `published`：工厂默认 `active`，
+    # 而部分唯一索引 `uq_manual_overrides_published` 只认 `published`；
+    # `created_at` 用 `sql_now()` 保住原 SQL 的库侧 `DEFAULT CURRENT_TIMESTAMP`。
+    SeedSqlite(sqlite_store).override(
+        "000001", "total_assets", 200,
+        report_date="2025-12-31", reason="verified", status="published",
+        created_at=sql_now(),
     )
     engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
@@ -244,18 +246,23 @@ def test_published_statement_overrides_filtered_to_participating_pairs(
     # 勘误才准加载，000001 的 2025-09-30 是过期期 → 必须被过滤掉。
     seed.snapshot("000001", "2025-12-31")
     seed.snapshot("000002", "2025-09-30")
-    # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库；
-    # 且这一处在 sqlite_store.transaction() 内写（3 行同进同退）。
-    # 留（第 4 类·多站点缺口）：同上一处——三行覆盖「参与 / 过期 / 他人」三种组合，
+    # 三行覆盖「参与本期 / 过期期 / 他人」三种组合，必须同进同退 → `join()` 进调用点事务。
     with sqlite_store.transaction() as conn:
-        # 留（第 4 类·多站点缺口）：同上一处——三行覆盖「参与 / 过期 / 他人」三种组合，
-        conn.execute(
-            """INSERT INTO manual_overrides
-               (stock_code, field_name, report_date, override_value, reason, status)
-               VALUES
-               ('000001', 'total_assets', '2025-12-31', 200, 'relevant', 'published'),
-               ('000001', 'total_assets', '2025-09-30', 999, 'stale', 'published'),
-               ('000002', 'total_assets', '2025-09-30', 300, 'other', 'published')"""
+        overrides = SeedSqlite(sqlite_store).join(conn)
+        overrides.override(
+            "000001", "total_assets", 200,
+            report_date="2025-12-31", reason="relevant", status="published",
+            created_at=sql_now(),
+        )
+        overrides.override(
+            "000001", "total_assets", 999,
+            report_date="2025-09-30", reason="stale", status="published",
+            created_at=sql_now(),
+        )
+        overrides.override(
+            "000002", "total_assets", 300,
+            report_date="2025-09-30", reason="other", status="published",
+            created_at=sql_now(),
         )
 
     overrides = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)._published_statement_overrides(
@@ -276,17 +283,18 @@ def test_published_statement_overrides_exceeding_cap_raises(
     seed = Seed(duckdb_store)
     seed.stock("000001", name="One", exchange="SZSE", is_listed=True)
     seed.snapshot("000001", "2025-12-31")
-    # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库；
-    # 且这一处在 sqlite_store.transaction() 内写（2 行同进同退）。
-    # 留（第 4 类·多站点缺口）：同上。此行造的是「两行都参与」超上限的场景，
+    # 两行都参与 → 造「超上限」场景；必须同进同退 → `join()` 进调用点事务。
     with sqlite_store.transaction() as conn:
-        # 留（第 4 类·多站点缺口）：同上。此行造的是「两行都参与」超上限的场景，
-        conn.execute(
-            """INSERT INTO manual_overrides
-               (stock_code, field_name, report_date, override_value, reason, status)
-               VALUES
-               ('000001', 'total_assets', '2025-12-31', 200, 'one', 'published'),
-               ('000001', 'revenue', '2025-12-31', 300, 'two', 'published')"""
+        overrides = SeedSqlite(sqlite_store).join(conn)
+        overrides.override(
+            "000001", "total_assets", 200,
+            report_date="2025-12-31", reason="one", status="published",
+            created_at=sql_now(),
+        )
+        overrides.override(
+            "000001", "revenue", 300,
+            report_date="2025-12-31", reason="two", status="published",
+            created_at=sql_now(),
         )
     monkeypatch.setattr(engine_module, "MAX_OVERRIDE_VALUES", 1)
 

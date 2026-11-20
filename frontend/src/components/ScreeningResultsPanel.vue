@@ -44,6 +44,12 @@ const props = defineProps<{
   totalMatched?: number
   // 2026-08-14 红队 P2-4：严格模式空结果的原因反馈
   strictModeWarning?: string | null
+  /**
+   * 按设计豁免字段级 strict 校验的**自算派生字段**（`strict_exempt_fields`，
+   * 2026-11-23 后端下发）。非空时必须如实披露：这类字段本来就没有抓取血缘，
+   * 不能让用户以为是自己把条件写错了。
+   */
+  strictExemptFields?: readonly string[]
 }>()
 
 const message = useMessage()
@@ -182,6 +188,93 @@ function nullReasonCode(row: ScreeningResult, field: string): string | null {
   return typeof flat === 'string' && flat ? flat : null
 }
 
+/**
+ * 结果表的**列头排序**（2026-11-24）。
+ *
+ * 背景：用户裁定"结果的排名在结果那里自己选 —— 点一下表头就按市值排，点一下
+ * ROE 表头就按 ROE 排"。条件行里的「排名口径」下拉已因此移除（见
+ * `RuleConditionRow.vue`），**这套列头排序就是那个替代方案**，必须真的能用。
+ *
+ * 为什么不用 naive-ui 的 `sorter: 'default'`（原实现）：
+ * `useSorter.mjs::getDefaultSorterFn` 只在**两边都是 number**时做数值比较，
+ * **两边都是 string** 时用 `localeCompare`（字典序），类型不一致（一边数字
+ * 一边字符串）直接返回 0 = 保持不变。于是有两个真实故障：
+ *
+ * 1. 后端 DECIMAL 走 SQLite 存档时被 `json.dumps(default=str)` 序列化过
+ *    （`app/web/api/screening.py` 的 screening_runs/screening_results 写入），
+ *    回读的行里 `total_market_cap` 是 `"1.2e+11"` 这类**数值字符串** ——
+ *    字典序排序会把 "9e+10" 排到 "1.2e+11" 后面（9 < 1 是 false，反着来），
+ *    用户点了表头却发现顺序不像市值。
+ * 2. 同一列里混着数字和数字字符串（本次 run 返回数字、历史行是字符串）时，
+ *    默认比较器返回 0 → 整列"点了没反应"。
+ *
+ * 因此这里用显式比较器：能转成有限数字的一律**按数值**比（百分比/亿元都不
+ * 影响次序，因为格式化是单调变换），其余退回中文字典序；空值（null/undefined/
+ * 空串）**恒排最后**，不会插在中间让人以为没排序。
+ */
+const NUMERIC_STRING_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
+
+/** 值 → 可比较的数字；不是"数字"就返回 null（交给字典序兜底）。 */
+function toSortKeyNumber(value: unknown): number | null {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value === 'boolean') return value ? 1 : 0
+  if (typeof value === 'string') {
+    const trimmed = value.trim()
+    if (!trimmed || !NUMERIC_STRING_RE.test(trimmed)) return null
+    const parsed = Number(trimmed)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+  return null
+}
+
+/** 空值判定：null / undefined / 空串都当"没有数据"。 */
+function isEmptySortValue(value: unknown): boolean {
+  return value === null || value === undefined || value === ''
+}
+
+/**
+ * 当前排序方向（naive-ui 的 `update:sorter` 回调）。
+ *
+ * 空值恒排最后需要知道方向：naive-ui 是"比较结果 × 方向系数"（ascend=+1、
+ * descend=-1，见 `node_modules/naive-ui/es/data-table/src/utils.mjs::
+ * getFlagOfOrder`），所以要在升序时返回 +1、降序时返回 -1 才能让空值**两边
+ * 都在末尾**。
+ */
+const activeSortState = ref<{ columnKey: string; order: 'ascend' | 'descend' | false } | null>(null)
+
+/** 豁免字段（缺失/旧后端 → 空数组，不渲染那一行说明）。 */
+const strictExemptList = computed(() => props.strictExemptFields ?? [])
+
+function onSorterChange(state: unknown): void {
+  const single = Array.isArray(state) ? state[0] : state
+  if (!single || typeof single !== 'object') {
+    activeSortState.value = null
+    return
+  }
+  const record = single as { columnKey?: unknown; order?: unknown }
+  activeSortState.value = {
+    columnKey: String(record.columnKey ?? ''),
+    order: record.order === 'ascend' || record.order === 'descend' ? record.order : false,
+  }
+}
+
+/** 某一列的排序比较器：数值优先、空值恒最后、其余中文字典序。 */
+function compareResultCells(left: unknown, right: unknown): number {
+  const leftEmpty = isEmptySortValue(left)
+  const rightEmpty = isEmptySortValue(right)
+  if (leftEmpty || rightEmpty) {
+    if (leftEmpty && rightEmpty) return 0
+    // 空值恒排最后（见 activeSortState 注释）
+    const emptyIsLast = activeSortState.value?.order !== 'descend'
+    if (leftEmpty) return emptyIsLast ? 1 : -1
+    return emptyIsLast ? -1 : 1
+  }
+  const leftNumber = toSortKeyNumber(left)
+  const rightNumber = toSortKeyNumber(right)
+  if (leftNumber !== null && rightNumber !== null) return leftNumber - rightNumber
+  return String(left).localeCompare(String(right), 'zh-Hans-CN')
+}
+
 const tableColumns = computed(() => {
   if (!displayedResults.value.length) return []
   const firstRow = displayedResults.value[0]
@@ -194,7 +287,8 @@ const tableColumns = computed(() => {
         title: columnOptions.value.find(o => o.value === key)?.label
           || fieldTitleWithUnit(key, fieldDisplayName(key, key)),
         key,
-        sorter: 'default',
+        // 2026-11-24：显式比较器（数值优先、空值恒最后），见 compareResultCells
+        sorter: (row1, row2) => compareResultCells(row1[key], row2[key]),
         // L1-7: 固定代码列，滚动时始终可见
         fixed: key === 'stock_code' ? 'left' : undefined,
         render(row) {
@@ -343,14 +437,21 @@ async function addToWatchlist() {
 <template>
   <!-- 2026-08-14 红队 P3：strict 模式空结果的警告必须可见，不能随
        results.length>0 的条件一起隐藏（此前空结果时用户看不到原因）。 -->
+  <!-- 标题用中性词「说明」：后端 `build_strict_mode_warning` 有三条分支，
+       其中一条正是"空结果与可信度模式无关"——写死「无匹配」会与正文自相矛盾。 -->
   <n-alert
     v-if="props.strictOnly && props.strictModeWarning"
     id="strict-mode-alert"
     type="warning"
-    title="严格可信模式无匹配"
+    title="严格可信模式说明"
     style="margin-bottom: 16px"
   >
-    {{ props.strictModeWarning }}
+    <p class="strict-mode-warning">{{ props.strictModeWarning }}</p>
+    <p v-if="strictExemptList.length > 0" class="strict-exempt-note">
+      其中 {{ strictExemptList.length }} 个字段是本项目自算的派生字段（{{ strictExemptList.join('、') }}），
+      按设计没有字段级抓取血缘、已豁免字段级 strict 校验（它们的输入字段仍逐个校验），
+      不是你的条件写错了。
+    </p>
   </n-alert>
 
   <div v-if="results.length > 0">
@@ -418,6 +519,7 @@ async function addToWatchlist() {
       :scroll-x="1200"
       size="small"
       striped
+      @update:sorter="onSorterChange"
     />
     </section>
 
@@ -450,4 +552,7 @@ async function addToWatchlist() {
 /* 空值原因可通过 title 悬停查看：给个下划线提示"这格有话说"，但不改颜色，
    保持与真正缺失（无原因码的「—」）同一视觉层级。 */
 .null-reason-cell { border-bottom: 1px dashed #b9c5bd; cursor: help; }
+/* strict 模式说明：正文 + （可选）豁免字段那行，弱化成次级信息。 */
+.strict-mode-warning { margin: 0; }
+.strict-exempt-note { margin: 6px 0 0; color: #8b978f; font-size: 11px; }
 </style>

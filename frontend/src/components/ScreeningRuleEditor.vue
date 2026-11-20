@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { NButton } from 'naive-ui'
 import { isRuleNode, generateRuleId } from '../types/screening.ts'
-import type { IndicatorOption, ScreeningRuleCondition, ScreeningRuleNode } from '../types/screening.ts'
+import type { IndicatorOption, ScreeningRuleNode } from '../types/screening.ts'
 import RuleConditionRow from './RuleConditionRow.vue'
 
 // Self-import for recursive rendering in the template.
@@ -15,9 +15,13 @@ const props = withDefaults(defineProps<{
   maxConditions: number
   isRoot: boolean
   indicatorOptions: IndicatorOption[]
-  /** 可用排名口径（方案 C），透传给条件行；缺省视为不可用 */
-  rankModes?: Array<{ label: string; value: string }>
-  /** 判定某字段是否支持排名口径；缺省一律 false */
+  /**
+   * 判定某字段是否支持排名口径；缺省一律 false。
+   *
+   * 2026-11-24：条件行里**不再渲染**「排名口径」下拉（用户裁定），这个回调
+   * 只剩一个用途 —— 换了字段之后，把旧 `rank_mode` 清掉，避免把
+   * `xxx_market_rank` 这种不存在的列名发给后端（见 `updateField`）。
+   */
   rankableOf?: (field: string) => boolean
   /** 取某字段的参数规格（如 CAGR 年数）；缺省一律 null */
   paramSpecOf?: (field: string) => {
@@ -28,9 +32,8 @@ const props = withDefaults(defineProps<{
   } | null
   opOptions: Array<{ label: string; value: string }>
 }>(), {
-  // 排名口径是可选能力（方案 C）：缺省时不渲染该下拉，
-  // 让只关心规则语义的单测可以不带这些 props 挂载。
-  rankModes: () => [],
+  // 缺省视为"任何字段都不可排名"：只关心规则语义的单测不带这个 prop 时，
+  // 换字段一律清掉 rank_mode（保守，不会发出未知列名）。
   rankableOf: () => false,
   paramSpecOf: () => null,
 })
@@ -92,8 +95,9 @@ function updateField(index: number, field: string): void {
   const item = props.node.rules[index]
   if (!item || isRuleNode(item)) return
   item.field = field
-  // 换到不支持排名的字段时，必须清掉 rank_mode，
-  // 否则后端会收到 `xxx_market_rank` 这种不存在的字段。
+  // 2026-11-24：UI 上已经没有「排名口径」下拉了，但历史规则/草稿里仍可能带
+  // `rank_mode`（旧字段的排名口径）。换字段时若新字段不支持排名，必须清掉，
+  // 否则后端会收到 `xxx_market_rank` 这种不存在的字段而报错。
   if (!props.rankableOf(field)) item.rank_mode = undefined
   // 参数化字段换了 → 旧参数（cagr_years / tenor）必须清掉，
   // 否则后端会收到「roe 不支持 cagr_years」这类错误。
@@ -135,13 +139,6 @@ function updateParam(index: number, key: string, value: string | number | undefi
   if (value === undefined) delete target[key]
   else target[key] = value
 }
-
-/** 排名口径（方案 C）：空 = 原始值。 */
-function updateRankMode(index: number, value: string | undefined): void {
-  const item = props.node.rules[index]
-  if (!item || isRuleNode(item)) return
-  item.rank_mode = value as ScreeningRuleCondition['rank_mode']
-}
 </script>
 
 <template>
@@ -177,7 +174,6 @@ function updateRankMode(index: number, value: string | undefined): void {
           :is-root="false"
           :indicator-options="indicatorOptions"
           :op-options="opOptions"
-          :rank-modes="rankModes"
           :rankable-of="rankableOf"
           :param-spec-of="paramSpecOf"
           @delete="removeAt(index)"
@@ -189,10 +185,7 @@ function updateRankMode(index: number, value: string | undefined): void {
           :ordinal="index + 1"
           :indicator-options="indicatorOptions"
           :op-options="opOptions"
-          :rank-modes="rankModes"
-          :rankable="rankableOf(item.field)"
           :param-spec="paramSpecOf(item.field)"
-          @update:rank-mode="updateRankMode(index, $event)"
           @update:param="(key: string, value: string | number | undefined) => updateParam(index, key, value)"
           @update:field="updateField(index, $event)"
           @update:op="updateOp(index, $event)"

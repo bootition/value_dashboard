@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-import sqlite3
-
 import pytest
 
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from tests.support.seed import Seed
+from tests.support.seed_sqlite import DuplicateSqliteSeed, SeedSqlite
 
 
 def test_active_override_does_not_change_financials(
@@ -45,7 +44,12 @@ def test_duplicate_current_published_override_is_rejected(
 ) -> None:
     _insert_override(sqlite_store, status="published", value=2000.0)
 
-    with pytest.raises(sqlite3.IntegrityError):
+    # 工厂把部分唯一索引 `uq_manual_overrides_published` 的失败**规整**成
+    # `DuplicateSqliteSeed`（不是 sqlite3.IntegrityError 子类）：这里要的语义是
+    # "第二条 published 被拒"，而不是"sqlite3 的哪一种异常" —— 分类由
+    # `test_seed_sqlite_factory.test_active_overrides_coexist_while_published_is_unique`
+    # 钉住（含批量 rows：两条 published 整批回滚）。
+    with pytest.raises(DuplicateSqliteSeed):
         _insert_override(sqlite_store, status="published", value=3000.0)
 
 
@@ -62,20 +66,14 @@ def _insert_financials(store: DuckDBStore) -> None:
 
 
 def _insert_override(store: SQLiteStore, status: str, value: float) -> None:
-    with store.transaction() as connection:
-        # 留（第 3 类·必须写失败的）：这条 INSERT 的**第二次**调用是
-        # `test_duplicate_current_published_override_is_rejected` 的被测行为本身 ——
-        # 它要撞的是部分唯一索引 `uq_manual_overrides_published`，而且断言写死了
-        # `pytest.raises(sqlite3.IntegrityError)`。`SeedSqlite.override()`
-        # 把 UNIQUE 失败**规整**成 `DuplicateSqliteSeed`（故意不是 IntegrityError 子类，
-        # 见 `tests/support/seed_sqlite.py` 的 `_insert_many`），换成工厂就等于
-        # 改掉断言要的异常类型，所以这一处保留内联写法。
-        connection.execute(
-            """
-            INSERT INTO manual_overrides
-                (stock_code, field_name, report_date, original_value,
-                 override_value, reason, status)
-            VALUES ('600519', 'total_assets', '2025-03-31', 1000, ?, 'test', ?)
-            """,
-            [value, status],
-        )
+    # 业务值（1000 / 'test' / 2025-03-31 / status）逐字给；工厂只补 NOT NULL 的
+    # 形状与确定性时间戳。第二次 published 调用由工厂抛 `DuplicateSqliteSeed`。
+    SeedSqlite(store).override(
+        "600519",
+        "total_assets",
+        value,
+        reason="test",
+        report_date="2025-03-31",
+        original_value=1000,
+        status=status,
+    )

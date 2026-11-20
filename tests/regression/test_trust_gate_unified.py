@@ -26,6 +26,7 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import router as screening_router
 from app.web.api.stock_detail import router as stock_detail_router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import CURRENT_DATE, CURRENT_TIMESTAMP, Seed
 
 STOCK_CODE = "000001"
 
@@ -40,31 +41,33 @@ def _build_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
 
 
 def _seed_screenable(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES (?, 'Trust Test', 'SZSE', '2020-01-01', false, false)""",
-        [STOCK_CODE],
+    Seed(duck).stock(
+        STOCK_CODE, name="Trust Test", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
     insert_minimum_screenable_data(duck, STOCK_CODE)
     insert_matching_trading_calendar(duck, sqlite)
-    # 快照域数值：详情页与筛选页读的是同一行。
-    duck.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, latest_close, latest_price_date, calculated_at,
-                pe_ttm, pb_mrq, roe, dividend_yield)
-           VALUES (?, '2025-12-31', 10, CURRENT_DATE, CURRENT_TIMESTAMP,
-                   12.5, 1.5, 0.2, 0.02)
-           ON CONFLICT (stock_code, report_date) DO UPDATE SET
-               pe_ttm = excluded.pe_ttm,
-               pb_mrq = excluded.pb_mrq,
-               roe = excluded.roe,
-               dividend_yield = excluded.dividend_yield""",
-        [STOCK_CODE],
+    # 快照域数值：详情页与筛选页读的是同一行。`insert_minimum_screenable_data()` 刚刚
+    # 建过同一个 `(stock_code, '2025-12-31')` 行，所以必须 `overwrite=True`
+    # （INSERT OR REPLACE）—— 语义等同原 SQL 的 `ON CONFLICT ... DO UPDATE`，
+    # 而且九列逐字写全，不会把 conftest 写的那三列替换成 NULL。
+    # `CURRENT_DATE` / `CURRENT_TIMESTAMP` 走哨兵：仍是库侧时钟，不是 Python 的 now()。
+    Seed(duck).snapshot(
+        STOCK_CODE, "2025-12-31",
+        latest_close=10,
+        latest_price_date=CURRENT_DATE,
+        calculated_at=CURRENT_TIMESTAMP,
+        pe_ttm=12.5, pb_mrq=1.5, roe=0.2, dividend_yield=0.02,
+        overwrite=True,
     )
 
 
 def _poison_lineage(duck: DuckDBStore) -> None:
     """制造真实 LINEAGE_INVALID：非法摘要 + 孤儿批次。"""
+    # 留（第 6 类·库侧相对时间）：`CURRENT_TIMESTAMP - INTERVAL '1 day'` 是"库侧昨天"，
+    # 这条审计行要比归档行**早**才算合法溯源史。**本轮实证不可收敛**：DuckDB 侧工厂的
+    # `SqlValue` 哨兵只有裸 `CURRENT_TIMESTAMP`/`CURRENT_DATE`，而 `sql_now("-1 day")`
+    # 生成的 `datetime('now', '-1 day')` 是 SQLite 语法（DuckDB 无此函数，CatalogException）。
     duck.write_query(
         """INSERT INTO source_audit
            (stock_code, field_name, report_date, value, source, fetch_batch_id,

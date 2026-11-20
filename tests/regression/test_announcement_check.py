@@ -4,7 +4,8 @@ from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater, classify_announcement
-from tests.support.seed_sqlite import SeedSqlite
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite, sql_now
 
 
 class EmptySQLite:
@@ -186,13 +187,12 @@ def test_announcement_retry_cleanup_requires_registered_ids(
 ) -> None:
     """Q1 完整但中报公告未入册时，retry 不得被误清。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    sqlite_store.execute(
-        """INSERT INTO retry_list
-           (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
-           VALUES ('000001', 'announcements', 'cninfo',
-                   'financial refresh failed; announcement remains pending', 0,
-                   CURRENT_TIMESTAMP, ?)""",
-        ['{"announcement_ids": ["a1", "a2"]}'],
+    SeedSqlite(sqlite_store).retry(
+        "000001", "announcements", adapter="cninfo",
+        error="financial refresh failed; announcement remains pending",
+        retry_count=0,
+        last_attempt=sql_now(),  # 原 SQL 的 `CURRENT_TIMESTAMP`：库侧"刚试过"
+        extra_json='{"announcement_ids": ["a1", "a2"]}',
     )
     assert updater._cleanup_completed_announcement_retries() == 0
     updater._mark_announcements_seen("000001", [
@@ -210,13 +210,16 @@ def test_global_announcement_source_retry_cleared_after_recovery(
 ) -> None:
     """CNINFO 全局故障恢复后，stock_code='' 的源级 retry 不得永久残留。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    sqlite_store.execute(
-        """INSERT INTO retry_list
-           (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
-           VALUES ('', 'announcements', 'cninfo', 'all_boards_failed', 0,
-                   CURRENT_TIMESTAMP, '{}'),
-                  ('000001', 'announcements', 'cninfo', 'pending', 0,
-                   CURRENT_TIMESTAMP, '{}')"""
+    # 两行同一张 `retry_list`：源级（`stock_code=''`）与个股级各一条，靠工厂的一次一事务
+    # 分开写 —— 唯一索引 `(stock_code, data_type, adapter, extra_json)` 上两者不冲突。
+    seed = SeedSqlite(sqlite_store)
+    seed.retry(
+        "", "announcements", adapter="cninfo", error="all_boards_failed",
+        retry_count=0, last_attempt=sql_now(),  # 库侧时钟（原 SQL：CURRENT_TIMESTAMP）
+    )
+    seed.retry(
+        "000001", "announcements", adapter="cninfo", error="pending",
+        retry_count=0, last_attempt=sql_now(),
     )
 
     updater._resolve_announcement_source_retries()
@@ -340,10 +343,7 @@ def test_refetch_one_incremental_writes_new_report_period(duckdb_store, sqlite_s
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO balance_sheet (stock_code, report_date, total_assets) "
-        "VALUES ('000001', '2026-03-31', 100.0)"
-    )
+    Seed(duckdb_store).balance("000001", "2026-03-31", total_assets=100.0)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=FinancialAdapter())
 
     result = updater.refetch_one("000001", "balance_sheet", incremental=True)
@@ -378,10 +378,7 @@ def test_refetch_one_incremental_skips_when_source_has_no_new_period(duckdb_stor
                 raw_response=raw_response,
             )
 
-    duckdb_store.write_query(
-        "INSERT INTO balance_sheet (stock_code, report_date, total_assets) "
-        "VALUES ('000001', '2026-03-31', 100.0)"
-    )
+    Seed(duckdb_store).balance("000001", "2026-03-31", total_assets=100.0)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=FinancialAdapter())
 
     result = updater.refetch_one("000001", "balance_sheet", incremental=True)

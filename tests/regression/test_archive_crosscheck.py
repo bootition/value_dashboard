@@ -60,9 +60,13 @@ def test_crosscheck_computes_agreement_for_seeded_pair(duckdb_store) -> None:
                      "(stock_code VARCHAR, report_date DATE, my_metric DOUBLE)")
         conn.execute("CREATE TABLE IF NOT EXISTS xcheck_theirs "
                      "(stock_code VARCHAR, report_date DATE, their_metric DOUBLE)")
+        # 留（第 5 类·测试自建表）：`xcheck_ours` / `xcheck_theirs` 是上面那两行
+        # `CREATE TABLE IF NOT EXISTS` 现造的 3 列窄表，不在 schema 里、不属于任何 store，
+        # `Seed` 连 DESCRIBE 都够不着 —— 只能内联。
         for i, value in enumerate((1.0, 2.0, 3.0, 4.0)):
             conn.execute("INSERT INTO xcheck_ours VALUES (?, ?, ?)",
                          [f"00000{i}", date(2020, 12, 31), value])
+            # 留（第 5 类·测试自建表）：对照表同一批 4 行、逐行数值相同 → 一致率须为 100%。
             conn.execute("INSERT INTO xcheck_theirs VALUES (?, ?, ?)",
                          [f"00000{i}", date(2020, 12, 31), value])
     pair = CheckPair("测试指标", "xcheck_ours", "my_metric", "xcheck_theirs", "their_metric")
@@ -85,9 +89,12 @@ def test_crosscheck_flags_large_disagreement(duckdb_store) -> None:
                      "(stock_code VARCHAR, report_date DATE, my_metric DOUBLE)")
         conn.execute("CREATE TABLE IF NOT EXISTS xcheck_theirs "
                      "(stock_code VARCHAR, report_date DATE, their_metric DOUBLE)")
+        # 留（第 5 类·测试自建表）：同上一处，两张自建窄表；10 行 ours=1.0 / theirs=4.0
+        # 差 300%，正是 `needs_review` 要抓的那类分歧（bps 25% 事故的机制）。
         for i in range(10):
             conn.execute("INSERT INTO xcheck_ours VALUES (?, ?, ?)",
                          [f"10000{i}", date(2020, 12, 31), 1.0])
+            # 留（第 5 类·测试自建表）：故意写成 4 倍差 → `within_tolerance == 0.0`。
             conn.execute("INSERT INTO xcheck_theirs VALUES (?, ?, ?)",
                          [f"10000{i}", date(2020, 12, 31), 4.0])
     pair = CheckPair("测试指标", "xcheck_ours", "my_metric", "xcheck_theirs", "their_metric")

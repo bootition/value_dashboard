@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from app.web.main import auto_update_is_due
+from tests.support.seed import Seed
 from tests.support.seed_sqlite import SeedSqlite
 
 # 2026-11-23 修正：原来这里 monkeypatch 的是 `app.web.main.datetime`，
@@ -41,15 +42,11 @@ def test_auto_update_due_after_close_uses_today(duckdb_store, sqlite_store, monk
     seed = SeedSqlite(sqlite_store)
     seed.auto_update_state(state="enabled", paused=0, current_stage="idle")
     seed.trading_dates(["2026-09-08"])
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', '2026-09-07', 10)"
-    )
+    Seed(duckdb_store).prices("000001", [("2026-09-07", 10)])
 
     assert auto_update_is_due(duckdb_store, sqlite_store) is True
 
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', '2026-09-08', 11)"
-    )
+    Seed(duckdb_store).prices("000001", [("2026-09-08", 11)])
     assert auto_update_is_due(duckdb_store, sqlite_store) is False
 
 
@@ -67,9 +64,7 @@ def test_close_cutoff_switches_target_between_previous_and_today(
     seed.auto_update_state(state="enabled", paused=0, current_stage="idle")
     # 日历里同时有 09-08 与 09-09；价格只补到 09-08
     seed.trading_dates(["2026-09-08", "2026-09-09"])
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', '2026-09-08', 11)"
-    )
+    Seed(duckdb_store).prices("000001", [("2026-09-08", 11)])
 
     # 09-09 盘中（<15:30）：目标仍是 09-08 → 已达标 → 不该到期
     _pin_now(monkeypatch, _FAKE_INTRADAY)
@@ -106,10 +101,7 @@ def test_auto_update_due_when_retry_task_is_ready(
         "601091", "dividends", adapter="manager", error="source error",
         retry_count=0, max_retries=5,
     )
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) "
-        "VALUES ('000001', '2026-09-08', 11)"
-    )
+    Seed(duckdb_store).prices("000001", [("2026-09-08", 11)])
 
     assert auto_update_is_due(duckdb_store, sqlite_store) is True
 

@@ -81,6 +81,23 @@ const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
 const dataReady = ref<boolean | null>(null)
 // 2026-08-14 红队 P2-4：严格模式空结果反馈文案（来自 /run 响应）
 const strictModeWarning = ref<string | null>(null)
+// 2026-11-23 后端新增：按设计豁免字段级 strict 校验的自算派生字段。
+// 只用于把"这不是你的条件写错了"讲清楚，不影响筛选结果。
+const strictExemptFields = ref<string[]>([])
+
+/**
+ * 从 /run 响应里读一个**可选**字符串数组字段。
+ *
+ * `strict_exempt_fields` 是后端刚加的增量字段（旧后端没有）。响应类型
+ * `ScreeningRunResponse` 是跨页面共享契约，本轮不改它，这里按 unknown 读、
+ * 缺失时安全降级成空数组。
+ */
+function readOptionalStringList(payload: unknown, key: string): string[] {
+  if (!payload || typeof payload !== 'object') return []
+  const value = (payload as Record<string, unknown>)[key]
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string')
+}
 
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
 const strictOnly = ref(false)
@@ -150,8 +167,13 @@ const readinessCopy = computed(() => {
   return { state: 'blocked', label: '数据尚未就绪' }
 })
 
-// 方案 C（2026-11-16）：后端不再下发 930 条排名派生字段（`pe_ttm_market_rank` …），
-// 改为条件行上的「排名口径」下拉（rankModes）。下拉里只剩主指标 + 统计域。
+// 方案 C（2026-11-16）：后端不再下发 930 条排名派生字段（`pe_ttm_market_rank` …）。
+//
+// 2026-11-24 用户裁定：**条件行里不再有「排名口径」下拉**（详见
+// `RuleConditionRow.vue` 顶部注释）。`rank_modes` 仍然从 /indicators 取，但只用于
+// 两件"结果侧"的事：①「结果展示列」里可加一列排名/分位（`useScreeningColumns`）；
+// ② 载入历史规则时把旧排名字段名迁移成 `{field, rank_mode}`（见下方
+// `migrateLegacyRankFields`），让带排名口径的老规则语义不变。
 
 // 指标全中文名（规则：display_name → FIELD_LABELS → 后端 label → 字段名 + 单位）
 // 2026-11-22：纯函数已抽到 utils/screening-format.ts 的 indicatorDisplayName。
@@ -307,6 +329,7 @@ async function runScreening() {
     snapshotAsOf.value = resp.data.data_as_of ?? null
     // 2026-08-14 红队 P2-4：严格模式空结果的原因反馈（无 strict 血缘等）
     strictModeWarning.value = resp.data.strict_mode_warning ?? null
+    strictExemptFields.value = readOptionalStringList(resp.data, 'strict_exempt_fields')
     if (resp.data.truncated) {
       message.warning(`结果超过 5000 条，仅展示前 5000 条（共 ${resp.data.total} 条匹配）`)
     }
@@ -484,7 +507,7 @@ onMounted(async () => {
             </div>
           </div>
           <div class="conditions-join" aria-hidden="true"><span>并且</span></div>
-          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" :rank-modes="rankModes" :rankable-of="rankableOf" :param-spec-of="paramSpecOf" @warn="(msg: string) => message.warning(msg)" />
+          <ScreeningRuleEditor class="conditions-workbench" :node="ruleTree" :depth="1" :max-depth="3" :max-conditions="20" :is-root="true" :indicator-options="indicatorOptions" :op-options="opOptions" :rankable-of="rankableOf" :param-spec-of="paramSpecOf" @warn="(msg: string) => message.warning(msg)" />
           <div v-if="trulyUnavailableIndicators.length > 0" class="unavailable-indicators" aria-label="当前报告期不可用指标">
             <div class="unavailable-indicators-heading">
               <strong>当前报告期不可用指标（{{ trulyUnavailableIndicators.length }}）</strong>
@@ -568,7 +591,7 @@ onMounted(async () => {
       数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
     </n-alert>
     <div ref="resultsAnchor" class="screening-results-anchor">
-      <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
+      <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :strict-exempt-fields="strictExemptFields" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
     </div>
 
     <section v-if="results.length === 0" class="screening-empty-card">

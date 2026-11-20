@@ -298,13 +298,16 @@ def test_reroute_keeps_supplement_owned_row_provenance(duckdb_store, sqlite_stor
     这道断言把"改道必须是无副作用的部分更新"钉死。
     """
     _seed_stock(duckdb_store, "601318", "中国平安")
-    duckdb_store.write_query(
-        # 留（第 4 类·多站点缺口）：`financial_sector_items` 全仓 2 处播种，工厂没有方法；
-        """INSERT INTO financial_sector_items
-               (stock_code, report_date, report_type, earned_premiums,
-                source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES ('601318', DATE '2025-06-30', 'semi_annual', 123.0,
-                   'eastmoney_f10', TIMESTAMP '2026-09-01 00:00:00', 'h', 'strict', 'b')"""
+    Seed(duckdb_store).financial_sector_item(
+        "601318",
+        "2025-06-30",
+        report_type="semi_annual",
+        earned_premiums=123.0,
+        source="eastmoney_f10",
+        fetch_time="2026-09-01 00:00:00",
+        raw_response_hash="h",
+        confidence="strict",
+        batch_id="b",
     )
     initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store)
     rows = [{

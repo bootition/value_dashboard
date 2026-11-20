@@ -388,13 +388,13 @@ def test_settled_non_retryable_rows_do_not_consume_retry_budget(
     """retry_count=4/5 的合法空任务立即结算，不得再被推成 retry_exhausted。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     with sqlite_store.transaction() as conn:
-        # 保留内联：`last_attempt` 要库侧 `CURRENT_TIMESTAMP`（"刚尝试过"），本轮不收敛。
-        conn.execute(
-            """INSERT INTO retry_list
-                   (stock_code, data_type, adapter, error, retry_count, max_retries,
-                    last_attempt, extra_json, error_kind)
-               VALUES ('301689', 'dividends', 'ths', 'no dividend', 4, 5,
-                       CURRENT_TIMESTAMP, '{}', 'legal_empty')"""
+        SeedSqlite(sqlite_store).join(conn).retry(
+            "301689", "dividends", adapter="ths", error="no dividend",
+            retry_count=4, max_retries=5,
+            # 库侧"刚尝试过"：`sql_now()` 就是原 SQL 的 `CURRENT_TIMESTAMP`
+            # （同一句 `datetime('now')`），不换成 Python 时钟。
+            last_attempt=sql_now(),
+            error_kind="legal_empty",
         )
 
     assert updater._check_retry_tasks() == []
@@ -422,13 +422,10 @@ def test_zero_attempt_failure_is_rechecked_once(duckdb_store, sqlite_store) -> N
     """历史 `无可用适配器 (tried: [])` 行重置为一次干净重试，且只重置一次。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     with sqlite_store.transaction() as conn:
-        # 保留内联：同上（`last_attempt` 用库侧时钟），本轮不收敛。
-        conn.execute(
-            """INSERT INTO retry_list
-                   (stock_code, data_type, adapter, error, retry_count, max_retries,
-                    last_attempt, extra_json)
-               VALUES ('601123', 'dividends', 'manager',
-                       '无可用适配器 (tried: [])', 4, 5, CURRENT_TIMESTAMP, '{}')"""
+        SeedSqlite(sqlite_store).join(conn).retry(
+            "601123", "dividends", adapter="manager",
+            error="无可用适配器 (tried: [])", retry_count=4, max_retries=5,
+            last_attempt=sql_now(),  # 同上：库侧时钟，非 Python `now()`
         )
 
     updater._cleanup_unretryable_tasks()
@@ -571,8 +568,11 @@ def test_retry_exhaustion_keeps_legacy_field_name_for_unknown_kind(
     """error_kind=unknown 的耗尽行保持 field_name='retry_exhausted:<type>'（兼容旧查询）。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     with sqlite_store.transaction() as conn:
-        # 保留内联：`lastrowid` 回捞 —— 这一行后面要被 `_mark_retry_failed` 指着更新，
-        # 工厂刻意不返回 id（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
+        # 留（第 2 类·lastrowid 回捞）：这一行后面要被 `_mark_retry_failed(retry_id, …)`
+        # 指着更新，`retry_id` 必须是**这一行**的 id；`SeedSqlite` 的域方法一律返回 None
+        # （刻意不暴露游标，见 `tests/support/seed_sqlite.py` 的模块 docstring），
+        # 拿不到 `lastrowid`，所以只能内联。`last_attempt`/`next_retry_at` 两列仍是
+        # 库侧 `CURRENT_TIMESTAMP`（"刚试过 / 立刻可再试"），不是 Python 时钟。
         cursor = conn.execute(
             """INSERT INTO retry_list
                    (stock_code, data_type, adapter, error, retry_count,
