@@ -549,8 +549,15 @@ def run_incremental_update_flow(
         # 依据 S7 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
         # 全量重算（波动率/回撤/区间收益读 qfq 历史），而价格域增量路径
         # 会因为"最新价/最新日期没变"直接跳过（见 compute_price_sensitive）。
+        # 2026-11-20（验收漏算 ⑧）：**行情指纹**抓到的股票同样必须强制 —— 外部
+        # UPDATE 改的可能是历史某天的收盘价、成交量或整段 qfq，`latest_close` /
+        # `latest_price_date` 与快照一模一样，不强制就会被"最新价没变 → 跳过"
+        # 吃掉，MA5/波动率/回撤永远停在旧值。
         price_force_codes = (
-            set(full_codes) | set(price_xdxr_codes) | set(technical_pending_codes)
+            set(full_codes)
+            | set(price_xdxr_codes)
+            | set(technical_pending_codes)
+            | set(scope_plan.price_fingerprint_codes)
         )
         if price_raw_full_refetch:
             price_force_codes.update(updated_price_codes)

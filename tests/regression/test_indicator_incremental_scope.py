@@ -718,6 +718,122 @@ def _setup_missing_prev_period(duckdb_store, sqlite_store, codes) -> None:
         )
 
 
+# ─── ⑥⑦ 验收最后 2 类漏算（2026-11-20 实测口径）───────────────────────────
+#
+# ⑦ 新增/修改/删除 `share_capital_history` 的一行（**不是** stock_meta.total_shares）
+#   修前：skipped / planned_count=0，而 total_market_cap 1000→9.0e10、
+#   cumulative_dividend_amount 88→9.9e9、pe/pb/ps/pcf 6 列全错。
+# ⑧ 外部直接 UPDATE 行情（不走价格步，`_updated_codes` 里没有它）
+#   修前：skipped / planned_count=0，15 列全错（pe_ttm/total_market_cap/ma5…）。
+#
+# 目标股在 `share_capital_history` 里先有一条 **800 股**的链（≠ stock_meta 的
+# 100 股），这样"删掉这条链"也会真的改变结果——否则删除后退回 meta 与原来
+# 恰好相同，用例会变成空转。
+CAPITAL_TARGET = 6
+CAPITAL_SEEDED_SHARES = 800.0
+
+
+def _setup_share_capital_chain(duckdb_store, sqlite_store, codes) -> None:
+    """⑦ 前置：目标股已有一条股本链 + 一笔现金分红（金额 = 每股股息 × 当日股本）。"""
+    target = codes[CAPITAL_TARGET]
+    seed = Seed(duckdb_store)
+    seed.shares(target, [("2020-01-01", CAPITAL_SEEDED_SHARES)])
+    seed.dividends(
+        target, [("2024-06-20", "2024-05-01", 0.5)], if_exists="ignore",
+    )
+
+
+def _case_share_capital_insert(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑦a 股本链**新增**一行（生效日在最新价之前 → 市值改用新股本）。"""
+    target = codes[CAPITAL_TARGET]
+    Seed(duckdb_store).shares(target, [("2025-01-01", 950.0)])
+    return target
+
+
+def _case_share_capital_modify(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑦b 股本链**改值**（生效日不变、total_shares 变）。"""
+    target = codes[CAPITAL_TARGET]
+    duckdb_store.write_query(
+        "UPDATE share_capital_history SET total_shares = 900.0 "
+        "WHERE stock_code = ? AND effective_date = DATE '2020-01-01'",
+        [target],
+    )
+    return target
+
+
+def _case_share_capital_delete(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑦c 股本链**删除**整条（退回 stock_meta/circ_shares 近似口径）。"""
+    target = codes[CAPITAL_TARGET]
+    duckdb_store.write_query(
+        "DELETE FROM share_capital_history WHERE stock_code = ?", [target],
+    )
+    return target
+
+
+def _recent_trade_date(duckdb_store, code: str, offset: int, table: str = "price_daily_raw"):
+    """该股票倒数第 `offset+1` 个交易日（offset=0 即最新一天）。"""
+    rows = duckdb_store.read_query(
+        f"SELECT trade_date FROM {table} WHERE stock_code = ? "
+        "ORDER BY trade_date DESC LIMIT 1 OFFSET ?",
+        [code, offset],
+    )
+    return rows[0]["trade_date"]
+
+
+def _case_external_latest_close(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑧a 外部改**最新一天**的收盘价（原始 + 前复权两张表）。"""
+    target = codes[0]
+    latest = _recent_trade_date(duckdb_store, target, 0)
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"UPDATE {table} SET close = 12.5 WHERE stock_code = ? AND trade_date = ?",
+            [target, latest],
+        )
+    return target
+
+
+def _case_external_historical_close(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑧b 外部改**历史某天**的收盘价：最新价/日期不变，只有 MA5 会变。
+
+    价格域增量的 `compute_price_sensitive` 有一条"最新价没变就跳过"的自检，
+    所以这类改动**必须**由指纹带进 `force_codes`，否则照样漏算。
+    """
+    target = codes[1]
+    day = _recent_trade_date(duckdb_store, target, 2)
+    duckdb_store.write_query(
+        "UPDATE price_daily_raw SET close = 40.0 WHERE stock_code = ? AND trade_date = ?",
+        [target, day],
+    )
+    return target
+
+
+def _case_external_qfq_history(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑧c 外部改 qfq 历史：只动波动率/区间收益/最大回撤，最新价完全不变。"""
+    target = codes[2]
+    day = _recent_trade_date(duckdb_store, target, 1, table="price_daily_qfq")
+    duckdb_store.write_query(
+        "UPDATE price_daily_qfq SET close = 40.0 WHERE stock_code = ? AND trade_date = ?",
+        [target, day],
+    )
+    return target
+
+
+def _case_external_volume(duckdb_store, sqlite_store, codes, updater) -> str:
+    """⑧d 外部改历史成交量：只改 avg_volume。
+
+    这一条是"只哈希 (MAX(trade_date), 当日 close, COUNT(*))"**覆盖不到**的改法，
+    本用例钉住我们选的是全行全列哈希，而不是那个更便宜但有盲区的摘要。
+    """
+    target = codes[3]
+    day = _recent_trade_date(duckdb_store, target, 4)
+    duckdb_store.write_query(
+        "UPDATE price_daily_raw SET volume = 100000.0 "
+        "WHERE stock_code = ? AND trade_date = ?",
+        [target, day],
+    )
+    return target
+
+
 CASES = [
     (
         "prev_period_restatement", None,
@@ -738,6 +854,34 @@ CASES = [
     (
         "manual_override_published", None,
         _case_manual_override, "manual_override_fingerprint", False,
+    ),
+    (
+        "share_capital_history_insert", _setup_share_capital_chain,
+        _case_share_capital_insert, "share_capital_fingerprint", False,
+    ),
+    (
+        "share_capital_history_modify", _setup_share_capital_chain,
+        _case_share_capital_modify, "share_capital_fingerprint", False,
+    ),
+    (
+        "share_capital_history_delete", _setup_share_capital_chain,
+        _case_share_capital_delete, "share_capital_fingerprint", False,
+    ),
+    (
+        "external_price_latest_close", None,
+        _case_external_latest_close, "price_fingerprint", False,
+    ),
+    (
+        "external_price_historical_close", None,
+        _case_external_historical_close, "price_fingerprint", False,
+    ),
+    (
+        "external_qfq_historical_close", None,
+        _case_external_qfq_history, "price_fingerprint", False,
+    ),
+    (
+        "external_historical_volume", None,
+        _case_external_volume, "price_fingerprint", False,
     ),
 ]
 
@@ -781,6 +925,13 @@ def test_acceptance_five_leaks_incremental_equals_full(
     assert step["changed_sources"].get(expected_source, 0) >= 1, (
         f"{case_name}: 变化来源 {expected_source} 没被记录：{step['changed_sources']}"
     )
+    if expected_source == "price_fingerprint":
+        # 本组用例**故意不让价格步报出这些股票**（`_stub_network_steps` 里价格步
+        # 恒为 skipped）：唯一的信号只能是行情指纹，否则证明不了"外部改价看得见"。
+        assert step["changed_sources"].get("price", 0) == 0, (
+            f"{case_name}: 价格步不该报出这只股票（会掩盖指纹是否生效）："
+            f"{step['changed_sources']}"
+        )
 
     incremental = _snapshot_map(duckdb_store)
     if expect_restore:
@@ -802,12 +953,60 @@ def test_acceptance_five_leaks_incremental_equals_full(
     full = _snapshot_map(duckdb_store)
 
     delta = _diff_snapshot(incremental, full)
-    assert not delta, (
-        f"{case_name}: 增量与全量不一致 {len(delta)} 只股票；"
+    mismatches = sum(len(columns) for columns in delta.values())
+    assert mismatches == 0, (
+        f"{case_name}: 增量与全量不一致 {mismatches} 个格子（{len(delta)} 只股票）；"
         f"首例 {list(delta.items())[0]}"
     )
-    # 列数自证：比对的是**全列**（除时间戳），不是挑几列看的。
+    # 列数自证：比对的是**全列**（除时间戳 `calculated_at` 外的 73 列），
+    # 不是挑几列看的。
     assert len(next(iter(incremental.values()))) >= 70
+
+
+def test_price_fingerprint_codes_are_forced_through_latest_price_skip(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """行情指纹抓到的股票必须进 `force_codes`，否则"最新价没变 → 跳过"又吃掉它。
+
+    价格域增量 `compute_price_sensitive_for_codes` 的自检是
+    "`latest_price_date` + `latest_close` 与快照一致就 skipped"。外部改的是
+    **历史**收盘价（MA5 窗口内）时这两个格子一模一样 —— 不强制就还是漏算，
+    而用例的等价性断言会看到 ma5 停在旧值。这里直接钉住 `force_codes` 的接线
+    （`update_parts/flow.py` 的薄改），比只比结果更早失败、更好定位。
+    """
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    bootstrap_indicator_scope(updater)
+
+    target = codes[2]
+    day = _recent_trade_date(duckdb_store, target, 2)
+    duckdb_store.write_query(
+        "UPDATE price_daily_raw SET close = 40.0 WHERE stock_code = ? AND trade_date = ?",
+        [target, day],
+    )
+
+    captured: dict[str, Any] = {}
+    real = IndicatorCalculator.compute_price_sensitive_for_codes
+
+    def spy(self, stock_codes, *, force_codes=None, **kwargs):
+        captured["codes"] = list(stock_codes)
+        captured["force"] = set(force_codes or ())
+        return real(self, stock_codes, force_codes=force_codes, **kwargs)
+
+    monkeypatch.setattr(
+        IndicatorCalculator, "compute_price_sensitive_for_codes", spy,
+    )
+    step = updater.run_incremental_update()["steps"]["indicators"]
+
+    assert step["mode"] == "incremental", step
+    assert step["changed_sources"].get("price_fingerprint", 0) == 1, step["changed_sources"]
+    assert captured["codes"] == [target], captured
+    assert target in captured["force"], (
+        "行情指纹抓到的股票没进 force_codes —— 最新价没变的那类外部改价会被跳过："
+        f"force={captured['force']}"
+    )
+    assert step["recomputed_count"] == 1, step
 
 
 # ─── 判据守卫：指纹必须**在集合里**，不是靠"退回全量"蒙混 ────────────────

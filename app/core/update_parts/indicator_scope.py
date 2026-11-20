@@ -34,6 +34,8 @@
 |---|---|---|
 | 三大报表（新报告期/修正值/覆盖写） | report_date、PE/PB/PS/PCF、ROE/ROA/毛利/净利/ROIC、YoY/CAGR、安全性 6 项、股东回报、ROCE | `financial` / `financial_stale` / `financial_backfill` / `financial_fingerprint` |
 | 股本 total_shares/circ_shares | total_market_cap、circ_market_cap、每股股息 DPS、换手率 | `universe_fingerprint` |
+| **历史股本链** `share_capital_history`（新增/改值/删行） | total_market_cap、circ_market_cap、PE/PB/PS/PCF、cumulative_dividend_amount、dividend_financing_ratio_pct | `share_capital_fingerprint`（逐股哈希 effective_date+total_shares） |
+| **行情表被外部直接改写**（不经价格步） | latest_close/latest_price_date、MA5/10/20/60/120/250、turnover_rate、avg_volume、period_return、annualized_volatility、max_drawdown、估值 6 项、ttm_dividend_yield 与利差 | `price_fingerprint`（逐股哈希 raw/qfq 的相关列，进 price 组） |
 | 上市状态/ST/停牌/行业 csrc_l1 | 名单成员 + 排名/筛选口径（市值排名分位） | `universe_fingerprint` |
 | 行情 price_daily_raw/qfq | latest_close/date、估值价格域、MA/波动率/回撤/区间收益/成交量/换手 | `price` / `technical_pending` |
 | 分红 dividends / 除权 xdxr | dividend_yield、连续分红年数、DPS、分红融资比 | `dividend_event` / `corporate_event` |
@@ -66,6 +68,8 @@ __all__ = [
     "listed_stock_count",
     "manual_override_fingerprints",
     "plan_indicator_scope",
+    "price_fingerprints",
+    "share_capital_fingerprints",
     "snapshot_fingerprints",
     "snapshot_row_count",
     "snapshot_version_mismatch_codes",
@@ -89,6 +93,15 @@ UNIVERSE_FP_KEY = "indicator_universe_fingerprint:v1"
 FINANCIAL_FP_KEY = "indicator_financial_fingerprint:v2"
 # 分红 / 回购 / 融资事件：无公告驱动的手工插入也必须进集合。
 EVENT_FP_KEY = "indicator_event_fingerprint:v1"
+# 历史股本链 `share_capital_history`（2026-11-20 验收漏算 ⑦）：
+# 市值/估值以前只由 `stock_meta` 股本驱动，**历史股本链新增一行就能让
+# total_market_cap 与 cumulative_dividend_amount 变一个数量级**，而它不在任何
+# 指纹里 → `skipped / planned_count=0`。新 key 让部署后第一轮走
+# `input_fingerprint_bootstrap` 全量建基线（可解释，不是悄悄发生）。
+SHARE_CAPITAL_FP_KEY = "indicator_share_capital_fingerprint:v1"
+# 行情表**逐股内容**指纹（2026-11-20 验收漏算 ⑧）：价格域此前只由价格步返回的
+# `updated_codes` 驱动，**外部直接 UPDATE price_daily_raw/qfq 谁都看不见**。
+PRICE_FP_KEY = "indicator_price_fingerprint:v1"
 # `manual_overrides` 里 status='published' 的行（PRD §9.5 R7 官方纠正路径）。
 OVERRIDE_FP_KEY = "indicator_manual_override_fingerprint:v1"
 # `indicator_snapshot` 逐股内容摘要：外部改坏/半写靠它当场发现（#3）。
@@ -122,6 +135,9 @@ SOURCE_DOMAIN: dict[str, str] = {
     "price": "price",
     "technical_pending": "price",
     "corporate_event": "event",
+    # 2026-11-20 验收实测的最后 2 类漏算（⑦⑧）：
+    "share_capital_fingerprint": "full",      # 历史股本链（⑦）→ 估值/分红口径全变
+    "price_fingerprint": "price",             # 行情表被外部改写（⑧）→ 只重算价格域
 }
 
 # stock_meta 里**不进指纹**的列：`updated_at` 每次 listing_info 刷新都会变，
@@ -145,13 +161,21 @@ class IndicatorScopePlan:
     universe_fingerprint: dict[str, str] = field(default_factory=dict)
     financial_fingerprint: dict[str, str] = field(default_factory=dict)
     event_fingerprint: dict[str, str] = field(default_factory=dict)
+    share_capital_fingerprint: dict[str, str] = field(default_factory=dict)
+    price_fingerprint: dict[str, str] = field(default_factory=dict)
     manual_override_fingerprint: dict[str, str] = field(default_factory=dict)
     snapshot_fingerprint: dict[str, str] = field(default_factory=dict)
     prev_universe_fingerprint: dict[str, str] | None = None
     prev_financial_fingerprint: dict[str, str] | None = None
     prev_event_fingerprint: dict[str, str] | None = None
+    prev_share_capital_fingerprint: dict[str, str] | None = None
+    prev_price_fingerprint: dict[str, str] | None = None
     prev_manual_override_fingerprint: dict[str, str] | None = None
     prev_snapshot_fingerprint: dict[str, str] | None = None
+    # 由**行情指纹**（而不是价格步 `_updated_codes`）抓到的代码：这些股票的最新
+    # 收盘价/日期可能没变（改的是历史行或 qfq/成交量），`compute_price_sensitive`
+    # 的"最新价相同就跳过"自检会把它们当成没事 → 必须强制重算。
+    price_fingerprint_codes: list[str] = field(default_factory=list)
     fingerprint_error: str | None = None
     # 范围裁决整体失败（异常/读不出/算不出）时的原始异常与栈：必须进报告，
     # 不许静默吞掉（`scope_planning_failed` 只是给用户看的那一句）。
@@ -361,6 +385,69 @@ def event_fingerprints(owner: Any) -> dict[str, str]:
     return _multisurface_fingerprints(owner, _EVENT_TABLES, _EVENT_EXCLUDED_COLUMNS)
 
 
+# 历史股本链里**真正进指标计算**的列（按 calculator.py / market_cap.py 逐行核对，
+# 不是按表名猜）：
+#   * `_calc_valuation` → `market_cap.latest_market_cap` → `resolve_shares_asof`
+#     = `effective_date <= price_date` 的最近一条 `total_shares`；
+#   * `_get_cumulative_dividend_amount` 的 `capital_windows` 窗口函数
+#     = `ORDER BY effective_date, total_shares` 的 LEAD 区间。
+# 其余列不参与任何快照列：`change_reason`/`is_anchor`/`verified` 只影响统计披露，
+# 而 `source`/`raw_hash`/`batch_id` 每次重抓都会换（`capital.py` 是**全删全插**）
+# —— 把它们算进指纹会让"内容没变的重抓"每轮触发整股重算，稳态直接退化。
+_SHARE_CAPITAL_COLUMNS = ("effective_date", "total_shares")
+
+
+def share_capital_fingerprints(owner: Any) -> dict[str, str]:
+    """逐股**历史股本链**指纹（覆盖新增 / 改值 / 删行三种变化，验收漏算 ⑦）。
+
+    修前 `total_market_cap` / `cumulative_dividend_amount` 只由 `stock_meta`
+    的股本指纹驱动：给一只股票补一条 `share_capital_history`（或改/删一条），
+    增量轮直接 `skipped / planned_count=0`，而市值与分红会差一个数量级。
+
+    粒度：`(count(*), Σhash, XOR hash)` 三元聚合按 `(effective_date,
+    total_shares)` 求——**全表全行**都进哈希（不做时间窗截断），因为
+    `_get_cumulative_dividend_amount` 会逐笔回看**每一条**历史分红日的股本。
+    实测真库 24.4 万行 / 5,551 只：**17–27 ms**（threads=2、只读连接）。
+    """
+    aggregates = _digest_by_stock(
+        owner, "share_capital_history", list(_SHARE_CAPITAL_COLUMNS),
+    )
+    return {code: _combine_digest([agg]) for code, agg in aggregates.items()}
+
+
+# 行情表里**真正被指标读到的列**（同样按 calculator.py 核对）：
+#   * `_get_latest_price` / `compute_price_fields_for_stock` 取 raw 的 close；
+#   * `_calc_technical` 读 raw 的 close/volume/turnover/turnover_rate
+#     + qfq 的 close（按 trade_date 左连接）。
+# `open/high/low` 不进任何快照列 → 不哈希（少一条"每轮多算"的噪声通道）。
+_PRICE_FINGERPRINT_TABLES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("price_daily_raw", ("trade_date", "close", "volume", "turnover", "turnover_rate")),
+    ("price_daily_qfq", ("trade_date", "close")),
+)
+
+
+def price_fingerprints(owner: Any) -> dict[str, str]:
+    """逐股**行情内容**指纹（覆盖"外部直接 UPDATE 行情表"，验收漏算 ⑧）。
+
+    修前价格域只由价格步返回的 `_updated_codes` 驱动：有人绕过更新流程直接
+    `UPDATE price_daily_raw/qfq` 时，增量轮 `skipped / planned_count=0`，
+    15 列（pe_ttm/total_market_cap/ma5 …）永久停在旧值。
+
+    粒度：**全表全行** `(count(*), Σhash, XOR hash)`，不是"最近 N 日"摘要——
+    实测 1,759 万 + 1,757 万行上，全行哈希与"MAX+COUNT"同量级（扫描/分组是
+    瓶颈，哈希不是），所以没必要为了省几十毫秒去留"改历史行看不见"的盲区。
+    实测（threads=2，真库只读）：raw 5 列 0.36 s、qfq 2 列 0.25 s，合计 ~0.61 s。
+
+    覆盖不到：整行 `DELETE` 到 0 行后再按**原样**插回（内容不变＝结果不变，
+    所以不算漏）；以及 `price_daily_*` 之外的行情副本（ETF/港股行情表另域）。
+    """
+    collected: dict[str, list[tuple[int, int, int]]] = {}
+    for table, columns in _PRICE_FINGERPRINT_TABLES:
+        for code, aggregate in _digest_by_stock(owner, table, list(columns)).items():
+            collected.setdefault(code, []).append(aggregate)
+    return {code: _combine_digest(aggs) for code, aggs in collected.items()}
+
+
 def manual_override_fingerprints(owner: Any) -> dict[str, str]:
     """逐股 `manual_overrides` 里 published 覆写的指纹（PRD §9.5 R7 官方纠正路径）。
 
@@ -539,17 +626,21 @@ _FINGERPRINT_SURFACES: tuple[tuple[str, str, str], ...] = (
     ("universe", UNIVERSE_FP_KEY, "universe_fingerprint"),
     ("financial", FINANCIAL_FP_KEY, "financial_fingerprint"),
     ("event", EVENT_FP_KEY, "event_fingerprint"),
+    ("share_capital", SHARE_CAPITAL_FP_KEY, "share_capital_fingerprint"),
+    ("price", PRICE_FP_KEY, "price_fingerprint"),
     ("manual_override", OVERRIDE_FP_KEY, "manual_override_fingerprint"),
     ("snapshot", SNAPSHOT_FP_KEY, "snapshot_state_mismatch"),
 )
 
 
 def _collect_fingerprints(owner: Any) -> dict[str, dict[str, str]]:
-    """一次性算出五个输入面的逐股指纹。任一失败 → 整轮退回全量（宁可多算）。"""
+    """一次性算出七个输入面的逐股指纹。任一失败 → 整轮退回全量（宁可多算）。"""
     return {
         "universe": universe_fingerprints(owner),
         "financial": financial_fingerprints(owner),
         "event": event_fingerprints(owner),
+        "share_capital": share_capital_fingerprints(owner),
+        "price": price_fingerprints(owner),
         "manual_override": manual_override_fingerprints(owner),
         "snapshot": snapshot_fingerprints(owner),
     }
@@ -629,13 +720,20 @@ def _plan_indicator_scope(
         universe_fingerprint=current["universe"],
         financial_fingerprint=current["financial"],
         event_fingerprint=current["event"],
+        share_capital_fingerprint=current["share_capital"],
+        price_fingerprint=current["price"],
         manual_override_fingerprint=current["manual_override"],
         snapshot_fingerprint=current["snapshot"],
         prev_universe_fingerprint=previous["universe"],
         prev_financial_fingerprint=previous["financial"],
         prev_event_fingerprint=previous["event"],
+        prev_share_capital_fingerprint=previous["share_capital"],
+        prev_price_fingerprint=previous["price"],
         prev_manual_override_fingerprint=previous["manual_override"],
         prev_snapshot_fingerprint=previous["snapshot"],
+        price_fingerprint_codes=sorted({
+            str(code) for code in (merged_sources.get("price_fingerprint") or []) if code
+        }),
     )
 
     # 阈值只看**完整重算组**（整股 149 列），不看价格域组：
@@ -702,6 +800,8 @@ def bootstrap_indicator_scope(owner: Any) -> dict[str, Any]:
         "universe_codes": len(current["universe"]),
         "financial_codes": len(current["financial"]),
         "event_codes": len(current["event"]),
+        "share_capital_codes": len(current["share_capital"]),
+        "price_codes": len(current["price"]),
         "manual_override_codes": len(current["manual_override"]),
         "snapshot_codes": len(current["snapshot"]),
     }
@@ -721,6 +821,8 @@ def _current_maps(plan: IndicatorScopePlan) -> dict[str, dict[str, str]]:
         "universe": plan.universe_fingerprint,
         "financial": plan.financial_fingerprint,
         "event": plan.event_fingerprint,
+        "share_capital": plan.share_capital_fingerprint,
+        "price": plan.price_fingerprint,
         "manual_override": plan.manual_override_fingerprint,
         "snapshot": plan.snapshot_fingerprint,
     }
@@ -731,6 +833,8 @@ def _previous_maps(plan: IndicatorScopePlan) -> dict[str, dict[str, str] | None]
         "universe": plan.prev_universe_fingerprint,
         "financial": plan.prev_financial_fingerprint,
         "event": plan.prev_event_fingerprint,
+        "share_capital": plan.prev_share_capital_fingerprint,
+        "price": plan.prev_price_fingerprint,
         "manual_override": plan.prev_manual_override_fingerprint,
         "snapshot": plan.prev_snapshot_fingerprint,
     }
@@ -768,19 +872,21 @@ def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> d
             for surface, key, _source in _FINGERPRINT_SURFACES:
                 stored = dict(previous[surface] or {})
                 latest = current[surface]
-                for code in plan.full_codes:
+                # 哪些代码的**输入水位**可以由本轮算过之后推进：
+                # * 默认：只有整股重算组（full）——它的输入被完整消费；
+                # * snapshot：价格域/事件域重算也会改快照行，按"本轮算过的全部股票"；
+                # * price：行情指纹驱动的股票落在**价格域**（不是 full），不推进
+                #   就等于每轮重复检测同一处改动（⑦⑧ 补完之后的新面必须在这里
+                #   登记，否则稳态从"算一次"退化成"每轮都算"）。
+                if surface in ("snapshot", "price"):
+                    advance = plan.planned_codes
+                else:
+                    advance = plan.full_codes
+                for code in advance:
                     if code in latest:
                         stored[code] = latest[code]
                     else:
                         stored.pop(code, None)
-                if surface == "snapshot":
-                    # 价格域/事件域重算也会改快照行，所以快照面按"本轮算过的
-                    # 全部股票"推进，而不是只有 full 组。
-                    for code in plan.planned_codes:
-                        if code in latest:
-                            stored[code] = latest[code]
-                        else:
-                            stored.pop(code, None)
                 _write_json_map(owner, key, stored)
             if plan.prev_universe_fingerprint is not None:
                 # 水位已建立，口径版本也必须是"当前版本"，否则下一轮又判
