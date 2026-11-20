@@ -79,6 +79,28 @@ function Remove-StaleS1RunRoots {
     }
     catch {}
 }
+function Invoke-TempHygiene {
+    <#
+    跑全量前顺手回收"我们造的、旧的、没在跑的"临时根（reports/149）。
+
+    为什么放在这里：%TEMP% 曾涨到 107 GB，导致全量回归报 50 个
+    "No space left on device" —— 症状像代码坏了。手搓的运行根（mktemp -d +
+    --basetemp）跑完不删，只靠"记得清"必然复发。
+    在每次全量开跑前自动回收，就把"清不清"从人的记性里拿掉了。
+    失败一律忽略（fail-open）：清扫不该阻断测试。
+    #>
+    try {
+        $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $python)) { return }
+        $hygiene = Join-Path $projectRoot "scripts	emp_hygiene.py"
+        if (-not (Test-Path -LiteralPath $hygiene)) { return }
+        # 只清"有主的"（带 .vd-scratch-owner 或 vd-scoped-/vd-run- 前缀）且空闲超过 2 小时
+        & $python $hygiene --older-than-minutes 120 --execute 2>&1 |
+            ForEach-Object { try { [Console]::Error.WriteLine($_) } catch {} }
+    }
+    catch {}
+}
+Invoke-TempHygiene
 $savedEnvironment = @{}
 foreach ($name in @(
     "VD_ENV", "VD_TEST_RUN_ROOT", "VD_DUCKDB_PATH", "VD_SQLITE_PATH", "VD_TEST_EVIDENCE_ROOT",
