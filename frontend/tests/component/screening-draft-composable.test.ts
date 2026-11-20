@@ -44,6 +44,10 @@ function mountDraft() {
     rules: [{ id: 'c1', field: 'pe_ttm', op: '<', value: 15 }],
   } as unknown as ScreeningRuleNode)
   const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
+  // 用户裁定（本轮）：页面上的「仅使用严格可信数据」开关已移除，ScreeningPage 传进来的
+  // strictOnly 恒为 false。这里仍用本地 `ref` 直接驱动 composable —— 本文件覆盖的是
+  // **草稿状态机这个通用管道**（`strict_only` 字段要原样透传/回填，后端能力保留），
+  // 与实际页面传什么值无关。页面级的"恒 false"由 screening-run-flow.test.ts 断言。
   const strictOnly = ref(false)
   const selectedResultColumns = ref<string[]>(['stock_code'])
   const notify = { warning: vi.fn(), success: vi.fn(), error: vi.fn() }
@@ -132,6 +136,9 @@ describe('useScreeningDraft 自动保存（防抖 400ms + 单飞 + 409）', () =
     const [url, body] = (axios.put as Mock).mock.calls[0]
     expect(url).toBe(DRAFT_URL)
     expect(body.revision).toBe(0)
+    // 透传契约：composable 只负责把注入的 strictOnly 原样写进草稿。
+    // 页面（ScreeningPage）现在恒传 false，并把历史 true 归一成 false —— 见
+    // screening-run-flow.test.ts「历史草稿残留 strict_only: true」用例。
     expect(body.draft.strict_only).toBe(true)
     expect(body.draft.base_pool).toEqual({ exclude_st: true, exclude_suspended: true, min_listing_years: 3 })
     expect(body.draft.result_columns).toEqual(['stock_code', 'name'])

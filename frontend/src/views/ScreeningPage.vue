@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch, nextTick, h } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, h } from 'vue'
 import type { VNode } from 'vue'
-import { NButton, NSwitch, NInput, NInputNumber, NSelect, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
+import { NButton, NInput, NInputNumber, NSelect, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
 import { NEllipsis } from 'naive-ui'
 import axios from 'axios'
 import ScreeningResultsPanel from '../components/ScreeningResultsPanel.vue'
@@ -67,6 +67,37 @@ const runId = ref<string | null>(null)
 const truncated = ref(false)
 const totalMatched = ref(0)
 const resultsAnchor = ref<HTMLElement | null>(null)
+
+/**
+ * 显式运行状态（2026-11-24 P0）。
+ *
+ * 缺陷：以前 `catch` 只弹 toast，`results`/`totalMatched`/`runId` 原样留在
+ * state 里 —— 于是失败后结果面板继续写「N 家公司符合**当前**规则」，
+ * 「保存到自选」也照旧可点，用户会把**上一次**的股票按**当前**规则名写进
+ * 自选（数据污染）。首次就失败时页面又和"没跑过/没命中"完全同形。
+ *
+ * 现在把"跑没跑过 / 跑成功 / 成功但 0 条 / 跑失败"拆成显式状态：
+ * - `idle`    没跑过
+ * - `running` 正在跑（下方若还有旧结果，只是**上一次**的，动作入口一律禁用）
+ * - `ok`      成功且有结果（唯一允许保存/导出/加入自选的状态）
+ * - `empty`   成功但 0 条（条件太严，不是故障）
+ * - `failed`  失败：清空旧结果 + 记下原因，页面可原地重试
+ */
+type RunState = 'idle' | 'running' | 'ok' | 'empty' | 'failed'
+const runState = ref<RunState>('idle')
+/** 最近一次运行失败的用户可读原因（仅 `failed` 态有值）。 */
+const lastRunError = ref<string | null>(null)
+/**
+ * disclose 级告警（后端 200 随结果下发，`screening_warnings`：
+ * `[{code, severity, detail}]`；旧后端/409 只有 `disclosed_warnings` 的 code 数组）。
+ * 这类告警**不阻断**筛选，但必须让用户看见（黄色提示条），不能塞进 error 弹窗。
+ */
+interface ScreeningWarning {
+  readonly code: string
+  readonly severity?: string
+  readonly detail?: string
+}
+const screeningWarnings = ref<readonly ScreeningWarning[]>([])
 // reports/79 方案 A: 更新窗口内快照口径运行标注
 const autoUpdateSnapshot = ref(false)
 const snapshotAsOf = ref<string | null>(null)
@@ -99,8 +130,96 @@ function readOptionalStringList(payload: unknown, key: string): string[] {
   return value.filter((item): item is string => typeof item === 'string')
 }
 
+/**
+ * 读 `/run` 结果体里的 disclose 级告警（后端已改，随 200 返回）。
+ *
+ * 两种形态都要兼容（都按 unknown 读，旧后端缺字段时安全降级成空数组）：
+ * - `screening_warnings: [{code, severity, detail}]` —— 首选，带 detail，
+ *   典型如「158/5,580 只标的日历覆盖不匹配（2.8%），其技术指标窗口计数可能偏移」；
+ * - `disclosed_warnings: ["SNAPSHOT_STALE", ...]` —— 只有 code 的旧形态。
+ *
+ * 后端可能会同时给两份；只要 `screening_warnings` 有内容就用它（信息更全），
+ * 否则退回 code 数组，避免把同一批告警渲染两遍。
+ */
+function readScreeningWarnings(payload: unknown): ScreeningWarning[] {
+  if (!payload || typeof payload !== 'object') return []
+  const record = payload as Record<string, unknown>
+  const detailed = record.screening_warnings
+  const collected: ScreeningWarning[] = []
+  const seen = new Set<string>()
+  const push = (item: ScreeningWarning) => {
+    const key = item.code
+    if (!key || seen.has(key)) return
+    seen.add(key)
+    collected.push(item)
+  }
+  if (Array.isArray(detailed)) {
+    for (const item of detailed) {
+      if (!item || typeof item !== 'object') continue
+      const entry = item as Record<string, unknown>
+      if (typeof entry.code !== 'string' || !entry.code) continue
+      push({
+        code: entry.code,
+        severity: typeof entry.severity === 'string' ? entry.severity : undefined,
+        detail: typeof entry.detail === 'string' && entry.detail.trim() ? entry.detail : undefined,
+      })
+    }
+  }
+  if (collected.length > 0) return collected
+  for (const code of readOptionalStringList(record, 'disclosed_warnings')) {
+    push({ code })
+  }
+  return collected
+}
+
+/**
+ * 失败即清空：上一次运行派生出来的一切都不能继续代表"当前规则"。
+ *
+ * 只清结果还不够 —— 面板文案、数据日期、快照标注、strict 说明、披露告警都
+ * 来自上一次响应；留着任何一项都会让用户把旧运行误读成当前运行。
+ */
+function clearRunArtifacts(): void {
+  results.value = []
+  totalMatched.value = 0
+  runId.value = null
+  truncated.value = false
+  executionTime.value = 0
+  basePoolSize.value = 0
+  dataDate.value = null
+  autoUpdateSnapshot.value = false
+  snapshotAsOf.value = null
+  readinessHint.value = null
+  strictModeWarning.value = null
+  strictExemptFields.value = []
+  screeningWarnings.value = []
+}
+
+/**
+ * 保存/导出时后端说"这次 run 已经不在了" → 必须落到失败态。
+ *
+ * 典型两句：`saved screening result not found`、`saved result rule provenance
+ * is missing`。此时屏幕上的结果已无法被后端追溯，继续显示 = 让用户以为还能
+ * 保存/导出（保存入口看到的 runId 是死的）。所以由面板发事件、页面清空并报失败。
+ */
+function handleRunInvalidated(reason: string): void {
+  clearRunArtifacts()
+  runState.value = 'failed'
+  lastRunError.value = reason
+  void nextTick(() => scrollToResults())
+}
+
 const basePool = reactive({ exclude_st: true, exclude_suspended: true, min_listing_years: 1 })
-const strictOnly = ref(false)
+/**
+ * 用户裁定：**去掉「仅使用严格可信数据」开关**，筛选口径固定为「包含近似数据」。
+ *
+ * 这里刻意保留一个**恒为 false** 的写入口，而不是把接线一并删掉：
+ * `useScreeningDraft` 的草稿契约里仍有 `strict_only`（后端能力保留，见
+ * `app/core/screening/engine.py`），历史草稿里可能残留 `strict_only: true`。
+ * 载入草稿时 composable 会往这个 ref 写 true，但写入口吞掉赋值 → 归一成 false，
+ * 下一次自动保存就把草稿写回 false。绝不能让一个"界面上看不见、也改不掉"的
+ * 严格模式在用户不知情时悄悄生效。
+ */
+const strictOnly = computed<boolean>({ get: () => false, set: () => {} })
 const inclusionOptions = [
   { label: '排除', value: 'exclude' },
   { label: '包含', value: 'include' },
@@ -301,6 +420,10 @@ async function runScreening() {
     }
   }
   loading.value = true
+  // 进入 running：旧结果暂时留在屏幕上，但会由面板显式标注「上一次运行的结果」
+  // 并禁用保存/导出/加入自选；本次一旦失败则整体清空（见 catch）。
+  runState.value = 'running'
+  lastRunError.value = null
   try {
     const resp = await axios.post<ScreeningRunResponse>('/api/screening/run', {
       rule_id: activeRule.value.id,
@@ -308,7 +431,9 @@ async function runScreening() {
       include_st: !basePool.exclude_st,
       include_suspended: !basePool.exclude_suspended,
       min_listing_years: basePool.min_listing_years,
-      strict_only: strictOnly.value,
+      // 用户裁定：严格模式开关已移除，口径固定「包含近似数据」。这里写死 false，
+      // 即使历史草稿/已保存规则里残留 `strict_only: true` 也不会把请求带成严格口径。
+      strict_only: false,
       columns: selectedColumnsForRequest(),
     }, {
       // 后端筛选门禁在无缓存冷启动时需执行一次全库数据质量核对；
@@ -316,13 +441,15 @@ async function runScreening() {
       // 从浏览器侧中止，造成“一直 loading 却永远收不到结果”。
       timeout: 120_000,
     })
-    results.value = resp.data.results
+    // 响应缺字段时按空处理：宁可显示 0 条，也不能让 undefined 进模板。
+    const rows: readonly ScreeningResult[] = Array.isArray(resp.data.results) ? resp.data.results : []
+    results.value = rows
     executionTime.value = resp.data.execution_time_ms
     basePoolSize.value = resp.data.base_pool_size
     dataDate.value = resp.data.data_date
     runId.value = resp.data.run_id
     truncated.value = resp.data.truncated ?? false
-    totalMatched.value = resp.data.total
+    totalMatched.value = typeof resp.data.total === 'number' ? resp.data.total : rows.length
     // reports/79 方案 A: 更新窗口内基于快照的运行，明确告知口径
     autoUpdateSnapshot.value = resp.data.auto_update_in_progress === true
     readinessHint.value = readinessNotice(resp.data)
@@ -330,33 +457,41 @@ async function runScreening() {
     // 2026-08-14 红队 P2-4：严格模式空结果的原因反馈（无 strict 血缘等）
     strictModeWarning.value = resp.data.strict_mode_warning ?? null
     strictExemptFields.value = readOptionalStringList(resp.data, 'strict_exempt_fields')
+    // 2026-11-24（reports/150）：disclose 级告警随 200 一起返回 —— 必须看见，但不挡路。
+    screeningWarnings.value = readScreeningWarnings(resp.data)
+    // 成功也要区分「有结果」与「成功但 0 条」：后者不是错误，是条件太严。
+    runState.value = rows.length > 0 ? 'ok' : 'empty'
     if (resp.data.truncated) {
       message.warning(`结果超过 5000 条，仅展示前 5000 条（共 ${resp.data.total} 条匹配）`)
     }
     if (resp.data.auto_update_in_progress) {
       message.info(`数据自动更新中：本次筛选基于最近完整快照（数据截至 ${resp.data.data_as_of ?? dataDate.value}）`)
     }
-    message.success(`筛选完成: ${resp.data.total} 条 (${resp.data.execution_time_ms}ms)，已滚动到结果区`)
+    if (rows.length === 0) {
+      message.info(`筛选完成：没有公司符合当前条件（共 ${totalMatched.value} 条匹配）。可以放宽阈值后重新运行。`)
+    } else {
+      message.success(`筛选完成: ${totalMatched.value} 条 (${resp.data.execution_time_ms}ms)，已滚动到结果区`)
+    }
     await nextTick()
     scrollToResults()
   } catch (e: unknown) {
-    message.error(apiErrorText(e, '筛选失败'))
+    // P0：失败 = 上一次结果作废。不清空的话面板会继续写「N 家符合当前规则」，
+    // 「保存到自选」也照旧可点 → 用户把旧股票按新规则写进自选（数据污染）。
+    const reason = apiErrorText(e, '筛选失败')
+    clearRunArtifacts()
+    runState.value = 'failed'
+    lastRunError.value = reason
+    message.error(reason)
+    await nextTick()
+    scrollToResults()
   } finally {
     loading.value = false
   }
 }
 
-// L0-3（报告42）: strict-only 切换时重新按服务端口径运行，
-// 使屏幕展示、保存记录、导出 CSV 三者结果一致（不再客户端二次过滤）。
-let strictRerunTimer: ReturnType<typeof setTimeout> | undefined
-watch(strictOnly, () => {
-  if (results.value.length === 0 || activeRule.value === null) return
-  if (strictRerunTimer) clearTimeout(strictRerunTimer)
-  strictRerunTimer = setTimeout(() => {
-    message.info(strictOnly.value ? '正在按 strict 口径重新筛选…' : '正在按完整口径重新筛选…')
-    void runScreening()
-  }, 400)
-})
+// L0-3（报告42）原本在这里挂了一个「strict-only 切换时自动按服务端口径重跑」的
+// 防抖 watch。用户裁定移除严格模式开关后，页面内不再有任何东西能改变 strict_only
+// → 该 watch 永远不可能触发，随开关一起删除（重跑逻辑仍由「运行筛选」按钮承担）。
 
 // ─── 筛选草稿（/api/screening/draft）────────────────────────────────────
 // 2026-11-22：草稿状态机（快照脏检查 / 单飞保存 / 409 冲突弹窗 / 防抖 400ms）
@@ -576,11 +711,13 @@ onMounted(async () => {
           size="small"
         >{{ readinessHint.text }}</n-alert>
         <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
-        <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
-        <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
+        <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>可信度</span><b>包含近似值</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
+        <!-- 用户裁定：这里原来是「仅使用严格可信数据 / 包含近似可信数据」二选一的 n-switch
+             （右侧那个绿色药丸就是它），已整个移除。口径固定，只保留一句纯文字说明。 -->
+        <p class="screening-policy-note">口径固定：结果包含近似值，口径不完整或近似计算的指标照常参与筛选。</p>
         <n-button type="primary" block :loading="loading" :disabled="!runEnabled" @click="runScreening">运行筛选 →</n-button>
         <n-button v-if="results.length > 0" text type="primary" block style="margin-top: 8px" @click="scrollToResults">
-          查看本次筛选结果（{{ totalMatched || results.length }} 条）↓
+          {{ runState === 'running' ? '查看上一次筛选结果' : '查看本次筛选结果' }}（{{ totalMatched || results.length }} 条）↓
         </n-button>
         <p v-if="autoUpdateRunning && dataReady === false" class="screening-run-help">数据正在自动更新：将以最近完整快照运行（后端将标注数据截至日期）。</p>
         <p v-else class="screening-run-help">运行结果可保存、导出或加入自选列表。</p>
@@ -591,29 +728,81 @@ onMounted(async () => {
       数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
     </n-alert>
     <div ref="resultsAnchor" class="screening-results-anchor">
-      <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :strict-exempt-fields="strictExemptFields" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
+      <ScreeningResultsPanel
+        :results="results"
+        :run-state="runState"
+        :last-run-error="lastRunError"
+        :screening-warnings="screeningWarnings"
+        :strict-mode-warning="strictModeWarning"
+        :strict-exempt-fields="strictExemptFields"
+        :execution-time="executionTime"
+        :base-pool-size="basePoolSize"
+        :data-date="dataDate"
+        :warning-codes="warningCodes"
+        :untrusted-fields="untrustedFields"
+        :quality-status="qualityStatus"
+        :rule-tree="ruleTree"
+        :run-id="runId"
+        :rule-id="activeRule?.id ?? null"
+        :rule-version="activeRule?.version ?? null"
+        :rule-name="activeRule?.name ?? ''"
+        :locked-indicators="activeRule?.locked_indicators ?? {}"
+        :base-pool-config="basePool"
+        :truncated="truncated"
+        :total-matched="totalMatched"
+        @retry="runScreening"
+        @run-invalidated="handleRunInvalidated"
+      />
     </div>
 
-    <section v-if="results.length === 0" class="screening-empty-card">
-      <n-empty description="运行筛选后显示候选公司" />
-      <!-- L0-1（报告42）: 空态给出可执行的首次筛选步骤，而非只提示"运行筛选" -->
-      <div class="first-screening-help">
-      <n-alert
-        v-if="qualityStatus === 'failed'"
-        type="error"
-        :show-icon="true"
-      >
-        无法获取数据质量状态，运行结果可能不可信。请先前往<router-link to="/data-status">数据状态页</router-link>确认。
-      </n-alert>
-      <ol>
-        <li>在「筛选条件」设置常驻范围条件（ST、停牌、上市年限）与投资判断，并选择数据质量口径。</li>
-        <li>在「筛选条件」添加条件（如 pe_ttm &lt; 15），在「排序」设置优先级。</li>
-        <li>点击<strong>运行筛选</strong>——系统会自动把当前草稿保存为一个规则版本，用于后续溯源。</li>
-      </ol>
-      <div>
-        之后可保存结果、导出 CSV（含数据日期与规则溯源）或加入自选。
-      </div>
-      </div>
+    <!-- 三种"空"必须长得不一样（P0）：
+         ① idle = 没跑过（给首次步骤）；② empty = 跑成功但 0 条（条件太严，不是故障）；
+         ③ failed = 跑失败（原因 + 重试）—— 失败卡由 ScreeningResultsPanel 渲染在结果区，
+            因为那正是"上一次结果曾经出现的地方"，用户第一眼就该看到它作废了。 -->
+    <section
+      v-if="results.length === 0 && runState !== 'failed'"
+      class="screening-empty-card"
+      :data-run-state="runState"
+    >
+      <template v-if="runState === 'running'">
+        <n-empty id="run-running-state" description="正在运行筛选，请稍候…" />
+        <div class="first-screening-help">
+          <p>后端正在按当前规则计算（冷启动时首次核对数据质量可能需数十秒）。</p>
+        </div>
+      </template>
+      <template v-else-if="runState === 'empty'">
+        <n-empty id="run-empty-state" description="筛选完成：没有公司符合当前条件（0 条）" />
+        <div class="first-screening-help">
+          <p><strong>这不是出错</strong>：规则已完整执行，只是命中 0 家。常见原因是条件太严。</p>
+          <ol>
+            <li>放宽阈值（例如把 pe_ttm &lt; 15 改成 &lt; 25）。</li>
+            <li>减少「并且」条件，或把条件组改成「任一成立」。</li>
+            <li>检查常驻范围条件（ST、停牌、上市年限）是否把股票池收得太小。</li>
+          </ol>
+          <p>改完条件后直接点<strong>运行筛选</strong>即可，不需要刷新页面。</p>
+        </div>
+      </template>
+      <template v-else>
+        <n-empty id="run-idle-state" description="还没有运行筛选" />
+        <!-- L0-1（报告42）: 空态给出可执行的首次筛选步骤，而非只提示"运行筛选" -->
+        <div class="first-screening-help">
+        <n-alert
+          v-if="qualityStatus === 'failed'"
+          type="error"
+          :show-icon="true"
+        >
+          无法获取数据质量状态，运行结果可能不可信。请先前往<router-link to="/data-status">数据状态页</router-link>确认。
+        </n-alert>
+        <ol>
+          <li>在「筛选条件」设置常驻范围条件（ST、停牌、上市年限）与投资判断，并选择数据质量口径。</li>
+          <li>在「筛选条件」添加条件（如 pe_ttm &lt; 15）；排序不在这里设置 —— 结果表里点表头即可升序/降序。</li>
+          <li>点击<strong>运行筛选</strong>——系统会自动把当前草稿保存为一个规则版本，用于后续溯源。</li>
+        </ol>
+        <div>
+          之后可保存结果、导出 CSV（含数据日期与规则溯源）或加入自选。
+        </div>
+        </div>
+      </template>
     </section>
 
     <!-- L0-4（报告42）: 草稿冲突恢复——加载服务器/保留本地/刷新 -->
@@ -696,8 +885,7 @@ onMounted(async () => {
 .screening-run-data { padding: 13px 0; border-top: 1px solid #dbeade; border-bottom: 1px solid #dbeade; }
 .screening-run-data p { display: flex; justify-content: space-between; margin: 8px 0; color: #809087; font-size: 10px; }
 .screening-run-data b { color: #4d6556; font-weight: 650; }
-.screening-strict { display: grid; gap: 6px; margin: 18px 0; }
-.screening-strict span { color: #8d9b91; font-size: 9px; }
+.screening-policy-note { margin: 14px 0 0; color: #8d9b91; font-size: 9px; line-height: 1.5; }
 .screening-run-help { margin: 11px 0 0; color: #8d9b91; font-size: 9px; line-height: 1.5; text-align: center; }
 .screening-empty-card { margin-top: 18px; padding: 28px; }
 .first-screening-help { max-width: 650px; margin: 16px auto 0; color: #68736b; font-size: 11px; line-height: 1.7; }

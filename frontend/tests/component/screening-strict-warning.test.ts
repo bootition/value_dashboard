@@ -29,7 +29,7 @@ vi.mock('axios', () => {
 })
 
 function mountPanel(props: {
-  strictModeWarning: string
+  strictModeWarning?: string
   strictExemptFields?: string[]
 }) {
   const router = createRouter({ history: createMemoryHistory(), routes: [] })
@@ -38,8 +38,8 @@ function mountPanel(props: {
       default: () =>
         h(ScreeningResultsPanel, {
           results: [],
-          strictOnly: true,
-          // 典型的第一条分支：空结果与可信度模式无关
+          // 用户裁定（本轮）：面板不再接收 `strictOnly` —— 严格/近似已不可选，
+          // 这条披露只由后端自己下发的信号（warning / strict_exempt_fields）驱动。
           strictModeWarning: props.strictModeWarning,
           strictExemptFields: props.strictExemptFields,
           executionTime: 5,
@@ -96,5 +96,32 @@ describe('严格模式告警标题与豁免字段披露', () => {
     expect(wrapper.find('#strict-mode-alert').exists()).toBe(true)
     expect(wrapper.find('.strict-exempt-note').exists()).toBe(false)
     expect(wrapper.text()).toContain('严格可信模式说明')
+  })
+
+  /**
+   * 用户裁定（本轮）：严格模式开关移除后，本面板不再由 `strictOnly` 驱动 ——
+   * 但"信息别藏起来"仍然成立：后端只要下发 `strict_exempt_fields`（例如有人用
+   * CLI/API 指定了 strict_only），豁免字段就必须照常披露。标题此时不能再冒充
+   * 「严格可信模式」，用中性的「字段口径说明」。
+   */
+  it('只有豁免字段、没有告警时也披露（标题中性：字段口径说明）', async () => {
+    const wrapper = mountPanel({ strictExemptFields: ['roce_10y_median'] })
+    await flushPromises()
+
+    const alert = wrapper.find('#strict-mode-alert')
+    expect(alert.exists()).toBe(true)
+    expect(alert.find('.n-alert-body__title').text()).toBe('字段口径说明')
+    const exemptNote = alert.find('.strict-exempt-note')
+    expect(exemptNote.exists()).toBe(true)
+    expect(exemptNote.text()).toContain('roce_10y_median')
+    expect(exemptNote.text()).toContain('不是你的条件写错了')
+  })
+
+  it('既无告警也无豁免字段时不渲染任何口径披露', async () => {
+    const wrapper = mountPanel({})
+    await flushPromises()
+
+    expect(wrapper.find('#strict-mode-alert').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('严格可信')
   })
 })

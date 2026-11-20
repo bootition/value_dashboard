@@ -68,7 +68,6 @@ function mountPanel(results: ScreeningResult[]) {
       default: () =>
         h(ScreeningResultsPanel, {
           results,
-          strictOnly: false,
           executionTime: 5,
           basePoolSize: 100,
           dataDate: '2026-06-30',

@@ -7,8 +7,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -18,6 +20,23 @@ from app.core.screening.defaults import base_pool_defaults
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
 router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+
+logger = logging.getLogger(__name__)
+
+#: `GET /api/watchlist/list` 的 DuckDB 富化状态。
+#:
+#: 自选列表有**两个数据源**：分组/股票代码只查 SQLite（用户态，永不受
+#: 自动更新影响），名称/指标才需要 DuckDB 的 `stock_meta` + `indicator_snapshot`。
+#: 写进程持锁时第二层取不到，是**暂时状态**，不是"自选为空"。
+#:
+#: 2026-11-24 用户实测：自动更新期间整页显示「还没有分组」+「还没有可显示的
+#: 自选分组」，而库里《往股东口袋装钱的大老公司》573 行完好——取名字失败
+#: 被当成了列表失败。这是最不能接受的一类假象（比报错更糟），因此富化层
+#: 一律降级返回，并在响应里显式标注状态。
+ENRICHMENT_OK = "ok"
+ENRICHMENT_UNAVAILABLE = "unavailable"
+#: 写进程持锁的稳定原因码：前端据它说"正在自动更新"，而不是猜一个原因。
+ENRICHMENT_READ_LOCKED = "duckdb_read_locked"
 
 # 依赖 indicator_snapshot 的数值字段；信任决策阻断时必须遮蔽
 _SNAPSHOT_VALUE_FIELDS = (
@@ -58,9 +77,55 @@ class RefreshGroupRequest(BaseModel):
     group_name: str
 
 
+def _fetch_stock_info(duck: Any, stock_codes: list[str]) -> dict[str, dict]:
+    """DuckDB 富化层：按代码取名称/交易所/行业/上市日 + 最新一期快照指标。
+
+    这是自选列表里**唯一**需要 DuckDB 的步骤，单独成函数是为了让调用点
+    能把"富化失败"与"列表失败"分开处理（见 `list_watchlist` 的降级注释）。
+    """
+    placeholders = ", ".join(["?"] * len(stock_codes))
+    stock_info = duck.read_query(
+        f"""SELECT m.stock_code, m.name, m.exchange, m.csrc_l1, m.listing_date,
+                   s.latest_close, s.pe_ttm, s.pb_mrq, s.roe,
+                   s.gross_margin, s.net_margin, s.debt_ratio,
+                   s.revenue_yoy, s.net_profit_yoy, s.dividend_yield,
+                   s.total_market_cap, s.circ_market_cap
+             FROM stock_meta m
+             LEFT JOIN LATERAL (
+                 SELECT * FROM indicator_snapshot s2
+                 WHERE s2.stock_code = m.stock_code
+                 ORDER BY s2.report_date DESC LIMIT 1
+             ) s ON true
+             WHERE m.stock_code IN ({placeholders})""",
+        stock_codes,
+    )
+    return {r["stock_code"]: r for r in stock_info}
+
+
+def _read_trust(duck: Any, sqlite: Any) -> dict:
+    """服务端权威信任决策；读不到告警集时也不许炸掉整个自选页。
+
+    DuckDB 不可用时 `read_warning_codes` 本身也可能失败——这时返回空告警集：
+    降级响应里所有指标都是 None，遮蔽是空操作，因此**"没有任何数值"本身**
+    就保证了 fail-closed，不存在放行未核验数字的可能。
+    """
+    from app.core.data_quality import indicator_trust, read_warning_codes
+
+    try:
+        return indicator_trust(read_warning_codes(duck, sqlite))
+    except Exception as error:  # 见 docstring：宁可少一个横幅，也不要整页 500
+        logger.warning("自选列表读取 trust 失败，按空告警集降级: %s", error)
+        return indicator_trust([])
+
+
 @router.get("/list")
 def list_watchlist(request: Request, group: str | None = None) -> dict:
-    """列出自选股票 (PRD §13: 分组/排序/自定义列/来源记录)"""
+    """列出自选股票 (PRD §13: 分组/排序/自定义列/来源记录)
+
+    降级契约（2026-11-24）：**分组与股票行只依赖 SQLite，任何情况下都必须
+    返回**；DuckDB 只用来富化名称/指标，取不到就标 `enrichment=unavailable`
+    并把名称留空、指标置 null，绝不把本页整体打成 503/空列表。
+    """
     sqlite = request.app.state.sqlite
     duck = request.app.state.duck
 
@@ -95,38 +160,33 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
     )
 
     if not rows:
-        return {"items": [], "count": 0, "groups": groups}
+        # 没有任何自选行：此时**不需要** DuckDB，富化视为已完成。
+        return {
+            "items": [], "count": 0, "groups": groups,
+            "enrichment": ENRICHMENT_OK, "enrichment_error": None,
+        }
 
-    # 关联股票名称和最新指标
+    # 关联股票名称和最新指标 —— 这一步失败只影响"显示得全不全"，
+    # 不影响"有没有自选"，因此异常一律就地降级（详见模块级常量注释）。
     stock_codes = [r["stock_code"] for r in rows]
-    placeholders = ", ".join(["?"] * len(stock_codes))
-
+    enrichment = ENRICHMENT_OK
+    enrichment_error: str | None = None
     try:
-        stock_info = duck.read_query(
-            f"""SELECT m.stock_code, m.name, m.exchange, m.csrc_l1, m.listing_date,
-                       s.latest_close, s.pe_ttm, s.pb_mrq, s.roe,
-                       s.gross_margin, s.net_margin, s.debt_ratio,
-                       s.revenue_yoy, s.net_profit_yoy, s.dividend_yield,
-                       s.total_market_cap, s.circ_market_cap
-                 FROM stock_meta m
-                 LEFT JOIN LATERAL (
-                     SELECT * FROM indicator_snapshot s2
-                     WHERE s2.stock_code = m.stock_code
-                     ORDER BY s2.report_date DESC LIMIT 1
-                 ) s ON true
-                 WHERE m.stock_code IN ({placeholders})""",
-            stock_codes,
-        )
-        info_map = {r["stock_code"]: r for r in stock_info}
+        info_map = _fetch_stock_info(duck, stock_codes)
     except DuckDBReadLockedError as error:
-        # 自动更新/CLI 写进程持锁：如实提示"更新中"，不要把原始 IO 错误抛给用户。
-        raise HTTPException(
-            status_code=503, detail="数据正在自动更新中，请稍后刷新"
-        ) from error
-    except Exception as error:
-        raise HTTPException(
-            status_code=503, detail={"error": "database unavailable", "detail": str(error)}
-        ) from error
+        # 自动更新/CLI 写进程持锁：这是已知的**暂时**状态，如实提示"更新中"，
+        # 不要把原始 IO 错误抛给用户，更不要把整页打成失败。
+        logger.warning("自选列表 DuckDB 富化跳过（写进程持锁）: %s", error)
+        info_map = {}
+        enrichment = ENRICHMENT_UNAVAILABLE
+        enrichment_error = ENRICHMENT_READ_LOCKED
+    except Exception as error:  # 降级而非整页失败，原因照实回传
+        # 非锁类故障也降级：分组与代码是 SQLite 里的事实，必须照常可见。
+        # 真实原因进日志 + `enrichment_error`，不静默吞掉。
+        logger.warning("自选列表 DuckDB 富化失败，降级返回: %s", error)
+        info_map = {}
+        enrichment = ENRICHMENT_UNAVAILABLE
+        enrichment_error = f"{type(error).__name__}: {error}"
 
     items = []
     for row in rows:
@@ -157,13 +217,9 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
         })
 
     # P1-4: 服务端权威信任决策；阻断警告存在时遮蔽快照数值字段
-    from app.core.data_quality import (
-        indicator_trust,
-        mask_untrusted_values,
-        read_warning_codes,
-    )
+    from app.core.data_quality import mask_untrusted_values
 
-    trust = indicator_trust(read_warning_codes(duck, sqlite))
+    trust = _read_trust(duck, sqlite)
     untrusted = set(trust["untrusted_fields"])
     for item in items:
         item.update(mask_untrusted_values(
@@ -189,6 +245,7 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
     return {
         "items": items, "count": len(items), "groups": groups, "trust": trust,
         "auto_update_in_progress": auto_update_in_progress,
+        "enrichment": enrichment, "enrichment_error": enrichment_error,
     }
 
 

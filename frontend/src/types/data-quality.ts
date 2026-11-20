@@ -29,6 +29,12 @@ export type KnownWarningCode =
   | 'MINIMUM_DATA_NOT_READY'
   | 'CODE_IDENTITY_ALIAS'
   | 'LIVE_SCHEMA_INCOMPATIBLE'
+  // 2026-11-20：筛选门禁改为 block/disclose/inventory 三级，
+  // `app/core/data_quality.py::_SCREENING_WARNING_SEVERITY` 新增/改名两条日历码：
+  //   TRADING_CALENDAR_UNAVAILABLE = block    （整体不可用，无法判定窗口）
+  //   TRADING_CALENDAR_INCOMPLETE  = disclose （日历在，少量标的覆盖不匹配）
+  | 'TRADING_CALENDAR_UNAVAILABLE'
+  | 'TRADING_CALENDAR_INCOMPLETE'
   // 2026-11-14 资产健康检查（reports/119）：`app/core/quality/asset_health.py`
   // 的规则（条数以该模块 `RULE_CODES` 为准，当前 14 条）。这些 code 默认
   // 不进 data_quality 的阻断集合（不遮蔽指标、不让筛选 409），P1 只出现在
@@ -73,6 +79,10 @@ export const KNOWN_WARNING_CODES = [
   'MINIMUM_DATA_NOT_READY',
   'CODE_IDENTITY_ALIAS',
   'LIVE_SCHEMA_INCOMPATIBLE',
+  // 2026-11-20 交易日历两级（`_SCREENING_WARNING_SEVERITY`）：
+  // block = 整体不可用；disclose = 日历存在但个别标的覆盖不匹配。
+  'TRADING_CALENDAR_UNAVAILABLE',
+  'TRADING_CALENDAR_INCOMPLETE',
   // 资产健康（reports/119）
   'EXT_PERIOD_MISMATCH',
   'FIELD_COVERAGE_LOW',
@@ -247,6 +257,14 @@ const WARNING_TO_AFFECTED_FIELDS: Readonly<Record<KnownWarningCode, readonly str
   MINIMUM_DATA_NOT_READY: [],
   CODE_IDENTITY_ALIAS: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
   LIVE_SCHEMA_INCOMPATIBLE: SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
+  // 交易日历两级（2026-11-20）：**都不遮蔽任何字段**。
+  // 与后端 `data_quality.indicator_trust()` 严格同源 —— 两条日历码都不在
+  // `_SNAPSHOT_BLOCKING_WARNINGS` 里，`masked_fields_for_codes()` 也不认它们。
+  // UNAVAILABLE 的"阻断"只发生在筛选门禁（409），详情页指标该显示的照常显示；
+  // INCOMPLETE 是 disclose 级，仅披露"少数标的的窗口计数可能偏移"。
+  // 若这里写 '*'，会出现"详情页一片「—」而 API 仍有值"的自相矛盾。
+  TRADING_CALENDAR_UNAVAILABLE: [],
+  TRADING_CALENDAR_INCOMPLETE: [],
   // 2026-11-14 资产健康规则（reports/120 §5 J9；条数以
   // asset_health.RULE_CODES 为准，当前 14 条）：
   // - 绝大多数是披露型 → []：它们是"数据资产该维护了"，不是"这些数字不可信"；
@@ -296,6 +314,14 @@ export const WARNING_CODE_LABELS: Readonly<Record<KnownWarningCode, string>> = {
   MINIMUM_DATA_NOT_READY: '部分股票未达最小可用数据门槛',
   CODE_IDENTITY_ALIAS: '行情表存在股票代码别名（同一只股票两种写法）',
   LIVE_SCHEMA_INCOMPATIBLE: '库结构与当前代码要求的 schema 不兼容',
+  // 2026-11-20 交易日历两级。文案口径与 `app/core/data_quality.py`
+  // `_trading_calendar_coverage()` 的 verdict 一一对应：
+  //   unavailable = 日历表空 / 查询失败 / 受影响 ≥1/3 → 硬阻断筛选；
+  //   partial     = 日历存在，但部分标的的行情覆盖与日历不匹配 → 只披露。
+  TRADING_CALENDAR_UNAVAILABLE:
+    '交易日历整体不可用（日历表为空、查询失败，或受影响标的超过 1/3），无法判定指标窗口 — 已阻断本次筛选',
+  TRADING_CALENDAR_INCOMPLETE:
+    '交易日历存在，但部分标的的行情覆盖与日历不匹配，这些标的的技术指标窗口计数可能偏移 — 不影响其余标的，本次结果照常给出',
   EXT_PERIOD_MISMATCH: '扩展指标的报告期与界面快照不一致',
   FIELD_COVERAGE_LOW: '界面字段最新报告期覆盖率过低',
   FIELD_COVERAGE_DROP: '界面字段覆盖率较上一期断崖下跌',

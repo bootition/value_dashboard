@@ -20,13 +20,57 @@ DEFAULT_MINIMUM_HISTORY_OBSERVATIONS = 1_300
 DEFAULT_MINIMUM_VOLUME_OBSERVATIONS = 1_300
 READINESS_CACHE_KEY = "minimum_data_readiness"
 READINESS_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
-_SCREENING_BLOCKING_WARNINGS = {
-    "FINANCIAL_SHELL_ROWS",
-    "SNAPSHOT_STALE",
-    "CODE_IDENTITY_ALIAS",
-    "LIVE_SCHEMA_INCOMPATIBLE",
-    "LINEAGE_INVALID",
+# ─── 筛选门禁的告警三级（2026-11-20 裁定，依据 reports/122 §2.3 J9 + S2 §2.3）───
+#
+# 三级语义与 `app/core/quality/asset_health.py` 的 severity 完全同源：
+#   block     = 该告警意味着**筛选结果不可信**（读不到列 / 无法判定窗口），
+#               必须整库拦截；
+#   disclose  = 数据有瑕疵但结论仍可用：**不拦**，但必须在响应里如实披露
+#               （`disclosed_warnings`），让用户自己判断；
+#   inventory = 纯盘点，既不拦也不进告警展示之外的地方。
+#
+# 判据（2026-11-20 正式库实测，见 reports/150）：
+#   * 旧表把 6 条统统当硬阻断，于是"数据有点瑕疵"= "整个筛选不能用"，
+#     用户点「运行筛选」只得到「数据质量不满足筛选要求 / 去数据状态页看」。
+#   * 其中 4 条快照域告警（FINANCIAL_SHELL_ROWS / SNAPSHOT_STALE /
+#     CODE_IDENTITY_ALIAS / LINEAGE_INVALID）**已经有唯一的硬阻断实现**
+#     —— `_SNAPSHOT_BLOCKING_WARNINGS` + `indicator_trust()` +
+#     `app/web/api/screening.py::_require_trusted_snapshot()`（409
+#     `snapshot_values_untrusted`，并同步遮蔽详情页指标）。本表把它们降为
+#     disclose **不是撤掉阻断，而是删掉重复的第二道 409**：真正让数字不可
+#     信时，快照信任门禁仍然先于本表拦截，且给出的原因更具体、详情页结论
+#     与筛选页保持一致。把同一条告警在两个地方各判一次，只会让用户看到
+#     更含糊的那条消息。
+#   * LIVE_SCHEMA_INCOMPATIBLE / TRADING_CALENDAR_UNAVAILABLE 没有其它实现，
+#     且真的会让结果错，**保持 block**。
+SCREENING_SEVERITY_BLOCK = "block"
+SCREENING_SEVERITY_DISCLOSE = "disclose"
+SCREENING_SEVERITY_INVENTORY = "inventory"
+
+_SCREENING_WARNING_SEVERITY: dict[str, str] = {
+    # 实时 schema 不兼容：列都读不到，"筛选结果"无从谈起 —— 硬阻断。
+    "LIVE_SCHEMA_INCOMPATIBLE": SCREENING_SEVERITY_BLOCK,
+    # 交易日历整体不可用（表空/查询失败/系统性缺日期）→ 无法判定窗口 —— 硬阻断。
+    # 注意：日历"存在但个别标的覆盖不全"走的是另一个码
+    # `TRADING_CALENDAR_INCOMPLETE`（disclose），见 `_trading_calendar_coverage`。
+    "TRADING_CALENDAR_UNAVAILABLE": SCREENING_SEVERITY_BLOCK,
+    # ↓ 以下 4 条的快照域硬阻断由 `_SNAPSHOT_BLOCKING_WARNINGS` 唯一负责。
+    "FINANCIAL_SHELL_ROWS": SCREENING_SEVERITY_DISCLOSE,
+    "SNAPSHOT_STALE": SCREENING_SEVERITY_DISCLOSE,
+    "CODE_IDENTITY_ALIAS": SCREENING_SEVERITY_DISCLOSE,
+    "LINEAGE_INVALID": SCREENING_SEVERITY_DISCLOSE,
+    # 日历存在但少量标的的日历覆盖不匹配：只有这几只的窗口计数可能偏移，
+    # 不影响其余标的的排名 —— 披露，不拦（正式库实测 197/5,580 = 3.5%）。
+    "TRADING_CALENDAR_INCOMPLETE": SCREENING_SEVERITY_DISCLOSE,
 }
+
+# 只有 block 级才 ready=False。**从表派生，禁止另处手写清单**：
+# 新增 block 必须改 `_SCREENING_WARNING_SEVERITY`（单点），回归护栏
+# `tests/regression/test_screening_readiness_severity.py` 会盯住这层派生关系。
+_SCREENING_BLOCKING_WARNINGS = frozenset(
+    code for code, severity in _SCREENING_WARNING_SEVERITY.items()
+    if severity == SCREENING_SEVERITY_BLOCK
+)
 # 2026-11-12 契约 §3：发布门禁的硬阻断阈值。违规票 ≤ 阈值时逐股隔离发布，
 # 超过阈值才认为"系统性单位错乱"并整批拒绝。
 # 正式库 ~5,580 只上市股票 → 阈值 max(50, 55) = 55 只。
@@ -95,20 +139,110 @@ def store_cached_data_readiness(sqlite: SQLiteStore, readiness: dict) -> dict:
     return value
 
 
+def _screening_warning_detail(
+    code: str, quality: dict, calendar: dict,
+) -> dict:
+    """Per-code evidence payload for a screening warning (never raises)."""
+    try:
+        if code == "TRADING_CALENDAR_UNAVAILABLE":
+            return {
+                "calendar_days": calendar.get("calendar_days"),
+                "affected_stocks": calendar.get("affected_stocks"),
+                "listed_stocks": calendar.get("listed_stocks"),
+            }
+        if code == "TRADING_CALENDAR_INCOMPLETE":
+            return {
+                "calendar_days": calendar.get("calendar_days"),
+                "affected_stocks": calendar.get("affected_stocks"),
+                "listed_stocks": calendar.get("listed_stocks"),
+                "raw_gap_excess_stocks": calendar.get("raw_gap_excess_stocks"),
+                "qfq_gap_excess_stocks": calendar.get("qfq_gap_excess_stocks"),
+                "raw_stocks_outside_calendar": calendar.get("raw_stocks_outside_calendar"),
+                "qfq_stocks_outside_calendar": calendar.get("qfq_stocks_outside_calendar"),
+            }
+        if code == "SNAPSHOT_STALE":
+            dates = quality.get("dates") or {}
+            snapshot = dates.get("indicator_snapshot") or {}
+            return {
+                "price_date": dates.get("price"),
+                "snapshot_price_date": snapshot.get("latest_price_date"),
+            }
+        if code == "FINANCIAL_SHELL_ROWS":
+            dates = quality.get("dates") or {}
+            return {
+                "balance_sheet": dates.get("balance_sheet"),
+                "income_statement": dates.get("income_statement"),
+            }
+        if code == "LINEAGE_INVALID":
+            lineage = quality.get("lineage") or {}
+            return {
+                key: lineage.get(key)
+                for key in (
+                    "invalid_hash_rows", "orphan_batch_rows",
+                    "archive_gap_rows", "hash_mismatch_rows",
+                )
+                if key in lineage
+            }
+        if code == "CODE_IDENTITY_ALIAS":
+            return dict(quality.get("code_identity") or {})
+    except Exception:  # noqa: BLE001 - 披露细节坏掉不能反过来阻断筛选
+        logger.warning("筛选告警披露细节构建失败(非致命): %s", code, exc_info=True)
+    return {}
+
+
 def screening_readiness(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
-    """Return one fail-closed policy decision for every screening entry point."""
+    """Return one fail-closed policy decision for every screening entry point.
+
+    2026-11-20（reports/150）**告警三级**：此前这里把 6 条告警写成硬阻断集合，
+    于是任何一条命中 = 整个筛选功能不可用（用户实测：「运行筛选」只弹出
+    「数据质量不满足筛选要求」）。现在按 `_SCREENING_WARNING_SEVERITY` 分级：
+
+      * ``ready`` 只由 **block 级**决定（``_SCREENING_BLOCKING_WARNINGS``）；
+      * disclose/inventory 级 **不拦**，但必须进 ``disclosed_warnings``，
+        并带 ``warnings``（code + severity + detail）供前端如实展示；
+      * ``warning_codes`` **语义不变**：仍是"硬阻断码"的排序列表（老客户端
+        只读这个键也不会误判成"放行"）。
+    """
     quality = build_data_quality_status_cached(duck, sqlite)
-    blocking_warnings = sorted(
-        set(quality["warning_codes"]) & _SCREENING_BLOCKING_WARNINGS
-    )
-    if not _has_complete_trading_calendar(duck, sqlite):
-        blocking_warnings.append("TRADING_CALENDAR_UNAVAILABLE")
+    calendar = _trading_calendar_coverage(duck, sqlite)
+    codes = list(quality["warning_codes"])
+    verdict = calendar.get("verdict")
+    if verdict == "unavailable":
+        codes.append("TRADING_CALENDAR_UNAVAILABLE")
+    elif verdict == "partial":
+        codes.append("TRADING_CALENDAR_INCOMPLETE")
+    # 字典序去重：同一码只出现一次，且顺序稳定（缓存/指纹比对要看稳定性）。
+    warnings = []
+    seen: set[str] = set()
+    for code in codes:
+        if code in seen:
+            continue
+        seen.add(code)
+        warnings.append({
+            "code": code,
+            # 未登记的码按 disclose 处理 = 维持旧行为（旧表里它们都不阻断）。
+            "severity": _SCREENING_WARNING_SEVERITY.get(code, SCREENING_SEVERITY_DISCLOSE),
+            "detail": _screening_warning_detail(code, quality, calendar),
+        })
+    buckets: dict[str, list[str]] = {
+        SCREENING_SEVERITY_BLOCK: [],
+        SCREENING_SEVERITY_DISCLOSE: [],
+        SCREENING_SEVERITY_INVENTORY: [],
+    }
+    for warning in warnings:
+        buckets[warning["severity"]].append(warning["code"])
+    blocking_warnings = sorted(buckets[SCREENING_SEVERITY_BLOCK])
     return {
         # 2026-08-27：筛选/导出不再被少数股票的数据缺口全局阻断。
-        # 只保留真正影响全库/全字段的硬性阻断（schema、lineage 等）。
+        # 2026-11-20：连"数据有点瑕疵"也不再阻断 —— 只有 block 级才不 ready。
         "ready": not blocking_warnings,
         "readiness": quality["minimum_data_readiness"],
+        # 向后兼容：语义仍是"硬阻断码"。
         "warning_codes": blocking_warnings,
+        "blocking_warnings": blocking_warnings,
+        "disclosed_warnings": sorted(buckets[SCREENING_SEVERITY_DISCLOSE]),
+        "inventory_warnings": sorted(buckets[SCREENING_SEVERITY_INVENTORY]),
+        "warnings": warnings,
     }
 
 SCREENING_READINESS_CACHE_KEY = "screening_readiness_cache"
@@ -841,8 +975,37 @@ _CALENDAR_GAP_TOLERANCE = 0.02
 _CALENDAR_GAP_ABSOLUTE_FLOOR = 20
 
 
-def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
-    """Require every listed stock's raw and QFQ series to match the persisted calendar.
+# 「系统性」判据（2026-11-20）：受影响上市股 ≥ 1/3 视为日历整体不可用。
+# 与本文件 `GATE_HARD_BLOCK_SHARE_DIVISOR` 同一套"占比而非绝对阈值"的理由：
+# 绝对阈值在小库上形同虚设，占比判据与库大小无关。正式库实测受影响
+# 197/5,580 = 3.5% → 远低于 1/3 → 披露而非阻断（见 reports/150）。
+_CALENDAR_SYSTEMIC_SHARE_DIVISOR = 3
+
+
+def _calendar_status(verdict: str, **counts) -> dict:
+    return {"verdict": verdict, **counts}
+
+
+def _trading_calendar_coverage(duck: DuckDBStore, sqlite: SQLiteStore) -> dict:
+    """Classify how usable the persisted trading calendar is for screening.
+
+    返回 ``{"verdict": "ok" | "partial" | "unavailable", ...counts}``：
+
+      * ``ok``          —— 每个上市股的 raw/qfq 序列都与日历对得上；
+      * ``partial``     —— 日历存在，但**个别标的**的覆盖不匹配（缺 bar 或
+        有日历里没有的成交日）。只有这些标的的窗口计数可能偏移，其余标的
+        的排名不受影响 → 筛选门禁按 disclose 处理（不拦，如实披露）；
+      * ``unavailable`` —— 日历表为空 / 查询失败 / 受影响上市股 ≥ 1/3（系统性）
+        → 无法判定窗口，硬阻断。
+
+    2026-11-20 缺陷（本次修复）：旧实现把这些情况一律返回 False → 门禁
+    `TRADING_CALENDAR_UNAVAILABLE` → **整个筛选永久 409**，而正式库的真实
+    规模只有 197/5,580 只标的（3.5%），用户却完全无法筛选。同时旧实现把
+    门禁缓存写死成 ``{"result": True}``（无论本次判定是真是假），于是
+    "第一次报错、立刻重试又通过、下次更新后再报错"——失败被缓存成了通过
+    （fail-open）。现在缓存存**真实 verdict + counts**，判定与缓存不再互相矛盾。
+
+    Require every listed stock's raw and QFQ series to match the persisted calendar.
 
     A global first/last-date check permits an incomplete calendar or an internal
     per-stock gap to pass. Screening indicators read latest_close from raw but
@@ -860,7 +1023,8 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
             for row in sqlite.query("SELECT trade_date FROM trading_dates")
         })
         if not calendar_dates:
-            return False
+            # 日历表空 = 无法判定任何窗口 → 硬阻断（安全底线）。
+            return _calendar_status("unavailable", calendar_days=0)
         # 2026-08-30 提速：该检查在正式库上约需 60 秒，且筛选每次运行都会
         # 调用。交易日历与价格覆盖不变时结果不会变，因此用输入指纹做持久
         # 缓存；价格更新后仅首次筛选会重算一次。
@@ -891,8 +1055,15 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
             )
             if cached:
                 payload = json.loads(cached[0]["value"] or "{}")
-                if payload.get("fingerprint") == fingerprint and "result" in payload:
-                    return bool(payload["result"])
+                status = payload.get("status")
+                if (
+                    payload.get("fingerprint") == fingerprint
+                    and isinstance(status, dict)
+                    and status.get("verdict") in {"ok", "partial", "unavailable"}
+                ):
+                    return status
+                # 旧格式（{"result": bool}）不再采信：它把失败写成了 True，
+                # 继续读它就是继续 fail-open。直接落到下面的重算。
         except Exception:
             fingerprint = None
         values = ", ".join("(CAST(? AS DATE))" for _ in calendar_dates)
@@ -948,27 +1119,48 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
                   AND window_days - have_days > {_CALENDAR_GAP_ABSOLUTE_FLOOR}
             ),
             raw_missing_calendar AS (
-                SELECT r.stock_code, 'raw' AS source
+                SELECT DISTINCT r.stock_code
                 FROM price_daily_raw r
                 JOIN stock_meta m ON m.stock_code = r.stock_code AND m.is_listed IS TRUE
                 LEFT JOIN calendar c ON c.trade_date = r.trade_date
                 WHERE r.close IS NOT NULL AND c.trade_date IS NULL
             ),
             qfq_missing_calendar AS (
-                SELECT q.stock_code, 'qfq' AS source
+                SELECT DISTINCT q.stock_code
                 FROM price_daily_qfq q
                 JOIN stock_meta m ON m.stock_code = q.stock_code AND m.is_listed IS TRUE
                 LEFT JOIN calendar c ON c.trade_date = q.trade_date
                 WHERE q.close IS NOT NULL AND c.trade_date IS NULL
+            ),
+            affected AS (
+                SELECT stock_code FROM raw_gap_excess
+                UNION SELECT stock_code FROM qfq_gap_excess
+                UNION SELECT stock_code FROM raw_missing_calendar
+                UNION SELECT stock_code FROM qfq_missing_calendar
             )
-            SELECT stock_code FROM raw_gap_excess
-            UNION SELECT stock_code FROM qfq_gap_excess
-            UNION SELECT stock_code FROM raw_missing_calendar
-            UNION SELECT stock_code FROM qfq_missing_calendar
-            LIMIT 1
+            SELECT
+                (SELECT COUNT(*) FROM raw_gap_excess) AS raw_gap_excess_stocks,
+                (SELECT COUNT(*) FROM qfq_gap_excess) AS qfq_gap_excess_stocks,
+                (SELECT COUNT(*) FROM raw_missing_calendar) AS raw_stocks_outside_calendar,
+                (SELECT COUNT(*) FROM qfq_missing_calendar) AS qfq_stocks_outside_calendar,
+                -- 逐个 stock_code 去重：同一个标的同时命中 raw/qfq 只算 1 只，
+                -- 否则"受影响标的数"会被重复计数、把披露级误升成系统性阻断。
+                (SELECT COUNT(*) FROM affected) AS affected_stocks,
+                (SELECT COUNT(*) FROM stock_meta WHERE is_listed IS TRUE) AS listed_stocks
             """,
             calendar_dates,
         )
+        counts = dict(missing[0]) if missing else {}
+        affected = int(counts.get("affected_stocks") or 0)
+        listed = int((missing[0] if missing else {}).get("listed_stocks") or 0)
+        counts["calendar_days"] = len(calendar_dates)
+        if affected == 0:
+            status = _calendar_status("ok", **counts)
+        elif listed > 0 and affected * _CALENDAR_SYSTEMIC_SHARE_DIVISOR >= listed:
+            # ≥1/3 的上市股同时覆盖不上 → 视同日历整体不可用（系统性）。
+            status = _calendar_status("unavailable", **counts)
+        else:
+            status = _calendar_status("partial", **counts)
         try:
             if fingerprint is not None:
                 sqlite.execute(
@@ -976,13 +1168,29 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
                        VALUES ('trading_calendar_gate_cache', ?, ?)
                        ON CONFLICT(key) DO UPDATE SET value=excluded.value,
                                                      updated_at=excluded.updated_at""",
-                    [json.dumps({"fingerprint": fingerprint, "result": True}), datetime.now(UTC).isoformat()],
+                    [
+                        json.dumps(
+                            {"fingerprint": fingerprint, "status": status},
+                            ensure_ascii=False,
+                        ),
+                        datetime.now(UTC).isoformat(),
+                    ],
                 )
         except Exception:
             pass
-        return not missing
+        return status
     except Exception:
-        return False
+        # 查询本身失败 = 无法判定 → 保持 fail-closed。
+        return _calendar_status("unavailable", error="calendar_query_failed")
+
+
+def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
+    """True only when the calendar is fully consistent (verdict == "ok").
+
+    保留这个布尔入口：既有调用方/测试读的是"完整"语义；分级由
+    :func:`_trading_calendar_coverage` 负责。
+    """
+    return _trading_calendar_coverage(duck, sqlite).get("verdict") == "ok"
 
 
 # 2026-11-12 契约 §3：股本完整性地板的唯一 SQL。

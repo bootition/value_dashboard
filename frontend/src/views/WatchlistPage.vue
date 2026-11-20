@@ -48,6 +48,11 @@ interface WatchlistResponse {
   groups: WatchlistGroup[]
   trust?: IndicatorTrust
   auto_update_in_progress?: boolean
+  /** 后端降级契约（2026-11-24）：`unavailable` = DuckDB 取名称/指标失败
+   *  （通常是自动更新持锁），**分组与股票行照常返回**，只是没有名称/指标。
+   *  绝不能把它读成"你没有分组"。 */
+  enrichment?: 'ok' | 'unavailable'
+  enrichment_error?: string | null
 }
 
 const router = useRouter()
@@ -58,6 +63,9 @@ const items = ref<WatchlistItem[]>([])
 const groups = ref<WatchlistGroup[]>([])
 const trust = ref<IndicatorTrust | null>(null)
 const autoUpdateInProgress = ref(false)
+// DuckDB 富化是否降级：只影响"名称/指标显示得全不全"，不影响分组与行是否存在。
+const enrichmentUnavailable = ref(false)
+const enrichmentError = ref<string | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
 // `default` 只是后端持久化 key（历史数据无法改名，改库会丢分组），
@@ -92,6 +100,16 @@ const selectedIsManual = computed(() => isManualGroup(selectedGroup.value))
 const emptyDescription = computed(
   () => selectedGroup.value ? `「${selectedGroupLabel.value}」里还没有公司` : '还没有可显示的自选分组',
 )
+
+/** 降级横幅：必须说清"是名称/指标没加载"，而不是让页面看起来像"自选没了"。 */
+const enrichmentNotice = computed(() => {
+  if (!enrichmentUnavailable.value) return ''
+  const reason = (enrichmentError.value ?? '').slice(0, 120)
+  if (enrichmentError.value === 'duckdb_read_locked' || autoUpdateInProgress.value) {
+    return '数据正在自动更新，股票名称/指标暂未加载；分组与股票代码已正常显示，稍后刷新即可。'
+  }
+  return `股票名称/指标暂时加载失败${reason ? `（${reason}）` : ''}；分组与股票代码已正常显示，稍后刷新重试。`
+})
 
 function resolveSelectedGroup(list: WatchlistGroup[]): string | null {
   const visible = list.filter((g) => !isManualGroup(g.group_name) || g.cnt > 0)
@@ -195,7 +213,8 @@ const tableColumns = computed(() => {
         }, { default: () => '复制' }),
       ]),
     },
-    name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || '—' },
+    // 降级时名称取不到（DuckDB 正在更新）：用代码兜底，绝不留一列空白。
+    name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || r.stock_code },
     exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
     group_name: { title: '分组', key: 'group_name', width: 90, render: (r) => displayGroupName(r.group_name) },
     listing_date: { title: '上市日期', key: 'listing_date', width: 96, sorter: 'default', render: (r) => r.listing_date || '—' },
@@ -229,6 +248,8 @@ function applyResponse(data: WatchlistResponse) {
   groups.value = data.groups ?? []
   trust.value = data.trust ?? null
   autoUpdateInProgress.value = data.auto_update_in_progress === true
+  enrichmentUnavailable.value = data.enrichment === 'unavailable'
+  enrichmentError.value = data.enrichment_error ?? null
 }
 
 async function fetchWatchlist() {
@@ -236,20 +257,29 @@ async function fetchWatchlist() {
   try {
     const params = selectedGroup.value ? { group: selectedGroup.value } : {}
     const resp = await axios.get<WatchlistResponse>('/api/watchlist/list', { params })
+    // 侧栏分组先落地：它只来自 SQLite，既不依赖第二趟请求，也不依赖 DuckDB
+    // 富化。2026-11-24 用户实测：此前一拍请求失败就把 groups 一起炸掉，
+    // 573 行的分组被渲染成「还没有分组」——是"数据全丢了"的来源。
+    applyResponse(resp.data)
     // 首次进入 / 当前分组消失（例如最后一只股票被移除）时，自动落到第一个
     // 真实规则分组再取一次数：不要停留在空的占位分组上。
-    // 分组与列表必须一起落地，否则会先闪一帧"该分组暂无公司"。
     const next = resolveSelectedGroup(resp.data.groups ?? [])
     if (next !== selectedGroup.value) {
       selectedGroup.value = next
-      const scoped = await axios.get<WatchlistResponse>('/api/watchlist/list', {
-        params: next ? { group: next } : {},
-      })
-      applyResponse(scoped.data)
-      items.value = scoped.data.items
+      try {
+        const scoped = await axios.get<WatchlistResponse>('/api/watchlist/list', {
+          params: next ? { group: next } : {},
+        })
+        applyResponse(scoped.data)
+        items.value = scoped.data.items ?? []
+      } catch (e: unknown) {
+        // 第二趟失败不回滚第一趟：分组与列表都已经拿到了，先显示全部自选，
+        // 别让"切换分组失败"退化成"你没有分组 / 你没有公司"。
+        items.value = resp.data.items ?? []
+        message.warning(friendlyErrorMessage(e, '切换分组失败，先显示全部自选'))
+      }
     } else {
-      applyResponse(resp.data)
-      items.value = resp.data.items
+      items.value = resp.data.items ?? []
     }
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '加载自选失败'))
@@ -337,14 +367,16 @@ onMounted(fetchWatchlist)
         <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="分组名（留空则为手动收录）" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
       </aside>
       <section class="watchlist-content">
-        <n-alert v-if="autoUpdateInProgress" type="info" :show-icon="true" class="watchlist-warning">数据正在自动更新，以下指标为更新前快照，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。</n-alert>
+        <n-alert v-if="enrichmentUnavailable" type="info" :show-icon="true" class="watchlist-warning">{{ enrichmentNotice }}<n-button size="tiny" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></n-alert>
+        <n-alert v-else-if="autoUpdateInProgress" type="info" :show-icon="true" class="watchlist-warning">数据正在自动更新，以下指标为更新前快照，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" class="watchlist-warning">当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <div class="watchlist-card">
           <template v-if="hasVisibleGroups">
             <div class="watchlist-card-heading"><div><p>{{ selectedIsManual ? '手动加入' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedIsManual ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><div class="watchlist-actions"><span v-if="items.length > 0">显示 {{ items.length }} 家公司</span><n-button v-if="hasRefreshableRule" size="small" :loading="refreshing" @click="refreshGroup">按最新数据重新筛选</n-button><n-button v-if="items.length > 0" size="small" @click="showColumnSettings = !showColumnSettings">配置列</n-button></div></div>
             <div v-if="showColumnSettings && items.length > 0" class="watchlist-toolbar"><n-checkbox-group v-model:value="selectedColumns"><n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" /></n-checkbox-group></div>
             <n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped />
-            <n-empty v-else class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">去筛选规则页跑一次规则，把命中结果保存到自选，就能在这里看到公司。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
+            <n-empty v-else-if="!loading" class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">去筛选规则页跑一次规则，把命中结果保存到自选，就能在这里看到公司。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
+            <p v-else class="watchlist-empty-hint watchlist-loading">正在加载自选…</p>
           </template>
           <n-empty v-else-if="!loading" class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">自选分组来自筛选规则的保存结果。先到筛选规则页跑一条规则，把命中结果保存到自选，就会生成对应分组；也可以直接在左侧输入股票代码收进「手动收录」。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
           <p v-else class="watchlist-empty-hint watchlist-loading">正在加载分组…</p>

@@ -65,7 +65,6 @@ function mountPanel() {
       default: () =>
         h(ScreeningResultsPanel, {
           results: RESULT_ROWS,
-          strictOnly: false,
           executionTime: 5,
           basePoolSize: 100,
           dataDate: '2026-06-30',
@@ -197,7 +196,6 @@ describe('ScreeningResultsPanel 持久化流程（PRD §12 SC14/SC16/SC17）', (
         default: () =>
           h(ScreeningResultsPanel, {
             results: RESULT_ROWS,
-            strictOnly: false,
             executionTime: 5,
             basePoolSize: 100,
             dataDate: '2026-06-30',
@@ -229,7 +227,6 @@ describe('ScreeningResultsPanel 持久化流程（PRD §12 SC14/SC16/SC17）', (
         default: () =>
           h(ScreeningResultsPanel, {
             results: RESULT_ROWS,
-            strictOnly: false,
             executionTime: 5,
             basePoolSize: 6000,
             dataDate: '2026-06-30',

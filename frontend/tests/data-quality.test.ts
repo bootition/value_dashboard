@@ -11,6 +11,8 @@ import assert from 'node:assert/strict'
 import {
   isIndicatorUntrusted,
   KNOWN_WARNING_CODES,
+  WARNING_CODE_LABELS,
+  warningCodeLabel,
   DIVIDEND_INDICATOR_FIELDS,
   SNAPSHOT_DEPENDENT_INDICATOR_FIELDS,
   type DataQualityStatus,
@@ -202,4 +204,56 @@ test('isIndicatorUntrusted: FINANCIAL_SHELL_ROWS affects snapshot-dependent indi
     isIndicatorUntrusted('pe_ratio', ['FINANCIAL_SHELL_ROWS']),
     true,
   )
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 中文文案穷尽性（2026-11-20）
+//
+// 根因（用户实测）：后端在 `_SCREENING_WARNING_SEVERITY` 里新增/改名告警码时，
+// 前端 `WARNING_CODE_LABELS` 没有同步 → `warningCodeLabel()` 回落成裸英文码，
+// 状态页/结果面板直接给用户看 `TRADING_CALENDAR_INCOMPLETE`。
+// 这里用**穷尽性断言**把它钉死：KNOWN_WARNING_CODES 里每一个都必须有中文。
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('WARNING_CODE_LABELS：每个已知告警码都有中文（不漏任何一条）', () => {
+  const missing: string[] = []
+  for (const code of KNOWN_WARNING_CODES) {
+    const label = WARNING_CODE_LABELS[code]
+    if (typeof label !== 'string' || label.trim() === '') missing.push(`${code}（缺文案）`)
+    else if (label === code) missing.push(`${code}（文案是英文码本身）`)
+    // 必须有中文汉字，否则等于没翻译
+    else if (!/[\u4e00-\u9fa5]/.test(label)) missing.push(`${code}（无汉字）`)
+  }
+  assert.deepEqual(missing, [], `以下告警码没有中文名：${missing.join('、')}`)
+})
+
+test('warningCodeLabel：交易日历两级都有中文，且不再回落成裸英文码', () => {
+  for (const code of ['TRADING_CALENDAR_UNAVAILABLE', 'TRADING_CALENDAR_INCOMPLETE'] as const) {
+    assert.ok(KNOWN_WARNING_CODES.includes(code), `${code} 未登记进 KNOWN_WARNING_CODES`)
+    const label = warningCodeLabel(code)
+    assert.notEqual(label, code)
+    assert.match(label, /[\u4e00-\u9fa5]/)
+  }
+})
+
+test('交易日历两级文案语义分离：整体不可用=阻断，部分标的=披露', () => {
+  const unavailable = warningCodeLabel('TRADING_CALENDAR_UNAVAILABLE')
+  const incomplete = warningCodeLabel('TRADING_CALENDAR_INCOMPLETE')
+  assert.notEqual(unavailable, incomplete)
+  // UNAVAILABLE 已被瘦身为「整体不可用」，仍是硬阻断；不许再写成「不完整」。
+  assert.match(unavailable, /整体不可用/)
+  assert.match(unavailable, /阻断/)
+  assert.ok(!unavailable.includes('不完整'), 'UNAVAILABLE 不得再表述为「不完整」')
+  // INCOMPLETE 是 disclose 级：日历存在、只有部分标的覆盖不匹配、不拦筛选。
+  assert.match(incomplete, /部分标的/)
+  assert.ok(!incomplete.includes('阻断'), 'INCOMPLETE 是披露级，文案不能写「阻断」')
+})
+
+test('交易日历两级都不遮蔽字段（与后端 indicator_trust 同源）', () => {
+  // 后端 `data_quality.indicator_trust()` 的 _SNAPSHOT_BLOCKING_WARNINGS /
+  // masked_fields_for_codes 都不认这两条码 → 前端也不得把指标打成不可信。
+  for (const code of ['TRADING_CALENDAR_UNAVAILABLE', 'TRADING_CALENDAR_INCOMPLETE'] as const) {
+    assert.equal(isIndicatorUntrusted('roe', [code]), false)
+    assert.equal(isIndicatorUntrusted('period_return', [code]), false)
+  }
 })

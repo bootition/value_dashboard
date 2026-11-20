@@ -20,6 +20,7 @@ import {
   rankColumnValue,
   RESULT_METADATA_COLUMNS,
   useScreeningColumns,
+  useSharedResultColumnSelection,
 } from '../../src/composables/useScreeningColumns.ts'
 import type { ScreeningIndicator } from '../../src/types/screening.ts'
 
@@ -93,5 +94,87 @@ describe('useScreeningColumns 提交给后端的 columns', () => {
     expect(values).toContain('pe_ttm::rank::market_rank')
     // 元数据列不会因指标同名而重复
     expect(values.filter((v) => v === 'stock_code')).toHaveLength(1)
+  })
+})
+
+describe('默认结果列必须含核心指标（2026-11-20 用户实测：点不到 ROE 表头）', () => {
+  // 根因：结果面板的列下拉是 `Object.keys(firstRow)`（ScreeningResultsPanel.vue），
+  // 而 firstRow 的键 = `/run` 返回的列 = 本文件提交的 columns。旧默认列里
+  // 一个指标都没有 → 表头没有 ROE/ROCE → 用户「点 ROE 表头排序」时无从点起。
+  const CORE_METRICS = [
+    'roce_10y_median',
+    'roe',
+    'pe_ttm',
+    'pb_mrq',
+    'ttm_dividend_yield',
+    'revenue_yoy',
+    'net_profit_yoy',
+    'total_market_cap',
+  ] as const
+
+  it('默认列包含全部核心指标', () => {
+    for (const metric of CORE_METRICS) {
+      expect(DEFAULT_RESULT_COLUMNS, `默认列缺少 ${metric}`).toContain(metric)
+    }
+  })
+
+  it('默认列仍是纯字段名（不带 @参数 / ::rank:: 合成值）', () => {
+    for (const column of DEFAULT_RESULT_COLUMNS) {
+      expect(column).not.toContain('@')
+      expect(column).not.toContain('::rank::')
+    }
+  })
+
+  it('每个默认列在页面下拉里都有「中文名(单位)」选项（指标清单为空也不许露英文）', () => {
+    const cols = useScreeningColumns({
+      indicators: ref<readonly ScreeningIndicator[]>([]),
+      rankModes: ref<Array<{ label: string; value: string }>>([]),
+      indicatorOptions: computed(() => []),
+    })
+    const byValue = new Map(cols.resultColumnOptions.value.map((o) => [o.value, o.label]))
+    for (const column of DEFAULT_RESULT_COLUMNS) {
+      const label = byValue.get(column)
+      expect(label, `${column} 没有下拉选项`).toBeTruthy()
+      expect(label!, `${column} 的选项仍是英文：${label}`).toMatch(/[\u4e00-\u9fa5]/)
+    }
+    // 单位：市值写「亿」、百分比写「%」
+    expect(byValue.get('total_market_cap')).toContain('亿')
+    expect(byValue.get('roe')).toContain('%')
+    expect(byValue.get('revenue_yoy')).toContain('%')
+    expect(byValue.get('pe_ttm')).toContain('倍')
+  })
+})
+
+describe('两个列选择入口共享同一份状态（seam）', () => {
+  it('显式传入同一个 selection 时，两处读到同一份选择', () => {
+    const shared = useSharedResultColumnSelection()
+    const baseDeps = () => ({
+      indicators: ref<readonly ScreeningIndicator[]>([]),
+      rankModes: ref<Array<{ label: string; value: string }>>([]),
+      indicatorOptions: computed(() => []),
+      selection: shared,
+    })
+    const page = useScreeningColumns(baseDeps())
+    const panel = useScreeningColumns(baseDeps())
+    try {
+      page.selectedResultColumns.value = ['stock_code', 'roe']
+      expect(panel.selectedResultColumns.value).toEqual(['stock_code', 'roe'])
+      expect(panel.selectedColumnsForRequest()).toEqual(['stock_code', 'roe'])
+      expect(page.selectedColumnsForRequest()).toEqual(['stock_code', 'roe'])
+    } finally {
+      shared.value = []
+    }
+  })
+
+  it('不传 selection 时互不影响（默认仍是各自独立的 ref）', () => {
+    const mk = () => useScreeningColumns({
+      indicators: ref<readonly ScreeningIndicator[]>([]),
+      rankModes: ref<Array<{ label: string; value: string }>>([]),
+      indicatorOptions: computed(() => []),
+    })
+    const a = mk()
+    const b = mk()
+    a.selectedResultColumns.value = ['stock_code']
+    expect(b.selectedResultColumns.value).toEqual([])
   })
 })

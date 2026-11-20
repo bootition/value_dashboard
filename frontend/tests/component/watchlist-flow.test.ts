@@ -272,3 +272,118 @@ describe('WatchlistPage 分组展示归一与空态出口（用户实测：不�
     expect(get).toHaveBeenCalled()
   })
 })
+
+describe('WatchlistPage DuckDB 降级（2026-11-24 用户实测：自选"看起来全没了"）', () => {
+  // 用户库里的真实分组名（逐字）。当天自动更新持锁，`/api/watchlist/list` 返回
+  // 503 → groups 一起丢失 → 侧栏渲染成「还没有分组」，而库里 573 行完好。
+  const REAL_GROUP = '往股东口袋装钱的大老公司'
+
+  function degradedItem(code: string) {
+    // 降级响应里名称是空串、12 个快照字段全是 null（后端 `enrichment: "unavailable"`）。
+    return {
+      stock_code: code, name: '', exchange: '', csrc_l1: null, listing_date: null,
+      group_name: REAL_GROUP, source_rule_id: 48, source_result_id: 10,
+      added_at: '2026-09-16 11:53:02',
+      latest_close: null, pe_ttm: null, pb_mrq: null, roe: null,
+      gross_margin: null, net_margin: null, debt_ratio: null,
+      revenue_yoy: null, net_profit_yoy: null, dividend_yield: null,
+      total_market_cap: null, circ_market_cap: null,
+    }
+  }
+
+  function mountPage() {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/:pathMatch(.*)*', component: { template: '<div />' } }],
+    })
+    return mount(NDialogProvider, {
+      slots: { default: () => h(NMessageProvider, null, { default: () => h(WatchlistPage) }) },
+      global: { plugins: [router] },
+    })
+  }
+
+  it('降级时照常渲染分组与股票行（代码兜底），并给出不挡路的"正在更新"提示', async () => {
+    const get = axios.get as Mock
+    const codes = ['002961', '300938', '600851']
+    get.mockImplementation(() => Promise.resolve({
+      data: {
+        items: codes.map(degradedItem),
+        count: codes.length,
+        groups: [{ group_name: REAL_GROUP, cnt: codes.length }],
+        trust: { warning_codes: [], untrusted_all: false, untrusted_fields: [] },
+        auto_update_in_progress: true,
+        enrichment: 'unavailable',
+        enrichment_error: 'duckdb_read_locked',
+      },
+    }))
+
+    const wrapper = mountPage()
+    await flushPromises()
+    const text = wrapper.text()
+
+    // 绝不出现"你的自选没了"这类假象
+    expect(text).not.toContain('还没有可显示的自选分组')
+    expect(text).not.toContain('还没有分组')
+    // 分组与每一行都在，名称缺失时用代码兜底
+    expect(text).toContain(REAL_GROUP)
+    expect(text).toContain('显示 3 家公司')
+    for (const code of codes) expect(text).toContain(code)
+    // 不挡路的降级提示（说清是"名称/指标没加载"，不是"你没有分组"）
+    expect(text).toContain('数据正在自动更新，股票名称/指标暂未加载')
+  })
+
+  it('非锁类富化失败也照常渲染行，并把真实原因显示出来（不伪装成"更新中"）', async () => {
+    const get = axios.get as Mock
+    get.mockImplementation(() => Promise.resolve({
+      data: {
+        items: [degradedItem('600519')],
+        count: 1,
+        groups: [{ group_name: REAL_GROUP, cnt: 1 }],
+        trust: { warning_codes: [], untrusted_all: false, untrusted_fields: [] },
+        auto_update_in_progress: false,
+        enrichment: 'unavailable',
+        enrichment_error: 'OperationalError: Cannot open file',
+      },
+    }))
+
+    const wrapper = mountPage()
+    await flushPromises()
+    const text = wrapper.text()
+
+    expect(text).toContain('600519')
+    expect(text).toContain('股票名称/指标暂时加载失败')
+    expect(text).toContain('Cannot open file')
+    expect(text).not.toContain('数据正在自动更新，股票名称/指标暂未加载')
+  })
+
+  it('第二趟分组取数失败时保留第一趟的分组与全部行，不退化成"你没有分组"', async () => {
+    const get = axios.get as Mock
+    const codes = ['002961', '300938']
+    let call = 0
+    get.mockImplementation((_url: string, config?: { params?: { group?: string } }) => {
+      call += 1
+      if (config?.params?.group) {
+        return Promise.reject(new Error('Network Error'))
+      }
+      return Promise.resolve({
+        data: {
+          items: codes.map(degradedItem),
+          count: codes.length,
+          groups: [{ group_name: REAL_GROUP, cnt: codes.length }],
+          trust: { warning_codes: [], untrusted_all: false, untrusted_fields: [] },
+          enrichment: 'ok',
+          enrichment_error: null,
+        },
+      })
+    })
+
+    const wrapper = mountPage()
+    await flushPromises()
+    const text = wrapper.text()
+
+    expect(call).toBeGreaterThanOrEqual(2) // 先全量、再按分组
+    expect(text).toContain(REAL_GROUP)
+    for (const code of codes) expect(text).toContain(code)
+    expect(text).not.toContain('还没有可显示的自选分组')
+  })
+})
