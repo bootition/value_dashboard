@@ -26,6 +26,9 @@
 
 from __future__ import annotations
 
+import copy
+import functools
+import inspect
 from datetime import date, datetime, timedelta
 from typing import Any, Literal
 
@@ -35,6 +38,8 @@ from fastapi.responses import FileResponse
 from app.core.blacklist import blacklisted_codes, exclusion_condition
 from app.core.financial_period import cn_today
 from app.core.pdf.manager import PDFManager
+from app.core.storage import read_cache
+from app.core.storage.duckdb_store import DuckDBReadLockedError
 from app.web.api.blacklist import require_visible_stock
 
 # 2026-11-22：本模块内部拆成两个子 router，对外仍只暴露一个 `router`（见文件末尾聚合）。
@@ -50,8 +55,67 @@ _guarded_router = APIRouter(
     dependencies=[Depends(require_visible_stock)],
 )
 
-TTM_FLOW_FIELDS = (
-    "revenue",
+def _request_path(request: Any, default: str) -> str:
+    """取请求路径做缓存 key；**裸 Request（单测直接调端点）没有 scope["path"]**。
+
+    `starlette.datastructures.URL` 在 scope 缺 path 时抛 `KeyError`，而
+    `tests/regression/test_stock_detail_periods.py` 正是用
+    `Request({"type": "http", "app": ...})` 直接调端点函数。取不到就退回块名：
+    块名加上绑定参数已经足够区分缓存条目。
+    """
+    try:
+        return request.url.path
+    except Exception:  # noqa: BLE001 - 裸 Request 的 URL 属性可能抛任何 KeyError
+        return default
+
+
+def _resilient_block(name: str, empty: dict[str, Any]):
+    """详情页单块的「更新中不整页失败」包装（2026-11-20 用户实测第 2 条）。
+
+    为什么要有它：详情页是十几个块拼出来的。写进程持锁时任何一块的 `read_query`
+    抛 `DuckDBReadLockedError` 都会让**整页** 503 —— 用户连公司名都看不见。
+    有了它：每块各自回退到「本块上次成功值」；没有就降级成空块 + 明确的
+    `data_freshness.degraded` 标记。**空块不等于静默假绿**：标记在响应里，
+    前端可以说"这块正在更新，稍后自动重试"。
+
+    签名保持原样（`functools.wraps` 让 FastAPI 仍按原签名解析路径/查询参数），
+    缓存 key 由「块名 + 路径 + 绑定后的全部非 request 参数」组成 ——
+    `days`/`period`/`metric` 这些参数不同就是不同的缓存条目，不能串。
+    """
+
+    def decorate(fn):
+        signature = inspect.signature(fn)
+        key_params = tuple(
+            param for param in signature.parameters if param != "request"
+        )
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            bound = signature.bind_partial(*args, **kwargs)
+            request = kwargs.get("request")
+            if request is None:
+                request = next(
+                    (value for value in args if isinstance(value, Request)), None
+                )
+            if request is None:  # 直接调用且没传 request：按原语义执行
+                return fn(*args, **kwargs)
+            duck = request.app.state.duck
+            path = _request_path(request, name)
+            key = (
+                name,
+                path,
+                *(repr(bound.arguments.get(param)) for param in key_params),
+            )
+            return read_cache.serve_block(
+                duck, key, lambda: fn(*args, **kwargs), empty=copy.deepcopy(empty)
+            )
+
+        return wrapper
+
+    return decorate
+
+
+TTM_FLOW_FIELDS = (    "revenue",
     "cost_of_revenue",
     "operating_profit",
     "net_profit",
@@ -275,6 +339,7 @@ def _history_stats(values: list[float]) -> dict:
 
 
 @_guarded_router.get("/{stock_code}/metric-history")
+@_resilient_block("metric-history", {"series": [], "statistics": None})
 def get_metric_history(
     stock_code: str,
     request: Request,
@@ -484,6 +549,16 @@ _NAME_SPACE_RE = r"[\s\p{Zs}]+"
 _NORMALIZED_NAME_SQL = rf"regexp_replace(name, '{_NAME_SPACE_RE}', '', 'g')"
 _NORMALIZED_TERM_SQL = rf"regexp_replace(?, '{_NAME_SPACE_RE}', '', 'g')"
 
+#: 搜索结果条数上限。SQL 的 `LIMIT` 与内存快照路径的 `limit=` 共用这一个数，
+#: 否则锁窗口内外的结果条数会不一致（前端会看起来"搜索变少了"）。
+SEARCH_LIMIT = 20
+
+#: `/info` 要的 `stock_meta` 列。从快照列清单派生（`is_listed` 是搜索过滤用的，
+#: 不进详情响应），避免"快照里有、详情没取"的两份清单漂移。
+_INFO_COLUMNS: tuple[str, ...] = tuple(
+    column for column in read_cache.STOCK_META_COLUMNS if column != "is_listed"
+)
+
 
 @_public_router.get("/search")
 def search_stocks(
@@ -494,6 +569,11 @@ def search_stocks(
 
     名称匹配忽略内嵌空白（ASCII 空格/制表/U+3000 全角空格/NBSP），
     代码仍是前缀/子串匹配 + `ESCAPE` 转义，排序优先级不变。
+
+    **更新中照常可用**（2026-11-20 用户实测第 1 条）：写进程持锁时 `read_query`
+    开不出新连接，但本端点只需要 `stock_meta` 这 6,285 行小表 —— 用进程内快照
+    在内存里复刻同一套语义（`read_cache.search_stock_meta`），并标注
+    `served_from="cache"` + `as_of`。**只有"从来没成功读到过快照"才如实 503**。
     """
     term = query.strip()
     if not term:
@@ -505,61 +585,117 @@ def search_stocks(
     # 本端点是 stock_detail 里唯一没有 `{stock_code}` 路径参数的路由，因此不能
     # 用 secure_router 的依赖守卫，改为池条件过滤——片段仍由
     # `app/core/blacklist.py::exclusion_condition()` 唯一生成。
-    blacklist_pred, blacklist_params = exclusion_condition(
-        "stock_code", blacklisted_codes(request.app.state.sqlite)
-    )
+    blacklisted = blacklisted_codes(request.app.state.sqlite)
+    blacklist_pred, blacklist_params = exclusion_condition("stock_code", blacklisted)
     blacklist_filter = f"AND {blacklist_pred}" if blacklist_pred else ""
-    rows = request.app.state.duck.read_query(
-        f"""SELECT stock_code, name, exchange, csrc_l1
-           FROM stock_meta
-           WHERE is_listed IS TRUE
-             AND (stock_code LIKE ? ESCAPE '\\'
-                  OR {_NORMALIZED_NAME_SQL} LIKE {_NORMALIZED_TERM_SQL} ESCAPE '\\')
-             {blacklist_filter}
-           ORDER BY
-             CASE WHEN stock_code = ? THEN 0
-                  WHEN {_NORMALIZED_NAME_SQL} = {_NORMALIZED_TERM_SQL} THEN 1
-                  ELSE 2 END,
-             stock_code
-           LIMIT 20""",
-        [pattern, pattern, *blacklist_params, term, term],
-    )
-    return {"items": rows, "query": term}
+    duck = request.app.state.duck
+
+    def _live() -> list[dict]:
+        return duck.read_query(
+            f"""SELECT stock_code, name, exchange, csrc_l1
+               FROM stock_meta
+               WHERE is_listed IS TRUE
+                 AND (stock_code LIKE ? ESCAPE '\\'
+                      OR {_NORMALIZED_NAME_SQL} LIKE {_NORMALIZED_TERM_SQL} ESCAPE '\\')
+                 {blacklist_filter}
+               ORDER BY
+                 CASE WHEN stock_code = ? THEN 0
+                      WHEN {_NORMALIZED_NAME_SQL} = {_NORMALIZED_TERM_SQL} THEN 1
+                      ELSE 2 END,
+                 stock_code
+               LIMIT 20""",
+            [pattern, pattern, *blacklist_params, term, term],
+        )
+
+    try:
+        rows = _live()
+    except DuckDBReadLockedError:
+        # 锁窗口：只读内存快照，**不重试打库**（reload=False），避免每个搜索请求
+        # 都去撞一个已经锁死的文件。没有快照就原样上抛 → 全局 handler 503。
+        snapshot = read_cache.stock_meta_snapshot(duck, reload=False)
+        if snapshot is None:
+            raise
+        rows = read_cache.search_stock_meta(
+            snapshot, term, blacklisted, limit=SEARCH_LIMIT
+        )
+        return {
+            "items": rows,
+            "query": term,
+            **read_cache.freshness_meta(
+                read_cache.entry_for_snapshot(snapshot),
+                live=False,
+                stale=True,
+                reason_code=read_cache.REASON_READ_LOCKED,
+                notice=read_cache.STALE_NOTICE,
+            ),
+        }
+
+    # 读成功：让快照在后台跟上（自己不发查询也能兜住下一次锁窗口）。
+    read_cache.schedule_stock_meta_refresh(duck)
+    return {"items": rows, "query": term, "served_from": read_cache.SERVED_FROM_LIVE,
+            "as_of": None, "stale": False}
 
 
 @_guarded_router.get("/{stock_code}/info")
 def get_stock_info(stock_code: str, request: Request) -> dict:
-    """股票基本信息 (PRD §14 SD1: 代码/名称/拼音/最近收盘价/价格日期)"""
+    """股票基本信息 (PRD §14 SD1: 代码/名称/拼音/最近收盘价/价格日期)
+
+    **更新中照常可打开**（2026-11-20 用户实测第 2 条）：写进程持锁时先回退到
+    本端点上一次成功值（含 `latest_close`），没有就退到 `stock_meta` 全表快照
+    —— 公司名/行业/上市日仍然显示，只有收盘价置空并标注 `stale`。
+    "更新时间"与"能不能看见这家公司叫什么"没有任何必然联系。
+    """
     duck = request.app.state.duck
-    rows = duck.read_query(
-        "SELECT stock_code, name, pinyin, exchange, listing_date, "
-        "is_st, is_suspended, csrc_l1, csrc_l2 "
-        "FROM stock_meta WHERE stock_code = ?",
-        [stock_code],
-    )
-    if not rows:
-        raise HTTPException(status_code=404, detail="stock not found")
 
-    info = rows[0]
+    def _live() -> dict:
+        rows = duck.read_query(
+            f"SELECT {', '.join(_INFO_COLUMNS)} FROM stock_meta WHERE stock_code = ?",
+            [stock_code],
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="stock not found")
 
-    # 最新收盘价
-    price_rows = duck.read_query(
-        "SELECT trade_date, close FROM price_daily_raw "
-        "WHERE stock_code = ? AND close IS NOT NULL "
-        "ORDER BY trade_date DESC LIMIT 1",
-        [stock_code],
-    )
-    if price_rows:
-        info["latest_close"] = price_rows[0]["close"]
-        info["latest_price_date"] = str(price_rows[0]["trade_date"])
-    else:
+        info = rows[0]
+
+        # 最新收盘价
+        price_rows = duck.read_query(
+            "SELECT trade_date, close FROM price_daily_raw "
+            "WHERE stock_code = ? AND close IS NOT NULL "
+            "ORDER BY trade_date DESC LIMIT 1",
+            [stock_code],
+        )
+        if price_rows:
+            info["latest_close"] = price_rows[0]["close"]
+            info["latest_price_date"] = str(price_rows[0]["trade_date"])
+        else:
+            info["latest_close"] = None
+            info["latest_price_date"] = None
+        return info
+
+    try:
+        info, meta = read_cache.serve(duck, ("stock_info", stock_code), _live)
+    except DuckDBReadLockedError:
+        # 冷缓存撞上锁窗口：仍然能从全表快照拼出"这家公司是谁"。
+        snapshot = read_cache.stock_meta_snapshot(duck, reload=False)
+        row = snapshot.by_code.get(stock_code) if snapshot is not None else None
+        if row is None:
+            raise
+        info = {column: row.get(column) for column in _INFO_COLUMNS}
         info["latest_close"] = None
         info["latest_price_date"] = None
+        meta = read_cache.freshness_meta(
+            read_cache.entry_for_snapshot(snapshot),
+            live=False,
+            stale=True,
+            reason_code=read_cache.REASON_READ_LOCKED,
+            notice=read_cache.STALE_NOTICE,
+        )
 
-    return info
+    return {**info, **meta}
 
 
 @_guarded_router.get("/{stock_code}/kline")
+@_resilient_block("kline", {"candles": [], "count": 0})
 def get_kline(
     stock_code: str,
     request: Request,
@@ -750,6 +886,7 @@ def _merge_sum(a: float | None, b: float | None) -> float | None:
 
 
 @_guarded_router.get("/{stock_code}/indicators")
+@_resilient_block("indicators", {"indicators": {}, "trust": {}, "freshness": {}})
 def get_indicators(stock_code: str, request: Request) -> dict:
     """指标摘要 (PRD §14 SD3: 估值/盈利/成长/安全/股东回报)"""
     duck = request.app.state.duck
@@ -876,6 +1013,7 @@ def _update_lock_active(duck: Any) -> bool:
 
 
 @_guarded_router.get("/{stock_code}/financial-trend")
+@_resilient_block("financial-trend", {"trend": [], "count": 0})
 def get_financial_trend(
     stock_code: str,
     request: Request,
@@ -999,6 +1137,7 @@ def _apply_published_overrides(rows: list[dict], sqlite, stock_code: str) -> Non
 
 
 @_guarded_router.get("/{stock_code}/business-overview")
+@_resilient_block("business-overview", {"profile": {}, "breakdown": []})
 def get_business_overview(stock_code: str, request: Request) -> dict:
     """业务概览 (依据 S1 独立低频域: 公司资料 + 主营构成 + 溯源)
 
@@ -1102,6 +1241,7 @@ def get_business_overview(stock_code: str, request: Request) -> dict:
 
 
 @_guarded_router.get("/{stock_code}/treasury-comparison")
+@_resilient_block("treasury-comparison", {"series": [], "missing": [], "tenors_available": []})
 def get_treasury_comparison(
     stock_code: str,
     request: Request,
@@ -1284,6 +1424,7 @@ def get_treasury_comparison(
 
 
 @_guarded_router.get("/{stock_code}/research-statistics")
+@_resilient_block("research-statistics", {"series": [], "statistics": None})
 def get_research_statistics(
     stock_code: str,
     request: Request,
@@ -1334,6 +1475,7 @@ def get_research_statistics(
 
 
 @_guarded_router.get("/{stock_code}/source-audit")
+@_resilient_block("source-audit", {"batch_audit": [], "field_audit": []})
 def get_source_audit(
     stock_code: str,
     request: Request,
@@ -1447,6 +1589,7 @@ CUSTOM_TREND_FIELDS: dict[str, str] = {
 
 
 @_guarded_router.get("/{stock_code}/custom-trend")
+@_resilient_block("custom-trend", {"trend": [], "fields": [], "count": 0})
 def get_custom_trend(
     stock_code: str,
     request: Request,
@@ -1660,6 +1803,7 @@ def _total_market_cap_reference(duck: Any, stock_code: str) -> dict[str, Any] | 
 
 
 @_guarded_router.get("/{stock_code}/ah-metrics")
+@_resilient_block("ah-metrics", {})
 def get_ah_metrics(stock_code: str, request: Request) -> dict:
     """A+H「H 股市值」快照（依据 S6 §2.7 J12 的产品出口；依据 S6 接入）
 

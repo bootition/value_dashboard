@@ -255,6 +255,15 @@ SCREENING_READINESS_CACHE_TTL_SECONDS = 600
 # 上约 20-60s，一个自动更新窗口约几分钟；给一个完整 TTL 的重试余量足以
 # 覆盖"刷新正在进行"，再久就说明刷新确实坏了，必须同步重算而不是继续骗。
 SCREENING_READINESS_STALE_MAX_AGE_SECONDS = 2 * SCREENING_READINESS_CACHE_TTL_SECONDS
+# 2026-11-20 性能修复（用户实测"筛选要等 20-30 秒"）：上面的 2×TTL 硬上限只在
+# **指纹不可信**时才必要。指纹一旦是"内容敏感"的（未降级 + 有 content_epoch），
+# 它就等价于输入内容的哈希：**同指纹 = 同输入**，那条决策仍然是当前输入的正确
+# 函数值，墙钟年龄不提供任何额外的正确性保证。此时把硬上限放到 24h，只作为
+# "世界变了但指纹看不见"（外部 CLI 直写库等）的最终兜底；TTL(600s) 仍然是
+# **刷新触发点**，每次命中都会 single-flight 后台重算，所以正常情况决策几分钟
+# 内就是新的。实测：正式库空闲态每次"缓存超过 20 分钟"都要在请求线程里同步
+# 重建一次全量质量（25-37s），这是用户看到的主要卡顿。
+SCREENING_READINESS_CONFIDENT_STALE_MAX_AGE_SECONDS = 24 * 60 * 60
 SCREENING_READINESS_REFRESH_STATE_KEY = "screening_readiness_refresh_state"
 FULL_DATA_QUALITY_CACHE_KEY = "data_quality_status_cache_v1"
 
@@ -721,6 +730,42 @@ def screening_readiness_fingerprint(
         return None, {}
 
 
+def readiness_fingerprint_confident(fingerprint: str, sqlite: SQLiteStore) -> bool:
+    """指纹是否**内容敏感**（决定旧决策还能不能按指纹复用）。
+
+    只有同时满足两条，"同指纹 ⇒ 同输入 ⇒ 决策仍是当前正确值"才成立：
+      ① 指纹没有降级（没有表退回 count-only，见 :func:`fingerprint_degradation`）；
+      ② `content_epoch` 可用（>0）——它由每个成功的 DuckDB 写事务 +1，
+         正是"就地 UPDATE 也改变指纹"的那一半信号（见 content_epoch 模块）。
+    任一不成立都返回 ``False``，调用方退回 2×TTL 的 fail-closed 硬上限。
+    """
+    if not fingerprint:
+        return False
+    try:
+        if fingerprint_degradation(fingerprint) is not None:
+            return False
+        from app.core.storage import content_epoch as _content_epoch
+
+        return int(_content_epoch.current(sqlite.paths.sqlite_path) or 0) > 0
+    except Exception:
+        return False
+
+
+def readiness_stale_limit_seconds(payload: dict | None) -> int:
+    """A same-fingerprint decision may be how old before we refuse to serve it.
+
+    2026-11-20 性能修复：门槛从"墙上时钟"改成"指纹可信度"。
+    指纹内容敏感时（缓存行带 ``fingerprint_confident: true``），同指纹即同输入，
+    旧决策仍是当前输入的正确函数值 —— 年龄不提供任何额外正确性保证，因此给
+    24h 兜底上限（真正的刷新由 TTL + 后台 single-flight 完成）。
+    指纹降级 / 无纪元 / **旧格式缓存行没有该标记**时，一律保持 2×TTL 的
+    fail-closed 硬上限（宁可同步重算一次 25s，也不对外假绿）。
+    """
+    if isinstance(payload, dict) and payload.get("fingerprint_confident") is True:
+        return SCREENING_READINESS_CONFIDENT_STALE_MAX_AGE_SECONDS
+    return SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+
+
 def load_screening_readiness_entry(
     sqlite: SQLiteStore, fingerprint: str, *, allow_stale: bool = False,
 ) -> dict | None:
@@ -764,7 +809,7 @@ def load_screening_readiness_entry(
             updated_dt = updated_dt.replace(tzinfo=UTC)
         age_seconds = (datetime.now(UTC) - updated_dt).total_seconds()
         max_age = (
-            SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+            readiness_stale_limit_seconds(payload)
             if allow_stale
             else SCREENING_READINESS_CACHE_TTL_SECONDS
         )
@@ -781,6 +826,9 @@ def load_screening_readiness_entry(
             # 盲区 4：这条决策当初算的时候指纹是否降级。旧缓存行没有该字段
             # → None（不是"未降级"的断言，只是"当时没记录"）。
             "fingerprint_degraded": payload.get("fingerprint_degraded"),
+            # 2026-11-20：本条决策的指纹是否内容敏感（决定它还能按指纹复用多久）
+            "fingerprint_confident": payload.get("fingerprint_confident") is True,
+            "stale_limit_seconds": max_age,
         }
     except Exception:
         return None
@@ -932,6 +980,12 @@ def store_screening_readiness_cache(
                     "fingerprint": fingerprint,
                     "decision": decision,
                     "fingerprint_degraded": fingerprint_degradation(fingerprint),
+                    # 2026-11-20：把"指纹是否内容敏感"随决策一起落盘，读取侧据此
+                    # 决定旧决策的可复用上限（见 readiness_stale_limit_seconds）。
+                    # ⚠️ 只有**成功算完**的决策才会走到这里，失败/未算出绝不落盘。
+                    "fingerprint_confident": readiness_fingerprint_confident(
+                        fingerprint, sqlite
+                    ),
                     "updated_at": datetime.now(UTC).isoformat(),
                 }, default=str),
                 datetime.now(UTC).isoformat(),

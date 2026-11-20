@@ -20,6 +20,7 @@ vi.mock('axios', () => {
 
 import axios from 'axios'
 import type { Mock } from 'vitest'
+import { resetScreeningSession } from '../../src/stores/screening-session.ts'
 
 function makeRouter() {
   return createRouter({ history: createMemoryHistory(), routes: [] })
@@ -40,6 +41,10 @@ function mountScreeningPage() {
 describe('ScreeningPage 常驻范围条件（范围并入筛选条件，去掉滑动开关）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // 「切页保状态」把运行结果提到了模块级单例（stores/screening-session.ts）：
+    // 一个 it 就是一次新的页面加载（= F5），必须整体重置，否则上一个用例的
+    // 结果会漏到下一个用例里，测试变成顺序相关。
+    resetScreeningSession()
     const get = axios.get as Mock
     get.mockImplementation((url: string) => {
       if (url === '/api/screening/draft') {

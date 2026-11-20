@@ -21,6 +21,10 @@ import { cloneScreeningRule } from '../types/screening.ts'
 import type { Ref } from 'vue'
 import axios, { isAxiosError } from 'axios'
 import type { ResultColumn, ScreeningRuleNode } from '../types/screening.ts'
+import {
+  DEFAULT_RESULT_COLUMNS_VERSION,
+  isLegacyDefaultResultColumns,
+} from './useScreeningColumns.ts'
 
 /** 常驻范围条件（与页面 `reactive` 同形）。 */
 export interface ScreeningBasePool {
@@ -43,8 +47,12 @@ export interface ScreeningDraftDeps {
   basePool: ScreeningBasePool
   strictOnly: Ref<boolean>
   selectedResultColumns: Ref<string[]>
+  /** 用户手动移除过的条件自动列（跨刷新保留，避免条件字段被强行加回）。 */
+  removedResultColumns?: Ref<string[]>
   /** 草稿里没有 result_columns 时回落的默认列。 */
   defaultResultColumns: readonly string[]
+  /** 当前默认列版本；旧版本且列等于旧默认集合时迁移。 */
+  defaultResultColumnsVersion?: number
   /** 后端列定义 → 结果列合成取值。 */
   encodeResultColumn: (column: ResultColumn) => string
   notify: DraftNotifier
@@ -68,10 +76,13 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
     basePool,
     strictOnly,
     selectedResultColumns,
+    removedResultColumns,
     defaultResultColumns,
+    defaultResultColumnsVersion,
     encodeResultColumn,
     notify,
   } = deps
+  const expectedColumnsVersion = defaultResultColumnsVersion ?? DEFAULT_RESULT_COLUMNS_VERSION
   const reloadPage = deps.reloadPage ?? (() => { window.location.reload() })
 
   let draftTimer: ReturnType<typeof setTimeout> | undefined
@@ -107,6 +118,8 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
       base_pool: { ...basePool },
       strict_only: strictOnly.value,
       result_columns: selectedResultColumns.value,
+      removed_result_columns: removedResultColumns?.value ?? [],
+      default_columns_version: expectedColumnsVersion,
     }
   }
 
@@ -181,7 +194,7 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
   }
 
   watch(
-    [ruleTree, basePool, strictOnly, selectedResultColumns],
+    [ruleTree, basePool, strictOnly, selectedResultColumns, () => removedResultColumns?.value ?? []],
     saveDraftSoon,
     { deep: true },
   )
@@ -192,11 +205,16 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
         conditions?: ScreeningRuleNode
         base_pool?: Partial<ScreeningBasePool>
         strict_only?: boolean
-        result_columns?: string[]
+        result_columns?: ResultColumn[]
+        removed_result_columns?: string[]
+        default_columns_version?: number
       } | null; revision?: number }>(draftResponseSchema)
       const draft = response.data.draft
       draftRevision.value = response.data.revision ?? 0
       if (!draft) {
+        if (selectedResultColumns.value.length === 0) {
+          selectedResultColumns.value = [...defaultResultColumns]
+        }
         syncEditorSnapshot()
         return
       }
@@ -208,8 +226,22 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
       }
       if (draft.base_pool) Object.assign(basePool, draft.base_pool)
       if (typeof draft.strict_only === 'boolean') strictOnly.value = draft.strict_only
+      if (removedResultColumns && Array.isArray(draft.removed_result_columns)) {
+        removedResultColumns.value = draft.removed_result_columns.filter(
+          (column): column is string => typeof column === 'string' && column.length > 0,
+        )
+      }
       if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
-        selectedResultColumns.value = draft.result_columns.map(encodeResultColumn)
+        const encoded = draft.result_columns.map(encodeResultColumn)
+        // 版本缺失/落后，且恰好是旧默认集合 → 迁移；用户自定义过的列保持原样。
+        if (
+          draft.default_columns_version !== expectedColumnsVersion
+          && isLegacyDefaultResultColumns(encoded)
+        ) {
+          selectedResultColumns.value = [...defaultResultColumns]
+        } else {
+          selectedResultColumns.value = encoded
+        }
       } else if (selectedResultColumns.value.length === 0) {
         selectedResultColumns.value = [...defaultResultColumns]
       }

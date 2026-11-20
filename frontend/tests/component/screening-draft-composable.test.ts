@@ -33,11 +33,12 @@ vi.mock('axios', () => {
 
 import axios from 'axios'
 import { useScreeningDraft } from '../../src/composables/useScreeningDraft.ts'
+import { DEFAULT_RESULT_COLUMNS, DEFAULT_RESULT_COLUMNS_VERSION } from '../../src/composables/useScreeningColumns.ts'
 import type { ScreeningRuleNode } from '../../src/types/screening.ts'
 
 const DRAFT_URL = '/api/screening/draft'
 
-function mountDraft() {
+function mountDraft(options: { defaultResultColumns?: readonly string[] } = {}) {
   const ruleTree = reactive<ScreeningRuleNode>({
     id: 'root',
     logic: 'AND',
@@ -50,6 +51,7 @@ function mountDraft() {
   // 与实际页面传什么值无关。页面级的"恒 false"由 screening-run-flow.test.ts 断言。
   const strictOnly = ref(false)
   const selectedResultColumns = ref<string[]>(['stock_code'])
+  const removedResultColumns = ref<string[]>([])
   const notify = { warning: vi.fn(), success: vi.fn(), error: vi.fn() }
   const scope: EffectScope = effectScope()
   const draft = scope.run(() => useScreeningDraft({
@@ -57,11 +59,22 @@ function mountDraft() {
     basePool,
     strictOnly,
     selectedResultColumns,
-    defaultResultColumns: ['stock_code', 'name'],
+    removedResultColumns,
+    defaultResultColumns: options.defaultResultColumns ?? ['stock_code', 'name'],
+    defaultResultColumnsVersion: DEFAULT_RESULT_COLUMNS_VERSION,
     encodeResultColumn: (column) => (typeof column === 'string' ? column : String(column.field)),
     notify,
   }))!
-  return { draft, ruleTree, basePool, strictOnly, selectedResultColumns, notify, scope }
+  return {
+    draft,
+    ruleTree,
+    basePool,
+    strictOnly,
+    selectedResultColumns,
+    removedResultColumns,
+    notify,
+    scope,
+  }
 }
 
 describe('useScreeningDraft 未保存修改判定（reports/42 P3）', () => {
@@ -142,6 +155,8 @@ describe('useScreeningDraft 自动保存（防抖 400ms + 单飞 + 409）', () =
     expect(body.draft.strict_only).toBe(true)
     expect(body.draft.base_pool).toEqual({ exclude_st: true, exclude_suspended: true, min_listing_years: 3 })
     expect(body.draft.result_columns).toEqual(['stock_code', 'name'])
+    expect(body.draft.default_columns_version).toBe(DEFAULT_RESULT_COLUMNS_VERSION)
+    expect(body.draft.removed_result_columns).toEqual([])
     expect(body.draft.conditions.logic).toBe('OR')
     // 成功后刷新快照 + 记录新 revision
     expect(draft.draftState().revision).toBe(7)
@@ -260,6 +275,70 @@ describe('useScreeningDraft 自动保存（防抖 400ms + 单飞 + 409）', () =
     ;(axios.get as Mock).mockRejectedValue(new Error('boom'))
     await expect(draft.restoreDraft()).resolves.toBeUndefined()
     expect(notify.warning).toHaveBeenCalledWith('无法恢复最近筛选草稿')
+    scope.stop()
+  })
+})
+
+
+describe('旧草稿默认列迁移（默认列版本号）', () => {
+  const OLD_8 = [
+    'stock_code', 'name', 'exchange', 'listing_date',
+    'csrc_l1', 'csrc_l2', 'latest_close', 'total_market_cap',
+  ]
+
+  it('版本缺失且 result_columns 恰好是旧 8 列默认集合 → 替换为新默认', async () => {
+    const { draft, selectedResultColumns, scope } = mountDraft({
+      defaultResultColumns: DEFAULT_RESULT_COLUMNS,
+    })
+    ;(axios.get as Mock).mockResolvedValue({
+      data: {
+        draft: {
+          conditions: { id: 'root', logic: 'AND', rules: [] },
+          result_columns: OLD_8,
+        },
+        revision: 3,
+      },
+    })
+    await draft.restoreDraft()
+    expect(selectedResultColumns.value).toEqual([...DEFAULT_RESULT_COLUMNS])
+    expect(selectedResultColumns.value).not.toContain('csrc_l1')
+    scope.stop()
+  })
+
+  it('用户自定义过列（即使版本更旧）不被覆盖', async () => {
+    const { draft, selectedResultColumns, scope } = mountDraft({
+      defaultResultColumns: DEFAULT_RESULT_COLUMNS,
+    })
+    ;(axios.get as Mock).mockResolvedValue({
+      data: {
+        draft: {
+          conditions: { id: 'root', logic: 'AND', rules: [] },
+          result_columns: ['stock_code', 'roce_10y_median'],
+          default_columns_version: 0,
+        },
+        revision: 3,
+      },
+    })
+    await draft.restoreDraft()
+    expect(selectedResultColumns.value).toEqual(['stock_code', 'roce_10y_median'])
+    scope.stop()
+  })
+
+  it('恢复手动移除状态，后续条件重算也不会加回', async () => {
+    const { draft, removedResultColumns, scope } = mountDraft()
+    ;(axios.get as Mock).mockResolvedValue({
+      data: {
+        draft: {
+          conditions: { id: 'root', logic: 'AND', rules: [] },
+          result_columns: ['stock_code', 'name'],
+          removed_result_columns: ['roce_10y_median'],
+          default_columns_version: DEFAULT_RESULT_COLUMNS_VERSION,
+        },
+        revision: 3,
+      },
+    })
+    await draft.restoreDraft()
+    expect(removedResultColumns.value).toEqual(['roce_10y_median'])
     scope.stop()
   })
 })
