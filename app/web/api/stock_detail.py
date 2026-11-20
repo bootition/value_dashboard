@@ -270,8 +270,38 @@ def _metric_history_yoy(rows: list[dict], metric: str) -> list[dict]:
     return out
 
 
+def _roce_history_rows(duck: object, stock_code: str) -> list[dict]:
+    """ROCE 逐年序列（reports/150：用户要「点进去看每一年怎么变」）。
+
+    来源是 `roce_history`（与筛选口径同一张表、同一份计算代码），
+    而不是在详情页另算一遍 —— 否则详情与筛选会对不上。
+    逐年带上 EBIT 与已动用资本，用户能看到「分子分母各自怎么变」，
+    而不只是一个光秃秃的百分比。
+    """
+    rows = duck.read_query(
+        """SELECT report_date, roce, ebit, ce, ce_prev, status
+           FROM roce_history
+           WHERE stock_code = ? AND roce IS NOT NULL
+           ORDER BY report_date ASC""",
+        [stock_code],
+    )
+    return [
+        {
+            "report_date": row.get("report_date"),
+            "value": row.get("roce"),
+            "ebit": row.get("ebit"),
+            "capital_employed": row.get("ce"),
+            "capital_employed_prev": row.get("ce_prev"),
+            "status": row.get("status"),
+        }
+        for row in rows
+    ]
+
+
 def _metric_history_rows(duck: object, stock_code: str, metric: str, period: str) -> list[dict]:
     """Build the latest-restated historical series for one metric."""
+    if metric == "roce":
+        return _roce_history_rows(duck, stock_code)
     yoy_metrics = {"revenue_yoy", "net_profit_yoy", "deducted_profit_yoy"}
     base_period = "ttm" if metric in yoy_metrics else period
     rows = duck.read_query(
@@ -353,7 +383,8 @@ def get_metric_history(
     cf_to_net_profit/revenue_yoy/net_profit_yoy/deducted_profit_yoy。
     """
     yoy_metrics = {"revenue_yoy", "net_profit_yoy", "deducted_profit_yoy"}
-    supported = set(_METRIC_HISTORY_RATIO_FIELDS) | yoy_metrics
+    # ROCE 是派生域，不在 ratio 字段表里（它有自己的 roce_history 表）
+    supported = set(_METRIC_HISTORY_RATIO_FIELDS) | yoy_metrics | {"roce"}
     if metric not in supported:
         raise HTTPException(status_code=400, detail=f"unsupported metric: {metric}")
     duck = request.app.state.duck

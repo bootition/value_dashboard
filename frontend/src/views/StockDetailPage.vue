@@ -61,6 +61,8 @@ const {
 
 // ─── 图表指标下拉（一处一图，只保留有历史意义的指标）──────────────────
 const operationsMetricOptions = [
+  // reports/150：ROCE 逐年序列（来源 roce_history，与筛选同一口径）
+  { label: 'ROCE（已动用资本回报率）', value: 'roce' },
   { label: 'ROE', value: 'roe' },
   { label: 'ROA', value: 'roa' },
   { label: '毛利率', value: 'gross_margin' },
