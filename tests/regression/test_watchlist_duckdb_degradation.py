@@ -52,11 +52,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core.blacklist import add_stock
+from app.core.financial_period import expected_financial_period
 from app.core.storage.duckdb_store import DuckDBReadLockedError, DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.watchlist import router as watchlist_router
 from tests.conftest import insert_minimum_screenable_data
-from tests.support.seed import CURRENT_DATE, CURRENT_TIMESTAMP, Seed
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 from tests.support.seed_sqlite import SeedSqlite
 
 #: 用户库里唯一的分组名（逐字取自 `data/valuedashboard.sqlite`，含全角/中文标点）。
@@ -277,6 +278,63 @@ def test_watchlist_list_degrades_and_still_drops_blacklisted_rows(
 # ─── 4. 正常路径行为不变 ─────────────────────────────────────────
 
 
+def _last_bar_date(duck: DuckDBStore, code: str) -> str:
+    """播种后 `price_daily_raw` 里这根股票的**最后一根日线**日期（YYYY-MM-DD）。
+
+    与 `test_indicator_trust_api.py::_last_bar_date` 同一口径（两文件各自内联，
+    见该函数 docstring 的完整来龙去脉）：`insert_minimum_screenable_data` 只产
+    工作日 bar，`has_coherent_snapshot` 又要求快照的 `latest_price_date` 逐字等于
+    `MAX(price_daily_raw.trade_date)`。写 `CURRENT_DATE` 就在周末/节假日恒不达标
+    （2026-11-21 周六 00:45 4 条用例齐红即此）。
+    """
+    rows = duck.read_query(
+        "SELECT CAST(MAX(trade_date) AS VARCHAR) AS last_bar"
+        " FROM price_daily_raw WHERE stock_code = ?",
+        [code],
+    )
+    last_bar = rows[0]["last_bar"] if rows else None
+    assert last_bar, f"播种后 {code} 必须至少有一根日线（否则测试前提不成立）"
+    return last_bar
+
+
+def _readiness_period() -> str:
+    """本次播种用的报告期 = 生产口径的「按今天应当已发布的期」（季末）。
+
+    写死 `'2025-12-31'` 会让 `has_complete_financial_period`
+    （`complete_financials.report_date >= CURRENT_DATE - INTERVAL '18 months'`）
+    在 2027-07-01 之后恒不达标。`expected_financial_period()` 恒是距今 0~4 个月的
+    季末，窗口余量 >1 年。
+    """
+    return expected_financial_period()
+
+
+def _rebase_seed_period(duck: DuckDBStore, code: str, period: str) -> None:
+    """把 `insert_minimum_screenable_data` 写死的 `'2025-12-31'` 期整体搬到 `period`。
+
+    三表 / 快照 / `source_audit` 的报告期必须一起搬：readiness 还要求
+    「快照期 == 最新完整三表期」(`snapshot_period_alignment`) 与「完整期上有逐字段
+    血缘证据」(`lineage_coverage`，缺一条即阻断)。价格类批次
+    （`price_daily_raw` / `price_daily_qfq`）的 `source_audit.report_date` 是
+    "最新交易日"、不是报告期，不能动。
+    """
+    with duck.write_connection() as connection:
+        for table in ("balance_sheet", "income_statement", "cash_flow", "indicator_snapshot"):
+            # 表名来自上面四元素白名单常量，值走参数占位符。
+            connection.execute(
+                f"UPDATE {table} SET report_date = ? WHERE stock_code = ?",
+                [period, code],
+            )
+        connection.execute(
+            """UPDATE source_audit SET report_date = ?
+               WHERE stock_code = ?
+                 AND fetch_batch_id IN (
+                     SELECT batch_id FROM fetch_batch
+                     WHERE data_type NOT IN ('price_daily_raw', 'price_daily_qfq')
+                 )""",
+            [period, code],
+        )
+
+
 def _seed_enrichable_stock(duck: DuckDBStore, code: str, name: str) -> None:
     """一只"新鲜度/口径都合格"的股票，让 trust 决策落回空告警集。
 
@@ -293,15 +351,18 @@ def _seed_enrichable_stock(duck: DuckDBStore, code: str, name: str) -> None:
         is_suspended=False,
     )
     insert_minimum_screenable_data(duck, code)
+    period = _readiness_period()
+    _rebase_seed_period(duck, code, period)
     # 九个指标全部写满：`minimum_data_readiness` 少一个就报 `MINIMUM_DATA_NOT_READY`，
     # 于是 trust 变成"不可信"、所有数值被遮蔽 —— 那样这条用例就在测遮蔽而不是富化。
     Seed(duck).snapshot(
         code,
-        "2025-12-31",
+        period,
         # `latest_close` 必须等于 `price_daily_raw` 的最新收盘（这里统一是 10），
-        # 否则 `snapshot_price_coherence` 不达标 → MINIMUM_DATA_NOT_READY。
+        # `latest_price_date` 必须等于日线的最新交易日 —— 两条同时成立
+        # `snapshot_price_coherence` 才达标，否则 MINIMUM_DATA_NOT_READY。
         latest_close=10,
-        latest_price_date=CURRENT_DATE,
+        latest_price_date=_last_bar_date(duck, code),
         calculated_at=CURRENT_TIMESTAMP,
         pe_ttm=30.5,
         pb_mrq=8.0,
