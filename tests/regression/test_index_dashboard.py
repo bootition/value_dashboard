@@ -184,12 +184,25 @@ def test_index_api_endpoints(duckdb_store: DuckDBStore, sqlite_store: SQLiteStor
     erp = client.get("/api/index/000300/erp")
     assert erp.status_code == 200
     assert erp.json()["name"] == "沪深300"
-    assert erp.json()["series"]
+    erp_series = erp.json()["series"]
+    assert len(erp_series) == 40, "种子里的 40 个估值点必须逐点配上国债算出 ERP（不许静默丢点）"
+    assert [p["trade_date"] for p in erp_series] == sorted(
+        p["trade_date"] for p in erp_series
+    ), "ERP 序列必须按日期升序"
+    assert all(
+        p["erp"] == pytest.approx(1 / p["pe"] * 100 - p["treasury_yield"])
+        for p in erp_series
+    ), "series 里的 erp 必须真是 1/PE×100 − 10Y 国债收益率"
 
     detail = client.get("/api/index/000300/detail")
     assert detail.status_code == 200
-    assert detail.json()["erp"]["series"]
-    assert detail.json()["valuation"]["pe_series"]
+    assert detail.json()["erp"]["series"] == erp_series, "详情页必须与 /{code}/erp 同源同算"
+    pe_series = detail.json()["valuation"]["pe_series"]
+    assert len(pe_series) == 40, "PE 序列必须逐点返回（不许去重/截断）"
+    assert [p["trade_date"] for p in pe_series] == sorted(
+        p["trade_date"] for p in pe_series
+    ), "PE 序列必须按日期升序"
+    assert all(10.0 <= p["value"] <= 14.5 for p in pe_series), "PE 列必须是 pe_ttm，不能混入 PB"
 
     valuation = client.get("/api/index/SW801010/valuation")
     assert valuation.status_code == 200

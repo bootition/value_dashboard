@@ -471,7 +471,13 @@ def test_status_page_runs_cheap_only_but_passes_expensive_summary(
     assert expensive["status"] == "ok"
     assert expensive["generated_at"] == doctor["generated_at"]
     assert expensive["run_id"] == doctor["run_id"]
-    assert expensive["cached_at"]
+    stored_cached_at = sqlite_store.query(
+        "SELECT updated_at FROM data_refresh_state WHERE key = ?",
+        [asset_health.EXPENSIVE_SUMMARY_STATE_KEY],
+    )[0]["updated_at"]
+    assert expensive["cached_at"] == stored_cached_at, (
+        "cached_at 必须是缓存行的写入时间（不是本次构建时间，否则过期缓存会装成新数据）"
+    )
     assert expensive["crosscheck"] is not None
     assert expensive["crosscheck"]["tier"] == "expensive"
     # cheap 档本身依然把 expensive 规则标 skipped

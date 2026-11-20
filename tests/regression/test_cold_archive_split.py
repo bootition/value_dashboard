@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sys
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -297,7 +298,11 @@ def test_export_writes_manifest_with_required_fields(cold, tmp_path: Path) -> No
     assert _sha256_file(db_path) == before, "--export 改动了正式库文件"
 
     manifest = json.loads((pkg / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["exported_at"]
+    exported_at = datetime.fromisoformat(manifest["exported_at"])
+    assert exported_at.utcoffset() == timedelta(0), "exported_at 必须带 UTC 时区"
+    assert abs((datetime.now(UTC) - exported_at).total_seconds()) < 600, (
+        "exported_at 必须是本次导出的时刻（下游按 UTC 切片展示）"
+    )
     assert Path(manifest["source_db"]) == db_path
     assert manifest["source_cutoff"] == "2025-03-31"
     # 清单来源要记对（否则事后无法判断这包是按哪版清单导的）

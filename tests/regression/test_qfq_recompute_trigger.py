@@ -152,7 +152,7 @@ def test_qfq_lag_codes_are_written_to_pending_state(
     assert updater._load_tech_recompute_pending() == ["600519"]
     stored = _read_state(sqlite_store)
     # 值必须是 JSON 数组（运维可直接 SELECT 出来看），且带标记时间供 TTL 判定
-    assert isinstance(stored, list) and stored
+    assert isinstance(stored, list) and len(stored) == 1, "一只股票只能有一条待重算记录"
     assert stored[0]["code"] == "600519"
     assert stored[0]["marked_at"]
 

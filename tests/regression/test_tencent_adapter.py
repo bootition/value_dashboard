@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 
 from app.core.adapters.base import FetchRequest
@@ -59,7 +60,11 @@ def test_tencent_bse_qfq_prices_are_normalized_and_archivable(monkeypatch) -> No
 
     assert result.metadata.error is None
     assert result.metadata.source == "tencent"
-    assert result.metadata.raw_response_hash
+    raw_response = result.raw_response
+    raw_bytes = raw_response.encode("utf-8") if isinstance(raw_response, str) else raw_response
+    assert result.metadata.raw_response_hash == hashlib.sha256(raw_bytes).hexdigest(), (
+        "溯源哈希必须是原始响应字节的 SHA256（不许是 <empty> 兜底值）"
+    )
     assert result.raw_response
     assert result.data == [{
         "stock_code": "920000", "trade_date": "2026-07-31",

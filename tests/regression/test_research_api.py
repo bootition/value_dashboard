@@ -21,7 +21,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core.financial_period import CN_TZ
-from app.core.point_in_time import latest_visible_period, was_visible
+from app.core.point_in_time import PIT_LIMITATIONS, latest_visible_period, was_visible
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.update import classify_announcement
@@ -179,8 +179,10 @@ def test_as_reported_between_two_announce_dates_returns_the_earlier_period(
     # 口径必须自曝：数值是「最新重述值」，不是当年原始披露值
     assert payload["value_basis"] == "latest_restated"
     assert "income_statement" in payload["value_source"]
-    assert payload["disclaimer"]
-    assert payload["limitations"]
+    assert "不是当年披露时的原始数字" in payload["disclaimer"], (
+        "disclaimer 必须点明数值是「最新重述值」，不是披露当时的口径"
+    )
+    assert payload["limitations"] == list(PIT_LIMITATIONS), "边界披露必须原样透出，不许截断/替换"
 
 
 def test_as_reported_matches_point_in_time_module(
@@ -275,7 +277,9 @@ def test_as_reported_rejects_fields_outside_whitelist(
     assert response.status_code == 400
     detail = response.json()["detail"]
     assert detail["reason"] == reason
-    assert detail["examples"]
+    assert {"revenue", "parent_net_profit"} <= set(detail["examples"]), (
+        "examples 必须给出白名单内的合法字段（而不是被拒字段/空列表）"
+    )
 
 
 def test_as_reported_field_not_allowed_lists_rejected_names(
@@ -350,7 +354,7 @@ def test_visible_periods_lists_start_dates_ascending_with_earliest_announce(
     assert {row["report_type"] for row in payload["periods"]} == {
         "annual", "quarterly", "semi_annual",
     }
-    assert payload["limitations"]
+    assert payload["limitations"] == list(PIT_LIMITATIONS), "边界披露必须原样透出，不许截断/替换"
 
 
 def test_visible_periods_supports_as_of_and_frequency_filters(
@@ -439,7 +443,9 @@ def test_announcements_are_descending_paged_and_classified(
     assert all(item["announcement_date_cn"] for item in items)
     assert payload["by_category"] == {"financial": 1, "dividend": 1, "other": 1}
     assert payload["timezone"] == "Asia/Shanghai"
-    assert payload["disclaimer"]
+    assert "不是全市场全量公告库" in payload["disclaimer"], (
+        "disclaimer 必须写明覆盖边界（只含已登记公告），不能换成别的文案"
+    )
 
 
 def test_announcements_limit_and_offset_take_effect(
