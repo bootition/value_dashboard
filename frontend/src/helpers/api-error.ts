@@ -47,7 +47,7 @@ interface DetailRule extends GuidanceText {
 
 /** 具体模式优先于通用模式（长字符串在前）。 */
 const DETAIL_RULES: ReadonlyArray<DetailRule> = [
-  { match: /auto_update_in_progress|duckdb_read_locked/, title: '数据正在自动更新中', action: '请稍候片刻；更新完成后刷新页面即可恢复' },
+  { match: /auto_update_in_progress|data_update_in_progress|duckdb_read_locked/, title: '数据正在自动更新中', action: '请稍候片刻；更新完成后刷新页面即可恢复' },
   { match: /正在自动更新|数据库正在更新/, title: '数据正在自动更新中', action: '请稍候片刻；更新完成后刷新页面即可恢复' },
   { match: /saved result rule provenance is missing/, title: '筛选结果缺少规则溯源', action: '请重新运行筛选并保存结果' },
   { match: /screening_data_quality_not_ready/, title: '数据质量不满足筛选要求', action: '请前往「数据状态」页按告警提示修复后再试' },
