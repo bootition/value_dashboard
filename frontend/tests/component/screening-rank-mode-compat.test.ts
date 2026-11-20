@@ -34,6 +34,7 @@ vi.mock('axios', () => {
 
 import axios from 'axios'
 import type { Mock } from 'vitest'
+import { resetScreeningSession } from '../../src/stores/screening-session.ts'
 
 const indicatorOptions = [
   { label: '市盈率（PE-TTM）', value: 'pe_ttm' },
@@ -198,6 +199,10 @@ function mountPage() {
 describe('页面级：载入带 rank_mode 的已保存规则 → 运行 → 提交 payload 不丢字段', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // 「切页保状态」把运行结果提到了模块级单例（stores/screening-session.ts）：
+    // 一个 it 就是一次新的页面加载（= F5），必须整体重置，否则上一个用例的
+    // 结果会漏到下一个用例里，测试变成顺序相关。
+    resetScreeningSession()
     localStorage.clear()
     ;(axios.put as Mock).mockResolvedValue({ data: { revision: 1 } })
     const get = axios.get as Mock

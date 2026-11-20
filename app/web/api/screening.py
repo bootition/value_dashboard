@@ -293,6 +293,10 @@ def _require_current_screenability(request: Request) -> dict:
         if entry is not None:
             cached = entry.get("decision") or {}
             request.app.state.startup_readiness = cached.get("readiness") or {}
+            # 2026-11-20（reports/150）：`ready` 现在只由 **block 级**告警决定，
+            # 所以这里的 409 与「数据有瑕疵」不再等价。disclose 级（如
+            # TRADING_CALENDAR_INCOMPLETE / SNAPSHOT_STALE）走下面的 200，
+            # 由 `disclosed_warnings` 如实披露（前端显示成提示而不是错误）。
             if not cached.get("ready"):
                 raise HTTPException(status_code=409, detail={
                     "reason_code": (
@@ -302,15 +306,25 @@ def _require_current_screenability(request: Request) -> dict:
                     ),
                     "readiness": cached.get("readiness") or {},
                     "warning_codes": cached.get("warning_codes") or [],
+                    "disclosed_warnings": cached.get("disclosed_warnings") or [],
                     **freshness,
                 })
             # 缓存的是 screening_readiness 决策，不是 gate 形状；调用方
             # run_screening 需要 lock_active/data_as_of 两个键。
-            return {"lock_active": False, "data_as_of": None, **freshness}
+            return {
+                "lock_active": False,
+                "data_as_of": None,
+                "disclosed_warnings": cached.get("disclosed_warnings") or [],
+                "screening_warnings": cached.get("warnings") or [],
+                **freshness,
+            }
     decision = screening_readiness(request.app.state.duck, request.app.state.sqlite)
     if cache_key:
         store_screening_readiness_cache(request.app.state.sqlite, cache_key, decision)
     request.app.state.startup_readiness = decision["readiness"]
+    # 2026-11-20（reports/150）：只有 block 级才 409；reason_code 映射不变
+    # （`minimum_data_not_ready` 优先，其余为 `screening_data_quality_not_ready`），
+    # 前端 `api-error.ts` 的既有映射继续有效。
     if not decision["ready"]:
         reason_code = (
             "minimum_data_not_ready"
@@ -321,6 +335,7 @@ def _require_current_screenability(request: Request) -> dict:
             "reason_code": reason_code,
             "readiness": decision["readiness"],
             "warning_codes": decision["warning_codes"],
+            "disclosed_warnings": decision.get("disclosed_warnings") or [],
             "readiness_source": "computed",
             "readiness_cached_at": None,
             "readiness_stale": False,
@@ -329,6 +344,8 @@ def _require_current_screenability(request: Request) -> dict:
     return {
         "lock_active": False,
         "data_as_of": None,
+        "disclosed_warnings": decision.get("disclosed_warnings") or [],
+        "screening_warnings": decision.get("warnings") or [],
         "readiness_source": "computed",
         "readiness_cached_at": None,
         "readiness_stale": False,
@@ -461,6 +478,10 @@ def run_screening(req: ScreeningRequest, request: Request) -> dict:
     result["auto_update_in_progress"] = auto_update
     result["data_as_of"] = data_as_of
     # 缺陷 B：把门禁用的就绪决策新鲜度一并返回（新增字段，向后兼容）。
+    # 2026-11-20（reports/150）：disclose 级告警随 200 结果一起返回，
+    # 前端显示成提示（不是错误），用户能自己判断"这条结论有多新/多脏"。
+    result["disclosed_warnings"] = gate.get("disclosed_warnings") or []
+    result["screening_warnings"] = gate.get("screening_warnings") or []
     result["readiness_source"] = gate.get("readiness_source")
     result["readiness_cached_at"] = gate.get("readiness_cached_at")
     result["readiness_stale"] = bool(gate.get("readiness_stale", False))

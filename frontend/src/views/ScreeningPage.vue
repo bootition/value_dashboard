@@ -17,7 +17,13 @@ import type {
 } from '../types/screening.ts'
 import { generateRuleId } from '../types/screening.ts'
 import { useAutoUpdateRunning } from '../composables/useAutoUpdatePolling.ts'
-import { useScreeningColumns, DEFAULT_RESULT_COLUMNS, encodeResultColumn } from '../composables/useScreeningColumns.ts'
+import {
+  DEFAULT_RESULT_COLUMNS,
+  DEFAULT_RESULT_COLUMNS_VERSION,
+  encodeResultColumn,
+  resultColumnOptionLabel,
+  useScreeningColumns,
+} from '../composables/useScreeningColumns.ts'
 import { useScreeningDraft } from '../composables/useScreeningDraft.ts'
 import { useScreeningRules } from '../composables/useScreeningRules.ts'
 import { readinessNotice } from '../utils/readiness-notice.ts'
@@ -25,6 +31,12 @@ import type { ReadinessNotice } from '../utils/readiness-notice.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
 import { apiErrorText } from '../helpers/api-error.ts'
 import { applyIndicatorUnits, fieldDisplayName, indicatorDisplayName } from '../utils/screening-format.ts'
+import {
+  markRunExpired,
+  refreshRunExpiry,
+  saveRunSnapshot,
+  screeningSession,
+} from '../stores/screening-session.ts'
 import {
   unavailableCoverageText,
   unavailableKey,
@@ -58,32 +70,66 @@ const renamedIndicators = computed(() =>
 const trulyUnavailableIndicators = computed(() =>
   unavailableIndicators.value.filter((item) => item.reason !== 'deprecated'),
 )
-const loading = ref(false)
-const results = ref<readonly ScreeningResult[]>([])
-const executionTime = ref(0)
-const basePoolSize = ref(0)
-const dataDate = ref<string | null>(null)
-const runId = ref<string | null>(null)
-const truncated = ref(false)
-const totalMatched = ref(0)
+// ─── 跨挂载保活的运行结果（切页保状态，2026-11-24）───────────────────────
+// 路由切换会卸载本组件（App.vue 的 <router-view /> 没有 keep-alive），页面里的 ref
+// 全部销毁 —— 这就是「跑完结果、去数据状态页、切回来就没了」的根因。
+// 结果类状态改由模块级单例 `stores/screening-session.ts` 保管：组件卸载不销毁模块，
+// 切回来时在这里把上次的运行结果原样回填；F5 重建 JS 上下文 → 模块回到空态。
+// 过期判定放在 setup 里先跑一次：过期的运行凭据只停用保存入口，**不清空结果**。
+refreshRunExpiry()
+const restoredRun = screeningSession.run
+const loading = ref(screeningSession.running)
+const results = ref<readonly ScreeningResult[]>(restoredRun?.results ?? [])
+const executionTime = ref(restoredRun?.executionTime ?? 0)
+const basePoolSize = ref(restoredRun?.basePoolSize ?? 0)
+const dataDate = ref<string | null>(restoredRun?.dataDate ?? null)
+const runId = ref<string | null>(restoredRun?.runId ?? null)
+const truncated = ref(restoredRun?.truncated ?? false)
+const totalMatched = ref(restoredRun?.totalMatched ?? 0)
 const resultsAnchor = ref<HTMLElement | null>(null)
 // reports/79 方案 A: 更新窗口内快照口径运行标注
-const autoUpdateSnapshot = ref(false)
-const snapshotAsOf = ref<string | null>(null)
+const autoUpdateSnapshot = ref(restoredRun?.autoUpdateSnapshot ?? false)
+const snapshotAsOf = ref<string | null>(restoredRun?.snapshotAsOf ?? null)
+/**
+ * 运行凭据（`runId`）已失效：结果照常展示，只停用「保存结果 / 导出 / 加入自选」。
+ * 见 stores/screening-session.ts 顶部关于 SLA 的说明。
+ */
+const runExpired = computed(() => screeningSession.run?.expired === true)
+
+/**
+ * 结果面板的「执行规则」必须指向**产生这批结果的**规则版本，而不是编辑区此刻选中的版本。
+ *
+ * 切页回来时 `savedRules` 要重新拉取（`activeRule` 会短暂为 null），若面板直接吃
+ * `activeRule`，回填结果的头几百毫秒里 ruleId 是 null → `durableActionsDisabled`
+ * 变 true → 用户看到"保存按钮自己灰了一下"。有历史结果时以结果快照里的定格为准，
+ * 没有历史结果时保持原来的行为（跟随编辑区当前规则）。
+ */
+const runRuleId = computed(() => screeningSession.run?.context.ruleId ?? activeRule.value?.id ?? null)
+const runRuleVersion = computed(
+  () => screeningSession.run?.context.ruleVersion ?? activeRule.value?.version ?? null,
+)
+const runRuleName = computed(
+  () => screeningSession.run?.context.ruleName ?? activeRule.value?.name ?? '',
+)
+/**
+ * 结果面板的「严格可信模式说明」必须按**这批结果实际使用的口径**展示，
+ * 而不是编辑区此刻的开关位置（开关一拨就开始重跑，重跑回来前屏幕上还是旧结果）。
+ */
+const runStrictOnly = computed(() => screeningSession.run?.strictOnly ?? strictOnly.value)
 // 自动更新状态轮询（更新中 → 10s，空闲 → 60s；卸载时清 timer）
 const { autoUpdateRunning, refreshAutoUpdate, startAutoUpdatePolling } = useAutoUpdateRunning()
 
 // 2026-08-27：运行按钮不再被少数股票的数据缺口全局禁用。
 // 引擎会排除缺口股，后端只拦截真正的全库硬性阻断。
 const runEnabled = computed(() => true)
-const warningCodes = ref<readonly WarningCode[]>([])
-const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
-const dataReady = ref<boolean | null>(null)
+const warningCodes = ref<readonly WarningCode[]>(restoredRun?.warningCodes ?? [])
+const qualityStatus = ref<'loading' | 'available' | 'failed'>(restoredRun?.qualityStatus ?? 'loading')
+const dataReady = ref<boolean | null>(restoredRun?.dataReady ?? null)
 // 2026-08-14 红队 P2-4：严格模式空结果反馈文案（来自 /run 响应）
-const strictModeWarning = ref<string | null>(null)
+const strictModeWarning = ref<string | null>(restoredRun?.strictModeWarning ?? null)
 // 2026-11-23 后端新增：按设计豁免字段级 strict 校验的自算派生字段。
 // 只用于把"这不是你的条件写错了"讲清楚，不影响筛选结果。
-const strictExemptFields = ref<string[]>([])
+const strictExemptFields = ref<string[]>([...(restoredRun?.strictExemptFields ?? [])])
 
 /**
  * 从 /run 响应里读一个**可选**字符串数组字段。
@@ -156,7 +202,7 @@ function renderOptionLabel(option: { label?: string }): VNode {
 
 
 // 后端就绪结论的新鲜度/降级提示（readiness_* 字段，reports/140 §15.5）
-const readinessHint = ref<ReadinessNotice | null>(null)
+const readinessHint = ref<ReadinessNotice | null>(restoredRun?.readinessHint ?? null)
 
 const readinessCopy = computed(() => {
   if (qualityStatus.value === 'failed') return { state: 'failed', label: '状态读取失败' }
@@ -183,14 +229,19 @@ const indicatorOptions = computed(() =>
 
 // ─── 结果展示列（合成值编解码 / 下拉选项）────────────────────────────────
 // 2026-11-22：列定义、合成值编解码、下拉选项整块抽到 composables/useScreeningColumns.ts。
-const { selectedResultColumns, resultColumnOptions, selectedColumnsForRequest } =
-  useScreeningColumns({ indicators, rankModes, indicatorOptions })
+const {
+  selectedResultColumns,
+  manuallyRemovedResultColumns,
+  resultColumnsSelection,
+  resultColumnOptions,
+  selectedColumnsForRequest,
+} = useScreeningColumns({ ruleTree, indicators, rankModes, indicatorOptions })
 
 /**
  * 结果列多选的中文兜底（reports/148）：旧规则里的排名字段不在下拉里时不能露英文。
  */
 function fallbackResultColumnOption(value: string): { label: string; value: string } {
-  return { label: fieldDisplayName(String(value), String(value)), value: String(value) }
+  return resultColumnOptionLabel(String(value), rankModes.value)
 }
 
 /**
@@ -300,15 +351,22 @@ async function runScreening() {
       return
     }
   }
+  // 本次运行到底按哪个规则版本、哪个口径跑的：必须在发请求前定格，
+  // 因为 await 期间 activeRule/strictOnly 都可能被用户改动（保存新版本、拨开关）。
+  // 结果面板的「执行规则」与「保存入口是否可用」都以这份定格为准，
+  // 而不是以"编辑区此刻选中的规则"为准 —— 后者会让结果对应错的规则版本。
+  const runRule = activeRule.value
+  const runStrictOnly = strictOnly.value
   loading.value = true
+  screeningSession.running = true
   try {
     const resp = await axios.post<ScreeningRunResponse>('/api/screening/run', {
-      rule_id: activeRule.value.id,
-      rule_version: activeRule.value.version,
+      rule_id: runRule.id,
+      rule_version: runRule.version,
       include_st: !basePool.exclude_st,
       include_suspended: !basePool.exclude_suspended,
       min_listing_years: basePool.min_listing_years,
-      strict_only: strictOnly.value,
+      strict_only: runStrictOnly,
       columns: selectedColumnsForRequest(),
     }, {
       // 后端筛选门禁在无缓存冷启动时需执行一次全库数据质量核对；
@@ -330,6 +388,31 @@ async function runScreening() {
     // 2026-08-14 红队 P2-4：严格模式空结果的原因反馈（无 strict 血缘等）
     strictModeWarning.value = resp.data.strict_mode_warning ?? null
     strictExemptFields.value = readOptionalStringList(resp.data, 'strict_exempt_fields')
+    // 一次性把整份可展示产物写进模块级会话：组件随后被卸载（用户切到别的页）
+    // 也不影响，切回来时 setup 会原样回填 —— 包括 runId 与披露告警。
+    saveRunSnapshot({
+      results: resp.data.results,
+      runId: resp.data.run_id,
+      totalMatched: resp.data.total,
+      executionTime: resp.data.execution_time_ms,
+      basePoolSize: resp.data.base_pool_size,
+      dataDate: resp.data.data_date,
+      truncated: resp.data.truncated ?? false,
+      autoUpdateSnapshot: resp.data.auto_update_in_progress === true,
+      snapshotAsOf: resp.data.data_as_of ?? null,
+      readinessHint: readinessHint.value,
+      strictModeWarning: strictModeWarning.value,
+      strictExemptFields: strictExemptFields.value,
+      warningCodes: warningCodes.value,
+      qualityStatus: qualityStatus.value,
+      dataReady: dataReady.value,
+      strictOnly: runStrictOnly,
+      context: {
+        ruleId: runRule.id,
+        ruleVersion: runRule.version,
+        ruleName: runRule.name,
+      },
+    })
     if (resp.data.truncated) {
       message.warning(`结果超过 5000 条，仅展示前 5000 条（共 ${resp.data.total} 条匹配）`)
     }
@@ -340,23 +423,34 @@ async function runScreening() {
     await nextTick()
     scrollToResults()
   } catch (e: unknown) {
+    // 失败时**不清空**上一次的结果：用户宁可看到旧结果 + 错误提示，
+    // 也不要"点一下运行，结果反而没了"。
     message.error(apiErrorText(e, '筛选失败'))
   } finally {
     loading.value = false
+    screeningSession.running = false
   }
 }
 
 // L0-3（报告42）: strict-only 切换时重新按服务端口径运行，
 // 使屏幕展示、保存记录、导出 CSV 三者结果一致（不再客户端二次过滤）。
+//
+// 2026-11-24「切页保状态」：这里由 `watch(strictOnly)` 改成**只由用户拨开关触发**。
+// 原来的 watch 是"任何程序化赋值都会重跑"的口子：从草稿恢复（restoreDraft 会把
+// draft.strict_only 写回 ref）、规则装载、以及任何回填都会触发一次 /run，
+// 用户看到的现象正是"我从别的页切回来，它自己又跑了一遍"。
+// 拨开关仍是唯一入口（模板里 n-switch 的 @update:value），行为对用户零变化。
 let strictRerunTimer: ReturnType<typeof setTimeout> | undefined
-watch(strictOnly, () => {
+function onStrictOnlyChange(next: boolean) {
+  if (next === strictOnly.value) return
+  strictOnly.value = next
   if (results.value.length === 0 || activeRule.value === null) return
   if (strictRerunTimer) clearTimeout(strictRerunTimer)
   strictRerunTimer = setTimeout(() => {
     message.info(strictOnly.value ? '正在按 strict 口径重新筛选…' : '正在按完整口径重新筛选…')
     void runScreening()
   }, 400)
-})
+}
 
 // ─── 筛选草稿（/api/screening/draft）────────────────────────────────────
 // 2026-11-22：草稿状态机（快照脏检查 / 单飞保存 / 409 冲突弹窗 / 防抖 400ms）
@@ -374,7 +468,11 @@ const {
   basePool,
   strictOnly,
   selectedResultColumns,
+  // useScreeningColumns 把这组状态叫 manuallyRemovedResultColumns（用户手动移除过的
+  // 条件自动列），草稿状态机侧的入参名是 removedResultColumns —— 这里对上。
+  removedResultColumns: manuallyRemovedResultColumns,
   defaultResultColumns: DEFAULT_RESULT_COLUMNS,
+  defaultResultColumnsVersion: DEFAULT_RESULT_COLUMNS_VERSION,
   encodeResultColumn,
   notify: message,
 })
@@ -382,6 +480,7 @@ const {
 // ─── 已保存规则 CRUD / 装载 ────────────────────────────────────────────
 // 2026-11-22：整块抽到 composables/useScreeningRules.ts（行为逐字等价，有单测）。
 const {
+  savedRules,
   selectedRuleId,
   activeRule,
   ruleName,
@@ -405,10 +504,22 @@ const {
 })
 
 onMounted(async () => {
+  // 2026-11-24「切页保状态」：挂载时**不再重跑任何会产生结果的请求**。
+  // 这里只做两件"不改变已跑结果"的事：恢复草稿（编辑区，服务端持久化）
+  // 与重取规则/指标目录（它们只影响下拉选项）。
+  // 关键不变量：这里没有任何 `fetch*Run()`，也没有任何代码把 results/runId 置空。
   await restoreDraft()
   markDraftHydrated()
   await loadSavedRules()
-  
+
+  // 切回来时把编辑区重新绑回上次选中的规则版本：否则 selectedRuleId 归零 →
+  // activeRule 变 null → 结果面板拿到 ruleId=null → 保存入口被误置灰。
+  if (screeningSession.ruleName) ruleName.value = screeningSession.ruleName
+  const lastRuleId = screeningSession.activeRuleId
+  if (lastRuleId > 0 && savedRules.value.some((rule) => rule.id === lastRuleId)) {
+    selectedRuleId.value = lastRuleId
+  }
+
   try {
     const resp = await axios.get<{
       indicators?: readonly ScreeningIndicator[]
@@ -434,15 +545,21 @@ onMounted(async () => {
     message.warning('无法加载指标列表')
   }
 
-  try {
-    const resp = await axios.get<DataStatusSummaryResponse>('/api/data-status/summary')
-    warningCodes.value = resp.data.data_quality.warning_codes
-    dataReady.value = resp.data.data_quality.minimum_data_readiness.ready
-    qualityStatus.value = 'available'
-  } catch {
-    dataReady.value = null
-    qualityStatus.value = 'failed'
-    message.warning('无法加载数据质量状态')
+  // 数据质量披露（warning_codes / 就绪结论）是**这次运行当时**的披露内容。
+  // 已经在本文档里跑过结果时不再重取：否则切回来会拿"现在的"状态去覆盖
+  // 结果旁边的告警，等于把用户看到的披露偷偷改掉（用户要的是"界面保持在那里"）。
+  // 真要看最新数据状态，用户会去数据状态页，或者重新运行。
+  if (restoredRun === null) {
+    try {
+      const resp = await axios.get<DataStatusSummaryResponse>('/api/data-status/summary')
+      warningCodes.value = resp.data.data_quality.warning_codes
+      dataReady.value = resp.data.data_quality.minimum_data_readiness.ready
+      qualityStatus.value = 'available'
+    } catch {
+      dataReady.value = null
+      qualityStatus.value = 'failed'
+      message.warning('无法加载数据质量状态')
+    }
   }
 
   // reports/79 方案 A: 更新窗口内允许以最近完整快照运行（后端同口径）
@@ -452,6 +569,11 @@ onMounted(async () => {
   // 2026-11-22：轮询+单飞+卸载清理已抽到 composables/useAutoUpdatePolling.ts。
   startAutoUpdatePolling(10000)
 })
+
+// 编辑区绑定（当前规则 / 规则名）随会话保存：切走再回来，"当前规则"仍是同一个版本。
+watch(selectedRuleId, (id) => { screeningSession.activeRuleId = id })
+watch(ruleName, (name) => { screeningSession.ruleName = name })
+
 </script>
 
 <template>
@@ -548,9 +670,9 @@ onMounted(async () => {
         </div>
 
         <div class="screening-section">
-          <div class="screening-section-title"><div><b>02</b><h3>结果展示列</h3></div><p>运行前可自由增加或删减展示信息；修改展示列不会产生新的规则版本。</p></div>
+          <div class="screening-section-title"><div><b>02</b><h3>结果展示列</h3></div><p>默认展示 PE/PB/股息率/市值/ROE/ROCE/利润率/成长等初级信息；筛选条件用到的指标会自动追加在默认列之后。修改展示列不会产生新的规则版本。</p></div>
           <n-select
-            v-model:value="selectedResultColumns"
+            v-model:value="resultColumnsSelection"
             :options="resultColumnOptions"
             :fallback-option="fallbackResultColumnOption"
             multiple
@@ -577,7 +699,7 @@ onMounted(async () => {
         >{{ readinessHint.text }}</n-alert>
         <div class="screening-run-title"><p>当前规则</p><h2>{{ activeRule?.name || '未命名筛选草稿' }}</h2></div>
         <div class="screening-run-data"><p><span>筛选条件</span><b>{{ ruleFields.size }} 项</b></p><p><span>可信度</span><b>{{ strictOnly ? '严格可信' : '包含近似值' }}</b></p><p><span>数据日期</span><b>{{ dataDate || '运行后确认' }}</b></p></div>
-        <div class="screening-strict"><n-switch v-model:value="strictOnly"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
+        <div class="screening-strict"><n-switch :value="strictOnly" @update:value="onStrictOnlyChange"><template #checked>仅使用严格可信数据</template><template #unchecked>包含近似可信数据</template></n-switch><span>{{ strictOnly ? '排除口径不完整或近似计算的指标。' : '结果会包含近似可信的数据。' }}</span></div>
         <n-button type="primary" block :loading="loading" :disabled="!runEnabled" @click="runScreening">运行筛选 →</n-button>
         <n-button v-if="results.length > 0" text type="primary" block style="margin-top: 8px" @click="scrollToResults">
           查看本次筛选结果（{{ totalMatched || results.length }} 条）↓
@@ -591,7 +713,7 @@ onMounted(async () => {
       数据正在自动更新：本次结果基于最近完整快照（数据截至 {{ snapshotAsOf || dataDate || '—' }}），更新完成后重新运行即可获得最新数据。
     </n-alert>
     <div ref="resultsAnchor" class="screening-results-anchor">
-      <ScreeningResultsPanel :results="results" :strict-only="strictOnly" :strict-mode-warning="strictModeWarning" :strict-exempt-fields="strictExemptFields" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="activeRule?.id ?? null" :rule-version="activeRule?.version ?? null" :rule-name="activeRule?.name ?? ''" :locked-indicators="activeRule?.locked_indicators ?? {}" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" />
+      <ScreeningResultsPanel :results="results" :strict-only="runStrictOnly" :strict-mode-warning="strictModeWarning" :strict-exempt-fields="strictExemptFields" :execution-time="executionTime" :base-pool-size="basePoolSize" :data-date="dataDate" :warning-codes="warningCodes" :untrusted-fields="untrustedFields" :quality-status="qualityStatus" :rule-tree="ruleTree" :run-id="runId" :rule-id="runRuleId" :rule-version="runRuleVersion" :rule-name="runRuleName" :locked-indicators="activeRule?.locked_indicators ?? {}" :base-pool-config="basePool" :truncated="truncated" :total-matched="totalMatched" :run-expired="runExpired" @run-expired="markRunExpired" />
     </div>
 
     <section v-if="results.length === 0" class="screening-empty-card">

@@ -435,3 +435,154 @@ def test_stale_hard_limit_value_is_bounded_and_anchored() -> None:
     ), "硬上限不得超过 4×TTL，否则 stale 窗口长到等于没有上限"
     # 与 DESIGN 决策一致：当前取值 2×TTL
     assert SCREENING_READINESS_STALE_MAX_AGE_SECONDS == 2 * SCREENING_READINESS_CACHE_TTL_SECONDS
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-20 性能修复：旧决策复用的边界从"墙上时钟"改成"指纹可信度"
+#
+# 实测背景（正式库同规模只读快照，21.6M source_audit / 28GB）：
+#   * 就绪门禁占一次 /run 的 98.5%（engine 只要 0.5s）；
+#   * 指纹仍匹配、但缓存超过旧硬上限 1200s 时，旧实现必须在请求线程里同步
+#     重建全量质量 —— 冷进程实测 28.7s，热缓存 1.0-1.3s；
+#   * 指纹**内容敏感**时同指纹即同输入，年龄不提供额外正确性保证，
+#     因此把上限放到 24h 并照常后台单飞刷新 → 实测 0.35s。
+# 下列用例锁定"提速不许变成假绿"的三条边界。
+# ---------------------------------------------------------------------------
+
+
+def _store_marked_decision(
+    sqlite: SQLiteStore,
+    fingerprint: str,
+    decision: dict,
+    *,
+    age_seconds: int,
+    confident: bool | None,
+) -> None:
+    """Persist a decision with an explicit ``fingerprint_confident`` marker."""
+    updated = (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+    payload: dict[str, object] = {
+        "fingerprint": fingerprint,
+        "decision": decision,
+        "updated_at": updated,
+    }
+    if confident is not None:
+        payload["fingerprint_confident"] = confident
+    sqlite.execute(
+        """INSERT INTO data_refresh_state (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
+                                         updated_at=excluded.updated_at""",
+        [SCREENING_READINESS_CACHE_KEY, json.dumps(payload), updated],
+    )
+
+
+def _no_background_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the assertion deterministic: no worker thread may recompute."""
+    from app.web.api import screening as screening_api
+
+    monkeypatch.setattr(
+        screening_api, "ensure_screening_readiness_refresh", lambda *a, **k: None
+    )
+
+
+def _count_recomputes(monkeypatch: pytest.MonkeyPatch, decision: dict) -> list[int]:
+    from app.core import data_quality as data_quality_module
+
+    calls: list[int] = []
+
+    def _fake(duck, sqlite):  # noqa: ANN001, ARG001 - 形状与真实实现一致
+        calls.append(1)
+        return decision
+
+    monkeypatch.setattr(data_quality_module, "screening_readiness", _fake)
+    return calls
+
+
+def test_confident_stale_decision_is_served_without_recompute(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """指纹可信 + 同指纹 → 过期 1800s(>2×TTL) 仍然复用，且**不重算**。"""
+    from app.core.data_quality import readiness_stale_limit_seconds
+
+    _seed_screenable(duckdb_store, sqlite_store)
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert fingerprint is not None
+    _store_marked_decision(
+        sqlite_store, fingerprint, _READY_DECISION, age_seconds=1_800, confident=True,
+    )
+
+    entry = load_screening_readiness_entry(sqlite_store, fingerprint, allow_stale=True)
+    assert entry is not None, "同指纹的旧决策应可复用"
+    assert entry["stale"] is True
+    assert entry["fingerprint_confident"] is True
+    assert entry["stale_limit_seconds"] == readiness_stale_limit_seconds(
+        {"fingerprint_confident": True}
+    )
+
+    calls = _count_recomputes(monkeypatch, _READY_DECISION)
+    _no_background_refresh(monkeypatch)
+    gate = _require_current_screenability(_FakeRequest(duckdb_store, sqlite_store))
+    assert gate["readiness_source"] == "stale_cache"
+    assert gate["readiness_stale"] is True
+    assert calls == [], "命中可信旧决策时绝不能再同步重算全量质量"
+
+
+def test_stale_cached_failure_never_becomes_a_pass(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """缓存里是 not-ready 决策时，复用**只能复用结论**，不许变成通过。"""
+    _seed_screenable(duckdb_store, sqlite_store)
+    fingerprint = screening_readiness_cache_key(duckdb_store, sqlite_store)
+    assert fingerprint is not None
+    _store_marked_decision(
+        sqlite_store, fingerprint, _NOT_READY_DECISION, age_seconds=1_800, confident=True,
+    )
+    calls = _count_recomputes(monkeypatch, _READY_DECISION)
+    _no_background_refresh(monkeypatch)
+
+    with pytest.raises(HTTPException) as excinfo:
+        _require_current_screenability(_FakeRequest(duckdb_store, sqlite_store))
+    assert excinfo.value.status_code == 409
+    assert excinfo.value.detail["readiness_source"] == "stale_cache"
+    assert calls == []
+
+
+def test_fingerprint_change_and_untrusted_markers_still_fail_closed(
+    sqlite_store: SQLiteStore,
+) -> None:
+    """三条 fail-closed 边界：指纹变了 / 旧格式无标记 / 超 24h 兜底。"""
+    from app.core.data_quality import (
+        SCREENING_READINESS_CONFIDENT_STALE_MAX_AGE_SECONDS,
+        readiness_stale_limit_seconds,
+    )
+
+    assert (
+        readiness_stale_limit_seconds({"fingerprint_confident": True})
+        == SCREENING_READINESS_CONFIDENT_STALE_MAX_AGE_SECONDS
+    )
+    # 旧格式缓存行（上一轮之前写的）没有可信标记 → 保持 2×TTL
+    assert readiness_stale_limit_seconds({}) == SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+    # 显式不可信（指纹降级 / 无 content_epoch）→ 同样保持 2×TTL
+    assert (
+        readiness_stale_limit_seconds({"fingerprint_confident": False})
+        == SCREENING_READINESS_STALE_MAX_AGE_SECONDS
+    )
+
+    # 指纹变了：即便标记可信也不复用
+    _store_marked_decision(
+        sqlite_store, "outdated-fingerprint", _READY_DECISION,
+        age_seconds=60, confident=True,
+    )
+    assert load_screening_readiness_entry(sqlite_store, "current-fingerprint") is None
+
+    # 同指纹但超过 24h 兜底上限：仍然拒绝（宁可重算一次）
+    _store_marked_decision(
+        sqlite_store, "fp-24h", _READY_DECISION,
+        age_seconds=SCREENING_READINESS_CONFIDENT_STALE_MAX_AGE_SECONDS + 60,
+        confident=True,
+    )
+    assert load_screening_readiness_entry(sqlite_store, "fp-24h", allow_stale=True) is None

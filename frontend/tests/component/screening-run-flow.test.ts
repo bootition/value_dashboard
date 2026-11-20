@@ -20,6 +20,7 @@ vi.mock('axios', () => {
 
 import axios from 'axios'
 import type { Mock } from 'vitest'
+import { resetScreeningSession } from '../../src/stores/screening-session.ts'
 
 function makeRouter() {
   return createRouter({ history: createMemoryHistory(), routes: [] })
@@ -40,6 +41,10 @@ function mountScreeningPage() {
 describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // 「切页保状态」把运行结果提到了模块级单例（stores/screening-session.ts）：
+    // 一个 it 就是一次新的页面加载（= F5），必须整体重置，否则上一个用例的
+    // 结果会漏到下一个用例里，测试变成顺序相关。
+    resetScreeningSession()
     const get = axios.get as Mock
     // 草稿自动保存（防抖定时器）可能在测试收尾后触发：put 必须给出 resolved 响应，
     // 否则 persistDraft 进入 catch 造成未处理拒绝（红队 P2-13 同型测试泄漏）。
@@ -193,6 +198,17 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
       expect.objectContaining({ rule_id: 42, rule_version: 1 }),
       expect.objectContaining({ timeout: 120_000 }),
     )
+    // 全新用户（无草稿、未手选列）：/run 必须自带初级指标默认列，
+    // 不能再只请求 stock_code/name/交易所/证监会行业。
+    const runCall = post.mock.calls.find(([url]) => url === '/api/screening/run')
+    const runPayload = runCall?.[1] as { columns?: string[] } | undefined
+    expect(runPayload?.columns).toEqual(expect.arrayContaining([
+      'pe_ttm', 'pb_mrq', 'ttm_dividend_yield', 'total_market_cap',
+      'circ_market_cap', 'roe', 'roce_10y_median', 'gross_margin',
+      'net_margin', 'debt_ratio', 'revenue_yoy', 'net_profit_yoy',
+    ]))
+    expect(runPayload?.columns).not.toContain('csrc_l1')
+    expect(runPayload?.columns).not.toContain('listing_date')
     expect(wrapper.text()).toContain('600519')
   })
 

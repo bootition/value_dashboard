@@ -26,8 +26,21 @@ from tests.support.schema_template import (
 
 
 def insert_minimum_screenable_data(store: DuckDBStore, stock_code: str = "000001") -> None:
-    """Populate the non-metadata inputs required by the screening readiness gate."""
+    """Populate the non-metadata inputs required by the screening readiness gate.
+
+    2026-11-20（测试提速，.planning/2026-11-20-test-speed/T_report.md §B1）：
+    本函数铺的是 ~40 条语句（2 次 6 年 ``generate_series`` + 9 批
+    ``raw_response_archive``/``fetch_batch``/``source_audit``）。此前每条语句
+    都是**自动提交**，而 DuckDB 的自动提交 = 每条语句一次 WAL fsync ——
+    实测本函数 **606 ms**，其中约 **75% 是 40 次提交**（探针实测：同一连接
+    内单条语句自动提交 **23.1 ms**，显式事务内 **7.1 ms**，3.3×）。
+    显式 ``BEGIN/COMMIT`` 后整段只提交一次；**SQL 与插入内容逐字未变**，
+    只是把它们放进同一个事务（等价性见同目录 probe 的逐表内容比对）。
+    失败路径不写 COMMIT → 连接关闭时回滚，与「每条各自提交后中途失败」
+    相比只会更一致（不会留半套 fixture）。
+    """
     with store.write_connection() as connection:
+        connection.execute("BEGIN TRANSACTION")
         connection.execute(
             """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
                SELECT ?, trade_date, 10, 100
@@ -133,6 +146,7 @@ def insert_minimum_screenable_data(store: DuckDBStore, stock_code: str = "000001
                        VALUES (?, ?, {report_date}, 1, 'fixture', ?, CURRENT_TIMESTAMP - INTERVAL '1 day', ?, 'strict')""",
                     [stock_code, field_name, batch_id, digest],
                 )
+        connection.execute("COMMIT")
 
 
 def insert_matching_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> None:

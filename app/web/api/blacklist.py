@@ -19,6 +19,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from app.core import blacklist as blacklist_core
+from app.core.storage import read_cache
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
 router = APIRouter(prefix="/api/blacklist", tags=["blacklist"])
@@ -68,17 +69,27 @@ def list_blacklist(request: Request) -> dict:
 
     codes = [entry["stock_code"] for entry in entries]
     placeholders = ", ".join("?" for _ in codes)
+    duck = request.app.state.duck
+    served_from = read_cache.SERVED_FROM_LIVE
+    as_of: str | None = None
     try:
-        meta_rows = request.app.state.duck.read_query(
+        meta_rows = duck.read_query(
             f"""SELECT stock_code, name, exchange, csrc_l1
                 FROM stock_meta
                 WHERE stock_code IN ({placeholders})""",
             codes,
         )
-    except DuckDBReadLockedError as error:
-        raise HTTPException(
-            status_code=503, detail="数据正在自动更新中，请稍后刷新"
-        ) from error
+    except DuckDBReadLockedError:
+        # 2026-11-20：写进程持锁时不再 503 —— 黑名单里那几行**代码本身**在 SQLite
+        # 里，只有"取名字"需要 DuckDB。名字取不到就退回 `stock_meta` 全表快照；
+        # 连快照都没有才如实报错（否则用户会以为黑名单被清空了，那是更糟的假象）。
+        snapshot_meta = read_cache.stock_meta_by_code(duck, codes)
+        if snapshot_meta is None:
+            raise
+        meta_rows = list(snapshot_meta.values())
+        snapshot = read_cache.stock_meta_snapshot(duck, reload=False)
+        served_from = read_cache.SERVED_FROM_CACHE
+        as_of = snapshot.as_of if snapshot is not None else None
     meta = {row["stock_code"]: row for row in meta_rows}
 
     items: list[dict[str, Any]] = []
@@ -93,7 +104,13 @@ def list_blacklist(request: Request) -> dict:
             "reason": entry.get("reason"),
             "created_at": entry.get("created_at"),
         })
-    return {"items": items, "count": len(items)}
+    return {
+        "items": items,
+        "count": len(items),
+        "served_from": served_from,
+        "as_of": as_of,
+        "stale": served_from == read_cache.SERVED_FROM_CACHE,
+    }
 
 
 @router.get("/check/{stock_code}")

@@ -119,7 +119,10 @@ describe('WatchlistPage 自选展示与信任遮蔽（PRD §13）', () => {
   it('预置列配置后挂载不白屏（reports/80 F5 TDZ 回归）', async () => {
     // 用户在自选页配置过列 → localStorage 存有列配置 → 每次进入页面
     // 必须正常渲染（此前 filter 回调访问未初始化 allColumnOptions 抛错白屏）。
-    localStorage.setItem('vd.watchlist.columns', JSON.stringify(['stock_code', 'name']))
+    // 2026-11-25：列配置改为**按分组**存（`vd.watchlist.columns.<编码分组名>`），
+    // 这里预置的就是新 key、新形状（顺序 + 可见集合），仍然是"读到配置不能崩"的回归。
+    const storageKey = `vd.watchlist.columns.${encodeURIComponent('default')}`
+    localStorage.setItem(storageKey, JSON.stringify({ v: 1, order: ['name', 'stock_code'], visible: ['stock_code', 'name'] }))
     try {
       const router = createRouter({ history: createMemoryHistory(), routes: [] })
       const wrapper = mount(NDialogProvider, {
@@ -133,6 +136,7 @@ describe('WatchlistPage 自选展示与信任遮蔽（PRD §13）', () => {
       expect(wrapper.text()).toContain('600519')
       expect(wrapper.text()).toContain('贵州茅台')
     } finally {
+      localStorage.removeItem(storageKey)
       localStorage.removeItem('vd.watchlist.columns')
     }
   })

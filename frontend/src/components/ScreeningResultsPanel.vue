@@ -21,6 +21,7 @@ import type { ScreeningResult, WarningCode, ScreeningRuleNode, ScreeningExportRe
 import axios from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import { fieldDisplayName, fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
+import { isLegacyDefaultResultColumns } from '../composables/useScreeningColumns.ts'
 
 const props = defineProps<{
   results: readonly ScreeningResult[]
@@ -50,7 +51,18 @@ const props = defineProps<{
    * 不能让用户以为是自己把条件写错了。
    */
   strictExemptFields?: readonly string[]
+  /**
+   * 这次运行的凭据（`runId`）已在服务端失效：TTL 到期（后端只保留 24h）
+   * 或已被 `/save` 消费掉。
+   *
+   * 语义（2026-11-24 用户裁定）：**仍然原样展示结果**，只把"要落库/要回服务端"的
+   * 入口（保存结果 / 导出 CSV / 保存到自选）置灰并说明原因 ——
+   * 绝不能因为凭据过期就把整页清空，那正是用户最讨厌的行为。
+   */
+  runExpired?: boolean
 }>()
+
+const emit = defineEmits<{ (e: 'run-expired'): void }>()
 
 const message = useMessage()
 const showSaveDialog = ref(false)
@@ -58,15 +70,31 @@ const saveTitle = ref('')
 const saveNote = ref('')
 const savedResultId = ref<number | null>(null)
 
-// L1-7（报告42）: 列配置记忆（localStorage），刷新/重进页面不丢失
-const COLUMNS_STORAGE_KEY = 'vd.screening.columns'
+// L1-7（报告42）: 列配置记忆（localStorage），刷新/重进页面不丢失。
+// v2：旧键只存数组、没有版本，UI 曾把旧 8/12 列默认集合回填进来，导致
+// 新运行返回了 PE/ROCE 等列却只显示旧的几列。新键用对象包一层版本；
+// 旧键里的**用户自定义**列仍迁移，只有恰好等于旧默认集合的才丢弃。
+const COLUMNS_STORAGE_KEY = 'vd.screening.columns.v2'
+const LEGACY_COLUMNS_STORAGE_KEY = 'vd.screening.columns'
+const COLUMNS_STORAGE_VERSION = 2
+
+function stringColumns(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
 
 function loadSavedColumns(): string[] {
   try {
     const raw = localStorage.getItem(COLUMNS_STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && 'columns' in parsed) {
+        return stringColumns((parsed as { columns?: unknown }).columns)
+      }
+      return stringColumns(parsed)
+    }
+    const legacy = stringColumns(JSON.parse(localStorage.getItem(LEGACY_COLUMNS_STORAGE_KEY) ?? '[]'))
+    // 旧默认列集合不是用户自定义，直接让本次新结果全量展示。
+    return isLegacyDefaultResultColumns(legacy) ? [] : legacy
   } catch {
     return []
   }
@@ -89,12 +117,17 @@ const operationsOnlyWarnings = computed(
 // 保存/导出仍要求存在有效运行与规则；部分股票缺口由引擎排除，
 // 警告仅作披露，不再把整个结果变成不可导出。
 const durableActionsDisabled = computed(
-  () => (props.qualityStatus === 'failed' || props.ruleId === null || props.runId === null) && props.results.length > 0,
+  () => (
+    props.runExpired === true
+    || props.qualityStatus === 'failed'
+    || props.ruleId === null
+    || props.runId === null
+  ) && props.results.length > 0,
 )
 // 自选列表只保存股票代码与规则来源，不保存当前不可信数值，
 // 因此即使存在数据质量警告，也允许用户把“本次筛选命中的公司”固定到自选。
 const watchlistDisabled = computed(
-  () => props.runId === null || props.results.length === 0,
+  () => props.runExpired === true || props.runId === null || props.results.length === 0,
 )
 
 // L0-3（报告42）: 展示以服务端 run 结果为准。strict_only 切换时由 ScreeningPage
@@ -116,7 +149,10 @@ watch(allAvailableColumns, (newCols) => {
 
 watch(selectedColumns, (cols) => {
   try {
-    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(cols))
+    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify({
+      version: COLUMNS_STORAGE_VERSION,
+      columns: cols,
+    }))
   } catch {
     // localStorage 不可用时静默降级（不阻断功能）
   }
@@ -334,6 +370,19 @@ const tableColumns = computed(() => {
   return cols
 })
 
+/**
+ * 服务端说「这张运行凭据不存在了」吗？
+ *
+ * `/api/screening/save` 在 `screening_runs` 找不到 `run_id` 时返回
+ * 400 `{"detail": "server screening run not found"}`（见 app/web/api/screening.py）。
+ * 这不是"保存失败"这么简单 —— 它意味着这份结果再也落不了库，必须如实告诉用户
+ * 并停用入口，而不是让他反复点保存。
+ */
+function isStaleRunError(error: unknown): boolean {
+  const detail = (error as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail
+  return typeof detail === 'string' && detail.includes('run not found')
+}
+
 async function saveResults() {
   if (durableActionsDisabled.value) {
     message.warning('当前结果包含不可信字段或质量状态未知，无法保存')
@@ -357,6 +406,7 @@ async function saveResults() {
     saveTitle.value = ''
     saveNote.value = ''
   } catch (e: unknown) {
+    if (isStaleRunError(e)) emit('run-expired')
     message.error(friendlyErrorMessage(e, '保存失败'))
   }
 }
@@ -429,6 +479,7 @@ async function addToWatchlist() {
     })
     message.success(`已保存到自选列表: ${resp.data.added} 只`)
   } catch (e: unknown) {
+    if (isStaleRunError(e)) emit('run-expired')
     message.error(friendlyErrorMessage(e, '保存到自选列表失败'))
   }
 }
@@ -496,8 +547,21 @@ async function addToWatchlist() {
       否则保存的结果与导出的 CSV 同样只包含这 5000 条。
     </n-alert>
 
+    <n-alert
+      v-if="props.runExpired"
+      id="run-expired-alert"
+      type="warning"
+      title="这次结果已过期，请重新运行"
+      :show-icon="true"
+      style="margin-bottom: 16px"
+    >
+      服务端只保留最近 24 小时的运行结果，本次运行的保存凭据已失效。
+      <b>结果仍然照常显示</b>，但「保存结果 / 导出 CSV / 保存到自选」已停用 ——
+      请点「运行筛选」重新跑一次，再保存。
+    </n-alert>
+
     <section class="screening-results-card">
-      <div class="results-heading"><div><p>SCREENING RESULTS</p><h2>筛选结果</h2><span>{{ totalMatched || displayedResults.length }} 家公司符合当前规则</span></div><div><n-button id="save-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="showSaveDialog = true">保存结果</n-button><n-button id="export-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined" @click="exportCSV">导出 CSV</n-button><n-button id="watchlist-btn" size="small" type="primary" :disabled="watchlistDisabled" :aria-describedby="watchlistDisabled ? 'quality-alert' : undefined" @click="addToWatchlist">保存到自选列表</n-button></div></div>
+      <div class="results-heading"><div><p>SCREENING RESULTS</p><h2>筛选结果</h2><span>{{ totalMatched || displayedResults.length }} 家公司符合当前规则</span></div><div><n-button id="save-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? (props.runExpired ? 'run-expired-alert' : 'quality-alert') : undefined" @click="showSaveDialog = true">保存结果</n-button><n-button id="export-btn" size="small" :disabled="durableActionsDisabled" :aria-describedby="durableActionsDisabled ? (props.runExpired ? 'run-expired-alert' : 'quality-alert') : undefined" @click="exportCSV">导出 CSV</n-button><n-button id="watchlist-btn" size="small" type="primary" :disabled="watchlistDisabled" :aria-describedby="watchlistDisabled ? (props.runExpired ? 'run-expired-alert' : 'quality-alert') : undefined" @click="addToWatchlist">保存到自选列表</n-button></div></div>
       <div class="result-meta"><span><b>{{ displayedResults.length }}</b> 家已展示</span><span>执行规则 <b>{{ ruleName }} v{{ ruleVersion }}</b></span><span>基础股票池 <b>{{ basePoolSize }}</b></span><span>耗时 <b>{{ executionTime }} ms</b></span><span>数据日期 <b>{{ dataDate || '—' }}</b></span><span class="sort-hint">点列头可升序/降序排列（只影响当前视图，导出按当前顺序）</span></div>
       <div class="column-config">
         <n-select
@@ -537,7 +601,7 @@ async function addToWatchlist() {
         <n-button
           type="primary"
           :disabled="durableActionsDisabled"
-          :aria-describedby="durableActionsDisabled ? 'quality-alert' : undefined"
+          :aria-describedby="durableActionsDisabled ? (props.runExpired ? 'run-expired-alert' : 'quality-alert') : undefined"
           @click="saveResults"
         >
           保存
