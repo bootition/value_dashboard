@@ -22,6 +22,7 @@ import {
   DEFAULT_RESULT_COLUMNS_VERSION,
   isLegacyDefaultResultColumns,
   migrateDraftResultColumns,
+  resultColumnMigrationReason,
   useScreeningColumns,
 } from '../../src/composables/useScreeningColumns.ts'
 import type {
@@ -198,7 +199,7 @@ describe('手动移除的条件列不被自动加回', () => {
   })
 })
 
-describe('草稿默认列版本迁移（default_columns_version = 2）', () => {
+describe('草稿默认列版本迁移（default_columns_version = 3）', () => {
   const OLD_8 = [
     'stock_code', 'name', 'exchange', 'listing_date',
     'csrc_l1', 'csrc_l2', 'latest_close', 'total_market_cap',
@@ -231,10 +232,15 @@ describe('草稿默认列版本迁移（default_columns_version = 2）', () => {
     })
   })
 
-  it('版本已是最新 → 即使用户手选回旧默认集合也不覆盖', () => {
+  it('版本已是 3，但列仍是历史默认集合 → **仍然迁移**（防"版本号被提前写上"）', () => {
+    // 旧 v2 判据是 `version !== 2 && isLegacy(...)`，一旦 version 先被写成最新，
+    // 这份残留列就**再也**不会被迁 —— 正是「机制在、但到不了用户」的那一类。
+    // v3 起判据 2（精确命中历史默认集合）与版本号无关。
     expect(migrateDraftResultColumns(OLD_8, DEFAULT_RESULT_COLUMNS_VERSION)).toEqual({
-      columns: OLD_8,
-      migrated: false,
+      columns: [...DEFAULT_RESULT_COLUMNS],
+      migrated: true,
     })
+    expect(resultColumnMigrationReason(OLD_8, DEFAULT_RESULT_COLUMNS_VERSION))
+      .toBe('legacy-default-set')
   })
 })

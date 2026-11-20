@@ -23,7 +23,7 @@ import axios, { isAxiosError } from 'axios'
 import type { ResultColumn, ScreeningRuleNode } from '../types/screening.ts'
 import {
   DEFAULT_RESULT_COLUMNS_VERSION,
-  isLegacyDefaultResultColumns,
+  shouldMigrateResultColumns,
 } from './useScreeningColumns.ts'
 
 /** 常驻范围条件（与页面 `reactive` 同形）。 */
@@ -233,11 +233,12 @@ export function useScreeningDraft(deps: ScreeningDraftDeps) {
       }
       if (Array.isArray(draft.result_columns) && draft.result_columns.length > 0) {
         const encoded = draft.result_columns.map(encodeResultColumn)
-        // 版本缺失/落后，且恰好是旧默认集合 → 迁移；用户自定义过的列保持原样。
-        if (
-          draft.default_columns_version !== expectedColumnsVersion
-          && isLegacyDefaultResultColumns(encoded)
-        ) {
+        // v3 判据（唯一实现在 useScreeningColumns.ts 的 resultColumnMigrationReason）：
+        // 精确命中历史默认集合、或一个指标列都没有 → 迁移成新默认列；
+        // 选过任何指标列（真自定义）→ 一个字都不动。
+        // 审计实证的 revision=111：version 已是 2、列是 4 个纯元数据 ——
+        // 旧判据（版本落后 ∧ 精确等于旧集合）两条都不命中 → 静默不迁 → 用户看不到 PE/PB/ROE。
+        if (shouldMigrateResultColumns(encoded, draft.default_columns_version)) {
           selectedResultColumns.value = [...defaultResultColumns]
         } else {
           selectedResultColumns.value = encoded

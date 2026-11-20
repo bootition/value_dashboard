@@ -105,6 +105,7 @@ def recover_interrupted_auto_update(
     sqlite: SQLiteStore,
     *,
     reason: str,
+    expected_owner_pid: int | None = None,
 ) -> bool:
     """Clear jobs/state left behind by a crashed update child.
 
@@ -114,10 +115,24 @@ def recover_interrupted_auto_update(
     to block the trigger endpoint with ``already_running`` until the whole web
     service was restarted. Reconciliation here makes the next scheduler tick or
     ``start.bat`` trigger able to launch a fresh child without a restart.
-    """
-    from app.core.storage.update_lock import any_write_lock_active
 
-    if any_write_lock_active(duck.db_path):
+    ``expected_owner_pid`` is the **proof** form: the caller just reaped that
+    child (``Popen.wait()`` returned), so the lock it left behind is a zombie by
+    construction and is reclaimed without trusting ``_pid_exists`` (which can
+    report "alive" for a reaped child on Windows). 2026-11-20 reports/152:
+    没有这条路径时，子进程一崩就留下僵尸锁，父进程放弃结算，下一条更新才把它
+    写成 ``dead_update_lock_owner`` —— 连续多轮"更新没跑完"的直接机制。
+    """
+    from app.core.storage.update_lock import any_write_lock_active, reclaim_update_lock
+
+    reclaimed = False
+    if expected_owner_pid is not None:
+        reclaimed = reclaim_update_lock(duck.db_path, owner_pid=expected_owner_pid)
+        if reclaimed:
+            logger.warning(
+                "已回收刚退出的更新子进程 (%s) 留下的僵尸锁", expected_owner_pid,
+            )
+    if not reclaimed and any_write_lock_active(duck.db_path):
         return False
     from app.core.update import IncrementalUpdater
 
@@ -168,22 +183,27 @@ def run_auto_update_child(duck: DuckDBStore, sqlite: SQLiteStore) -> bool:
         logger.info("启动自动更新子进程（PRD §7.3）...")
         try:
             with log_path.open("a", encoding="utf-8") as child_log:
-                completed = subprocess.run(
+                # Popen（而不是 subprocess.run）+ wait：我们要拿到子进程 pid，
+                # 这样它异常退出时能用"刚被我 wait 到的 pid"作证据回收僵尸锁，
+                # 不再靠 _pid_exists 猜死活（reports/152）。
+                process = subprocess.Popen(
                     cmd,
                     cwd=project_root,
                     env=os.environ.copy(),
                     stdout=child_log,
                     stderr=subprocess.STDOUT,
-                    check=False,
                 )
-            logger.info("自动更新子进程完成 exit=%s", completed.returncode)
-            if completed.returncode != 0:
+                logger.info("自动更新子进程已启动: pid=%s", process.pid)
+                returncode = process.wait()
+            logger.info("自动更新子进程完成 exit=%s", returncode)
+            if returncode != 0:
                 # 原生崩溃/被强杀不会执行子进程内的 finally，SQLite 会留下
                 # running 标记；父进程是唯一可靠的回收点。
                 recover_interrupted_auto_update(
                     duck,
                     sqlite,
-                    reason=f"update_child_exit_{completed.returncode}",
+                    reason=f"update_child_exit_{returncode}",
+                    expected_owner_pid=process.pid,
                 )
             return True
         except Exception as error:
@@ -438,8 +458,12 @@ def _run_startup_maintenance(
         if controller.status().get("enabled") and not controller.status().get("paused"):
             # 进程被直接关闭时 job_logs 会残留 running 行；启动先结算它们，
             # 避免“重开一次就多一个 running 任务”的观感与错误统计。
+            # 必须 only_if_owner_dead：服务重启时子进程可能还活着（本机实测
+            # 2026-11-20 20:05），无条件结算会把**正在跑**的作业写成 failed。
             from app.core.update import IncrementalUpdater
-            IncrementalUpdater(duck=duck, sqlite=sqlite)._reconcile_crashed_incremental_jobs()
+            IncrementalUpdater(
+                duck=duck, sqlite=sqlite
+            )._reconcile_crashed_incremental_jobs(only_if_owner_dead=True)
             run_auto_update_child(duck, sqlite)
         else:
             logger.info("自动更新已关闭或暂停，跳过")

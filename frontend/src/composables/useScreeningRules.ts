@@ -19,6 +19,7 @@ import type { Ref } from 'vue'
 import axios from 'axios'
 import type { ScreeningRuleNode } from '../types/screening.ts'
 import { cloneScreeningRule } from '../types/screening.ts'
+import { shouldMigrateResultColumns } from './useScreeningColumns.ts'
 import { apiErrorText, friendlyErrorMessage } from '../helpers/api-error.ts'
 
 export interface SavedRule {
@@ -180,8 +181,14 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
     ruleTree.rules.splice(0, ruleTree.rules.length)
     Object.assign(ruleTree, clone)
 
-    selectedResultColumns.value = (rule.rule_json.columns && rule.rule_json.columns.length > 0)
-      ? [...rule.rule_json.columns]
+    // 规则里存的 columns 可能是历史默认列的残留（审计实证：规则 48/49/50 的
+    // rule_json.columns 全是旧列，选规则就把当前的新默认列覆盖掉了 → 用户
+    // 永远看不到 PE/PB/ROE）。命中历史残留判据 → 用新默认列；规则自带**真自定义**
+    // 列（含任一指标列）则照旧用它的。⚠️ 只改内存状态，不回写数据库。
+    const ruleColumns = rule.rule_json.columns
+    selectedResultColumns.value = (ruleColumns && ruleColumns.length > 0
+      && !shouldMigrateResultColumns(ruleColumns))
+      ? [...ruleColumns]
       : [...defaultResultColumns]
 
     notify.success(`已加载规则: ${rule.name} v${rule.version}`)

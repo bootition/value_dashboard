@@ -84,12 +84,21 @@ export const DEFAULT_RESULT_COLUMNS: readonly string[] = [
 ]
 
 /**
- * 默认列版本号（g4，2026-11-24）：草稿里的列若是**旧默认集合**，按版本号迁移。
+ * 默认列版本号（g4 → 2026-11-24 第三版）：**草稿/规则里存的列**按版本号 + 列内容迁移。
  *
- * 只比较**集合**，不比较顺序：旧草稿可能被 JSON 序列化/去重过。用户自己增删过
- * 的列（不等于任何旧默认集合）绝不覆盖 —— 那些才代表用户的真实意图。
+ * v2 → v3 的原因（独立审计实测证伪「机制在、但到不了用户」）：v2 的迁移判据是
+ * `version !== 2 && 恰好等于旧默认集合`，于是
+ *   1. 真实草稿（`screening_drafts` revision=111）已经是 `version=2`，
+ *      列是 `['stock_code','name','csrc_l2','latest_close']` —— 既不是"版本落后"，
+ *      也不是"精确等于旧默认集合" → **不迁移** → 界面最终只有 4 列 + 条件列，
+ *      用户永远看不到 PE/PB/ROE（尽管 15 列常量、bundle 里都在）；
+ *   2. 已保存规则（`screening_rules` 48/49/50）的 `rule_json.columns` 全是旧列，
+ *      选规则时 `applyLoadedRule` 用它覆盖当前列 → 同样看不到指标。
+ *
+ * v3 的判据见 `resultColumnMigrationReason()`：**含任一指标列就绝不迁**（尊重真自定义），
+ * 纯元数据残留或精确命中历史默认集合就迁（与版本号无关，防"版本号被提前写上"）。
  */
-export const DEFAULT_RESULT_COLUMNS_VERSION = 2
+export const DEFAULT_RESULT_COLUMNS_VERSION = 3
 
 /** 历史默认列（集合）—— 用于识别"用户从没自定义过"的旧草稿。 */
 export const LEGACY_DEFAULT_RESULT_COLUMNS: ReadonlyArray<readonly string[]> = [
@@ -194,8 +203,36 @@ function uniqueColumns(columns: readonly string[]): string[] {
   return out
 }
 
-/** 判断一组列是否**恰好等于**某个历史默认集合（顺序无关）。 */
-export function isLegacyDefaultResultColumns(columns: readonly ResultColumn[]): boolean {
+/**
+ * 「非指标列」白名单：**只有**基础元数据 + 行情/规模快照。
+ *
+ * 迁移判据靠它做**反证**：一组列里只要出现**任何不在此集合**的字段
+ * （`pe_ttm` / `pb_mrq` / `roe` / `roce_10y_median` / `gross_margin` /
+ * 参数化 `revenue_cagr@cagr_years=5` / 排名口径 `roe::rank::…` …），
+ * 就说明用户**主动选过指标** → 绝不迁移他的选择。
+ *
+ * 为什么用「元数据白名单」而不是「指标黑名单」：**故意 fail-safe**。将来新增一个
+ * 指标字段时，白名单口径自动把它算成"用户选过指标"（宁可少迁一次，也不删用户的
+ * 自定义）；反过来，黑名单口径漏登记一个新指标就会把用户的自定义列冲掉。
+ *
+ * `latest_close` / `total_market_cap` 算元数据（审计里的旧 8 列正好是这 8 个），
+ * 所以「旧 8 列的子集」这种历史残留仍会被识别成残留 → 迁移；而只要用户点过
+ * PE/PB/ROE 任何一个，就不会被误迁。
+ */
+export const RESULT_COLUMN_NON_INDICATOR_FIELDS: ReadonlySet<string> = new Set([
+  ...RESULT_METADATA_COLUMNS.map(item => item.value),
+  // 行情 / 规模快照：不是"指标"，用户无从据此表达"我要看估值/盈利"
+  'latest_close',
+  'total_market_cap',
+])
+
+/** 一组列里是否有**指标列**（即任何不在元数据白名单里的字段）。 */
+export function hasIndicatorResultColumn(columns: readonly ResultColumn[]): boolean {
+  return columns.some((column) => !RESULT_COLUMN_NON_INDICATOR_FIELDS.has(encodeResultColumn(column)))
+}
+
+/** 一组列是否**恰好等于**某个历史默认集合（顺序无关，只比集合）。 */
+export function matchesLegacyDefaultResultColumns(columns: readonly ResultColumn[]): boolean {
   if (columns.length === 0) return false
   const actual = new Set(columns.map(encodeResultColumn))
   return LEGACY_DEFAULT_RESULT_COLUMNS.some((legacy) => {
@@ -205,22 +242,88 @@ export function isLegacyDefaultResultColumns(columns: readonly ResultColumn[]): 
 }
 
 /**
- * 迁移草稿里的结果列（g4）。
+ * 是不是「历史默认列的残留」——即**不该继续当作用户意图**的一组列。
  *
- * - 版本号已是最新：原样保留（哪怕用户手动选回了旧默认集合）；
- * - 旧版本/无版本，且列恰好是旧默认集合：替换成新默认；
- * - 其它情况（用户自定义过）：原样保留。
+ * = 精确等于某个历史默认集合（旧 8 列 / 旧 12 列）**或** 一个指标列都没有
+ * （只有 `stock_code`/`name`/`csrc_*`/`latest_close`/`total_market_cap` 这类元数据）。
+ * 空列表不算（空 = 用户主动清空 → 落到默认列，不叫"迁移"）。
  *
- * ⚠️ 页面里真正生效的是 `useScreeningDraft::restoreDraft` 里的同一套判断
- * （它需要在回填 `selectedResultColumns` 之前决定），本函数供其它入口/测试复用，
- * 两者必须保持同一判据 —— 判据的唯一实现在 `isLegacyDefaultResultColumns`。
+ * ⚠️ 这是**唯一**的"历史残留"判据实现：草稿恢复、规则装载、结果面板的
+ * localStorage 旧键迁移全都调它，不允许各处再抄一份。
+ */
+export function isLegacyDefaultResultColumns(columns: readonly ResultColumn[]): boolean {
+  if (columns.length === 0) return false
+  return matchesLegacyDefaultResultColumns(columns) || !hasIndicatorResultColumn(columns)
+}
+
+/** 触发了哪一条迁移判据（诊断/测试用；`null` = 不迁移）。 */
+export type ResultColumnMigrationReason =
+  | 'legacy-default-set'
+  | 'outdated-version'
+  | 'no-indicator-column'
+
+/**
+ * 草稿/已保存规则里的一组结果列，是否该按新默认列重新初始化？（v3 判据唯一实现）
+ *
+ * 三条判据**任一命中即迁移**，但顺序至关重要：
+ *
+ * 1. `legacy-default-set`：集合**精确等于**历史默认集合（旧 8 列 / 旧 12 列）
+ *    → 必迁，**与版本号无关**（防"版本号被提前写上"导致第二次再也不迁）。
+ * 2. 硬否决：含**任一指标列** → 绝不迁。这是"尊重真自定义"的唯一出口，
+ *    必须排在规则 1 之前判断"版本落后"，否则会把 v2 用户的自定义列冲掉。
+ * 3. `outdated-version` / `no-indicator-column`：剩下的只可能是**纯元数据**列
+ *    （一个指标都没有）—— 这几乎必然是历史默认的残留，而不是"用户主动只想要
+ *    stock_code+name+csrc_l2+latest_close 这 4 列"（审计里的 revision=111 正是
+ *    这一种）。规则 1（`version < 3`）在这里已被规则 3 蕴含，保留它只为在
+ *    诊断里说清"到底是版本落后，还是版本已最新但列仍是残留"。
+ *
+ * `version >= 3` 且纯元数据 → 仍迁（判据 3 与版本无关）：宁可多显示三列指标，
+ * 也不让"机制在、但到不了用户"重演。
+ */
+export function resultColumnMigrationReason(
+  columns: readonly ResultColumn[],
+  savedVersion?: number,
+): ResultColumnMigrationReason | null {
+  const encoded = uniqueColumns(columns.map(encodeResultColumn))
+  // 空列表 = 用户主动清空 → 由调用方回落到默认列，不算"迁移"。
+  if (encoded.length === 0) return null
+  // 判据 2：精确命中历史默认集合 → 必迁（哪怕版本号已经是最新的 3）。
+  if (matchesLegacyDefaultResultColumns(encoded)) return 'legacy-default-set'
+  // 硬否决：选过任何指标列 = 真自定义 → 一个字都不动。
+  if (hasIndicatorResultColumn(encoded)) return null
+  // 判据 1：版本落后（且上面已确认没有任何指标列 → 不是真自定义）。
+  if (savedVersion !== undefined && savedVersion < DEFAULT_RESULT_COLUMNS_VERSION) {
+    return 'outdated-version'
+  }
+  // 判据 3：版本不落后，但一个指标列都没有 → 历史默认残留。
+  return 'no-indicator-column'
+}
+
+/** `resultColumnMigrationReason()` 的布尔版（草稿/规则装载的判断入口）。 */
+export function shouldMigrateResultColumns(
+  columns: readonly ResultColumn[],
+  savedVersion?: number,
+): boolean {
+  return resultColumnMigrationReason(columns, savedVersion) !== null
+}
+
+/**
+ * 迁移草稿里的结果列（v3）。
+ *
+ * - 空列表：原样保留（由调用方回落到默认列）；
+ * - 历史残留（见 `resultColumnMigrationReason`）：替换成新默认列；
+ * - 含任一指标列（用户自定义过）：原样保留。
+ *
+ * ⚠️ 页面里真正生效的是 `useScreeningDraft::restoreDraft` / `useScreeningRules::applyLoadedRule`
+ * 里的同一套判断（它们需要在回填 `selectedResultColumns` 之前决定），本函数供其它入口/测试复用。
+ * 三处必须共用同一个判据实现 —— 就是上面的 `resultColumnMigrationReason`。
  */
 export function migrateDraftResultColumns(
   columns: readonly ResultColumn[],
   savedVersion?: number,
 ): { columns: string[]; migrated: boolean } {
   const encoded = uniqueColumns(columns.map(encodeResultColumn))
-  if (savedVersion !== DEFAULT_RESULT_COLUMNS_VERSION && isLegacyDefaultResultColumns(encoded)) {
+  if (shouldMigrateResultColumns(encoded, savedVersion)) {
     return { columns: [...DEFAULT_RESULT_COLUMNS], migrated: true }
   }
   return { columns: encoded, migrated: false }

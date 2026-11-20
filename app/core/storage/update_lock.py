@@ -159,6 +159,45 @@ def update_lock_owned_by_current_process(database_path: Path) -> bool:
         return False
 
 
+def reclaim_update_lock(database_path: Path, *, owner_pid: int | None = None) -> bool:
+    """Force-remove a zombie update lock; True only when this call removed it.
+
+    Two modes:
+
+    * ``owner_pid is None`` — 常规回收：只删"属主已死"的锁（PID 不在、PID 复用、
+      或超龄的损坏锁），活锁一律不动。
+    * ``owner_pid=<pid>`` — **证据模式**：调用方刚刚 `Popen.wait()` 到这个进程
+      退出（它就是我们启动的更新子进程）。这时它写下的锁**必然是僵尸**，不再
+      依赖 `_pid_exists`/创建时间这类会骗人的探测：Windows 上句柄未关、PID 被
+      复用、OpenProcess 权限失败都会让"已死"看起来"还活着"。
+      若锁已被别的进程换主（记录的 pid ≠ owner_pid），仍然拒绝回收——绝不抢活锁。
+
+    为什么需要这条路径（2026-11-20 reports/152）：子进程原生崩溃/被
+    `TerminateProcess` 后，父进程 `recover_interrupted_auto_update` 先看
+    `any_write_lock_active`，一旦探测把死属主看成"活着"就直接返回 False，
+    于是僵尸锁 + `running` 行要留到下一次**服务重启**才被结算 —— job_logs
+    上就是连续多轮 `dead_update_lock_owner`（症状，不是原因）。
+    """
+    lock_path = _lock_path(database_path)
+    if not lock_path.exists():
+        return False
+    recorded: int | None = None
+    fields = _parse_lock(lock_path)
+    if fields is not None:
+        with contextlib.suppress(ValueError):
+            recorded = int(fields["pid"])
+    if owner_pid is None:
+        if not _owner_is_dead(lock_path):
+            return False
+    elif recorded is not None and recorded != owner_pid:
+        return False
+    try:
+        lock_path.unlink()
+    except OSError:
+        return False
+    return True
+
+
 def update_lock_active(database_path: Path) -> bool:
     """True when a live process holds the incremental-update write lock.
 

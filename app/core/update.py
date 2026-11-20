@@ -676,15 +676,30 @@ class IncrementalUpdater:
                 "finished_at": datetime.now(UTC).isoformat(),
             }
 
-    def _reconcile_crashed_incremental_jobs(self) -> None:
-        """Close jobs abandoned by the dead process that owned the update lock."""
+    def _reconcile_crashed_incremental_jobs(self, *, only_if_owner_dead: bool = False) -> int:
+        """Close jobs abandoned by the dead process that owned the update lock.
+
+        返回被结算的行数（0 = 没有可结算的悬挂作业）。
+
+        ``only_if_owner_dead=True``（服务启动/调度触发用）：先确认**更新锁属主
+        确实已死**再动手。2026-11-20 reports/152：启动维护路径原先无条件把
+        `status='running'` 的行结算成 failed —— 只要服务重启时子进程还活着（本机
+        实测 20:05 那次），一条**正在跑**的作业会被写成
+        `dead_update_lock_owner`，等于自己制造假失败。
+        """
+        if only_if_owner_dead:
+            from app.core.storage.update_lock import any_write_lock_active
+
+            if any_write_lock_active(self.duck.db_path):
+                logger.info("更新锁仍由活进程持有：跳过悬挂增量作业结算")
+                return 0
         finished_at = datetime.now(UTC).isoformat()
         running = self.sqlite.query(
             """SELECT id, details_json FROM job_logs
                WHERE job_type = 'incremental_update' AND status = 'running'"""
         )
         if not running:
-            return
+            return 0
         with self.sqlite.transaction() as connection:
             for job in running:
                 try:
@@ -701,6 +716,7 @@ class IncrementalUpdater:
                     [finished_at, json.dumps(details, ensure_ascii=False), job["id"]],
                 )
         logger.warning("已回收死亡更新锁并结算 %d 条悬挂增量作业", len(running))
+        return len(running)
 
     def _run_incremental_update_locked(
         self,
