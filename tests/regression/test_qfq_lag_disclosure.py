@@ -137,4 +137,95 @@ def test_qfq_lag_summary_empty_target_is_neutral(duckdb_store, sqlite_store) -> 
 
     assert updater._qfq_lag_summary([], TARGET_DATE) == {
         "qfq_lag_count": 0, "qfq_lag_ratio": 0.0, "qfq_lag_codes": [],
+        # reports/151：源侧水位两个字段同样必须是中性 0（不参与降级）
+        "raw_lag_count": 0, "qfq_below_target_count": 0,
     }
+
+
+# ─── 2026-11-20（reports/151）：判据口径修正的两个方向 ────────────────────
+class _FrozenSourceAdapter:
+    """源侧整体还没发到 TARGET_DATE：raw/qfq 都只回到 ``end``（两侧齐平）。"""
+
+    def __init__(self, end: str) -> None:
+        self.end = end
+        self.requests: list[tuple[str, str | None]] = []
+
+    def fetch(self, request):
+        self.requests.append((request.adjust, request.start_date))
+        return _price_result(request.adjust, self.end)
+
+
+class _RawAheadAdapter:
+    """真滞后：raw 前进到 TARGET_DATE，qfq 仍停在更早的 ``qfq_end``。"""
+
+    def __init__(self, qfq_end: str) -> None:
+        self.qfq_end = qfq_end
+
+    def fetch(self, request):
+        return _price_result(
+            request.adjust,
+            TARGET_DATE if request.adjust == "raw" else self.qfq_end,
+        )
+
+
+def test_source_not_published_yet_is_not_qfq_lag(duckdb_store, sqlite_store) -> None:
+    """源侧整市场都还没发到目标日（raw 与 qfq 齐平）→ 不得报 qfq 滞后。
+
+    这是 2026-11-18 job 243 的形态：收盘后那一轮 ``qfq_lag_count=5,416/5,572``
+    （97.2%）被判成 partial(qfq_lagged)。但"整市场都还没发"是源侧时间表，
+    不是本地复权序列缺数据；把它算成滞后会让状态页长期假红。
+    """
+    codes = [f"6004{index:02d}" for index in range(10)]
+
+    report = _run_price_step(
+        duckdb_store, sqlite_store, _FrozenSourceAdapter(end=LOCAL_DATE), codes,
+    )
+
+    assert report["status"] == "success", "raw 与 qfq 齐平 → 不能降级 partial"
+    assert report["reason"] is None
+    assert report["qfq_lag_count"] == 0, "qfq 没有落后自己的 raw，不算滞后"
+    assert report["qfq_lag_ratio"] == 0.0
+    # 源侧水位必须仍然可见（可观测性不能丢）
+    assert report["raw_lag_count"] == len(codes)
+    assert report["qfq_below_target_count"] == len(codes)
+
+
+def test_real_qfq_lag_still_updates_and_downgrades(duckdb_store, sqlite_store) -> None:
+    """真滞后：qfq 落后自己的 raw → 必须计入滞后并降级（不能为了快放过）。"""
+    codes = [f"6005{index:02d}" for index in range(10)]
+
+    report = _run_price_step(
+        duckdb_store, sqlite_store, _RawAheadAdapter(qfq_end=LOCAL_DATE), codes,
+    )
+
+    assert report["qfq_lag_count"] == len(codes), "raw 已到目标日而 qfq 没跟上"
+    assert report["status"] == "partial"
+    assert report["reason"] == "qfq_lagged"
+    assert report["raw_lag_count"] == 0, "raw 已到目标日 → 源侧水位不再是瓶颈"
+    assert report["qfq_below_target_count"] == len(codes)
+
+
+def test_qfq_lag_summary_compares_with_own_raw(duckdb_store, sqlite_store) -> None:
+    """``_qfq_lag_summary`` 的判据是"自己的 raw"，不是日历目标日。
+
+    造两只股票：A 的 qfq 比自己的 raw 晚一天（真滞后）；B 的 raw/qfq 齐平
+    但都停在目标日之前（源侧未发）。只有 A 允许计入 ``qfq_lag_count``。
+    """
+    Seed(duckdb_store).stock("600601", name="a", exchange="SHSE", is_listed=True)
+    Seed(duckdb_store).stock("600602", name="b", exchange="SHSE", is_listed=True)
+    Seed(duckdb_store).prices("600601", [(LOCAL_DATE, 9.0), (TARGET_DATE, 9.5)],
+                             table="price_daily_raw")
+    Seed(duckdb_store).prices("600601", [(LOCAL_DATE, 9.1)], table="price_daily_qfq")
+    Seed(duckdb_store).prices("600602", [(LOCAL_DATE, 8.0)], table="price_daily_raw")
+    Seed(duckdb_store).prices("600602", [(LOCAL_DATE, 8.1)], table="price_daily_qfq")
+
+    updater = IncrementalUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=_FrozenSourceAdapter(LOCAL_DATE),
+    )
+    summary = updater._qfq_lag_summary(["600601", "600602"], TARGET_DATE)
+
+    assert summary["qfq_lag_count"] == 1
+    assert summary["qfq_lag_codes"] == ["600601"]
+    assert summary["qfq_lag_ratio"] == 0.5
+    assert summary["raw_lag_count"] == 1, "只有 B 的 raw 没到目标日"
+    assert summary["qfq_below_target_count"] == 2

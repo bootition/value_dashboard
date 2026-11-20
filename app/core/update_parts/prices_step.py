@@ -609,12 +609,26 @@ def _finalize_price_step(
     if fail_count == 0 and qfq_lag["qfq_lag_count"] > qfq_lag_threshold:
         step_status = "partial"
         step_reason = "qfq_lagged"
+        # 2026-11-20（reports/151）：判据是"qfq 落后自己的 raw"（真滞后）；
+        # 源侧整体还没发到 target_date 只记在 raw_lag_count，不再降级，
+        # 否则收盘后那一轮会把 97% 的正常波动报成 partial(qfq_lagged)。
         logger.warning(
-            "[增量] qfq 滞后 %d/%d 只（阈值 %d）→ 价格步骤降级 partial(qfq_lagged): %s",
+            "[增量] qfq 落后自己 raw %d/%d 只（阈值 %d，源侧未到目标日 raw=%d/qfq=%d）"
+            " → 价格步骤降级 partial(qfq_lagged): %s",
             qfq_lag["qfq_lag_count"],
             len(scope.target_stocks),
             qfq_lag_threshold,
+            qfq_lag.get("raw_lag_count", 0),
+            qfq_lag.get("qfq_below_target_count", 0),
             ", ".join(qfq_lag["qfq_lag_codes"]),
+        )
+    elif qfq_lag.get("raw_lag_count"):
+        logger.info(
+            "[增量] 源侧尚未发布到目标日 %s：raw 未到 %d 只 / qfq 未到 %d 只"
+            "（qfq 与自己的 raw 齐平 → 不算滞后，不降级）",
+            scope.target_date,
+            qfq_lag.get("raw_lag_count", 0),
+            qfq_lag.get("qfq_below_target_count", 0),
         )
     # 2026-11-14 P0 J6（依据 S7 §2.2）：qfq 落后自己 raw 的股票必须写进"技术指标待重算
     # 名单"。价格步骤"成功"只说明 raw 落库成功；价格域指标读的是 qfq，
@@ -642,6 +656,9 @@ def _finalize_price_step(
         "qfq_lag_count": qfq_lag["qfq_lag_count"],
         "qfq_lag_ratio": qfq_lag["qfq_lag_ratio"],
         "qfq_lag_threshold": qfq_lag_threshold,
+        # 源侧水位（reports/151）：raw/qfq 相对日历目标日的覆盖，不参与降级
+        "raw_lag_count": qfq_lag.get("raw_lag_count", 0),
+        "qfq_below_target_count": qfq_lag.get("qfq_below_target_count", 0),
         "qfq_lag_codes": qfq_lag["qfq_lag_codes"],
         **({"qfq_lag_error": qfq_lag["qfq_lag_error"]} if "qfq_lag_error" in qfq_lag else {}),
         "xdxr_full_refetch": len(scope.xdxr_codes),
