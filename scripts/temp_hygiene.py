@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import stat
 import tempfile
 import time
 from dataclasses import dataclass
@@ -212,12 +213,31 @@ def prune(
             removed.append(candidate)
             continue
         try:
-            shutil.rmtree(candidate.path)
+            _force_rmtree(candidate.path)
         except OSError as error:
             emit(f"[temp-hygiene] 删除失败 {candidate.path}: {error}")
             continue
         removed.append(candidate)
     return removed
+
+
+
+def _force_rmtree(path: Path) -> None:
+    """删除目录树，**能删只读文件**。
+
+    2026-11-20 实测缺陷：schema 模板是 ``chmod 0444`` 的，``shutil.rmtree`` 直接抛
+    ``WinError 5 拒绝访问`` —— 清扫工具于是"看起来跑了、其实一个没删"，
+    而这正是它存在的意义所在（`reports/149`）。所以这里先把只读位改掉再重试。
+    """
+
+    def _on_error(func, target, _exc_info):  # noqa: ANN001, ANN202
+        try:
+            os.chmod(target, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
+            func(target)
+        except OSError:
+            raise
+
+    shutil.rmtree(path, ignore_errors=False, onerror=_on_error)
 
 
 def human_gb(value: float) -> str:
