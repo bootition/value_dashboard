@@ -100,6 +100,14 @@ seed.trading_dates(["2026-08-06"])
 seed.job_log("incremental_update", started_at="2026-08-04T10:33:17+00:00")
 seed.retry("000001", "price_daily", adapter="manager", error="paired failure")
 seed.watchlist("600519", group_name="current")
+# 人工覆写批量（一次事务 + executemany）：两条 published 会撞部分唯一索引，
+# 整批回滚成 DuplicateSqliteSeed；active/rolled_back 行可以共存。
+seed.override(rows=[
+    {"stock_code": "600519", "field_name": "total_assets", "override_value": 2000.0,
+     "reason": "verified", "status": "active"},
+    {"stock_code": "000001", "field_name": "revenue", "override_value": 300.0,
+     "reason": "verified", "status": "active"},
+])
 # 用户态三张表（20 面板的"已发布 DSL / 已存规则 / 缺失清单"）
 seed.dsl_expression("value_score", 1, "pe_ttm / pb_mrq", status="published",
                     direction="higher_is_better", content_hash="locked-hash")
@@ -421,11 +429,12 @@ class SeedSqlite:
     # ── 人工覆写 ──────────────────────────────────────────────────────
     def override(
         self,
-        stock_code: str,
-        field_name: str,
-        override_value: float,
+        stock_code: str | None = None,
+        field_name: str | None = None,
+        override_value: float | None = None,
         *,
-        reason: str,
+        reason: str | None = None,
+        rows: Iterable[dict[str, Any]] | None = None,
         report_date: str | None = None,
         original_value: float | None = None,
         correction_template: str | None = None,
@@ -445,23 +454,80 @@ class SeedSqlite:
         只在 `status='published'` 时才可能出现 —— 拿 `status='active'` 播种两次
         不报错**不是**工厂漏了检查。
 
-        `override_value` / `reason` 是 NOT NULL，所以是必填参数：工厂不让 NULL
-        走到库里再被 `SqliteSeedConstraint` 拦（那种红得晚一轮，且不好读）。
+        `override_value` / `reason` 是 NOT NULL，所以单行模式下是必填参数：工厂
+        不让 NULL 走到库里再被 `SqliteSeedConstraint` 拦（那种红得晚一轮，且不好读）。
+        漏给时是 `SqliteSeedError`（不是 TypeError），因为批量模式让签名不能把它们
+        写成硬必填 —— 但"没说清要哪一行"仍必须当场红。
+
+        批量：`rows=[{列: 值}, …]`（一次事务 + 一次 `executemany`）。每行必须给
+        `stock_code` / `field_name` / `override_value` / `reason`，其余列按单行
+        默认值补齐；逐行键覆盖 `**cols`。`rows=` 与单行参数**不能同时给**
+        （等于没说清播哪一批）→ :class:`SqliteSeedError`，一行不落。
+
+        为什么需要批量：部分唯一索引是**逐行**判定的 —— 同一条 `executemany`
+        里第二条 `published` 撞第一条 → 整批回滚 + :class:`DuplicateSqliteSeed`
+        （`active` 仍可共存）。这既是生产"一次导入多行覆写"的真实形状，也是
+        契约测试要钉住的那条。
         """
+        defaults = {
+            "report_date": report_date,
+            "original_value": original_value,
+            "correction_template": correction_template,
+            "status": status,
+            "rolled_back_at": rolled_back_at,
+            "rolled_back_to": rolled_back_to,
+            "created_at": created_at,
+        }
+        if rows is not None:
+            if (
+                stock_code is not None
+                or field_name is not None
+                or override_value is not None
+                or reason is not None
+            ):
+                raise SqliteSeedError(
+                    "override(): rows= 批量与单行参数（stock_code/field_name/"
+                    "override_value/reason）不能同时给，不知道你要播哪一批；"
+                    "删掉一个再来。"
+                )
+            payload: list[dict[str, Any]] = []
+            for row in rows:
+                missing = [
+                    column
+                    for column in ("stock_code", "field_name", "override_value", "reason")
+                    if column not in row
+                ]
+                if missing:
+                    raise SqliteSeedError(
+                        f"override(rows=...) 每行必须给 NOT NULL 列，缺 {missing}"
+                        f"（收到 {row}）"
+                    )
+                payload.append({**defaults, **cols, **row})
+            self._insert_many(
+                "manual_overrides",
+                payload,
+                key=("stock_code", "field_name", "report_date"),
+                overwrite=overwrite,
+            )
+            return
+        if (
+            stock_code is None
+            or field_name is None
+            or override_value is None
+            or reason is None
+        ):
+            raise SqliteSeedError(
+                "override(): 单行模式必须给 stock_code / field_name / "
+                "override_value / reason 四个 NOT NULL 参数（批量请用 rows=）。"
+            )
         self._insert(
             "manual_overrides",
             {
                 "stock_code": stock_code,
                 "field_name": field_name,
-                "report_date": report_date,
-                "original_value": original_value,
                 "override_value": override_value,
                 "reason": reason,
-                "correction_template": correction_template,
-                "status": status,
-                "rolled_back_at": rolled_back_at,
-                "rolled_back_to": rolled_back_to,
-                "created_at": created_at,
+                **defaults,
                 **cols,
             },
             key=("stock_code", "field_name", "report_date"),
@@ -796,7 +862,14 @@ class SeedSqlite:
         payloads = [self._prepare(table, row) for row in rows]
         if not payloads:
             return
-        columns = list(payloads[0])
+        # 列集合取**并集**：批量 rows（`override(rows=...)`）允许逐行只填部分列，
+        # 没给的行按 NULL 写。直接拿第一行的键会让后面行多出来的值整行错位
+        # （`executemany` 按位置绑定，而 dict 的键集不必相同）。
+        columns: list[str] = []
+        for payload in payloads:
+            for column in payload:
+                if column not in columns:
+                    columns.append(column)
         placeholders = ", ".join("?" for _ in columns)
         verb = "INSERT OR REPLACE" if overwrite else "INSERT"
         sql = f"{verb} INTO {table} ({', '.join(columns)}) VALUES ({placeholders})"
@@ -809,7 +882,10 @@ class SeedSqlite:
                 ):
                     self._emit_with_sentinels(conn, table, verb, columns, payloads)
                 else:
-                    conn.executemany(sql, [list(payload.values()) for payload in payloads])
+                    conn.executemany(
+                        sql,
+                        [[payload.get(column) for column in columns] for payload in payloads],
+                    )
         except sqlite3.IntegrityError as exc:
             message = str(exc)
             if "UNIQUE constraint failed" in message or "PRIMARY KEY" in message:

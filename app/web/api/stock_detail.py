@@ -472,12 +472,29 @@ INDICATOR_HISTORICAL_CAPABLE: dict[str, bool] = {
 }
 
 
+# 名称匹配对空白不敏感：数据源原样带进来的中文简称大量内嵌空白
+# （`五 粮 液`、`万  科Ａ`、`PT 金田A`；正式库 `name LIKE '% %'` 265 行，
+# 其中 `is_listed` 36 行），用户输入无空格版本原先永远搜不到。
+# 归一化只在查询侧做（不改 `stock_meta` 源数据，否则污染导出/详情/筛选）。
+# DuckDB 的 regexp 走 RE2：`\s` 只覆盖 ASCII 空白，**不含**全角空格 U+3000 与
+# NBSP；`\p{Zs}`（Unicode 空格分隔符）不含制表符。两者并集 `[\s\p{Zs}]+`
+# 才同时覆盖 空格/制表/全角空格/NBSP（已在本机 DuckDB 1.5.5 实测）。
+_NAME_SPACE_RE = r"[\s\p{Zs}]+"
+# 列侧与参数侧共用同一正则，避免两处漂移；`?` 由调用方按顺序绑定。
+_NORMALIZED_NAME_SQL = rf"regexp_replace(name, '{_NAME_SPACE_RE}', '', 'g')"
+_NORMALIZED_TERM_SQL = rf"regexp_replace(?, '{_NAME_SPACE_RE}', '', 'g')"
+
+
 @_public_router.get("/search")
 def search_stocks(
     request: Request,
     query: str = Query(min_length=1, max_length=80),
 ) -> dict:
-    """Search the covered listed-stock universe by partial code or Chinese name."""
+    """Search the covered listed-stock universe by partial code or Chinese name.
+
+    名称匹配忽略内嵌空白（ASCII 空格/制表/U+3000 全角空格/NBSP），
+    代码仍是前缀/子串匹配 + `ESCAPE` 转义，排序优先级不变。
+    """
     term = query.strip()
     if not term:
         raise HTTPException(status_code=400, detail="search query is required")
@@ -496,10 +513,13 @@ def search_stocks(
         f"""SELECT stock_code, name, exchange, csrc_l1
            FROM stock_meta
            WHERE is_listed IS TRUE
-             AND (stock_code LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\')
+             AND (stock_code LIKE ? ESCAPE '\\'
+                  OR {_NORMALIZED_NAME_SQL} LIKE {_NORMALIZED_TERM_SQL} ESCAPE '\\')
              {blacklist_filter}
            ORDER BY
-             CASE WHEN stock_code = ? THEN 0 WHEN name = ? THEN 1 ELSE 2 END,
+             CASE WHEN stock_code = ? THEN 0
+                  WHEN {_NORMALIZED_NAME_SQL} = {_NORMALIZED_TERM_SQL} THEN 1
+                  ELSE 2 END,
              stock_code
            LIMIT 20""",
         [pattern, pattern, *blacklist_params, term, term],

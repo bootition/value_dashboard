@@ -205,6 +205,16 @@ def _one(store: DuckDBStore, table: str) -> dict:
             "csrc_industy",
             id="company_profile:csrc_industy",
         ),
+        pytest.param(
+            # 金融股专用科目：银行模板列叫 `customer_deposits`（复数 s），
+            # 拼成单数后该科目静默 NULL —— 跨行业比较会当成"这家银行没有存款"。
+            lambda seed: seed.financial_sector_item(
+                "601398", "2026-09-30", customer_deposit=1.0,
+            ),
+            "financial_sector_items",
+            "customer_deposit",
+            id="financial_sector_item:customer_deposit",
+        ),
     ],
 )
 def test_misspelled_column_raises_unknown_seed_column_and_writes_no_row(
@@ -308,6 +318,15 @@ def test_misspelled_column_raises_unknown_seed_column_and_writes_no_row(
             lambda seed: seed.company_profile(STOCK, name="贵州茅台"),
             "company_profile",
             id="company_profile",
+        ),
+        pytest.param(
+            # 主键 `(stock_code, report_date)`：同一金融股同一报告期只能一行，
+            # 重复播种必须抛而不是静默留旧值（补充管线按源删插，撞 PK 就是事故）。
+            lambda seed: seed.financial_sector_item(
+                "601398", "2026-09-30", customer_deposits=1.0
+            ),
+            "financial_sector_items",
+            id="financial_sector_item",
         ),
     ],
 )
@@ -516,6 +535,22 @@ def test_business_columns_not_passed_stay_null(duckdb_store: DuckDBStore) -> Non
     assert profile["trade_market"] is None
     assert profile["source"] == "eastmoney_f10"
     assert profile["updated_at"] is not None
+
+    # 金融股专用科目：银行模板只给"吸收存款"，保险/证券那一段必须真的是 NULL
+    # （不是 0.0）—— 「这家银行没有已赚保费」与「已赚保费为 0」是两件事，
+    # 后者会让跨行业聚合把不适用科目当成真实 0 计入。
+    seed.financial_sector_item("601398", "2026-09-30", customer_deposits=100.0)
+    sector = _one(duckdb_store, "financial_sector_items")
+    assert sector["customer_deposits"] == 100.0
+    assert sector["earned_premiums"] is None
+    assert sector["insurance_contract_liability"] is None
+    assert sector["fee_commission_income_net"] is None
+    assert sector["settlement_reserve"] is None
+    assert sector["report_type"] is None
+    # `source` 默认东财 F10：这张表 2025Q2+ 的热数据只有这条管线写。
+    assert sector["source"] == "eastmoney_f10"
+    assert HASH64.fullmatch(sector["raw_response_hash"])
+    assert HASH32.fullmatch(sector["batch_id"])
 
 
 # ── 不变式 6：screenable() 的"确保股票存在"语义 ─────────────────────

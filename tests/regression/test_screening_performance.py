@@ -15,6 +15,8 @@ from datetime import date, timedelta
 from app.core.screening.engine import ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 COMPOSITE_NAME = "performance_value_blend"
 COMPOSITE_EXPRESSION = "pe_ttm + pb_mrq"
@@ -67,49 +69,51 @@ def _seed_synthetic_pool(
     price_date = "2026-07-31"
 
     meta_rows: list[tuple] = []
-    snapshot_rows: list[tuple] = []
+    snapshot_rows: list[dict] = []
     for i in range(count):
         code = f"{600000 + i:06d}"
         industry = industries[i % len(industries)]
+        # 逐行列不给全批默认值：`exchange` 显式写 SZSE（工厂按代码段推断会得 SHSE，
+        # 那是另一套夹具口径），其余 8 列逐行不同。
         meta_rows.append((
-            code, f"stock-{i}", "SZSE", listed_date, True, False, False,
-            industry, f"{industry}-sub", 1_000_000 + i, 800_000 + i,
+            code, f"stock-{i}", {
+                "exchange": "SZSE",
+                "listing_date": listed_date,
+                "is_listed": True, "is_st": False, "is_suspended": False,
+                "csrc_l1": industry, "csrc_l2": f"{industry}-sub",
+                "total_shares": 1_000_000 + i, "circ_shares": 800_000 + i,
+            },
         ))
-        snapshot_rows.append((
-            code, snapshot_date, 10.0 + (i % 100) / 10, price_date, 10.0 + (i % 100) / 10,
-            10.0 + (i % 100) / 10, 0.05 + (i % 50) / 1000, 0.3 + (i % 50) / 100,
-        ))
+        snapshot_rows.append({
+            "stock_code": code,
+            "report_date": snapshot_date,
+            "latest_close": 10.0 + (i % 100) / 10,
+            "latest_price_date": price_date,
+            "pe_ttm": 10.0 + (i % 100) / 10,
+            "pb_mrq": 10.0 + (i % 100) / 10,
+            "roe": 0.05 + (i % 50) / 1000,
+            "debt_ratio": 0.3 + (i % 50) / 100,
+            # 库侧"现在"：快照新鲜度判据读的是库时钟，用哨兵而不是 Python `datetime.now()`
+            "calculated_at": CURRENT_TIMESTAMP,
+        })
 
-    # 留（第 6 类·库侧相对时间）：`calculated_at` 写库侧 `CURRENT_TIMESTAMP`，
+    # 一批一次事务、一批一次绑定（`join()` 把两批并进调用点这一条写连接）。
     with duckdb_store.write_connection() as connection:
-        # 留（第 4 类·多站点缺口）：5,000 只股票的 `stock_meta` 是**程序化生成**的 11 列批量行，
-        # 留（第 4 类·多站点缺口）：5,000 只股票的 `stock_meta` 是**程序化生成**的 11 列批量行，
-        connection.executemany(
-            """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended,
-                csrc_l1, csrc_l2, total_shares, circ_shares)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            meta_rows,
-        )
-        # 留（第 6 类·库侧相对时间）：`calculated_at` 写库侧 `CURRENT_TIMESTAMP`，
-        connection.executemany(
-            """INSERT INTO indicator_snapshot
-               (stock_code, report_date, latest_close, latest_price_date, pe_ttm, pb_mrq,
-                roe, debt_ratio, calculated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
-            snapshot_rows,
-        )
+        duplicate_safe = Seed(duckdb_store).join(connection)
+        duplicate_safe.stocks(meta_rows)
+        duplicate_safe.snapshots(snapshot_rows)
 
     content_hash = hashlib.sha256(COMPOSITE_EXPRESSION.encode("utf-8")).hexdigest()
-    # 留（第 4 类·多站点缺口）：`dsl_expressions.content_hash` 必须与本用例现算的
+    # `content_hash` 是本用例现算的论点（规则保存时锁进 `locked_indicators` 的指纹），
+    # 必须逐字给；`status` 工厂默认 `draft`，筛选只认 `published`，所以显式写。
     with sqlite_store.transaction() as connection:
-        # 留（第 4 类·多站点缺口）：`dsl_expressions.content_hash` 必须与本用例现算的
-        connection.execute(
-            """INSERT INTO dsl_expressions
-               (name, version, expression_text, status, description, direction,
-                historical_capable, content_hash)
-               VALUES (?, 1, ?, 'published', 'PRD 19.1 synthetic benchmark', 'lower_is_better', 0, ?)""",
-            [COMPOSITE_NAME, COMPOSITE_EXPRESSION, content_hash],
+        SeedSqlite(sqlite_store).join(connection).dsl_expression(
+            COMPOSITE_NAME, 1, COMPOSITE_EXPRESSION,
+            status="published",
+            description="PRD 19.1 synthetic benchmark",
+            direction="lower_is_better",
+            historical_capable=False,
+            content_hash=content_hash,
         )
     return {"name": COMPOSITE_NAME, "version": 1, "content_hash": content_hash}
 

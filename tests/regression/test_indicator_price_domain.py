@@ -39,13 +39,17 @@ def test_price_sensitive_recompute_skips_unchanged_and_updates_only_price_fields
 
     # 新交易日价格变化 → 只重算价格域，报告期与累计分红字段保持原值。
     with duckdb_store.write_connection() as conn:
-        # 留（第 6 类·库侧相对时间）：`CURRENT_DATE + INTERVAL '1 day'` 是"**明天**"的
-        # 交易日 —— 用例要的是"价格比库里的最后一天更新"，固定字面量过了那天就变成
-        # 历史日期，价格域根本不会触发重算，用例会静默退化。raw/qfq 两行同一口径一起留。
+        # 留（第 6 类·库侧相对时间）：`CURRENT_DATE + INTERVAL '1 day'` 是"**明天**"的交易日
+        # —— 用例要的是"价格比库里最后一天更新"；换成固定字面量，过了那天它就是历史日期，
+        # 价格域根本不触发重算，用例静默退化。**本轮实证不可收敛**：DuckDB 侧工厂的哨兵只有
+        # 裸 `CURRENT_TIMESTAMP`/`CURRENT_DATE`，`sql_now()` 生成的 `datetime('now', …)` 是
+        # SQLite 语法，DuckDB 里 `CatalogException: Scalar Function datetime does not exist`。
         conn.execute(
             """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
                VALUES ('000001', CURRENT_DATE + INTERVAL '1 day', 11, 200)"""
         )
+        # 留（第 6 类·库侧相对时间）：同上 —— raw 与 qfq 必须是**同一个"明天"**，
+        # 两边都靠库侧 `CURRENT_DATE` 才不会在跨零点/跨天时错开成两个交易日。
         conn.execute(
             """INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume)
                VALUES ('000001', CURRENT_DATE + INTERVAL '1 day', 11, 200)"""

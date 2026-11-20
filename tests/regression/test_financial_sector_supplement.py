@@ -129,13 +129,16 @@ def _seed_financial_item(
     source: str,
     customer_deposits: float | None = None,
 ) -> None:
-    duck.write_query(
-        # 留（第 4 类·多站点缺口）：`financial_sector_items` 无工厂方法，且 `fetch_time` 用本文件
-        """INSERT INTO financial_sector_items
-               (stock_code, report_date, report_type, customer_deposits, source,
-                fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 'quarterly', ?, ?, ?, 'hash', 'strict', 'b')""",
-        [code, report_date, customer_deposits, source, FETCH_TIME],
+    Seed(duck).financial_sector_item(
+        code,
+        report_date,
+        report_type="quarterly",
+        customer_deposits=customer_deposits,
+        source=source,
+        fetch_time=FETCH_TIME,
+        raw_response_hash="hash",
+        confidence="strict",
+        batch_id="b",
     )
 
 

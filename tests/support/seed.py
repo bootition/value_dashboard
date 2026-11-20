@@ -175,6 +175,11 @@ DEFAULT_ETF_SOURCE: Final = "ths"
 DEFAULT_HK_DIVIDEND_SOURCE: Final = "eastmoney_hk_dividend"
 #: `company_profile` 的生产来源：东财 F10 公司资料（`eastmoney_f10`）。
 DEFAULT_COMPANY_PROFILE_SOURCE: Final = "eastmoney_f10"
+#: `financial_sector_items` 的生产来源：东财 F10 金融股专用三表补采
+#: （`app/core/supplement.py:111` 的 `SOURCE`）。CSMAR C17 只覆盖到 2025-03-31，
+#: 2025Q2+ 热数据全部由这条东财管线写入 —— 落 `csmar` 会让上游
+#: `replace_source_rows`（`DELETE ... WHERE source = 'eastmoney_f10'`）漏掉这些行。
+DEFAULT_FINANCIAL_SECTOR_SOURCE: Final = "eastmoney_f10"
 _DEFAULT_BATCH_ID: Final = hashlib.sha256(b"value-dashboard/test-seed").hexdigest()[:32]
 
 #: 各表需要的溯源列组合。列名必须与**该表 schema** 一致 —— 财务附表写
@@ -489,6 +494,39 @@ class Seed:
         self._insert(
             "balance_sheet_ext",
             {"stock_code": code, "report_date": period, **cols},
+            key=("stock_code", "report_date"),
+            trace=_TRACE_CRAWL,
+            overwrite=overwrite,
+        )
+
+    def financial_sector_item(
+        self, code: str, period: str, *, overwrite: bool = False, **cols: Any
+    ) -> None:
+        """`financial_sector_items`（金融股专用科目，主键 `stock_code, report_date`）。
+
+        这张表是**银行/证券/保险三套模板的并集**（存款、贷款、利息净收入、已赚
+        保费、结算备付金…每类股票只用其中一段），所以业务列**一个都不给默认
+        值**：不写就是 NULL。原表里"这家银行没有已赚保费"就该是 NULL，工厂替你
+        补 0 会把「该科目不适用」变成「该科目为 0」，跨行业比较当场失真。
+
+        溯源 :data:`_TRACE_CRAWL`（`source/fetch_time/raw_response_hash/
+        confidence/batch_id`，五列全 NOT NULL）；`source` 默认
+        :data:`DEFAULT_FINANCIAL_SECTOR_SOURCE`（`eastmoney_f10`）—— 这张表的
+        2025Q2+ 热数据只有东财补采一家，落 `csmar` 会让补充管线的
+        `replace_source_rows` 删不到自己刚写的行。要造 CSMAR 覆盖期的行就显式
+        `source="csmar"`。
+
+        `report_date` 由调用点逐字给（`date` 或 `"YYYY-MM-DD"`），工厂不做日期
+        归一化：报告期本身常常就是用例的论点（季报/半年报/年报口径）。
+        """
+        self._insert(
+            "financial_sector_items",
+            {
+                "stock_code": code,
+                "report_date": period,
+                "source": DEFAULT_FINANCIAL_SECTOR_SOURCE,
+                **cols,
+            },
             key=("stock_code", "report_date"),
             trace=_TRACE_CRAWL,
             overwrite=overwrite,

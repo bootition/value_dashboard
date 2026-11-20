@@ -133,6 +133,25 @@ def _one(store: SQLiteStore, table: str) -> dict:
             id="override:reprot_date",
         ),
         pytest.param(
+            # 批量 rows 也要逐行进同一套列校验：任一行拼错 → 整批一行都不落
+            # （`_prepare` 在写之前就把所有行校验完，不会先写一半再撞拼错）。
+            lambda seed: seed.override(
+                rows=[
+                    {
+                        "stock_code": STOCK, "field_name": "revenue",
+                        "override_value": 1.0, "reason": "r",
+                    },
+                    {
+                        "stock_code": STOCK, "field_name": "total_assets",
+                        "override_value": 2.0, "reason": "r", "staus": "published",
+                    },
+                ],
+            ),
+            "manual_overrides",
+            "staus",
+            id="override_rows:staus",
+        ),
+        pytest.param(
             lambda seed: seed.refresh_state("csrc_industry_last_refresh", "{}", updatd_at="x"),
             "data_refresh_state",
             "updatd_at",
@@ -213,6 +232,20 @@ def test_misspelled_column_raises_unknown_sqlite_column_and_writes_no_row(
             ),
             "manual_overrides",
             id="override_published",
+        ),
+        pytest.param(
+            # 批量入口同一把尺子：同一批 published 行第二次播种同样抛。
+            lambda seed: seed.override(
+                rows=[
+                    {
+                        "stock_code": STOCK, "field_name": "revenue",
+                        "override_value": 1000.0, "reason": "人工修正",
+                        "status": "published",
+                    },
+                ],
+            ),
+            "manual_overrides",
+            id="override_rows_published",
         ),
     ],
 )
@@ -308,6 +341,55 @@ def test_active_overrides_coexist_while_published_is_unique(
     )
     assert _count(sqlite_store, "manual_overrides") == 4
 
+    # 批量 rows（一次 executemany + 一次事务）：两条 active 同键共存是**真实
+    # 语义**（同一股票同一字段的多次人工修正历史），不是工厂漏检。
+    seed.override(rows=[
+        {
+            "stock_code": STOCK, "field_name": "total_assets",
+            "override_value": 1.0, "reason": "批量一",
+        },
+        {
+            "stock_code": STOCK, "field_name": "total_assets",
+            "override_value": 2.0, "reason": "批量二",
+        },
+    ])
+    assert _count(sqlite_store, "manual_overrides") == 6
+
+    # 同一批里两条 `published`（同股票/字段/报告期）→ 第二条撞部分唯一索引 →
+    # **整批回滚**：不是"第一条留下、第二条报错"，而是一行都不落。
+    with pytest.raises(DuplicateSqliteSeed, match="manual_overrides"):
+        seed.override(rows=[
+            {
+                "stock_code": "000001", "field_name": "revenue",
+                "report_date": REPORT_DATE, "override_value": 1.0,
+                "reason": "批次头", "status": "published",
+            },
+            {
+                "stock_code": "000001", "field_name": "revenue",
+                "report_date": REPORT_DATE, "override_value": 2.0,
+                "reason": "批次尾", "status": "published",
+            },
+        ])
+    assert _count(sqlite_store, "manual_overrides") == 6
+
+    # 已回滚的 published 不占唯一槽位：两条一起播也可以（索引条件含
+    # `rolled_back_at IS NULL`）—— 这正是"回滚后重新发布"要的批量形状。
+    seed.override(rows=[
+        {
+            "stock_code": "000001", "field_name": "revenue",
+            "report_date": REPORT_DATE, "override_value": 1.0,
+            "reason": "回滚一", "status": "published",
+            "rolled_back_at": "2026-08-01 00:00:00",
+        },
+        {
+            "stock_code": "000001", "field_name": "revenue",
+            "report_date": REPORT_DATE, "override_value": 2.0,
+            "reason": "回滚二", "status": "published",
+            "rolled_back_at": "2026-08-02 00:00:00",
+        },
+    ])
+    assert _count(sqlite_store, "manual_overrides") == 8
+
 
 # ── 不变式 5：未传的业务列必须是 NULL ────────────────────────────────
 def test_business_columns_not_passed_stay_null(
@@ -343,6 +425,29 @@ def test_business_columns_not_passed_stay_null(
     assert override["correction_template"] is None
     assert override["rolled_back_at"] is None
     assert override["rolled_back_to"] is None
+
+    # 批量 rows 走同一把尺子：未传的业务列仍是 NULL（不是批量路径补的默认值），
+    # 可选口径列落单行默认值（status='active'、created_at=固定字面量）。
+    seed.override(rows=[
+        {
+            "stock_code": STOCK, "field_name": "batch_blank",
+            "override_value": 7.0, "reason": "批量",
+        },
+    ])
+    batch = sqlite_store.query(
+        "SELECT report_date, original_value, correction_template, rolled_back_at, "
+        "rolled_back_to, status, created_at FROM manual_overrides "
+        "WHERE field_name = 'batch_blank'"
+    )
+    assert batch == [{
+        "report_date": None,
+        "original_value": None,
+        "correction_template": None,
+        "rolled_back_at": None,
+        "rolled_back_to": None,
+        "status": "active",
+        "created_at": DEFAULT_SEED_TIME,
+    }]
 
     state = _one(sqlite_store, STATE_TABLE)
     assert state["progress_json"] is None

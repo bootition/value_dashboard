@@ -144,6 +144,109 @@ def series_break_field_warnings(fields: Any) -> list[str]:
     return series_break_warnings(fields)
 
 
+# ─── strict 模式：派生字段豁免（2026-11-23，用户实测"点了严格模式一条都筛不出来"）
+#
+# `strict_only` 的本意：**不给用户看没把握的数据**。对"抓取型源数据字段"，
+# 这条靠字段级 strict 血缘落实（`source_audit.confidence='strict'` 且值与快照一致）。
+# 但**本项目自算的派生字段**（`roce_*` 十列、`total_market_cap`、`pe_ttm`、均线、
+# YoY、CAGR…）**按定义不存在抓取事件**，永远不会有字段级 strict 血缘 —— 旧实现
+# 对它们也要求抓取血缘，等于让 strict 模式对这些指标**永久空集**（正式库实测：
+# `roce_10y_median` 在 `source_audit` 里 0 条记录；`total_market_cap` 338,733 条
+# **全是** `source='derived_calculator'` 的 approximate）。
+#
+# 正确的语义：strict 模式卡的是**抓取字段的血缘**，派生字段的可信度由"谁算的"决定。
+# 判定只在**有证据**时豁免，缺证据一律照旧卡住（fail-closed）：
+#   1. **注册表**（静态、有门禁核对）：`derived_snapshot_domains()`（RG4 在核对）、
+#      `EXTENDED_COLUMNS`（indicator_ext 自算域）、`DERIVED_FIELDS`（DSL/SQL 派生）。
+#   2. **生产者证据**：该字段在 `source_audit` 里**有记录且全部**由
+#      `derived_calculator` 写入（= 唯一生产者是本项目计算器）。
+#      **零审计记录的字段不豁免** —— 否则"删掉血缘就能绕过 strict"就成了新的
+#      fail-open，正是原 docstring 担心的事。
+# SQL 派生字段的**输入原始列**（`DERIVED_FIELDS[*].raw_columns`）仍在快照池里可查，
+# 因此豁免时把 strict 检查**下沉到输入列**上继续做（见 `derived_input_fields`）。
+DERIVED_AUDIT_SOURCE = "derived_calculator"
+
+
+def registered_derived_fields() -> frozenset[str]:
+    """本项目自算派生字段的静态注册表（strict 豁免的静态依据，与门禁同源）。
+
+    三个来源都是既有登记处，不新增一份平行清单：
+    - `derived_snapshot_domains()`：RG4 门禁逐列核对的快照派生域（ROCE 十列）；
+    - `EXTENDED_COLUMNS`：indicator_ext 扩展指标域（本模块自己的登记处）；
+    - `DERIVED_FIELDS`：跨年口径断点派生字段（SQL 真源在 dsl/derived_fields.py）。
+    """
+    from app.core.indicators.calculator import derived_snapshot_domains
+
+    fields: set[str] = set(EXTENDED_COLUMNS) | set(DERIVED_FIELDS_BY_KEY)
+    for domain in derived_snapshot_domains():
+        fields.update(domain.columns)
+    return frozenset(fields)
+
+
+def derived_input_fields(field: str) -> tuple[str, ...]:
+    """SQL 派生字段的输入原始列（`derived_from`），用于把 strict 检查下沉一层。
+
+    只返回**能在快照池里查值**的列（`base_pool` 暴露为 `{table}__{column}`），
+    因此 `_build_strict_clause` 可以对它们做与源数据字段**完全相同**的值级校验。
+    快照派生域（ROCE / 市值 / 均线…）的输入是表达式内部量，无对应列 → 返回空。
+    """
+    derived = DERIVED_FIELDS_BY_KEY.get(field)
+    if derived is None:
+        return ()
+    candidates = tuple(
+        f"{derived.table}.{column}" for column in derived.raw_columns
+    )
+    return tuple(field_name for field_name in candidates if field_name in NORMALIZED_FIELDS)
+
+
+def build_strict_mode_warning(
+    *,
+    total_matched: int,
+    missing_fields: list[str],
+    exempt_fields: list[str],
+    enforced_fields: list[str],
+) -> str | None:
+    """严格模式无匹配时给用户**可行动**的解释（不再谎报"永远无法满足"）。
+
+    - `missing_fields`：被 strict 卡住的**源数据**字段（没有任何 strict 血缘）；
+    - `exempt_fields`：按定义豁免的**派生**字段（本项目自算，无抓取事件）；
+    - `enforced_fields`：真正参与 strict 谓词的字段。
+    """
+    if total_matched > 0:
+        return None
+    exempt_note = ""
+    if exempt_fields:
+        exempt_note = (
+            "；其中 " + "、".join(exempt_fields) + " 是本项目自算的派生字段，"
+            "按设计没有字段级抓取血缘，已豁免字段级 strict 校验（它们的输入字段仍逐个校验）"
+        )
+    if missing_fields:
+        return (
+            "严格可信模式排除了全部行：以下源数据字段没有任何 strict 血缘记录，"
+            "严格模式会把用到它们的行全部排除 —— "
+            + "、".join(missing_fields)
+            + "。可以这样解决：① 切换到「包含近似可信数据」先看完整结果；"
+            "② 等这些字段的抓取血缘补齐后再用严格模式"
+            + exempt_note
+            + "。"
+        )
+    if not enforced_fields:
+        return (
+            "严格可信模式无匹配：本次规则只用到本项目自算的派生字段（"
+            + "、".join(exempt_fields)
+            + "），它们已按设计豁免字段级 strict 校验；"
+            "因此这次空结果是筛选条件本身没有命中，与可信度模式无关 —— "
+            "可以放宽条件，或切换到「包含近似可信数据」再试。"
+        )
+    return (
+        "严格可信模式无匹配：所用源数据字段都有 strict 血缘记录，"
+        "但当前没有一只股票的快照值与严格记录的值/报告期完全一致；"
+        "可以切换到「包含近似可信数据」查看完整口径结果"
+        + exempt_note
+        + "。"
+    )
+
+
 class MaskedFieldError(ValueError):
     """规则引用了"当前不可信"的字段 → 拒绝执行（HTTP 409），不静默返回空集。
 
@@ -729,6 +832,18 @@ class ScreeningEngine:
         # 页面可见行数自洽（见 app/core/blacklist.py 模块 docstring「与排名口径的关系」）。
         self._blacklist_codes = blacklisted_codes(self.sqlite)
 
+        # 2.4 strict 模式：派生字段豁免（语义与 fail-closed 判据见模块常量
+        #     `DERIVED_AUDIT_SOURCE` 的注释）。豁免只发生在**派生**字段上；
+        #     源数据字段一个都不放过 —— 那是 strict 模式唯一的安全底线。
+        strict_exempt: set[str] = (
+            self._strict_exempt_derived_fields(strict_fields) if strict_only else set()
+        )
+        strict_enforced: set[str] = set(strict_fields) - strict_exempt
+        if strict_only:
+            # 派生字段的输入原始列仍可查值 → strict 检查下沉一层继续做。
+            for field in sorted(strict_exempt):
+                strict_enforced.update(derived_input_fields(field))
+
         # 3. 构建 SQL
         sql, params = self._build_sql(
             conditions=conditions,
@@ -738,7 +853,7 @@ class ScreeningEngine:
             include_suspended=include_suspended,
             min_listing_years=min_listing_years,
             rank_fields=rank_fields,
-            strict_fields=strict_fields if strict_only else set(),
+            strict_fields=strict_enforced if strict_only else set(),
             compiled_indicators=compiled_indicators,
         )
 
@@ -753,33 +868,40 @@ class ScreeningEngine:
         execution_time = (time.monotonic() - start_time) * 1000
 
         # 2026-08-14 红队 P2-4：strict_only 无结果时给出可行动反馈。
-        # 此前严格模式静默返回空集，用户无法区分"确实无股票符合"与
-        # "指标没有 strict 血缘记录、条件永远无法满足"。
+        # 2026-11-23 修正（用户实测）：此前把**派生字段**也列进"没有 strict 血缘、
+        # 条件永远无法满足"，既吓人又不准确 —— 派生字段按设计没有抓取血缘，早已
+        # 豁免；这里只统计**真正卡住结果**的源数据字段，并把豁免情况如实说明。
         strict_availability: dict[str, int] = {}
         strict_mode_warning: str | None = None
         if strict_only and strict_fields:
-            fields = sorted(strict_fields)
-            placeholders = ", ".join(["?"] * len(fields))
-            audit_rows = self.duck.read_query(
-                "SELECT field_name, COUNT(*) AS n FROM source_audit "
-                f"WHERE confidence = 'strict' AND field_name IN ({placeholders}) "
-                "GROUP BY field_name",
-                fields,
+            # 审计表里 `field_name` 是裸列名（`income.revenue` → `revenue`），
+            # 旧实现拿点号全名去查 → 归一化字段永远"查不到"，误报成缺血缘。
+            audit_name_of = {
+                self._audit_field_name(field): field
+                for field in sorted(strict_enforced)
+            }
+            if audit_name_of:
+                names = sorted(audit_name_of)
+                placeholders = ", ".join(["?"] * len(names))
+                audit_rows = self.duck.read_query(
+                    "SELECT field_name, COUNT(*) AS n FROM source_audit "
+                    f"WHERE confidence = 'strict' AND field_name IN ({placeholders}) "
+                    "GROUP BY field_name",
+                    names,
+                )
+                strict_availability = {
+                    audit_name_of[r["field_name"]]: int(r["n"])
+                    for r in audit_rows
+                    if r["field_name"] in audit_name_of
+                }
+            enforced_fields = sorted(strict_enforced)
+            missing = [f for f in enforced_fields if f not in strict_availability]
+            strict_mode_warning = build_strict_mode_warning(
+                total_matched=total_matched,
+                missing_fields=missing,
+                exempt_fields=sorted(strict_exempt),
+                enforced_fields=enforced_fields,
             )
-            strict_availability = {r["field_name"]: int(r["n"]) for r in audit_rows}
-            missing = [f for f in fields if f not in strict_availability]
-            if total_matched == 0:
-                if missing:
-                    strict_mode_warning = (
-                        "严格可信模式无匹配：以下指标没有任何 strict 血缘记录，"
-                        "相应条件永远无法满足 —— " + "、".join(missing)
-                    )
-                else:
-                    strict_mode_warning = (
-                        "严格可信模式无匹配：所用指标存在 strict 血缘记录，"
-                        "但当前快照期没有值/报告期完全一致的严格记录；"
-                        "可切换“包含近似可信数据”查看完整口径结果。"
-                    )
 
         # 5. 获取基础池大小（用于报告）
         base_pool_size = self._get_base_pool_size(
@@ -803,7 +925,14 @@ class ScreeningEngine:
             "base_pool_size": base_pool_size,
             "data_date": data_date,
             "strict_only": strict_only,
+            # 引用到的可审计字段全集（含被豁免的派生字段），保持既有语义不变。
             "strict_fields": sorted(strict_fields),
+            # 真正参与 strict 谓词的字段（源数据字段 + 派生字段下沉后的输入列）。
+            # 非 strict 模式不拼谓词 → 恒为空，和 SQL 里发生的事一致。
+            "strict_enforced_fields": sorted(strict_enforced) if strict_only else [],
+            # 按设计豁免字段级抓取血缘的派生字段：如实披露，不让 strict 模式
+            # 假装对"自己算出来的值"有抓取级保证。
+            "strict_exempt_fields": sorted(strict_exempt),
             "strict_availability": strict_availability,
             "strict_mode_warning": strict_mode_warning,
             "locked_indicators": locked_indicators or {},
@@ -1605,12 +1734,52 @@ LIMIT {MAX_RESULT_ROWS}
         """Only compare numeric data fields; metadata and rank values are not interchangeable."""
         return left not in METADATA_COLUMNS and right not in METADATA_COLUMNS
 
-    def _build_strict_clause(self, strict_fields: set[str], source_table: str) -> str:
-        """Require a latest, field-level strict audit record for every used metric.
+    def _strict_exempt_derived_fields(self, strict_fields: set[str]) -> set[str]:
+        """strict 模式下**豁免**字段级抓取血缘的派生字段（判据见 `DERIVED_AUDIT_SOURCE`）。
 
-        Derived metrics without a recorded field-level source deliberately fail this
-        predicate: strict mode may omit data, but must never claim unsupported
-        confidence.
+        fail-closed 两条铁律：
+        1. `source_audit` 里**一条记录都没有**且不在注册表里的字段 → **不豁免**
+           （否则"血缘缺失"就能冒充"派生字段"，strict 直接被绕过）；
+        2. 有记录但混入任何非 `derived_calculator` 生产者 → **不豁免**
+           （那是抓取字段，必须拿 strict 抓取血缘）。
+        """
+        if not strict_fields:
+            return set()
+        registry = registered_derived_fields()
+        exempt = {field for field in strict_fields if field in registry}
+        candidates = sorted(strict_fields - exempt)
+        if not candidates:
+            return exempt
+        audit_name_of = {
+            self._audit_field_name(field): field for field in candidates
+        }
+        names = sorted(audit_name_of)
+        placeholders = ", ".join(["?"] * len(names))
+        rows = self.duck.read_query(
+            "SELECT field_name, COUNT(*) AS n, "
+            "COUNT(*) FILTER (WHERE source = ?) AS n_derived "
+            f"FROM source_audit WHERE field_name IN ({placeholders}) "
+            "GROUP BY field_name",
+            [DERIVED_AUDIT_SOURCE, *names],
+        )
+        for row in rows:
+            audit_name = row["field_name"]
+            if audit_name not in audit_name_of:
+                continue
+            total = int(row["n"])
+            if total > 0 and int(row["n_derived"]) == total:
+                exempt.add(audit_name_of[audit_name])
+        return exempt
+
+    def _build_strict_clause(self, strict_fields: set[str], source_table: str) -> str:
+        """Require a latest, field-level strict audit record for every enforced field.
+
+        `strict_fields` here is the **enforced** set, i.e. source-data fields plus the
+        input columns of exempted derived fields (`derived_input_fields`) — derived
+        values themselves never have a capture event, so demanding one for them was a
+        category error that made strict mode permanently empty for every computed
+        indicator. The rule this predicate enforces is unchanged and non-negotiable:
+        a captured field without a matching strict audit record is filtered out.
         """
         clauses: list[str] = []
         for field in sorted(strict_fields):

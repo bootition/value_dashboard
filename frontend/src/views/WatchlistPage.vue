@@ -58,12 +58,18 @@ const items = ref<WatchlistItem[]>([])
 const groups = ref<WatchlistGroup[]>([])
 const trust = ref<IndicatorTrust | null>(null)
 const autoUpdateInProgress = ref(false)
-const loading = ref(false)
+const loading = ref(true)
 const refreshing = ref(false)
-const selectedGroup = ref<string | null>('default')
+// `default` 只是后端持久化 key（历史数据无法改名，改库会丢分组），
+// 用户可见处一律走 displayGroupName 归一成中文。
+const MANUAL_GROUP_KEY = 'default'
+const MANUAL_GROUP_LABEL = '手动收录'
+// 首屏不预选任何分组：等分组列表回来后自动落到第一个真实规则分组，
+// 这样用户一进来自选页看到的就是「已有的规则分组」，而不是空的占位组。
+const selectedGroup = ref<string | null>(null)
 const showColumnSettings = ref(false)
 const addStockCode = ref('')
-const addGroupName = ref('default')
+const addGroupName = ref('')
 
 const warningCodes = computed(() => trust.value?.warning_codes ?? [])
 const hasUntrustedIndicators = computed(
@@ -71,8 +77,32 @@ const hasUntrustedIndicators = computed(
 )
 const hasRefreshableRule = computed(() => items.value.some((item) => item.source_rule_id != null))
 
-const selectedGroupLabel = computed(() => selectedGroup.value || '默认组')
-const displayGroupName = (name: string) => name === 'default' ? '默认组' : name
+/** 唯一的组名展示归一出口：`default` 只作为内部 key 存在。 */
+const displayGroupName = (name: string) => name === MANUAL_GROUP_KEY ? MANUAL_GROUP_LABEL : name
+const isManualGroup = (name: string | null) => name === MANUAL_GROUP_KEY
+/** 空的手动组不占侧栏位置（后端 GROUP BY 不会返回 0 行分组，这里兜底）；
+ *  真实规则分组排前面，手动收录作为兜底入口排最后。 */
+const visibleGroups = computed(() => groups.value
+  .filter((g) => !isManualGroup(g.group_name) || g.cnt > 0)
+  .slice()
+  .sort((a, b) => Number(isManualGroup(a.group_name)) - Number(isManualGroup(b.group_name))))
+const hasVisibleGroups = computed(() => visibleGroups.value.length > 0)
+const selectedGroupLabel = computed(() => selectedGroup.value ? displayGroupName(selectedGroup.value) : '')
+const selectedIsManual = computed(() => isManualGroup(selectedGroup.value))
+const emptyDescription = computed(
+  () => selectedGroup.value ? `「${selectedGroupLabel.value}」里还没有公司` : '还没有可显示的自选分组',
+)
+
+function resolveSelectedGroup(list: WatchlistGroup[]): string | null {
+  const visible = list.filter((g) => !isManualGroup(g.group_name) || g.cnt > 0)
+  const current = selectedGroup.value
+  if (current && visible.some((g) => g.group_name === current)) return current
+  // 优先落到真实规则分组（用户说的"已有的那个规则分组界面"），
+  // 只有完全没有规则分组时才回退到手动收录。
+  return visible.find((g) => !isManualGroup(g.group_name))?.group_name
+    ?? visible.find((g) => isManualGroup(g.group_name))?.group_name
+    ?? null
+}
 
 // L1-7（报告42）: 列配置记忆（localStorage），无历史配置时用默认列
 const DEFAULT_COLUMNS = ['stock_code', 'name', 'exchange', 'group_name', 'listing_date', 'total_market_cap', 'latest_close', 'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'debt_ratio', 'source']
@@ -167,7 +197,7 @@ const tableColumns = computed(() => {
     },
     name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || '—' },
     exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
-    group_name: { title: '分组', key: 'group_name', width: 90 },
+    group_name: { title: '分组', key: 'group_name', width: 90, render: (r) => displayGroupName(r.group_name) },
     listing_date: { title: '上市日期', key: 'listing_date', width: 96, sorter: 'default', render: (r) => r.listing_date || '—' },
     total_market_cap: { title: fieldTitleWithUnit('total_market_cap', '总市值'), key: 'total_market_cap', width: 110, sorter: 'default', render: trustedRender('total_market_cap') },
     circ_market_cap: { title: fieldTitleWithUnit('circ_market_cap', '流通市值'), key: 'circ_market_cap', width: 110, sorter: 'default', render: trustedRender('circ_market_cap') },
@@ -195,20 +225,43 @@ const tableColumns = computed(() => {
   return cols
 })
 
+function applyResponse(data: WatchlistResponse) {
+  groups.value = data.groups ?? []
+  trust.value = data.trust ?? null
+  autoUpdateInProgress.value = data.auto_update_in_progress === true
+}
+
 async function fetchWatchlist() {
   loading.value = true
   try {
     const params = selectedGroup.value ? { group: selectedGroup.value } : {}
     const resp = await axios.get<WatchlistResponse>('/api/watchlist/list', { params })
-    items.value = resp.data.items
-    groups.value = resp.data.groups
-    trust.value = resp.data.trust ?? null
-  autoUpdateInProgress.value = resp.data.auto_update_in_progress === true
+    // 首次进入 / 当前分组消失（例如最后一只股票被移除）时，自动落到第一个
+    // 真实规则分组再取一次数：不要停留在空的占位分组上。
+    // 分组与列表必须一起落地，否则会先闪一帧"该分组暂无公司"。
+    const next = resolveSelectedGroup(resp.data.groups ?? [])
+    if (next !== selectedGroup.value) {
+      selectedGroup.value = next
+      const scoped = await axios.get<WatchlistResponse>('/api/watchlist/list', {
+        params: next ? { group: next } : {},
+      })
+      applyResponse(scoped.data)
+      items.value = scoped.data.items
+    } else {
+      applyResponse(resp.data)
+      items.value = resp.data.items
+    }
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '加载自选失败'))
   } finally {
     loading.value = false
   }
+}
+
+function selectGroup(name: string) {
+  if (selectedGroup.value === name) return
+  selectedGroup.value = name
+  void fetchWatchlist()
 }
 
 async function refreshGroup() {
@@ -219,7 +272,7 @@ async function refreshGroup() {
       '/api/watchlist/refresh',
       { group_name: selectedGroup.value },
     )
-    message.success(`已按最新数据重新筛选「${selectedGroup.value}」，更新 ${resp.data.added} 只`)
+    message.success(`已按最新数据重新筛选「${displayGroupName(selectedGroup.value)}」，更新 ${resp.data.added} 只`)
     await fetchWatchlist()
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '按最新数据重新筛选失败'))
@@ -235,11 +288,15 @@ async function addStock() {
     message.warning('请输入 6 位股票代码（如 600519）')
     return
   }
+  // 分组名留空 = 收进「手动收录」（后端内部 key 仍是 default，展示层归一）。
+  const targetGroup = addGroupName.value.trim() || MANUAL_GROUP_KEY
   try {
-    await axios.post('/api/watchlist/add', { stock_code: code, group_name: addGroupName.value || 'default' })
-    message.success(`已添加 ${code}`)
+    await axios.post('/api/watchlist/add', { stock_code: code, group_name: targetGroup })
+    message.success(`已添加 ${code} 到「${displayGroupName(targetGroup)}」`)
     addStockCode.value = ''
-    fetchWatchlist()
+    // 加完直接看这只票落到的分组，避免"加成功但列表里看不见"。
+    selectedGroup.value = targetGroup
+    await fetchWatchlist()
   } catch (e: unknown) {
     message.error(friendlyErrorMessage(e, '添加失败'))
   }
@@ -259,7 +316,7 @@ async function removeStock(code: string, group: string) {
 function confirmRemove(code: string, group: string) {
   dialog.warning({
     title: '移出自选',
-    content: `确定将 ${code} 从「${group}」移除吗？`,
+    content: `确定将 ${code} 从「${displayGroupName(group)}」移除吗？`,
     positiveText: '确认移除',
     negativeText: '取消',
     onPositiveClick: () => void removeStock(code, group),
@@ -274,19 +331,29 @@ onMounted(fetchWatchlist)
     <header class="watchlist-header"><div><p>研究工具 / 自选列表</p><h1>我的自选</h1><span>按手动收录与筛选规则来源组织研究中的公司。</span></div></header>
     <div class="watchlist-layout">
       <aside class="watchlist-groups">
-        <div class="groups-heading"><p>WATCHLIST GROUPS</p><h2>公司分组</h2></div>
-        <n-button v-for="group in groups" :key="group.group_name" :class="{ selected: selectedGroup === group.group_name }" text block @click="selectedGroup = group.group_name; fetchWatchlist()"><span><b>{{ displayGroupName(group.group_name) }}</b><small>{{ group.group_name === 'default' ? '手动收录' : '筛选规则来源' }}</small></span><em>{{ group.cnt }}</em></n-button>
-        <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="手动分组名" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
+        <div class="groups-heading"><p>自选列表</p><h2>公司分组</h2></div>
+        <n-button v-for="group in visibleGroups" :key="group.group_name" :class="{ selected: selectedGroup === group.group_name }" text block @click="selectGroup(group.group_name)"><span><b>{{ displayGroupName(group.group_name) }}</b><small>{{ isManualGroup(group.group_name) ? '手动加入，不关联筛选规则' : '筛选规则来源' }}</small></span><em>{{ group.cnt }}</em></n-button>
+        <p v-if="!hasVisibleGroups && !loading" class="groups-empty">还没有分组，去筛选规则页运行规则并保存到自选即可生成。</p>
+        <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="分组名（留空则为手动收录）" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
       </aside>
       <section class="watchlist-content">
         <n-alert v-if="autoUpdateInProgress" type="info" :show-icon="true" class="watchlist-warning">数据正在自动更新，以下指标为更新前快照，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" class="watchlist-warning">当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。</n-alert>
-        <div class="watchlist-card"><div class="watchlist-card-heading"><div><p>{{ selectedGroupLabel === '默认组' ? '手动收录' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedGroupLabel === '默认组' ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><div class="watchlist-actions"><span>显示 {{ items.length }} 家公司</span><n-button v-if="hasRefreshableRule" size="small" :loading="refreshing" @click="refreshGroup">按最新数据重新筛选</n-button><n-button size="small" @click="showColumnSettings = !showColumnSettings">配置列</n-button></div></div><div v-if="showColumnSettings" class="watchlist-toolbar"><n-checkbox-group v-model:value="selectedColumns"><n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" /></n-checkbox-group></div><n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped /><n-empty v-else description="该分组暂无公司" class="watchlist-empty" /></div>
+        <div class="watchlist-card">
+          <template v-if="hasVisibleGroups">
+            <div class="watchlist-card-heading"><div><p>{{ selectedIsManual ? '手动加入' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedIsManual ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><div class="watchlist-actions"><span v-if="items.length > 0">显示 {{ items.length }} 家公司</span><n-button v-if="hasRefreshableRule" size="small" :loading="refreshing" @click="refreshGroup">按最新数据重新筛选</n-button><n-button v-if="items.length > 0" size="small" @click="showColumnSettings = !showColumnSettings">配置列</n-button></div></div>
+            <div v-if="showColumnSettings && items.length > 0" class="watchlist-toolbar"><n-checkbox-group v-model:value="selectedColumns"><n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" /></n-checkbox-group></div>
+            <n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped />
+            <n-empty v-else class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">去筛选规则页跑一次规则，把命中结果保存到自选，就能在这里看到公司。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
+          </template>
+          <n-empty v-else-if="!loading" class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">自选分组来自筛选规则的保存结果。先到筛选规则页跑一条规则，把命中结果保存到自选，就会生成对应分组；也可以直接在左侧输入股票代码收进「手动收录」。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
+          <p v-else class="watchlist-empty-hint watchlist-loading">正在加载分组…</p>
+        </div>
       </section>
     </div>
   </section>
 </template>
 
 <style scoped>
-.watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.n-button) { justify-content: space-between; height: auto; margin-top: 5px; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.n-button.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.n-button__content) { display: flex; justify-content: space-between; width: 100%; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }
+.watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.n-button) { justify-content: space-between; height: auto; margin-top: 5px; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.n-button.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.n-button__content) { display: flex; justify-content: space-between; width: 100%; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }.groups-empty { margin: 14px 10px 0; color: #99a39c; font-size: 11px; line-height: 1.7; }.watchlist-empty-extra { display: grid; gap: 12px; justify-items: center; max-width: 460px; }.watchlist-empty-hint { margin: 0; color: #829087; font-size: 12px; line-height: 1.7; text-align: center; }.watchlist-empty-actions { display: flex; align-items: center; gap: 12px; }.watchlist-empty-link { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 6px; background: #eff8f1; color: #55966d; font-size: 13px; text-decoration: none; }.watchlist-empty-link:hover { background: #e2f2e7; }.watchlist-loading { padding: 40px; color: #99a39c; }
 </style>

@@ -55,6 +55,9 @@ def _seed(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, code: str, *, co
                    ON CONFLICT DO NOTHING""",
                 [code],
             )
+            # 留（第 6 类·库侧相对时间）：同上 —— raw 与 qfq 必须铺**同一张六年日历**，
+            # 缺一张就从"价格齐备"退化成"价格缺"，本用例的缺口分类会换掉；
+            # 只是这次针对另一张表，所以注释单独写一条。
             connection.execute(
                 """INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume)
                    SELECT ?, trade_date, 10, 100

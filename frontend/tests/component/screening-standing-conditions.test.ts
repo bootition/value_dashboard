@@ -13,7 +13,9 @@ vi.mock('axios', () => {
     delete: vi.fn(),
     isAxiosError: (e: unknown) => (e as { isAxiosError?: boolean })?.isAxiosError === true,
   }
-  return { default: mock }
+  // ScreeningPage → useScreeningDraft 会 `import { isAxiosError } from 'axios'`；
+  // 只 mock default 会让草稿自动保存的 catch 分支抛未处理拒绝（全量 vitest 偶发红）。
+  return { default: mock, ...mock }
 })
 
 import axios from 'axios'
