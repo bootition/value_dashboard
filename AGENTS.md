@@ -31,7 +31,6 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 ## 文档规则（强制，防止"读到过期结论"）
 
 ### 1. 必读顺序（任何任务开始时）
-
 1. `docs/reference/CODE_MAP.md` — **代码地图**：想改 X 就读 Y（含 7 本词汇表 + 同名陷阱）
 2. `docs/STATUS.md` — **当前状态唯一权威**（当前裁决、剩余缺口、进行中工作）；`docs/README.md` — 文档地图与生命周期
 4. `docs/runbooks/ops-knowledge-base.md` — **域知识/运行期硬约束**（`D*/S*/E*/I*/C*` 定义处）。**不必通读**：
@@ -39,7 +38,6 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 5. 任务相关代码/文档；做指标/筛选时读 `docs/skills/composite-indicator/SKILL.md`
 
 ### 2. 文档状态语义（front-matter `status` 字段）
-
 | 状态 | 含义 | 处理 |
 |---|---|---|
 | `approved` | 当前有效 | 可作建议依据 |
@@ -47,7 +45,6 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 | `historical` / `archived` | 历史决策 / 已归档 | 同上；`archived` 默认不读 |
 
 ### 3. 禁止行为
-
 - ❌ 引用 `status: superseded` 的结论当当前状态（如 25/27/28 的 BLOCK 已被 29 更新）；引用 `docs/archive/`、
   `docs/evidence/` 当结论依据（证据 ≠ 结论）
 - ❌ 把会话产物（findings/progress/task_plan）写入 `docs/` —— 一律放 `.planning/<date>-<topic>/`
@@ -75,6 +72,7 @@ A股价值投资研究与筛选工具：FastAPI + DuckDB/SQLite + Vue3 前端，
 ```bash
 # 会话开工自检（W4 执行器：脏工作区/别的 worktree/别人的 pytest/8765；退出码 2 = 先别动手）
 uv run --locked python scripts/session_preflight.py
+uv run --locked python scripts/scoped_pytest.py tests/regression/test_xxx.py -q   # 靶向测试唯一入口：自动建根、跑完必删
 # 测试（S1 隔离回归，保护正式数据库）
 scripts/s1-pytest.ps1 tests/regression
 uv run --locked ruff check app tests/regression          # 静态检查
@@ -128,13 +126,15 @@ uv lock --locked
 - 为什么：`reports/138` §4 —— 一个 agent 两小时零落盘：判据本身是错的，任务书又写了"建议先 copy 28GB 库彩排"这种没有时间盒的前置动作。
 
 ### W6 测试范围：定向优先；全量 S1 只走包装器，禁止裸跑
-
-- 规则：改动 <5 个文件先跑定向用例；全量只在合并前跑**一次**，且必须 `scripts/s1-pytest.ps1 tests/regression`。
-  服务在跑时 wrapper 按设计拒绝（"freeze S1"），不得绕过——**若拒绝原因是别人在跑，见 W4，别绕过**。
-- 为什么：`reports/138` §1/§6.4 —— 两次全量共 57 分钟且失败原因都与改动无关；**裸跑全量会派生真实的
-  `app.web.main` 与 `data auto-update run` 子进程**（实测留下 4 个孤儿进程，已清理）。`reports/144` §2 C3：
-  别人的裸 pytest 会让本会话的 S1 preflight 反复失败，反之亦然。
-- 附带：新增测试按 `tests/regression/README.md` 命名约定（`test_<域>_<行为>.py`，事故编号进 docstring）。
+- 规则：改动 <5 个文件先跑定向用例；全量只在合并前跑**一次**，且必须 `scripts/s1-pytest.ps1 tests/regression`
+  （服务在跑时 wrapper 按设计拒绝 freeze S1，不得绕过——若原因是别人在跑，见 W4）。
+- **临时根不许手搓**：靶向测试只走 `scripts/scoped_pytest.py <目标>`（`try/finally` 保证删根 + 开跑前
+  回收旧残留）；**禁止** `mktemp -d` + `--basetemp` 这种跑完没人删的写法。`reports/149`：`%TEMP%` 这样
+  涨到 **107 GB**，全量回归报 50 个 `No space left on device`（像代码塌了）。超 5 GB `session_preflight`
+  WARN、超 15 GB BLOCK；清理用 `python scripts/temp_hygiene.py -h`。
+- 为什么：`reports/138` §1/§6.4 —— 两次全量 57 分钟且失败都与改动无关；**裸跑全量会派生真实的
+  `app.web.main` / `data auto-update run` 子进程**（实测留 4 个孤儿进程）。`reports/144` §2 C3：别人的
+  裸 pytest 会让本会话 S1 preflight 反复失败。新增测试按 `test_<域>_<行为>.py` 命名、事故编号进 docstring。
 
 ### W7 删除 / 取消跟踪前先 grep 契约测试
 

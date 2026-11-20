@@ -298,6 +298,56 @@ def check_db_write_lease() -> Check:
     return Check("写租约", WARN, f"残留的失效租约（{detail}），可直接 acquire 回收")
 
 
+#: 临时目录预算（`reports/149`：%TEMP% 到 107 GB 时全量回归列出 50 个
+#: `No space left on device`，看起来像代码塌了）。低于这些值就提前拦，别等爆。
+TEMP_SCRATCH_WARN_GB = 5.0
+TEMP_SCRATCH_BLOCK_GB = 15.0
+
+
+def check_temp_hygiene(stats: dict[str, float] | None = None) -> Check:
+    """靶向测试/探针留下的临时根不该无限堆积。
+
+    这条检查存在的原因很具体：`reports/149` 里 `%TEMP%` 涨到 107 GB，
+    全量回归以 50 个 `OSError: No space left on device` 收场 ——
+    **症状长得像代码坏了**，谁都先去怀疑刚才的改动，白花一轮。
+    真正的原因是手搓的运行根（`mktemp -d` + `--basetemp`）跑完不删。
+
+    所以把它变成开工前就能看见的数字：超过阈值就提示去清，并给出**一条**命令。
+    """
+    if stats is None:
+        try:
+            # 本脚本常以 `scripts/xxx.py` 直接运行，此时 sys.path[0] 是 `scripts/`；
+            # 把同目录加进去后直接 `import temp_hygiene` 最稳（不依赖 packages/命名空间包布局）。
+            scripts_dir = str(Path(__file__).resolve().parent)
+            if scripts_dir not in sys.path:
+                sys.path.insert(0, scripts_dir)
+            import temp_hygiene
+
+            stats = temp_hygiene.usage()
+        except Exception as error:  # noqa: BLE001 - 探测失败必须降级放行（fail-open）
+            return Check("临时目录", WARN, f"探测失败（{error}），降级放行")
+
+    try:
+        scratch_gb = stats["scratch_bytes"] / (1024 ** 3)
+        total_gb = stats["temp_root_bytes"] / (1024 ** 3)
+        scratch_dirs = int(stats["scratch_dirs"])
+    except Exception as error:  # noqa: BLE001 - 探测值坏了也必须降级放行
+        return Check("临时目录", WARN, f"探测值不可用（{error}），降级放行")
+    detail = (
+        f"%TEMP% 合计 {total_gb:.1f} GB；"
+        f"其中我们造的运行根 {scratch_gb:.1f} GB / {scratch_dirs} 个"
+    )
+    hint = (
+        "清理：`uv run --locked python scripts/temp_hygiene.py "
+        "--older-than-minutes 60 --execute`（历史手搓的可加 --include-legacy）"
+    )
+    if scratch_gb >= TEMP_SCRATCH_BLOCK_GB:
+        return Check("临时目录", BLOCK, detail, f"已超 {TEMP_SCRATCH_BLOCK_GB:g} GB。{hint}")
+    if scratch_gb >= TEMP_SCRATCH_WARN_GB:
+        return Check("临时目录", WARN, detail, f"已超 {TEMP_SCRATCH_WARN_GB:g} GB。{hint}")
+    return Check("临时目录", PASS, detail)
+
+
 def build_report(*, port: int = DEFAULT_WEB_PORT, allow_port: bool = False) -> Report:
     port_check = check_port(port, open_=probe_port(port))
     if allow_port and port_check.status == BLOCK:
@@ -308,6 +358,7 @@ def build_report(*, port: int = DEFAULT_WEB_PORT, allow_port: bool = False) -> R
         check_foreign_pytest(collect_python_processes()),
         port_check,
         check_db_write_lease(),
+        check_temp_hygiene(),
     ])
 
 
