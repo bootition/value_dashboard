@@ -112,6 +112,12 @@ update:
   financial_detail_backfill_tdx_max_stocks_per_run: 10
   financial_detail_backfill_missing_retry_days: 7
   buyback_refresh_interval_days: 7
+  # 指标快照范围裁决（reports/145 + 2026-11-20 验收漏算修复）：
+  #   周期全量兜底：距上次「真的全量成功」超过 N 天 → 下一轮强制全量，
+  #   reason=periodic_full_refresh。它是指纹看不出的外部改坏的最终兜底。
+  indicator_periodic_full_days: 7
+  #   运维开关：true = 下一轮指标重算整表全量（跑完自动回到增量）。
+  indicator_force_full: false
   csrc_refresh_interval_days: 30
   # 业务概览低频域（reports/67）：价格优先后按月有界续传，自选股票优先；
   # 失败保留旧值，绝不阻断价格/财务/readiness。

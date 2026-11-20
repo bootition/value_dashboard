@@ -105,6 +105,58 @@ def run_incremental_update_flow(
         "steps": {},
     }
 
+    def persist_step_progress(
+        name: str, step: dict[str, Any] | None = None, *, state: str = "finished",
+    ) -> None:
+        """把"跑到哪一步"落盘到 `job_logs` 的 running 行（崩溃可见性的唯一来源）。
+
+        背景（2026-11-25）：`job_logs` 原先只有"开始 running / 结束 update"两次
+        写库。更新子进程被**原生崩溃**打死时（实测 `business_overview` 的
+        DuckDB 内部 FATAL → 0xC0000409），行永远停在 `status='running'`、
+        `details_json` 里只有 `job_id/max_stocks` ——
+        ① 事后无从判断死在哪一步；② 下一轮只能靠"属主已死"把它结算成
+        `dead_update_lock_owner`，把**真因（写库崩溃）**误指成**症状（锁）**。
+
+        这里每步入册后回写一次紧凑摘要（只留 status/reason/success/failed 这类
+        小字段，绝不把整份 report 每步各写一遍）。定位方式是按 `details_json`
+        里的 `job_id` 匹配 running 行，**绝不动别的作业的行**；任何异常只记日志，
+        绝不阻断更新（监控只能观测，不许改变行为）。
+        """
+        sqlite = getattr(owner, "sqlite", None)
+        if sqlite is None:
+            return
+        updated_at = datetime.now(UTC).isoformat()
+        summary = {
+            key: {
+                field: value.get(field)
+                for field in ("status", "reason", "success", "failed", "skipped", "targeted")
+                if isinstance(value, dict) and field in value
+            }
+            for key, value in report["steps"].items()
+        }
+        try:
+            rows = sqlite.query(
+                "SELECT id, details_json FROM job_logs "
+                "WHERE job_type = 'incremental_update' AND status = 'running'"
+            )
+            for row in rows:
+                try:
+                    details = json.loads(row.get("details_json") or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    continue
+                if not isinstance(details, dict) or details.get("job_id") != job_id:
+                    continue
+                details["current_step"] = name
+                details["current_step_state"] = state
+                details["progress_at"] = updated_at
+                details["steps"] = summary
+                sqlite.execute(
+                    "UPDATE job_logs SET details_json = ? WHERE id = ? AND status = 'running'",
+                    [json.dumps(details, ensure_ascii=False, default=str), row["id"]],
+                )
+        except Exception as error:  # noqa: BLE001 - 观测不许反噬更新
+            logger.warning("步骤进度回写 job_logs 失败（不影响更新）: %s", error)
+
     def report_step(name: str, step: dict[str, Any]) -> dict[str, Any]:
         # 步骤名必须登记在 update_steps.STEP_ORDER（更新步骤的唯一可读索引）；只告警不改行为。
         if name not in STEP_NAMES:
@@ -112,6 +164,8 @@ def run_incremental_update_flow(
         report["steps"][name] = step
         if progress_cb is not None:
             progress_cb(name, step)
+        # 每步结束立刻落盘一次：崩溃后"死在哪一步"必须查得到（见函数 docstring）。
+        persist_step_progress(name, step)
         return step
 
     def indicator_progress(info: dict[str, Any]) -> None:
@@ -411,6 +465,8 @@ def run_incremental_update_flow(
     from app.core.indicators.calculator import IndicatorCalculator
     from app.core.update_parts.indicator_scope import (
         commit_indicator_scope,
+        force_full_requested,
+        periodic_full_days,
         plan_indicator_scope,
     )
 
@@ -436,7 +492,10 @@ def run_incremental_update_flow(
             "dividend_event": market_action_codes,
             "corporate_event": [*buyback_changed_codes, *funding_changed_codes],
         },
-        force_full=bool(getattr(owner, "force_full_indicator_recompute", False)),
+        # forced_full 的**唯一设置点**在 indicator_scope.force_full_requested
+        # （owner 属性 > 配置项 update.indicator_force_full）。此前这里是
+        # `getattr(owner, ...)` 读一个**从来没人写过**的属性 = 假开关。
+        force_full=force_full_requested(owner),
     )
     report["indicator_scope"] = {
         "mode": scope_plan.mode,
@@ -444,6 +503,10 @@ def run_incremental_update_flow(
         "listed_count": scope_plan.listed_count,
         "changed_sources": dict(sorted(scope_plan.changed_sources.items())),
         "computation_version": scope_plan.computation_version,
+        # 判不准/算不出时的**事实**必须能查到（不许只留在日志里）。
+        "fingerprint_error": scope_plan.fingerprint_error,
+        "planning_error": scope_plan.planning_error,
+        "periodic_full_days": periodic_full_days(),
     }
     if scope_plan.fingerprint_error:
         logger.warning("指标输入指纹不可用，本轮退回全量: %s", scope_plan.fingerprint_error)
@@ -579,6 +642,11 @@ def run_incremental_update_flow(
 
     # 3. 业务概览低频域（依据 S1 独立域）：仅当自动集成启用且间隔到期
     #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
+    #    ⚠️ 这一步是唯一会在 DuckDB 内部 FATAL 下被原生 fail-fast 打死的步骤
+    #    （business_breakdown 索引 ↔ 堆失联，见 duckdb_store 模块注释）。
+    #    因此**进入前**先落一次"begin"：崩溃后 `current_step` 必须指向它，
+    #    否则现场只剩上一步的名字，等于又一次"无声"。
+    persist_step_progress("business_overview", state="started")
     report_step("business_overview", owner._refresh_business_overview(detail_cb=detail_cb))
 
     # 4. 国债曲线已提前到指标快照重算之前执行。

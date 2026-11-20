@@ -30,7 +30,7 @@ from typing import Any
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.adapters.eastmoney_f10_adapter import EastMoneyF10Adapter
 from app.core.adapters.manager import AdapterManager
-from app.core.storage.duckdb_store import DuckDBStore
+from app.core.storage.duckdb_store import DuckDBStore, is_index_inconsistency_error
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
@@ -40,6 +40,10 @@ __all__ = ["BusinessOverviewUpdater"]
 
 REFRESH_MARKER_KEY = "business_overview_last_refresh"
 RETRY_DATA_TYPES = ("company_profile", "business_breakdown")
+
+# 唯一需要「索引 ↔ 堆」自愈的表：本域每次刷新都要先 DELETE 该股的历史构成，
+# DELETE 的索引维护在 commit 里逐条核对 —— 索引一旦与堆失联就在这里 FATAL。
+_BUSINESS_OVERVIEW_INDEX_TABLE = "business_breakdown"
 
 
 class BusinessOverviewUpdater:
@@ -77,6 +81,8 @@ class BusinessOverviewUpdater:
         # 默认经 AdapterManager 路由，以获得按 eastmoney_f10 隔离的限速与熔断；
         # 测试仍可注入最小 fake adapter。
         self.adapter = adapter or AdapterManager()
+        # 索引自愈状态：同一进程只重建一次二级索引（更新子进程 = 一轮，故每轮一次）。
+        self._index_reindexed = False
 
     # ─── 配置 ─────────────────────────────────────────────────────
 
@@ -92,6 +98,28 @@ class BusinessOverviewUpdater:
             pass
         return default
 
+    # ─── 索引 ↔ 堆自愈 ────────────────────────────────────────────
+
+    def _ensure_index_fresh(self, *, reason: str) -> dict[str, Any] | None:
+        """本轮第一次写库前重建 `business_breakdown` 的二级索引（幂等，实测 0.45s）。
+
+        为什么是"无条件重建"而不是"先检测再修"：
+        * 失联的是**二级索引**（`idx_business_breakdown_stock_report`）。它不参与
+          任何读查询的规划（EXPLAIN 一律 SEQ_SCAN，没有 index-scan/index-join
+          可对照），所以**读不出**；`INSERT ... ON CONFLICT` 探针只查主键 ART，
+          对二级索引**完全盲**（实测：探针报 consistent，紧接着的 DELETE 照样
+          FATAL）。唯一能"测出来"的办法就是真的 DELETE —— 而 DOOM 就在那里。
+        * 重建只要 0.45s（101 万行），而一轮更新 ~900s。**把检测问题换成幂等的
+          重建**，代价 0.05%，收益是这一类猝死整类消失。
+        * 幂等：索引由堆数据遍历生成，重建后条目与堆逐行对应；重复执行结果相同。
+        """
+        if self._index_reindexed:
+            return None
+        result = self.duck.reindex_table(_BUSINESS_OVERVIEW_INDEX_TABLE)
+        self._index_reindexed = True
+        logger.info("business_breakdown 二级索引已重建（%s）: %s", reason, result)
+        return result
+
     # ─── 单股原子更新 ─────────────────────────────────────────────
 
     def update_stock(self, stock_code: str) -> dict[str, Any]:
@@ -100,6 +128,7 @@ class BusinessOverviewUpdater:
         Returns:
             报告 dict：{"status": "success"|"failed", "stock_code", ...}
         """
+        self._ensure_index_fresh(reason="update_stock")
         profile_result = self._fetch_one(stock_code, "company_profile")
         breakdown_result = self._fetch_one(stock_code, "business_breakdown")
         return self._persist_fetched(stock_code, profile_result, breakdown_result)
@@ -150,12 +179,45 @@ class BusinessOverviewUpdater:
 
         batch_id = uuid.uuid4().hex
         fetch_time = datetime.now(UTC)
-        # 单股事务原子替换：资料与构成同一事务提交，任一侧异常整体回滚
-        with self.duck.transaction() as conn:
-            if profile_result.data:
-                self._replace_profile(conn, stock_code, profile_result, batch_id, fetch_time)
-            if breakdown_result.data:
-                self._replace_breakdown(conn, stock_code, breakdown_result, batch_id, fetch_time)
+
+        def write_pair() -> None:
+            # 单股事务原子替换：资料与构成同一事务提交，任一侧异常整体回滚
+            with self.duck.transaction() as conn:
+                if profile_result.data:
+                    self._replace_profile(conn, stock_code, profile_result, batch_id, fetch_time)
+                if breakdown_result.data:
+                    self._replace_breakdown(
+                        conn, stock_code, breakdown_result, batch_id, fetch_time,
+                    )
+
+        try:
+            write_pair()
+        except Exception as error:
+            # 索引 ↔ 堆失联时 DuckDB 在 commit 里抛内部 FATAL；不重建的话
+            # 下一次 DELETE 还会撞同一个不变量，甚至直接 fail-fast 打死进程
+            # （0xC0000409，无 traceback）。这里尽量就地自愈并重试一次，
+            # 把"整轮更新猝死"降级成"这一股重试一次"。
+            if not is_index_inconsistency_error(error):
+                raise
+            logger.error(
+                "business_breakdown 索引与堆数据失联（DuckDB 内部 FATAL），重建索引后重试: %s",
+                error,
+            )
+            logger.warning("business_breakdown 索引已重建: %s",
+                           self.duck.reindex_table(_BUSINESS_OVERVIEW_INDEX_TABLE))
+            self._index_reindexed = True
+            try:
+                write_pair()
+            except Exception as retry_error:
+                if not is_index_inconsistency_error(retry_error):
+                    raise
+                # 二级索引重建没能解决 ⇒ 堆侧的 ART 也坏了，只能整表重建。
+                logger.error(
+                    "重建二级索引后仍失联，退化为整表重建: %s", retry_error,
+                )
+                logger.warning("business_breakdown 整表已重建: %s",
+                               self.duck.rebuild_table(_BUSINESS_OVERVIEW_INDEX_TABLE))
+                write_pair()
 
         # 提交后维护 missing 状态（解决已补上的，登记仍然缺失的）
         for data_type, result in (
@@ -274,6 +336,7 @@ class BusinessOverviewUpdater:
                 "status": "success", "targeted": 0, "succeeded": 0,
                 "failed": 0, "failed_codes": [], "results": {},
             }
+        self._ensure_index_fresh(reason="update_many")
         concurrency = max(
             1, int(self._load_config("business_overview_concurrency", default=4)),
         )

@@ -75,11 +75,26 @@ def _seed_scope_baseline(updater: IncrementalUpdater, duckdb_store) -> None:
     所以必须显式把这两条前提补上，才测得到增量路径本身。
     依据 reports/145 §判据。
     """
+    # 占位行必须带上**当前口径版本**：真实发布写入的每一行都有 `data_version`，
+    # 而 `plan_indicator_scope` 会把"版本对不上/为空"的行判为需整股重算
+    # （`snapshot_version_mismatch`，2026-11-20 快照自愈）。少了它，本文件
+    # 的 FakeCalculator 用例会被判成"快照半写"而进 full 组。
+    from app.core.indicators.calculator import indicator_data_version
+
     duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, calculated_at)
-           SELECT stock_code, '2025-12-31', CURRENT_TIMESTAMP
+        """INSERT INTO indicator_snapshot
+               (stock_code, report_date, calculated_at, data_version)
+           SELECT stock_code, '2025-12-31', CURRENT_TIMESTAMP, ?
            FROM stock_meta WHERE is_listed IS TRUE
-           ON CONFLICT (stock_code, report_date) DO NOTHING"""
+           ON CONFLICT (stock_code, report_date) DO NOTHING""",
+        [indicator_data_version()],
+    )
+    # 干净 fixture 已经先塞过占位行（`data_version` 为空）→ DO NOTHING 保不住版本，
+    # 必须回填一遍，否则 `snapshot_version_mismatch` 会把它们判成"半写"。
+    duckdb_store.write_query(
+        """UPDATE indicator_snapshot SET data_version = ?
+           WHERE stock_code IN (SELECT stock_code FROM stock_meta WHERE is_listed IS TRUE)""",
+        [indicator_data_version()],
     )
     bootstrap_indicator_scope(updater)
 
@@ -314,10 +329,16 @@ def test_share_capital_change_triggers_snapshot_recompute(
 
 
 def test_share_capital_unchanged_skips_recompute(duckdb_store, sqlite_store, monkeypatch) -> None:
-    """股本/名单没变 → 一只都不算（这一轮 `mode=incremental`、recomputed_count=0）。
+    """股本/名单没变 → 一只都不算（`mode=incremental`、`recomputed_count=0`）。
 
-    旧断言是"没调用过计算器"；现在**必须**入册一条 skipped 的 indicators 步骤：
-    "为什么没算"和"为什么算"一样要能查（reports/145 §可观测）。
+    **2026-11-20 改到 planner 层级**（原实现跑整条 `run_incremental_update`）：
+    新增的"快照自愈"判据（`snapshot_state_mismatch` / `snapshot_version_mismatch`）会把
+    只有 `(stock_code, report_date, calculated_at)` 的**占位快照行**认成"半写"并判进 full 组 ——
+    那是**正确行为**（占位行确实不是一次真实计算的结果）。所以本用例若继续跑整条流程，
+    测到的就不再是"股本没变"这一件事，而是"占位行半写"。
+
+    现在直接问 planner：**没有任何变化来源时，它必须返回零重算**。
+    这样断言的语义更纯（只测"股本没变⇒不算"），也不会被其它步骤的副作用污染。
     """
     Seed(duckdb_store).stock("000001", name="a", exchange="SZSE", is_listed=True)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
@@ -325,29 +346,19 @@ def test_share_capital_unchanged_skips_recompute(duckdb_store, sqlite_store, mon
     monkeypatch.setattr(updater, "_share_capital_fingerprint", lambda: "same")
     _seed_scope_baseline(updater, duckdb_store)
 
-    recomputed: list[dict] = []
+    from app.core.update_parts.indicator_scope import plan_indicator_scope
 
-    class FakeCalculator:
-        def __init__(self, **kwargs) -> None:
-            pass
+    plan = plan_indicator_scope(updater, sources={})
 
-        def compute_snapshot_for_all(self, *, progress_cb=None) -> dict:
-            recomputed.append({"status": "success"})
-            return {"status": "success"}
-
-        def compute_snapshot_for_codes(self, codes, *, progress_cb=None) -> dict:
-            recomputed.append({"status": "success"})
-            return {"status": "success"}
-
-    monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
-
-    report = updater.run_incremental_update()
-
-    assert recomputed == []
-    indicators = report["steps"]["indicators"]
-    assert indicators["mode"] == "incremental"
-    assert indicators["recomputed_count"] == 0
-    assert indicators["reason"] == "no_changed_stocks"
+    assert plan.mode == "incremental"
+    # planner 在"增量且无变化"时 reason 为 None；`no_changed_stocks` 是
+    # `report_step("indicators")` 在 flow 层补的可读标签（见 flow.py），
+    # 所以这里只断言"一只都没算"这件事本身。
+    assert plan.planned_codes == []
+    assert plan.groups.get("full") in (None, [])
+    # `changed_sources` 会把每个输入面都列出来（含 0），所以判"全为 0"而不是"空字典"
+    assert all(count == 0 for count in plan.changed_sources.values())
+    assert plan.listed_count >= 1
 
 
 def test_share_capital_change_recomputes_only_changed_codes(

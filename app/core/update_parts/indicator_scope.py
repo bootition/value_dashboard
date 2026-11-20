@@ -44,22 +44,31 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import traceback
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 __all__ = [
+    "DEFAULT_PERIODIC_FULL_DAYS",
     "INCREMENTAL_FULL_RATIO_THRESHOLD",
     "IndicatorScopePlan",
     "bootstrap_indicator_scope",
     "commit_indicator_scope",
     "current_computation_version",
+    "event_fingerprints",
     "financial_fingerprints",
+    "force_full_requested",
     "listed_stock_count",
+    "manual_override_fingerprints",
     "plan_indicator_scope",
+    "snapshot_fingerprints",
     "snapshot_row_count",
+    "snapshot_version_mismatch_codes",
     "universe_fingerprints",
 ]
 
@@ -74,9 +83,24 @@ INCREMENTAL_FULL_RATIO_THRESHOLD = 0.6
 INCREMENTAL_FULL_MIN_CODES = 5
 
 UNIVERSE_FP_KEY = "indicator_universe_fingerprint:v1"
-FINANCIAL_FP_KEY = "indicator_financial_fingerprint:v1"
+# v2（2026-11-20，验收报告漏算 #1/#4）：v1 只哈希"最新完整报告期"，
+# 上一期修正与报告期回补都在格子外 → 换 key 让部署后的第一轮走
+# `input_fingerprint_bootstrap` 全量建基线（可解释，不是悄悄发生）。
+FINANCIAL_FP_KEY = "indicator_financial_fingerprint:v2"
+# 分红 / 回购 / 融资事件：无公告驱动的手工插入也必须进集合。
+EVENT_FP_KEY = "indicator_event_fingerprint:v1"
+# `manual_overrides` 里 status='published' 的行（PRD §9.5 R7 官方纠正路径）。
+OVERRIDE_FP_KEY = "indicator_manual_override_fingerprint:v1"
+# `indicator_snapshot` 逐股内容摘要：外部改坏/半写靠它当场发现（#3）。
+SNAPSHOT_FP_KEY = "indicator_snapshot_fingerprint:v1"
 COMPUTATION_VERSION_KEY = "indicator_computation_version"
 LAST_SCOPE_KEY = "indicator_last_scope_decision"
+# 周期全量兜底的"上次全量时间"。**只在真的全量成功后刷新**（增量轮不刷新），
+# 否则常跑的实例永远不会到期。
+PERIODIC_FULL_KEY = "indicator_periodic_full_last_at"
+
+DEFAULT_PERIODIC_FULL_DAYS = 7
+DEFAULT_FORCE_FULL = False
 
 # 变化来源 → 重算组。full = 整股 149 列；price = 价格域（估值/行情/利差）；
 # event = 仅分红融资比三列。判不准的来源一律归 full（宁可多算）。
@@ -90,28 +114,15 @@ SOURCE_DOMAIN: dict[str, str] = {
     "dividend_event": "full",
     "share_capital": "full",
     "universe_fingerprint": "full",
+    # 2026-11-20 覆盖补全（验收报告 5 类漏算）：
+    "event_fingerprint": "full",              # 分红/回购/融资行（#2）
+    "manual_override_fingerprint": "full",    # PRD §9.5 R7 published 覆写（#5）
+    "snapshot_state_mismatch": "full",        # 快照内容被外部改坏/半写（#3）
+    "snapshot_version_mismatch": "full",      # 快照 data_version 与当前口径不一致
     "price": "price",
     "technical_pending": "price",
     "corporate_event": "event",
 }
-
-# 最新完整报告期三表核心列（与 calculator._get_latest_financials 读取的列同源）。
-_BS_COLUMNS = (
-    "total_assets", "total_liabilities", "total_equity", "total_equity_parent",
-    "monetary_funds", "accounts_receivable", "inventory",
-    "total_current_assets", "total_current_liabilities", "paid_in_capital",
-    "goodwill", "short_term_loans", "long_term_loans", "bonds_payable",
-    "notes_receivable", "prepayments", "other_receivables",
-    "fixed_assets", "intangible_assets",
-)
-_IC_COLUMNS = (
-    "revenue", "cost_of_revenue", "operating_profit", "net_profit",
-    "parent_net_profit", "deducted_net_profit", "total_operating_revenue",
-    "total_operating_cost", "selling_expenses", "administrative_expenses",
-    "financial_expenses", "rd_expenses", "interest_expense",
-    "investment_income", "total_profit", "income_tax", "basic_eps",
-)
-_CF_COLUMNS = ("cf_from_operating", "cf_from_investing", "cf_from_financing", "cf_net")
 
 # stock_meta 里**不进指纹**的列：`updated_at` 每次 listing_info 刷新都会变，
 # name/pinyin/exchange 不参与任何指标。把 updated_at 算进指纹 = 每轮全量。
@@ -133,9 +144,19 @@ class IndicatorScopePlan:
     groups: dict[str, list[str]] = field(default_factory=dict)
     universe_fingerprint: dict[str, str] = field(default_factory=dict)
     financial_fingerprint: dict[str, str] = field(default_factory=dict)
+    event_fingerprint: dict[str, str] = field(default_factory=dict)
+    manual_override_fingerprint: dict[str, str] = field(default_factory=dict)
+    snapshot_fingerprint: dict[str, str] = field(default_factory=dict)
     prev_universe_fingerprint: dict[str, str] | None = None
     prev_financial_fingerprint: dict[str, str] | None = None
+    prev_event_fingerprint: dict[str, str] | None = None
+    prev_manual_override_fingerprint: dict[str, str] | None = None
+    prev_snapshot_fingerprint: dict[str, str] | None = None
     fingerprint_error: str | None = None
+    # 范围裁决整体失败（异常/读不出/算不出）时的原始异常与栈：必须进报告，
+    # 不许静默吞掉（`scope_planning_failed` 只是给用户看的那一句）。
+    planning_error: str | None = None
+    planning_traceback: str | None = None
 
     @property
     def full_codes(self) -> list[str]:
@@ -190,6 +211,9 @@ class IndicatorScopePlan:
             "planned_count": planned,
             "planned_groups": {name: len(codes) for name, codes in sorted(self.groups.items())},
             "recomputed_codes": self.planned_codes[:200],
+            # 判不准/算不出时的**事实**必须进报告（不许只留在日志里）。
+            "fingerprint_error": self.fingerprint_error,
+            "planning_error": self.planning_error,
         }
 
 
@@ -235,41 +259,161 @@ def universe_fingerprints(owner: Any) -> dict[str, str]:
     return {str(row["stock_code"]): str(row["fp"]) for row in rows}
 
 
-def financial_fingerprints(owner: Any) -> dict[str, str]:
-    """逐股"最新完整报告期"三表核心列指纹（新报告期/修正值/覆盖写都会变）。"""
-    bs_cols = ", ".join(f"bs.{name}" for name in _BS_COLUMNS)
-    ic_cols = ", ".join(f"ic.{name}" for name in _IC_COLUMNS)
-    cf_cols = ", ".join(f"cf.{name}" for name in _CF_COLUMNS)
+# ─── 输入指纹：**全历史**而不是"最新一期的 40 个格子"───────────────────
+#
+# 验收报告（2026-11-20）的根因原话：指纹只哈希"最新完整期 40 列 + stock_meta
+# 8 列 = 49 个格子"，格子外的输入（历史期修正 / 报告期回补 / 分红行 / 已落库
+# 快照 / manual_overrides）既不进集合，也**说不出"我不知道"** → 永不退回全量。
+# 这里按输入面逐个补全，每只股票**每个输入面一个指纹**，差异集仍按股票求并集。
+#
+# 性能（同一个查询在真库副本 5,575 只 × 36 万行/表上实测，2026-11-20）：
+# 旧实现"最新期 JOIN + md5(CAST(... AS VARCHAR))"约 102 ms；
+# 新实现"全历史 + hash() 聚合"按表 30–45 ms（三表 ~114 ms）——比旧实现更快，
+# 因为 DuckDB 的 `hash()` 是向量化整数哈希，不必把 55 列都转成字符串再 md5。
+_FINANCIAL_TABLES = ("balance_sheet", "income_statement", "cash_flow")
+# `raw_data` 是整段原始报文（体积最大且不是指标输入的有序数值）；
+# `stock_code` 是分组键。其余列**全部进哈希**——新增财务科目自动被覆盖，
+# 不需要有人记得回来加列（"未知信号默认进 full"在指纹层面同样成立）。
+_FINANCIAL_EXCLUDED_COLUMNS = frozenset({"stock_code", "raw_data"})
+
+# 分红 / 回购 / 融资：取"值列"，剔除抓取簿记列（fetch_time/raw_hash/batch_id/
+# source/confidence 每轮刷新都变，算进指纹等于每轮全量）。
+_EVENT_TABLES = ("dividends", "buyback_events", "funding_events")
+_EVENT_EXCLUDED_COLUMNS = frozenset({
+    "stock_code", "fetch_time", "raw_hash", "batch_id", "source", "confidence",
+})
+
+# 快照自检：`calculated_at` 每次重算必然不同（不是内容），`data_version` 单独走
+# `snapshot_version_mismatch`（口径版本有它自己的可解释 reason）。
+_SNAPSHOT_EXCLUDED_COLUMNS = frozenset({"calculated_at", "data_version"})
+
+
+def _table_columns(owner: Any, table: str, excluded: frozenset[str]) -> list[str]:
+    """表列清单（按 ordinal_position，稳定顺序）减掉永不进指纹的列。"""
     rows = owner.duck.read_query(
-        f"""WITH complete AS (
-                SELECT bs.stock_code, bs.report_date
-                FROM balance_sheet bs
-                JOIN income_statement ic
-                  ON ic.stock_code = bs.stock_code AND ic.report_date = bs.report_date
-                JOIN cash_flow cf
-                  ON cf.stock_code = bs.stock_code AND cf.report_date = bs.report_date
-                WHERE bs.total_assets IS NOT NULL
-                  AND bs.total_liabilities IS NOT NULL
-                  AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
-                  AND ic.revenue IS NOT NULL
-                  AND ic.parent_net_profit IS NOT NULL
-                  AND cf.cf_from_operating IS NOT NULL
-            ), latest AS (
-                SELECT stock_code, MAX(report_date) AS report_date
-                FROM complete GROUP BY stock_code
-            )
-            SELECT latest.stock_code AS stock_code,
-                   substr(md5(CAST((latest.report_date, {bs_cols}, {ic_cols}, {cf_cols})
-                                  AS VARCHAR)), 1, 16) AS fp
-            FROM latest
-            JOIN balance_sheet bs
-              ON bs.stock_code = latest.stock_code AND bs.report_date = latest.report_date
-            JOIN income_statement ic
-              ON ic.stock_code = latest.stock_code AND ic.report_date = latest.report_date
-            JOIN cash_flow cf
-              ON cf.stock_code = latest.stock_code AND cf.report_date = latest.report_date"""
+        """SELECT column_name FROM information_schema.columns
+           WHERE table_name = ? ORDER BY ordinal_position""",
+        [table],
     )
-    return {str(row["stock_code"]): str(row["fp"]) for row in rows}
+    columns = [str(row["column_name"]) for row in rows]
+    if not columns:
+        raise RuntimeError(f"指纹无法计算：表 {table} 不存在或没有列")
+    return [name for name in columns if name not in excluded]
+
+
+def _digest_by_stock(owner: Any, table: str, columns: list[str]) -> dict[str, tuple[int, int, int]]:
+    """按股票哈希**该表全部行**：`(行数, Σhash, XOR hash)` 三个聚合。
+
+    为什么是聚合摘要而不是 `string_agg + md5`：后者要把每行的所有列转成字符串，
+    36 万行 × 55 列实测 ~1.1 s/表；`hash()` 是向量化整数哈希，同表 ~45 ms。
+    行数 + 求和 + 异或三条同时撞的概率可以忽略，而且撞了也只会"少算"这一只，
+    另有 `periodic_full_refresh` 兜底。
+    """
+    if not columns:
+        return {}
+    args = ", ".join(f'"{name}"' for name in columns)
+    rows = owner.duck.read_query(
+        f"""SELECT stock_code,
+                   count(*) AS n,
+                   sum(hash({args})) AS s,
+                   bit_xor(hash({args})) AS x
+            FROM {table}
+            GROUP BY stock_code"""
+    )
+    return {
+        str(row["stock_code"]): (
+            int(row["n"] or 0),
+            int(row["s"] or 0),
+            int(row["x"] or 0),
+        )
+        for row in rows
+    }
+
+
+def _combine_digest(aggregates: list[tuple[int, int, int]]) -> str:
+    payload = "|".join(f"{n}:{s}:{x}" for n, s, x in aggregates)
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _multisurface_fingerprints(
+    owner: Any, tables: Iterable[str], excluded: frozenset[str],
+) -> dict[str, str]:
+    """多个输入表合并成"每只股票一个指纹"（表顺序固定，保证可复现）。"""
+    collected: dict[str, list[tuple[int, int, int]]] = {}
+    for table in tables:
+        columns = _table_columns(owner, table, excluded)
+        for code, aggregate in _digest_by_stock(owner, table, columns).items():
+            collected.setdefault(code, []).append(aggregate)
+    return {code: _combine_digest(aggs) for code, aggs in collected.items()}
+
+
+def financial_fingerprints(owner: Any) -> dict[str, str]:
+    """逐股**全部报告期**的三表指纹（覆盖同期修正 + 报告期回补）。
+
+    v1 只看"最新完整期"，所以"上一期数值被修正"（YoY/TTM 的输入）和
+    "补一个过去某期"都在指纹之外 —— 验收报告漏算 #1/#4 的根因。
+    """
+    return _multisurface_fingerprints(owner, _FINANCIAL_TABLES, _FINANCIAL_EXCLUDED_COLUMNS)
+
+
+def event_fingerprints(owner: Any) -> dict[str, str]:
+    """逐股分红 / 回购 / 融资事件行指纹（覆盖**无公告驱动**的手工插入）。"""
+    return _multisurface_fingerprints(owner, _EVENT_TABLES, _EVENT_EXCLUDED_COLUMNS)
+
+
+def manual_override_fingerprints(owner: Any) -> dict[str, str]:
+    """逐股 `manual_overrides` 里 published 覆写的指纹（PRD §9.5 R7 官方纠正路径）。
+
+    行数是个位到百位量级，直接在 SQLite 侧拼内容再摘要。含值、期次、状态与
+    `rolled_back_at`：撤销一条覆写（状态变了）与改一个值都必须被看见。
+    """
+    rows = owner.sqlite.query(
+        """SELECT stock_code, field_name, report_date, override_value,
+                  COALESCE(status, '') AS status,
+                  COALESCE(CAST(rolled_back_at AS TEXT), '') AS rolled_back_at
+           FROM manual_overrides
+           WHERE status = 'published'
+           ORDER BY stock_code, field_name, report_date, id"""
+    )
+    grouped: dict[str, list[str]] = {}
+    for row in rows:
+        code = str(row["stock_code"])
+        grouped.setdefault(code, []).append(
+            "|".join((
+                str(row["field_name"]),
+                str(row["report_date"]),
+                repr(row["override_value"]),
+                str(row["status"]),
+                str(row["rolled_back_at"]),
+            ))
+        )
+    return {
+        code: hashlib.md5("\n".join(lines).encode("utf-8")).hexdigest()[:16]
+        for code, lines in grouped.items()
+    }
+
+
+def snapshot_fingerprints(owner: Any) -> dict[str, str]:
+    """逐股 `indicator_snapshot` **内容**指纹：外部改坏/半写的当场发现通道。
+
+    `data_version` 只能证明"这行是这版公式算的"，证明不了"没被人改过"——
+    验收报告 #3（`roe -999` / `latest_close 999`）就是靠它自愈的。
+    """
+    columns = _table_columns(owner, "indicator_snapshot", _SNAPSHOT_EXCLUDED_COLUMNS)
+    aggregates = _digest_by_stock(owner, "indicator_snapshot", columns)
+    return {code: _combine_digest([agg]) for code, agg in aggregates.items()}
+
+
+def snapshot_version_mismatch_codes(owner: Any) -> list[str]:
+    """`data_version` 与当前口径不一致的股票（口径 bump 后遗留行 / 半写入行）。"""
+    from app.core.indicators.calculator import indicator_data_version
+
+    rows = owner.duck.read_query(
+        """SELECT DISTINCT stock_code FROM indicator_snapshot
+           WHERE data_version IS DISTINCT FROM ?""",
+        [indicator_data_version()],
+    )
+    return sorted(str(row["stock_code"]) for row in rows)
 
 
 def snapshot_row_count(owner: Any) -> int:
@@ -311,8 +455,64 @@ def _group_codes(sources: Mapping[str, Iterable[str]]) -> tuple[dict[str, list[s
     return ordered, counts
 
 
-def _full_reason(owner: Any, *, force_full: bool) -> tuple[str | None, dict[str, Any]]:
-    """四个可解释的全量原因（按"最需要解释"的优先级）。"""
+def _update_config() -> dict[str, Any]:
+    """`update` 段配置（读不到就用空字典：配置问题不得让范围裁决崩掉）。"""
+    try:
+        from app.core.config import Config
+
+        section = Config.current().get_value("update", {})
+        return section if isinstance(section, dict) else {}
+    except Exception as error:  # noqa: BLE001 - 配置读不出来按默认值走
+        logger.warning("读取 update 配置失败，按默认值处理: %s", error)
+        return {}
+
+
+def force_full_requested(owner: Any) -> bool:
+    """`forced_full` 的**唯一设置点**（此前是没有任何写入方的空开关）。
+
+    优先级：owner 属性（测试 / 嵌入方显式传）> 配置项 `update.indicator_force_full`。
+    配置项在两个 `default.yaml` 里都有登记，运维改一行即可让下一轮全量。
+    """
+    attr = getattr(owner, "force_full_indicator_recompute", None)
+    if attr is not None:
+        return bool(attr)
+    return bool(_update_config().get("indicator_force_full", DEFAULT_FORCE_FULL))
+
+
+def periodic_full_days() -> int:
+    """周期全量兜底的天数（默认 7 天，`update.indicator_periodic_full_days` 可配）。"""
+    try:
+        days = int(_update_config().get("indicator_periodic_full_days", DEFAULT_PERIODIC_FULL_DAYS))
+    except (TypeError, ValueError):
+        return DEFAULT_PERIODIC_FULL_DAYS
+    return max(1, days)
+
+
+def _periodic_full_due(owner: Any, *, now: datetime | None = None) -> tuple[bool, str | None]:
+    """距上次**真的全量成功**是否已超过兜底周期（返回 (是否到期, 上次时间)）。"""
+    days = periodic_full_days()
+    stored = owner._read_refresh_state(PERIODIC_FULL_KEY)
+    if not stored:
+        return True, None
+    try:
+        last = datetime.fromisoformat(str(stored))
+    except ValueError:
+        logger.warning("周期全量水位 %s 无法解析，按到期处理", stored)
+        return True, str(stored)
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    reference = now or datetime.now(UTC)
+    return reference - last >= timedelta(days=days), str(stored)
+
+
+def _full_reason(
+    owner: Any, *, force_full: bool,
+) -> tuple[str | None, dict[str, Any]]:
+    """可解释的全量原因（按"最需要解释"的优先级）。
+
+    `forced_full` → `first_run` → `computation_version` → `periodic_full_refresh`。
+    周期兜底排最后：它是**兜底**，有更具体的理由时优先报更具体的那个。
+    """
     version = current_computation_version()
     if force_full:
         return "forced_full", {"computation_version": version}
@@ -323,52 +523,100 @@ def _full_reason(owner: Any, *, force_full: bool) -> tuple[str | None, dict[str,
         return "computation_version", {
             "computation_version": version, "stored_computation_version": stored,
         }
+    due, last_run = _periodic_full_due(owner)
+    if due:
+        return "periodic_full_refresh", {
+            "computation_version": version,
+            "periodic_full_days": periodic_full_days(),
+            "periodic_full_last_at": last_run,
+        }
     return None, {"computation_version": version}
 
 
-def plan_indicator_scope(
+# 输入面 → (当前指纹、上一轮水位 key、变化来源名)。新增输入面只能加在这里，
+# 漏加 = 这个面永远不进增量集合（验收报告 5 类漏算就是这么产生的）。
+_FINGERPRINT_SURFACES: tuple[tuple[str, str, str], ...] = (
+    ("universe", UNIVERSE_FP_KEY, "universe_fingerprint"),
+    ("financial", FINANCIAL_FP_KEY, "financial_fingerprint"),
+    ("event", EVENT_FP_KEY, "event_fingerprint"),
+    ("manual_override", OVERRIDE_FP_KEY, "manual_override_fingerprint"),
+    ("snapshot", SNAPSHOT_FP_KEY, "snapshot_state_mismatch"),
+)
+
+
+def _collect_fingerprints(owner: Any) -> dict[str, dict[str, str]]:
+    """一次性算出五个输入面的逐股指纹。任一失败 → 整轮退回全量（宁可多算）。"""
+    return {
+        "universe": universe_fingerprints(owner),
+        "financial": financial_fingerprints(owner),
+        "event": event_fingerprints(owner),
+        "manual_override": manual_override_fingerprints(owner),
+        "snapshot": snapshot_fingerprints(owner),
+    }
+
+
+def _failed_plan(owner: Any, error: BaseException) -> IndicatorScopePlan:
+    """范围裁决整体失败 → **真的**退回全量，并把异常写进报告。"""
+    detail = f"{type(error).__name__}: {error}"
+    logger.error("指标范围裁决失败，本轮退回全量: %s", detail, exc_info=error)
+    try:
+        listed_count = listed_stock_count(owner)
+    except Exception:  # noqa: BLE001 - 连只数都读不出来也不能再抛
+        listed_count = 0
+    try:
+        version = current_computation_version()
+    except Exception:  # noqa: BLE001
+        version = "unknown"
+    return IndicatorScopePlan(
+        mode="full",
+        reason="scope_planning_failed",
+        computation_version=version,
+        listed_count=listed_count,
+        fingerprint_error=detail,
+        planning_error=detail,
+        planning_traceback=traceback.format_exc(limit=12),
+    )
+
+
+def _plan_indicator_scope(
     owner: Any,
     *,
     sources: Mapping[str, Iterable[str]],
-    force_full: bool = False,
+    force_full: bool,
 ) -> IndicatorScopePlan:
-    """决定这一轮"算谁"：增量集合（默认）或全量（仅四个可解释原因）。
-
-    Args:
-        owner: `IncrementalUpdater`（鸭子类型：duck/sqlite/_read_refresh_state/
-            _write_refresh_state）。
-        sources: 变化来源 → 代码集合。键必须是 :data:`SOURCE_DOMAIN` 里的名字。
-        force_full: 显式强制全量（运维开关/CLI flag）。
-    """
     reason, meta = _full_reason(owner, force_full=force_full)
     version = str(meta["computation_version"])
     listed_count = listed_stock_count(owner)
 
-    current_universe: dict[str, str] = {}
-    current_financial: dict[str, str] = {}
-    fingerprint_error: str | None = None
-    try:
-        current_universe = universe_fingerprints(owner)
-        current_financial = financial_fingerprints(owner)
-    except Exception as error:  # noqa: BLE001 - 指纹算不出来就必须退回全量（宁可多算）
-        logger.warning("指标输入指纹计算失败，本轮退回全量: %s", error)
-        fingerprint_error = str(error)
+    unknown = sorted(name for name in sources if name not in SOURCE_DOMAIN)
+    if unknown:
+        # 新增/未知信号来源**默认进 full 组**（`SOURCE_DOMAIN.get` 已如此），
+        # 这里再显式记一笔，避免"以为它被忽略"或"以为它被当价格域"。
+        logger.info("指标范围裁决收到未知来源，按 full 处理: %s", unknown)
 
-    prev_universe = _read_json_map(owner, UNIVERSE_FP_KEY)
-    prev_financial = _read_json_map(owner, FINANCIAL_FP_KEY)
+    current = _collect_fingerprints(owner)
+    previous = {
+        surface: _read_json_map(owner, key) for surface, key, _ in _FINGERPRINT_SURFACES
+    }
 
     merged_sources: dict[str, Iterable[str]] = dict(sources)
-    if fingerprint_error is not None and reason is None:
-        reason = "scope_planning_failed"
     if reason is None:
-        if prev_universe is None or prev_financial is None:
-            # 首次部署本机制：没有上轮水位，无法证明谁没变 → 一次全量建立基线。
+        # 任何一个输入面没有上轮水位 → 无法证明"谁没变" → 一次全量建基线。
+        missing = [
+            surface for surface, _key, _src in _FINGERPRINT_SURFACES
+            if previous[surface] is None
+        ]
+        if missing:
+            logger.info("指标指纹基线缺失(%s)，本轮全量建立基线", ",".join(missing))
             reason = "input_fingerprint_bootstrap"
         else:
-            merged_sources["universe_fingerprint"] = _diff_codes(prev_universe, current_universe)
-            merged_sources["financial_fingerprint"] = _diff_codes(
-                prev_financial, current_financial,
-            )
+            for surface, _key, source_name in _FINGERPRINT_SURFACES:
+                merged_sources[source_name] = _diff_codes(
+                    previous[surface], current[surface],
+                )
+            # 口径版本的**行级**证据：快照里有行的 data_version 与当前口径不一致，
+            # 说明上一轮只写了一部分（半写）或公式 bump 后残留 → 这些股票整股重算。
+            merged_sources["snapshot_version_mismatch"] = snapshot_version_mismatch_codes(owner)
 
     groups, changed_sources = _group_codes(merged_sources)
     plan = IndicatorScopePlan(
@@ -378,11 +626,16 @@ def plan_indicator_scope(
         listed_count=listed_count,
         changed_sources=changed_sources,
         groups=groups,
-        universe_fingerprint=current_universe,
-        financial_fingerprint=current_financial,
-        prev_universe_fingerprint=prev_universe,
-        prev_financial_fingerprint=prev_financial,
-        fingerprint_error=fingerprint_error,
+        universe_fingerprint=current["universe"],
+        financial_fingerprint=current["financial"],
+        event_fingerprint=current["event"],
+        manual_override_fingerprint=current["manual_override"],
+        snapshot_fingerprint=current["snapshot"],
+        prev_universe_fingerprint=previous["universe"],
+        prev_financial_fingerprint=previous["financial"],
+        prev_event_fingerprint=previous["event"],
+        prev_manual_override_fingerprint=previous["manual_override"],
+        prev_snapshot_fingerprint=previous["snapshot"],
     )
 
     # 阈值只看**完整重算组**（整股 149 列），不看价格域组：
@@ -391,7 +644,7 @@ def plan_indicator_scope(
     # 一次全扫（单事务 staging 发布）才真的比逐股维护更省。
     full_group_size = len(groups["full"])
     threshold = max(INCREMENTAL_FULL_MIN_CODES, int(listed_count * INCREMENTAL_FULL_RATIO_THRESHOLD))
-    if reason is None and plan.fingerprint_error is None and full_group_size > threshold:
+    if reason is None and full_group_size > threshold:
         reason = "incremental_over_threshold"
 
     if reason is not None:
@@ -400,23 +653,58 @@ def plan_indicator_scope(
     return plan
 
 
+def plan_indicator_scope(
+    owner: Any,
+    *,
+    sources: Mapping[str, Iterable[str]],
+    force_full: bool | None = None,
+) -> IndicatorScopePlan:
+    """决定这一轮"算谁"：增量集合（默认）或全量（仅可解释原因）。
+
+    **整体包 try/except**：任何异常 / 数据读不出 / 指纹算不出 → 返回 full，
+    `reason="scope_planning_failed"`，异常与栈写进 `planning_error` 随报告出去。
+    "判不准就归 full"以前只是文档里的一句话：代码里只要有一处抛异常，整轮更新
+    就垮掉，既没全量也没增量。
+
+    Args:
+        owner: `IncrementalUpdater`（鸭子类型：duck/sqlite/_read_refresh_state/
+            _write_refresh_state）。
+        sources: 变化来源 → 代码集合。键不在 :data:`SOURCE_DOMAIN` 里时按
+            **full** 处理（未知信号不得被默认忽略）。
+        force_full: 显式强制全量；``None`` = 由 :func:`force_full_requested` 决定
+            （owner 属性 / 配置项 `update.indicator_force_full`）。
+    """
+    try:
+        requested = force_full_requested(owner) if force_full is None else bool(force_full)
+        return _plan_indicator_scope(owner, sources=sources, force_full=requested)
+    except Exception as error:  # noqa: BLE001 - 判不准必须真的退回全量
+        return _failed_plan(owner, error)
+
+
 def bootstrap_indicator_scope(owner: Any) -> dict[str, Any]:
     """把"当前输入指纹 + 当前口径版本"直接写成基线（**不重算任何股票**）。
 
-    两个正当用途：
+    三个正当用途：
     1. 运维：明确知道现网快照就是当前口径、只想立刻切到增量模式时，用它建立
        基线，避免升级后的第一轮全量；
-    2. 回归测试：钉住"上一轮水位"，让用例只验证本轮的变化来源。
+    2. 回归测试：钉住"上一轮水位"，让用例只验证本轮的变化来源；
+    3. 周期兜底的"今天已经全量过了"声明（同时重置 `periodic_full` 计时）。
 
     常规路径**不需要**调用它：没有基线时 `plan_indicator_scope` 会判
     `input_fingerprint_bootstrap` 并跑一次全量建立基线。
     """
-    universe = universe_fingerprints(owner)
-    financial = financial_fingerprints(owner)
-    _write_json_map(owner, UNIVERSE_FP_KEY, universe)
-    _write_json_map(owner, FINANCIAL_FP_KEY, financial)
+    current = _collect_fingerprints(owner)
+    for surface, key, _source in _FINGERPRINT_SURFACES:
+        _write_json_map(owner, key, current[surface])
     owner._write_refresh_state(COMPUTATION_VERSION_KEY, current_computation_version())
-    return {"universe_codes": len(universe), "financial_codes": len(financial)}
+    owner._write_refresh_state(PERIODIC_FULL_KEY, datetime.now(UTC).isoformat())
+    return {
+        "universe_codes": len(current["universe"]),
+        "financial_codes": len(current["financial"]),
+        "event_codes": len(current["event"]),
+        "manual_override_codes": len(current["manual_override"]),
+        "snapshot_codes": len(current["snapshot"]),
+    }
 
 
 # ─── 收尾：只有算成功才推进指纹水位 ──────────────────────────────────────
@@ -428,34 +716,72 @@ def _step_succeeded(step: Mapping[str, Any] | None) -> bool:
     return str(step.get("status")) == "success" and not step.get("failed")
 
 
+def _current_maps(plan: IndicatorScopePlan) -> dict[str, dict[str, str]]:
+    return {
+        "universe": plan.universe_fingerprint,
+        "financial": plan.financial_fingerprint,
+        "event": plan.event_fingerprint,
+        "manual_override": plan.manual_override_fingerprint,
+        "snapshot": plan.snapshot_fingerprint,
+    }
+
+
+def _previous_maps(plan: IndicatorScopePlan) -> dict[str, dict[str, str] | None]:
+    return {
+        "universe": plan.prev_universe_fingerprint,
+        "financial": plan.prev_financial_fingerprint,
+        "event": plan.prev_event_fingerprint,
+        "manual_override": plan.prev_manual_override_fingerprint,
+        "snapshot": plan.prev_snapshot_fingerprint,
+    }
+
+
 def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> dict[str, Any]:
     """把本轮裁决结果落盘：口径版本 + 逐股指纹水位 + 最后的决策记录。
 
-    规则（"不会漏算"的第二条）：**只有 step 成功**才推进水位；partial/failed/
-    rejected 一律保留旧指纹 —— 下一轮这些股票会重新进入增量集合（宁可多算）。
+    三条规则：
+    1. **只有 step 成功**才推进水位；partial/failed/rejected 一律保留旧指纹 ——
+       下一轮这些股票会重新进入增量集合（宁可多算）。
+    2. 快照面的指纹必须**重算后**再取（计划时取的是算之前的内容）：任何一组
+       （full/price/event）真的算过，就用当前库里的内容重新摘一遍，否则下一轮会
+       把自己刚写的结果当成"被外部改坏"。
+    3. `periodic_full` 水位**只在真的全量成功后**刷新；增量轮不刷新，否则常跑
+       的实例永远等不到周期兜底。
     """
     succeeded = _step_succeeded(step)
     committed_codes = 0
+    snapshot_refreshed = False
     if succeeded:
+        current = _current_maps(plan)
+        if plan.planned_codes or plan.is_full:
+            # 算过东西 → 快照内容变了，必须按**算完之后**的库重新摘要。
+            current["snapshot"] = snapshot_fingerprints(owner)
+            snapshot_refreshed = True
         if plan.is_full:
-            _write_json_map(owner, UNIVERSE_FP_KEY, plan.universe_fingerprint)
-            _write_json_map(owner, FINANCIAL_FP_KEY, plan.financial_fingerprint)
+            for surface, key, _source in _FINGERPRINT_SURFACES:
+                _write_json_map(owner, key, current[surface])
             owner._write_refresh_state(COMPUTATION_VERSION_KEY, plan.computation_version)
-            committed_codes = len(plan.universe_fingerprint)
+            owner._write_refresh_state(PERIODIC_FULL_KEY, datetime.now(UTC).isoformat())
+            committed_codes = len(current["universe"])
         else:
-            universe = dict(plan.prev_universe_fingerprint or {})
-            financial = dict(plan.prev_financial_fingerprint or {})
-            for code in plan.full_codes:
-                if code in plan.universe_fingerprint:
-                    universe[code] = plan.universe_fingerprint[code]
-                else:
-                    universe.pop(code, None)
-                if code in plan.financial_fingerprint:
-                    financial[code] = plan.financial_fingerprint[code]
-                else:
-                    financial.pop(code, None)
-            _write_json_map(owner, UNIVERSE_FP_KEY, universe)
-            _write_json_map(owner, FINANCIAL_FP_KEY, financial)
+            previous = _previous_maps(plan)
+            for surface, key, _source in _FINGERPRINT_SURFACES:
+                stored = dict(previous[surface] or {})
+                latest = current[surface]
+                for code in plan.full_codes:
+                    if code in latest:
+                        stored[code] = latest[code]
+                    else:
+                        stored.pop(code, None)
+                if surface == "snapshot":
+                    # 价格域/事件域重算也会改快照行，所以快照面按"本轮算过的
+                    # 全部股票"推进，而不是只有 full 组。
+                    for code in plan.planned_codes:
+                        if code in latest:
+                            stored[code] = latest[code]
+                        else:
+                            stored.pop(code, None)
+                _write_json_map(owner, key, stored)
             if plan.prev_universe_fingerprint is not None:
                 # 水位已建立，口径版本也必须是"当前版本"，否则下一轮又判
                 # computation_version。增量路径只有在版本一致时才会走到这里。
@@ -470,6 +796,9 @@ def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> d
             "changed_sources": dict(sorted(plan.changed_sources.items())),
             "planned_count": len(plan.planned_codes),
             "committed_codes": committed_codes,
+            "snapshot_refreshed": snapshot_refreshed,
+            "fingerprint_error": plan.fingerprint_error,
+            "planning_error": plan.planning_error,
             "succeeded": succeeded,
         }, ensure_ascii=False),
     )

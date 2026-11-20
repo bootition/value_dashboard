@@ -194,7 +194,11 @@ def test_unchanged_inputs_second_round_skips_and_is_much_faster(
     assert second_step["reason"] == "no_changed_stocks"
     assert second_step["skipped_count"] == len(codes)
     assert all(count == 0 for count in second_step["changed_sources"].values())
-    assert second_elapsed < first_elapsed / 2, (
+    # 比例阈值从 1/2 放宽到 0.7：稳态轮现在多了**固定**的指纹开销（五个输入面
+    # 逐股摘要 ~56 ms / 小库），而第一轮的成本里只有"12 只股票的全量计算"这一
+    # 段是可省的。判据要点是"稳态真的没算"（上面 recomputed_count==0 + 计算器
+    # 一调用就炸），比例只是辅助证据。
+    assert second_elapsed < first_elapsed * 0.7, (
         f"第二轮没有显著变快：first={first_elapsed:.2f}s second={second_elapsed:.2f}s"
     )
 
@@ -549,3 +553,359 @@ def test_universe_fingerprint_ignores_irrelevant_metadata(duckdb_store, sqlite_s
     plan = plan_indicator_scope(updater, sources={})
     assert plan.mode == "incremental"
     assert plan.planned_codes == [], "updated_at/name 不是指标输入，不该触发重算"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. 验收报告 5 类漏算的**逐行等价**回归（2026-11-20）
+#
+# 验收判据：每一类场景「增量轮跑完」后 vs 「同一份数据全量重算」，
+# `indicator_snapshot` 全列逐行比对必须 mismatches == 0。修前五类全部
+# `skipped / no_changed_stocks`（指纹没覆盖那些格子，也说不出口不知道）。
+#   #1 上一期数值被修正（YoY 输入）  #2 分红行新增（无公告驱动）
+#   #3 快照被外部改坏              #4 报告期回补
+#   #5 人工覆写 published（PRD §9.5 R7）
+# ─────────────────────────────────────────────────────────────────────────────
+PREV_PERIOD = "2024-12-31"
+AUDIT_POOL = 8
+
+
+def _audit_codes(n: int = AUDIT_POOL) -> list[str]:
+    return [f"60{i:04d}" for i in range(n)]
+
+
+def _seed_prev_period(duckdb_store, codes: list[str]) -> None:
+    """给全部股票补一整年（2024-12-31）的完整三表，让 YoY/TTM 有上年可比。"""
+    seed = Seed(duckdb_store)
+    for code in codes:
+        seed.balance(
+            code, PREV_PERIOD,
+            total_assets=90.0, total_liabilities=20.0, total_equity=70.0,
+        )
+        seed.income(code, PREV_PERIOD, revenue=80.0, parent_net_profit=8.0)
+        seed.cash_flow(code, PREV_PERIOD, cf_from_operating=8.0)
+
+
+def _audit_env(duckdb_store, sqlite_store, codes: list[str]) -> IncrementalUpdater:
+    seed = Seed(duckdb_store)
+    for code in codes:
+        seed.stock(
+            code,
+            name=f"S{code}",
+            exchange="SZSE",
+            listing_date="2020-01-01",
+            is_st=False,
+            is_suspended=False,
+        )
+        insert_minimum_screenable_data(duckdb_store, code)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+    duckdb_store.write_query("DELETE FROM indicator_snapshot")
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    _stub_network_steps(updater)
+    return updater
+
+
+def _snapshot_map(duckdb_store) -> dict[str, dict[str, Any]]:
+    """stock_code → 全列字典（排除 `calculated_at`：时间戳不是等价性的一部分）。"""
+    columns = [
+        str(row["column_name"])
+        for row in duckdb_store.read_query(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'indicator_snapshot' ORDER BY ordinal_position"
+        )
+    ]
+    selected = [name for name in columns if name != "calculated_at"]
+    column_sql = ", ".join(f'"{name}"' for name in selected)
+    rows = duckdb_store.read_query(
+        f"SELECT {column_sql} FROM indicator_snapshot ORDER BY stock_code, report_date"
+    )
+    return {
+        str(row["stock_code"]): {name: row.get(name) for name in selected}
+        for row in rows
+    }
+
+
+def _diff_snapshot(
+    incremental: dict[str, dict[str, Any]],
+    full: dict[str, dict[str, Any]],
+) -> dict[str, list[tuple[str, Any, Any]]]:
+    """逐股逐列差异：{code: [(列, 增量值, 全量值)]}，只列出真有差异的。"""
+    out: dict[str, list[tuple[str, Any, Any]]] = {}
+    for code in sorted(set(incremental) | set(full)):
+        left = incremental.get(code)
+        right = full.get(code)
+        if left is None or right is None:
+            out[code] = [("<row>", left is not None, right is not None)]
+            continue
+        delta = [
+            (column, left.get(column), right.get(column))
+            for column in left
+            if column != "stock_code" and left.get(column) != right.get(column)
+        ]
+        if delta:
+            out[code] = delta
+    return out
+
+
+# ─── 五类场景（验收报告的实测口径）────────────────────────────────────────
+
+
+def _case_prev_period_restatement(duckdb_store, sqlite_store, codes, updater) -> str:
+    """#1 同一报告期"上一期"数值被修正：YoY 的输入变了，报告期没变。"""
+    target = codes[3]
+    Seed(duckdb_store).income(
+        target, PREV_PERIOD, overwrite=True, revenue=999.0, parent_net_profit=99.0,
+    )
+    return target
+
+
+def _case_dividend_insert(duckdb_store, sqlite_store, codes, updater) -> str:
+    """#2 分红行新增（无公告驱动）：直接往 dividends 表插一行。"""
+    target = codes[2]
+    Seed(duckdb_store).dividends(
+        target, [("2025-12-01", "2025-11-01", 5.0)], if_exists="ignore",
+    )
+    return target
+
+
+def _case_corrupt_snapshot(duckdb_store, sqlite_store, codes, updater) -> str:
+    """#3 快照被外部改坏：`roe -999` / `latest_close 999`（版本号看不出来）。"""
+    target = codes[2]
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET roe = -999.0, latest_close = 999.0 "
+        "WHERE stock_code = ?",
+        [target],
+    )
+    return target
+
+
+def _case_backfill_period(duckdb_store, sqlite_store, codes, updater) -> str:
+    """#4 报告期回补：把 2024-12-31 这一期补上（此前该股只有 2025-12-31）。
+
+    验收报告的实测形态就是这一种：补完之后 `roe` 从 NULL 变有值、`*_yoy`
+    从 NULL 变成 0.25 —— 期次与数值都在"最新完整期"之外，v1 指纹看不见。
+    """
+    target = codes[5]
+    seed = Seed(duckdb_store)
+    seed.balance(
+        target, PREV_PERIOD,
+        total_assets=90.0, total_liabilities=20.0, total_equity=70.0,
+    )
+    seed.income(target, PREV_PERIOD, revenue=80.0, parent_net_profit=8.0)
+    seed.cash_flow(target, PREV_PERIOD, cf_from_operating=8.0)
+    return target
+
+
+def _case_manual_override(duckdb_store, sqlite_store, codes, updater) -> str:
+    """#5 人工覆写 published（PRD §9.5 R7）：PS/PB 等估值必须跟着覆写后的值走。"""
+    target = codes[4]
+    sqlite_store.execute(
+        """INSERT INTO manual_overrides
+               (stock_code, field_name, report_date, original_value, override_value,
+                reason, status)
+           VALUES (?, 'revenue', ?, NULL, 5000.0, 'PRD §9.5 R7 官方纠正', 'published')""",
+        [target, PERIOD],
+    )
+    return target
+
+
+def _setup_missing_prev_period(duckdb_store, sqlite_store, codes) -> None:
+    """回补场景的前置：这只股票**先缺** 2024-12-31（期次缺失 = 下一期是回补）。"""
+    target = codes[5]
+    for table in ("balance_sheet", "income_statement", "cash_flow"):
+        duckdb_store.write_query(
+            f"DELETE FROM {table} WHERE stock_code = ? AND report_date = ?",
+            [target, PREV_PERIOD],
+        )
+
+
+CASES = [
+    (
+        "prev_period_restatement", None,
+        _case_prev_period_restatement, "financial_fingerprint", False,
+    ),
+    (
+        "dividend_insert_no_announcement", None,
+        _case_dividend_insert, "event_fingerprint", False,
+    ),
+    (
+        "snapshot_corrupted", None,
+        _case_corrupt_snapshot, "snapshot_state_mismatch", True,
+    ),
+    (
+        "report_period_backfill", _setup_missing_prev_period,
+        _case_backfill_period, "financial_fingerprint", False,
+    ),
+    (
+        "manual_override_published", None,
+        _case_manual_override, "manual_override_fingerprint", False,
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("case_name", "setup", "mutate", "expected_source", "expect_restore"),
+    CASES,
+    ids=[case[0] for case in CASES],
+)
+def test_acceptance_five_leaks_incremental_equals_full(
+    duckdb_store, sqlite_store, case_name: str, setup, mutate, expected_source: str,
+    expect_restore: bool,
+) -> None:
+    """五类漏算各跑一次：增量 vs 全量 `indicator_snapshot` **全列**逐行相等。"""
+    codes = _audit_codes()
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    _seed_prev_period(duckdb_store, codes)
+    if setup is not None:
+        setup(duckdb_store, sqlite_store, codes)
+
+    first = updater.run_incremental_update()["steps"]["indicators"]
+    assert first["mode"] == "full", first
+    # 稳态轮先把水位对齐（真实部署里就是上一轮），再构造本轮改动。
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["mode"] == "incremental", steady
+    assert steady["recomputed_count"] == 0, f"稳态轮不该算任何股票：{steady}"
+    before = _snapshot_map(duckdb_store)
+
+    target = mutate(duckdb_store, sqlite_store, codes, updater)
+
+    report = updater.run_incremental_update()
+    step = report["steps"]["indicators"]
+    assert step["mode"] == "incremental", (
+        f"{case_name}: 该场景必须走增量（走全量 = 判据退化成'判不准就全量'），"
+        f"实际 reason={step['reason']}"
+    )
+    assert step["planned_count"] >= 1, f"{case_name}: 一只都没进重算集合 = 漏算"
+    assert target in step["recomputed_codes"], (
+        f"{case_name}: 变化的那只股票没进重算集合：{step['recomputed_codes']}"
+    )
+    assert step["changed_sources"].get(expected_source, 0) >= 1, (
+        f"{case_name}: 变化来源 {expected_source} 没被记录：{step['changed_sources']}"
+    )
+
+    incremental = _snapshot_map(duckdb_store)
+    if expect_restore:
+        # 快照自愈：算完必须逐列回到"被外部改坏之前"的样子（roe/latest_close 等）。
+        not_healed = {
+            col: (before[target].get(col), incremental[target].get(col))
+            for col in before[target]
+            if before[target].get(col) != incremental[target].get(col)
+        }
+        assert incremental[target] == before[target], (
+            f"{case_name}: 被改坏的快照没有自愈：{not_healed}"
+        )
+    else:
+        assert incremental[target] != before[target], f"{case_name}: 快照一个字节都没变 = 漏算"
+
+    # 金标准：同一份数据全量重算（同一个库、同一批输入）。
+    full_report = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    assert full_report["status"] == "success", full_report
+    full = _snapshot_map(duckdb_store)
+
+    delta = _diff_snapshot(incremental, full)
+    assert not delta, (
+        f"{case_name}: 增量与全量不一致 {len(delta)} 只股票；"
+        f"首例 {list(delta.items())[0]}"
+    )
+    # 列数自证：比对的是**全列**（除时间戳），不是挑几列看的。
+    assert len(next(iter(incremental.values()))) >= 70
+
+
+# ─── 判据守卫：指纹必须**在集合里**，不是靠"退回全量"蒙混 ────────────────
+
+
+def test_scope_planning_failure_falls_back_to_full(duckdb_store, sqlite_store) -> None:
+    """`plan_indicator_scope` 整体失败 → **真的**返回 full + 可解释 reason。
+
+    修前：指纹函数一抛异常，`plan_indicator_scope` 自己就炸，整轮更新垮掉
+    （既没全量也没增量）。现在必须 full + `scope_planning_failed` + 异常进报告。
+    """
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    bootstrap_indicator_scope(updater)
+
+    def _boom(*_args: Any, **_kwargs: Any):
+        raise RuntimeError("指纹算不出来（故障注入）")
+
+    updater_duck = updater.duck
+    original_read_query = updater_duck.read_query
+
+    def _broken_read_query(sql: str, params: list[Any] | None = None):
+        if "information_schema.columns" in sql or "GROUP BY stock_code" in sql:
+            raise RuntimeError("指纹算不出来（故障注入）")
+        return original_read_query(sql, params)
+
+    updater_duck.read_query = _broken_read_query
+    try:
+        plan = plan_indicator_scope(updater, sources={})
+    finally:
+        updater_duck.read_query = original_read_query
+
+    assert plan.mode == "full", "指纹算不出来必须退回全量"
+    assert plan.reason == "scope_planning_failed"
+    assert plan.planning_error and "故障注入" in plan.planning_error
+    assert plan.planning_traceback, "异常栈必须留存（不许静默吞掉）"
+
+
+def test_unknown_signal_source_goes_full_group(duckdb_store, sqlite_store) -> None:
+    """新增/未知信号来源默认进 full 组（不得被忽略或降级到价格域）。"""
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    bootstrap_indicator_scope(updater)
+
+    plan = plan_indicator_scope(
+        updater,
+        sources={"a_brand_new_signal_source": [codes[1]]},
+    )
+
+    assert plan.mode == "incremental"
+    assert plan.full_codes == [codes[1]], "未知来源必须进 full 组（整股 149 列）"
+
+
+def test_forced_full_switch_is_wired(duckdb_store, sqlite_store) -> None:
+    """`forced_full` 不是空开关：owner 属性 / 配置项都能真的触发全量。"""
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    bootstrap_indicator_scope(updater)
+
+    assert plan_indicator_scope(updater, sources={}).mode == "incremental"
+
+    updater.force_full_indicator_recompute = True
+    plan = plan_indicator_scope(updater, sources={})
+
+    assert plan.mode == "full"
+    assert plan.reason == "forced_full"
+
+
+def test_periodic_full_refresh_fires_after_configured_days(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """周期全量兜底：超过 N 天没有全量成功 → reason=`periodic_full_refresh`。"""
+    from app.core.update_parts import indicator_scope as scope_module
+
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    bootstrap_indicator_scope(updater)
+    assert plan_indicator_scope(updater, sources={}).mode == "incremental"
+
+    # 把"上次全量"改成 8 天前（默认兜底 7 天）→ 下一轮必须全量。
+    monkeypatch.setattr(scope_module, "periodic_full_days", lambda: 7)
+    from datetime import UTC, datetime, timedelta
+
+    eight_days_ago = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, eight_days_ago)
+
+    report = updater.run_incremental_update()
+    step = report["steps"]["indicators"]
+    assert step["mode"] == "full", f"周期兜底没生效：{step}"
+    assert step["reason"] == "periodic_full_refresh"
+    # 兜底必须留痕：状态表里能查到 reason，且水位被刷新到"刚刚"。
+    import json as _json
+
+    decision = _json.loads(updater._read_refresh_state(scope_module.LAST_SCOPE_KEY))
+    assert decision["reason"] == "periodic_full_refresh"
+    refreshed = updater._read_refresh_state(scope_module.PERIODIC_FULL_KEY)
+    assert refreshed != eight_days_ago, "全量成功后必须刷新周期水位，否则每轮都全量"

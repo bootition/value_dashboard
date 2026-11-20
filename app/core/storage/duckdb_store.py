@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import logging
 import os
 import secrets
 import threading
@@ -27,6 +28,8 @@ import duckdb
 
 from app.core.storage.maintenance import assert_writes_allowed
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError, VdEnv
+
+logger = logging.getLogger(__name__)
 
 # 空/半写锁文件宽限期（秒）：与 update_lock.py 同口径，超过即视为死锁
 _STALE_MALFORMED_LOCK_SECONDS = 5.0
@@ -218,6 +221,68 @@ class DuckDBWriteLockError(Exception):
 
 class DuckDBReadLockedError(Exception):
     """外部写进程正占用 DuckDB 文件，当前无法新建只读连接。"""
+
+
+# =============================================================================
+# 索引 ↔ 堆不变量：检测与自愈（2026-11-25，业务概览每轮原生崩溃的真因）
+# =============================================================================
+#
+# ## 现象（副本上实测，见 docs/reports 本轮报告）
+# `BusinessOverviewUpdater.update_stock('002185')` 每轮都把更新子进程打死，
+# **没有 traceback、没有报告 JSON、job 永久 running**。逐级探针把崩溃点缩到
+# `DuckDBStore.transaction()` 的 `conn.commit()`（看门狗每 20ms dump 全线程栈，
+# 最后一条样本就是 commit 行），退出码 **0xC0000409**（`__fastfail`；不是 Python
+# 异常，`PYTHONFAULTHANDLER=1` + `-X dev` 也拿不到栈，因为 fail-fast 绕过 SEH）。
+# commit 里抛出的真正错误是 DuckDB 的内部 FATAL：
+#
+#     FatalException: FATAL Error: Invalid Input Error:
+#     Failed to delete all rows from index. Only deleted 0 out of 200 rows.
+#
+# ## 它是什么（2026-11-25 定位到具体索引）
+# 坏的是 `business_breakdown` 的**二级索引** `idx_business_breakdown_stock_report`
+# (stock_code, report_date)：堆里 002185 的 200 行在索引里一条都没有。DELETE 的
+# 索引维护在提交时逐条核对，核对不上就抛 FATAL —— 而且 FATAL 之后 DuckDB 的
+# 连接状态不可再信，rollback/close 可能再撞一次 fail-fast 直接 abort，所以进程
+# "猝死"。触发面是**文件级不变量被破坏**（写库中途被打断 / 双写者 / 拷活动库），
+# 不是调用方的 SQL 写法：同一 DDL + 同一批数据在**新建库**上三种 DELETE/INSERT
+# 形态全部正常（`.planning/20261125-bo-crash/freshdb.py`）。
+#
+# ## 怎么修：`reindex_table()` 优先，`rebuild_table()` 兜底
+# 索引由堆数据遍历生成 ⇒ 重建索引即可恢复"条目 ↔ 行"逐行对应，且**不动堆数据**：
+# 实测 101 万行 `business_breakdown` 重建二级索引 **0.45s**（整表重建 4.2s 且会让
+# 追加型库文件的表数据再存一份，因此只当索引重建无效时的兜底）。
+#
+# ## 为什么不做"检测"
+# 二级索引**读不出来**：优化器对 `WHERE stock_code = ?` 一律走 SEQ_SCAN（实测
+# EXPLAIN），没有 index-scan/index-join 可对照；`INSERT ... ON CONFLICT DO NOTHING`
+# 探针只查主键 ART，对二级索引**完全盲** —— 实测探针报 `consistent=True`，紧接着
+# 同一笔 DELETE 照样 FATAL（本轮就是被这个假绿骗过一次）。唯一"测得出来"的动作
+# 就是真 DELETE，而那就是猝死点本身。既然重建只要 0.45s（一轮 ~900s），
+# 就把检测问题换成**幂等重建**：每轮第一次写库前重建一次，代价 0.05%。
+_INDEX_INCONSISTENCY_MARKERS: tuple[str, ...] = (
+    "Failed to delete all rows from index",
+    "Failed to update all rows in index",
+    "Failed to insert all rows into index",
+    "Failed to delete all rows from index.",
+)
+
+
+def is_index_inconsistency_error(error: BaseException | str) -> bool:
+    """是否为"索引 ↔ 堆失联"这一类 DuckDB 内部 FATAL。
+
+    只认 DuckDB 自己那句话：把范围放宽会把并发/IO 错误误判成需要重建表。
+    """
+    text = error if isinstance(error, str) else str(error)
+    return any(marker in text for marker in _INDEX_INCONSISTENCY_MARKERS)
+
+
+class DuckDBIndexInconsistencyError(RuntimeError):
+    """表索引与堆数据失联（DuckDB 内部 FATAL）；必须整表重建才能恢复。"""
+
+    def __init__(self, table: str, detail: str) -> None:
+        super().__init__(f"{table}: {detail}")
+        self.table = table
+        self.detail = detail
 
 
 def _is_external_file_lock(message: str, *, lock_active: bool = False) -> bool:
@@ -1071,6 +1136,102 @@ class DuckDBStore:
                         content_epoch.bump(
                             self._path_set.sqlite_path, reason="duckdb_transaction"
                         )
+
+    def _assert_simple_identifier(self, name: str) -> str:
+        """表名/索引名只允许 `[A-Za-z_][A-Za-z0-9_]*`：下面这些 DDL 是拼进 SQL 的。"""
+        import re
+
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError(f"非法表名: {name!r}")
+        return name
+
+    def reindex_table(self, table: str, *, timeout: float = 300.0) -> dict[str, Any]:
+        """重建 `table` 的**全部二级索引**（DROP + 按 `duckdb_indexes()` 里的 SQL 重建）。
+
+        这是修 `DuckDBIndexInconsistencyError` 的首选手段：只重写索引、不动堆数据，
+        实测 `business_breakdown`（101 万行）**0.45s**（整表重建要 4.2s 且会让
+        追加型库文件的表数据再存一份）。主键 ART 由 `PRIMARY KEY(...)` 约束持有，
+        不能也不会在这里重建（约束索引无法 DROP）。
+
+        DDL 在 DuckDB 里是事务性的：中途失败整体回滚，旧索引原样保留。
+        """
+        table = self._assert_simple_identifier(table)
+        started = time.perf_counter()
+        rebuilt: list[str] = []
+        with self.write_connection(timeout=timeout) as conn:
+            index_rows = conn.execute(
+                "SELECT index_name, sql FROM duckdb_indexes() WHERE table_name = ?", [table],
+            ).fetchall()
+            # ⚠️ 索引 DDL **不能**包在显式事务里：DROP+CREATE 同事务实测报
+            # `INTERNAL Error: BoundIndex::CreateDeltaIndex is not supported for
+            # this index type`（DuckDB 1.5.5）。所以逐条语句自动提交。
+            # 代价：不是原子的。因此先把 DDL 读进内存，CREATE 失败时用这份 SQL
+            # 再补一次，尽力避免"索引被删掉没建回来"。
+            for index_name, index_sql in index_rows:
+                conn.execute(f"DROP INDEX {self._assert_simple_identifier(str(index_name))}")
+                try:
+                    conn.execute(str(index_sql))
+                except Exception:
+                    logger.warning("重建索引 %s 失败，用捕获的 DDL 重试一次", index_name)
+                    conn.execute(str(index_sql))
+                rebuilt.append(str(index_name))
+        return {
+            "table": table,
+            "indexes_rebuilt": rebuilt,
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
+
+    def rebuild_table(self, table: str, *, timeout: float = 600.0) -> dict[str, Any]:
+        """整表重建：从堆数据重建 heap + 全部索引，恢复索引 ↔ 堆不变量。
+
+        唯一能修 `DuckDBIndexInconsistencyError` 的手段（见模块内长注释）。
+        在一个事务里：建同 DDL 新表 → `INSERT ... SELECT` 全量搬 → 删旧表 →
+        改名 → 按 `duckdb_indexes()` 里记录的 SQL 重建二级索引。
+        任何一步失败整体回滚，旧表原样保留（DDL 在 DuckDB 里是事务性的）。
+
+        注意：主键/唯一约束的 ART 索引由 DDL 里的 `PRIMARY KEY(...)` 自动重建，
+        因此**不需要**也不允许手工 `CREATE INDEX` 主键。
+        """
+        table = self._assert_simple_identifier(table)
+        started = time.perf_counter()
+        with self.write_connection(timeout=timeout) as conn:
+            ddl_row = conn.execute(
+                "SELECT sql FROM duckdb_tables() WHERE table_name = ?", [table],
+            ).fetchone()
+            if not ddl_row or not ddl_row[0]:
+                raise ValueError(f"找不到表 {table} 的 DDL，拒绝重建")
+            ddl = str(ddl_row[0])
+            body = ddl[ddl.index("("):]
+            index_sql = [
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT sql FROM duckdb_indexes() WHERE table_name = ?", [table],
+                ).fetchall()
+                if row[0]
+            ]
+            rows_before = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+            staging = f"{table}__vd_rebuild_{secrets.token_hex(4)}"
+            conn.execute("BEGIN TRANSACTION")
+            try:
+                conn.execute(f"CREATE TABLE {staging} {body}")
+                conn.execute(f"INSERT INTO {staging} SELECT * FROM {table}")
+                conn.execute(f"DROP TABLE {table}")
+                conn.execute(f"ALTER TABLE {staging} RENAME TO {table}")
+                for sql in index_sql:
+                    conn.execute(sql)
+                conn.execute("COMMIT")
+            except Exception:
+                with contextlib.suppress(Exception):
+                    conn.execute("ROLLBACK")
+                raise
+            rows_after = conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+        return {
+            "table": table,
+            "rows_before": int(rows_before),
+            "rows_after": int(rows_after),
+            "indexes_rebuilt": len(index_sql),
+            "elapsed_seconds": round(time.perf_counter() - started, 3),
+        }
 
     def write_query(self, sql: str, params: list[Any] | None = None) -> None:
         """执行写操作（自动获取写锁）"""
