@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
 
 CODES = ["600001", "600002", "600003"]
 
@@ -64,10 +65,7 @@ class BatchAdapter:
 
 def _seed(duckdb_store) -> None:
     for code in CODES:
-        duckdb_store.write_query(
-            f"INSERT INTO stock_meta (stock_code, name, exchange) "
-            f"VALUES ('{code}', 'TEST', 'SHSE')"
-        )
+        Seed(duckdb_store).stock(code, name="TEST", exchange="SHSE")
 
 
 def test_market_actions_batches_one_request_per_data_type(duckdb_store, sqlite_store) -> None:

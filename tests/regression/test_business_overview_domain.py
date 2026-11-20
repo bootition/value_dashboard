@@ -296,6 +296,7 @@ class _FakeF10Adapter:
 def _seed_business_rows(duck: DuckDBStore, code: str = "600519") -> None:
     # 第 4 类（多站点缺口/本轮不补 API）：`company_profile` 全仓 3 处 + 工厂没有
     # 这张表的方法 —— 补方法要新增 API，本轮租约不允许，故留内联。
+    # 留（第 6 类·库侧相对时间）：`company_profile.fetch_time` 写 `CURRENT_TIMESTAMP`
     duck.write_query(
         """INSERT INTO company_profile
            (stock_code, code, name, profile, scope, employee_num,
@@ -620,6 +621,7 @@ def test_readiness_unchanged_by_business_domain(
 
     # 第 4 类（多站点缺口/本轮不补 API）：`company_profile` 无工厂方法，同
     # `_seed_business_rows`，留内联。
+    # 留（第 6 类·库侧相对时间）：同上，`fetch_time` 是库侧此刻
     duckdb_store.write_query(
         """INSERT INTO company_profile
            (stock_code, code, name, profile, scope, employee_num,
@@ -691,6 +693,7 @@ def test_business_overview_api_returns_composition_history_and_provenance(
     _seed_stock(duckdb_store)
     # 第 4 类（多站点缺口/本轮不补 API）：`company_profile` 无工厂方法；`fetch_time`
     # 的库侧时钟也随这一行留在这里，故留内联。
+    # 留（第 6 类·库侧相对时间）：同上，`fetch_time=CURRENT_TIMESTAMP`
     duckdb_store.write_query(
         """INSERT INTO company_profile
            (stock_code, code, name, profile, scope, employee_num, csrc_industry, trade_market,

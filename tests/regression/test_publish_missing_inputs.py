@@ -15,25 +15,36 @@ Regression: 指标全量发布不得被单只"输入缺口"股票一票否决。
 
 from __future__ import annotations
 
+from datetime import date
+
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
 
 
 def _seed(duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, code: str, *, complete: bool) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_st, is_suspended,
-                total_shares, circ_shares)
-           VALUES (?, ?, 'SZSE', '2020-01-01', false, false, 100, 80)""",
-        [code, f"Test{code}"],
+    Seed(duckdb_store).stock(
+        code,
+        name=f"Test{code}",
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
+        total_shares=100,
+        circ_shares=80,
     )
     if complete:
         insert_minimum_screenable_data(duckdb_store, code)
     else:
         # 价格齐备但三表为空 → 非新股的核心输入缺口。
         with duckdb_store.write_connection() as connection:
+            # 留（第 6 类·库侧相对时间）：两条日线是 `generate_series(CURRENT_DATE - INTERVAL
+            # '6 years', CURRENT_DATE, ...)` 铺出来的"六年日历"，"价格齐备"这个前提
+            # 恰恰是相对**今天**的（固定字面量几年后就不再覆盖近 6 年，本用例会静默变成
+            # "价格也缺"，缺口分类从三表缺转成价格缺）；行数也不由调用点给定，
+            # 工厂的 `[(date, close), …]` 逐字清单表达不了。
             connection.execute(
                 """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
                    SELECT ?, trade_date, 10, 100
@@ -64,9 +75,11 @@ def test_complete_stocks_are_published_even_when_one_input_gap_exists(
     _seed(duckdb_store, sqlite_store, "000003", complete=False)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
     # 缺口股票保留上一代快照行，用于验证"不被删除"。
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close, latest_price_date)
-           VALUES ('000003', '2025-06-30', 9, DATE '2025-06-30')"""
+    Seed(duckdb_store).snapshot(
+        "000003",
+        "2025-06-30",
+        latest_close=9,
+        latest_price_date=date(2025, 6, 30),
     )
 
     report = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()

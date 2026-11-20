@@ -57,6 +57,7 @@ def test_web_dsl_delete_referenced_draft_returns_409(
 
     # 直接构造依赖关系（dep_ref -> base_ref），触发删除时的 FK 约束
     with sqlite_store.transaction() as conn:
+        # 留（第 2 类·外键引用树）：`dsl_dependencies(expression_id, depends_on_id)` 引用的两个 id
         conn.execute(
             """INSERT INTO dsl_dependencies (expression_id, depends_on_id, depends_on_version)
                VALUES (?, ?, 1)""",

@@ -50,6 +50,7 @@ def _seed_ext_period(
     """铺一期 indicator_ext：`ebitda_value=None` 模拟季报未披露折旧摊销。"""
     for index in range(codes):
         code = f"9{index:05d}"
+        # 留（第 6 类·库侧相对时间）：`indicator_ext.calculated_at` 写库侧 `now()`，
         duck.write_query(
             """INSERT INTO indicator_ext
                    (stock_code, report_date, ebitda, calculated_at, source, data_version)

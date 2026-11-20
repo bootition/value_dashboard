@@ -68,6 +68,7 @@ def _insert(store: DuckDBStore, table: str, row: dict[str, Any]) -> None:
     columns = ", ".join(row)
     placeholders = ", ".join("?" for _ in row)
     with store.write_connection() as connection:
+        # 留（第 4 类·多站点缺口）：`_insert()` 的表名与列清单都是**参数**，
         connection.execute(
             f"INSERT INTO {table} ({columns}) VALUES ({placeholders})",
             list(row.values()),

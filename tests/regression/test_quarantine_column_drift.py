@@ -41,6 +41,14 @@ def test_quarantine_survives_column_order_drift(duckdb_store: DuckDBStore) -> No
     # Simulate a quarantine table built by an older release: same column names,
     # different physical order (this is exactly what made the positional INSERT
     # cast a BOOLEAN into a TIMESTAMP).
+    # 留（第 3 类·隔离归档 / 故意造错）：下面三条 INSERT 是**本文件的论点载荷**，不是"造一行"：
+    #   * `fetch_batch` 的 `batch_id='B-LEGACY'` 是"老版本批次"，工厂没有也不该有这张表的
+    #     方法（整批搬家用例的写入本身就是被断言的对象）；
+    #   * `raw_response_archive` 故意写 `payload = NULL`（"空载荷归档"正是
+    #     `empty_payload_archives` 要数的那类行）；
+    #   * `source_audit` 与归档行共用 `_MD5_HASH`（32 位 md5，**不是** 64 位 sha256），
+    #     故意造的是"溯源已被篡改/非本系统写入"的坏 hash，工厂按生产口径只发正确形状。
+    # 三条还都写在调用点自己的 `duck.transaction()` 里（要与 `DROP/CREATE` 漂移表同事务）。
     drifted = list(reversed(columns))
     with duck.transaction() as connection:
         connection.execute("DROP TABLE IF EXISTS raw_response_archive_quarantine")

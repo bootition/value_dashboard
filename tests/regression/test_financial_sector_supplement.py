@@ -30,6 +30,7 @@ from app.core.supplement import (
     SupplementFetcher,
 )
 from scripts import fetch_exchange_gain, fetch_financial_sector
+from tests.support.seed import Seed
 
 FETCH_TIME = datetime(2026, 11, 15, 12, 0, 0)
 
@@ -88,12 +89,18 @@ def _seed_stock(
     exchange: str = "SSE",
     is_listed: bool = True,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_listed, is_st,
-                is_suspended, sw_level1, csrc_l1, total_shares, circ_shares)
-           VALUES (?, ?, ?, '2010-01-05', ?, FALSE, FALSE, ?, ?, 100, 80)""",
-        [code, name, exchange, is_listed, sw_level1, csrc_l1],
+    Seed(duck).stock(
+        code,
+        name=name,
+        exchange=exchange,
+        listing_date="2010-01-05",
+        is_listed=is_listed,
+        is_st=False,
+        is_suspended=False,
+        sw_level1=sw_level1,
+        csrc_l1=csrc_l1,
+        total_shares=100,
+        circ_shares=80,
     )
 
 
@@ -105,11 +112,12 @@ def _seed_income(
     exchange_gain: float | None = None,
     revenue: float = 1000.0,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO income_statement
-               (stock_code, report_date, report_type, revenue, exchange_gain)
-           VALUES (?, CAST(? AS DATE), 'quarterly', ?, ?)""",
-        [code, report_date, revenue, exchange_gain],
+    Seed(duck).income(
+        code,
+        report_date,
+        report_type="quarterly",
+        revenue=revenue,
+        exchange_gain=exchange_gain,
     )
 
 
@@ -122,6 +130,7 @@ def _seed_financial_item(
     customer_deposits: float | None = None,
 ) -> None:
     duck.write_query(
+        # 留（第 4 类·多站点缺口）：`financial_sector_items` 无工厂方法，且 `fetch_time` 用本文件
         """INSERT INTO financial_sector_items
                (stock_code, report_date, report_type, customer_deposits, source,
                 fetch_time, raw_response_hash, confidence, batch_id)

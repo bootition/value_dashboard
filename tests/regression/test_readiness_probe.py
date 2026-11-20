@@ -45,6 +45,7 @@ from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api import data_status as data_status_module
 from tests.conftest import insert_minimum_screenable_data
+from tests.support.seed import Seed
 
 _READY_PAYLOAD = {
     "ready": True,
@@ -178,6 +179,11 @@ def test_stale_readiness_cache_is_disclosed_but_still_answers_200(
     client, app = _build_app(database_paths)
     sqlite = app.state.sqlite
     stale_at = (datetime.now().astimezone() - timedelta(hours=3)).isoformat()
+    # 留（第 6 类·相对时间 / 新鲜度论点）：`updated_at` 必须是"相对此刻 3 小时前"，
+    # 断言 `checked_at_age_seconds > READINESS_STALE_AFTER_SECONDS` 钉的就是这个间距；
+    # 工厂的确定性固定字面量会随日历漂移成"几天前"或"未来"，把本条变成假绿/假红。
+    # 另外 `data_refresh_state` 是 upsert（`ON CONFLICT(key) DO UPDATE`）语义，
+    # 工厂的 `overwrite=True` 在 SQLite 侧是"删行再插"、口径不同，不能顶替。
     sqlite.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
            ON CONFLICT(key) DO UPDATE SET value=excluded.value,
@@ -220,11 +226,13 @@ def test_readiness_does_not_block_on_share_capital_gaps_below_the_threshold(
     必须造一个占比低于 1/3 的库（4 只库里 1 只违规 = 25%）。
     """
     for code in ("000001", "000002", "000003", "000004"):
-        duckdb_store.write_query(
-            """INSERT INTO stock_meta
-                   (stock_code, name, exchange, listing_date, is_st, is_suspended)
-               VALUES (?, ?, 'SZSE', '2020-01-01', FALSE, FALSE)""",
-            [code, code],
+        Seed(duckdb_store).stock(
+            code,
+            name=code,
+            exchange="SZSE",
+            listing_date="2020-01-01",
+            is_st=False,
+            is_suspended=False,
         )
         insert_minimum_screenable_data(duckdb_store, code)
     # 制造 1 只股本缺口（circ > total）。小库阈值 = max(50, ...) = 50。
@@ -255,11 +263,13 @@ def test_readiness_blocks_when_share_capital_gaps_exceed_the_threshold(
     # 硬阻断下限做成可注入常量（契约 §3 设计意图），小库用 1 复现同一政策。
     monkeypatch.setattr(data_quality, "GATE_HARD_BLOCK_MIN", 1)
     for code in ("000001", "000002"):
-        duckdb_store.write_query(
-            """INSERT INTO stock_meta
-                   (stock_code, name, exchange, listing_date, is_st, is_suspended)
-               VALUES (?, ?, 'SZSE', '2020-01-01', FALSE, FALSE)""",
-            [code, code],
+        Seed(duckdb_store).stock(
+            code,
+            name=code,
+            exchange="SZSE",
+            listing_date="2020-01-01",
+            is_st=False,
+            is_suspended=False,
         )
         insert_minimum_screenable_data(duckdb_store, code)
     duckdb_store.write_query(
@@ -290,10 +300,10 @@ def test_readiness_keeps_share_capital_gate_aligned_with_publish_gate(
 
     codes = [f"6000{index}" for index in range(total)]
     with duckdb_store.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO stock_meta (stock_code, name, exchange, listing_date)
-               VALUES (?, ?, 'SSE', '2020-01-01')""",
+        Seed(duckdb_store).join(connection).stocks(
             [(code, code) for code in codes],
+            exchange="SSE",
+            listing_date="2020-01-01",
         )
         # 先给**所有**股票合法股本（否则 NULL 股本在 90 天豁免外同样是违规，
         # 会让 gap_count 从 broken 变成 total，测例失真）。

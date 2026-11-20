@@ -215,6 +215,7 @@ def _seed_rows(store, table: str, rows: list[tuple[str, str, str]]) -> None:
     )
     for field_name, reason_code, count in rows:
         for index in range(count):
+            # 留（第 6 类·库侧相对时间）：`computed_at` 写库侧 `now()`，
             store.write_query(
                 f"""INSERT INTO {table}
                        (stock_code, report_date, field_name, reason_code, detail, computed_at)

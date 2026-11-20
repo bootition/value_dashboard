@@ -83,6 +83,8 @@ def _meta_rows() -> list[tuple[str, str, str | None, str | None]]:
 def _build_meta_db() -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(":memory:")
     con.execute("CREATE TABLE stock_meta (stock_code VARCHAR, name VARCHAR, sw_level1 VARCHAR, csrc_l1 VARCHAR)")
+    # 留（第 5 类·测试自建表）：`stock_meta` 是本函数用 `duckdb.connect(':memory:')` 自己
+    # 留（第 5 类·测试自建表）：`stock_meta` 是本函数用 `duckdb.connect(':memory:')` 自己
     con.executemany(
         "INSERT INTO stock_meta VALUES (?, ?, ?, ?)",
         [list(row) for row in _meta_rows()],
@@ -93,7 +95,9 @@ def _build_meta_db() -> duckdb.DuckDBPyConnection:
 def _insert(store: DuckDBStore, table: str, row: dict) -> None:
     columns = ", ".join(row)
     placeholders = ", ".join("?" for _ in row)
+    # 留（第 4 类·多站点缺口）：`_insert()` 的表名与列名**全是参数**（`stock_meta` /
     with store.write_connection() as connection:
+        # 留（第 4 类·多站点缺口）：`_insert()` 的表名与列名**全是参数**（`stock_meta` /
         connection.execute(
             f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", list(row.values())
         )
@@ -263,6 +267,8 @@ def test_null_reason_sweeper_uses_single_sector_predicate() -> None:
             "CREATE TABLE stock_meta (stock_code VARCHAR, name VARCHAR, sw_level1 VARCHAR, "
             "sw_level2 VARCHAR, csrc_l1 VARCHAR)"
         )
+        # 留（第 5 类·测试自建表）：照例是内存库自建 5 列 `stock_meta`，为的是单独跑
+        # 留（第 5 类·测试自建表）：照例是内存库自建 5 列 `stock_meta`，为的是单独跑
         con.executemany(
             "INSERT INTO stock_meta VALUES (?, ?, ?, ?, ?)",
             [

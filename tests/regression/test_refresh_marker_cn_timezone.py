@@ -41,6 +41,7 @@ def test_marker_is_normalized_to_china_trading_date() -> None:
 
 
 def _write_marker(sqlite_store: SQLiteStore, key: str, value: str) -> None:
+    # 留（第 4 类·多站点缺口）：`_write_marker()` 的 `key`/`value`/`updated_at` **三者同值**，
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
            VALUES (?, ?, ?)""",

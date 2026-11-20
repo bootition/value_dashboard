@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
 
 TARGET_DATE = "2026-11-13"
 LOCAL_DATE = "2026-11-12"
@@ -55,16 +56,9 @@ class _AdjustAwareAdapter:
 
 
 def _seed_stock(duckdb_store, code: str) -> None:
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES (?, 'x', 'SHSE', true)",
-        [code],
-    )
+    Seed(duckdb_store).stock(code, name="x", exchange="SHSE", is_listed=True)
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES (?, ?, 9.0)",
-            [code, LOCAL_DATE],
-        )
+        Seed(duckdb_store).prices(code, [(LOCAL_DATE, 9.0)], table=table)
 
 
 def _run_price_step(duckdb_store, sqlite_store, adapter, codes: list[str]) -> dict:
@@ -130,10 +124,7 @@ def test_qfq_lag_below_threshold_stays_success(duckdb_store, sqlite_store) -> No
 def test_qfq_lag_summary_handles_missing_qfq_rows(duckdb_store, sqlite_store) -> None:
     """qfq 完全没有本地行（NULL）也必须计入滞后，而不是被 SQL 漏掉。"""
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES ('600401', 'x', 'SHSE', true)"
-    )
+    Seed(duckdb_store).stock("600401", name="x", exchange="SHSE", is_listed=True)
 
     summary = updater._qfq_lag_summary(["600401"], TARGET_DATE)
 

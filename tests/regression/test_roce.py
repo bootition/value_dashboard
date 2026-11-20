@@ -541,6 +541,7 @@ def test_ineligible_for_financial_sector(duckdb_store: DuckDBStore) -> None:
 def _seed_history(duck: DuckDBStore, code: str, values: list[float]) -> None:
     """直接铺 `roce_history`（绕过报表），让 10 年窗口的统计量可以手算。"""
     for index, value in enumerate(values):
+        # 留（第 6 类·库侧相对时间）：`roce_history.calculated_at` 写库侧 `now()`，
         duck.write_query(
             """INSERT INTO roce_history
                    (stock_code, report_date, ce, ce_prev, ebit, roce, status,

@@ -75,6 +75,7 @@ def test_sqlite_query_is_read_only(tmp_path: Path) -> None:
     # `ProgrammingError` 只要文本碰巧带 "readonly" 就绿的写法已不可接受
     # （2026-11-19 审计 W3）。
     with pytest.raises(sqlite3.OperationalError, match="attempt to write a readonly database"), store.connection() as conn:
+        # 留（第 3 类·必须写失败）：这行 `INSERT` 包在 `pytest.raises(sqlite3.OperationalError,
         conn.execute("INSERT INTO query_boundary (id) VALUES (1)")
     # 光看"抛了什么异常"不够：必须实证副作用没发生（只读边界真的没写进去）
     assert store.query("SELECT COUNT(*) AS count FROM query_boundary") == [{"count": 0}]

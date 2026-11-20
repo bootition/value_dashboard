@@ -15,9 +15,9 @@
 
 全部使用 tmp_path 里的临时 DuckDB/SQLite（S1 隔离），不触碰 data/ 正式库。
 
-播种：能表达的都走 `tests/support/seed.py` 的按域工厂（数值仍逐字写在调用点）。
-**仍留内联 SQL 的只有一类**：`with duck.write_connection()` 事务块内的多表批量
-写入 —— 工厂自带写锁，嵌套进已持有写锁的事务会撞锁，故保留。
+播种：`tests/support/seed.py` 的按域工厂（数值仍逐字写在调用点）。
+`with duck.write_connection()` 事务块内的多表写入用 `Seed(duck).join(connection)`
+加入**调用方**事务（不拿写锁、不提交），所以本文件已无内联 `INSERT`。
 """
 
 from __future__ import annotations
@@ -77,30 +77,24 @@ def _seed_yoy_financials(duck: DuckDBStore, code: str = "600519") -> None:
         ("2026-06-30", 180.0, 18.0, 16.0),
         ("2026-09-30", 300.0, 30.0, 27.0),
     ]
-    # 保留内联：三表要在同一个 write_connection() 事务里一起写入（同一组报告期
-    # 必须同时出现，否则用例前提不成立）；工厂每次自带写锁，嵌套会撞锁。
+    # 三表要在同一个 write_connection() 事务里一起写入（同一组报告期必须同时
+    # 出现，否则用例前提不成立）；`join(connection)` 加入调用方事务，工厂不再
+    # 自己拿写锁，所以不自撞。
     with duck.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO income_statement
-                   (stock_code, report_date, revenue, parent_net_profit,
-                    deducted_net_profit)
-               VALUES (?, ?, ?, ?, ?)""",
-            [(code, report_date, revenue, profit, deducted)
-             for report_date, revenue, profit, deducted in periods],
-        )
-        connection.executemany(
-            """INSERT INTO balance_sheet
-                   (stock_code, report_date, total_assets, total_liabilities,
-                    total_equity, total_equity_parent,
-                    total_current_assets, total_current_liabilities, inventory)
-               VALUES (?, ?, 1000, 400, 600, 600, 500, 250, 50)""",
-            [(code, report_date) for report_date, *_ in periods],
-        )
-        connection.executemany(
-            """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-               VALUES (?, ?, 50)""",
-            [(code, report_date) for report_date, *_ in periods],
-        )
+        seed = Seed(duck).join(connection)
+        for report_date, revenue, profit, deducted in periods:
+            seed.income(
+                code, report_date,
+                revenue=revenue, parent_net_profit=profit, deducted_net_profit=deducted,
+            )
+        for report_date, *_ in periods:
+            seed.balance(
+                code, report_date,
+                total_assets=1000, total_liabilities=400,
+                total_equity=600, total_equity_parent=600,
+                total_current_assets=500, total_current_liabilities=250, inventory=50,
+            )
+            seed.cash_flow(code, report_date, cf_from_operating=50)
 
 
 def _seed_prices(
@@ -471,23 +465,20 @@ def test_ttm_yoy_uses_abs_denominator_on_negative_base(
         ("2024-12-31", 100.0, -100.0, -100.0),
         ("2025-12-31", 100.0, -50.0, -50.0),
     ]
-    # 保留内联：同上 —— write_connection() 事务块内写入，工厂会撞写锁。
+    # 同上：`join(connection)` 加入调用方事务（两个表同一组报告期一起落库）。
     with duckdb_store.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO income_statement
-                   (stock_code, report_date, revenue, parent_net_profit,
-                    deducted_net_profit)
-               VALUES (?, ?, ?, ?, ?)""",
-            [(code, d, rev, profit, ded) for d, rev, profit, ded in periods],
-        )
-        connection.executemany(
-            """INSERT INTO balance_sheet
-                   (stock_code, report_date, total_assets, total_liabilities,
-                    total_equity, total_equity_parent,
-                    total_current_assets, total_current_liabilities, inventory)
-               VALUES (?, ?, 1000, 400, 600, 600, 500, 250, 50)""",
-            [(code, d) for d, *_ in periods],
-        )
+        seed = Seed(duckdb_store).join(connection)
+        for d, rev, profit, ded in periods:
+            seed.income(
+                code, d, revenue=rev, parent_net_profit=profit, deducted_net_profit=ded
+            )
+        for d, *_ in periods:
+            seed.balance(
+                code, d,
+                total_assets=1000, total_liabilities=400,
+                total_equity=600, total_equity_parent=600,
+                total_current_assets=500, total_current_liabilities=250, inventory=50,
+            )
 
     calc = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     growth = calc._calc_ttm_yoy(code)

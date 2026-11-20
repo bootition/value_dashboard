@@ -19,6 +19,7 @@ def test_stale_job_reconciliation_requires_a_confirmed_plan(sqlite_store) -> Non
 
 def test_reconciliation_plan_records_stale_job_ids(sqlite_store) -> None:
     old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    # 留（第 6 类·库侧相对时间）：`started_at` 传的是相对此刻算出来的 `old`（几小时前），
     sqlite_store.execute(
         "INSERT INTO job_logs (job_type, status, started_at) VALUES (?, 'running', ?)",
         ["full_init", old],

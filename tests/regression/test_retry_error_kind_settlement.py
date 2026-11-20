@@ -21,6 +21,7 @@ from app.core.update import IncrementalUpdater
 
 
 def _seed_retry(sqlite_store: SQLiteStore, *, code: str = "301688", retry_count: int = 4) -> int:
+    # 留（第 2 类·lastrowid）：写完后按 `stock_code + data_type` 回捞 `id` 交给结算路径，
     sqlite_store.execute(
         """INSERT INTO retry_list
                (stock_code, data_type, adapter, error, retry_count, last_attempt,

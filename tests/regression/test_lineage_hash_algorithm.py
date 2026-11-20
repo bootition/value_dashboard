@@ -58,6 +58,7 @@ def _insert_batch(
     raw_response_hash: str,
     data_type: str = "income_statement",
 ) -> None:
+    # 留（第 6 类·库侧相对时间）：`fetch_batch.fetch_time` 写 `CURRENT_TIMESTAMP`，
     store.write_query(
         """INSERT INTO fetch_batch
                (batch_id, data_type, source, adapter_version, fetch_time,
@@ -90,6 +91,7 @@ def _seed_legacy_csmar_batch(store: DuckDBStore, *, count: int = 3) -> None:
         raw_response_hash=_MD5_HEX, data_type="income_statement",
     )
     # 归档里带着非空 payload 且已校验，确保 lineage 的其它子项为 0（隔离用例）。
+    # 留（第 3 类·故意造错）：`raw_response_hash` 是 **MD5 长度**的 legacy 摘要、`payload` 是裸
     store.write_query(
         """INSERT INTO raw_response_archive
                (raw_response_hash, source, fetch_time, payload, integrity_verified)
@@ -216,6 +218,7 @@ def test_lineage_invalid_warning_disappears_for_legacy_digest_only_data(
         duckdb_store, batch_id="akshare-ok", adapter_version=_OTHER_ADAPTER,
         raw_response_hash=_SHA256_HEX, data_type="price_daily_raw",
     )
+    # 留（第 3 类·故意造错）：同上一处——手写的 32 位 `_SHA256_HEX` 摘要 + 裸 BLOB 载荷，
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive
                (raw_response_hash, source, fetch_time, payload, integrity_verified)

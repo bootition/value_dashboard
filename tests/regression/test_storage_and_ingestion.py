@@ -107,6 +107,7 @@ def test_qfq_api_supports_schema_before_turnover_rate_migration(
     database_paths: DatabasePathSet,
 ) -> None:
     store = DuckDBStore(paths=database_paths)
+    # 留（第 5 类·测试自建表 + `execute_script`）：上一段 `execute` 在**旧 schema**
     store.execute_script(
         """
         CREATE TABLE price_daily_qfq (

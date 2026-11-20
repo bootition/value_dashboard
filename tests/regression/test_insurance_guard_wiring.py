@@ -48,6 +48,7 @@ from app.core.financial_guards import (
 )
 from app.core.init import DataInitializer
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
 
 FETCH_TIME = datetime(2026, 11, 17, 9, 30, tzinfo=UTC)
 #: 601318 中国平安 FY2024：审计给的原值（4.98 万亿）与负债合计
@@ -70,12 +71,19 @@ def _seed_stock(
     sw_level2: str | None = "保险Ⅱ",
     csrc_l1: str | None = "金融业",
 ) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_listed, is_st,
-                is_suspended, sw_level1, sw_level2, csrc_l1, total_shares, circ_shares)
-           VALUES (?, ?, 'SSE', '2010-01-05', TRUE, FALSE, FALSE, ?, ?, ?, 100, 80)""",
-        [code, name, sw_level1, sw_level2, csrc_l1],
+    Seed(duck).stock(
+        code,
+        name=name,
+        exchange="SSE",
+        listing_date="2010-01-05",
+        is_listed=True,
+        is_st=False,
+        is_suspended=False,
+        sw_level1=sw_level1,
+        sw_level2=sw_level2,
+        csrc_l1=csrc_l1,
+        total_shares=100,
+        circ_shares=80,
     )
 
 
@@ -85,16 +93,15 @@ def _seed_balance(
     total_liabilities: float | None = None,
     raw_data: dict | None = None,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO balance_sheet
-               (stock_code, report_date, report_type, total_assets,
-                total_liabilities, total_equity, contract_liabilities, raw_data)
-           VALUES (?, CAST(? AS DATE), 'annual', 12957827000000,
-                   ?, 1304712000000, ?, ?)""",
-        [
-            code, report_date, total_liabilities, contract_liabilities,
-            json.dumps(raw_data, ensure_ascii=False) if raw_data is not None else None,
-        ],
+    Seed(duck).balance(
+        code,
+        report_date,
+        report_type="annual",
+        total_assets=12957827000000,
+        total_liabilities=total_liabilities,
+        total_equity=1304712000000,
+        contract_liabilities=contract_liabilities,
+        raw_data=json.dumps(raw_data, ensure_ascii=False) if raw_data is not None else None,
     )
 
 
@@ -292,6 +299,7 @@ def test_reroute_keeps_supplement_owned_row_provenance(duckdb_store, sqlite_stor
     """
     _seed_stock(duckdb_store, "601318", "中国平安")
     duckdb_store.write_query(
+        # 留（第 4 类·多站点缺口）：`financial_sector_items` 全仓 2 处播种，工厂没有方法；
         """INSERT INTO financial_sector_items
                (stock_code, report_date, report_type, earned_premiums,
                 source, fetch_time, raw_response_hash, confidence, batch_id)

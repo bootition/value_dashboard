@@ -34,6 +34,8 @@ from app.core.init import DataInitializer
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 
 def _result(
@@ -593,11 +595,15 @@ def test_initializer_record_failure_preserves_retry_count(sqlite_store: SQLiteSt
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.sqlite = sqlite_store
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO retry_list
-               (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
-               VALUES ('600519', 'balance_sheet', 'sina', 'old', 3, ?, '{}')""",
-            [datetime.now(UTC).isoformat()],
+        # `retry_count=3` 与 `last_attempt=<此刻>` 是用例的全部意义（"不重置计数"看的就是 3），
+        # 逐字给；`extra_json='{}'` 等其余列走表默认口径。
+        SeedSqlite(sqlite_store).join(conn).retry(
+            "600519",
+            "balance_sheet",
+            adapter="sina",
+            error="old",
+            retry_count=3,
+            last_attempt=datetime.now(UTC).isoformat(),
         )
 
     initializer._record_failure("600519", "balance_sheet", "sina", "new error")
@@ -625,10 +631,7 @@ class _FinancialTrioAdapter:
 def test_initializer_financial_branches_distinguish_error_and_source_empty(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('600519', '贵州茅台', 'SSE', true)"""
-    )
+    Seed(duckdb_store).stock("600519", name="贵州茅台", exchange="SSE", is_listed=True)
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.adapter_mgr = _FinancialTrioAdapter()
     initializer.duck = duckdb_store
@@ -660,12 +663,15 @@ def test_sqlite_schema_dedups_retry_rows_before_unique_index(database_paths) -> 
     init_sqlite_schema(sqlite)
     with sqlite.transaction() as conn:
         conn.execute("DROP INDEX IF EXISTS uq_retry_list_request")
+        # 索引已 DROP：两行**故意同请求键**（工厂不替库侧去重，去重是建索引那一步的
+        # 论点），`error` 逐行不同正是"保留最新一条"要看的。
         for error in ("older", "newest"):
-            conn.execute(
-                """INSERT INTO retry_list
-                   (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
-                   VALUES ('600519', 'price_daily', 'tencent', ?, 0, ?, '{}')""",
-                [error, datetime.now(UTC).isoformat()],
+            SeedSqlite(sqlite).join(conn).retry(
+                "600519",
+                "price_daily",
+                adapter="tencent",
+                error=error,
+                last_attempt=datetime.now(UTC).isoformat(),
             )
 
     init_sqlite_schema(sqlite)
@@ -686,6 +692,10 @@ def test_duckdb_v12_funding_drop_only_when_version_not_applied(database_paths) -
     def recreate_legacy_pk_with_row() -> None:
         with duck.transaction() as conn:
             conn.execute("DROP TABLE IF EXISTS funding_events")
+            # 留（第 5 类·测试自建旧 schema 表）：`CREATE TABLE funding_events` 是**本用例
+            # 自己造出来的 v11 旧主键形状**（`PRIMARY KEY (stock_code, event_type, list_date)`
+            # 就是 v12 要 DROP 掉的东西），工厂绑定的是当前 schema 的 `funding_events`，
+            # 表达不了"旧 DDL + 旧行共存"这个前提；`CURRENT_TIMESTAMP` 同理随旧表一起留。
             conn.execute(
                 """CREATE TABLE funding_events (
                     stock_code VARCHAR NOT NULL,

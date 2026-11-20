@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import _to_single_quarter, get_kline, router
+from tests.support.seed import Seed
 
 
 def _insert_kline_rows(
@@ -17,11 +18,15 @@ def _insert_kline_rows(
 ) -> None:
     """插入日线原始数据（换手率统一 1.23，用于验证周/月 fail-closed 置 null）"""
     for trade_date, open_, high, low, close, volume, turnover in rows:
-        duck.write_query(
-            """INSERT INTO price_daily_raw
-               (stock_code, trade_date, open, high, low, close, volume, turnover, turnover_rate)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [stock_code, trade_date, open_, high, low, close, volume, turnover, 1.23],
+        Seed(duck).prices(
+            stock_code,
+            [(trade_date, close)],
+            open=open_,
+            high=high,
+            low=low,
+            volume=volume,
+            turnover=turnover,
+            turnover_rate=1.23,
         )
 
 

@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from app.core.indicators.calculator import IndicatorCalculator
 from tests.conftest import insert_minimum_screenable_data
+from tests.support.seed import Seed
 
 
 def test_price_sensitive_recompute_skips_unchanged_and_updates_only_price_fields(
     duckdb_store, sqlite_store,
 ) -> None:
     with duckdb_store.write_connection() as conn:
-        conn.execute(
-            """INSERT INTO stock_meta
-                   (stock_code, name, exchange, is_listed, is_st, is_suspended)
-               VALUES ('000001', 'fixture', 'SZSE', TRUE, FALSE, FALSE)"""
+        Seed(duckdb_store).join(conn).stock(
+            "000001",
+            name="fixture",
+            exchange="SZSE",
+            is_listed=True,
+            is_st=False,
+            is_suspended=False,
         )
     insert_minimum_screenable_data(duckdb_store)
     # 保证价格域更新前有干净快照
@@ -35,6 +39,9 @@ def test_price_sensitive_recompute_skips_unchanged_and_updates_only_price_fields
 
     # 新交易日价格变化 → 只重算价格域，报告期与累计分红字段保持原值。
     with duckdb_store.write_connection() as conn:
+        # 留（第 6 类·库侧相对时间）：`CURRENT_DATE + INTERVAL '1 day'` 是"**明天**"的
+        # 交易日 —— 用例要的是"价格比库里的最后一天更新"，固定字面量过了那天就变成
+        # 历史日期，价格域根本不会触发重算，用例会静默退化。raw/qfq 两行同一口径一起留。
         conn.execute(
             """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
                VALUES ('000001', CURRENT_DATE + INTERVAL '1 day', 11, 200)"""
@@ -63,13 +70,27 @@ def test_funding_dividend_field_refresh_updates_only_three_columns(
     insert_minimum_screenable_data(duckdb_store)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     with duckdb_store.write_connection() as conn:
-        conn.execute(
-            """INSERT INTO funding_events
-                   (stock_code, event_type, announce_date, list_date, issue_price,
-                    issue_shares, raise_funds, raise_funds_net, source, fetch_time,
-                    raw_hash, confidence, batch_id)
-               VALUES ('000001', 'ipo', '2015-01-01', '2015-01-10', 10, 100, NULL, 1000,
-                       'cninfo_funding', CURRENT_TIMESTAMP, 'h', 'strict', 'fixture')"""
+        # 迁移守则：原 SQL 的 `fetch_time = CURRENT_TIMESTAMP` 显式换成 `trace_now=True`
+        # （"刚抓的融资事件"），否则会静默退化成固定的过去时间戳。
+        Seed(duckdb_store, trace_now=True).join(conn).fundings(
+            "000001",
+            [
+                (
+                    "ipo",
+                    "2015-01-10",
+                    100,
+                    {
+                        "announce_date": "2015-01-01",
+                        "issue_price": 10,
+                        "raise_funds": None,
+                        "raise_funds_net": 1000,
+                        "source": "cninfo_funding",
+                        "raw_hash": "h",
+                        "confidence": "strict",
+                        "batch_id": "fixture",
+                    },
+                )
+            ],
         )
         conn.execute(
             """UPDATE indicator_snapshot SET pe_ttm = 7.5 WHERE stock_code='000001'"""

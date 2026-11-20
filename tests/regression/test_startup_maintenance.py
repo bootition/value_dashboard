@@ -209,6 +209,7 @@ def test_stale_readiness_cache_is_ignored(sqlite_store) -> None:
 
     from app.core.data_quality import read_cached_data_readiness
 
+    # 留（第 6 类·库侧相对时间）：`data_refresh_state.updated_at` 固定成 `2020-01-01`
     sqlite_store.execute(
         "INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)",
         [

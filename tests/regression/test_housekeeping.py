@@ -11,6 +11,7 @@ def test_gc_clears_expired_pending_plans(
     sqlite_store: SQLiteStore,
 ) -> None:
     with sqlite_store.transaction() as conn:
+        # 留（第 6 类·库侧相对时间）：`plans` 的 `created_at`/`expires_at` 必须相对**库侧**
         conn.execute(
             """INSERT INTO plans (plan_id, operation, plan_summary, created_at, expires_at, status)
                VALUES ('old-plan', 'op', '{}', datetime('now', '-50 days'), datetime('now', '-30 days'), 'pending'),
@@ -27,10 +28,12 @@ def test_gc_keeps_old_confirmed_plan_and_running_job(
 ) -> None:
     """已确认的 plan 与 running job 不被清理（审计保留）。"""
     with sqlite_store.transaction() as conn:
+        # 留（第 6 类·库侧相对时间）：同上——400 天前建、370 天前过期，判据是库侧时钟；
         conn.execute(
             """INSERT INTO plans (plan_id, operation, plan_summary, created_at, expires_at, status)
                VALUES ('confirmed-old', 'op', '{}', datetime('now', '-400 days'), datetime('now', '-370 days'), 'executed')"""
         )
+        # 留（第 6 类·库侧相对时间）：`job_logs.started_at` 用 `datetime('now','-1 hour')`/
         conn.execute(
             """INSERT INTO job_logs (job_type, status, started_at, finished_at)
                VALUES ('update', 'running', datetime('now', '-1 hour'), NULL),

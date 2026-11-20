@@ -33,6 +33,7 @@ from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.schema import init_duckdb_schema
 from tests.support import schema_template
 from tests.support.schema_template import TEMPLATE_DB_FILENAME
+from tests.support.seed import Seed
 
 #: 本模块里**实际跑过**的「取 ``duckdb_store``」用例名（供 module teardown 对账：
 #: 用「跑了多少条」而不是「文件里写了几条」，这样 `-k` 只挑一条跑时账本仍然成立）。
@@ -182,10 +183,7 @@ def test_store_is_independent_writable_copy_and_template_is_untouched(
     template_mtime = template.stat().st_mtime_ns
 
     # 复制件**可写**：真写一行 + 一句 DDL（连 schema 都能改，证明不是只读挂载）。
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange) "
-        "VALUES ('000001', 'template guard', 'SZSE')"
-    )
+    Seed(duckdb_store).stock("000001", name="template guard", exchange="SZSE")
     duckdb_store.write_query("CREATE TABLE template_guard_probe (id INTEGER)")
 
     assert _sha256(template) == digest_before, "测试写入改掉了模板本体的字节"
@@ -306,6 +304,7 @@ def test_init_duckdb_schema_is_idempotent_on_migrated_database(
     第二次 init 拿到的是已经记录了 v12 的库，必须**跳过** DROP 而不是再删表。
     """
     store = _init_from_scratch(database_paths)
+    # 留（第 6 类·库侧相对时间）：`funding_events.fetch_time` 写 `CURRENT_TIMESTAMP`，
     store.write_query(
         """INSERT INTO funding_events
                (stock_code, event_type, list_date, source, fetch_time,

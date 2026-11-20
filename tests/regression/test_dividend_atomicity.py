@@ -42,6 +42,7 @@ def _backfiller(
     sqlite_store: SQLiteStore,
     result: FetchResult,
 ) -> PriceBackfiller:
+    # 留（第 5 类·测试自建表 + `execute_script`）：这段 SQL 在 `execute` 的**脚本文本**里，
     duckdb_store.write_query(
         """
         INSERT INTO stock_meta (stock_code, name, exchange)

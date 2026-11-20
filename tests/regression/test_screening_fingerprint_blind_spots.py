@@ -441,6 +441,9 @@ def test_content_epoch_advances_on_every_write_path(
 
     # 路径 1：write_connection()
     before = content_epoch.current(path)
+    # 留（第 3 类·写路径论点构造）：这三条 `INSERT` 的论点**就是写路径本身**（哪个口
+    # 提交后必须推进内容纪元、回滚的那次必须不推进），所以逐字写成 `conn.execute`，
+    # 不换成工厂调用 —— 换了就看不出"是这条连接提交/回滚决定记账"这件事。
     with duckdb_store.write_connection() as conn:
         conn.execute(
             "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) "
@@ -452,6 +455,7 @@ def test_content_epoch_advances_on_every_write_path(
     )
 
     # 路径 2：transaction()
+    # 留（第 3 类·写路径论点构造）：同路径 1 —— 钉的是"`transaction()` 提交也要记账"。
     with duckdb_store.transaction() as conn:
         conn.execute(
             "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) "
@@ -465,6 +469,8 @@ def test_content_epoch_advances_on_every_write_path(
 
     # 回滚的那次**不许**推进（没落库就没有内容变化）
     stable = content_epoch.current(path)
+    # 留（第 3 类·必须写失败/回滚）：这一条**必须**随事务回滚掉（`pytest.raises` 抛在
+    # `with` 内），断言钉的是"没落库就不许推进内容纪元"，所以保留原始写连接写法。
     with pytest.raises(RuntimeError), duckdb_store.transaction() as conn:
         conn.execute(
             "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) "

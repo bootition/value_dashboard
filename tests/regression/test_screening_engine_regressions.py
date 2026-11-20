@@ -27,6 +27,8 @@ def test_run_binds_overrides_before_mixed_codes_and_where(
     # 报表原值 100，勘误覆盖 200：`> 150` 只可能命中被覆盖后的值。
     seed.balance("000001", "2025-12-31", total_assets=100)
     # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库。
+    # 留（第 4 类·多站点缺口）：`manual_overrides` 一次写多组不同
+    # 留（第 4 类·多站点缺口）：`manual_overrides` 一次写多组不同
     sqlite_store.execute(
         """INSERT INTO manual_overrides
            (stock_code, field_name, report_date, override_value, reason, status)
@@ -244,7 +246,9 @@ def test_published_statement_overrides_filtered_to_participating_pairs(
     seed.snapshot("000002", "2025-09-30")
     # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库；
     # 且这一处在 sqlite_store.transaction() 内写（3 行同进同退）。
+    # 留（第 4 类·多站点缺口）：同上一处——三行覆盖「参与 / 过期 / 他人」三种组合，
     with sqlite_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口）：同上一处——三行覆盖「参与 / 过期 / 他人」三种组合，
         conn.execute(
             """INSERT INTO manual_overrides
                (stock_code, field_name, report_date, override_value, reason, status)
@@ -274,7 +278,9 @@ def test_published_statement_overrides_exceeding_cap_raises(
     seed.snapshot("000001", "2025-12-31")
     # 需要 SQLite 侧播种器：manual_overrides 与 Seed 持有的 DuckDBStore 不同库；
     # 且这一处在 sqlite_store.transaction() 内写（2 行同进同退）。
+    # 留（第 4 类·多站点缺口）：同上。此行造的是「两行都参与」超上限的场景，
     with sqlite_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口）：同上。此行造的是「两行都参与」超上限的场景，
         conn.execute(
             """INSERT INTO manual_overrides
                (stock_code, field_name, report_date, override_value, reason, status)

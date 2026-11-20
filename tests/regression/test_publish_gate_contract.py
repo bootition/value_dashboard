@@ -71,6 +71,7 @@ def _insert_bulk_valid_stocks(store: DuckDBStore, prefix: str, count: int) -> li
     # 且要求在 write_connection() 事务内一次落盘；工厂是「一行一事务」的
     # 按域接口，逐只播种会让「少数违规不阻断全市场」这条门禁用例跑不动。
     with store.write_connection() as connection:
+        # 留（第 4 类·多站点缺口）：这批是 5,000+ 只的**程序化生成**批量行，且已在调用方
         connection.executemany(
             """INSERT INTO stock_meta
                    (stock_code, name, exchange, is_listed, listing_date, total_shares, circ_shares)

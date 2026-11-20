@@ -210,6 +210,7 @@ def test_screening_executes_published_dividend_financing_ratio(
     content_hash = "divfin-hash"
     # 需要 SQLite 侧播种器：dsl_expressions 与 Seed 持有的 DuckDBStore 不同库
     # （见 seed.py 模块 docstring「尚未覆盖」），故保留内联 SQL。
+    # 留（第 4 类·多站点缺口）：`content_hash` 由本用例现算 `hashlib.sha256(expression)`
     sqlite_store.execute(
         """INSERT INTO dsl_expressions
            (name, version, expression_text, status, description, direction, historical_capable, content_hash)

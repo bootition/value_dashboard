@@ -26,6 +26,7 @@ from app.core.storage.schema import init_duckdb_schema, init_sqlite_schema
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web import main as web_main
 from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 # ─── P1-1: read_connection 重试 ─────────────────────────────────────────
 
@@ -212,9 +213,8 @@ def test_screening_run_allowed_on_snapshot_during_update_lock(
     from app.core.storage.update_lock import exclusive_update
 
     app, duck = _app_with_schema(database_paths)
-    duck.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close, latest_price_date)
-           VALUES ('600519', '2026-06-30', 10.0, '2026-08-11')"""
+    Seed(duck).snapshot(
+        "600519", "2026-06-30", latest_close=10.0, latest_price_date="2026-08-11"
     )
     client = TestClient(app)
     token = client.get("/api/session").json()["write_token"]
@@ -241,19 +241,23 @@ def test_treasury_comparison_batch_window_matches_legacy_semantics(
 
     app, duck = _app_with_schema(database_paths)
     code = "600519"
-    duck.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_st, is_suspended, is_listed)
-           VALUES (?, ?, 'SSE', '2020-01-01', false, false, true)""",
-        [code, code],
+    # 上市日/ST/停牌/已上市四个状态列是用例前提（"上市满 1 年"门禁），逐字给。
+    Seed(duck).stock(
+        code,
+        name=code,
+        exchange="SSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
+        is_listed=True,
     )
     insert_minimum_screenable_data(duck, code)
-    for trade_date, close in [(date(2026, 8, 1), 10.0), (date(2026, 8, 5), 10.0)]:
-        duck.write_query(
-            "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?) "
-            "ON CONFLICT DO NOTHING",
-            [code, trade_date, close],
-        )
+    # `if_exists="ignore"` = `ON CONFLICT DO NOTHING`：`insert_minimum_screenable_data`
+    # 已经铺了 6 年日线（含这两天），这里是"确保这两个价格日存在"，不得改动已有行。
+    Seed(duck).prices_bulk(
+        [(code, date(2026, 8, 1), 10.0), (code, date(2026, 8, 5), 10.0)],
+        if_exists="ignore",
+    )
     seed = Seed(duck)
     # 分红 1：2025-08-01 除权（对 2026-08-01 在 1 年窗口内；对 2026-08-05 在窗口外）
     seed.dividends(code, [(date(2025, 8, 1), date(2025, 7, 30), 1.0)], if_exists="ignore")
@@ -284,6 +288,9 @@ def test_statistics_staging_tables_are_swept(
     from app.core.statistics import StatisticsBuilder
 
     app, duck = _app_with_schema(database_paths)
+    # 留（第 5 类·测试自建表）：`research_statistics_staging_deadbeef` 是**本用例自己
+    # CREATE** 的一次性 staging 表（表名里的 `deadbeef` 就是"残留物"本身），
+    # 工厂没有也不该有这张表的方法 —— 它存在正是 `_cleanup_staging_tables()` 的待清理对象。
     duck.write_query(
         "CREATE TABLE research_statistics_staging_deadbeef AS "
         "SELECT * FROM research_statistics WHERE FALSE"
@@ -394,10 +401,7 @@ def test_watchlist_remove_reports_deleted_rows(
     client = TestClient(app)
     token = client.get("/api/session").json()["write_token"]
     headers = {"X-VD-Write-Token": token}
-    app.state.sqlite.execute(
-        "INSERT INTO watchlist (stock_code, group_name) VALUES (?, ?)",
-        ["600519", "default"],
-    )
+    SeedSqlite(app.state.sqlite).watchlist("600519", group_name="default")
     response = client.request(
         "DELETE", "/api/watchlist/remove",
         headers=headers,

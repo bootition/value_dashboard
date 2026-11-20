@@ -11,6 +11,7 @@ def test_financial_upsert_preserves_existing_values_absent_from_partial_payload(
 ) -> None:
     initializer = DataInitializer(duck=duckdb_store, sqlite=sqlite_store)
     with duckdb_store.transaction() as conn:
+        # 留（第 3 类·论点构造）：这一行是「**部分列已存在**」的前提行，下一句 `_upsert_financial_row`
         conn.execute(
             """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities)
                VALUES ('000001', '2025-12-31', 100.0, 40.0)"""

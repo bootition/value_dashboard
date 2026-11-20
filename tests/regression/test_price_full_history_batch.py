@@ -20,6 +20,7 @@ import pytest
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater, _PriceReplaceBuffer
+from tests.support.seed import Seed
 
 
 def _price_result(adjust: str, dates: list[str], close: float = 10.0) -> FetchResult:
@@ -40,16 +41,10 @@ def _price_result(adjust: str, dates: list[str], close: float = 10.0) -> FetchRe
 
 
 def _seed_stock(duckdb_store, code: str, dates: list[str], close: float = 9.0) -> None:
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES (?, 'x', 'SHSE', true)",
-        [code],
-    )
+    Seed(duckdb_store).stock(code, name="x", exchange="SHSE", is_listed=True)
     for table in ("price_daily_raw", "price_daily_qfq"):
-        duckdb_store.write_query(
-            f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
-            + ", ".join("(?, ?, ?)" for _ in dates),
-            [value for trade_date in dates for value in (code, trade_date, close)],
+        Seed(duckdb_store).prices(
+            code, [(trade_date, close) for trade_date in dates], table=table
         )
 
 

@@ -95,6 +95,7 @@ def test_archive_restore_replaces_hot_data_from_verified_archive(
         Config({"archive": {"root": "parquet"}}, paths=database_paths),
     )
     with duckdb_store.write_connection() as connection:
+        # 留（第 3 类·论点构造）：这行是「热表里先有一行」的前提，`restore` 之后断言它被
         connection.execute(
             """INSERT INTO price_daily_raw
                (stock_code, trade_date, open, high, low, close, volume)

@@ -855,6 +855,7 @@ def test_price_retry_without_adjust_refreshes_raw_and_qfq(
     for table in ("price_daily_raw", "price_daily_qfq"):
         seed.prices("000001", [("2026-08-05", 1.0)], table=table)
     with sqlite_store.transaction() as conn:
+        # 留（第 2 类·lastrowid）：下一句立刻 `SELECT id FROM retry_list` 回捞这一行的 id
         conn.execute(
             """INSERT INTO retry_list
                    (stock_code, data_type, adapter, error, retry_count, extra_json)

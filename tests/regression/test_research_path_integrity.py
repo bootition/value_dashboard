@@ -340,6 +340,7 @@ def test_cli_run_to_web_export_preserves_truncated_marker(
 
     with sqlite_store.transaction() as conn:
         # 保留内联：不在本轮清单内（下一轮可换 `SeedSqlite.join(conn).screening_rule()`）。
+        # 留（第 4 类·多站点缺口）：`screening_rules` 全仓 3 处播种、工厂 `screening_rule()`
         conn.execute(
             """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
                VALUES ('cli-trunc', 1, ?, '{}', 'saved')""",
@@ -420,6 +421,7 @@ def _seed_cli_screenable_pool(
 
     with sqlite_store.transaction() as conn:
         # 保留内联：同上（不在本轮清单内）。
+        # 留（第 4 类·多站点缺口）：同上，规则体是就地拼的 `rule_json`（空条件 + 两列），
         conn.execute(
             """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
                VALUES (?, 1, ?, '{}', 'saved')""",

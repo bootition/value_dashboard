@@ -38,6 +38,7 @@ def _seed_employee(
     duck: DuckDBStore, rows: list[tuple[str, str, int, str]],
 ) -> None:
     for code, report_date, count, source in rows:
+        # 留（第 6 类·库侧相对时间）：`company_employee_history` 无工厂方法，`fetch_time` 又是
         duck.write_query(
             """INSERT INTO company_employee_history
                    (stock_code, report_date, employee_count, source, fetch_time, batch_id)
@@ -91,6 +92,7 @@ def test_employee_apply_drops_when_target_exists(duckdb_store: DuckDBStore) -> N
 
 
 def test_declare_date_backfill_plan_and_apply(duckdb_store: DuckDBStore) -> None:
+    # 留（第 6 类·库侧相对时间）：`report_metadata.fetched_at` 写库侧 `now()`，
     duckdb_store.write_query(
         """INSERT INTO report_metadata
                (stock_code, report_date, declare_date, source, fetched_at)

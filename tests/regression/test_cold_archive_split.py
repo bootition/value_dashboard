@@ -105,6 +105,7 @@ def _build_source_db(db_path: Path) -> None:
             )
             """
         )
+        # 留（第 5 类·测试自建表 + `execute_script`）：这段 SQL 在 `executescript` 里**自己
         connection.execute(
             """
             INSERT INTO csmar_fi_t1 VALUES
@@ -125,6 +126,7 @@ def _build_source_db(db_path: Path) -> None:
             )
             """
         )
+        # 留（第 5 类·测试自建表 + `execute_script`）：同上，`csmar_disclosure_metrics` 也是
         connection.execute(
             """
             INSERT INTO csmar_disclosure_metrics VALUES

@@ -1,11 +1,10 @@
 """指标数据质量回归（口径如实缺失 / TTM 对齐 / 分红窗口）。
 
-播种：能表达的都走 `tests/support/seed.py` 的按域工厂。**仍留内联 SQL 的三类**：
-1. `with duckdb_store.write_connection()` 事务块内的多行写入 —— 工厂自带写锁，
-   嵌套进已持有写锁的事务会撞锁，故保留；
-2. `dividends` / `treasury_yield_curve` / `manual_overrides` 这类工厂还没有方法的表；
-3. 依赖 `CURRENT_DATE`（相对「今天」构造 13/11 个月前的分红）的行 —— 工厂的
-   日期列是字面量，表达不了相对日期。
+播种：能表达的都走 `tests/support/seed.py` / `tests/support/seed_sqlite.py`
+的按域工厂（`write_connection()` 块内用 `join(connection)` 加入调用方事务，
+不再自撞写锁）。**仍留内联 SQL 的只剩第 6 类**：
+1. 依赖 `CURRENT_DATE - INTERVAL '13 months'`（相对「今天」构造 13/11 个月前的
+   分红）的行 —— 工厂的日期列是字面量，表达不了**相对日历月**。
 """
 
 from __future__ import annotations
@@ -14,6 +13,7 @@ from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from tests.support.seed import Seed
+from tests.support.seed_sqlite import CURRENT_TIMESTAMP, SeedSqlite
 
 
 def _calculator(store: DuckDBStore, sqlite: SQLiteStore) -> IndicatorCalculator:
@@ -53,35 +53,23 @@ def test_latest_financials_ignore_newer_shell_row(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    # 保留内联：三表要在**同一个** write_connection 事务里一起写入（这个用例
-    # 本身就是「最新期是空壳行」的场景），工厂每次自带写锁，嵌套会撞锁。
+    # 三表在**同一个** write_connection 事务里一起写入（这个用例本身就是
+    # 「最新期是空壳行」的场景）；用 `join(connection)` 加入调用方事务 ——
+    # 工厂不再自己拿写锁，所以不会自撞。
     with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO balance_sheet
-                (stock_code, report_date, total_assets, total_liabilities,
-                 total_equity, total_equity_parent, paid_in_capital)
-            VALUES
-                ('600519', '2025-03-31', 1000, 300, 700, 700, 100),
-                ('600519', '2026-03-31', NULL, NULL, NULL, NULL, NULL)
-            """
+        seed = Seed(duckdb_store).join(connection)
+        seed.balance(
+            "600519", "2025-03-31",
+            total_assets=1000, total_liabilities=300,
+            total_equity=700, total_equity_parent=700, paid_in_capital=100,
         )
-        connection.execute(
-            """
-            INSERT INTO income_statement
-                (stock_code, report_date, revenue, parent_net_profit)
-            VALUES
-                ('600519', '2025-03-31', 500, 100),
-                ('600519', '2026-03-31', NULL, 110)
-            """
-        )
+        # 空壳行的"空"就是论点：五个核心列一个都不传 → 全 NULL。
+        seed.balance("600519", "2026-03-31")
+        seed.income("600519", "2025-03-31", revenue=500, parent_net_profit=100)
+        # 空壳行里的半条数据：只给 `parent_net_profit`，`revenue` 缺席。
+        seed.income("600519", "2026-03-31", parent_net_profit=110)
         # P0-4/5: 最新完整期 = 三表核心字段齐备；快照计算只取完整期
-        connection.execute(
-            """
-            INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-            VALUES ('600519', '2025-03-31', 50)
-            """
-        )
+        seed.cash_flow("600519", "2025-03-31", cf_from_operating=50)
 
     financials = _calculator(duckdb_store, sqlite_store)._get_latest_financials("600519")
 
@@ -93,15 +81,15 @@ def test_ttm_matches_the_prior_year_same_report_period_not_row_position(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    # 保留内联：同上 —— write_connection() 事务块内写入，工厂会撞写锁。
+    # 同上：`join(connection)` 加入调用方事务（只写 `revenue` 一列，其余列 NULL）。
     with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO income_statement (stock_code, report_date, revenue)
-               VALUES
-               ('600519', '2025-09-30', 900), ('600519', '2025-03-31', 200),
-               ('600519', '2024-12-31', 1000), ('600519', '2024-09-30', 700),
-               ('600519', '2024-06-30', 400), ('600519', '2024-03-31', 100)"""
-        )
+        seed = Seed(duckdb_store).join(connection)
+        for period, revenue in (
+            ("2025-09-30", 900), ("2025-03-31", 200),
+            ("2024-12-31", 1000), ("2024-09-30", 700),
+            ("2024-06-30", 400), ("2024-03-31", 100),
+        ):
+            seed.income("600519", period, revenue=revenue)
 
     ttm = _calculator(duckdb_store, sqlite_store)._get_ttm_data("600519")
 
@@ -133,11 +121,14 @@ def test_published_income_correction_applies_to_ttm_and_growth_history(
     seed = Seed(duckdb_store)
     seed.income("600519", "2025-12-31", revenue=200, parent_net_profit=20, deducted_net_profit=18)
     seed.income("600519", "2024-12-31", revenue=100, parent_net_profit=10, deducted_net_profit=9)
-    # 保留内联：`manual_overrides` 是 SQLite 侧的表（已发布人工修正），不在 DuckDB 工厂范围。
-    sqlite_store.execute(
-        """INSERT INTO manual_overrides
-           (stock_code, field_name, report_date, override_value, reason, status)
-           VALUES ('600519', 'revenue', '2025-12-31', 300, 'verified correction', 'published')"""
+    # `manual_overrides` → SQLite 侧工厂 `SeedSqlite.override()`；
+    # `status='published'` 必须显式（工厂默认 `active` 走的是另一条部分唯一索引）。
+    # `created_at` 原 SQL 不写（schema `DEFAULT CURRENT_TIMESTAMP` = 库侧此刻），
+    # 按迁移守则显式传哨兵，别让它静默变成工厂的固定过去时间。
+    SeedSqlite(sqlite_store).override(
+        "600519", "revenue", 300,
+        reason="verified correction", report_date="2025-12-31", status="published",
+        created_at=CURRENT_TIMESTAMP,
     )
     calculator = _calculator(duckdb_store, sqlite_store)
 
@@ -152,10 +143,11 @@ def test_dividend_yield_uses_only_trailing_twelve_months(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    # 保留内联：日期是 SQL 侧 `CURRENT_DATE - INTERVAL '13 months'` 的**日历月**
-    # 运算（相对今天构造 13/11 个月前的分红，让用例不随日历漂移）。要换成工厂调用
-    # 就得在 Python 侧重造日历月（`timedelta` 只能按天，得引 `dateutil.relativedelta`），
-    # 等于给种子再立一份日期口径，而且"今天"会从库里时钟挪到进程时钟 —— 不是缺 API。
+    # 留（第 6 类·库侧相对时间 / 相对日历月）：`ex_date` 是 `CURRENT_DATE -
+    # INTERVAL '13 months'` —— 相对「今天」构造 13/11 个月前的分红，让用例不随日历
+    # 漂移。要换成工厂调用就得在 Python 侧重造日历月（`timedelta` 只能按天，得引
+    # `dateutil.relativedelta`），等于给种子再立一份日期口径，而且"今天"会从库里
+    # 时钟挪到进程时钟 —— 不是缺 API。
     duckdb_store.write_query(
         """INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
            SELECT '600519', CURRENT_DATE - INTERVAL '13 months', CURRENT_DATE - INTERVAL '14 months', 10.0

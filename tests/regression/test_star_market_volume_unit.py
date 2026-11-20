@@ -152,6 +152,7 @@ def repair_env(monkeypatch: pytest.MonkeyPatch, database_paths, tmp_path: Path) 
 
 def _seed(duck) -> None:
     with duck.write_connection() as conn:
+        # 留（第 4 类·多站点缺口）：3 行日线分属 2 只票、`open/close/volume` **逐行**不同，
         conn.executemany(
             """INSERT INTO price_daily_raw (stock_code, trade_date, open, close, volume)
                VALUES (?, CAST(? AS DATE), ?, ?, ?)""",
@@ -164,6 +165,7 @@ def _seed(duck) -> None:
                 ("600519", "2026-07-31", 1600.0, 1610.0, 1_234_500.0),
             ],
         )
+        # 留（第 4 类·多站点缺口）：这条 `INSERT ... SELECT FROM price_daily_raw` 是**跨表复制**，
         conn.execute(
             """INSERT INTO price_daily_qfq (stock_code, trade_date, open, close, volume)
                SELECT stock_code, trade_date, open, close, volume FROM price_daily_raw"""
