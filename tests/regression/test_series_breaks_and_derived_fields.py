@@ -59,10 +59,13 @@ from app.core.screening.engine import (
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
+from tests.support.seed_sqlite import SeedSqlite
 
-# 本文件的播种**全部留在内联**：主链三表 / 价格 / 股本都写在 `transaction()` 里
-# （工厂会自撞写锁），`indicator_snapshot` 依赖 CURRENT_TIMESTAMP，`stock_meta`
-# 全文件只出现一次；`dsl_expressions` 则没有对应的 SQLite 工厂方法。
+# 本文件的播种**已收敛到工厂**：原先写在 `transaction()` 里的主链三表 / 价格 /
+# 股本改用 `Seed(...).join(conn)`（绑定调用方连接，不自带写锁，事务边界不变）；
+# `indicator_snapshot` 的 `CURRENT_TIMESTAMP` 走 `Seed.snapshot()` 的 SQL 哨兵；
+# `stock_meta` / `dsl_expressions` 分别用 `Seed.stock()` / `SeedSqlite.dsl_expression()`。
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 共同夹具
@@ -82,34 +85,32 @@ def _seed_statement_rows(
     total_assets: float = 2000.0,
 ) -> None:
     """在**同一天**写 income/balance/cash_flow 三表（保证报告期对齐）。"""
+    # 第 1 类：三表 → `Seed.income/balance/cash_flow`；整块用 `join(conn)` 留在
+    # 调用方的**同一个事务**里（工厂自带的写锁不能嵌套进已持有写锁的事务）。
+    # 业务列一个不少逐字写在调用点：这里的原始值本身就是"符号翻转/重分类"的论点。
     with duck.transaction() as conn:
-        conn.execute(
-            """INSERT INTO income_statement
-                   (stock_code, report_date, revenue, parent_net_profit, net_profit,
-                    income_tax, financial_expenses, total_profit,
-                    asset_impairment_loss, credit_impairment_loss)
-               VALUES (?, ?, ?, 300, 300, 50, 20, 370, ?, ?)""",
-            [stock_code, report_date, revenue, asset_impairment_loss, credit_impairment_loss],
+        seed = Seed(duck).join(conn)
+        seed.income(
+            stock_code, report_date, revenue=revenue,
+            parent_net_profit=300, net_profit=300, income_tax=50,
+            financial_expenses=20, total_profit=370,
+            asset_impairment_loss=asset_impairment_loss,
+            credit_impairment_loss=credit_impairment_loss,
         )
-        conn.execute(
-            """INSERT INTO balance_sheet
-                   (stock_code, report_date, total_assets, total_liabilities,
-                    total_equity, total_equity_parent,
-                    prepayments_received, contract_liabilities)
-               VALUES (?, ?, ?, 800, 1200, 1100, ?, ?)""",
-            [stock_code, report_date, total_assets, prepayments_received, contract_liabilities],
+        seed.balance(
+            stock_code, report_date, total_assets=total_assets,
+            total_liabilities=800, total_equity=1200, total_equity_parent=1100,
+            prepayments_received=prepayments_received,
+            contract_liabilities=contract_liabilities,
         )
-        conn.execute(
-            "INSERT INTO cash_flow (stock_code, report_date, cf_from_operating) VALUES (?, ?, 380)",
-            [stock_code, report_date],
-        )
+        seed.cash_flow(stock_code, report_date, cf_from_operating=380)
 
 
 def _seed_snapshot(duck: DuckDBStore, stock_code: str, report_date: str) -> None:
-    duck.write_query(
-        "INSERT INTO indicator_snapshot (stock_code, report_date, calculated_at, latest_close) "
-        "VALUES (?, ?, CURRENT_TIMESTAMP, 10)",
-        [stock_code, report_date],
+    # 第 1 类：`indicator_snapshot` → `Seed.snapshot()`；`calculated_at` 原为库侧
+    # `CURRENT_TIMESTAMP`（新鲜度判据要"刚算的"），按迁移守则显式传 SQL 哨兵。
+    Seed(duck).snapshot(
+        stock_code, report_date, calculated_at=CURRENT_TIMESTAMP, latest_close=10,
     )
 
 
@@ -120,11 +121,10 @@ def _seed_screenable_stock(
     **statement_kwargs: float | None,
 ) -> None:
     """最小可筛选夹具（stock_meta + 快照 + 三表同日均齐）。"""
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES (?, 'Seed', 'SSE', '1990-01-01', false, false)""",
-        [stock_code],
+    # 第 1 类：`stock_meta` → `Seed.stock()`；`exchange='SSE'` 与两个布尔列逐字保留。
+    Seed(duck).stock(
+        stock_code, name="Seed", exchange="SSE", listing_date="1990-01-01",
+        is_st=False, is_suspended=False,
     )
     _seed_snapshot(duck, stock_code, report_date)
     _seed_statement_rows(duck, stock_code, report_date, **statement_kwargs)
@@ -243,13 +243,13 @@ def test_published_indicator_bubbles_up_raw_column_break_warning(
     ``income.asset_impairment_loss`` —— 若不冒泡，跨 2018 的假低值会被
     包在一个"看起来正常"的复合指标里静默输出。
     """
+    # 第 1 类：`dsl_expressions` → `SeedSqlite.dsl_expression()`；`join(conn)` 保持
+    # 在调用方事务里（"已发布指标内部引用断点原始列"要的就是 `status='published'`）。
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO dsl_expressions
-                   (name, version, expression_text, status, content_hash)
-               VALUES ('impair_ratio', 1,
-                       'income.asset_impairment_loss@LATEST / income.revenue@LATEST',
-                       'published', 'impair-hash')"""
+        SeedSqlite(sqlite_store).join(conn).dsl_expression(
+            "impair_ratio", 1,
+            "income.asset_impairment_loss@LATEST / income.revenue@LATEST",
+            status="published", content_hash="impair-hash",
         )
     _seed_screenable_stock(duckdb_store, "600519", "2019-12-31", asset_impairment_loss=-150.0)
 
@@ -533,17 +533,15 @@ def _seed_indicator_ext_inputs(duck: DuckDBStore) -> None:
         duck, _DRIFT_STOCK, _DRIFT_REPORT_DATE,
         asset_impairment_loss=-15.0, prepayments_received=100.0,
     )
+    # 第 1 类：价格 → `Seed.prices()`、股本 → `Seed.shares()`；`join(conn)` 保持在
+    # 调用方事务里。`change_reason='anchor'` 与 `source/raw_hash/batch_id` 逐字保留
+    # （锚点行的溯源口径本身是股本链判据的一部分）。
     with duck.transaction() as conn:
-        conn.execute(
-            "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
-            [_DRIFT_STOCK, _DRIFT_REPORT_DATE, _DRIFT_CLOSE],
-        )
-        conn.execute(
-            """INSERT INTO share_capital_history
-                   (stock_code, effective_date, total_shares, change_reason,
-                    source, raw_hash, batch_id)
-               VALUES (?, '2024-01-01', ?, 'anchor', 'cninfo_capital', 'h', 'b')""",
-            [_DRIFT_STOCK, _DRIFT_SHARES_BEFORE],
+        seed = Seed(duck).join(conn)
+        seed.prices(_DRIFT_STOCK, [(_DRIFT_REPORT_DATE, _DRIFT_CLOSE)])
+        seed.shares(
+            _DRIFT_STOCK, [("2024-01-01", _DRIFT_SHARES_BEFORE)],
+            change_reason="anchor", source="cninfo_capital", raw_hash="h", batch_id="b",
         )
 
 
@@ -639,19 +637,17 @@ def test_share_capital_window_digest_is_stable_and_ordered(
     duckdb_store: DuckDBStore,
 ) -> None:
     """摘要必须与插入顺序无关（否则指纹每轮都在"变化"→ 每轮全量重建）。"""
+    # 第 1 类：`share_capital_history` → `Seed.shares()`（两条不同股票一次事务写入；
+    # `source/raw_hash/batch_id` 逐行不同，正是"摘要与插入顺序无关"的输入）。
     with duckdb_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO share_capital_history
-                   (stock_code, effective_date, total_shares, source, raw_hash, batch_id)
-               VALUES ('600519', '2024-03-31', 100, 's', 'h1', 'b1'),
-                      ('000001', '2024-06-30', 200, 's', 'h2', 'b2')"""
-        )
+        seed = Seed(duckdb_store).join(conn)
+        seed.shares("600519", [("2024-03-31", 100)], source="s", raw_hash="h1", batch_id="b1")
+        seed.shares("000001", [("2024-06-30", 200)], source="s", raw_hash="h2", batch_id="b2")
     first = share_capital_state(duckdb_store)
+    # 第 1 类：同上（再补一条**更早**生效日的股本 → 摘要仍须稳定有序）。
     with duckdb_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO share_capital_history
-                   (stock_code, effective_date, total_shares, source, raw_hash, batch_id)
-               VALUES ('600519', '2023-12-31', 90, 's', 'h3', 'b3')"""
+        Seed(duckdb_store).join(conn).shares(
+            "600519", [("2023-12-31", 90)], source="s", raw_hash="h3", batch_id="b3",
         )
     second = share_capital_state(duckdb_store)
     assert second["rows"] == first["rows"] + 1

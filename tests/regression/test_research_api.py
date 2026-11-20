@@ -28,6 +28,7 @@ from app.core.update import classify_announcement
 from app.web.api import research as research_api
 from app.web.api.research import router as research_router
 from app.web.api.stock_detail import router as stock_detail_router
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 
 STOCK = "600519"
 
@@ -54,6 +55,11 @@ def _seed_duck(duck: DuckDBStore, stock_code: str = STOCK) -> None:
     # 单事务批量写入：DuckDBStore.write_query 每次都要取写锁，逐条写会把
     # 33 个用例的夹具时间从 ~3s 拖到 ~30s
     with duck.transaction() as conn:
+        # 三表走 `Seed.join(conn)`：已经在上面那条事务里，工厂不能再自己开一个
+        # （DuckDB 写锁是应用级文件锁，嵌套获取会自己等自己）。
+        seed = Seed(duck).join(conn)
+        # 留（第 4 类·多站点缺口）：`financial_report_dates` 全仓 6 处 + 工厂没有方法，
+        # 本轮租约禁止补 API，所以这里继续写内联 SQL（含 `CAST(? AS DATE)` 的列形状）。
         conn.executemany(
             """INSERT INTO financial_report_dates
                (stock_code, report_date, announce_date, source, fetch_time, batch_id)
@@ -61,20 +67,11 @@ def _seed_duck(duck: DuckDBStore, stock_code: str = STOCK) -> None:
                        CURRENT_TIMESTAMP, 'fixture')""",
             [[stock_code, report_date, announce_date] for report_date, announce_date in PERIODS],
         )
-        conn.executemany(
-            """INSERT INTO income_statement
-               (stock_code, report_date, revenue, parent_net_profit)
-               VALUES (?, CAST(? AS DATE), ?, ?)""",
-            [
-                [stock_code, report_date, revenue, revenue / 10.0]
-                for report_date, revenue in REVENUE_BY_PERIOD.items()
-            ],
-        )
-        conn.execute(
-            """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
-               VALUES (?, DATE '2023-12-31', 5000.0)""",
-            [stock_code],
-        )
+        for report_date, revenue in REVENUE_BY_PERIOD.items():
+            seed.income(
+                stock_code, report_date, revenue=revenue, parent_net_profit=revenue / 10.0
+            )
+        seed.balance(stock_code, "2023-12-31", total_assets=5000.0)
 
 
 def _api_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -101,14 +98,16 @@ def _insert_announcement(
 
 
 def _insert_source_audit(duck: DuckDBStore, stock_code: str = STOCK) -> None:
+    # `source_audit` 走工厂（`join(conn)`：本函数自带事务，工厂不另开）。
+    # `fetch_time` 原 SQL 是 `CURRENT_TIMESTAMP` → 传库侧哨兵，别落成固定字面量；
+    # `raw_response_hash='hash-1'` 是**故意**不写成 64 位 sha256 的（本组用例只关心
+    # 该行存在与 `as_reported_value` 键缺席），工厂不校验形状、逐字照收。
     with duck.transaction() as conn:
-        conn.execute(
-            """INSERT INTO source_audit
-               (stock_code, field_name, report_date, value, source, fetch_batch_id,
-                fetch_time, raw_response_hash, confidence)
-               VALUES (?, 'revenue', DATE '2023-12-31', 1200.0, 'fixture', 'batch-1',
-                       CURRENT_TIMESTAMP, 'hash-1', 'strict')""",
-            [stock_code],
+        Seed(duck).join(conn).source_audit(
+            stock_code, "revenue",
+            report_date="2023-12-31", value=1200.0, source="fixture",
+            fetch_batch_id="batch-1", fetch_time=CURRENT_TIMESTAMP,
+            raw_response_hash="hash-1", confidence="strict",
         )
 
 
@@ -230,6 +229,8 @@ def test_as_reported_404_when_visible_period_has_no_financials(
 ) -> None:
     """可见期已定位但三表都没有该期 → 404，并回带报告期让用户知道差哪期。"""
     with duckdb_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口）：`financial_report_dates` 没有工厂方法，本轮租约
+        # 禁止补 API；这里的两期公告日是"可见期已定位但三表缺该期"的前提，逐字保留。
         conn.executemany(
             """INSERT INTO financial_report_dates
                (stock_code, report_date, announce_date, source, fetch_time, batch_id)
@@ -330,6 +331,8 @@ def test_visible_periods_lists_start_dates_ascending_with_earliest_announce(
     _seed_duck(duckdb_store)
     # 同一报告期的第二个来源（补录更晚）：可见日必须取 MIN，而不是任一来源
     with duckdb_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口）：`financial_report_dates` 没有工厂方法（见 `_seed_duck`）。
+        # 同报告期的第二个来源 + 更晚公告日是"可见日取 MIN"这条断言的构造本身。
         conn.execute(
             """INSERT INTO financial_report_dates
                (stock_code, report_date, announce_date, source, fetch_time, batch_id)

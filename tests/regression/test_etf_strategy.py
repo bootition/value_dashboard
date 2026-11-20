@@ -32,6 +32,7 @@ from app.core.etf_strategy import (
 from app.core.storage.duckdb_store import DuckDBReadLockedError, DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.etf_strategy import router as etf_router
+from tests.support.seed import Seed
 
 
 def _seed_meta(sqlite: SQLiteStore, *, budget: float = 1000.0, step_pct: float = 5.0) -> None:
@@ -324,11 +325,8 @@ def test_meta_post_without_note_preserves_existing_note(
 def test_latest_close_reads_etf_daily(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO etf_daily
-           (etf_code, trade_date, close_price, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('512880', '2026-09-03', 1.234, 'ths', CURRENT_TIMESTAMP, 'h', 'strict', 'b')"""
-    )
+    # 原来是 `INSERT ... CURRENT_TIMESTAMP` → 显式 `trace_now=True` 保住"刚抓的"语义。
+    Seed(duckdb_store, trace_now=True).etf_daily("512880", [("2026-09-03", 1.234)])
     assert latest_close(duckdb_store, "512880") == pytest.approx(1.234)
     assert latest_close(duckdb_store, "999999") is None
 

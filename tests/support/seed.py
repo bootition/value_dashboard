@@ -167,6 +167,14 @@ DEFAULT_FETCH_TIME: Final = "2026-09-19 00:00:00"
 #: `treasury_yield_curve` 的生产来源：`app/core/treasury.py` 落的是适配器
 #: `metadata.source`，国债曲线只有 `czb_mof`（财政部/中债）一家，写 csmar 是错的。
 DEFAULT_TREASURY_SOURCE: Final = "czb_mof"
+#: `etf_daily` 的生产主源：同花顺官方 Financial-API（schema 该列注释即 `ths`，
+#: 见 `app/core/storage/schema.py` 的 `etf_daily` DDL）；腾讯只是回退源。
+DEFAULT_ETF_SOURCE: Final = "ths"
+#: `hk_dividends` 的生产来源：东财港股 F10 分红（适配器
+#: `eastmoney_hk_dividend`，见 `app/core/adapters/`）。写 csmar 是错的。
+DEFAULT_HK_DIVIDEND_SOURCE: Final = "eastmoney_hk_dividend"
+#: `company_profile` 的生产来源：东财 F10 公司资料（`eastmoney_f10`）。
+DEFAULT_COMPANY_PROFILE_SOURCE: Final = "eastmoney_f10"
 _DEFAULT_BATCH_ID: Final = hashlib.sha256(b"value-dashboard/test-seed").hexdigest()[:32]
 
 #: 各表需要的溯源列组合。列名必须与**该表 schema** 一致 —— 财务附表写
@@ -486,6 +494,54 @@ class Seed:
             overwrite=overwrite,
         )
 
+    # ── 报告期公告日（时点可见性的唯一来源）───────────────────────────
+    def report_dates(
+        self,
+        code: str,
+        rows: Iterable[
+            tuple[str | date, str | date] | tuple[str | date, str | date, str]
+        ],
+        *,
+        overwrite: bool = False,
+        **cols: Any,
+    ) -> None:
+        """`financial_report_dates`：`rows` = `[(report_date, announce_date[, source]), …]`。
+
+        这张表没有业务数值，**只有日期**：它是 `point_in_time` 的
+        `announce_date <= as_of` 判据与 `visible_periods` 的唯一输入，所以
+        `announce_date` 与 `report_date` 一样必须由调用点逐字给出（签名里就是
+        二元组的前两项，`announce_date` 是 NOT NULL，漏给会当场 `TypeError`，
+        不会走到"NULL 公布日"那种摸不着头脑的语义）。
+
+        第三个元素是**该行自己的 `source`**（主键含它，schema 为
+        `(stock_code, report_date, source)`）：同一报告期可以有第二个来源
+        （"补录更晚的公告日"正是 `visible_periods` 要取 `MIN(announce_date)`
+        的那条口径），此时两个来源的行必须能同时存在 —— 与 :meth:`headcounts`
+        同一形状。不写则用 :data:`DEFAULT_SOURCE`（财务域的真实来源 `csmar`）。
+
+        溯源只有 `source / fetch_time / batch_id`（该表**没有**
+        `raw_*_hash` / `confidence`，见 schema v1）→ :data:`_TRACE_NO_CONFIDENCE`。
+        """
+        payload = []
+        for row in rows:
+            report_date, announce_date, *rest = row
+            payload.append(
+                {
+                    "stock_code": code,
+                    "report_date": report_date,
+                    "announce_date": announce_date,
+                    "source": rest[0] if rest else DEFAULT_SOURCE,
+                    **cols,
+                }
+            )
+        self._insert_many(
+            "financial_report_dates",
+            payload,
+            key=("stock_code", "report_date", "source"),
+            trace=_TRACE_NO_CONFIDENCE,
+            overwrite=overwrite,
+        )
+
     # ── 股本 / 价格 ──────────────────────────────────────────────────
     def shares(
         self,
@@ -534,6 +590,104 @@ class Seed:
                 for trade_date, close in rows
             ],
             key=("stock_code", "trade_date"),
+            overwrite=overwrite,
+        )
+
+    # ── ETF 行情 / 指数估值（各自独立低频域，都不进 A 股 readiness）───
+    def etf_daily(
+        self,
+        etf_code: str,
+        rows: Iterable[
+            tuple[str | date, float | None]
+            | tuple[str | date, float | None, dict[str, Any]]
+        ],
+        *,
+        overwrite: bool = False,
+        **cols: Any,
+    ) -> None:
+        """`etf_daily`：`rows` = `[(trade_date, close_price[, cols]), …]`。
+
+        主键是 `(etf_code, trade_date, source)` —— `source` 进主键是真实语义
+        （同一交易日同花顺与腾讯回退源可以各有一行，`etf_prices` 的幂等/保旧值
+        用例要的正是"同键同源只覆盖自己"），所以默认 :data:`DEFAULT_ETF_SOURCE`
+        （`ths`），要种回退源就显式 `source="tencent"`。
+
+        第三项（可选）是**该行独有**的列：`open_price` / `volume` /
+        `turnover` / `track_pe_ttm_five_year_percentile` 这类逐行不同的业务列，
+        优先级高于 `**cols`（全批同值）。`close_price` 允许 `None`
+        （"只有日历没有价格"是真实的缺失形状，工厂不补 0）。
+
+        溯源是事件形状 :data:`_TRACE_EVENT`（`raw_hash` 而非
+        `raw_response_hash`，见 schema）。抓取时刻的口径看用例：
+        要"刚抓的"就 `Seed(store, trace_now=True)`。
+        """
+        payload = []
+        for row in rows:
+            trade_date, close_price, *rest = row
+            payload.append(
+                {
+                    "etf_code": etf_code,
+                    "trade_date": trade_date,
+                    "close_price": close_price,
+                    "source": DEFAULT_ETF_SOURCE,
+                    **cols,
+                    **(rest[0] if rest else {}),
+                }
+            )
+        self._insert_many(
+            "etf_daily",
+            payload,
+            key=("etf_code", "trade_date", "source"),
+            trace=_TRACE_EVENT,
+            overwrite=overwrite,
+        )
+
+    def index_valuation(
+        self,
+        index_code: str,
+        rows: Iterable[
+            tuple[str | date, float | None]
+            | tuple[str | date, float | None, dict[str, Any]]
+        ],
+        *,
+        source: str,
+        overwrite: bool = False,
+        **cols: Any,
+    ) -> None:
+        """`index_valuation`：`rows` = `[(trade_date, pe_ttm[, cols]), …]`。
+
+        `source` 是**必填关键字参数**而不是工厂默认值：这张表是四源并存
+        （乐咕宽基月度 `legulegu` / 申万日度 `sws` / 中证官网 `csindex` /
+        同花顺 `ths`），到底哪一源是这条曲线的生产口径由用例说，工厂不猜
+        （猜错会让 `pe_metric` 与源对不上，而断言通常只读 `pe_ttm` → 静默假绿）。
+        它同时进主键 `(index_code, trade_date, source)`。
+
+        第三项（可选）是**该行独有**的列：`pb` / `div_yield` / `pe_metric` /
+        `extra` 常常逐行不同（"40 点曲线"的每一个点都是不同估值），
+        优先级高于 `**cols`。`pe_ttm` 允许 `None`（"该日无披露"是真实缺口）。
+
+        溯源 :data:`_TRACE_EVENT`（`raw_hash`）；`confidence` 不写就是默认
+        `strict` —— 乐咕/申万这类二次加工源的真实口径是 `approximate`，
+        调用点要如实标就显式传（工厂不替它降级，也不替它升级）。
+        """
+        payload = []
+        for row in rows:
+            trade_date, pe_ttm, *rest = row
+            payload.append(
+                {
+                    "index_code": index_code,
+                    "trade_date": trade_date,
+                    "pe_ttm": pe_ttm,
+                    "source": source,
+                    **cols,
+                    **(rest[0] if rest else {}),
+                }
+            )
+        self._insert_many(
+            "index_valuation",
+            payload,
+            key=("index_code", "trade_date", "source"),
+            trace=_TRACE_EVENT,
             overwrite=overwrite,
         )
 
@@ -665,6 +819,44 @@ class Seed:
         """`xdxr` 送转行（`category=1`，`songzhuangu` 是**每股**比例，见 D53）。"""
         self.xdxr(code, event_date, category=1, songzhuangu=ratio, overwrite=overwrite, **cols)
 
+    # ── 公司概览（东财 F10 事实域）────────────────────────────────────
+    def company_profile(
+        self,
+        stock_code: str,
+        *,
+        overwrite: bool = False,
+        **cols: Any,
+    ) -> None:
+        """`company_profile`：主键 `stock_code`（一只股票一行事实概览）。
+
+        第一个位置参数叫 `stock_code` 而不是别的方法那样的 `code`：这张表**自己
+        有一列 `code`**（东财的证券代码，与 `stock_code` 同值但不是同一件事）。
+        两处都叫 `code` 会让"给业务列 `code` 传值"和"主键"在同一个关键字上
+        打架（`TypeError: got multiple values for argument 'code'`），所以主键
+        显式改名，`code=` 永远指向那一列。
+
+        业务列（`code` / `name` / `org_name` / `profile` / `scope` /
+        `employee_num` / `csrc_industry` / `trade_market`）**一个都不给默认值**：
+        不写就是 NULL。这是"原子替换后旧字段被新响应的空值覆盖""概览缺失不得
+        影响 readiness"这类用例的前提 —— 工厂替你补一份"看起来合理"的简介，
+        就等于把"这次的响应没带简介"这条断言的前提抹掉。
+
+        溯源 :data:`_TRACE_EVENT`（`raw_hash`）；`updated_at` 不在签名里，
+        由 schema 的 `DEFAULT CURRENT_TIMESTAMP` 兜底（那一列的语义就是
+        "库里更新于何时"），要钉某一刻就显式传 `updated_at=...`。
+
+        `source` 默认 :data:`DEFAULT_COMPANY_PROFILE_SOURCE`（`eastmoney_f10`）：
+        这张表只有东财 F10 一家来源，落到 `_TRACE_EVENT` 的通用默认 `csmar`
+        是错的（csmar 根本不提供公司简介/经营范围）。
+        """
+        self._insert(
+            "company_profile",
+            {"stock_code": stock_code, "source": DEFAULT_COMPANY_PROFILE_SOURCE, **cols},
+            key=("stock_code",),
+            trace=_TRACE_EVENT,
+            overwrite=overwrite,
+        )
+
     def segments(
         self,
         code: str,
@@ -743,6 +935,58 @@ class Seed:
             key=("stock_code", "ex_date"),
             overwrite=overwrite,
             if_exists=if_exists,
+        )
+
+    def hk_dividends(
+        self,
+        code: str,
+        rows: Iterable[
+            tuple[str | date, str, float | None, float | None]
+            | tuple[str | date, str, float | None, float | None, dict[str, Any]]
+        ],
+        *,
+        overwrite: bool = False,
+        **cols: Any,
+    ) -> None:
+        """`hk_dividends`：`rows` = `[(ex_date, plan_explain, dps_hkd, dps_cny[, cols]), …]`。
+
+        主键是 `(stock_code, ex_date, plan_explain)` —— `plan_explain`（东财原文
+        "每股派人民币2.51元(相当于港币2.9003元)"）**进主键**，是因为同一次除权
+        可能同时有多条计划（现金 + 送转），原文是唯一的区分手段；所以它和前两个
+        主键列一起写在元组里，不能省。
+
+        `dps_hkd` / `dps_cny` 都允许 `None`：港股分红经常"只披露港币"或
+        "只披露人民币"（reparse 用例的两行正是 `(1.0, 0.07)` 与
+        `(None, None)` 这种形状），工厂**不**用汇率替它换算 —— 换算口径是被测
+        逻辑的事，种子里编一个等价值会把那条断言变成自证。
+
+        第五项（可选）是**该行独有**的列：`announcement_date` / `report_period` /
+        `transfer_end_date` / `dividend_date` 逐行不同，优先级高于 `**cols`。
+
+        溯源 :data:`_TRACE_CRAWL`（这张表写 `raw_response_hash`，不是 `raw_hash`），
+        `source` 默认 :data:`DEFAULT_HK_DIVIDEND_SOURCE`（`eastmoney_hk_dividend`）。
+        """
+        payload = []
+        for row in rows:
+            ex_date, plan_explain, dps_hkd, dps_cny, *rest = row
+            payload.append(
+                {
+                    "stock_code": code,
+                    "ex_date": ex_date,
+                    "plan_explain": plan_explain,
+                    "dividend_per_share_hkd": dps_hkd,
+                    "dividend_per_share_cny": dps_cny,
+                    "source": DEFAULT_HK_DIVIDEND_SOURCE,
+                    **cols,
+                    **(rest[0] if rest else {}),
+                }
+            )
+        self._insert_many(
+            "hk_dividends",
+            payload,
+            key=("stock_code", "ex_date", "plan_explain"),
+            trace=_TRACE_CRAWL,
+            overwrite=overwrite,
         )
 
     def treasury_yield_curve(

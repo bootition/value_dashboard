@@ -559,6 +559,64 @@ class SeedSqlite:
             overwrite=overwrite,
         )
 
+    def screening_run(
+        self,
+        run_id: str,
+        rule_id: int,
+        rule_version: int,
+        *,
+        result_json: str,
+        columns_json: str,
+        sort_json: str,
+        base_pool_config: str,
+        strict_only: bool,
+        confidence_summary: str,
+        data_date: str | None = None,
+        overwrite: bool = False,
+        **cols: Any,
+    ) -> None:
+        """`screening_runs`：主键 `run_id`，一行"服务端跑过一次筛选"的存档。
+
+        为什么这群列在**签名里**而不是留给 `**cols`：schema 把它们全设成
+        NOT NULL，且它们正是「结果不可由浏览器伪造」这条口径的**论点** ——
+        `rule_id` + `rule_version`（保存时校验的溯源）、`result_json` /
+        `columns_json` / `sort_json`（导出的三件套）、`base_pool_config` /
+        `strict_only` / `confidence_summary`（这批结果是怎么筛出来的）。
+        漏传任何一个都只会在库里被 NOT NULL 拦下（红得晚一轮、还不好读），
+        写成必填关键字参数就是调用点的 `TypeError`。
+
+        `run_id` **不是**自增列（生产由服务端生成后落库），所以它是必填位置
+        参数；重复播种同一个 `run_id` → :class:`DuplicateSqliteSeed`。
+
+        `data_date` 默认 `None` ＝ "没有指定数据日"（列可空，生产在无
+        `as_of` 时留空）；`created_at` 不在签名里，交给 schema 的
+        `DEFAULT CURRENT_TIMESTAMP`（它的语义就是"库里落档的时刻"），
+        要钉某一刻就显式传 `created_at=...`（列校验照旧）。
+
+        `rule_id` 有外键指向 `screening_rules(id)`：本方法**不**替调用点建父行
+        （那需要回捞 `lastrowid`，见模块 docstring「尚未覆盖」），父行由
+        :meth:`screening_rule` 或真实 API 先建好；外键失败会如实报成
+        :class:`SqliteSeedConstraint`，不冒充重复。
+        """
+        self._insert(
+            "screening_runs",
+            {
+                "run_id": run_id,
+                "rule_id": rule_id,
+                "rule_version": rule_version,
+                "result_json": result_json,
+                "columns_json": columns_json,
+                "sort_json": sort_json,
+                "data_date": data_date,
+                "base_pool_config": base_pool_config,
+                "strict_only": strict_only,
+                "confidence_summary": confidence_summary,
+                **cols,
+            },
+            key=("run_id",),
+            overwrite=overwrite,
+        )
+
     def missing_list(
         self,
         stock_code: str,

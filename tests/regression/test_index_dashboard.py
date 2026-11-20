@@ -35,27 +35,40 @@ from tests.support.seed import Seed
 
 def _seed_index_valuation(duck: DuckDBStore) -> None:
     """000300：乐咕月度 40 点；SW801010：申万日度 40 点（同窗口无国债的点用于测试跳过）。"""
+    # 原来是逐点 `INSERT ... CURRENT_TIMESTAMP`（80 次写锁）→ 每源一次批量事务；
+    # `trace_now=True` 保住"刚抓的"，`pb` 逐行不同照旧在调用点（`raw_hash` 交给
+    # 工厂的确定性 64 位 sha256，原来是 `h00`/`s00` 这种短占位值）。
+    seed = Seed(duck, trace_now=True)
     base = date(2026, 1, 31)
-    for i in range(40):
-        d = base - timedelta(days=30 * i)
-        pe = 10.0 + (i % 10) * 0.5  # 10.0 ~ 14.5
-        duck.write_query(
-            """INSERT INTO index_valuation
-               (index_code, trade_date, pe_ttm, pe_metric, pb, div_yield, source,
-                fetch_time, raw_hash, confidence, batch_id, extra)
-               VALUES (?, ?, ?, 'ttm', ?, NULL, 'legulegu', CURRENT_TIMESTAMP, ?, 'approximate', 'b', NULL)""",
-            ["000300", d.isoformat(), pe, 1.0 + i * 0.01, f"h{i:02d}"],
-        )
-    for i in range(40):
-        d = date(2026, 8, 31) - timedelta(days=i)
-        pe = 20.0 + (i % 10) * 0.4
-        duck.write_query(
-            """INSERT INTO index_valuation
-               (index_code, trade_date, pe_ttm, pe_metric, pb, div_yield, source,
-                fetch_time, raw_hash, confidence, batch_id, extra)
-               VALUES (?, ?, ?, 'sws_daily', ?, ?, 'sws', CURRENT_TIMESTAMP, ?, 'approximate', 'b', NULL)""",
-            ["SW801010", d.isoformat(), pe, 2.0 + i * 0.01, 1.5, f"s{i:02d}"],
-        )
+    seed.index_valuation(
+        "000300",
+        [
+            (
+                base - timedelta(days=30 * i),
+                10.0 + (i % 10) * 0.5,  # 10.0 ~ 14.5
+                {"pb": 1.0 + i * 0.01},
+            )
+            for i in range(40)
+        ],
+        source="legulegu",
+        pe_metric="ttm",
+        confidence="approximate",
+    )
+    seed.index_valuation(
+        "SW801010",
+        [
+            (
+                date(2026, 8, 31) - timedelta(days=i),
+                20.0 + (i % 10) * 0.4,
+                {"pb": 2.0 + i * 0.01},
+            )
+            for i in range(40)
+        ],
+        source="sws",
+        pe_metric="sws_daily",
+        div_yield=1.5,
+        confidence="approximate",
+    )
 
 
 def _seed_treasury(duck: DuckDBStore) -> None:

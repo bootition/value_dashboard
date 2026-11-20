@@ -144,6 +144,20 @@ def _one(store: SQLiteStore, table: str) -> dict:
             "curent_stage",
             id="auto_update_state:curent_stage",
         ),
+        pytest.param(
+            # `screening_runs` 的"只跑严格池"列叫 `strict_only`（不是 `strict`）：
+            # 它是结果可复现性的一部分，拼错后这一列成 NULL → 存档语义失真。
+            # 注：外键 `rule_id → screening_rules(id)` 在**列校验之后**才会碰到，
+            # 所以这里不需要先建父行（一行都没写，父行也不该出现）。
+            lambda seed: seed.screening_run(
+                "run-typo", 1, 1, result_json="[]", columns_json="[]", sort_json="[]",
+                base_pool_config="{}", strict_only=False, confidence_summary="{}",
+                strict="only",
+            ),
+            "screening_runs",
+            "strict",
+            id="screening_run:strict",
+        ),
     ],
 )
 def test_misspelled_column_raises_unknown_sqlite_column_and_writes_no_row(
@@ -607,6 +621,73 @@ def test_screening_rule_locks_indicators_and_rejects_same_version(
 
     with pytest.raises(DuplicateSqliteSeed, match="screening_rules"):
         seed.screening_rule("plain rule", 1, '{"conditions": {}}')
+
+
+def test_screening_run_duplicate_run_id_raises_and_optional_columns_stay_null(
+    seed: SeedSqlite, sqlite_store: SQLiteStore
+) -> None:
+    """`screening_runs`：主键 `run_id` 重复必须抛；`data_date` 不写就是 NULL。
+
+    为什么这条**单独**一个函数、没挂进不变式 2 的参数表：`screening_runs` 的
+    `rule_id` 有外键 `REFERENCES screening_rules(id)`，造一行合法种子必须先建
+    父行（两步），而那张参数表的契约是"一个 lambda = 一行种子"（父行若写在
+    lambda 里，第二遍会先撞父行重复，报成 `screening_rules` 冲突）。父行只用
+    :meth:`SeedSqlite.screening_rule` 建，不碰内联 SQL。
+
+    `data_date` 是这张表唯一可空的业务列（生产在无 `as_of` 时留空），
+    `created_at` 交给 schema 的 `DEFAULT CURRENT_TIMESTAMP` —— 工厂不替它编时间。
+    """
+    seed.screening_rule("run parent", 1, '{"conditions": {"logic": "AND", "rules": []}}')
+    rule_id = sqlite_store.query(
+        "SELECT id FROM screening_rules WHERE name = ? AND version = 1", ["run parent"]
+    )[0]["id"]
+
+    seed.screening_run(
+        "run-1",
+        rule_id,
+        1,
+        result_json='[{"stock_code":"000001"}]',
+        columns_json='["stock_code"]',
+        sort_json='[]',
+        base_pool_config='{}',
+        strict_only=True,
+        confidence_summary='{"strict_only":true}',
+    )
+
+    row = _one(sqlite_store, "screening_runs")
+    assert row["rule_id"] == rule_id
+    assert row["rule_version"] == 1
+    assert row["strict_only"] == 1
+    assert row["data_date"] is None
+    assert row["created_at"] is not None
+
+    with pytest.raises(DuplicateSqliteSeed, match="screening_runs"):
+        seed.screening_run(
+            "run-1", rule_id, 1, result_json="[]", columns_json="[]", sort_json="[]",
+            base_pool_config="{}", strict_only=False, confidence_summary="{}",
+        )
+    assert _count(sqlite_store, "screening_runs") == 1
+
+    # `overwrite=True` 才是"改成我的值"（SQLite 的 REPLACE 是删旧行插新行：
+    # 本次没提供的列回到 NULL，而不是保留旧值 —— 与 DuckDB 的 upsert 不同）。
+    seed.screening_run(
+        "run-1", rule_id, 1, result_json='[]', columns_json='[]', sort_json='[]',
+        base_pool_config='{"pool":"all"}', strict_only=False,
+        confidence_summary='{}', data_date="2025-12-31", overwrite=True,
+    )
+    replaced = _one(sqlite_store, "screening_runs")
+    assert replaced["strict_only"] == 0
+    assert replaced["data_date"] == "2025-12-31"
+    assert replaced["base_pool_config"] == '{"pool":"all"}'
+
+    # `join(conn)`：调用点已开事务时方法不自开、不提交（提交权归调用方）。
+    with sqlite_store.transaction() as conn:
+        SeedSqlite(sqlite_store).join(conn).screening_run(
+            "joined-run", rule_id, 1, result_json='[]', columns_json='[]',
+            sort_json='[]', base_pool_config='{}', strict_only=False,
+            confidence_summary='{}',
+        )
+    assert _count(sqlite_store, "screening_runs") == 2
 
 
 def test_missing_list_open_rows_are_unique_while_resolved_history_coexists(

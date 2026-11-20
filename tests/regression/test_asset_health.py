@@ -36,6 +36,7 @@ from app.core.quality.asset_health import (
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 # 固定"现在"：所有超期判定都相对它计算，避免用真实时钟让测试在月末翻车。
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
@@ -155,6 +156,8 @@ def _bulk_domain(
     count: int = DEFAULT_SAMPLE,
 ) -> None:
     """一条 INSERT ... SELECT 造 count 行；`null_every[field]=k` 表示每 k 行 1 行 NULL。"""
+    # 保留内联（第 2–6 类）：`INSERT … SELECT … FROM range(0, ?)` 批量生成器 —— 行数、
+    # 空值节奏与列集合都由调用点程序化生成，工厂的批量口只收逐行 `[(key, value…)]`。
     constants = constants or {}
     null_every = null_every or {}
     head = ["stock_code", "report_date", *constants]
@@ -200,6 +203,8 @@ def _bulk_income(
     duck: DuckDBStore, report_date: date, *, deducted_non_null: int,
     count: int = DEFAULT_SAMPLE,
 ) -> None:
+    # 保留内联（第 2–6 类）：同为 `INSERT … SELECT … FROM range(0, ?)` 生成器 ——
+    # "前 N 行有值、其后为 NULL"这个行号相关形状表达不了成逐行列表（100 行起）。
     duck.write_query(
         """INSERT INTO income_statement
                (stock_code, report_date, revenue, parent_net_profit, deducted_net_profit)
@@ -213,6 +218,8 @@ def _bulk_income(
 def _bulk_register_null_reason(
     duck: DuckDBStore, field: str, report_date: date, count: int
 ) -> None:
+    # 保留内联（第 4 类 单次表）：`indicator_null_reason` 全仓只此一处播种，
+    # 且同样是 `range()` 生成器 —— 补方法只多一层没有第二个用户的抽象。
     duck.write_query(
         """INSERT INTO indicator_null_reason
                (stock_code, report_date, field_name, reason_code, detail, computed_at)
@@ -238,12 +245,9 @@ def _insert_three_statements(duck: DuckDBStore, report_date: date, code: str = "
 
 
 def _set_refresh_state(sqlite: SQLiteStore, key: str, value: str) -> None:
-    sqlite.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value=excluded.value,
-                                          updated_at=excluded.updated_at""",
-        [key, value, NOW.isoformat()],
-    )
+    # `updated_at` 是**用例冻结的 NOW**（所有超期判据都相对它算），不是库侧时钟：
+    # 显式传 `updated_at=`；`overwrite=True` 等价原来的 ON CONFLICT DO UPDATE。
+    SeedSqlite(sqlite).refresh_state(key, value, updated_at=NOW.isoformat(), overwrite=True)
 
 
 def _write_manifest(repo_root: Path, price_latest: str) -> Path:
@@ -440,6 +444,8 @@ def _write_baseline(
     domain: str = "indicator_snapshot",
     days_ago: int = 7,
 ) -> None:
+    # 保留内联（第 4 类 单次表）：`field_coverage_history` 全仓只此一处播种，
+    # 工厂没有也不该有方法（没有第二个用户）。
     duck.write_query(
         """INSERT INTO field_coverage_history
                (recorded_at, run_id, domain, field_name, report_date,
@@ -546,6 +552,8 @@ def test_manual_chain_stale_uses_legacy_marker_key(
 
 def test_manual_chain_stale_falls_back_to_data_probe(duckdb_store: DuckDBStore) -> None:
     """没有记账的链靠数据侧探针自愈：ETF 行情停了 30 天必须报出来。"""
+    # 保留内联（第 4 类 多站点缺 API）：`etf_daily` 全仓 5 处播种但工厂没有方法，
+    # 本轮租约禁止补 API —— 如实登记为下一轮候选。
     duckdb_store.write_query(
         """INSERT INTO etf_daily (etf_code, trade_date, close_price, source, fetch_time,
                                   raw_hash, confidence, batch_id)
@@ -713,6 +721,8 @@ def _create_csmar_fi_t1(duck: DuckDBStore) -> None:
 def test_crosscheck_fires_when_agreement_below_threshold(duckdb_store: DuckDBStore) -> None:
     _create_csmar_fi_t1(duckdb_store)
     _insert_extended(duckdb_store, date(2026, 6, 30), ["000001"], values={"debt_to_equity": 1.0})
+    # 保留内联（第 4 类 多站点缺 API）：`csmar_fi_t1` 全仓 4 处、表由本文件
+    # `_create_csmar_fi_t1` 自建（旧 schema 探针），工厂无方法且本轮不补。
     duckdb_store.write_query(
         """INSERT INTO csmar_fi_t1
                (stock_code, report_date, "F011701A", source, fetch_time, batch_id)
@@ -732,6 +742,8 @@ def test_crosscheck_fires_when_agreement_below_threshold(duckdb_store: DuckDBSto
 def test_crosscheck_silent_when_agreement_matches(duckdb_store: DuckDBStore) -> None:
     _create_csmar_fi_t1(duckdb_store)
     _insert_extended(duckdb_store, date(2026, 6, 30), ["000001"], values={"debt_to_equity": 1.0})
+    # 保留内联（第 4 类 多站点缺 API）：`csmar_fi_t1` 全仓 4 处、表由本文件
+    # `_create_csmar_fi_t1` 自建（旧 schema 探针），工厂无方法且本轮不补。
     duckdb_store.write_query(
         """INSERT INTO csmar_fi_t1
                (stock_code, report_date, "F011701A", source, fetch_time, batch_id)

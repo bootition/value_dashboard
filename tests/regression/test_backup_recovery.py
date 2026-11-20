@@ -11,10 +11,13 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.maintenance import MaintenanceLockError, exclusive_maintenance
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 from tests.support.seed_sqlite import SeedSqlite
 
 # 本轮收敛：`test_personalized_restore_obeys_actual_foreign_key_topology` 里被引用的
-# 两层（`dsl_expressions` ×2 / `screening_rules` ×1）→ `SeedSqlite`。
+# 两层（`dsl_expressions` ×2 / `screening_rules` ×1）→ `SeedSqlite`；
+# `_seed_backup_data` 的 `stock_meta` → `Seed.stock`；
+# `test_restore_matches_parquet_columns_by_name` 的 `indicator_snapshot` → `Seed.snapshot`。
 # **保留内联**的是「外键引用树本身」：`dsl_dependencies` / `screening_results` 逐行
 # 回捞 `id` 再拼 `*_id`（`SELECT id ...` + 自增 id 回捞），那是被测结构、不是造一行；
 # `raw_response_archive`（整批搬家 + 空 BLOB 载荷）/ `dividends_quarantine`（隔离表）
@@ -353,12 +356,9 @@ def test_restore_matches_parquet_columns_by_name(
     tmp_path: Path,
 ) -> None:
     manager = BackupManager(duck=duckdb_store, sqlite=sqlite_store, paths=database_paths)
-    # 保留内联：本文件只此一处 `indicator_snapshot`（用例是 parquet 列序，不是造一行），
-    # 且不在本轮清单内。
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-           (stock_code, report_date, latest_close, latest_price_date)
-           VALUES ('600519', '2025-12-31', 1500, '2026-01-02')"""
+    # 一行快照：业务列（收盘价/价格日）逐字写，本用例断言的是 parquet 的列序还原。
+    Seed(duckdb_store).snapshot(
+        "600519", "2025-12-31", latest_close=1500, latest_price_date="2026-01-02",
     )
     parquet = tmp_path / "snapshot-reordered.parquet"
     with duckdb_store.write_connection() as connection:
@@ -458,10 +458,6 @@ def test_startup_recovery_repairs_a_restore_interrupted_by_system_exit(
 
 
 def _seed_backup_data(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
-    # 保留内联：`stock_meta` 的 1 处脚手架不在本轮清单内（工厂 `Seed.stock()` 已可覆盖，
-    # 下一轮收敛）；SQLite 侧的 `watchlist` 已走工厂。
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange)
-           VALUES ('600519', '贵州茅台', 'SSE')"""
-    )
+    # 两只库各一行最小种子：DuckDB 侧 `stock_meta` 与 SQLite 侧 `watchlist` 都走工厂。
+    Seed(duck).stock("600519", name="贵州茅台", exchange="SSE")
     SeedSqlite(sqlite).watchlist("600519", group_name="default")

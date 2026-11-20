@@ -15,6 +15,7 @@ from app.core.etf_prices import EtfPriceUpdater
 from app.core.etf_strategy import upsert_etf_meta
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 def _make_result(data, error=None, source="ths"):
@@ -89,11 +90,8 @@ def test_update_etf_failure_preserves_old_and_records_retry(
 ) -> None:
     upsert_etf_meta(sqlite_store, etf_code="513130", name="恒生科技",
                     track_index_code=None, primary_metric="pe")
-    duckdb_store.write_query(
-        """INSERT INTO etf_daily
-           (etf_code, trade_date, close_price, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('513130', '2026-09-01', 1.0, 'ths', CURRENT_TIMESTAMP, 'old', 'strict', 'b')"""
-    )
+    # 原来是 `INSERT ... CURRENT_TIMESTAMP` → 显式 `trace_now=True` 保住"刚抓的"语义。
+    Seed(duckdb_store, trace_now=True).etf_daily("513130", [("2026-09-01", 1.0)])
     updater = EtfPriceUpdater(duck=duckdb_store, sqlite=sqlite_store)
     updater._ths = FakeThs(daily_error="quota exhausted")  # type: ignore[assignment]
     # 2026-09-20 起同花顺失败会先走腾讯回退；本测试针对的是**全部源都失败**的场景，

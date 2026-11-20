@@ -159,6 +159,52 @@ def _one(store: DuckDBStore, table: str) -> dict:
             "raise_fund",
             id="fundings:per_row_raise_fund",
         ),
+        pytest.param(
+            # 报告期公告日只有两列业务列，`announce_date` 是最容易被缩写成
+            # `announce_dt` 的那一列 —— 拼错后该行公布日就成 NULL（NOT NULL 会拦，
+            # 但拦在库里而不是调用点）。
+            lambda seed: seed.report_dates(
+                STOCK, [(REPORT_DATE, "2025-04-20")], announce_dt="2025-04-20",
+            ),
+            "financial_report_dates",
+            "announce_dt",
+            id="report_dates:announce_dt",
+        ),
+        pytest.param(
+            # `etf_daily` 的收盘列叫 `close_price`（不是日线的 `close`）：
+            # 抄成 `close` 会静默把价格写成 NULL，`latest_close` 类断言当场空转。
+            lambda seed: seed.etf_daily("510300", [("2026-09-01", 1.0)], close=1.0),
+            "etf_daily",
+            "close",
+            id="etf_daily:close",
+        ),
+        pytest.param(
+            # 港股分红的原文计划列叫 `plan_explain`（拼错后虽然是主键列会 NOT NULL，
+            # 但报错必须点在调用点的列名上）。
+            lambda seed: seed.hk_dividends(
+                "00941", [("2026-08-25", "每股派港币0.2元", 0.2, None)],
+                plan_explan="每股派港币0.2元",
+            ),
+            "hk_dividends",
+            "plan_explan",
+            id="hk_dividends:plan_explan",
+        ),
+        pytest.param(
+            # 指数估值的口径列叫 `pe_metric`（不是 `metric`/`pe_type`）。
+            lambda seed: seed.index_valuation(
+                "000300", [("2026-07-31", 14.6)], source="legulegu", metric="ttm",
+            ),
+            "index_valuation",
+            "metric",
+            id="index_valuation:metric",
+        ),
+        pytest.param(
+            # 公司概览的行业列叫 `csrc_industry`：少一个 `r` 是最常见的拼错。
+            lambda seed: seed.company_profile(STOCK, name="贵州茅台", csrc_industy="制造业"),
+            "company_profile",
+            "csrc_industy",
+            id="company_profile:csrc_industy",
+        ),
     ],
 )
 def test_misspelled_column_raises_unknown_seed_column_and_writes_no_row(
@@ -231,6 +277,37 @@ def test_misspelled_column_raises_unknown_seed_column_and_writes_no_row(
             lambda seed: seed.treasury_yield_curve("2026-08-31", 10.0, 3.0),
             "treasury_yield_curve",
             id="treasury_yield_curve",
+        ),
+        pytest.param(
+            lambda seed: seed.report_dates(STOCK, [(REPORT_DATE, "2025-04-20")]),
+            "financial_report_dates",
+            id="report_dates",
+        ),
+        pytest.param(
+            lambda seed: seed.etf_daily("510300", [("2026-09-01", 1.0)]),
+            "etf_daily",
+            id="etf_daily",
+        ),
+        pytest.param(
+            lambda seed: seed.hk_dividends(
+                "00941", [("2026-08-25", "每股派港币0.2元", 0.2, None)]
+            ),
+            "hk_dividends",
+            id="hk_dividends",
+        ),
+        pytest.param(
+            # `source` 进主键：同一 (指数, 交易日) 换源是**另一行**，
+            # 所以只有同一 source 再播一次才是重复。
+            lambda seed: seed.index_valuation(
+                "000300", [("2026-07-31", 14.6)], source="legulegu"
+            ),
+            "index_valuation",
+            id="index_valuation",
+        ),
+        pytest.param(
+            lambda seed: seed.company_profile(STOCK, name="贵州茅台"),
+            "company_profile",
+            id="company_profile",
         ),
     ],
 )
@@ -381,6 +458,64 @@ def test_business_columns_not_passed_stay_null(duckdb_store: DuckDBStore) -> Non
     assert funding["issue_price"] is None
     assert funding["raise_funds"] is None
     assert funding["raise_funds_net"] is None
+
+    # 报告期公告日：只有日期列，`source` 落到财务域的真实来源（csmar）而不是
+    # `_TRACE_EVENT` 那套 hash 默认值 —— 该表 schema 里就没有 hash 列。
+    seed.report_dates(STOCK, [(REPORT_DATE, "2025-04-20")])
+    report_date = _one(duckdb_store, "financial_report_dates")
+    assert str(report_date["announce_date"]) == "2025-04-20"
+    assert report_date["source"] == "csmar"
+    assert HASH32.fullmatch(report_date["batch_id"])
+
+    # ETF 行情：`close_price` 之外的价格/成交列不写就是 NULL（不是 0.0）——
+    # "只有收盘价"的种子必须让"缺量能"的判据真的看见缺口。
+    seed.etf_daily("510300", [("2026-09-01", 1.5)])
+    etf = _one(duckdb_store, "etf_daily")
+    assert etf["close_price"] == 1.5
+    assert etf["open_price"] is None
+    assert etf["high_price"] is None
+    assert etf["volume"] is None
+    assert etf["turnover"] is None
+    assert etf["track_pe_ttm_five_year_percentile"] is None
+    assert etf["source"] == "ths"
+
+    # 港股分红：`dividend_per_share_cny` 允许真的缺着（不按汇率替你换算），
+    # 公告日/报告期/过户日/派息日不写就是 NULL。
+    seed.hk_dividends("00941", [("2026-08-25", "每股派港币0.2元", 0.2, None)])
+    hk = _one(duckdb_store, "hk_dividends")
+    assert hk["dividend_per_share_hkd"] == 0.2
+    assert hk["dividend_per_share_cny"] is None
+    assert hk["announcement_date"] is None
+    assert hk["report_period"] is None
+    assert hk["transfer_end_date"] is None
+    assert hk["dividend_date"] is None
+    assert hk["source"] == "eastmoney_hk_dividend"
+
+    # 指数估值：只给"交易日 + PE"就是一张干净的估值曲线，其余口径列全 NULL
+    # （`pe_metric` 缺着比编一个 `ttm` 更诚实：口径未知 ≠ ttm）。
+    seed.index_valuation("000300", [("2026-07-31", 14.6)], source="legulegu")
+    index_row = _one(duckdb_store, "index_valuation")
+    assert index_row["pe_ttm"] == 14.6
+    assert index_row["pe_metric"] is None
+    assert index_row["pb"] is None
+    assert index_row["div_yield"] is None
+    assert index_row["extra"] is None
+    assert index_row["source"] == "legulegu"
+
+    # 公司概览：业务事实列一个都不补（"这次的响应没带简介"必须留成 NULL）；
+    # `updated_at` 由 schema 的 `DEFAULT CURRENT_TIMESTAMP` 兜底 —— 工厂不编。
+    seed.company_profile(STOCK)
+    profile = _one(duckdb_store, "company_profile")
+    assert profile["code"] is None
+    assert profile["name"] is None
+    assert profile["org_name"] is None
+    assert profile["profile"] is None
+    assert profile["scope"] is None
+    assert profile["employee_num"] is None
+    assert profile["csrc_industry"] is None
+    assert profile["trade_market"] is None
+    assert profile["source"] == "eastmoney_f10"
+    assert profile["updated_at"] is not None
 
 
 # ── 不变式 6：screenable() 的"确保股票存在"语义 ─────────────────────

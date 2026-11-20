@@ -49,6 +49,8 @@ def test_saved_result_and_watchlist_require_rule_version_provenance(
     assert saved.status_code == 400
 
     with sqlite_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口，本轮不补 API）：`screening_runs` 全仓 3 处播种、
+        # 工厂没有方法；本轮租约禁止扩 `seed_sqlite.py`，如实登记为下一轮候选。
         conn.execute(
             """INSERT INTO screening_runs
                (run_id, rule_id, rule_version, result_json, columns_json, sort_json,
@@ -107,6 +109,7 @@ def test_csv_includes_rule_version_and_strict_provenance(
         },
     ).json()
     with sqlite_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口，本轮不补 API）：同上，`screening_runs` 无工厂方法。
         conn.execute(
             """INSERT INTO screening_runs
                (run_id, rule_id, rule_version, result_json, columns_json, sort_json,
