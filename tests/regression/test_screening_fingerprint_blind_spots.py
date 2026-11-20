@@ -31,6 +31,15 @@ from app.core.data_quality import (
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from tests.regression.test_screening_cache_freshness import _seed_screenable
+from tests.support.seed import Seed
+
+# `source_audit` 与 price_daily_raw/qfq 的**插入**走工厂的按域方法；紧随其后的
+# `UPDATE` 一律留在原地：「就地改值后指纹变没变」的论点就在"行集合与时间戳都不动、
+# 只有一列被改"上，插入与更新被混进同一条路径就看不见它了。
+#
+# 唯一例外是 `_insert_price_row()`：它显式走 `join(write_connection())`，因为
+# 本文件有一条断言钉着"这一行写下去内容纪元必须 +1"，而那个记账只挂在
+# `DuckDBStore.write_connection()` 上。详见该函数的 docstring。
 
 _READY = {"ready": True, "readiness": {"ready": True}, "warning_codes": []}
 
@@ -39,18 +48,27 @@ def _insert_audit_row(duck: DuckDBStore, *, stock_code: str = "000001",
                       confidence: str = "high", raw_hash: str = "a" * 64,
                       batch_id: str = "batch-1") -> None:
     """One source_audit row shaped like the real writer's output."""
-    duck.write_query(
-        """INSERT INTO source_audit
-               (stock_code, field_name, report_date, value, source, fetch_batch_id,
-                fetch_time, raw_response_hash, confidence, reason_code, api_version)
-           VALUES (?, 'total_assets', '2025-12-31', 100, 'akshare', ?,
-                   TIMESTAMP '2026-01-01 00:00:00', ?, ?, NULL, 'v1')""",
-        [stock_code, batch_id, raw_hash, confidence],
+    Seed(duck).source_audit(
+        stock_code,
+        "total_assets",
+        report_date="2025-12-31",
+        value=100,
+        # `source='akshare'`（不是工厂默认的 csmar）与固定 `fetch_time` 逐字传：
+        # 本文件钉的是"就地改值后指纹变没变"，改前/改后两次比较必须站在同一行上。
+        source="akshare",
+        fetch_batch_id=batch_id,
+        fetch_time="2026-01-01 00:00:00",
+        raw_response_hash=raw_hash,
+        confidence=confidence,
+        reason_code=None,
+        api_version="v1",
     )
 
 
 def _insert_batch_row(duck: DuckDBStore, *, batch_id: str = "batch-1",
                       data_type: str = "financials", row_count: int = 10) -> None:
+    # 留（第 4 类·多站点缺口，本轮不补 API）：`fetch_batch` 全仓 7 处播种、工厂
+    # 没有方法；本轮租约禁止扩 `seed.py`，如实登记为下一轮候选。
     duck.write_query(
         """INSERT INTO fetch_batch
                (batch_id, data_type, source, adapter_version, fetch_time,
@@ -63,6 +81,9 @@ def _insert_batch_row(duck: DuckDBStore, *, batch_id: str = "batch-1",
 
 def _insert_archive_row(duck: DuckDBStore, *, stock_code: str = "000001",
                         confidence: str = "high") -> None:
+    # 留（第 3 类·隔离归档）：`source_audit_archive` 的写入**就是本文件的论点** ——
+    # "归档行也必须被指纹覆盖"。把它搬进工厂等于把"哪一行进了归档"藏起来，
+    # 也不再是"整批搬家"的那条构造。
     duck.write_query(
         """INSERT INTO source_audit_archive
                (id, stock_code, field_name, report_date, value, source, fetch_batch_id,
@@ -199,10 +220,9 @@ def test_fingerprint_covers_price_tables_row_set(
     store_screening_readiness_cache(sqlite_store, baseline, _READY)
 
     # ③-a price_daily_raw 新增一行（旧的 K 线行集合变化）。
-    duckdb_store.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-           VALUES ('000002', DATE '2001-01-02', 5, 1)"""
-    )
+    # 这里用工厂默认事务口即可：本用例要的信号是**行集合/COUNT**（见 docstring
+    # 的"覆盖边界"），内容纪元那一路由 `_insert_price_row()` 单独钉。
+    Seed(duckdb_store).prices("000002", [("2001-01-02", 5)], volume=1)
     after_raw = screening_readiness_cache_key(duckdb_store, sqlite_store)
     assert after_raw is not None and after_raw != baseline, (
         "price_daily_raw 新增行后指纹必须变化，否则价格表仍然完全在外层指纹之外"
@@ -210,10 +230,7 @@ def test_fingerprint_covers_price_tables_row_set(
     assert load_screening_readiness_entry(sqlite_store, after_raw, allow_stale=True) is None
 
     # ③-b price_daily_qfq 新增一行。
-    duckdb_store.write_query(
-        """INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume)
-           VALUES ('000002', DATE '2001-01-02', 5, 1)"""
-    )
+    Seed(duckdb_store).prices("000002", [("2001-01-02", 5)], table="price_daily_qfq", volume=1)
     after_qfq = screening_readiness_cache_key(duckdb_store, sqlite_store)
     assert after_qfq is not None and after_qfq not in {baseline, after_raw}, (
         "price_daily_qfq 新增行后指纹必须变化"
@@ -305,10 +322,21 @@ def test_fingerprint_is_stable_across_repeated_calls(
 
 
 def _insert_price_row(duck: DuckDBStore, *, code: str, trade_date: str, close: float) -> None:
-    duck.write_query(
-        "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) VALUES (?, ?, ?, ?)",
-        [code, trade_date, close, 1000.0],
-    )
+    """插入一行 qfq；**只收敛插入这一半**。
+
+    紧随其后的 `_update_price_close()` 是 `UPDATE`，「就地改值 → 指纹要变」的
+    论点正在那条 UPDATE 上，绝不能连它一起搬走。
+
+    这里走 `join(write_connection())` 而不是让工厂自开 `transaction()`：
+    本文件的 `test_content_epoch_advances_only_on_writes_not_reads` 断言的正是
+    「这一行写下去，内容纪元必须 +1」，而 `DuckDBStore` 只在 `write_connection()`
+    成功退出时记账（`transaction()` 不记账）。换成工厂默认事务口会**静默**
+    把那条断言的前提抽掉 —— 种子形状一样，记账没了。
+    """
+    with duck.write_connection() as conn:
+        Seed(duck).join(conn).prices(
+            code, [(trade_date, close)], table="price_daily_qfq", volume=1000.0
+        )
 
 
 def _update_price_close(duck: DuckDBStore, *, code: str, trade_date: str, close: float) -> None:
@@ -392,3 +420,57 @@ def test_content_epoch_fails_open_when_store_is_unreadable(tmp_path) -> None:
     assert content_epoch.current(missing) == 0
     # bump 在表不存在时也不许抛（业务写入路径会吞它，但这里直接验证"不抛"）
     assert content_epoch.bump(missing, reason="probe") is None
+
+
+def test_content_epoch_advances_on_every_write_path(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
+) -> None:
+    """**两条写路径都必须推进内容纪元**（2026-11-23 由测试基建 agent 发现的真洞）。
+
+    `DuckDBStore` 有两条写路径：`write_connection()` 与 `transaction()`。
+    内容纪元最初只挂在 `write_connection()` 上，而 `transaction()` 被
+    `analyst_forecast` / `archive` / `backfill` / `backup` / `business` 等**生产代码**广泛使用 ——
+    也就是说，凡是走 `transaction()` 的就地改写**都不会**让指纹失效，
+    "就地改动看不见"的假绿会从这个口子悄悄回来。
+
+    这条用例把两条路径都钉住：任一分支漏了记账，立刻红。
+    """
+    from app.core.storage import content_epoch
+
+    path = sqlite_store.paths.sqlite_path
+
+    # 路径 1：write_connection()
+    before = content_epoch.current(path)
+    with duckdb_store.write_connection() as conn:
+        conn.execute(
+            "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) "
+            "VALUES ('000001', '2024-02-01', 10.0, 100.0)"
+        )
+    after_write_connection = content_epoch.current(path)
+    assert after_write_connection > before, (
+        "write_connection() 提交后没有推进内容纪元 → 指纹不会失效"
+    )
+
+    # 路径 2：transaction()
+    with duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) "
+            "VALUES ('000002', '2024-02-01', 20.0, 200.0)"
+        )
+    after_transaction = content_epoch.current(path)
+    assert after_transaction > after_write_connection, (
+        "transaction() 提交后没有推进内容纪元 → 走这条路径的生产写入会让"
+        "「就地改动看不见」的假绿从后门回来"
+    )
+
+    # 回滚的那次**不许**推进（没落库就没有内容变化）
+    stable = content_epoch.current(path)
+    with pytest.raises(RuntimeError), duckdb_store.transaction() as conn:
+        conn.execute(
+            "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume) "
+            "VALUES ('000003', '2024-02-01', 30.0, 300.0)"
+        )
+        raise RuntimeError("故意失败，验证回滚不记账")
+    assert content_epoch.current(path) == stable, (
+        "事务回滚了却推进了内容纪元 → 会让缓存无谓失效"
+    )
