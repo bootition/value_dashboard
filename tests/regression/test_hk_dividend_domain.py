@@ -450,15 +450,28 @@ def _hk_rows() -> list[dict]:
 
 
 def _seed_hk_dividend_row(duck: DuckDBStore) -> None:
-    duck.write_query(
-        """INSERT INTO hk_dividends
-           (stock_code, ex_date, announcement_date, report_period, plan_explain,
-            dividend_per_share_hkd, dividend_per_share_cny, transfer_end_date,
-            dividend_date, source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES ('00941', '2004-06-10', '2004-03-19', '2003', '每股派港币0.2元',
-                   0.2, NULL, '2004/06/14-2004/06/16', '2004-06-21',
-                   'eastmoney_hk_dividend', CURRENT_TIMESTAMP, ?, 'approximate', 'old-batch')""",
-        ["0" * 64],
+    # `batch_id="old-batch"` 是**用例的论点**，不是样板：下面的原子替换用例断言
+    # `batch_id != "old-batch"`（更新必须写入新批次，不是留着旧行）。所以显式传，
+    # 别让工厂的确定性默认值把它悄悄换掉 —— 那样断言会变成恒真。
+    # `fetch_time` 原来是库侧 `CURRENT_TIMESTAMP` → 显式 `trace_now=True`。
+    Seed(duck, trace_now=True).hk_dividends(
+        "00941",
+        [
+            (
+                "2004-06-10",
+                "每股派港币0.2元",
+                0.2,
+                None,
+                {
+                    "announcement_date": "2004-03-19",
+                    "report_period": "2003",
+                    "transfer_end_date": "2004/06/14-2004/06/16",
+                    "dividend_date": "2004-06-21",
+                    "confidence": "approximate",
+                    "batch_id": "old-batch",
+                },
+            )
+        ],
     )
 
 
@@ -577,14 +590,11 @@ def _seed_reparse_row(
     hkd: float | None,
     cny: float | None,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO hk_dividends
-           (stock_code, ex_date, plan_explain, dividend_per_share_hkd,
-            dividend_per_share_cny, source, fetch_time, raw_response_hash,
-            confidence, batch_id)
-           VALUES (?, ?, ?, ?, ?, 'eastmoney_hk_dividend', CURRENT_TIMESTAMP,
-                   ?, 'approximate', 'reparse-test')""",
-        [stock_code, ex_date, plan_explain, hkd, cny, "0" * 64],
+    # `fetch_time` 原来是库侧 `CURRENT_TIMESTAMP` → 显式 `trace_now=True`。
+    Seed(duck, trace_now=True).hk_dividends(
+        stock_code,
+        [(ex_date, plan_explain, hkd, cny)],
+        confidence="approximate",
     )
 
 

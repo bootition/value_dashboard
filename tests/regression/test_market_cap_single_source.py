@@ -34,6 +34,7 @@ from app.core.market_cap import (
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 BONUS_STOCK = "001225"
 PRE_BONUS_SHARES = 65_570_800
@@ -56,26 +57,30 @@ def _seed_stock(
     history: list[tuple[str, int]] | None = None,
     prices: list[tuple[str, float]] | None = None,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed,
-                                   total_shares, circ_shares)
-           VALUES (?, ?, 'SZSE', TRUE, ?, ?)""",
-        [stock_code, stock_code, meta_shares, circ_shares or meta_shares],
+    seed = Seed(duck)
+    seed.stock(
+        stock_code,
+        exchange="SZSE",
+        is_listed=True,
+        total_shares=meta_shares,
+        circ_shares=circ_shares or meta_shares,
     )
-    for trade_date, close in prices or [(LAST_PRICE_DATE, LAST_CLOSE)]:
-        for table in ("price_daily_raw", "price_daily_qfq"):
-            duck.write_query(
-                f"INSERT INTO {table} (stock_code, trade_date, close) VALUES (?, ?, ?)",
-                [stock_code, trade_date, close],
-            )
-    for effective_date, total_shares in history or []:
-        duck.write_query(
-            """INSERT INTO share_capital_history
-                   (stock_code, effective_date, total_shares, change_reason,
-                    is_anchor, verified, source, raw_hash, batch_id)
-               VALUES (?, ?, ?, NULL, TRUE, TRUE, 'cninfo_capital', 'seed', 'seed')""",
-            [stock_code, effective_date, total_shares],
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        seed.prices(
+            stock_code, prices or [(LAST_PRICE_DATE, LAST_CLOSE)], table=table,
         )
+    seed.shares(
+        stock_code,
+        history or [],
+        change_reason=None,
+        is_anchor=True,
+        verified=True,
+        # 溯源三件套照原样写死（`cninfo_capital` / `seed`）：历史股本的来源口径
+        # 就是这张表被断言的一部分，工厂默认形状（csmar + 计算出的 hash）不适用。
+        source="cninfo_capital",
+        raw_hash="seed",
+        batch_id="seed",
+    )
 
 
 def _bonus_stock_with_history(duck: DuckDBStore) -> None:
@@ -89,11 +94,16 @@ def _bonus_stock_with_history(duck: DuckDBStore) -> None:
             (LAST_PRICE_DATE, LAST_CLOSE),
         ],
     )
-    duck.write_query(
-        """INSERT INTO xdxr (stock_code, event_date, category, fenhong, songzhuangu,
-                             peigu, peigujia)
-           VALUES (?, ?, 1, 0.0, 0.4, 0.0, 0.0)""",
-        [BONUS_STOCK, BONUS_EX_DATE],
+    # 五个金额列逐字写（0.0 = 这次除权除息只有送转、没有现金/配股），
+    # 不用 `bonus()`：那个方法只写 `songzhuangu`，其余留 NULL，与这一行不等。
+    Seed(duck).xdxr(
+        BONUS_STOCK,
+        BONUS_EX_DATE,
+        category=1,
+        fenhong=0.0,
+        songzhuangu=0.4,
+        peigu=0.0,
+        peigujia=0.0,
     )
 
 
@@ -257,13 +267,17 @@ def test_both_paths_track_asof_shares_not_current_shares(
     # 送转事件尚未写进历史表 → 仍是送转前股本（旧行为不变，由回填脚本负责补）
     assert after["total_market_cap"] == LAST_CLOSE * PRE_BONUS_SHARES
 
-    duckdb_store.write_query(
-        """INSERT INTO share_capital_history
-               (stock_code, effective_date, total_shares, change_reason, is_anchor,
-                verified, source, raw_hash, batch_id)
-           VALUES (?, ?, ?, 'xdxr_songzhuangu=0.4', FALSE, FALSE,
-                   'xdxr_backfill', 'hash', 'batch')""",
-        [BONUS_STOCK, BONUS_EX_DATE, POST_BONUS_SHARES],
+    # 回填脚本写出来的形状：`xdxr_backfill` / `hash` / `batch`、未核验、非锚点
+    # —— 这几个值本身就是要与"人工锚点"区分开的判据，不能被工厂默认值替换。
+    Seed(duckdb_store).shares(
+        BONUS_STOCK,
+        [(BONUS_EX_DATE, POST_BONUS_SHARES)],
+        change_reason="xdxr_songzhuangu=0.4",
+        is_anchor=False,
+        verified=False,
+        source="xdxr_backfill",
+        raw_hash="hash",
+        batch_id="batch",
     )
 
     after_backfill = _calculator_market_cap(
@@ -357,30 +371,43 @@ def _seed_backfill_cases(duck: DuckDBStore) -> None:
     """三只股票：可推算 / 同日已有行（必须保留原值） / 缺前值（必须跳过）。"""
     # A: 可推算（链条末端之后的送转）
     _seed_stock(duck, history=[(HISTORY_DATE, PRE_BONUS_SHARES)])
-    duck.write_query(
-        """INSERT INTO xdxr (stock_code, event_date, category, fenhong, songzhuangu,
-                             peigu, peigujia)
-           VALUES (?, ?, 1, 0.0, 0.4, 0.0, 0.0)""",
-        [BONUS_STOCK, BONUS_EX_DATE],
+    # 五个金额列逐字写（0.0 = 这次除权除息只有送转、没有现金/配股），
+    # 不用 `bonus()`：那个方法只写 `songzhuangu`，其余留 NULL，与这一行不等。
+    Seed(duck).xdxr(
+        BONUS_STOCK,
+        BONUS_EX_DATE,
+        category=1,
+        fenhong=0.0,
+        songzhuangu=0.4,
+        peigu=0.0,
+        peigujia=0.0,
     )
     # B: 同日期已有行（值可疑，但「只增不改」不许覆盖）
     _seed_stock(duck, stock_code="600000", meta_shares=1_600_000, history=[
         ("2026-03-31", 1_000_000),
         ("2026-06-30", 1_600_000),
     ])
-    duck.write_query(
-        """INSERT INTO xdxr (stock_code, event_date, category, fenhong, songzhuangu,
-                             peigu, peigujia)
-           VALUES ('600000', '2026-06-30', 1, 0.0, 0.5, 0.0, 0.0)"""
+    Seed(duck).xdxr(
+        "600000",
+        "2026-06-30",
+        category=1,
+        fenhong=0.0,
+        songzhuangu=0.5,
+        peigu=0.0,
+        peigujia=0.0,
     )
     # C: 事件早于任何历史行 → 缺前值，必须跳过
     _seed_stock(duck, stock_code="600001", meta_shares=999_000, history=[
         ("2026-08-31", 999_000),
     ])
-    duck.write_query(
-        """INSERT INTO xdxr (stock_code, event_date, category, fenhong, songzhuangu,
-                             peigu, peigujia)
-           VALUES ('600001', '2026-06-30', 1, 0.0, 0.2, 0.0, 0.0)"""
+    Seed(duck).xdxr(
+        "600001",
+        "2026-06-30",
+        category=1,
+        fenhong=0.0,
+        songzhuangu=0.2,
+        peigu=0.0,
+        peigujia=0.0,
     )
 
 

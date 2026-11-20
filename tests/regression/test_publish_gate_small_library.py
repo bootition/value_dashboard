@@ -36,18 +36,21 @@ from app.core.data_quality import (
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 def _seed_listed(store: DuckDBStore, total: int, broken: int) -> list[str]:
     """Insert ``total`` listed stocks, of which ``broken`` breach circ<=total."""
     codes = [f"{index:06d}" for index in range(total)]
     with store.write_connection() as connection:
-        connection.executemany(
-            """INSERT INTO stock_meta
-                   (stock_code, name, exchange, is_listed, listing_date,
-                    total_shares, circ_shares)
-               VALUES (?, ?, 'SZSE', TRUE, DATE '2020-01-01', 100, 80)""",
+        # 池子播种走批量口（一次 executemany）；已在调用点的写连接里 → `join(connection)`，
+        # 否则工厂会自己再抢一次应用级写锁（自撞 ~30s 后超时）。
+        Seed(store).join(connection).stocks(
             [(code, code) for code in codes],
+            is_listed=True,
+            listing_date="2020-01-01",
+            total_shares=100,
+            circ_shares=80,
         )
         if broken:
             connection.execute(
@@ -60,33 +63,20 @@ def _seed_listed(store: DuckDBStore, total: int, broken: int) -> list[str]:
 
 def _seed_publish_sources(store: DuckDBStore, codes: list[str]) -> None:
     with store.write_connection() as connection:
+        # 同理：五张表逐只股票一行，全部写在这条写连接上（`join` 不拿锁/不提交）。
+        seed = Seed(store).join(connection)
         for code in codes:
-            connection.execute(
-                """INSERT INTO balance_sheet
-                       (stock_code, report_date, total_assets, total_liabilities, total_equity)
-                   VALUES (?, '2025-03-31', 100.0, 20.0, 80.0)""",
-                [code],
+            seed.balance(
+                code,
+                "2025-03-31",
+                total_assets=100.0,
+                total_liabilities=20.0,
+                total_equity=80.0,
             )
-            connection.execute(
-                """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-                   VALUES (?, '2025-03-31', 100.0, 10.0)""",
-                [code],
-            )
-            connection.execute(
-                """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-                   VALUES (?, '2025-03-31', 1.0)""",
-                [code],
-            )
-            connection.execute(
-                """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-                   VALUES (?, '2025-03-31', 10.0)""",
-                [code],
-            )
-            connection.execute(
-                """INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-                   VALUES (?, '2025-03-31', 10.0)""",
-                [code],
-            )
+            seed.income(code, "2025-03-31", revenue=100.0, parent_net_profit=10.0)
+            seed.cash_flow(code, "2025-03-31", cf_from_operating=1.0)
+            seed.prices(code, [("2025-03-31", 10.0)])
+            seed.prices(code, [("2025-03-31", 10.0)], table="price_daily_qfq")
 
 
 # ─── 纯判据（唯一实现）──────────────────────────────────────────────
@@ -204,10 +194,8 @@ def test_publish_rejects_instead_of_partial_when_every_stock_is_quarantined(
     """
     codes = _seed_listed(duckdb_store, total=2, broken=0)
     _seed_publish_sources(duckdb_store, codes)
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('OLD001', '2024-12-31', 10.0)"""
-    )
+    # 上一代快照（门禁拒绝后必须完整保留的那一行）。
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,
@@ -240,10 +228,8 @@ def test_real_gate_hard_blocks_a_fully_broken_small_library(
     """真门禁路径：小库 100% 违规 → 1/3 规则命中 → 整批 rejected（保留旧行）。"""
     _seed_listed(duckdb_store, total=1, broken=1)
     _seed_publish_sources(duckdb_store, ["000000"])
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, latest_close)
-           VALUES ('OLD001', '2024-12-31', 10.0)"""
-    )
+    # 上一代快照（门禁拒绝后必须完整保留的那一行）。
+    Seed(duckdb_store).snapshot("OLD001", "2024-12-31", latest_close=10.0)
     calculator = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store)
     monkeypatch.setattr(
         calculator,

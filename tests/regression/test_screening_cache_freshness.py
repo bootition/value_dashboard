@@ -40,6 +40,8 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import _require_current_screenability
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 _READY_DECISION = {"ready": True, "readiness": {"ready": True}, "warning_codes": []}
 _NOT_READY_DECISION = {
@@ -59,9 +61,14 @@ class _FakeRequest:
 
 
 def _seed_screenable(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    # `stock_meta` 走工厂：`exchange='SZSE'` 逐字传（工厂推断也是 SZSE，但这里不靠推断）。
+    Seed(duck).stock(
+        "000001",
+        name="Test",
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
     insert_minimum_screenable_data(duck)
     insert_matching_trading_calendar(duck, sqlite)
@@ -71,6 +78,10 @@ def _store_decision(
     sqlite: SQLiteStore, fingerprint: str, decision: dict, *, age_seconds: int,
 ) -> None:
     """Persist a decision whose recorded update time is ``age_seconds`` old."""
+    # 留（第 6 类·库侧相对时间 / 论点构造）：`updated_at` 必须是"相对此刻 age_seconds 秒前"，
+    # 而且同一个时间串要**同时**写进 JSON payload 与 `updated_at` 列（被测逻辑比对两者）。
+    # 哨兵 `sql_now("-N seconds")` 能表达相对量，却给不出同一个 Python 字符串塞进 payload，
+    # 换过去就等于把"过期多久"这条论点拆成两份时钟 —— 本轮不动。
     updated = (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
     sqlite.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -148,9 +159,9 @@ def test_fingerprint_changes_when_calendar_rows_replaced_in_place(
     sqlite_store.execute(
         "DELETE FROM trading_dates WHERE trade_date IN (?, ?)", replace,
     )
-    sqlite_store.execute(
-        "INSERT INTO trading_dates (trade_date) VALUES (?), (?)", weekend_donors,
-    )
+    # 纯粹的两行数据（`weekend_donors` 是前面按 fixture 区间算出的绝对日期），走工厂
+    # 的批量入口 `trading_dates()`；"换成周末"这个论点仍在上面那两行注释里。
+    SeedSqlite(sqlite_store).trading_dates(weekend_donors)
 
     legacy_after = sqlite_store.query(
         "SELECT COUNT(*) AS n, MIN(trade_date) AS lo, MAX(trade_date) AS hi FROM trading_dates"
@@ -179,11 +190,12 @@ def test_fingerprint_changes_when_published_override_payload_edited_in_place(
 ) -> None:
     """同型盲区：`manual_overrides` 就地改 payload 不刷新 created_at。"""
     _seed_screenable(duckdb_store, sqlite_store)
-    sqlite_store.execute(
-        """INSERT INTO manual_overrides
-           (stock_code, field_name, report_date, override_value, reason, status, created_at)
-           VALUES ('000001', 'total_assets', '2025-12-31', 200, 'verified', 'published',
-                   '2026-01-01T00:00:00+00:00')"""
+    # `manual_overrides` 走 `SeedSqlite.override`：`status='published'` 与写死的
+    # `created_at` 都是本用例的前提（后者正是"就地改 payload 不刷新它"的那个不变列）。
+    SeedSqlite(sqlite_store).override(
+        "000001", "total_assets", 200,
+        reason="verified", report_date="2025-12-31", status="published",
+        created_at="2026-01-01T00:00:00+00:00",
     )
     baseline = screening_readiness_cache_key(duckdb_store, sqlite_store)
     assert baseline is not None
@@ -303,6 +315,9 @@ def test_missing_updated_at_fails_closed_instead_of_bypassing_the_cap(
     # 注意：`data_refresh_state.updated_at` 列是 NOT NULL，所以"缺时间戳"的真实
     # 形态是**JSON payload 里没有 `updated_at` 字段**（旧版本写下的行 / 迁移残留），
     # 而列上的值另有其用。原实现只看 payload → `age_seconds=None` → 闸门整块跳过。
+    # 留（第 6 类·库侧相对时间 / 论点构造）：`fresh_col` 必须是"**列**上刚写的那一刻"，
+    # 而 payload 里故意缺 `updated_at` —— 这条"列新鲜但无法判定年龄 → fail-closed"的
+    # 差分正是用例要钉的东西；换成固定字面量就不再是"新鲜"的那一侧。
     fresh_col = datetime.now(UTC).isoformat()
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
@@ -324,6 +339,7 @@ def test_missing_updated_at_fails_closed_instead_of_bypassing_the_cap(
     ), "没有时间戳 = 无法判定年龄 = 不得以 stale 名义放行"
 
     # payload 里写了但无法解析，同样必须 fail-closed
+    # 留（第 6 类·库侧相对时间 / 论点构造）：同上一行，`updated_at` 列仍是刚写的 `fresh_col`。
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at)
            VALUES (?, ?, ?)

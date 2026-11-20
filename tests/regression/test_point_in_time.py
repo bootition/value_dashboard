@@ -17,6 +17,7 @@ from app.core.point_in_time import (
     was_visible,
 )
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import Seed
 
 STOCK = "600519"
 SEED = [
@@ -32,14 +33,9 @@ SEED = [
 
 
 def _seed(store: DuckDBStore) -> None:
+    # 已经在调用点事务里 → `join(conn)`（工厂不再自己开事务/拿写锁）。
     with store.transaction() as conn:
-        for report_date, announce_date in SEED:
-            conn.execute(
-                """INSERT INTO financial_report_dates
-                   (stock_code, report_date, announce_date, source, fetch_time, batch_id)
-                   VALUES (?, CAST(? AS DATE), CAST(? AS DATE), 'csmar', '2026-09-19 00:00:00', 'b')""",
-                [STOCK, report_date, announce_date],
-            )
+        Seed(store).join(conn).report_dates(STOCK, SEED)
 
 
 def test_picks_latest_period_whose_announce_date_has_passed(duckdb_store: DuckDBStore) -> None:
@@ -79,12 +75,7 @@ def test_stale_flag_uses_one_year_threshold(duckdb_store: DuckDBStore) -> None:
 
     # 某股票最后一期年报为 2010 年报（2011-04-30 公布），此后长期无披露
     with duckdb_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO financial_report_dates
-               (stock_code, report_date, announce_date, source, fetch_time, batch_id)
-               VALUES ('000999', CAST('2010-12-31' AS DATE), CAST('2011-04-30' AS DATE),
-                       'csmar', '2026-09-19 00:00:00', 'b')"""
-        )
+        Seed(duckdb_store).join(conn).report_dates("000999", [("2010-12-31", "2011-04-30")])
     stale = latest_visible_annual(duckdb_store, "000999", date(2013, 1, 1))
     assert stale is not None
     assert stale.days_since_announce > 400

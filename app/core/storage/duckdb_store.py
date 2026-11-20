@@ -594,6 +594,19 @@ class DuckDBStore:
                     with contextlib.suppress(Exception):
                         conn.rollback()
                 conn.close()
+                # 2026-11-23 修（由测试基建 agent 发现）：这是**第二条写路径** ——
+                # `write_connection()` 提交后会推进内容纪元，这里原先**没有**，
+                # 于是所有走 `transaction()` 的生产写入（analyst_forecast / archive /
+                # backfill / backup / business …）都**不会**让筛选就绪指纹失效，
+                # 等于把"就地改动看不见"的假绿从这个口子放了回来。
+                # 与 `write_connection()` 对齐：只在**提交成功**后推进一次。
+                if committed:
+                    with contextlib.suppress(Exception):
+                        from app.core.storage import content_epoch
+
+                        content_epoch.bump(
+                            self._path_set.sqlite_path, reason="duckdb_transaction"
+                        )
 
     def write_query(self, sql: str, params: list[Any] | None = None) -> None:
         """执行写操作（自动获取写锁）"""

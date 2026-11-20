@@ -56,6 +56,7 @@ from app.core.screening.engine import (
 )
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -96,6 +97,10 @@ def _bulk_domain(
         selects.append(
             f"CASE WHEN i % {step} = 0 THEN NULL ELSE 1.0 END" if step else "1.0"
         )
+    # 留（第 4 类·多站点缺口，本轮不补 API）：表名与列清单都是本函数**参数**
+    # （`_bulk_snapshot` / `_bulk_extended` 分别喂 `indicator_snapshot` /
+    # `indicator_ext`），`SELECT ... FROM range(...)` 一次生成 `count` 行也不是
+    # "播种一行"的语义 —— 按域方法表达不了，本轮如实登记为下一轮候选。
     duck.write_query(
         f"INSERT INTO {table} ({', '.join([*head, *columns])}) "
         f"SELECT {', '.join(selects)} FROM range(0, ?) AS t(i)",
@@ -145,21 +150,22 @@ def _patch_warning_codes(monkeypatch: pytest.MonkeyPatch, codes: list[str]) -> N
 def _seed_screenable(duck: DuckDBStore, values: dict[str, Any] | None = None) -> None:
     """最小可筛选夹具：1 只票 + 1 行快照。"""
     values = values or {}
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false)"""
+    seed = Seed(duck)
+    # `name='One'`、`exchange='SZSE'` 逐字传（工厂默认值按代码段推断，与本文件夹具
+    # 不是同一口径）；`calculated_at` 仍是本文件那个固定的 `NOW`，不是库侧时钟。
+    seed.stock(
+        "000001", name="One", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
-    duck.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, calculated_at, latest_close, roe, dividend_yield)
-           VALUES ('000001', '2025-12-31', ?, 10, ?, ?)""",
-        [NOW, values.get("roe", 12.0), values.get("dividend_yield", 0.02)],
+    seed.snapshot(
+        "000001",
+        "2025-12-31",
+        calculated_at=NOW,
+        latest_close=10,
+        roe=values.get("roe", 12.0),
+        dividend_yield=values.get("dividend_yield", 0.02),
     )
-    duck.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
-           VALUES ('000001', '2025-12-31', 100)"""
-    )
+    seed.balance("000001", "2025-12-31", total_assets=100)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -471,7 +477,13 @@ def test_status_page_runs_cheap_only_but_passes_expensive_summary(
     assert expensive["status"] == "ok"
     assert expensive["generated_at"] == doctor["generated_at"]
     assert expensive["run_id"] == doctor["run_id"]
-    assert expensive["cached_at"]
+    stored_cached_at = sqlite_store.query(
+        "SELECT updated_at FROM data_refresh_state WHERE key = ?",
+        [asset_health.EXPENSIVE_SUMMARY_STATE_KEY],
+    )[0]["updated_at"]
+    assert expensive["cached_at"] == stored_cached_at, (
+        "cached_at 必须是缓存行的写入时间（不是本次构建时间，否则过期缓存会装成新数据）"
+    )
     assert expensive["crosscheck"] is not None
     assert expensive["crosscheck"]["tier"] == "expensive"
     # cheap 档本身依然把 expensive 规则标 skipped
@@ -607,11 +619,15 @@ def test_low_coverage_extended_field_is_hidden_as_not_available(
     _patch_warning_codes(monkeypatch, [])
     # 扩展域：3 只票，只有 1 只有 free_cash_flow → 覆盖率 33%
     for index, code in enumerate(("000001", "000002", "000003")):
-        duckdb_store.write_query(
-            """INSERT INTO indicator_ext
-                   (stock_code, report_date, free_cash_flow, source, calculated_at, data_version)
-               VALUES (?, CAST('2026-09-30' AS DATE), ?, 'test', CURRENT_TIMESTAMP, 1)""",
-            [code, 1.0 if index == 0 else None],
+        # `source='test'` / `data_version=1` 逐字传（工厂不替调用点编"哪一版口径"）；
+        # `calculated_at` 原 SQL 是 `CURRENT_TIMESTAMP` → 显式传哨兵（迁移守则）。
+        Seed(duckdb_store).extended(
+            code,
+            "2026-09-30",
+            free_cash_flow=1.0 if index == 0 else None,
+            source="test",
+            calculated_at=CURRENT_TIMESTAMP,
+            data_version=1,
         )
 
     payload = _indicators_payload(duckdb_store, sqlite_store)

@@ -12,6 +12,7 @@ from app.core.etf_strategy import add_etf_trade, upsert_etf_meta
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.etf_strategy import router as etf_router
+from tests.support.seed import Seed
 
 
 def _build_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -30,18 +31,14 @@ def _seed(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     )
     add_etf_trade(sqlite, etf_code="512880", trade_date="2026-01-05",
                   direction="buy", price=1.0, shares=100, fee=0.1)
-    duck.write_query(
-        """INSERT INTO index_valuation
-           (index_code, trade_date, pe_ttm, pe_metric, pb, source,
-            fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('SW801790', '2026-09-01', 20.0, 'sws_daily', 1.0, 'sws',
-                   CURRENT_TIMESTAMP, 'h', 'approximate', 'b')"""
+    # 两处原来是 `INSERT ... CURRENT_TIMESTAMP` → `trace_now=True` 保住"刚抓的"
+    # （工作台用估值/行情的抓取时刻判新鲜度，换成固定过去时间会静默改判据）。
+    seed = Seed(duck, trace_now=True)
+    seed.index_valuation(
+        "SW801790", [("2026-09-01", 20.0)], source="sws",
+        pe_metric="sws_daily", pb=1.0, confidence="approximate",
     )
-    duck.write_query(
-        """INSERT INTO etf_daily
-           (etf_code, trade_date, close_price, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('512880', '2026-09-03', 1.1, 'ths', CURRENT_TIMESTAMP, 'h', 'strict', 'b')"""
-    )
+    seed.etf_daily("512880", [("2026-09-03", 1.1)])
 
 
 def test_overview_and_detail_are_read_only(
@@ -77,12 +74,9 @@ def test_overview_uses_ths_track_percentile_fallback(
     """港股/中概无指数估值历史：同花顺跟踪指数 PE-TTM 五年分位兜底信号。"""
     upsert_etf_meta(sqlite_store, etf_code="513130", name="恒生科技",
                     track_index_code=None, primary_metric="pe")
-    duckdb_store.write_query(
-        """INSERT INTO etf_daily
-           (etf_code, trade_date, close_price, track_pe_ttm_five_year_percentile,
-            source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('513130', '2026-09-03', 0.6, 25.0, 'ths',
-                   CURRENT_TIMESTAMP, 'h', 'strict', 'b')"""
+    # 原来是 `INSERT ... CURRENT_TIMESTAMP` → `trace_now=True`；分位列逐行给。
+    Seed(duckdb_store, trace_now=True).etf_daily(
+        "513130", [("2026-09-03", 0.6)], track_pe_ttm_five_year_percentile=25.0,
     )
     client = _build_client(duckdb_store, sqlite_store)
 

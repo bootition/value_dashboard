@@ -5,10 +5,12 @@ P0-3 回归：QFQ 收益/波动/回撤必须只认连续交易日（缺行/NULL/
 严格模式拒绝未证 `right_field`、拒绝混合 snapshot/statement 时点。
 全部用例使用隔离临时库（duckdb_store / sqlite_store fixture），不联网。
 
-播种：能表达的都走 `tests/support/seed.py` 的按域工厂。**仍留内联 SQL 的两类**：
-1. `with duckdb_store.write_connection()` 事务块内的批量价格写入 —— 工厂自带写锁，
-   嵌套进已持有写锁的事务会撞锁，故保留；
-2. `dividends`/`source_audit` 这类工厂还没有对应方法的表（见各处的「缺什么 API」注释）。
+播种：全部走 `tests/support/seed.py` / `seed_sqlite.py` 的按域工厂。原先"必须留内联"
+的两类现在都能表达：
+1. `with duckdb_store.write_connection()` 事务块内的批量价格写入 → `Seed(...).join(connection)`
+   （绑定调用方连接，不重复申请写锁，事务边界与原子性不变）；
+2. `dividends` / `source_audit` → `Seed.dividends()` / `Seed.source_audit()`
+   （原 SQL 的 `CURRENT_TIMESTAMP` 按迁移守则换成 SQL 哨兵，不静默降级成固定过去时间）。
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from app.core.indicators.calculator import IndicatorCalculator
 from app.core.screening.engine import ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
-from tests.support.seed import Seed
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 
 
 def _calculator(duck: DuckDBStore, sqlite: SQLiteStore) -> IndicatorCalculator:
@@ -72,23 +74,21 @@ def test_p0_3_red_raw_and_gap_compaction_green_qfq_contiguous_metrics(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore, seed_trading_dates,
 ) -> None:
     seed_trading_dates('2025-01-02', '2025-01-03', '2025-01-06', '2025-01-07', '2025-01-08')
+    # 第 1 类：`price_daily_raw` / `price_daily_qfq` → `Seed.prices()`；两块写在同一
+    # 个事务里（`join(connection)` 不自带写锁，不会与调用方已持有的写锁自撞）。
     with duckdb_store.write_connection() as connection:
-        connection.executemany(
-            "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
-            [
-                ('600519', '2025-01-02', 100.0), ('600519', '2025-01-03', 50.0),
-                ('600519', '2025-01-06', 1.0), ('600519', '2025-01-07', 1.0),
-                ('600519', '2025-01-08', 1.0),
-            ],
-        )
-        connection.executemany(
-            "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES (?, ?, ?)",
-            [
-                ('600519', '2025-01-02', 10.0), ('600519', '2025-01-03', 11.0),
-                ('600519', '2025-01-06', None), ('600519', '2025-01-07', 12.0),
-                ('600519', '2025-01-08', 13.0),
-            ],
-        )
+        seed = Seed(duckdb_store).join(connection)
+        seed.prices('600519', [
+            ('2025-01-02', 100.0), ('2025-01-03', 50.0),
+            ('2025-01-06', 1.0), ('2025-01-07', 1.0),
+            ('2025-01-08', 1.0),
+        ])
+        # `close=None` 是"当天前复权价缺失"的构造本身（趋势必须 fail-closed）。
+        seed.prices('600519', [
+            ('2025-01-02', 10.0), ('2025-01-03', 11.0),
+            ('2025-01-06', None), ('2025-01-07', 12.0),
+            ('2025-01-08', 13.0),
+        ], table='price_daily_qfq')
 
     metrics = _calculator(duckdb_store, sqlite_store)._calc_technical('600519')
 
@@ -112,16 +112,15 @@ def test_p0_3_qfq_metrics_reject_omitted_expected_trading_days(
         '2025-01-08', '2025-01-09', '2025-01-10',
     )
     with duckdb_store.write_connection() as connection:
-        connection.executemany(
-            "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
-            [('600519', '2025-01-02', 10.0), ('600519', '2025-01-03', 11.0),
-             ('600519', '2025-01-10', 12.0)],
-        )
-        connection.executemany(
-            "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES (?, ?, ?)",
-            [('600519', '2025-01-02', 10.0), ('600519', '2025-01-03', 11.0),
-             ('600519', '2025-01-10', 12.0)],
-        )
+        # 第 1 类：两张表同一份"缺行"序列 → `Seed.prices()`（缺哪几天就是论点，
+        # 日期逐字列在调用点；`join(connection)` 保持调用方事务）。
+        seed = Seed(duckdb_store).join(connection)
+        seed.prices('600519', [
+            ('2025-01-02', 10.0), ('2025-01-03', 11.0), ('2025-01-10', 12.0),
+        ])
+        seed.prices('600519', [
+            ('2025-01-02', 10.0), ('2025-01-03', 11.0), ('2025-01-10', 12.0),
+        ], table='price_daily_qfq')
 
     metrics = _calculator(duckdb_store, sqlite_store)._calc_technical('600519')
 
@@ -136,16 +135,14 @@ def test_p0_3_qfq_metrics_accept_calendar_contiguous_weekday_sequence(
     seed_trading_dates('2025-01-02', '2025-01-03', '2025-01-06', '2025-01-07', '2025-01-08')
     with duckdb_store.write_connection() as connection:
         prices = [
-            ('600519', '2025-01-02', 10.0), ('600519', '2025-01-03', 11.0),
-            ('600519', '2025-01-06', 12.0), ('600519', '2025-01-07', 13.0),
-            ('600519', '2025-01-08', 14.0),
+            ('2025-01-02', 10.0), ('2025-01-03', 11.0),
+            ('2025-01-06', 12.0), ('2025-01-07', 13.0),
+            ('2025-01-08', 14.0),
         ]
-        connection.executemany(
-            "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)", prices,
-        )
-        connection.executemany(
-            "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES (?, ?, ?)", prices,
-        )
+        # 第 1 类：同一份价格序列写两张表 → `Seed.prices()`（`join(connection)`）。
+        seed = Seed(duckdb_store).join(connection)
+        seed.prices('600519', prices)
+        seed.prices('600519', prices, table='price_daily_qfq')
 
     metrics = _calculator(duckdb_store, sqlite_store)._calc_technical('600519')
 
@@ -158,16 +155,18 @@ def test_raw_technical_metrics_do_not_compact_across_calendar_gaps(
 ) -> None:
     seed_trading_dates('2025-01-02', '2025-01-03', '2025-01-06', '2025-01-07', '2025-01-08')
     with duckdb_store.write_connection() as connection:
-        connection.executemany(
-            "INSERT INTO price_daily_raw (stock_code, trade_date, close, volume, turnover_rate) VALUES (?, ?, ?, ?, ?)",
-            [('600519', '2025-01-02', 10.0, 100.0, 1.0),
-             ('600519', '2025-01-03', 11.0, 100.0, 1.0),
-             ('600519', '2025-01-08', 12.0, 1000.0, 9.0)],
-        )
-        connection.executemany(
-            "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES (?, ?, ?)",
-            [('600519', '2025-01-02', 10.0), ('600519', '2025-01-03', 11.0), ('600519', '2025-01-08', 12.0)],
-        )
+        seed = Seed(duckdb_store).join(connection)
+        # 第 1 类：`price_daily_raw` → `Seed.prices()`。`volume`/`turnover_rate` 逐行
+        # 不同（最新一行 1000 股 / 9% 才是 `avg_volume`/`turnover_rate` 断言的论点），
+        # 所以按"同值的行分一组"两次调用，边界值仍逐字可见。
+        seed.prices('600519', [
+            ('2025-01-02', 10.0), ('2025-01-03', 11.0),
+        ], volume=100.0, turnover_rate=1.0)
+        seed.prices('600519', [('2025-01-08', 12.0)], volume=1000.0, turnover_rate=9.0)
+        # 第 1 类：`price_daily_qfq` → `Seed.prices(table='price_daily_qfq')`。
+        seed.prices('600519', [
+            ('2025-01-02', 10.0), ('2025-01-03', 11.0), ('2025-01-08', 12.0),
+        ], table='price_daily_qfq')
 
     metrics = _calculator(duckdb_store, sqlite_store)._calc_technical('600519')
 
@@ -179,16 +178,14 @@ def test_raw_technical_metrics_do_not_compact_across_calendar_gaps(
 def test_p0_3_red_wall_clock_dividends_green_snapshot_as_of(
     duckdb_store: DuckDBStore, sqlite_store: SQLiteStore,
 ) -> None:
-    # 保留内联：`dividends` 尚无工厂方法 —— 缺 `seed.dividends(code, ex_date,
-    # announcement_date=..., dividend_per_share=...)`（本表主键含 ex_date，
-    # 且 `announcement_date` 是本用例的**故意错配**维度，必须逐行写清）。
-    duckdb_store.write_query("""
-        INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-        VALUES
-            ('600519', '2024-06-30', '2024-06-01', 5.0),
-            ('600519', '2025-11-30', '2025-11-01', 1.0),
-            ('600519', '2025-12-15', '2026-01-01', 9.0)
-    """)
+    # 第 1 类：`dividends` → `Seed.dividends()`。三行一次播种：主键含 ex_date，
+    # 而 `announcement_date` 的**故意错配**（晚于 ex_date / 跨快照日）是本用例的
+    # 论点，所以公告日逐行写清、工厂不替你兜底。
+    Seed(duckdb_store).dividends('600519', [
+        ('2024-06-30', '2024-06-01', 5.0),
+        ('2025-11-30', '2025-11-01', 1.0),
+        ('2025-12-15', '2026-01-01', 9.0),
+    ])
     calculator = _calculator(duckdb_store, sqlite_store)
 
     summary = calculator._get_dividend_summary('600519', '2025-12-31')
@@ -227,14 +224,14 @@ def test_p0_4_red_right_field_unproven_green_strict_rejects_it(
     seed.stock('000001', name='Strict left only', exchange='SZSE',
                listing_date='2020-01-01', is_st=False, is_suspended=False)
     seed.snapshot('000001', '2025-12-31', pe_ttm=10, pb_mrq=5)
-    # 保留内联：`source_audit` 尚无工厂方法 —— 缺 provenance 审计行 API
-    # （`source/fetch_batch_id/fetch_time/raw_response_hash/confidence` 五件套 +
-    #  SQL 侧 `CURRENT_TIMESTAMP`/`repeat()` 生成值）。
-    duckdb_store.write_query("""
-        INSERT INTO source_audit
-            (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
-        VALUES ('000001', 'pe_ttm', '2025-12-31', 10, 'test', 'batch', CURRENT_TIMESTAMP, repeat('a', 64), 'strict')
-    """)
+    # 第 1 类：`source_audit` → `Seed.source_audit()`。`fetch_time` 原 SQL 是库侧
+    # `CURRENT_TIMESTAMP`（"这条审计是刚写的"是 strict 口径的判据），按迁移守则
+    # 传 SQL 哨兵；`raw_response_hash` 原为 `repeat('a', 64)`，逐字写 64 个 a。
+    Seed(duckdb_store).source_audit(
+        '000001', 'pe_ttm', report_date='2025-12-31', value=10, source='test',
+        fetch_batch_id='batch', fetch_time=CURRENT_TIMESTAMP,
+        raw_response_hash='a' * 64, confidence='strict',
+    )
 
     result = ScreeningEngine(duck=duckdb_store).run(
         {'conditions': {'logic': 'AND', 'rules': [

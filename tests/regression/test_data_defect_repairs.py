@@ -22,6 +22,7 @@ import repair_data_defects as repairs  # noqa: E402
 
 from app.core.report_periods import annual_period_for  # noqa: E402
 from app.core.storage.duckdb_store import DuckDBStore  # noqa: E402
+from tests.support.seed import Seed  # noqa: E402
 
 
 def test_annual_period_for_maps_fetch_date_back() -> None:
@@ -95,11 +96,9 @@ def test_declare_date_backfill_plan_and_apply(duckdb_store: DuckDBStore) -> None
                (stock_code, report_date, declare_date, source, fetched_at)
            VALUES ('000001', CAST('2024-12-31' AS DATE), NULL, 'fixture', now())"""
     )
-    duckdb_store.write_query(
-        """INSERT INTO financial_report_dates
-               (stock_code, report_date, announce_date, source, fetch_time, batch_id)
-           VALUES ('000001', CAST('2024-12-31' AS DATE), CAST('2025-04-20' AS DATE),
-                   'fixture', now(), 'fixture')"""
+    # 公告日行的 `fetch_time` 原来是库侧 `now()` → 显式 `trace_now=True` 保住"刚抓的"。
+    Seed(duckdb_store, trace_now=True).report_dates(
+        "000001", [("2024-12-31", "2025-04-20")], source="fixture",
     )
 
     plan = repairs.plan_declare_date_backfill(duckdb_store)

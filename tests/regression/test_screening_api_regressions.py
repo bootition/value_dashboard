@@ -11,13 +11,16 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import resolve_rule_indicator_locks, router
 from app.web.api.stock_detail import router as stock_detail_router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 from tests.support.seed_sqlite import SeedSqlite
 
-# 本轮收敛：`screening_rules` 1 处 + `dsl_expressions` 2 处 → `SeedSqlite`
-# （后两处原本是事务内 `executemany`，改用 `join(conn)` 后提交权仍归调用方）。
-# 其余保留内联：`stock_meta` / `indicator_snapshot`（`_make_screenable` 与
-# 技术覆盖/同比两条用例）与 `screening_runs` 都不在本轮清单内 —— 其中
-# `screening_runs` 工厂本就没有方法（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
+# 已收敛：`screening_rules` 1 处 + `dsl_expressions` 2 处 → `SeedSqlite`
+# （后两处原本是事务内 `executemany`，改用 `join(conn)` 后提交权仍归调用方）；
+# 本轮追加：`_make_screenable` 的 `stock_meta`/`indicator_snapshot` 与
+# 技术覆盖（100 行 `executemany`）/同比口径（单行）两条用例的 `indicator_snapshot`
+# → `Seed`，`calculated_at` 一律交回库侧 `CURRENT_TIMESTAMP` 哨兵。
+# 仍保留内联的只有 `screening_runs`：工厂没有方法（见 `tests/support/seed_sqlite.py`
+# 「尚未覆盖」），属第 4 类「多站点缺口，本轮不补 API」。
 
 
 def _make_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -29,15 +32,14 @@ def _make_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
 
 
 def _make_screenable(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
-    # 保留内联：这两行「可筛选股票」脚手架不在本轮清单内（工厂 `stocks()` 可覆盖）。
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false)"""
+    # 「可筛选股票」脚手架：`name='One'`、`exchange='SZSE'` 逐字传（工厂默认值按
+    # 代码段推断，与本文件夹具不是同一口径）。
+    seed = Seed(duck)
+    seed.stock(
+        "000001", name="One", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
-    duck.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm)
-           VALUES ('000001', '2025-12-31', 10)"""
-    )
+    seed.snapshot("000001", "2025-12-31", pe_ttm=10)
     insert_minimum_screenable_data(duck)
     insert_matching_trading_calendar(duck, sqlite)
 
@@ -190,7 +192,8 @@ def test_add_to_watchlist_deduplicates_requested_codes(
         json={"name": "watchlist-value", "rule_json": {"conditions": {"logic": "AND", "rules": []}}},
     ).json()
     with sqlite_store.transaction() as conn:
-        # 保留内联：`screening_runs` 工厂没有方法（见 `tests/support/seed_sqlite.py`「尚未覆盖」）。
+        # 留（第 4 类·多站点缺口，本轮不补 API）：`screening_runs` 全仓 3 处播种、
+        # 工厂没有方法；本轮租约禁止扩 `seed_sqlite.py`，如实登记为下一轮候选。
         conn.execute(
             """INSERT INTO screening_runs
                (run_id, rule_id, rule_version, result_json, columns_json, sort_json,
@@ -323,14 +326,20 @@ def test_technical_coverage_threshold_is_single_source_for_both_consumers(
         for index in range(100)
     ]
     with duckdb_store.transaction() as connection:
-        # 保留内联：100 行快照的 `calculated_at` 要库侧 `CURRENT_TIMESTAMP`，且不在本轮清单内。
-        connection.executemany(
-            """INSERT INTO indicator_snapshot
-                   (stock_code, report_date, calculated_at, period_return,
-                    annualized_volatility, max_drawdown)
-               VALUES (?, DATE '2026-09-30', CURRENT_TIMESTAMP, ?, ?, ?)""",
-            rows,
-        )
+        # `calculated_at` 原 SQL 写的是 `CURRENT_TIMESTAMP`：按迁移守则显式传哨兵，
+        # 免得"刚算出来的"被静默写成工厂的固定过去时间。`join(conn)` 让提交权
+        # 仍归调用方（工厂不在别人的事务里 begin/commit）。
+        Seed(duckdb_store).join(connection).snapshots([
+            {
+                "stock_code": code,
+                "report_date": "2026-09-30",
+                "calculated_at": CURRENT_TIMESTAMP,
+                "period_return": period_return,
+                "annualized_volatility": annualized_volatility,
+                "max_drawdown": max_drawdown,
+            }
+            for code, period_return, annualized_volatility, max_drawdown in rows
+        ])
 
     client = _make_client(duckdb_store, sqlite_store)
     body = client.get("/api/screening/indicators").json()
@@ -377,15 +386,17 @@ def test_stock_detail_indicators_expose_annual_yoy_caliber(
     import app.core.data_quality as data_quality_module
 
     monkeypatch.setattr(data_quality_module, "read_warning_codes", lambda *a, **k: [])
-    # 保留内联：单行快照（`calculated_at` 走库侧时钟），不在本轮清单内。
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, calculated_at,
-                revenue_yoy, revenue_yoy_fy,
-                net_profit_yoy, net_profit_yoy_fy,
-                deducted_profit_yoy, deducted_profit_yoy_fy)
-           VALUES ('600519', DATE '2025-12-31', CURRENT_TIMESTAMP,
-                   0.25, -0.5, 0.10, -0.40, 0.05, -0.30)"""
+    # `calculated_at` 原 SQL 是 `CURRENT_TIMESTAMP` → 显式传哨兵（迁移守则）。
+    Seed(duckdb_store).snapshot(
+        "600519",
+        "2025-12-31",
+        calculated_at=CURRENT_TIMESTAMP,
+        revenue_yoy=0.25,
+        revenue_yoy_fy=-0.5,
+        net_profit_yoy=0.10,
+        net_profit_yoy_fy=-0.40,
+        deducted_profit_yoy=0.05,
+        deducted_profit_yoy_fy=-0.30,
     )
     app = FastAPI()
     app.state.duck = duckdb_store

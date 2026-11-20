@@ -23,6 +23,9 @@ from datetime import UTC, datetime
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import CURRENT_TIMESTAMP as SQLITE_CURRENT_TIMESTAMP
+from tests.support.seed_sqlite import SeedSqlite
 
 
 def _result(rows: list[dict], *, adjust: str = "listing_info") -> FetchResult:
@@ -42,16 +45,23 @@ def _result(rows: list[dict], *, adjust: str = "listing_info") -> FetchResult:
 def _seed_stock(
     duckdb_store, code: str, *, name: str = "x", listing_date: str = "2020-01-01",
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, listing_date, total_shares, circ_shares)
-           VALUES (?, ?, 'SHSE', true, ?, 100, 80)""",
-        [code, name, listing_date],
+    # `stock_meta` 走工厂：`exchange='SHSE'` 是原 SQL 的逐字取值（本文件的代码段
+    # 都属于沪市，含 B 股 900948），不靠代码段推断；`is_listed=True` 同理显式。
+    Seed(duckdb_store).stock(
+        code,
+        name=name,
+        exchange="SHSE",
+        is_listed=True,
+        listing_date=listing_date,
+        total_shares=100,
+        circ_shares=80,
     )
 
 
 def _seed_prices(duckdb_store, code: str, dates: list[str], close: float = 9.0) -> None:
     for table in ("price_daily_raw", "price_daily_qfq"):
+        # 留（第 4 类·多站点缺口）：表名由 `for` 循环程序化生成（`{table}`），
+        # 台账按"`{table}` 全仓 11 处"归到第 4 类，本轮不补 API、也不改这里。
         duckdb_store.write_query(
             f"INSERT INTO {table} (stock_code, trade_date, close) VALUES "
             + ", ".join("(?, ?, ?)" for _ in dates),
@@ -175,10 +185,8 @@ def test_late_xdxr_event_forces_full_qfq_refetch_even_when_prices_are_ahead(
 
     _seed_stock(duckdb_store, "600522")
     _seed_prices(duckdb_store, "600522", ["2026-11-05", "2026-11-10"])
-    duckdb_store.write_query(
-        "INSERT INTO xdxr (stock_code, event_date, category, fenhong) "
-        "VALUES ('600522', '2026-11-05', 1, 1.0)"
-    )
+    # 只登记"这天发生过除权"（`fenhong=1.0` 是事实值，逐字传）。
+    Seed(duckdb_store).xdxr("600522", "2026-11-05", category=1, fenhong=1.0)
     updater = IncrementalUpdater(
         duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=PriceAdapter(),
     )
@@ -307,12 +315,14 @@ def test_b_share_market_actions_write_missing_without_retry(
     adapter = _ExplodingAdapter()
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=adapter)
     with sqlite_store.transaction() as conn:
-        conn.execute(
-            """INSERT INTO retry_list
-                   (stock_code, data_type, adapter, error, retry_count, max_retries,
-                    last_attempt, extra_json)
-               VALUES ('900948', 'xdxr', 'manager', 'old failure', 4, 5,
-                       CURRENT_TIMESTAMP, '{}')"""
+        # `retry_list` 走 `SeedSqlite.join(conn)`：已经在调用方事务里，工厂不能再自己开
+        # 一个（那会把后面 `_refresh_market_actions` 要看的原子块提前落库）。
+        # `retry_count=4 / max_retries=5` 是"下一轮就会 retry_exhausted"的全部前提，
+        # 逐字传；`last_attempt` 原 SQL 是 `CURRENT_TIMESTAMP` → 传库侧哨兵。
+        SeedSqlite(sqlite_store).join(conn).retry(
+            "900948", "xdxr", adapter="manager", error="old failure",
+            retry_count=4, max_retries=5, last_attempt=SQLITE_CURRENT_TIMESTAMP,
+            extra_json="{}",
         )
 
     report = updater._refresh_market_actions(["900948"])
@@ -340,6 +350,9 @@ def test_b_share_retry_row_settles_instead_of_retry_exhausting(
     adapter = _ExplodingAdapter()
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=adapter)
     with sqlite_store.transaction() as conn:
+        # 留（第 2 类·lastrowid）：下一行马上要 `cursor.lastrowid` 回捞这条重试行的 id
+        # 再喂给 `_retry_failed_tasks` —— 工厂刻意**不返回 id**，换成工厂调用就得
+        # `SELECT ... ORDER BY id DESC LIMIT 1` 反查，"刚插的那行"就不再是结构事实。
         cursor = conn.execute(
             """INSERT INTO retry_list
                    (stock_code, data_type, adapter, error, retry_count, max_retries,

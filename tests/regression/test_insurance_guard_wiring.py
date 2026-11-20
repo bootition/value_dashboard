@@ -247,7 +247,9 @@ def test_sina_path_rejects_insurer_contract_liability(duckdb_store, sqlite_store
         "WHERE stock_code = '601318' AND report_date = DATE '2024-12-31'"
     )[0]
     assert meta["source"] == GUARD_SOURCE
-    assert meta["batch_id"]
+    assert meta["batch_id"] == f"{GUARD_SOURCE}:601318:2024-12-31", (
+        "改道行必须带确定性批号（可回查股/期），不能留空也不能冒用主路径批次"
+    )
 
 
 def test_sina_path_clears_pre_existing_polluted_value(duckdb_store, sqlite_store) -> None:

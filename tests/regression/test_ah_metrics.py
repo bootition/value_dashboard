@@ -57,28 +57,31 @@ def _seed_meta(
     total_shares: int | None,
     circ_shares: int | None,
 ) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, total_shares, circ_shares)
-           VALUES (?, ?, 'SSE', TRUE, ?, ?)
-           ON CONFLICT (stock_code) DO UPDATE SET
-               name = excluded.name, is_listed = TRUE,
-               total_shares = excluded.total_shares,
-               circ_shares = excluded.circ_shares""",
-        [code, name, total_shares, circ_shares],
+    # 原来是 `ON CONFLICT (stock_code) DO UPDATE SET name/is_listed/total_shares/
+    # circ_shares`：DuckDB 的 `INSERT OR REPLACE` 就是"只更新本次提供的列"的 upsert，
+    # 而这里每次都把这几列（含 `exchange='SSE'`，全文件唯一取值）全给 →
+    # `overwrite=True` 语义等价。`total_shares`/`circ_shares` 的 None 是"缺着"，
+    # 正是股本口径用例的前提，逐字传。
+    Seed(duck).stock(
+        code,
+        name=name,
+        exchange="SSE",
+        is_listed=True,
+        total_shares=total_shares,
+        circ_shares=circ_shares,
+        overwrite=True,
     )
 
 
 def _seed_a_price(duck: DuckDBStore, code: str, day: str, close: float) -> None:
-    duck.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-           VALUES (?, ?, ?, 1000)
-           ON CONFLICT (stock_code, trade_date) DO UPDATE SET close = excluded.close""",
-        [code, day, close],
-    )
+    # 原来是 `ON CONFLICT (stock_code, trade_date) DO UPDATE SET close`：`volume`
+    # 每次都是同一个 1000，`overwrite=True` 连带更新它也不会改变任何一行 → 等价。
+    Seed(duck).prices(code, [(day, close)], volume=1000, overwrite=True)
 
 
 def _seed_h_price(duck: DuckDBStore, hk_code: str, day: str, close: float) -> None:
+    # 留（第 4 类·多站点缺口）：`hk_price_daily` 全仓 2 处 + 工厂没有方法（本轮不补 API）。
+    # `fetched_at=CURRENT_TIMESTAMP` 也是"刚抓的"语义，属于不能落成字面量的那一类。
     duck.write_query(
         """INSERT INTO hk_price_daily (stock_code, trade_date, close, source, fetched_at)
            VALUES (?, ?, ?, 'akshare_hk', CURRENT_TIMESTAMP)
@@ -88,6 +91,7 @@ def _seed_h_price(duck: DuckDBStore, hk_code: str, day: str, close: float) -> No
 
 
 def _seed_fx(duck: DuckDBStore, day: str, rate: float) -> None:
+    # 留（第 4 类·多站点缺口）：`fx_rate_daily` 全仓 2 处 + 工厂没有方法（本轮不补 API）。
     duck.write_query(
         """INSERT INTO fx_rate_daily (pair, trade_date, rate, source, fetched_at)
            VALUES ('HKDCNY', ?, ?, 'boc_sina', CURRENT_TIMESTAMP)
@@ -111,6 +115,8 @@ def _seed_h_dividend(
     hkd: float | None,
     cny: float | None,
 ) -> None:
+    # 留（第 4 类·多站点缺口）：`hk_dividends` 全仓 4 处 + 工厂没有方法（本轮不补 API）；
+    # `hkd`/`cny` 逐字传（None = 该口径缺着，正是 A+H 股息率用例的前提）。
     duck.write_query(
         """INSERT INTO hk_dividends
                (stock_code, ex_date, plan_explain, dividend_per_share_hkd,
@@ -521,10 +527,10 @@ def test_build_snapshot_does_not_touch_indicator_snapshot(
     duckdb_store: DuckDBStore,
 ) -> None:
     _seed_standard_inputs(duckdb_store)
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-               (stock_code, report_date, latest_close, total_market_cap)
-           VALUES ('601398', '2026-09-30', 10.0, 1000.0)"""
+    # 手工市值/收盘价各一个数：本用例要证明 `build_ah_snapshot` **不写**这张表，
+    # 所以数值逐字传，别让工厂替它们编默认值。
+    Seed(duckdb_store).snapshot(
+        "601398", "2026-09-30", latest_close=10.0, total_market_cap=1000.0
     )
     build_ah_snapshot(duckdb_store, as_of=date(2026, 1, 6), mapping=MAPPING)
     row = duckdb_store.read_query(

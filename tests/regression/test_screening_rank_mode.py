@@ -42,6 +42,7 @@ from app.core.screening.engine import (
     validate_rule_fields,
 )
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 
 
 def test_expand_rank_mode_rewrites_field() -> None:
@@ -151,20 +152,26 @@ def test_rank_mode_matches_legacy_suffix_condition(
 
     # 基础池要求 ST/停牌/上市日期齐全（engine._require_known_pool_status），
     # 缺一列就会整体拒绝运行——与排名逻辑无关，这里补齐。
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta "
-        "(stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended, listing_date) "
-        "VALUES ('000001','A','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
-        "       ('000002','B','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
-        "       ('000003','C','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE))"
+    seed = Seed(duckdb_store)
+    seed.stocks(
+        [("000001", "A"), ("000002", "B"), ("000003", "C")],
+        is_listed=True,
+        csrc_l1="制造业",
+        is_st=False,
+        is_suspended=False,
+        listing_date="2000-01-01",
     )
-    for code, pe in (("000001", 10.0), ("000002", 20.0), ("000003", 30.0)):
-        duckdb_store.write_query(
-            """INSERT INTO indicator_snapshot
-                   (stock_code, report_date, calculated_at, data_version, pe_ttm)
-               VALUES (?, CAST('2025-12-31' AS DATE), now(), 'fixture', ?)""",
-            [code, pe],
-        )
+    seed.snapshots([
+        {
+            "stock_code": code,
+            "report_date": "2025-12-31",
+            # `now()` 就是「库侧此刻」：换哨兵而不是写字面量（迁移守则）。
+            "calculated_at": CURRENT_TIMESTAMP,
+            "data_version": "fixture",
+            "pe_ttm": pe,
+        }
+        for code, pe in (("000001", 10.0), ("000002", 20.0), ("000003", 30.0))
+    ])
 
     engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
     new_rule = {
@@ -280,20 +287,26 @@ def test_rank_mode_works_in_conditions_sort_and_columns(
     """
     from app.core.screening.engine import ScreeningEngine
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta "
-        "(stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended, listing_date) "
-        "VALUES ('000001','A','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
-        "       ('000002','B','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
-        "       ('000003','C','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE))"
+    seed = Seed(duckdb_store)
+    seed.stocks(
+        [("000001", "A"), ("000002", "B"), ("000003", "C")],
+        is_listed=True,
+        csrc_l1="制造业",
+        is_st=False,
+        is_suspended=False,
+        listing_date="2000-01-01",
     )
-    for code, pe in (("000001", 30.0), ("000002", 10.0), ("000003", 20.0)):
-        duckdb_store.write_query(
-            """INSERT INTO indicator_snapshot
-                   (stock_code, report_date, calculated_at, data_version, pe_ttm)
-               VALUES (?, CAST('2025-12-31' AS DATE), now(), 'fixture', ?)""",
-            [code, pe],
-        )
+    seed.snapshots([
+        {
+            "stock_code": code,
+            "report_date": "2025-12-31",
+            # `now()` 就是「库侧此刻」：换哨兵而不是写字面量（迁移守则）。
+            "calculated_at": CURRENT_TIMESTAMP,
+            "data_version": "fixture",
+            "pe_ttm": pe,
+        }
+        for code, pe in (("000001", 30.0), ("000002", 10.0), ("000003", 20.0))
+    ])
 
     engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
     rule = {
@@ -443,20 +456,27 @@ def test_param_works_in_conditions_sort_and_columns(
     """参数化字段在条件、排序、结果列三处都能用。"""
     from app.core.screening.engine import ScreeningEngine
 
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta "
-        "(stock_code, name, exchange, is_listed, csrc_l1, is_st, is_suspended, listing_date) "
-        "VALUES ('000001','A','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE)), "
-        "       ('000002','B','SZSE',true,'制造业', false, false, CAST('2000-01-01' AS DATE))"
+    seed = Seed(duckdb_store)
+    seed.stocks(
+        [("000001", "A"), ("000002", "B")],
+        is_listed=True,
+        csrc_l1="制造业",
+        is_st=False,
+        is_suspended=False,
+        listing_date="2000-01-01",
     )
-    for code, cagr in (("000001", 0.30), ("000002", 0.10)):
-        duckdb_store.write_query(
-            """INSERT INTO indicator_snapshot
-                   (stock_code, report_date, calculated_at, data_version,
-                    revenue_cagr3, div_yield_spread_10y)
-               VALUES (?, CAST('2025-12-31' AS DATE), now(), 'fixture', ?, 1.5)""",
-            [code, cagr],
-        )
+    seed.snapshots([
+        {
+            "stock_code": code,
+            "report_date": "2025-12-31",
+            # `now()` 就是「库侧此刻」：换哨兵而不是写字面量（迁移守则）。
+            "calculated_at": CURRENT_TIMESTAMP,
+            "data_version": "fixture",
+            "revenue_cagr3": cagr,
+            "div_yield_spread_10y": 1.5,
+        }
+        for code, cagr in (("000001", 0.30), ("000002", 0.10))
+    ])
 
     engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
     rule = {

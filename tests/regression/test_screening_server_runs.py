@@ -7,23 +7,29 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import SCREENING_RUN_TTL_HOURS, router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import CURRENT_TIMESTAMP, SeedSqlite
+
+# `stock_meta` / `indicator_snapshot` / `manual_overrides` 三张表走工厂的按域方法：
+# `name='Test'`、`exchange='SZSE'` 逐字传（工厂默认值按代码段推断，与本文件夹具
+# 不是同一口径），`pe_ttm` 仍是本轮用例自己要钉的业务值。
 
 
 def test_screening_run_is_server_persisted_and_save_uses_its_output(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    Seed(duckdb_store).stock(
+        "000001", name="Test", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm)
-           VALUES ('000001', '2025-12-31', 10)
-           ON CONFLICT (stock_code, report_date) DO UPDATE SET pe_ttm = excluded.pe_ttm"""
-    )
+    # 本轮 SQL 的 `ON CONFLICT DO UPDATE SET pe_ttm = excluded.pe_ttm` 与
+    # `overwrite=True`（DuckDB 的 INSERT OR REPLACE 是 upsert，只更新本次给出的列）
+    # 同粒度：`insert_minimum_screenable_data()` 刚写进去的
+    # latest_close / latest_price_date / calculated_at 必须原样留着，不能整行重来。
+    Seed(duckdb_store).snapshot("000001", "2025-12-31", pe_ttm=10, overwrite=True)
     app = FastAPI()
     app.state.duck = duckdb_store
     app.state.sqlite = sqlite_store
@@ -70,17 +76,17 @@ def test_screening_run_ttl_keeps_recent_runs_and_lazily_purges_expired_ones(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    Seed(duckdb_store).stock(
+        "000001", name="Test", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm)
-           VALUES ('000001', '2025-12-31', 10)
-           ON CONFLICT (stock_code, report_date) DO UPDATE SET pe_ttm = excluded.pe_ttm"""
-    )
+    # 本轮 SQL 的 `ON CONFLICT DO UPDATE SET pe_ttm = excluded.pe_ttm` 与
+    # `overwrite=True`（DuckDB 的 INSERT OR REPLACE 是 upsert，只更新本次给出的列）
+    # 同粒度：`insert_minimum_screenable_data()` 刚写进去的
+    # latest_close / latest_price_date / calculated_at 必须原样留着，不能整行重来。
+    Seed(duckdb_store).snapshot("000001", "2025-12-31", pe_ttm=10, overwrite=True)
     app = FastAPI()
     app.state.duck = duckdb_store
     app.state.sqlite = sqlite_store
@@ -126,16 +132,22 @@ def test_screening_uses_published_statement_overrides(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    Seed(duckdb_store).stock(
+        "000001", name="Test", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
-    sqlite_store.execute(
-        """INSERT INTO manual_overrides
-           (stock_code, field_name, report_date, override_value, reason, status)
-           VALUES ('000001', 'total_assets', '2025-12-31', 200, 'verified', 'published')"""
+    SeedSqlite(sqlite_store).override(
+        "000001",
+        "total_assets",
+        200,
+        reason="verified",
+        report_date="2025-12-31",
+        status="published",
+        # 原 SQL 没写 `created_at`（由 schema 的 `DEFAULT CURRENT_TIMESTAMP` 兜底）：
+        # 按迁移守则显式交回库侧时钟，免得"刚覆写的"变成固定过去时间。
+        created_at=CURRENT_TIMESTAMP,
     )
     app = FastAPI()
     app.state.duck = duckdb_store
@@ -165,9 +177,9 @@ def test_screening_run_accepts_freely_selected_result_columns(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    Seed(duckdb_store).stock(
+        "000001", name="Test", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)

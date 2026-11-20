@@ -36,6 +36,8 @@ from app.core.supplement import (
     SupplementFetcher,
 )
 from app.core.update import IncrementalUpdater
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 TRIO_COLUMNS = ("stock_code", "report_date")
 LATEST_PERIOD = "2026-09-30"
@@ -46,56 +48,55 @@ OLD_PERIOD = "2026-06-30"
 
 
 def _seed_stock(store, code: str, *, name: str = "Test", exchange: str = "SZSE") -> None:
-    store.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended,
-            total_shares, circ_shares)
-           VALUES (?, ?, ?, '2015-01-05', TRUE, FALSE, FALSE, 100, 80)""",
-        [code, name, exchange],
+    Seed(store).stock(
+        code,
+        name=name,
+        exchange=exchange,
+        listing_date="2015-01-05",
+        is_listed=True,
+        is_st=False,
+        is_suspended=False,
+        total_shares=100,
+        circ_shares=80,
     )
 
 
 def _seed_trio(store, code: str, report_date: str) -> None:
     """写入三表各一行（income×balance 是 indicator_ext 的骨架）。"""
-    store.write_query(
-        """INSERT INTO income_statement
-               (stock_code, report_date, revenue, parent_net_profit, net_profit)
-           VALUES (?, CAST(? AS DATE), 1000, 100, 100)""",
-        [code, report_date],
+    seed = Seed(store)
+    seed.income(
+        code, report_date, revenue=1000, parent_net_profit=100, net_profit=100,
     )
-    store.write_query(
-        """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_liabilities, total_equity)
-           VALUES (?, CAST(? AS DATE), 2000, 800, 1200)""",
-        [code, report_date],
+    seed.balance(
+        code, report_date, total_assets=2000, total_liabilities=800, total_equity=1200,
     )
-    store.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES (?, CAST(? AS DATE), 200)""",
-        [code, report_date],
-    )
+    seed.cash_flow(code, report_date, cf_from_operating=200)
 
 
 def _seed_cashflow_activity(
     store, code: str, report_date: str, *, source: str = "eastmoney_f10",
 ) -> None:
-    store.write_query(
-        """INSERT INTO cash_flow_activity
-               (stock_code, report_date, capex, source, fetch_time,
-                raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 50, ?, TIMESTAMP '2026-09-20 00:00:00',
-                   'hash', 'strict', 'batch')""",
-        [code, report_date, source],
+    # 溯源列照原样写死（`'hash'` / `'batch'` 不是工厂默认形状）：这几行是
+    # `replace_source_rows` 的"上一批"，批号差异本身就是用例的论点。
+    Seed(store).cash_activity(
+        code,
+        report_date,
+        capex=50,
+        source=source,
+        fetch_time="2026-09-20 00:00:00",
+        raw_response_hash="hash",
+        confidence="strict",
+        batch_id="batch",
     )
 
 
 def _seed_indicator_ext(store, code: str, report_date: str) -> None:
-    store.write_query(
-        """INSERT INTO indicator_ext
-               (stock_code, report_date, calculated_at, source, data_version)
-           VALUES (?, CAST(? AS DATE), TIMESTAMP '2026-09-20 00:00:00',
-                   'derived_calculator', 1)""",
-        [code, report_date],
+    Seed(store).extended(
+        code,
+        report_date,
+        calculated_at="2026-09-20 00:00:00",
+        source="derived_calculator",
+        data_version=1,
     )
 
 
@@ -165,12 +166,9 @@ def _supplement_success(**overrides) -> dict:
 
 def _refreshed_today(sqlite, key: str) -> None:
     now = datetime.now(UTC).isoformat()
-    sqlite.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value = excluded.value,
-                                          updated_at = excluded.updated_at""",
-        [key, now, now],
-    )
+    # `now` 是**调用点算好的这一秒**（isoformat 形状），不是库侧时钟：显式传
+    # `updated_at=` 逐字保留原值；`overwrite=True` 等价原来的 ON CONFLICT DO UPDATE。
+    SeedSqlite(sqlite).refresh_state(key, now, updated_at=now, overwrite=True)
 
 
 # ─── 1. 水位与到期 ────────────────────────────────────────────────────
@@ -440,10 +438,8 @@ def test_indicator_ext_skips_when_up_to_date(
 
     fingerprint = input_state(duckdb_store)["fingerprint"]
     now = datetime.now(UTC).isoformat()
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)""",
-        [FINGERPRINT_STATE_KEY, fingerprint, now],
-    )
+    # 同上：`now` 逐字来自调用点，不换成库侧时钟。
+    SeedSqlite(sqlite_store).refresh_state(FINGERPRINT_STATE_KEY, fingerprint, updated_at=now)
     _refreshed_today(sqlite_store, "indicator_ext_last_refresh")
 
     def forbidden(self, codes=None):  # noqa: ANN001
@@ -489,13 +485,17 @@ def test_pending_flags_balance_sheet_ext_with_same_criteria(duckdb_store) -> Non
 
     _seed_stock(duckdb_store, "000001")
     _seed_trio(duckdb_store, "000001", LATEST_PERIOD)
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet_ext
-               (stock_code, report_date, other_payables, source, fetch_time,
-                raw_response_hash, confidence, batch_id)
-           VALUES ('000001', CAST(? AS DATE), 10, 'eastmoney_f10',
-                   TIMESTAMP '2026-09-20 00:00:00', 'hash', 'strict', 'batch')""",
-        [OLD_PERIOD],
+    # 溯源列照原样写死（`'hash'` / `'batch'`），与 `_seed_cashflow_activity` 同口径：
+    # "上一批"的批号差异就是用例的论点，不能换成工厂默认形状。
+    Seed(duckdb_store).balance_ext(
+        "000001",
+        OLD_PERIOD,
+        other_payables=10,
+        source="eastmoney_f10",
+        fetch_time="2026-09-20 00:00:00",
+        raw_response_hash="hash",
+        confidence="strict",
+        batch_id="batch",
     )
 
     fetcher = SupplementFetcher(duck=duckdb_store)

@@ -8,7 +8,9 @@ from app.core.data_quality import _data_dates, build_data_quality_status
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
 from app.core.storage.sqlite_store import SQLiteStore
-from tests.support.seed import Seed
+from tests.support.seed import CURRENT_DATE, CURRENT_TIMESTAMP, Seed
+from tests.support.seed_sqlite import CURRENT_TIMESTAMP as SQLITE_CURRENT_TIMESTAMP
+from tests.support.seed_sqlite import SeedSqlite
 
 
 def test_data_quality_status_exposes_untrusted_and_stale_data(
@@ -43,6 +45,9 @@ def test_data_dates_supports_snapshot_schema_before_freshness_migration(
     database_paths: DatabasePathSet,
 ) -> None:
     duck = DuckDBStore(paths=database_paths)
+    # 第 5 类（旧 schema/测试自建表）：本用例的被测对象**就是**"新鲜度列还不存在"
+    # 的旧 `indicator_snapshot`，建表 DDL 由测试自己写、列清单由测试定，工厂的
+    # 列校验与默认值在这条路径上正好是要避开的东西 —— 留内联。
     duck.execute_script(
         """
         CREATE TABLE price_daily_raw (trade_date DATE);
@@ -60,6 +65,8 @@ def test_data_dates_supports_snapshot_schema_before_freshness_migration(
         );
         CREATE TABLE cash_flow (report_date DATE, cf_from_operating DOUBLE);
         CREATE TABLE indicator_snapshot (report_date DATE);
+        -- 第 5 类：旧 schema 的 indicator_snapshot 只此一列，工厂的 `Seed.snapshot()`
+        -- 会按真实 schema 校验并补默认列，正好抹掉本用例要测的"列还不存在"。
         INSERT INTO indicator_snapshot VALUES ('2025-03-31');
         """
     )
@@ -140,10 +147,12 @@ def test_recent_listing_data_gaps_are_disclosed_but_share_capital_still_blocks(
     但理由变成占比判据，而不是"任一缺口即否决"）。缺口计数与
     ``share_capital_policy`` 在任何情况下都如实披露。
     """
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-             (stock_code, name, exchange, is_listed, listing_date, is_st, is_suspended)
-           VALUES ('301999', 'NEW', 'SZSE', TRUE, CURRENT_DATE, FALSE, FALSE)"""
+    # 第 1 类：`stock_meta` → `Seed.stock()`。`listing_date` 原 SQL 写库侧
+    # `CURRENT_DATE`（"今天上市的新股"正是 90 天豁免的前提），按迁移守则显式
+    # 传 SQL 哨兵，不换成 Python 算出的字面量。
+    Seed(duckdb_store).stock(
+        "301999", name="NEW", exchange="SZSE", is_listed=True,
+        listing_date=CURRENT_DATE, is_st=False, is_suspended=False,
     )
 
     readiness = build_data_quality_status(duckdb_store, sqlite_store)["minimum_data_readiness"]
@@ -184,33 +193,31 @@ def test_quality_status_flags_active_dividend_alias_and_lineage_archive_gaps(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    # 保留内联（`dividends` / `source_audit` 两行）：整块在**已持有写锁**的
-    # `write_connection()` 事务里跨三张表（stock_meta/price/fetch_batch + 分红/审计）
-    # 一起落库 —— 工厂每次自带写锁，嵌套进来会自撞（不是缺 API，是不能这么用）。
+    # 整块仍在**已持有写锁**的 `write_connection()` 事务里（四张表一起落库），所以
+    # 第 1 类的四处改用 `Seed(...).join(connection)`：绑定调用方连接，不自带写锁。
     with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-               VALUES ('000001', 'canonical', 'SZSE', TRUE)"""
-        )
-        connection.execute(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-               VALUES ('SZ000001', CURRENT_DATE, 10)"""
-        )
-        connection.execute(
-            """INSERT INTO dividends (stock_code, ex_date, dividend_per_share)
-               VALUES ('000001', '2025-08-15', 1)"""
-        )
+        seed = Seed(duckdb_store).join(connection)
+        # 第 1 类：`stock_meta` → `Seed.stock()`。
+        seed.stock("000001", name="canonical", exchange="SZSE", is_listed=True)
+        # 第 1 类：`price_daily_raw` → `Seed.prices()`；`trade_date` 原为库侧
+        # `CURRENT_DATE`（"今天"是 CODE_IDENTITY 别名口径的输入），传哨兵。
+        seed.prices("SZ000001", [(CURRENT_DATE, 10)])
+        # 第 1 类：`dividends` → `Seed.dividends()`（`announcement_date=None`
+        # 就是"未证公告日"，本用例要的正是它）。
+        seed.dividends("000001", [("2025-08-15", None, 1)])
+        # 第 3 类（故意造错/隔离归档）：`fetch_batch` 与下面 `source_audit` 成对
+        # 构造"有批次行/审计行但归档里没有"的 lineage 缺口 —— 缺哪一行就是论点。
         connection.execute(
             """INSERT INTO fetch_batch
                 (batch_id, data_type, source, adapter_version, fetch_time, raw_response_hash, row_count, confidence)
                VALUES ('batch-1', 'financial', 'test', 'v1', CURRENT_TIMESTAMP, ?, 1, 'verified')""",
             ["a" * 64],
         )
-        connection.execute(
-            """INSERT INTO source_audit
-                (stock_code, field_name, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
-               VALUES ('000001', 'revenue', 'test', 'batch-1', CURRENT_TIMESTAMP, ?, 'verified')""",
-            ["b" * 64],
+        # 第 1 类：`source_audit` → `Seed.source_audit()`；`fetch_time` 原为库侧
+        # `CURRENT_TIMESTAMP`，传哨兵（"刚写的审计"是 lineage 新鲜度判定输入）。
+        seed.source_audit(
+            "000001", "revenue", source="test", fetch_batch_id="batch-1",
+            fetch_time=CURRENT_TIMESTAMP, raw_response_hash="b" * 64, confidence="verified",
         )
 
     status = build_data_quality_status(duckdb_store, sqlite_store)
@@ -241,6 +248,8 @@ def test_quality_status_detects_archive_payload_hash_mismatch(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
+    # 第 3 类（故意造错）：归档里放的是「payload 与 raw_response_hash 故意不匹配」
+    # 的一份坏证据 —— 写哪一行、放什么 payload 就是本用例的论点，留内联。
     with duckdb_store.write_connection() as connection:
         connection.execute(
             """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
@@ -260,6 +269,8 @@ def test_archive_hash_check_is_cached_between_status_calls(
 ) -> None:
     payload = b"original payload"
     digest = hashlib.sha256(payload).hexdigest()
+    # 第 3 类（故意造错）：第一条是"哈希对得上"的归档、第二条故意不匹配，
+    # 两张归档行的时间先后/配对关系是"缓存要不要重算"的论点，留内联。
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
            VALUES (?, 'test', CURRENT_TIMESTAMP, ?)""",
@@ -270,6 +281,7 @@ def test_archive_hash_check_is_cached_between_status_calls(
     assert first["lineage"]["hash_mismatch_rows"] == 0
     assert first["lineage"]["archive_hash_check"]["cached"] is False
 
+    # 第 3 类（故意造错）：第二条归档刻意让 payload 与哈希不匹配（缓存用例的第二条）。
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
            VALUES (?, 'test', CURRENT_TIMESTAMP, ?)""",
@@ -320,39 +332,34 @@ def _insert_quality_fixture(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     seed.cash_flow("600519", "2025-03-31", cf_from_operating=120)
     seed.snapshot("600519", "2025-03-31", latest_price_date="2026-07-01")
 
-    # 保留内联（`dividends` / `source_audit` 两行）：同在**已持有写锁**的
-    # `write_connection()` 事务里（与上面的 sqlite 覆盖/`manual_overrides` 一起构成
-    # 一个场景），工厂自带写锁，嵌套进来会自撞。
+    # 两道事务块都用 `join()`：绑定调用方已持有的连接，工厂不再自开事务
+    # （`write_connection()` 已持有 DuckDB 写锁，嵌套取锁会自撞）。
     with duck.write_connection() as connection:
-        connection.execute(
-            """
-            INSERT INTO dividends (stock_code, ex_date, announcement_date, dividend_per_share)
-            VALUES
-                ('600519', '2023-12-31', NULL, 1.0),
-                ('600519', '2024-06-30', NULL, 2.0)
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO source_audit
-                (stock_code, field_name, source, fetch_batch_id, fetch_time,
-                 raw_response_hash, confidence)
-            VALUES
-                ('600519', 'total_assets', 'local_cache', 'orphan', now(), '', 'missing')
-            """
+        joined = Seed(duck).join(connection)
+        # 第 1 类：`dividends` → `Seed.dividends()`（两行一次播种，`NULL`
+        # 公告日 = "未证公告日"，是本用例的前提）。
+        joined.dividends("600519", [("2023-12-31", None, 1.0), ("2024-06-30", None, 2.0)])
+        # 第 1 类：`source_audit` → `Seed.source_audit()`；`fetch_time` 原为库侧
+        # `now()`，按迁移守则换成等价的 `CURRENT_TIMESTAMP` 哨兵（同为事务起始
+        # 时刻）；`raw_response_hash=''` 逐字保留（孤儿审计行的论点）。
+        joined.source_audit(
+            "600519", "total_assets", source="local_cache", fetch_batch_id="orphan",
+            fetch_time=CURRENT_TIMESTAMP, raw_response_hash="", confidence="missing",
         )
 
     with sqlite.transaction() as connection:
-        connection.execute(
-            """
-            INSERT INTO manual_overrides
-                (stock_code, field_name, override_value, reason, status)
-            VALUES ('600519', 'total_assets', 2000, 'draft', 'active')
-            """
+        joined_sqlite = SeedSqlite(sqlite).join(connection)
+        # 第 1 类：`manual_overrides` → `SeedSqlite.override()`。原 SQL 没写
+        # `created_at`（由 schema 的 `DEFAULT CURRENT_TIMESTAMP` 兜底），按迁移守则
+        # 显式传哨兵，避免"刚写的草稿"变成固定的过去时间。
+        joined_sqlite.override(
+            "600519", "total_assets", 2000, reason="draft", status="active",
+            created_at=SQLITE_CURRENT_TIMESTAMP,
         )
-        connection.execute(
-            """
-            INSERT INTO job_logs (job_type, status, started_at)
-            VALUES ('backfill', 'running', '2025-01-01T00:00:00')
-            """
+        # 第 1 类：`job_logs` → `SeedSqlite.job_log()`。原 SQL 只写三列，其余是
+        # schema 的 NULL（`details_json` 没有默认值），所以显式 `details_json=None`
+        # 才能保持行字节不变。
+        joined_sqlite.job_log(
+            "backfill", status="running", started_at="2025-01-01T00:00:00",
+            details_json=None,
         )

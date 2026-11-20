@@ -33,6 +33,7 @@ import pytest
 from app.core.indicators.extended import ExtendedIndicatorBuilder, build_select_sql
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet
+from tests.support.seed import Seed
 
 STOCK = "600080"
 REPORT_DATE = "2024-12-31"
@@ -41,16 +42,9 @@ REPORT_DATE = "2024-12-31"
 def _seed_report_row(store: DuckDBStore, stock_code: str) -> None:
     """最小骨架：builder 以 income_statement × balance_sheet 内连接为骨架。"""
     with store.transaction() as conn:
-        conn.execute(
-            "INSERT INTO income_statement (stock_code, report_date, revenue, net_profit) "
-            "VALUES (?, ?, 1000.0, 100.0)",
-            [stock_code, REPORT_DATE],
-        )
-        conn.execute(
-            "INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_equity) "
-            "VALUES (?, ?, 5000.0, 2000.0)",
-            [stock_code, REPORT_DATE],
-        )
+        seed = Seed(store).join(conn)
+        seed.income(stock_code, REPORT_DATE, revenue=1000.0, net_profit=100.0)
+        seed.balance(stock_code, REPORT_DATE, total_assets=5000.0, total_equity=2000.0)
 
 
 def _seed_bonus_events(
@@ -67,19 +61,12 @@ def _seed_bonus_events(
     正是拿这条链去反推 `songzhuangu` 的量纲（D53）。
     """
     with store.transaction() as conn:
+        seed = Seed(store).join(conn)
         for event_date, songzhuangu in events:
-            conn.execute(
-                "INSERT INTO xdxr (stock_code, event_date, category, songzhuangu) "
-                "VALUES (?, CAST(? AS DATE), 1, ?)",
-                [stock_code, event_date, songzhuangu],
-            )
-        for effective_date, total_shares in share_jumps:
-            conn.execute(
-                "INSERT INTO share_capital_history "
-                "(stock_code, effective_date, total_shares, source, raw_hash, batch_id) "
-                "VALUES (?, CAST(? AS DATE), ?, 'csmar', 'h', 'b')",
-                [stock_code, effective_date, total_shares],
-            )
+            seed.xdxr(stock_code, event_date, songzhuangu=songzhuangu)
+        # 股本链的 `raw_hash`/`batch_id` 显式传：这两列是本 fixture 的一部分
+        # （"上一批"标识），不让工厂用确定性默认值替换。
+        seed.shares(stock_code, share_jumps, raw_hash="h", batch_id="b")
 
 
 def _bonus(store: DuckDBStore, stock_code: str = STOCK) -> float | None:

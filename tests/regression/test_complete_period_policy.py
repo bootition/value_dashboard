@@ -11,13 +11,24 @@ from app.core.data_quality import minimum_data_readiness
 from app.core.indicators.calculator import IndicatorCalculator
 from app.core.screening.engine import ScreeningEngine
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
+
+# 三张主链表的播种全部走 `tests/support/seed.py` 的按域方法（`stock` / `balance` /
+# `income` / `cash_flow`）：它们的 provenance 五件套与主键形状是工厂口径，业务数值
+# （`200` / `40` / `160`）与"哪一列缺着"仍然逐字写在调用点 —— 这正是用例要钉的东西。
 
 
 def _seed_pool(duckdb_store, sqlite_store) -> None:
     """One listed stock with a complete 2025-12-31 period and published snapshot."""
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    # `exchange='SZSE'` 逐字传：工厂按代码段推断也是 SZSE，但交易所是这只股票的
+    # 用例前提，不从推断里读；`is_st`/`is_suspended` 写 False（原 SQL 的 `false`）。
+    Seed(duckdb_store).stock(
+        "000001",
+        name="Test",
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
     insert_minimum_screenable_data(duckdb_store)
     insert_matching_trading_calendar(duckdb_store, sqlite_store)
@@ -25,35 +36,22 @@ def _seed_pool(duckdb_store, sqlite_store) -> None:
 
 def _insert_pending_incomplete_period(duckdb_store) -> None:
     """三表都有 2026-03-31 行，但 balance.total_liabilities 为 NULL（源未就绪）。"""
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets, total_liabilities)
-           VALUES ('000001', '2026-03-31', 200, NULL)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-           VALUES ('000001', '2026-03-31', 200, 20)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES ('000001', '2026-03-31', 2)"""
-    )
+    seed = Seed(duckdb_store)
+    # `total_liabilities=None` 显式写出来：这一列缺着就是本用例的全部前提。
+    # 工厂不给业务列设默认值（省略即 NULL），但省略读代码看不出"这里是故意缺的"。
+    seed.balance("000001", "2026-03-31", total_assets=200, total_liabilities=None)
+    seed.income("000001", "2026-03-31", revenue=200, parent_net_profit=20)
+    seed.cash_flow("000001", "2026-03-31", cf_from_operating=2)
 
 
 def _insert_complete_newer_period(duckdb_store) -> None:
     """三表在 2026-03-31 的核心字段齐备（真正的完整期推进）。"""
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet
-               (stock_code, report_date, total_assets, total_liabilities, total_equity)
-           VALUES ('000001', '2026-03-31', 200, 40, 160)"""
+    seed = Seed(duckdb_store)
+    seed.balance(
+        "000001", "2026-03-31", total_assets=200, total_liabilities=40, total_equity=160
     )
-    duckdb_store.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, revenue, parent_net_profit)
-           VALUES ('000001', '2026-03-31', 200, 20)"""
-    )
-    duckdb_store.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES ('000001', '2026-03-31', 2)"""
-    )
+    seed.income("000001", "2026-03-31", revenue=200, parent_net_profit=20)
+    seed.cash_flow("000001", "2026-03-31", cf_from_operating=2)
 
 
 def _run_screening(duckdb_store) -> dict:

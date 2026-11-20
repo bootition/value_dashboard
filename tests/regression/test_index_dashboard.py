@@ -35,27 +35,40 @@ from tests.support.seed import Seed
 
 def _seed_index_valuation(duck: DuckDBStore) -> None:
     """000300：乐咕月度 40 点；SW801010：申万日度 40 点（同窗口无国债的点用于测试跳过）。"""
+    # 原来是逐点 `INSERT ... CURRENT_TIMESTAMP`（80 次写锁）→ 每源一次批量事务；
+    # `trace_now=True` 保住"刚抓的"，`pb` 逐行不同照旧在调用点（`raw_hash` 交给
+    # 工厂的确定性 64 位 sha256，原来是 `h00`/`s00` 这种短占位值）。
+    seed = Seed(duck, trace_now=True)
     base = date(2026, 1, 31)
-    for i in range(40):
-        d = base - timedelta(days=30 * i)
-        pe = 10.0 + (i % 10) * 0.5  # 10.0 ~ 14.5
-        duck.write_query(
-            """INSERT INTO index_valuation
-               (index_code, trade_date, pe_ttm, pe_metric, pb, div_yield, source,
-                fetch_time, raw_hash, confidence, batch_id, extra)
-               VALUES (?, ?, ?, 'ttm', ?, NULL, 'legulegu', CURRENT_TIMESTAMP, ?, 'approximate', 'b', NULL)""",
-            ["000300", d.isoformat(), pe, 1.0 + i * 0.01, f"h{i:02d}"],
-        )
-    for i in range(40):
-        d = date(2026, 8, 31) - timedelta(days=i)
-        pe = 20.0 + (i % 10) * 0.4
-        duck.write_query(
-            """INSERT INTO index_valuation
-               (index_code, trade_date, pe_ttm, pe_metric, pb, div_yield, source,
-                fetch_time, raw_hash, confidence, batch_id, extra)
-               VALUES (?, ?, ?, 'sws_daily', ?, ?, 'sws', CURRENT_TIMESTAMP, ?, 'approximate', 'b', NULL)""",
-            ["SW801010", d.isoformat(), pe, 2.0 + i * 0.01, 1.5, f"s{i:02d}"],
-        )
+    seed.index_valuation(
+        "000300",
+        [
+            (
+                base - timedelta(days=30 * i),
+                10.0 + (i % 10) * 0.5,  # 10.0 ~ 14.5
+                {"pb": 1.0 + i * 0.01},
+            )
+            for i in range(40)
+        ],
+        source="legulegu",
+        pe_metric="ttm",
+        confidence="approximate",
+    )
+    seed.index_valuation(
+        "SW801010",
+        [
+            (
+                date(2026, 8, 31) - timedelta(days=i),
+                20.0 + (i % 10) * 0.4,
+                {"pb": 2.0 + i * 0.01},
+            )
+            for i in range(40)
+        ],
+        source="sws",
+        pe_metric="sws_daily",
+        div_yield=1.5,
+        confidence="approximate",
+    )
 
 
 def _seed_treasury(duck: DuckDBStore) -> None:
@@ -184,12 +197,25 @@ def test_index_api_endpoints(duckdb_store: DuckDBStore, sqlite_store: SQLiteStor
     erp = client.get("/api/index/000300/erp")
     assert erp.status_code == 200
     assert erp.json()["name"] == "沪深300"
-    assert erp.json()["series"]
+    erp_series = erp.json()["series"]
+    assert len(erp_series) == 40, "种子里的 40 个估值点必须逐点配上国债算出 ERP（不许静默丢点）"
+    assert [p["trade_date"] for p in erp_series] == sorted(
+        p["trade_date"] for p in erp_series
+    ), "ERP 序列必须按日期升序"
+    assert all(
+        p["erp"] == pytest.approx(1 / p["pe"] * 100 - p["treasury_yield"])
+        for p in erp_series
+    ), "series 里的 erp 必须真是 1/PE×100 − 10Y 国债收益率"
 
     detail = client.get("/api/index/000300/detail")
     assert detail.status_code == 200
-    assert detail.json()["erp"]["series"]
-    assert detail.json()["valuation"]["pe_series"]
+    assert detail.json()["erp"]["series"] == erp_series, "详情页必须与 /{code}/erp 同源同算"
+    pe_series = detail.json()["valuation"]["pe_series"]
+    assert len(pe_series) == 40, "PE 序列必须逐点返回（不许去重/截断）"
+    assert [p["trade_date"] for p in pe_series] == sorted(
+        p["trade_date"] for p in pe_series
+    ), "PE 序列必须按日期升序"
+    assert all(10.0 <= p["value"] <= 14.5 for p in pe_series), "PE 列必须是 pe_ttm，不能混入 PB"
 
     valuation = client.get("/api/index/SW801010/valuation")
     assert valuation.status_code == 200

@@ -7,6 +7,8 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.screening import _field_provenance, router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import CURRENT_TIMESTAMP, SeedSqlite
 
 
 def _client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -19,14 +21,10 @@ def _client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
 
 
 def _make_screenable(duck: DuckDBStore) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'One', 'SZSE', '2020-01-01', false, false)"""
-    )
-    duck.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm)
-           VALUES ('000001', '2025-12-31', 10)"""
-    )
+    seed = Seed(duck)
+    seed.stock("000001", name="One", exchange="SZSE", listing_date="2020-01-01",
+               is_st=False, is_suspended=False)
+    seed.snapshot("000001", "2025-12-31", pe_ttm=10)
     insert_minimum_screenable_data(duck)
 
 
@@ -51,6 +49,8 @@ def test_saved_result_and_watchlist_require_rule_version_provenance(
     assert saved.status_code == 400
 
     with sqlite_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口，本轮不补 API）：`screening_runs` 全仓 3 处播种、
+        # 工厂没有方法；本轮租约禁止扩 `seed_sqlite.py`，如实登记为下一轮候选。
         conn.execute(
             """INSERT INTO screening_runs
                (run_id, rule_id, rule_version, result_json, columns_json, sort_json,
@@ -89,11 +89,15 @@ def test_csv_includes_rule_version_and_strict_provenance(
 ) -> None:
     _make_screenable(duckdb_store)
     client = _client(duckdb_store, sqlite_store)
-    sqlite_store.execute(
-        """INSERT INTO dsl_expressions
-           (name, version, expression_text, status, description, direction, historical_capable, content_hash)
-           VALUES (?, ?, ?, 'published', ?, ?, ?, ?)""",
-        ["quality_score", 1, "pe_ttm", "Quality score", "none", False, "quality-hash"],
+    SeedSqlite(sqlite_store).dsl_expression(
+        "quality_score",
+        1,
+        "pe_ttm",
+        status="published",
+        description="Quality score",
+        direction="none",
+        historical_capable=False,
+        content_hash="quality-hash",
     )
     rule = client.post(
         "/api/screening/rules/save",
@@ -105,6 +109,7 @@ def test_csv_includes_rule_version_and_strict_provenance(
         },
     ).json()
     with sqlite_store.transaction() as conn:
+        # 留（第 4 类·多站点缺口，本轮不补 API）：同上，`screening_runs` 无工厂方法。
         conn.execute(
             """INSERT INTO screening_runs
                (run_id, rule_id, rule_version, result_json, columns_json, sort_json,
@@ -132,10 +137,16 @@ def test_field_provenance_maps_normalized_fields_and_marks_overrides(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    sqlite_store.execute(
-        """INSERT INTO manual_overrides
-           (stock_code, field_name, report_date, override_value, reason, status)
-           VALUES ('000001', 'total_assets', '2025-12-31', 200, 'verified', 'published')"""
+    SeedSqlite(sqlite_store).override(
+        "000001",
+        "total_assets",
+        200,
+        reason="verified",
+        report_date="2025-12-31",
+        status="published",
+        # 原 SQL 没写 `created_at`（由 schema 的 `DEFAULT CURRENT_TIMESTAMP` 兜底）：
+        # 显式交回库侧时钟，免得迁移守则里那条"刚写的变成固定过去时间"漂移。
+        created_at=CURRENT_TIMESTAMP,
     )
 
     provenance = _field_provenance(

@@ -46,6 +46,12 @@ from app.core.supplement import (
     is_insurance_contract_liability_source,
     is_insurance_stock,
 )
+from tests.support.seed import Seed
+
+# 夹具里的表（`stock_meta` + 主链三表 + 补充域两张）走工厂的按域方法。
+# 三处口径**逐字传、不能吃默认值**：`exchange='SSE'`（本文件夹具用 SSE，
+# `exchange_of()` 推出来的是 SHSE/SZSE/BSE）、本源标记 `csmar` / `eastmoney_f10`
+# （"这行是谁写的"正是补采覆盖范围的判据）、批号 `'b'`。
 
 FETCH_TIME = datetime(2026, 11, 16, 12, 0, 0)
 LATEST = "2026-09-30"
@@ -74,44 +80,46 @@ def _seed_stock(
     csrc_l1: str | None = "金融业",
     exchange: str = "SSE",
 ) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_listed, is_st,
-                is_suspended, sw_level1, sw_level2, csrc_l1, total_shares, circ_shares)
-           VALUES (?, ?, ?, '2010-01-05', TRUE, FALSE, FALSE, ?, ?, ?, 100, 80)""",
-        [code, name, exchange, sw_level1, sw_level2, csrc_l1],
+    Seed(duck).stock(
+        code,
+        name=name,
+        exchange=exchange,
+        listing_date="2010-01-05",
+        is_listed=True,
+        is_st=False,
+        is_suspended=False,
+        sw_level1=sw_level1,
+        sw_level2=sw_level2,
+        csrc_l1=csrc_l1,
+        total_shares=100,
+        circ_shares=80,
     )
 
 
 def _seed_trio(duck, code: str, report_date: str = LATEST) -> None:
     """主链三表各一行（`pending_codes` 的股票池要 JOIN income_statement）。"""
-    duck.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, report_type, revenue)
-           VALUES (?, CAST(? AS DATE), 'quarterly', 1000)""",
-        [code, report_date],
+    seed = Seed(duck)
+    seed.income(code, report_date, report_type="quarterly", revenue=1000)
+    seed.balance(
+        code, report_date, total_assets=5000, total_liabilities=2000, total_equity=3000
     )
-    duck.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets,
-                                     total_liabilities, total_equity)
-           VALUES (?, CAST(? AS DATE), 5000, 2000, 3000)""",
-        [code, report_date],
-    )
-    duck.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES (?, CAST(? AS DATE), 100)""",
-        [code, report_date],
-    )
+    seed.cash_flow(code, report_date, cf_from_operating=100)
 
 
 def _seed_csmar_indirect(duck, code: str, report_date: str, *, net_profit: float) -> None:
     """CSMAR 覆盖期的间接法行（`period_floor` 保护范围内，本源绝不能改写它）。"""
-    duck.write_query(
-        """INSERT INTO cash_flow_indirect
-               (stock_code, report_date, report_type, net_profit,
-                source, fetch_time, raw_response_hash, confidence, batch_id)
-           VALUES (?, CAST(? AS DATE), 'annual', ?,
-                   'csmar', TIMESTAMP '2026-09-20 00:00:00', 'h', 'strict', 'b')""",
-        [code, report_date, net_profit],
+    Seed(duck).cash_indirect(
+        code,
+        report_date,
+        report_type="annual",
+        net_profit=net_profit,
+        # 本源标记（csmar / 'h' / 'b'）与被保护期的确定时间戳逐字传：`source` 与
+        # 批号正是"这一行是谁写的、能不能被本轮覆盖"的判据，不能吃工厂默认值。
+        source="csmar",
+        fetch_time="2026-09-20 00:00:00",
+        raw_response_hash="h",
+        confidence="strict",
+        batch_id="b",
     )
 
 
@@ -473,13 +481,18 @@ def test_refresh_keeps_out_of_window_source_rows(duckdb_store, monkeypatch) -> N
         (OLD, "semi_annual", 1),
         ("2025-12-31", "annual", 999),
     ):
-        duckdb_store.write_query(
-            """INSERT INTO cash_flow_activity
-                   (stock_code, report_date, report_type, capex, source, fetch_time,
-                    raw_response_hash, confidence, batch_id)
-               VALUES ('600519', CAST(? AS DATE), ?, ?, 'eastmoney_f10',
-                       TIMESTAMP '2026-09-20 00:00:00', 'h', 'strict', 'b')""",
-            [report_date, report_type, capex],
+        # `source='eastmoney_f10'` 是"本源行"的判据（补采只覆盖自己的来源），
+        # 与工厂默认的 `csmar` 不是同一件事，逐字传。
+        Seed(duckdb_store).cash_activity(
+            "600519",
+            report_date,
+            report_type=report_type,
+            capex=capex,
+            source="eastmoney_f10",
+            fetch_time="2026-09-20 00:00:00",
+            raw_response_hash="h",
+            confidence="strict",
+            batch_id="b",
         )
     fetcher = SupplementFetcher(duck=duckdb_store)
     monkeypatch.setattr(
@@ -754,11 +767,13 @@ def _seed_repair_fixture(duck) -> None:
            WHERE stock_code = '600519'"""
     )
     # 保险股、早于 CAS25 → 旧准则口径的真实合同负债，必须保留
-    duck.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets,
-                                      total_liabilities, total_equity, contract_liabilities)
-           VALUES ('601318', DATE '2013-12-31', 600000000000, 537217000000,
-                   60000000000, 49156000000)"""
+    Seed(duck).balance(
+        "601318",
+        "2013-12-31",
+        total_assets=600000000000,
+        total_liabilities=537217000000,
+        total_equity=60000000000,
+        contract_liabilities=49156000000,
     )
 
 

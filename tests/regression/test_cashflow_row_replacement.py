@@ -41,8 +41,9 @@ from app.core.supplement import (
 )
 from tests.support.seed import Seed
 
-# `stock_meta` 与主链三表（`_seed_stock` / `_seed_trio`）仍内联：这几张表在本文件
-# 各只出现一次，没有重复样板可收敛。
+# `stock_meta` 与主链三表（`_seed_stock` / `_seed_trio`）走工厂的按域方法：
+# `exchange='SSE'` 与 `report_type='semi_annual'` 逐字传（工厂默认值按代码段推断，
+# 与本文件的 fixture 不是同一口径）。
 
 FETCH_TIME = datetime(2026, 11, 17, 12, 0, 0)
 LATEST = "2026-09-30"
@@ -82,34 +83,30 @@ def _null_reason_rows(duck, field_name: str, report_date: str | None = None) -> 
 
 
 def _seed_stock(duck, code: str = "600519", name: str = "贵州茅台") -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, listing_date, is_listed, is_st,
-                is_suspended, sw_level1, sw_level2, csrc_l1, total_shares, circ_shares)
-           VALUES (?, ?, 'SSE', '2010-01-05', TRUE, FALSE, FALSE,
-                   '食品饮料', '白酒', '制造业', 100, 80)""",
-        [code, name],
+    Seed(duck).stock(
+        code,
+        name=name,
+        exchange="SSE",
+        listing_date="2010-01-05",
+        is_listed=True,
+        is_st=False,
+        is_suspended=False,
+        sw_level1="食品饮料",
+        sw_level2="白酒",
+        csrc_l1="制造业",
+        total_shares=100,
+        circ_shares=80,
     )
 
 
 def _seed_trio(duck, code: str = "600519", report_date: str = INCIDENT_PERIOD) -> None:
     """主链三表各一行（`pending_codes` 的股票池要 JOIN income_statement）。"""
-    duck.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, report_type, revenue)
-           VALUES (?, CAST(? AS DATE), 'semi_annual', 1000)""",
-        [code, report_date],
+    seed = Seed(duck)
+    seed.income(code, report_date, report_type="semi_annual", revenue=1000)
+    seed.balance(
+        code, report_date, total_assets=5000, total_liabilities=2000, total_equity=3000
     )
-    duck.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets,
-                                     total_liabilities, total_equity)
-           VALUES (?, CAST(? AS DATE), 5000, 2000, 3000)""",
-        [code, report_date],
-    )
-    duck.write_query(
-        """INSERT INTO cash_flow (stock_code, report_date, cf_from_operating)
-           VALUES (?, CAST(? AS DATE), 100)""",
-        [code, report_date],
-    )
+    seed.cash_flow(code, report_date, cf_from_operating=100)
 
 
 def _seed_old_source_rows(duck, code: str = "600519") -> None:

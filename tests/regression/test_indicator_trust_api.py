@@ -14,7 +14,8 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.stock_detail import router as stock_detail_router
 from app.web.api.watchlist import router as watchlist_router
 from tests.conftest import insert_minimum_screenable_data
-from tests.support.seed import Seed
+from tests.support.seed import CURRENT_DATE, CURRENT_TIMESTAMP, Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 SNAPSHOT_VALUE_FIELDS = (
     "latest_close", "pe_ttm", "pb_mrq", "roe", "gross_margin", "net_margin",
@@ -33,30 +34,41 @@ def _build_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
 
 
 def _seed_screenable(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    # `stock_meta` / `indicator_snapshot` 走工厂的按域方法（`stock` / `snapshot`）。
+    # 快照那两个"库侧当前时刻"列照原 SQL 继续写成库侧求值（`CURRENT_DATE` /
+    # `CURRENT_TIMESTAMP` 哨兵），不是固定字面量：原 SQL 里就是这两个函数，换成
+    # 工厂默认的历史字面量会静默改掉 `latest_price_date`/`calculated_at` 的语义。
+    Seed(duckdb_store).stock(
+        "000001",
+        name="Test",
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
 
 
     insert_minimum_screenable_data(duckdb_store)
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot
-           (stock_code, report_date, latest_close, latest_price_date, calculated_at,
-            pe_ttm, pb_mrq, roe, gross_margin, net_margin, debt_ratio,
-            revenue_yoy, net_profit_yoy, dividend_yield)
-           VALUES ('000001', '2025-12-31', 10, CURRENT_DATE, CURRENT_TIMESTAMP,
-                   12.5, 1.5, 0.2, 0.4, 0.1, 0.2, 0.3, 0.25, 0.02)
-           ON CONFLICT (stock_code, report_date) DO UPDATE SET
-               pe_ttm = excluded.pe_ttm,
-               pb_mrq = excluded.pb_mrq,
-               roe = excluded.roe,
-               gross_margin = excluded.gross_margin,
-               net_margin = excluded.net_margin,
-               debt_ratio = excluded.debt_ratio,
-               revenue_yoy = excluded.revenue_yoy,
-               net_profit_yoy = excluded.net_profit_yoy,
-               dividend_yield = excluded.dividend_yield"""
+    # `overwrite=True` = DuckDB 的 `INSERT OR REPLACE`（upsert）：只改本次给出的列，
+    # 与原来 `ON CONFLICT ... DO UPDATE SET <这九列>` 的粒度逐列一致
+    # （`latest_close`/`latest_price_date`/`calculated_at` 仍取 `insert_minimum_screenable_data`
+    # 先写入的那一份）。
+    Seed(duckdb_store).snapshot(
+        "000001",
+        "2025-12-31",
+        latest_close=10,
+        latest_price_date=CURRENT_DATE,
+        calculated_at=CURRENT_TIMESTAMP,
+        pe_ttm=12.5,
+        pb_mrq=1.5,
+        roe=0.2,
+        gross_margin=0.4,
+        net_margin=0.1,
+        debt_ratio=0.2,
+        revenue_yoy=0.3,
+        net_profit_yoy=0.25,
+        dividend_yield=0.02,
+        overwrite=True,
     )
 
 
@@ -64,9 +76,14 @@ def test_stock_search_matches_partial_code_and_name(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('600519', '贵州茅台', 'SSE', '2020-01-01', false, false)"""
+    # `exchange='SSE'` 逐字传：断言的名称/代码之外，交易所是这条搜索用例的前提。
+    Seed(duckdb_store).stock(
+        "600519",
+        name="贵州茅台",
+        exchange="SSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
     client = _build_client(duckdb_store, sqlite_store)
 
@@ -181,9 +198,9 @@ def test_watchlist_returns_values_and_trust_when_quality_clean(
     sqlite_store: SQLiteStore,
 ) -> None:
     _seed_screenable(duckdb_store)
-    sqlite_store.execute(
-        "INSERT INTO watchlist (stock_code, group_name) VALUES ('000001', 'default')"
-    )
+    # 自选行走 `SeedSqlite.watchlist`：`group_name='default'` 是 schema 默认值，
+    # 但 `item["group_name"] == "default"` 这条断言读的就是它，所以逐字写出来。
+    SeedSqlite(sqlite_store).watchlist("000001", group_name="default")
     client = _build_client(duckdb_store, sqlite_store)
 
     response = client.get("/api/watchlist/list")
@@ -204,9 +221,8 @@ def test_watchlist_masks_snapshot_values_when_lineage_invalid(
 ) -> None:
     _seed_screenable(duckdb_store)
     _poison_lineage(duckdb_store)
-    sqlite_store.execute(
-        "INSERT INTO watchlist (stock_code, group_name) VALUES ('000001', 'default')"
-    )
+    # 同上：自选行同形状（`group_name` 被断言读到，逐字传）。
+    SeedSqlite(sqlite_store).watchlist("000001", group_name="default")
     client = _build_client(duckdb_store, sqlite_store)
 
     response = client.get("/api/watchlist/list")

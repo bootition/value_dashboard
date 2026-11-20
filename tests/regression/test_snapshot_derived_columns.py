@@ -28,6 +28,7 @@ from app.core.indicators.calculator import IndicatorCalculator, derived_snapshot
 from app.core.indicators.roce import ELIGIBLE_MIN_YEARS
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
 
 PROBE_COLUMN = "derived_probe"  # 模拟"不由计算器生产"的外部派生列
 
@@ -47,17 +48,19 @@ def _seed_snapshot(
     duck: DuckDBStore, code: str, *, report_date: date, probe: float | None = None,
     roce_median: float | None = None,
 ) -> None:
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES (?, ?, 'SZSE', true)",
-        [code, code],
-    )
-    duck.write_query(
-        f"""INSERT INTO indicator_snapshot
-                (stock_code, report_date, calculated_at, data_version, {PROBE_COLUMN},
-                 roce_5y_median, roce_5y_years)
-            VALUES (?, CAST(? AS DATE), now(), 'fixture', ?, ?, ?)""",
-        [code, report_date.isoformat(), probe, roce_median, 5 if roce_median else None],
+    seed = Seed(duck)
+    # `exchange='SZSE'` 逐字传：工厂按代码段推断的是 SHSE，与本夹具口径不同。
+    seed.stock(code, exchange="SZSE", is_listed=True)
+    seed.snapshot(
+        code,
+        report_date.isoformat(),
+        # 原 SQL 是 `now()`（库侧当前时刻）：按迁移守则显式交回库侧时钟，
+        # 免得"刚算出来的"被静默写成工厂的固定过去时间。
+        calculated_at=CURRENT_TIMESTAMP,
+        data_version="fixture",
+        **{PROBE_COLUMN: probe},
+        roce_5y_median=roce_median,
+        roce_5y_years=5 if roce_median else None,
     )
 
 
@@ -112,6 +115,9 @@ def test_full_publish_preserves_externally_written_columns(
             SELECT stock_code, report_date, calculated_at, data_version, pe_ttm
             FROM indicator_snapshot WHERE FALSE"""
     )
+    # 留（第 5 类·测试自建表）：`"{staging}"` 是**本用例自己 CREATE** 出来的临时
+    # staging 表，列清单（只 5 列，缺 `derived_probe`）本身就是"生产形状的 staging"
+    # 这个论点；工厂方法绑定的是真表 `indicator_snapshot`，替不了它。
     duckdb_store.write_query(
         f"""INSERT INTO "{staging}"
                 (stock_code, report_date, calculated_at, data_version, pe_ttm)
@@ -170,6 +176,9 @@ def test_publish_allows_legendary_empty_derived_column(
 def _seed_roce_history(duck: DuckDBStore, code: str, values: list[float]) -> None:
     for index, value in enumerate(values):
         year = 2016 + index
+        # 留（第 6 类·库侧相对时间）：`calculated_at` 要的是库侧 `now()`（"这条历史
+        # 是不是新鲜的"由 ROCE 钩子按库时钟判），而 `roce_history` 在工厂里没有方法
+        # （本轮不补 API），`now()` 也超出了哨兵白名单的 TIMESTAMP/DATE 两形状。
         duck.write_query(
             """INSERT INTO roce_history
                    (stock_code, report_date, ce, ce_prev, ebit, roce, status,
@@ -245,6 +254,9 @@ def test_full_publish_with_production_shaped_staging_preserves_derived_columns(
     )
     # 只按计算器真正负责的列填值（与生产 staging 被 `_insert_records_in_connection`
     # 按同样方式填充一致）
+    # 留（第 5 类·测试自建表）：`"{staging}"` 是本用例自己 CREATE 的**全列** staging
+    # 副本，`BY NAME` 只喂 5 列、其余全 NULL —— 这个"生产形状"正是论点；工厂方法
+    # 绑定的是真表 `indicator_snapshot`，替不了它。
     duckdb_store.write_query(
         f"""INSERT INTO "{staging}" BY NAME
             SELECT stock_code, report_date, calculated_at, data_version, pe_ttm

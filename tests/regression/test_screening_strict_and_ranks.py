@@ -2,31 +2,52 @@ from __future__ import annotations
 
 from app.core.screening.engine import ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import CURRENT_TIMESTAMP, Seed
+
+# 三张表都走 `tests/support/seed.py` 的按域方法（`stocks` / `snapshots` /
+# `source_audit` / `balance`）：交易所/上市日/`is_st` 这类"全批同值"由 `**cols` 表达，
+# 逐行不同的名称、行业（`csrc_l1`/`csrc_l2`）、估值与审计值仍逐字写在调用点。
 
 
 def _seed_screening_data(duck: DuckDBStore) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_st, is_suspended, csrc_l1, csrc_l2)
-           VALUES
-           ('000001', 'Strict One', 'SZSE', '2020-01-01', false, false, 'Finance', 'Bank'),
-           ('000002', 'Approx Two', 'SZSE', '2020-01-01', false, false, 'Finance', 'Insurance'),
-           ('000003', 'Strict Three', 'SZSE', '2020-01-01', false, false, 'Industry', 'Machinery')"""
+    seed = Seed(duck)
+    # `exchange` / `listing_date` / `is_st` / `is_suspended` 原 SQL 三行逐字相同 → 全批同值；
+    # 逐行不同的是名称与细分行业。
+    seed.stocks(
+        [
+            ("000001", "Strict One", {"csrc_l1": "Finance", "csrc_l2": "Bank"}),
+            ("000002", "Approx Two", {"csrc_l1": "Finance", "csrc_l2": "Insurance"}),
+            ("000003", "Strict Three", {"csrc_l1": "Industry", "csrc_l2": "Machinery"}),
+        ],
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
-    duck.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm, roe)
-           VALUES
-           ('000001', '2025-12-31', 10, 0.20),
-           ('000002', '2025-12-31', 20, 0.10),
-           ('000003', '2025-12-31', 30, 0.30)"""
+    seed.snapshots(
+        [
+            {"stock_code": "000001", "report_date": "2025-12-31", "pe_ttm": 10, "roe": 0.20},
+            {"stock_code": "000002", "report_date": "2025-12-31", "pe_ttm": 20, "roe": 0.10},
+            {"stock_code": "000003", "report_date": "2025-12-31", "pe_ttm": 30, "roe": 0.30},
+        ]
     )
-    duck.write_query(
-        """INSERT INTO source_audit
-           (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
-           VALUES
-           ('000001', 'pe_ttm', '2025-12-31', 10, 'test', 'a', CURRENT_TIMESTAMP, repeat('a', 64), 'strict'),
-           ('000002', 'pe_ttm', '2025-12-31', 20, 'test', 'b', CURRENT_TIMESTAMP, repeat('b', 64), 'approximate'),
-           ('000003', 'pe_ttm', '2025-12-31', 30, 'test', 'c', CURRENT_TIMESTAMP, repeat('c', 64), 'strict')"""
+    # 审计行逐行给：`confidence`（strict/approximate）与批次/摘要三行都不同，
+    # 没有"全批同值"可收敛。`fetch_time` 原 SQL 是 `CURRENT_TIMESTAMP` → 照迁移守则
+    # 传库侧哨兵（固定字面量会让"这条是刚写的"静默变成过去时刻）。
+    seed.source_audit(
+        "000001", "pe_ttm", report_date="2025-12-31", value=10, source="test",
+        fetch_batch_id="a", fetch_time=CURRENT_TIMESTAMP, raw_response_hash="a" * 64,
+        confidence="strict",
+    )
+    seed.source_audit(
+        "000002", "pe_ttm", report_date="2025-12-31", value=20, source="test",
+        fetch_batch_id="b", fetch_time=CURRENT_TIMESTAMP, raw_response_hash="b" * 64,
+        confidence="approximate",
+    )
+    seed.source_audit(
+        "000003", "pe_ttm", report_date="2025-12-31", value=30, source="test",
+        fetch_batch_id="c", fetch_time=CURRENT_TIMESTAMP, raw_response_hash="c" * 64,
+        confidence="strict",
     )
 
 
@@ -49,6 +70,10 @@ def test_strict_only_requires_latest_strict_field_audit(duckdb_store: DuckDBStor
 
 def test_strict_only_rejects_audited_value_that_differs_from_snapshot(duckdb_store: DuckDBStore) -> None:
     _seed_screening_data(duckdb_store)
+    # 留（第 6 类·库侧相对时间）：`fetch_time` 要**比上面那三条审计晚**
+    # （`CURRENT_TIMESTAMP + INTERVAL '1 second'`），"谁是最新一条审计"正是本用例的
+    # 论点；`sql_now()` 只收 `datetime('now', '±N 单位')`，表达不出
+    # `CURRENT_TIMESTAMP + INTERVAL` 这种"相对另一列的库侧增量"。
     duckdb_store.write_query(
         """INSERT INTO source_audit
            (stock_code, field_name, report_date, value, source, fetch_batch_id, fetch_time, raw_response_hash, confidence)
@@ -89,11 +114,11 @@ def test_rank_fields_are_generated_for_sort_and_sw_levels(duckdb_store: DuckDBSt
 
 def test_normalized_statement_fields_support_filter_columns_and_ranks(duckdb_store: DuckDBStore) -> None:
     _seed_screening_data(duckdb_store)
-    duckdb_store.write_query(
-        """INSERT INTO balance_sheet (stock_code, report_date, total_assets)
-           VALUES ('000001', '2025-12-31', 100), ('000002', '2025-12-31', 200),
-                  ('000003', '2025-12-31', 300)"""
-    )
+    seed = Seed(duckdb_store)
+    # 三行的差别只有 `total_assets` 一个数 —— 逐个逐字传，别把 100/200/300 藏进工厂。
+    seed.balance("000001", "2025-12-31", total_assets=100)
+    seed.balance("000002", "2025-12-31", total_assets=200)
+    seed.balance("000003", "2025-12-31", total_assets=300)
 
     result = ScreeningEngine(duck=duckdb_store).run(
         {
