@@ -55,6 +55,21 @@ logger = logging.getLogger(__name__)
 
 SNAPSHOT_TABLE = "indicator_snapshot"
 
+# 计算口径版本（reports/145）：**任何**改变快照数值的公式/口径改动都必须 bump
+# 这个常量。增量重算（update_parts/indicator_scope.py）只在版本一致时才敢
+# 只算变化的那部分；bump 后第一轮自动全量，避免旧口径行长期混在新口径行里。
+INDICATOR_COMPUTATION_VERSION = "2026-11-19.incremental.1"
+DATA_VERSION_PREFIX = "audit-safe-v1"
+
+
+def indicator_data_version() -> str:
+    """写进 `indicator_snapshot.data_version`：一眼看出这行是哪版口径算的。
+
+    **每次现算**（不缓存成模块级常量）：版本号一 bump，写进快照的值必须
+    跟着变，否则"为什么这轮全量"事后无法从数据里核对。
+    """
+    return f"{DATA_VERSION_PREFIX};calc={INDICATOR_COMPUTATION_VERSION}"
+
 
 @dataclass(frozen=True)
 class DerivedSnapshotDomain:
@@ -135,7 +150,7 @@ class IndicatorCalculator:
         result: dict[str, Any] = {
             "stock_code": stock_code,
             "calculated_at": datetime.now(UTC),
-            "data_version": "audit-safe-v1",
+            "data_version": indicator_data_version(),
         }
 
         # 获取最新报告期的三大报表数据
@@ -218,7 +233,7 @@ class IndicatorCalculator:
             "stock_code": stock_code,
             "report_date": report_date,
             "calculated_at": datetime.now(UTC),
-            "data_version": "audit-safe-v1",
+            "data_version": indicator_data_version(),
         }
         price_info = self._get_latest_price(stock_code)
         result["latest_close"] = price_info.get("close")
@@ -407,7 +422,7 @@ class IndicatorCalculator:
                             "cumulative_financing_amount": financing,
                             "dividend_financing_ratio_pct": ratio,
                             "calculated_at": datetime.now(UTC),
-                            "data_version": "audit-safe-v1",
+                            "data_version": indicator_data_version(),
                         })
                     except Exception as error:
                         logger.debug("分红融资比增量计算 %s 失败: %s", code, error)

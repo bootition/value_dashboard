@@ -111,6 +111,8 @@ class PriceScope:
     # 本轮因"源侧 qfq 还没发"（gap < price_qfq_lag_bars 且本交易日已尝试满）
     # 被**延迟**的股票：既不抓取、也不算失败、不降级 partial、不写待重算名单。
     deferred_codes: list[str] = field(default_factory=list)
+    # 候选裁决的逐条计数（为什么延迟 / 为什么没延迟），供报告与日志自证。
+    defer_reasons: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -125,6 +127,9 @@ class PricePipelineOutcome:
     write_batch_sizes: list[int]
     observed_concurrency: int
     started_at: float
+    #: 本轮的追平尝试记账器（随批次落盘）。结算段只用它做兜底 flush 与计数；
+    #: ``None`` 表示调用方没走流水线（测试/意外路径）→ 退回单次记账。
+    catchup_tracker: QfqCatchupAttemptTracker | None = None
 
 
 # ─── 源侧 qfq 发布滞后：候选 + 裁决（reports/151 §1）──────────────────────
@@ -145,9 +150,34 @@ class PricePipelineOutcome:
 # 一律在上面两步之前就归入"必须抓"，延迟逻辑碰不到它们；判不出原因
 # （gap 查不到 / 记录对不上 / 状态读失败）时默认**不延迟**——方向是宁可多扫
 # 一轮，绝不漏更新。
+#
+# ## 2026-11-21：记账必须**跟着批次落盘**，否则整条裁决是死循环
+#
+# 旧实现把 :func:`mark_qfq_catchup_attempts` 只放在 :func:`_finalize_price_step`
+# （整步跑完）。而延迟判据要读的正是这条记录 —— 于是：
+#
+#    价格步跑不到终点（超时被杀 / 进程重启 / 收尾异常）
+#      → 记录永远不落盘 → 下轮没有"已尝试满"的证据
+#      → :func:`defer_qfq_source_lag` 永远判不出延迟 → 又重选全市场
+#      → 又跑不完 → 记录仍不落盘（自锁）
+#
+# 现场证据：``data_refresh_state`` 里**根本不存在** ``price_qfq_catchup_attempts``
+# 这个 key；76MB 日志里「源侧 qfq 滞后」0 次命中 —— 裁决一次都没生效过。
+#
+# 修法：记账由 :class:`QfqCatchupAttemptTracker` 承担，跟着
+# ``_persist_price_batch`` 的**每一个批次**走（内存累积 + 每批一次幂等写），
+# 步末只做兜底 flush。只对**成功落库**的股票记账（失败不记 → 下轮重试）。
 _QFQ_CATCHUP_ATTEMPTS_KEY = "price_qfq_catchup_attempts"
 #: 尝试记录的条目上限（正常只存"今天且仍落后"的股票，极端源故障时防无限膨胀）。
 _QFQ_CATCHUP_ATTEMPTS_LIMIT = 8000
+#: 记账落盘的合并阈值：攒够这么多**新记账**才写一次 ``data_refresh_state``。
+#: 为什么不能每只股票写一次：整张表是一个 JSON 值（事故形态下 5571 条 ≈ 500KB），
+#: 实测一次写 ≈13ms；每只写一次 = 5571×13ms ≈ 72s。按 100 只合并 ≈ 56 次 ≈ 0.7s。
+_QFQ_CATCHUP_FLUSH_STOCKS = 100
+#: 记账落盘的时间兜底：即使没攒够 ``_QFQ_CATCHUP_FLUSH_STOCKS``，超过这么多秒也写一次。
+#: 它兜的是"进程被硬杀（SIGKILL/重启，`finally` 跑不到）"——最多丢最后 N 秒的记账，
+#: 而不是像旧实现那样一次都写不下去。
+_QFQ_CATCHUP_FLUSH_SECONDS = 15.0
 _QFQ_LAG_BARS_DEFAULT = 2
 _QFQ_CATCHUP_MAX_ATTEMPTS_DEFAULT = 2
 
@@ -216,27 +246,31 @@ def load_qfq_catchup_attempts(owner: Any) -> dict[str, dict[str, Any]]:
     return attempts
 
 
-def mark_qfq_catchup_attempts(
-    owner: Any,
-    watermarks: dict[str, tuple[str | None, str | None]],
-    *,
-    on_date: str,
-) -> int:
-    """记一次"本交易日以该 ``(raw, qfq)`` 水位成功落库"的尝试，返回记账只数。
+def _prune_attempts(attempts: dict[str, dict[str, Any]]) -> None:
+    """条目超上限时按代码序丢掉超出部分（极端源故障时防状态无限膨胀）。"""
+    if len(attempts) <= _QFQ_CATCHUP_ATTEMPTS_LIMIT:
+        return
+    overflow = len(attempts) - _QFQ_CATCHUP_ATTEMPTS_LIMIT
+    for code in sorted(attempts)[:overflow]:
+        attempts.pop(code, None)
 
-    ``watermarks`` 必须是**落库之后**的水位（抓取失败不写 → 下轮照旧重试）。
-    同一 ``(raw, qfq)`` + 同一交易日 → ``n+1``；任一水位变化 → 重新从 1 记
-    （水位前进说明源侧已经动过，旧记录的"已尝试满"不再成立）。
-    换交易日整表作废 —— 这就是"最迟下个交易日必重试"的落地机制。
+
+def _apply_catchup_attempts(
+    attempts: dict[str, dict[str, Any]],
+    watermarks: dict[str, tuple[str | None, str | None]],
+    day: str,
+) -> list[str]:
+    """把一批**落库后**的水位记账进 ``attempts``（原地改），返回本次记上的代码。
+
+    语义（与 :func:`mark_qfq_catchup_attempts` 的文档一字不差）：
+    同一 ``(raw, qfq)`` + 同一交易日 → ``n+1``；任一水位变化 → 重新从 1 记；
+    没落后（qfq 已跟上自己的 raw）或水位判不出 → **不记**。
+
+    记账判据只在这里实现一次：批量落盘的
+    :class:`QfqCatchupAttemptTracker` 与单次写库的
+    :func:`mark_qfq_catchup_attempts` 都调它，不许出现第二份口径。
     """
-    day = _day_text(on_date)
-    if day is None or not watermarks:
-        return 0
-    loaded = load_qfq_catchup_attempts(owner)
-    attempts = {
-        code: record for code, record in loaded.items() if record.get("date") == day
-    }
-    marked = 0
+    marked: list[str] = []
     for code, (raw_value, qfq_value) in watermarks.items():
         raw_day = _day_text(raw_value)
         qfq_day = _day_text(qfq_value)
@@ -253,24 +287,197 @@ def mark_qfq_catchup_attempts(
             record["n"] = int(record.get("n") or 0) + 1
         else:
             attempts[code] = {"raw": raw_day, "qfq": qfq_day, "date": day, "n": 1}
-        marked += 1
-    if not marked and attempts == loaded:
-        return 0
-    if len(attempts) > _QFQ_CATCHUP_ATTEMPTS_LIMIT:
-        overflow = len(attempts) - _QFQ_CATCHUP_ATTEMPTS_LIMIT
-        for code in sorted(attempts)[:overflow]:
-            attempts.pop(code, None)
+        marked.append(code)
+    _prune_attempts(attempts)
+    return marked
+
+
+def _write_catchup_attempts(
+    owner: Any, attempts: dict[str, dict[str, Any]], *, logger: logging.Logger | None,
+) -> bool:
+    """把整张尝试记录写成 ``data_refresh_state`` 的一行（一次 SQLite 事务）。
+
+    写失败**不抛**：记账只影响"下一轮能不能延迟"，绝不能炸掉价格步骤本身
+    （下轮抓完再记一次即可）。返回是否写成功。
+    """
     try:
         owner._write_refresh_state(
             _QFQ_CATCHUP_ATTEMPTS_KEY,
             json.dumps(attempts, ensure_ascii=False, sort_keys=True),
         )
     except Exception as error:  # noqa: BLE001 - 记账失败只影响"能不能延迟"
-        logger = getattr(owner, "logger", None)
         if logger is not None:
             logger.warning("写入 qfq 追平尝试记录失败: %s", error)
+        return False
+    return True
+
+
+def mark_qfq_catchup_attempts(
+    owner: Any,
+    watermarks: dict[str, tuple[str | None, str | None]],
+    *,
+    on_date: str,
+) -> int:
+    """记一次"本交易日以该 ``(raw, qfq)`` 水位成功落库"的尝试，返回记账只数。
+
+    这是**单次/兜底**入口；流水线里每批落盘走
+    :class:`QfqCatchupAttemptTracker`（同一套 :func:`_apply_catchup_attempts`
+    口径，只是把"每批一次读+写"降成"内存累积 + 每批一次写"）。
+
+    ``watermarks`` 必须是**落库之后**的水位（抓取失败不写 → 下轮照旧重试）。
+    同一 ``(raw, qfq)`` + 同一交易日 → ``n+1``；任一水位变化 → 重新从 1 记
+    （水位前进说明源侧已经动过，旧记录的"已尝试满"不再成立）。
+    换交易日整表作废 —— 这就是"最迟下个交易日必重试"的落地机制。
+    """
+    day = _day_text(on_date)
+    if day is None or not watermarks:
+        return 0
+    loaded = load_qfq_catchup_attempts(owner)
+    attempts = {
+        code: record for code, record in loaded.items() if record.get("date") == day
+    }
+    marked = len(_apply_catchup_attempts(attempts, watermarks, day))
+    if not marked and attempts == loaded:
+        return 0
+    if not _write_catchup_attempts(owner, attempts, logger=getattr(owner, "logger", None)):
         return 0
     return marked
+
+
+class QfqCatchupAttemptTracker:
+    """把"本交易日以该 ``(raw, qfq)`` 水位成功落库"的记账**跟着批次落盘**。
+
+    为什么不能只在步末写（本模块顶部「记账必须跟着批次落盘」一节）：
+    延迟判据读的就是这条记录，而旧实现只在 :func:`_finalize_price_step`
+    （整步跑完）写 —— 价格步跑不到终点 → 记录永不落盘 → 永不延迟 →
+    下轮又跑满全市场 → 又跑不完，自锁。
+
+    设计约束（本类就是这三条的实现）：
+
+    * **只记成功落库的**：调用方只把 ``_persist_price_batch`` 返回的
+      ``updated_codes`` 增量交进来；抓取/落库失败的股票不记账 → 下轮重试。
+    * **低频**：状态在内存里累积，**攒够 100 只或过了 15 秒**才写一次
+      ``_write_refresh_state``（整张表一个 JSON、一个 SQLite 事务），
+      步末/异常收尾再兜底一次 —— 不是每只股票一次，也不是每批必写。
+    * **幂等**：同一 (code, 水位, 交易日) 重复落盘只会把 ``n`` 再加一次 ——
+      与"抓了一次就记一次"一致；flush 失败不清账，下次 flush 会补写。
+    """
+
+    __slots__ = (
+        "_attempts", "_clock", "_day", "_dirty", "_flush_seconds", "_flushes",
+        "_last_flush_at", "_loaded", "_pending_since_flush", "_recorded_codes",
+        "_total_marked",
+    )
+
+    def __init__(
+        self, *, clock: Callable[[], float], on_date: str | None = None,
+    ) -> None:
+        # 时钟由调用方注入（与模块内其余计时代码同一口径：不给测试留下
+        # "偷偷读真实时钟"的第二条路径）。
+        self._clock = clock
+        self._attempts: dict[str, dict[str, Any]] = {}
+        self._day = _day_text(on_date) or cn_today().strftime("%Y-%m-%d")
+        self._loaded = False
+        self._dirty = False
+        self._total_marked = 0
+        self._flushes = 0
+        self._flush_seconds = 0.0
+        self._pending_since_flush = 0
+        self._last_flush_at = clock()
+        self._recorded_codes: set[str] = set()
+
+    # ── 只读属性（供报告拼装）────────────────────────────────────────
+    @property
+    def total_marked(self) -> int:
+        """本轮累计记账只数（= 报告里的 ``qfq_catchup_attempts_marked``）。"""
+        return self._total_marked
+
+    @property
+    def flushes(self) -> int:
+        """本轮真正落盘的次数（每批一次 → 用来证明"低频"）。"""
+        return self._flushes
+
+    @property
+    def flush_seconds(self) -> float:
+        """本轮记账落盘的累计耗时（验收"不能让价格步变慢"的实测口径）。"""
+        return self._flush_seconds
+
+    @property
+    def recorded_codes(self) -> set[str]:
+        """本轮已记账的代码（步末兜底只补差集，避免同一只重复记）。"""
+        return self._recorded_codes
+
+    def _ensure_loaded(self, owner: Any) -> None:
+        if self._loaded:
+            return
+        loaded = load_qfq_catchup_attempts(owner)
+        # 换交易日整表作废：只保留今天的，其余不带进本轮写回。
+        self._attempts = {
+            code: record for code, record in loaded.items()
+            if record.get("date") == self._day
+        }
+        self._loaded = True
+
+    def record(
+        self,
+        owner: Any,
+        watermarks: dict[str, tuple[str | None, str | None]],
+        *,
+        logger: logging.Logger | None = None,
+    ) -> int:
+        """把一批落库后水位记入内存（**不写盘**），返回本批记上的只数。"""
+        if not watermarks:
+            return 0
+        self._ensure_loaded(owner)
+        marked = _apply_catchup_attempts(self._attempts, watermarks, self._day)
+        if not marked:
+            return 0
+        self._recorded_codes.update(marked)
+        self._total_marked += len(marked)
+        self._pending_since_flush += len(marked)
+        self._dirty = True
+        if logger is not None:
+            logger.debug("qfq 追平尝试已记账 %d 只（累计 %d）", len(marked), self._total_marked)
+        return len(marked)
+
+    def flush(self, owner: Any, *, logger: logging.Logger | None = None) -> bool:
+        """把内存里的整理结果落一次盘（无变化则**不写**，天然幂等）。"""
+        if not self._dirty:
+            return False
+        started = self._clock()
+        written = _write_catchup_attempts(owner, self._attempts, logger=logger)
+        self._flush_seconds += self._clock() - started
+        if not written:
+            return False
+        self._dirty = False
+        self._flushes += 1
+        self._pending_since_flush = 0
+        self._last_flush_at = self._clock()
+        return True
+
+    def flush_if_due(self, owner: Any, *, logger: logging.Logger | None = None) -> bool:
+        """攒够 ``_QFQ_CATCHUP_FLUSH_STOCKS`` 只、或距上次落盘超过
+        ``_QFQ_CATCHUP_FLUSH_SECONDS`` 秒，才真的写一次（低频但不丢太多）。"""
+        if not self._dirty:
+            return False
+        if self._pending_since_flush < _QFQ_CATCHUP_FLUSH_STOCKS and (
+            self._clock() - self._last_flush_at < _QFQ_CATCHUP_FLUSH_SECONDS
+        ):
+            return False
+        return self.flush(owner, logger=logger)
+
+    def mark_and_flush(
+        self,
+        owner: Any,
+        watermarks: dict[str, tuple[str | None, str | None]],
+        *,
+        logger: logging.Logger | None = None,
+    ) -> int:
+        """记账 + 按阈值/时间兜底落盘（每个落盘批次调用一次）。"""
+        marked = self.record(owner, watermarks, logger=logger)
+        if marked:
+            self.flush_if_due(owner, logger=logger)
+        return marked
 
 
 def raw_bars_beyond_qfq(
@@ -526,6 +733,7 @@ def defer_qfq_source_lag(
     candidates: dict[str, tuple[str, str]],
     *,
     logger: logging.Logger,
+    stats: dict[str, int] | None = None,
 ) -> set[str]:
     """裁决："``qfq < raw`` 的候选里，本轮哪些可以**跳过**"。
 
@@ -537,9 +745,19 @@ def defer_qfq_source_lag(
 
     gap ≥ ``price_qfq_lag_bars``（真滞后）在这里直接跳过判断 → 无条件重选；
     gap 查不到（``None``）同样不延迟。
+
+    ``stats``（可选，原地累加）：把"**为什么没延迟**"逐条计数写进去 ——
+    ``gap_unknown`` / ``gap_real_lag`` / ``record_missing`` /
+    ``watermark_mismatch`` / ``date_mismatch`` / ``attempts_below_cap`` /
+    ``deferred``。裁决失效时，光有 ``deferred=0`` 看不出卡在哪一环。
     """
     if not candidates:
         return set()
+    reason_counts = stats if stats is not None else {}
+
+    def bump(reason: str) -> None:
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+
     lag_bars = _positive_int(
         getattr(owner, "price_qfq_lag_bars", None), _QFQ_LAG_BARS_DEFAULT,
     )
@@ -553,22 +771,33 @@ def defer_qfq_source_lag(
     deferred: set[str] = set()
     for code, (raw_day, qfq_day) in candidates.items():
         gap = gaps.get(code)
-        if gap is None or gap < 1 or gap >= lag_bars:
+        if gap is None:
+            bump("gap_unknown")
+            continue
+        if gap < 1 or gap >= lag_bars:
+            # gap ≥ lag_bars = 真滞后（不是源侧发布节奏）；gap < 1 = 判不出落后。
+            bump("gap_real_lag")
             continue
         record = attempts.get(code)
         if not isinstance(record, dict):
+            bump("record_missing")
             continue
         if record.get("raw") != raw_day or record.get("qfq") != qfq_day:
+            bump("watermark_mismatch")
             continue
         if record.get("date") != today:
+            bump("date_mismatch")
             continue
         try:
             count = int(record.get("n") or 0)
         except (TypeError, ValueError):
+            bump("attempts_below_cap")
             continue
         if count < max_attempts:
+            bump("attempts_below_cap")
             continue
         deferred.add(code)
+        bump("deferred")
     return deferred
 
 
@@ -579,6 +808,7 @@ def _split_qfq_scope_rows(
     pending_set: set[str],
     target_date: str,
     logger: logging.Logger,
+    reasons: dict[str, int] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """把选股结果切成"本轮要抓"与"源侧滞后、本轮延迟"两半（顺序保持不变）。
 
@@ -586,9 +816,14 @@ def _split_qfq_scope_rows(
     ``qfq_refetch_pending`` 里）**一个都不许进延迟集合**：这里的判据与选股 SQL
     的 WHERE 逐条对应（血缘标志由同一条 SQL 的 SELECT 列给出），任何一项判不出
     都按硬缺口处理（方向 = 多扫一轮，不是漏更新）。
+
+    ``reasons``（可选，原地累加）：入选原因/未延迟原因的逐条计数，供报告回答
+    "这轮为什么延迟了 N 只（或为什么一只都没延迟）"。
     """
+    counts = reasons if reasons is not None else {}
     if not rows:
         return list(rows), []
+    hard_gap_count = 0
     candidates: dict[str, tuple[str, str]] = {}
     for row in rows:
         code = str(row["stock_code"])
@@ -602,9 +837,13 @@ def _split_qfq_scope_rows(
             or not _flag(row, "qfq_lineaged")
             or code in pending_set
         )
-        if not hard_gap:
+        if hard_gap:
+            hard_gap_count += 1
+        else:
             candidates[code] = (raw_day, qfq_day)
-    deferred = defer_qfq_source_lag(owner, candidates, logger=logger)
+    if hard_gap_count:
+        counts["hard_gap"] = counts.get("hard_gap", 0) + hard_gap_count
+    deferred = defer_qfq_source_lag(owner, candidates, logger=logger, stats=counts)
     if not deferred:
         return list(rows), []
     logger.warning(
@@ -721,11 +960,13 @@ def _plan_price_scope(
 
     # 候选 + 裁决：硬缺口全部留下，``qfq < raw`` 里"只差源侧那一根且已尝试满"的
     # 才本轮跳过（不算失败、不降级 partial、不写待重算名单）。
+    defer_reasons: dict[str, int] = {}
     target_stocks, deferred_codes = _split_qfq_scope_rows(
         owner, stocks,
         pending_set=pending_set,
         target_date=target_date,
         logger=logger,
+        reasons=defer_reasons,
     )
     if not target_stocks:
         logger.info(
@@ -733,7 +974,16 @@ def _plan_price_scope(
             "本交易日已尝试满，本轮不重扫）",
             len(deferred_codes),
         )
-        return {"status": "skipped", "reason": "prices_up_to_date"}
+        # 全部被延迟时这是**唯一**一条能看见裁决结果的路径：早退报告必须带上
+        # 延迟只数与逐条原因，否则"源侧 qfq 滞后"在生产里永远是隐形的
+        # （reports/151 §1 的死循环就是这么藏了三天）。
+        return {
+            "status": "skipped",
+            "reason": "prices_up_to_date",
+            "deferred_qfq_source_lag_count": len(deferred_codes),
+            "deferred_qfq_source_lag_codes": deferred_codes[:20],
+            "qfq_catchup_defer_reasons": defer_reasons,
+        }
 
     try:
         priority_codes = {
@@ -816,6 +1066,7 @@ def _plan_price_scope(
         xdxr_codes=xdxr_codes,
         raw_full_refetch=raw_full_refetch,
         deferred_codes=deferred_codes,
+        defer_reasons=defer_reasons,
     )
 
 
@@ -962,19 +1213,44 @@ def _run_price_pipeline(
             next_index += 1
             outstanding[stock_executor.submit(fetch_one, stock)] = stock
 
+    # 追平尝试记账：跟着**每一个落盘批次**走，而不是等整步跑完（死循环的修法，
+    # 见模块顶部「记账必须跟着批次落盘」）。状态在内存里累积，一批一次写。
+    catchup_tracker = QfqCatchupAttemptTracker(clock=clock)
+
+    def persist_batch(
+        pending: list[tuple[str, Any, Any, bool, bool]],
+        *,
+        flush_buffer: bool = False,
+    ) -> None:
+        """落一批价格，并**立刻**把这一批"成功落库且 QFQ 仍落后"的记账落盘。
+
+        记账点必须紧贴 ``_persist_price_batch`` 的返回值：``updated_codes`` 的
+        增量 = 本批**真的落库成功**的股票（失败的不进 → 下轮照旧重试）。
+        水位走 ``qfq_raw_watermarks``（落库后的库内真值，不是抓取结果的猜测）。
+        """
+        nonlocal success_count, updated_codes, fail_count
+        before = len(updated_codes)
+        success_count, updated_codes, fail_count = owner._persist_price_batch(
+            pending, success_count, updated_codes, fail_count,
+            buffer=write_buffer, flush_buffer=flush_buffer,
+            failed_codes=failed_codes, before_write=fill_pipeline,
+            batch_sizes=write_batch_sizes,
+        )
+        landed = updated_codes[before:]
+        if landed:
+            catchup_tracker.mark_and_flush(
+                owner,
+                qfq_raw_watermarks(owner, landed, logger=logger),
+                logger=logger,
+            )
+
     def flush_write_buffer() -> None:
         """Write the pending full-history buffer in one transaction.
 
         ``before_write`` 先补满流水线：写库期间主线程被占住，工作线程
         必须已经在跑下一批抓取，否则它们会空等（2026-11-12 P0 ③）。
         """
-        nonlocal success_count, updated_codes, fail_count
-        success_count, updated_codes, fail_count = owner._persist_price_batch(
-            [], success_count, updated_codes, fail_count,
-            buffer=write_buffer, flush_buffer=True,
-            failed_codes=failed_codes, before_write=fill_pipeline,
-            batch_sizes=write_batch_sizes,
-        )
+        persist_batch([], flush_buffer=True)
 
     def handle_price_result(
         code: str,
@@ -1002,11 +1278,7 @@ def _run_price_pipeline(
         else:
             batch.append((code, raw_result, qfq_result, raw_full_requested, qfq_full_requested))
         if len(batch) >= batch_size:
-            success_count, updated_codes, fail_count = owner._persist_price_batch(
-                batch, success_count, updated_codes, fail_count,
-                buffer=write_buffer, before_write=fill_pipeline,
-                failed_codes=failed_codes, batch_sizes=write_batch_sizes,
-            )
+            persist_batch(batch)
             batch.clear()
         elif write_buffer.should_flush():
             flush_write_buffer()
@@ -1081,11 +1353,7 @@ def _run_price_pipeline(
                 observed_concurrency = max(observed_concurrency, concurrency)
             fill_pipeline()
         if batch:
-            success_count, updated_codes, fail_count = owner._persist_price_batch(
-                batch, success_count, updated_codes, fail_count,
-                buffer=write_buffer, before_write=fill_pipeline,
-                failed_codes=failed_codes, batch_sizes=write_batch_sizes,
-            )
+            persist_batch(batch)
             batch.clear()
     finally:
         # ② 循环正常结束或抛异常都必须把剩余数据落盘：既包括未满一批的
@@ -1093,11 +1361,7 @@ def _run_price_pipeline(
         #    股票更不能停在"删了没插"的中间态。
         try:
             if batch:
-                success_count, updated_codes, fail_count = owner._persist_price_batch(
-                    list(batch), success_count, updated_codes, fail_count,
-                    buffer=write_buffer, failed_codes=failed_codes,
-                    batch_sizes=write_batch_sizes,
-                )
+                persist_batch(list(batch))
                 batch.clear()
             if len(write_buffer):
                 flush_write_buffer()
@@ -1106,6 +1370,11 @@ def _run_price_pipeline(
                 "价格收尾写入失败（暂存 %d 只 / 缓冲 %d 只）: %s",
                 len(batch), len(write_buffer), error,
             )
+        # 最后一道兜底：万一收尾写入/中途异常留下没落盘的记账，这里补一次。
+        try:
+            catchup_tracker.flush(owner, logger=logger)
+        except Exception as error:  # noqa: BLE001 - 记账失败绝不能吞掉原异常
+            logger.warning("qfq 追平尝试兜底落盘失败: %s", error)
         request_executor.shutdown(wait=False, cancel_futures=True)
         stock_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -1118,6 +1387,7 @@ def _run_price_pipeline(
         write_batch_sizes=write_batch_sizes,
         observed_concurrency=observed_concurrency,
         started_at=update_started,
+        catchup_tracker=catchup_tracker,
     )
 
 
@@ -1146,12 +1416,43 @@ def _finalize_price_step(
     # 水位取**落库之后**的值（`updated_codes` 只含成功落库的股票 → 失败不写 →
     # 下轮照旧重试）。同一水位当日记满 `price_qfq_catchup_max_attempts` 次后，
     # 下一轮"只差源侧那一根"的候选才会被延迟；水位/交易日一变记录立刻作废。
-    attempts_marked = mark_qfq_catchup_attempts(
-        owner,
-        qfq_raw_watermarks(owner, updated_codes, logger=logger),
-        on_date=cn_today().strftime("%Y-%m-%d"),
-    )
+    #
+    # 2026-11-21：主记账已经搬进 `_run_price_pipeline`（每批一次落盘，见模块
+    # 顶部「记账必须跟着批次落盘」）。这里只做**兜底**：补记流水线里没记到的
+    # 成功代码（例如调用方没走流水线、或批次落盘后异常）。
+    tracker = outcome.catchup_tracker
+    attempts_marked = 0
+    attempts_flushes = 0
+    attempts_flush_seconds = 0.0
+    if tracker is None:
+        attempts_marked = mark_qfq_catchup_attempts(
+            owner,
+            qfq_raw_watermarks(owner, updated_codes, logger=logger),
+            on_date=cn_today().strftime("%Y-%m-%d"),
+        )
+    else:
+        remaining = [code for code in updated_codes if code not in tracker.recorded_codes]
+        if remaining:
+            tracker.mark_and_flush(
+                owner,
+                qfq_raw_watermarks(owner, remaining, logger=logger),
+                logger=logger,
+            )
+        attempts_marked = tracker.total_marked
+        attempts_flushes = tracker.flushes
+        attempts_flush_seconds = tracker.flush_seconds
     logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
+    # 可观测性（reports/151 §1.1）：延迟裁决与记账必须能在**日志**里看见 ——
+    # 上一轮的死循环正是因为这两个数字从来没出现过。
+    logger.info(
+        "[增量] qfq 追平记账: qfq_catchup_attempts_marked=%d"
+        "（落盘 %d 次 / %.3fs）, deferred_qfq_source_lag_count=%d, 裁决明细=%s",
+        attempts_marked,
+        attempts_flushes,
+        attempts_flush_seconds,
+        len(scope.deferred_codes),
+        dict(scope.defer_reasons),
+    )
     if failed_codes:
         logger.warning(
             "[增量] 价格失败代码 %d 只: %s",
@@ -1236,9 +1537,17 @@ def _finalize_price_step(
         # 源侧 qfq 滞后（reports/151 §1）的可观测性：本轮延迟了哪些、记了几只尝试。
         # 被延迟的股票**不在** target_stocks 里 → 既不算失败、也不参与
         # `partial(qfq_lagged)` 降级判定、不进 tech_recompute_pending。
-        "qfq_catchup_deferred_count": len(scope.deferred_codes),
-        "qfq_catchup_deferred_codes": scope.deferred_codes[:20],
+        "deferred_qfq_source_lag_count": len(scope.deferred_codes),
+        "deferred_qfq_source_lag_codes": scope.deferred_codes[:20],
+        # 记账只看**成功落库**的股票 → 抓取/落库失败的下一轮照旧重试。
         "qfq_catchup_attempts_marked": attempts_marked,
+        # 记账落盘证据（"批次走一次写"而不是"每只一次写"的实测口径）：
+        # flushes = 本轮写了几次 data_refresh_state；flush_seconds = 这些写的累计耗时。
+        "qfq_catchup_attempt_flushes": attempts_flushes,
+        "qfq_catchup_attempt_flush_seconds": round(attempts_flush_seconds, 4),
+        # 为什么延迟了这些、为什么另一些没延迟（gap 判不出 / 真滞后 / 记录为空 /
+        # 水位不符 / 日期不符 / 次数不够）。延迟失效时先看这里。
+        "qfq_catchup_defer_reasons": dict(scope.defer_reasons),
         # 依据 S7 §2.2 J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
         "tech_recompute_lag_count": len(tech_lag_codes),
         "tech_recompute_pending_marked": tech_pending_marked,

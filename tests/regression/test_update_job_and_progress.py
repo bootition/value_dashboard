@@ -27,6 +27,7 @@ from app.core.adapters.tdx_adapter import TDXAdapter
 from app.core.init import CSRC_BATCH_SIZE, DataInitializer
 from app.core.storage.update_lock import exclusive_update
 from app.core.update import IncrementalUpdater
+from app.core.update_parts.indicator_scope import bootstrap_indicator_scope
 from tests.support.seed import Seed
 from tests.support.seed_sqlite import SeedSqlite
 
@@ -63,6 +64,24 @@ def _stub_update_network_steps(updater: IncrementalUpdater) -> None:
     # P4 历史股本链与统计域：测试环境不得触发网络或全量重建
     updater._refresh_capital_history = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
     updater._refresh_research_statistics = lambda **kwargs: {"status": "skipped", "reason": "test_stub"}
+
+
+def _seed_scope_baseline(updater: IncrementalUpdater, duckdb_store) -> None:
+    """把"指标重算范围"的基线置成"上一轮已算过"。
+
+    `plan_indicator_scope` 的三条全量原因里有两条会命中刚建好的空库：
+    `first_run`（`indicator_snapshot` 为空）与 `input_fingerprint_bootstrap`
+    （没有上一轮输入指纹）。本文件里的用例用 FakeCalculator 打桩、不落快照，
+    所以必须显式把这两条前提补上，才测得到增量路径本身。
+    依据 reports/145 §判据。
+    """
+    duckdb_store.write_query(
+        """INSERT INTO indicator_snapshot (stock_code, report_date, calculated_at)
+           SELECT stock_code, '2025-12-31', CURRENT_TIMESTAMP
+           FROM stock_meta WHERE is_listed IS TRUE
+           ON CONFLICT (stock_code, report_date) DO NOTHING"""
+    )
+    bootstrap_indicator_scope(updater)
 
 
 def test_tdx_declines_adjusted_prices_before_fetch() -> None:
@@ -295,9 +314,16 @@ def test_share_capital_change_triggers_snapshot_recompute(
 
 
 def test_share_capital_unchanged_skips_recompute(duckdb_store, sqlite_store, monkeypatch) -> None:
+    """股本/名单没变 → 一只都不算（这一轮 `mode=incremental`、recomputed_count=0）。
+
+    旧断言是"没调用过计算器"；现在**必须**入册一条 skipped 的 indicators 步骤：
+    "为什么没算"和"为什么算"一样要能查（reports/145 §可观测）。
+    """
+    Seed(duckdb_store).stock("000001", name="a", exchange="SZSE", is_listed=True)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     _stub_update_network_steps(updater)
     monkeypatch.setattr(updater, "_share_capital_fingerprint", lambda: "same")
+    _seed_scope_baseline(updater, duckdb_store)
 
     recomputed: list[dict] = []
 
@@ -315,21 +341,33 @@ def test_share_capital_unchanged_skips_recompute(duckdb_store, sqlite_store, mon
 
     monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
 
-    updater.run_incremental_update()
+    report = updater.run_incremental_update()
 
     assert recomputed == []
+    indicators = report["steps"]["indicators"]
+    assert indicators["mode"] == "incremental"
+    assert indicators["recomputed_count"] == 0
+    assert indicators["reason"] == "no_changed_stocks"
 
 
-def test_share_capital_change_recomputes_even_when_financials_partial(
+def test_share_capital_change_recomputes_only_changed_codes(
     duckdb_store, sqlite_store, monkeypatch,
 ) -> None:
-    """财报步骤 partial 时股本变化仍必须触发全量快照重算。
+    """财报步骤 partial + 一只股票股本变了 → 只算那一只，不是全量。
 
-    2026-08-31 全局数据路径审计：旧条件要求 financials 必须 success，
-    partial 时会继续使用旧股本口径的 market_cap/per_share 指标。
+    旧断言钉的是"必须 compute_snapshot_for_all"（reports/145 认定为 35 分钟
+    全量的元凶）；新口径：股本变化 = 逐股指纹差异，只重算受影响代码集，
+    `mode=incremental`。partial 财报不再阻断（价格/股本仍要落到快照）。
     """
+    Seed(duckdb_store).stock("000001", name="a", exchange="SZSE", is_listed=True)
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
     _stub_update_network_steps(updater)
+    _seed_scope_baseline(updater, duckdb_store)
+    # 基线之后改股本 → 逐股指纹差异必须只圈出 000001
+    duckdb_store.write_query(
+        "UPDATE stock_meta SET total_shares = 1234, circ_shares = 1000 "
+        "WHERE stock_code = '000001'"
+    )
     updater._check_new_announcements = lambda persist=False, **kwargs: {
         "status": "available", "affected_stock_codes": ["000001"],
         "affected_announcements": {"000001": [{"announcement_id": "a1", "title": "年度报告"}]},
@@ -364,7 +402,11 @@ def test_share_capital_change_recomputes_even_when_financials_partial(
     report = updater.run_incremental_update()
 
     assert report["share_capital_changed"] is True
-    assert recomputed == ["full"]
+    assert "full" not in recomputed, "股本变化不得再退回全量（reports/145）"
+    assert recomputed == ["codes"]
+    indicators = report["steps"]["indicators"]
+    assert indicators["mode"] == "incremental"
+    assert indicators["changed_sources"]["universe_fingerprint"] == 1
 
 
 def test_buyback_funding_treasury_refresh_before_indicators(
@@ -417,6 +459,7 @@ def test_buyback_funding_treasury_refresh_before_indicators(
 
     monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
     updater._share_capital_fingerprint = lambda: "same"
+    _seed_scope_baseline(updater, duckdb_store)
 
     updater.run_incremental_update()
 
@@ -475,6 +518,7 @@ def test_retry_success_runs_before_indicators_and_triggers_recompute(
 
     monkeypatch.setattr("app.core.indicators.calculator.IndicatorCalculator", FakeCalculator)
     updater._share_capital_fingerprint = lambda: "same"
+    _seed_scope_baseline(updater, duckdb_store)
 
     report = updater.run_incremental_update()
 

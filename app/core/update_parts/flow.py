@@ -260,6 +260,9 @@ def run_incremental_update_flow(
         ]
         announcement_check["affected_stock_codes"] = announcement_codes
     financials: dict[str, Any] | None = None
+    # 分红/除权公告命中"权益分派实施"等的股票：dividends/xdxr 的真输入变了，
+    # 必须并入指标重算集合（见下方 plan_indicator_scope 的 dividend_event）。
+    market_action_codes: list[str] = []
     if announcement_codes:
         financials = owner._refresh_financials(announcement_codes, detail_cb=detail_cb)
         report_step("financials", financials)
@@ -318,7 +321,6 @@ def run_incremental_update_flow(
         owner._save_announcement_cursor()
         owner._resolve_announcement_source_retries()
 
-    financial_step = report["steps"].get("financials", {"status": "success"})
     # 财报明细缺口有界续传：只重抓“核心字段齐全但明细字段缺失”的股票。
     # 该步骤不参与 readiness 阻断，只负责逐步补齐详情页字段。
     detail_backfill = report_step(
@@ -397,88 +399,98 @@ def run_incremental_update_flow(
     #     失败只让本步骤 failed，不影响主链与 readiness。
     report_step("roce", owner._refresh_roce())
 
-    if share_capital_changed:
-        # 股本/上市名单变化可能影响多只股票的市场类指标；保守全量重算。
-        # 该路径低频，且与自动更新同锁，不会再现"重算与抓取并发"的竞争。
-        from app.core.indicators.calculator import IndicatorCalculator
+    # ─── 指标快照：**只算变化的那部分**（reports/145）────────────────────
+    # 旧实现（2026-08-31 加固后）：`share_capital_changed` 为真时直接
+    # `compute_snapshot_for_all()` —— 5,567 只 × 149.7 只/分 ≈ 35 分钟，而
+    # 真正受影响的通常只有几十只。现在"算谁"的裁决只有唯一入口
+    # `update_parts/indicator_scope.plan_indicator_scope`：
+    #   增量集合 = **所有**"输入可能变了"的信号之并集（财务代码集 / 股本+上市
+    #   状态+ST+停牌+CSRC 行业逐股指纹差异 / 价格 / 待重算名单 / 重试成功 /
+    #   分红事件 / 回购融资）；全量只由可解释原因触发（口径版本 bump / 快照为空 /
+    #   首次部署无指纹基线 / 增量集合超全市场 60%），另有 forced_full 运维开关。
+    from app.core.indicators.calculator import IndicatorCalculator
+    from app.core.update_parts.indicator_scope import (
+        commit_indicator_scope,
+        plan_indicator_scope,
+    )
 
-        snapshot_step = IndicatorCalculator(
-            duck=owner.duck, sqlite=owner.sqlite,
-        ).compute_snapshot_for_all(progress_cb=indicator_progress)
-        if tech_pending_codes:
-            # 全量重算已覆盖名单里的每一只 → 成功即清空（rejected 不清）。
-            snapshot_step["tech_recompute_pending_cleared"] = (
-                owner._finalize_tech_recompute(snapshot_step, tech_pending_codes)
+    calculator = IndicatorCalculator(duck=owner.duck, sqlite=owner.sqlite)
+    refreshed_financial_codes = list(
+        financials.get("succeeded_codes", []) if financials else []
+    )
+    scope_plan = plan_indicator_scope(
+        owner,
+        sources={
+            # 三大报表：新报告期 / 修正值 / 覆盖写 / 明细回填 / 失败重试成功
+            "financial": refreshed_financial_codes,
+            "financial_stale": owner._stale_financial_snapshot_codes(),
+            "financial_backfill": detail_backfilled_codes,
+            "retry": retry_recompute_codes,
+            # 股本/上市名单/ST/停牌/行业：由逐股指纹差异补齐（不靠整体指纹）
+            "share_capital": [],
+            "tech_pending": tech_pending_codes,
+            # 行情：价格步骤刚写过的代码 + 快照价格日落后于 raw 的代码
+            "price": [*updated_price_codes, *owner._stale_price_snapshot_codes()],
+            "technical_pending": technical_pending_codes,
+            # 分红/除权公告、回购/融资事件
+            "dividend_event": market_action_codes,
+            "corporate_event": [*buyback_changed_codes, *funding_changed_codes],
+        },
+        force_full=bool(getattr(owner, "force_full_indicator_recompute", False)),
+    )
+    report["indicator_scope"] = {
+        "mode": scope_plan.mode,
+        "reason": scope_plan.reason,
+        "listed_count": scope_plan.listed_count,
+        "changed_sources": dict(sorted(scope_plan.changed_sources.items())),
+        "computation_version": scope_plan.computation_version,
+    }
+    if scope_plan.fingerprint_error:
+        logger.warning("指标输入指纹不可用，本轮退回全量: %s", scope_plan.fingerprint_error)
+
+    snapshot_step: dict[str, Any] = {
+        "status": "skipped",
+        "reason": "no_changed_stocks",
+        "success": 0,
+        "failed": 0,
+    }
+    ran_indicator_step = False
+    if scope_plan.is_full:
+        snapshot_step = calculator.compute_snapshot_for_all(progress_cb=indicator_progress)
+        ran_indicator_step = True
+        if snapshot_step.get("status") != "success" and not snapshot_step.get("reason"):
+            snapshot_step["reason"] = (
+                "price update retained; snapshot publication not ready"
             )
-        if technical_pending_codes:
-            # 全量重算同样覆盖技术三列 → 成功即清空。
-            snapshot_step["technical_pending_cleared"] = (
-                owner._finalize_technical_pending(
-                    snapshot_step, technical_pending_codes,
-                )
-            )
-        report_step("indicators", snapshot_step)
-        if snapshot_step["status"] != "success":
-            snapshot_step["reason"] = "price update retained; snapshot publication not ready"
-    elif (
-        financial_step["status"] in {"success", "partial"}
-        or retry_recompute_codes
-        or tech_pending_codes
-        or technical_pending_codes
-    ):
-        from app.core.indicators.calculator import IndicatorCalculator
-
-        calculator = IndicatorCalculator(duck=owner.duck, sqlite=owner.sqlite)
-        refreshed_financial_codes = list(
-            financials.get("succeeded_codes", []) if financials else []
-        )
-        financial_stale_codes = owner._stale_financial_snapshot_codes()
-        price_stale_codes = owner._stale_price_snapshot_codes()
-
-        # 完整重算组：财务变化/明细回填/失败重试成功，输入域不确定，保
-        # 守整股重算全部指标。价格变化组只重算价格域字段；回购/融资
-        # 变化组只重算分红融资比三列（2026-09-08 提速计划）。
-        # 依据 S7 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
-        # 全量重算（波动率/回撤/区间收益读 qfq 历史），而价格域增量路径
-        # 会因为"最新价/最新日期没变"直接跳过（见 compute_price_sensitive）。
+    else:
+        # 完整重算组：财务/股本/名单/行业/重试/待重算，输入域不确定 → 整股 149 列。
+        # 价格变化组只重算价格域字段；回购/融资变化组只重算分红融资比三列。
+        # 待重算名单是"必须重算"的硬信号（qfq 滞后 / 技术三列待补）：除了
+        # 范围裁决已经把它们算进去，这里再无条件并一次——将来谁改 SOURCE_DOMAIN
+        # 漏掉一个来源，这两个名单仍然会把股票带进重算集合（宁可多算）。
         full_codes = list(dict.fromkeys([
-            *refreshed_financial_codes,
-            *financial_stale_codes,
-            *detail_backfilled_codes,
-            *retry_recompute_codes,
+            *scope_plan.full_codes,
             *tech_pending_codes,
         ]))
         price_codes = [
-            code for code in list(dict.fromkeys([
-                *updated_price_codes,
-                *price_stale_codes,
-                # 2026-11-16 依据 S10 §9.2 P0-5：qfq 写入成功但最新价未变
-                # 的股票也要进价格域重算（force 绕过 skip），否则技术三列
-                # 永远停在补齐前写死的 NULL。
+            code for code in dict.fromkeys([
+                *scope_plan.price_codes,
                 *technical_pending_codes,
-            ]))
+            ])
             if code not in full_codes
         ]
         event_codes = [
-            code for code in list(dict.fromkeys([
-                *buyback_changed_codes,
-                *funding_changed_codes,
-            ]))
+            code for code in dict.fromkeys([*scope_plan.event_codes])
             if code not in full_codes
         ]
+        # 依据 S7 §2.2 J6：qfq 滞后的股票**强制**进完整重算组 —— 它们要的是价格域
+        # 全量重算（波动率/回撤/区间收益读 qfq 历史），而价格域增量路径
+        # 会因为"最新价/最新日期没变"直接跳过（见 compute_price_sensitive）。
         price_force_codes = (
             set(full_codes) | set(price_xdxr_codes) | set(technical_pending_codes)
         )
         if price_raw_full_refetch:
             price_force_codes.update(updated_price_codes)
-
-        snapshot_step: dict[str, Any] = {
-            "status": "skipped",
-            "reason": "no_changed_stocks",
-            "success": 0,
-            "failed": 0,
-        }
-        ran_indicator_step = False
         if full_codes:
             snapshot_step = calculator.compute_snapshot_for_codes(
                 full_codes, progress_cb=indicator_progress,
@@ -518,34 +530,52 @@ def run_incremental_update_flow(
             else:
                 snapshot_step = event_step
             ran_indicator_step = True
-        if ran_indicator_step:
-            # 依据 S7 §2.2 J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
-            # 里的股票继续保留，下一轮再强制重算。
-            if tech_pending_codes:
-                snapshot_step["tech_recompute_pending_cleared"] = (
-                    owner._finalize_tech_recompute(snapshot_step, tech_pending_codes)
-                )
-            if technical_pending_codes:
-                snapshot_step["technical_pending_cleared"] = (
-                    owner._finalize_technical_pending(
-                        snapshot_step, technical_pending_codes,
-                    )
-                )
-            report_step("indicators", snapshot_step)
 
-        if treasury_changed_codes:
-            # 国债曲线变化只影响 ttm_dividend_yield / div_yield_spread_*，
-            # 无需对全市场完整重算 PE/PB/成长/技术指标；专用批量刷新
-            # 在正式库为秒级，取代旧的约 12 分钟全量重算。
-            treasury_step = calculator.refresh_treasury_spreads(treasury_changed_codes)
-            if ran_indicator_step:
-                # rejected/partial 绝不能被国债利差刷新的 success 覆盖。
-                report_step(
-                    "indicators",
-                    merge_indicator_steps(snapshot_step, treasury_step),
+    if ran_indicator_step:
+        # 依据 S7 §2.2 J6：只有真正算过才清名单；rejected/skipped 与 failed_codes
+        # 里的股票继续保留，下一轮再强制重算。
+        if tech_pending_codes:
+            snapshot_step["tech_recompute_pending_cleared"] = (
+                owner._finalize_tech_recompute(snapshot_step, tech_pending_codes)
+            )
+        if technical_pending_codes:
+            snapshot_step["technical_pending_cleared"] = (
+                owner._finalize_technical_pending(
+                    snapshot_step, technical_pending_codes,
                 )
-            else:
-                report_step("indicators", treasury_step)
+            )
+        commit_indicator_scope(owner, scope_plan, snapshot_step)
+        snapshot_step.update(
+            scope_plan.report_fields(
+                int(snapshot_step.get("success") or 0),
+                step_reason=snapshot_step.get("reason"),
+            )
+        )
+        report_step("indicators", snapshot_step)
+    else:
+        # 没有任何输入变化 → 这一轮一只都不算，但**必须入册**：
+        # "为什么没算"和"为什么算"同样要能查（reports/145 §可观测）。
+        skipped_step = {
+            **snapshot_step,
+            **scope_plan.report_fields(
+                0,
+                skipped=scope_plan.listed_count,
+                step_reason=snapshot_step.get("reason"),
+            ),
+        }
+        report_step("indicators", skipped_step)
+
+    if treasury_changed_codes:
+        # 国债曲线变化只影响 ttm_dividend_yield / div_yield_spread_*，
+        # 无需对全市场完整重算 PE/PB/成长/技术指标；专用批量刷新
+        # 在正式库为秒级，取代旧的约 12 分钟全量重算。
+        treasury_step = calculator.refresh_treasury_spreads(treasury_changed_codes)
+        current = report["steps"].get("indicators")
+        if current is not None:
+            # rejected/partial 绝不能被国债利差刷新的 success 覆盖。
+            report_step("indicators", merge_indicator_steps(current, treasury_step))
+        else:
+            report_step("indicators", treasury_step)
 
     # 3. 业务概览低频域（依据 S1 独立域）：仅当自动集成启用且间隔到期
     #    时执行；失败保留旧值并进入独立 retry/missing，绝不阻断价格/财务。
