@@ -18,6 +18,7 @@ from datetime import UTC, date, datetime, timedelta
 
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.capital import CapitalHistoryUpdater
+from tests.support.seed import Seed
 
 PRICE_DATE = date(2026, 11, 13)
 
@@ -43,30 +44,26 @@ class _NoopAdapter:
 
 
 def _seed_stock(duck, code: str = "600519") -> None:
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) "
-        "VALUES (?, ?, 'SSE', true)",
-        [code, code],
-    )
+    Seed(duck).stock(code, name=code, exchange="SSE", is_listed=True)
 
 
 def _seed_price(duck, code: str, trade_date: date = PRICE_DATE) -> None:
-    duck.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, 10.0)",
-        [code, trade_date],
-    )
+    Seed(duck).prices(code, [(trade_date, 10.0)])
 
 
 def _seed_capital(duck, code: str, entries: list[date]) -> None:
-    for effective_date in entries:
-        duck.write_query(
-            """INSERT INTO share_capital_history
-               (stock_code, effective_date, total_shares, change_reason, is_anchor,
-                verified, source, raw_hash, batch_id)
-               VALUES (?, ?, 1000000000.0, NULL, true, true,
-                       'cninfo_capital', 'x', 'b1')""",
-            [code, effective_date],
-        )
+    # 主链锚点口径本身：`source='cninfo_capital'` + `is_anchor/verified=True` 必须逐字给
+    # （工厂不猜 source，也不替调用方决定核验状态）；`change_reason=None` 同理。
+    Seed(duck).shares(
+        code,
+        [(effective_date, 1000000000.0) for effective_date in entries],
+        change_reason=None,
+        is_anchor=True,
+        verified=True,
+        source="cninfo_capital",
+        raw_hash="x",
+        batch_id="b1",
+    )
 
 
 def _seed_cross_cache(
@@ -77,6 +74,11 @@ def _seed_cross_cache(
     main_status: str | None = "ok",
     cross_status: str = "verified",
 ) -> None:
+    # 留（第 6 类·相对时间 / 论点构造）：`main_fetched_at` 是"相对此刻 3 天/8 天前"，
+    # 而 due 判据就是 `main_fetched_at` 是否落在最近 7 天内 —— 固定字面量会随日历漂成
+    # "永远过期"或"永远新鲜"，把 TTL 用例整组变成假绿。`fetched_at` 也必须是"此刻"
+    # （TTL 的另一半输入）。另外 `capital_cross_cache` 是 SQLite 侧的表，DuckDB 工厂
+    # 没有也不该有它的方法（与 `test_capital_history_domain.py` 同一取舍）。
     sqlite.execute(
         """INSERT INTO capital_cross_cache
                (stock_code, events_json, verified_points, total_points, fetched_at,

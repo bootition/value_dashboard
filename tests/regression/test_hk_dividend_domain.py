@@ -39,6 +39,7 @@ def _seed_stock(
     *,
     exchange: str = "SSE",
 ) -> None:
+    # 留（第 4 类·多站点缺口）：这是**部分列 upsert**（`ON CONFLICT DO UPDATE SET name/
     duck.write_query(
         """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
            VALUES (?, ?, ?, TRUE)
@@ -481,6 +482,7 @@ def test_hk_dividend_updater_atomic_replace_without_touching_readiness(
 ) -> None:
     _seed_stock(duckdb_store, "600941", "中国移动")
     _seed_hk_dividend_row(duckdb_store)
+    # 留（第 6 类·库侧相对时间）：`calculated_at` 写库侧 `CURRENT_TIMESTAMP`，
     duckdb_store.write_query(
         """INSERT INTO indicator_snapshot
            (stock_code, report_date, latest_close, calculated_at)

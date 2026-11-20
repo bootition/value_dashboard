@@ -329,6 +329,7 @@ def test_trigger_recovers_stale_running_marker_without_restart(
     crashed._current_stage = "running"
     crashed._persist()
     with sqlite.transaction() as conn:
+        # 留（第 6 类·库侧相对时间）：`job_logs.started_at` 是「1 小时前」的**字面量**
         conn.execute(
             """INSERT INTO job_logs (job_type, status, started_at)
                VALUES ('incremental_update', 'running', '2026-10-29T05:00:00+00:00')"""

@@ -22,6 +22,9 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
+
 _REPO = Path(__file__).resolve().parents[2]
 _EXPORTER = _REPO / "scripts" / "export_data_package.py"
 
@@ -172,31 +175,44 @@ def test_load_sql_lists_every_parquet() -> None:
 def _seed(duckdb_store, sqlite_store) -> None:
     """造 2 张 DuckDB 表 + 2 张 SQLite 表的最小数据集。"""
     with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-               VALUES ('600519', '2026-06-29', 1500, 100),
-                      ('600519', '2026-06-30', 1510, 120),
-                      ('000001', '2026-06-30', 11, 200)"""
+        seed = Seed(duckdb_store).join(connection)
+        seed.prices_bulk(
+            [
+                ("600519", "2026-06-29", 1500, {"volume": 100}),
+                ("600519", "2026-06-30", 1510, {"volume": 120}),
+                ("000001", "2026-06-30", 11, {"volume": 200}),
+            ]
         )
         # 最新报告期放 6 行（覆盖率样本量门槛是 5 行）：扣非净利润整列为 NULL，
         # 用来验证"字段 X 在当前报告期无数据"这条规则真的会触发。
-        connection.execute(
-            """INSERT INTO income_statement
-                   (stock_code, report_date, revenue, parent_net_profit, deducted_net_profit)
-               VALUES ('600519', '2026-03-31', 100, 10, 9),
-                      ('600519', '2026-06-30', 200, 20, NULL),
-                      ('000001', '2026-06-30', 201, 21, NULL),
-                      ('000002', '2026-06-30', 202, 22, NULL),
-                      ('000004', '2026-06-30', 203, 23, NULL),
-                      ('000006', '2026-06-30', 204, 24, NULL),
-                      ('000008', '2026-06-30', 205, 25, NULL)"""
-        )
+        for stock_code, report_date, revenue, profit, deducted in [
+            ("600519", "2026-03-31", 100, 10, 9),
+            ("600519", "2026-06-30", 200, 20, None),
+            ("000001", "2026-06-30", 201, 21, None),
+            ("000002", "2026-06-30", 202, 22, None),
+            ("000004", "2026-06-30", 203, 23, None),
+            ("000006", "2026-06-30", 204, 24, None),
+            ("000008", "2026-06-30", 205, 25, None),
+        ]:
+            seed.income(
+                stock_code,
+                report_date,
+                revenue=revenue,
+                parent_net_profit=profit,
+                deducted_net_profit=deducted,
+            )
     with sqlite_store.transaction() as connection:
-        connection.executemany(
-            "INSERT OR IGNORE INTO trading_dates (trade_date) VALUES (?)",
-            [("2026-03-02",), ("2026-03-31",), ("2026-04-01",), ("2026-05-04",),
-             ("2026-06-01",), ("2026-06-29",), ("2026-06-30",), ("2026-07-01",)],
+        # `trading_dates` 只有 `trade_date` 一列，`overwrite=True`（`INSERT OR REPLACE`）
+        # 对"同一天再播一次"与原来的 `INSERT OR IGNORE` 落库结果完全一致。
+        SeedSqlite(sqlite_store).join(connection).trading_dates(
+            ["2026-03-02", "2026-03-31", "2026-04-01", "2026-05-04",
+             "2026-06-01", "2026-06-29", "2026-06-30", "2026-07-01"],
+            overwrite=True,
         )
+        # 留（第 4 类·只出现一次的表）：`announcement_registry` 全仓**只有这一处**播种
+        # （`grep -rn announcement_registry tests/ --include=*.py` = 1），且这一行是
+        # "文档说含公告台账 → 包里必须真的有"这条对账规则的唯一输入；为单个调用点补
+        # 工厂方法只会多一层没有第二个用户的抽象。
         connection.execute(
             """INSERT INTO announcement_registry
                    (announcement_id, stock_code, announcement_time, title)
@@ -351,9 +367,9 @@ def test_verify_reports_library_drift(
     root = tmp_path / "pkg"
     _build_minimal(exporter, database_paths, root)
     with duckdb_store.write_connection() as connection:
-        connection.execute(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-               VALUES ('600519', '2026-07-02', 1520, 130)"""
+        # 库里多一天 = 漂移（不致命）→ 退出码 2。
+        Seed(duckdb_store).join(connection).prices(
+            "600519", [("2026-07-02", 1520)], volume=130
         )
     assert exporter.verify_package(root, paths=database_paths) == 2
 

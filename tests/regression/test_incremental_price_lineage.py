@@ -330,6 +330,7 @@ def test_watchlist_stocks_are_updated_first_with_limit(duckdb_store, sqlite_stor
     seed = Seed(duckdb_store)
     for code in ("000001", "600519"):
         seed.stock(code, exchange="SZSE")
+    # 留（第 4 类·多站点缺口）：`watchlist` 这行是「优先池」的**前提**，工厂
     sqlite_store.execute(
         "INSERT INTO watchlist (stock_code, group_name) VALUES ('600519', '重点研究')"
     )
@@ -385,6 +386,7 @@ def test_get_xdxr_codes_since_returns_only_matching_stocks(duckdb_store, sqlite_
 
 def test_expected_price_date_waits_for_market_close(duckdb_store, sqlite_store) -> None:
     sqlite_store.execute("CREATE TABLE IF NOT EXISTS trading_dates (trade_date TEXT PRIMARY KEY)")
+    # 留（第 5 类·测试自建表）：上一行 `CREATE TABLE IF NOT EXISTS trading_dates` 是本用例
     sqlite_store.execute("INSERT INTO trading_dates VALUES ('2026-08-04'), ('2026-08-05')")
     updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
 

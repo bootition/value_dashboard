@@ -110,6 +110,7 @@ def _seed_quarantine(store: DuckDBStore, rows: list[tuple[str, str, float | None
     # `write_connection()` 事务里 `executemany`，工厂每次自带写锁，嵌套进来会自撞；
     # 另外 `dividends_quarantine` 只此一处用到，也刻意不建方法（见 seed.py「尚未覆盖」）。
     with store.write_connection() as conn:
+        # 留（第 3 类·故意造错/隔离表）：`dividends_quarantine` 里放的就是**被隔离的病态行**，
         conn.executemany(
             """INSERT INTO dividends_quarantine
                (stock_code, ex_date, dividend_per_share, quarantine_reason, quarantined_at)
@@ -122,6 +123,7 @@ def _seed_dividends(
     store: DuckDBStore, rows: list[tuple[str, str, float | None]]
 ) -> None:
     with store.write_connection() as conn:
+        # 留（第 4 类·多站点缺口）：`rows` 跨多只股票（`(code, ex_date, dps)` 混排），
         conn.executemany(
             """INSERT INTO dividends (stock_code, ex_date, dividend_per_share)
                VALUES (?, CAST(? AS DATE), ?)""",
@@ -542,6 +544,7 @@ def test_apply_never_zeroes_cash_when_source_amount_is_missing(
     # 是「回填空值 vs 整行跳过」的分野，且写在**已持有写锁**的 `write_connection()`
     # 事务里 —— 工厂自带写锁，嵌套进来会自撞。
     with store.write_connection() as conn:
+        # 留（第 4 类·多站点缺口）：逐行不同的 `stock_dividend`/`transfer_share`（None / 0.0 /
         conn.executemany(
             """INSERT INTO dividends
                (stock_code, ex_date, announcement_date, dividend_per_share,

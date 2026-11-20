@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
 from app.web.api.watchlist import router as watchlist_router
+from tests.support.seed import Seed
 
 
 def _build_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
@@ -22,10 +23,13 @@ def _build_client(duck: DuckDBStore, sqlite: SQLiteStore) -> TestClient:
 
 
 def _seed_stock(duckdb_store: DuckDBStore, code: str) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES (?, 'Test', 'SZSE', '2020-01-01', false, false)""",
-        [code],
+    Seed(duckdb_store).stock(
+        code,
+        name="Test",
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
 
 

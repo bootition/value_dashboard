@@ -4,6 +4,7 @@ import pytest
 
 from app.core.screening.engine import ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import Seed
 
 
 @pytest.mark.parametrize(
@@ -21,9 +22,11 @@ def test_invalid_screening_rules_fail_closed(duckdb_store: DuckDBStore, conditio
 
 
 def test_default_pool_rejects_unknown_suspension_status(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Unknown status', 'SZSE', '2020-01-01', false, NULL)"""
+    # `stock_meta` → `Seed.stock()`；`is_suspended=None` 是**故意**的
+    # （"停牌状态未知"正是本用例要拒绝的基础池元数据），所以显式写 None。
+    Seed(duckdb_store).stock(
+        "000001", name="Unknown status", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=None,
     )
 
     with pytest.raises(ValueError, match="base pool metadata is incomplete"):
@@ -33,10 +36,12 @@ def test_default_pool_rejects_unknown_suspension_status(duckdb_store: DuckDBStor
 
 
 def test_historical_unknown_metadata_does_not_block_current_pool(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES ('000001', 'Current', 'SZSE', TRUE), ('000002', 'Historical', 'SZSE', FALSE)"""
-    )
+    # 两行 `stock_meta` → `Seed.stocks()` 批量（一次事务、一次 executemany）；
+    # `is_listed` 逐行不同 → 第三项"该行独有的列"。
+    Seed(duckdb_store).stocks([
+        ("000001", "Current", {"is_listed": True}),
+        ("000002", "Historical", {"is_listed": False}),
+    ])
 
     result = ScreeningEngine(duck=duckdb_store).run(
         {"conditions": {"logic": "AND", "rules": []}},
@@ -49,9 +54,9 @@ def test_historical_unknown_metadata_does_not_block_current_pool(duckdb_store: D
 
 
 def test_listing_age_rejects_unknown_current_listing_date(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_st, is_suspended)
-           VALUES ('000001', 'Unknown date', 'SZSE', false, false)"""
+    # `stock_meta` → `Seed.stock()`；`listing_date` **故意不写**（NULL = 上市日未知）。
+    Seed(duckdb_store).stock(
+        "000001", name="Unknown date", exchange="SZSE", is_st=False, is_suspended=False,
     )
 
     with pytest.raises(ValueError, match="base pool metadata is incomplete"):
@@ -61,14 +66,12 @@ def test_listing_age_rejects_unknown_current_listing_date(duckdb_store: DuckDBSt
 
 
 def test_condition_can_compare_two_known_numeric_fields(duckdb_store: DuckDBStore) -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Compare', 'SZSE', '2020-01-01', false, false)"""
+    seed = Seed(duckdb_store)
+    seed.stock(
+        "000001", name="Compare", exchange="SZSE", listing_date="2020-01-01",
+        is_st=False, is_suspended=False,
     )
-    duckdb_store.write_query(
-        """INSERT INTO indicator_snapshot (stock_code, report_date, pe_ttm, pb_mrq)
-           VALUES ('000001', '2025-12-31', 10, 5)"""
-    )
+    seed.snapshot("000001", "2025-12-31", pe_ttm=10, pb_mrq=5)
 
     result = ScreeningEngine(duck=duckdb_store).run(
         {"conditions": {"logic": "AND", "rules": [

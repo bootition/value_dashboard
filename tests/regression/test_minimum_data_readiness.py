@@ -71,7 +71,9 @@ def test_readiness_requires_complete_history_fresh_prices_and_coherent_snapshot(
             [
                 "DELETE FROM price_daily_raw WHERE stock_code = '000001' AND trade_date >= CURRENT_DATE - INTERVAL '8 days'",
                 "DELETE FROM price_daily_qfq WHERE stock_code = '000001' AND trade_date >= CURRENT_DATE - INTERVAL '8 days'",
+                # 留（第 6 类·库侧相对时间）：raw/qfq 两行都是「8 天前」的库侧相对日期
                 "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES ('000001', CURRENT_DATE - INTERVAL '8 days', 10)",
+                # 留（第 6 类·库侧相对时间）：qfq 同一刻度；工厂不给库侧 CURRENT_DATE 口径
                 "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES ('000001', CURRENT_DATE - INTERVAL '8 days', 10)",
                 "UPDATE indicator_snapshot SET latest_price_date = CURRENT_DATE - INTERVAL '8 days' WHERE stock_code = '000001'",
                 "UPDATE source_audit SET report_date = CURRENT_DATE - INTERVAL '8 days' "
@@ -246,6 +248,7 @@ def test_published_override_after_snapshot_blocks_readiness(
     duckdb_store.write_query(
         "UPDATE indicator_snapshot SET calculated_at = TIMESTAMP '2000-01-01' WHERE stock_code = '000001'"
     )
+    # 留（第 6 类·库侧相对时间）：`created_at = datetime('now','+1 hour')`——覆盖值必须
     sqlite_store.execute(
         """INSERT INTO manual_overrides
            (stock_code, field_name, report_date, override_value, reason, status, created_at)

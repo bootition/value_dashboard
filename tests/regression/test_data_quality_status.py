@@ -45,7 +45,7 @@ def test_data_dates_supports_snapshot_schema_before_freshness_migration(
     database_paths: DatabasePathSet,
 ) -> None:
     duck = DuckDBStore(paths=database_paths)
-    # 第 5 类（旧 schema/测试自建表）：本用例的被测对象**就是**"新鲜度列还不存在"
+    # 留（第 5 类·旧 schema/测试自建表）：本用例的被测对象**就是**"新鲜度列还不存在"
     # 的旧 `indicator_snapshot`，建表 DDL 由测试自己写、列清单由测试定，工厂的
     # 列校验与默认值在这条路径上正好是要避开的东西 —— 留内联。
     duck.execute_script(
@@ -205,7 +205,7 @@ def test_quality_status_flags_active_dividend_alias_and_lineage_archive_gaps(
         # 第 1 类：`dividends` → `Seed.dividends()`（`announcement_date=None`
         # 就是"未证公告日"，本用例要的正是它）。
         seed.dividends("000001", [("2025-08-15", None, 1)])
-        # 第 3 类（故意造错/隔离归档）：`fetch_batch` 与下面 `source_audit` 成对
+        # 留（第 3 类·故意造错/隔离归档）：`fetch_batch` 与下面 `source_audit` 成对
         # 构造"有批次行/审计行但归档里没有"的 lineage 缺口 —— 缺哪一行就是论点。
         connection.execute(
             """INSERT INTO fetch_batch
@@ -248,7 +248,7 @@ def test_quality_status_detects_archive_payload_hash_mismatch(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    # 第 3 类（故意造错）：归档里放的是「payload 与 raw_response_hash 故意不匹配」
+    # 留（第 3 类·故意造错）：归档里放的是「payload 与 raw_response_hash 故意不匹配」
     # 的一份坏证据 —— 写哪一行、放什么 payload 就是本用例的论点，留内联。
     with duckdb_store.write_connection() as connection:
         connection.execute(
@@ -269,7 +269,7 @@ def test_archive_hash_check_is_cached_between_status_calls(
 ) -> None:
     payload = b"original payload"
     digest = hashlib.sha256(payload).hexdigest()
-    # 第 3 类（故意造错）：第一条是"哈希对得上"的归档、第二条故意不匹配，
+    # 留（第 3 类·故意造错）：第一条是"哈希对得上"的归档、第二条故意不匹配，
     # 两张归档行的时间先后/配对关系是"缓存要不要重算"的论点，留内联。
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
@@ -281,7 +281,7 @@ def test_archive_hash_check_is_cached_between_status_calls(
     assert first["lineage"]["hash_mismatch_rows"] == 0
     assert first["lineage"]["archive_hash_check"]["cached"] is False
 
-    # 第 3 类（故意造错）：第二条归档刻意让 payload 与哈希不匹配（缓存用例的第二条）。
+    # 留（第 3 类·故意造错）：第二条归档刻意让 payload 与哈希不匹配（缓存用例的第二条）。
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
            VALUES (?, 'test', CURRENT_TIMESTAMP, ?)""",

@@ -106,6 +106,7 @@ def test_publish_also_rejects_legacy_name_colliding_with_field_shorthand(
     engine = DSLEngine(duck=duckdb_store, sqlite=sqlite_store)
     # 绕过 create（模拟历史数据/直接 INSERT）进入可发布状态。
     with sqlite_store.transaction() as conn:
+        # 留（第 3 类·故意造错）：这行造的是「**legacy 名字撞字段简写**」的脏表达式
         conn.execute(
             """INSERT INTO dsl_expressions
                (name, version, expression_text, status, description, direction, historical_capable)

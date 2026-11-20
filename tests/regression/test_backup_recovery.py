@@ -53,14 +53,14 @@ def test_backup_preserves_archived_and_quarantined_evidence(
     tmp_path: Path,
 ) -> None:
     _seed_backup_data(duckdb_store, sqlite_store)
-    # 保留内联：`raw_response_archive` 是「整批搬家」的证据表（空 BLOB 载荷是**故意造错**），
+    # 留（第 3 类·故意造错/整批搬家）：`raw_response_archive` 是「整批搬家」的证据表（空 BLOB 载荷是**故意造错**），
     # 且 `fetch_time` 走库侧时钟 —— 工厂刻意不覆盖（见 `tests/support/seed.py`「尚未覆盖」）。
     duckdb_store.write_query(
         """INSERT INTO raw_response_archive (raw_response_hash, source, fetch_time, payload)
            VALUES (?, 'test', CURRENT_TIMESTAMP, ?)""",
         ["a" * 64, b"source-material"],
     )
-    # 保留内联：这是 `dividends_quarantine`（隔离表），不是 `dividends`；全仓仅此处
+    # 留（第 3 类·隔离表）：这是 `dividends_quarantine`（隔离表），不是 `dividends`；全仓仅此处
     # 播种一行，刻意不建工厂方法（见 `tests/support/seed.py`「尚未覆盖」）。
     duckdb_store.write_query(
         """INSERT INTO dividends_quarantine
@@ -197,7 +197,8 @@ def test_restore_maintenance_lock_blocks_other_profile_writes(
 
     def attempt_other_process_write() -> None:
         try:
-            # 保留内联：**故意造错** —— 这一行必须在维护锁下写不进去（异常类型是被测对象）。
+            # 留（第 3 类·必须在维护锁下写失败）：**故意造错** —— 这一行必须在维护锁下
+            # 写不进去（`MaintenanceLockError` 的类型本身是被测对象，走工厂会换成工厂异常）。
             sqlite_store.execute("INSERT INTO watchlist (stock_code, group_name) VALUES ('600519', 'blocked')")
         except Exception as error:
             errors.append(error)
@@ -244,14 +245,14 @@ def test_personalized_restore_obeys_actual_foreign_key_topology(
     dependent_id = sqlite_store.query(
         "SELECT id FROM dsl_expressions WHERE name = 'derived_metric'"
     )[0]["id"]
-    # 保留内联：**外键引用树本身**（下面 `id` 由 `SELECT id ...` 逐层回捞后拼进 `*_id`）。
+    # 留（第 2 类·外键引用树）：**引用树本身**（下面 `id` 由 `SELECT id ...` 逐层回捞后拼进 `*_id`）。
     sqlite_store.execute(
         "INSERT INTO dsl_dependencies (expression_id, depends_on_id, depends_on_version) VALUES (?, ?, 1)",
         [dependent_id, expression_id],
     )
     SeedSqlite(sqlite_store).screening_rule("value", 1, "{}")
     rule_id = sqlite_store.query("SELECT id FROM screening_rules")[0]["id"]
-    # 保留内联：引用树的第三层（`rule_id` 是回捞来的 id，`data_date` 还要库侧时钟）。
+    # 留（第 2 类·外键引用树）：引用树的第三层（`rule_id` 是回捞来的 id，`data_date` 还要库侧时钟）。
     sqlite_store.execute(
         """INSERT INTO screening_results
            (title, rule_id, rule_version, data_date, result_json, columns_json)

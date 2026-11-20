@@ -16,6 +16,7 @@ from app.core.dsl.engine import DSLEngine
 from app.core.init import DataInitializer
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 
 class XdxrAdapterManager:
@@ -53,10 +54,7 @@ def test_financial_sector_fields_are_migrated_catalogued_mapped_and_reasoned(
     created = dsl.create("bank_capital_ratio", "balance.capital_adequacy_ratio")
     assert dsl.validate("bank_capital_ratio", created["version"])["valid"] is True
 
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, csrc_l1)
-           VALUES ('600000', 'bank', 'SSE', '银行')"""
-    )
+    Seed(duckdb_store).stock("600000", name="bank", exchange="SSE", csrc_l1="银行")
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.duck = duckdb_store
     initializer.sqlite = sqlite_store
@@ -89,9 +87,7 @@ def test_xdxr_lifecycle_persists_corporate_actions(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,
 ) -> None:
-    duckdb_store.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES ('600000', 'bank', 'SSE', TRUE)"
-    )
+    Seed(duckdb_store).stock("600000", name="bank", exchange="SSE", is_listed=True)
     initializer = DataInitializer.__new__(DataInitializer)
     initializer.duck = duckdb_store
     initializer.sqlite = sqlite_store

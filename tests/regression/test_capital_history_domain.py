@@ -290,6 +290,7 @@ def _seed_statistics_inputs(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
     # 保留内联：在已持有写锁的 write_connection() 事务里批量写 1250 行 ——
     # 工厂每次自带写锁，嵌套进来会撞锁（不是 API 缺失，是不能这么用）。
     with duck.write_connection() as conn:
+        # 留（第 4 类·多站点缺口）：这批日线是 `price_rows` **程序化生成**的多股多日矩阵，
         conn.executemany(
             "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES (?, ?, ?)",
             price_rows,
@@ -559,6 +560,7 @@ def test_update_all_uses_due_cursor(
     # 构造 updater 以建缓存表，然后写入 600519 的交叉缓存
     _updater(duckdb_store, sqlite_store, _FakeCapitalAdapter(main=[], cross=[]))
     # 保留内联：SQLite 侧的表（`capital_cross_cache`）不在 DuckDB 工厂范围内。
+    # 留（第 6 类·库侧相对时间）：`capital_cross_cache.fetched_at` 传的是 `datetime.now(UTC)`
     sqlite_store.execute(
         """INSERT INTO capital_cross_cache
            (stock_code, events_json, verified_points, total_points, fetched_at)

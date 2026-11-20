@@ -20,6 +20,7 @@ def _seed_audit(duck: DuckDBStore) -> None:
         (5, "000001", "revenue", date(2026, 6, 30), 160.0),
     ]
     for item in rows:
+        # 留（第 6 类·库侧相对时间）：`source_audit.fetch_time` 写 `CURRENT_TIMESTAMP`（归档按
         duck.write_query(
             """INSERT INTO source_audit
                (id, stock_code, field_name, report_date, value, source,
@@ -72,6 +73,7 @@ def test_archive_state_reports_partial_when_capped(
     # 生产路径要求 batch_size ∈ [1000, 500000]：种子 1005 行、单批 1000，
     # max_batches=1 时必然 partial 并留下 5 行热数据。
     for i in range(1005):
+        # 留（第 6 类·库侧相对时间）：同上——200 行审计靠 `CURRENT_TIMESTAMP` 落在「此刻」，
         duckdb_store.write_query(
             """INSERT INTO source_audit
                (id, stock_code, field_name, report_date, value, source,

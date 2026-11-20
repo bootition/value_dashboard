@@ -43,6 +43,8 @@ from app.core.blacklist import (
 from app.core.screening.engine import ScreeningEngine
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import CURRENT_TIMESTAMP, SeedSqlite
 
 BLOCKED = "000001"
 VISIBLE = "600519"
@@ -54,19 +56,19 @@ VISIBLE_NAME = "贵州茅台"
 
 
 def _seed_meta(duck: DuckDBStore, code: str, name: str) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, is_listed)
-           VALUES (?, ?, 'SZSE', TRUE)
-           ON CONFLICT (stock_code) DO UPDATE SET name = excluded.name, is_listed = TRUE""",
-        [code, name],
+    # `stock_meta` → `Seed.stock()`。原 `ON CONFLICT DO UPDATE SET name, is_listed`
+    # 与 `overwrite=True`（DuckDB 的 `INSERT OR REPLACE` 是 upsert，只改本次给出的
+    # 列）语义相同：已有行只被改这两列，其余列保留。
+    Seed(duck).stock(
+        code, name=name, exchange="SZSE", is_listed=True, overwrite=True,
     )
 
 
 def _seed_price(duck: DuckDBStore, code: str) -> None:
-    duck.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-           VALUES (?, DATE '2026-01-05', 10, 1000) ON CONFLICT DO NOTHING""",
-        [code],
+    # `price_daily_raw` → `Seed.prices_bulk()`；原 `ON CONFLICT DO NOTHING`
+    # ＝ `if_exists="ignore"`（逐行入口 `prices()` 不开放它）。
+    Seed(duck).prices_bulk(
+        [(code, "2026-01-05", 10)], volume=1000, if_exists="ignore",
     )
 
 
@@ -265,10 +267,9 @@ def test_search_excludes_blacklisted_stock(seeded: dict[str, Any]) -> None:
 def test_watchlist_hides_blacklisted_but_keeps_the_row(seeded: dict[str, Any]) -> None:
     client = _api(seeded["duck"], seeded["sqlite"])
     sqlite = seeded["sqlite"]
-    sqlite.execute(
-        "INSERT INTO watchlist (stock_code, group_name) VALUES (?, '核心持仓')",
-        [BLOCKED],
-    )
+    # `watchlist` → `SeedSqlite.watchlist()`；分组名《核心持仓》是论点（计数按分组）。
+    # `added_at` 原 SQL 不写（schema `DEFAULT CURRENT_TIMESTAMP`），按迁移守则显式传哨兵。
+    SeedSqlite(sqlite).watchlist(BLOCKED, group_name="核心持仓", added_at=CURRENT_TIMESTAMP)
 
     before = client.get("/api/watchlist/list").json()
     assert [item["stock_code"] for item in before["items"]] == [BLOCKED]
@@ -307,11 +308,14 @@ def test_saved_screening_result_and_csv_export_drop_blacklisted_rows(
         {"stock_code": BLOCKED, "name": BLOCKED_NAME},
         {"stock_code": VISIBLE, "name": VISIBLE_NAME},
     ]
-    # screening_results.rule_id 有外键 → 先造一条来源规则
-    sqlite.execute(
-        """INSERT INTO screening_rules (id, name, version, rule_json, locked_indicators)
-           VALUES (1, 'blacklist-probe', 1, '{}', '{}')"""
+    # screening_results.rule_id 有外键 → 先造一条来源规则。
+    # `screening_rules` → `SeedSqlite.screening_rule()`；`id=1` 显式写死，因为下面
+    # 的 `screening_results.rule_id` 就指着它（自增 id 回捞是第 2 类，这里用固定 id 绕开）。
+    SeedSqlite(sqlite).screening_rule(
+        "blacklist-probe", 1, "{}", id=1,
     )
+    # 留（第 4 类·单次表无第二用户）：`screening_results` 全仓 2 处播种、工厂没有
+    # 方法，且这行是"已保存结果冻结 JSON"的论点本体（`result_json` 逐字），留内联。
     sqlite.execute(
         """INSERT INTO screening_results
                (id, title, note, rule_id, rule_version, data_date,

@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from app.core.adapters.base import FetchResult, SourceMetadata
 from app.core.update import IncrementalUpdater
 from tests.support import source_guard
+from tests.support.seed import Seed
 
 PENDING_KEY = "tech_recompute_pending"
 
@@ -62,27 +63,24 @@ class _LaggingQfqAdapter:
 
 
 def _seed_stock(duckdb_store, code: str = "600519") -> None:
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta
-               (stock_code, name, exchange, is_listed, listing_date, total_shares, circ_shares)
-           VALUES (?, 'x', 'SHSE', TRUE, '2020-01-01', 100, 80)""",
-        [code],
+    Seed(duckdb_store).stock(
+        code,
+        name="x",
+        exchange="SHSE",
+        is_listed=True,
+        listing_date="2020-01-01",
+        total_shares=100,
+        circ_shares=80,
     )
 
 
 def _seed_prices(
     duckdb_store, code: str, *, raw_dates: list[str], qfq_dates: list[str],
 ) -> None:
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_raw (stock_code, trade_date, close) VALUES "
-        + ", ".join("(?, ?, ?)" for _ in raw_dates),
-        [value for trade_date in raw_dates for value in (code, trade_date, 9.0)],
-    )
-    duckdb_store.write_query(
-        "INSERT INTO price_daily_qfq (stock_code, trade_date, close) VALUES "
-        + ", ".join("(?, ?, ?)" for _ in qfq_dates),
-        [value for trade_date in qfq_dates for value in (code, trade_date, 9.0)],
-    )
+    # 两张表的日期清单**故意不同**（`raw` 前进、`qfq` 落后）—— 这正是被判的滞后本身。
+    seed = Seed(duckdb_store)
+    seed.prices(code, [(trade_date, 9.0) for trade_date in raw_dates])
+    seed.prices(code, [(trade_date, 9.0) for trade_date in qfq_dates], table="price_daily_qfq")
 
 
 def _updater(duckdb_store, sqlite_store) -> IncrementalUpdater:
@@ -98,6 +96,10 @@ def _read_state(sqlite_store, key: str = PENDING_KEY):
 
 
 def _write_state(sqlite_store, value: str, key: str = PENDING_KEY) -> None:
+    # 留（第 6 类·相对时间）：`updated_at` 写的是"此刻"（TTL 从这一刻起算 3 天，
+    # 见模块 docstring 不变量 4），固定字面量会随日历漂成过期/未来，直接改掉 TTL 用例的
+    # 前提；且这句是 `ON CONFLICT(key) DO UPDATE` 的 upsert（累积写同一键），
+    # 不只是"造一行"，工厂的确定性口径表达不了。
     sqlite_store.execute(
         """INSERT INTO data_refresh_state (key, value, updated_at) VALUES (?, ?, ?)
            ON CONFLICT(key) DO UPDATE SET value=excluded.value,

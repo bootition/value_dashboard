@@ -137,6 +137,7 @@ def cold_switch(tmp_path: Path) -> SimpleNamespace:
                 f"CREATE TABLE {cold.table} ("
                 "stock_code VARCHAR NOT NULL, report_date DATE NOT NULL, value DOUBLE)"
             )
+            # 留（第 5 类·测试自建表）：`cold.table` 是冷库包里的表，连接是 `duckdb.connect(db_path)`
             connection.execute(
                 f"INSERT INTO {cold.table} VALUES "
                 f"('000001', DATE '2020-12-31', {index + 0.5}), "
@@ -294,6 +295,7 @@ def _insert_hot_row(cold: SimpleNamespace) -> None:
     """
     connection = duckdb.connect(str(cold.db_path))
     try:
+        # 留（第 5 类·测试自建表）：直接往**冷库文件**里插热表行，用裸 `duckdb.connect`
         connection.execute(
             "INSERT INTO csmar_fi_t1 VALUES ('000002', DATE '2026-09-30', 9.9)"
         )

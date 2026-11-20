@@ -33,6 +33,8 @@ from app.core.funding import FundingUpdater
 from app.core.index_valuation import IndexValuationUpdater
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
+from tests.support.seed_sqlite import SeedSqlite
 
 # ─── 东财 F10 BonusFinancing fixture（基于 2026-08-25 真实响应精简） ────
 
@@ -88,10 +90,7 @@ def _result(data: list[dict], *, source: str = "eastmoney_f10",
 
 
 def _seed_stock(duck: DuckDBStore, code: str = "000725") -> None:
-    duck.write_query(
-        "INSERT INTO stock_meta (stock_code, name, exchange, is_listed) VALUES (?, ?, 'SZSE', true)",
-        [code, code],
-    )
+    Seed(duck).stock(code, name=code, exchange="SZSE", is_listed=True)
 
 
 # ─── adapter：eastmoney_f10 placement_funding ─────────────────────────
@@ -441,13 +440,27 @@ class _FakeFundingAdapter:
 
 
 def _seed_funding_rows(duck: DuckDBStore, code: str = "000725") -> None:
-    duck.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, issue_price, issue_shares,
-            raise_funds, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES (?, 'a_placement', '2010-01-01', 1.0, 1000.0, 1000.0, false,
-                   'eastmoney_f10', CURRENT_TIMESTAMP, ?, 'approximate', 'old-batch')""",
-        [code, "0" * 64],
+    # 迁移守则：原 SQL 的 `fetch_time = CURRENT_TIMESTAMP` → `trace_now=True`（"刚抓的"）；
+    # `batch_id='old-batch'` / `confidence='approximate'` / `derived=False` 是用例的论点
+    # （"旧的、二次加工的批次必须被原子替换掉"），逐字给。
+    Seed(duck, trace_now=True).fundings(
+        code,
+        [
+            (
+                "a_placement",
+                "2010-01-01",
+                1000.0,
+                {
+                    "issue_price": 1.0,
+                    "raise_funds": 1000.0,
+                    "derived": False,
+                    "source": "eastmoney_f10",
+                    "raw_hash": "0" * 64,
+                    "confidence": "approximate",
+                    "batch_id": "old-batch",
+                },
+            )
+        ],
     )
 
 
@@ -552,13 +565,26 @@ def test_funding_partial_failure_replaces_only_successful_side(
     """一侧失败时：失败侧旧事件保留并记 retry，成功侧原子替换。"""
     _seed_stock(duckdb_store)
     _seed_funding_rows(duckdb_store)  # 旧 placement
-    duckdb_store.write_query(
-        """INSERT INTO funding_events
-           (stock_code, event_type, list_date, issue_price, issue_shares,
-            raise_funds, derived, source, fetch_time, raw_hash, confidence, batch_id)
-           VALUES ('000725', 'ipo', '2003-02-01', 2.0, 100000000.0, NULL, false,
-                   'cninfo_funding', CURRENT_TIMESTAMP, ?, 'approximate', 'old-batch')""",
-        ["0" * 64],
+    # 同上一处：`CURRENT_TIMESTAMP` → `trace_now=True`；`raise_funds=None` 是 IPO 口径
+    # （只有净额，没有总额），此处如实留 NULL。
+    Seed(duckdb_store, trace_now=True).fundings(
+        "000725",
+        [
+            (
+                "ipo",
+                "2003-02-01",
+                100000000.0,
+                {
+                    "issue_price": 2.0,
+                    "raise_funds": None,
+                    "derived": False,
+                    "source": "cninfo_funding",
+                    "raw_hash": "0" * 64,
+                    "confidence": "approximate",
+                    "batch_id": "old-batch",
+                },
+            )
+        ],
     )
     placement = [{
         "stock_code": "000725", "event_type": "a_placement", "announce_date": "2021-08-19",
@@ -601,14 +627,12 @@ def test_funding_update_all_skips_recent_source_empty_stocks(
     now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     for code in ("832566", "430047"):
         with sqlite_store.transaction() as conn:
-            conn.executemany(
-                """INSERT INTO missing_list (stock_code, field_name, reason_code, detected_at)
-                   VALUES (?, ?, 'source_empty', ?)""",
-                [
-                    (code, "ipo_funding", now),
-                    (code, "placement_funding", now),
-                ],
-            )
+            # `detected_at` 必须是"刚才"（重试窗口内才出队），所以由调用点逐字给，
+            # 不用 schema 默认之外的任何相对量。
+            for field_name in ("ipo_funding", "placement_funding"):
+                SeedSqlite(sqlite_store).join(conn).missing_list(
+                    code, field_name, "source_empty", detected_at=now
+                )
     calls: list[str] = []
     adapter = _FakeFundingAdapter(ipo=None, placement=None)
     original_fetch = adapter.fetch

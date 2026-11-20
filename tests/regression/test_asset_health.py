@@ -156,7 +156,7 @@ def _bulk_domain(
     count: int = DEFAULT_SAMPLE,
 ) -> None:
     """一条 INSERT ... SELECT 造 count 行；`null_every[field]=k` 表示每 k 行 1 行 NULL。"""
-    # 保留内联（第 2–6 类）：`INSERT … SELECT … FROM range(0, ?)` 批量生成器 —— 行数、
+    # 留（第 4 类·批量生成器）：`INSERT … SELECT … FROM range(0, ?)` 批量生成器 —— 行数、
     # 空值节奏与列集合都由调用点程序化生成，工厂的批量口只收逐行 `[(key, value…)]`。
     constants = constants or {}
     null_every = null_every or {}
@@ -203,7 +203,7 @@ def _bulk_income(
     duck: DuckDBStore, report_date: date, *, deducted_non_null: int,
     count: int = DEFAULT_SAMPLE,
 ) -> None:
-    # 保留内联（第 2–6 类）：同为 `INSERT … SELECT … FROM range(0, ?)` 生成器 ——
+    # 留（第 4 类·批量生成器）：同为 `INSERT … SELECT … FROM range(0, ?)` 生成器 ——
     # "前 N 行有值、其后为 NULL"这个行号相关形状表达不了成逐行列表（100 行起）。
     duck.write_query(
         """INSERT INTO income_statement
@@ -218,7 +218,7 @@ def _bulk_income(
 def _bulk_register_null_reason(
     duck: DuckDBStore, field: str, report_date: date, count: int
 ) -> None:
-    # 保留内联（第 4 类 单次表）：`indicator_null_reason` 全仓只此一处播种，
+    # 留（第 4 类·单次表）：`indicator_null_reason` 全仓只此一处播种，
     # 且同样是 `range()` 生成器 —— 补方法只多一层没有第二个用户的抽象。
     duck.write_query(
         """INSERT INTO indicator_null_reason
@@ -444,7 +444,7 @@ def _write_baseline(
     domain: str = "indicator_snapshot",
     days_ago: int = 7,
 ) -> None:
-    # 保留内联（第 4 类 单次表）：`field_coverage_history` 全仓只此一处播种，
+    # 留（第 4 类·单次表）：`field_coverage_history` 全仓只此一处播种，
     # 工厂没有也不该有方法（没有第二个用户）。
     duck.write_query(
         """INSERT INTO field_coverage_history
@@ -552,7 +552,7 @@ def test_manual_chain_stale_uses_legacy_marker_key(
 
 def test_manual_chain_stale_falls_back_to_data_probe(duckdb_store: DuckDBStore) -> None:
     """没有记账的链靠数据侧探针自愈：ETF 行情停了 30 天必须报出来。"""
-    # 保留内联（第 4 类 多站点缺 API）：`etf_daily` 全仓 5 处播种但工厂没有方法，
+    # 留（第 4 类·多站点缺 API）：`etf_daily` 全仓 5 处播种但工厂没有方法，
     # 本轮租约禁止补 API —— 如实登记为下一轮候选。
     duckdb_store.write_query(
         """INSERT INTO etf_daily (etf_code, trade_date, close_price, source, fetch_time,
@@ -721,7 +721,7 @@ def _create_csmar_fi_t1(duck: DuckDBStore) -> None:
 def test_crosscheck_fires_when_agreement_below_threshold(duckdb_store: DuckDBStore) -> None:
     _create_csmar_fi_t1(duckdb_store)
     _insert_extended(duckdb_store, date(2026, 6, 30), ["000001"], values={"debt_to_equity": 1.0})
-    # 保留内联（第 4 类 多站点缺 API）：`csmar_fi_t1` 全仓 4 处、表由本文件
+    # 留（第 4 类·多站点缺 API）：`csmar_fi_t1` 全仓 4 处、表由本文件
     # `_create_csmar_fi_t1` 自建（旧 schema 探针），工厂无方法且本轮不补。
     duckdb_store.write_query(
         """INSERT INTO csmar_fi_t1
@@ -742,7 +742,7 @@ def test_crosscheck_fires_when_agreement_below_threshold(duckdb_store: DuckDBSto
 def test_crosscheck_silent_when_agreement_matches(duckdb_store: DuckDBStore) -> None:
     _create_csmar_fi_t1(duckdb_store)
     _insert_extended(duckdb_store, date(2026, 6, 30), ["000001"], values={"debt_to_equity": 1.0})
-    # 保留内联（第 4 类 多站点缺 API）：`csmar_fi_t1` 全仓 4 处、表由本文件
+    # 留（第 4 类·多站点缺 API）：`csmar_fi_t1` 全仓 4 处、表由本文件
     # `_create_csmar_fi_t1` 自建（旧 schema 探针），工厂无方法且本轮不补。
     duckdb_store.write_query(
         """INSERT INTO csmar_fi_t1

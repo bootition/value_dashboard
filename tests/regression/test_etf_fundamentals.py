@@ -11,37 +11,39 @@ from app.core.etf_fundamentals import (
     resolve_constituents,
 )
 from app.core.storage.duckdb_store import DuckDBStore
+from tests.support.seed import Seed
 
 
 def _seed_basics(duck: DuckDBStore) -> None:
+    # 行业名（申万一级）是"按行业名解析成分"的输入，股本/市值/收盘价是聚合与增速的
+    # 输入 —— 数值全部逐字给，工厂只省 provenance/形状样板。
+    seed = Seed(duck)
     for code, shares, industry in [
         ("000001", 1_000_000, "农林牧渔"),
         ("000002", 2_000_000, "食品饮料"),
     ]:
-        duck.write_query(
-            """INSERT INTO stock_meta (stock_code, name, exchange, is_listed, sw_level1, total_shares)
-               VALUES (?, ?, 'SZSE', TRUE, ?, ?)""",
-            [code, code, industry, shares],
+        seed.stock(
+            code,
+            name=code,
+            exchange="SZSE",
+            is_listed=True,
+            sw_level1=industry,
+            total_shares=shares,
         )
     for stock_code, base in [("000001", 100.0), ("000002", 200.0)]:
-        duck.write_query(
-            """INSERT INTO indicator_snapshot (stock_code, report_date, total_market_cap)
-               VALUES (?, '2026-06-30', ?)""",
-            [stock_code, base * 10],
+        seed.snapshot(stock_code, "2026-06-30", total_market_cap=base * 10)
+        seed.prices(
+            stock_code,
+            [("2026-06-30", 10.0), ("2025-06-30", 8.0), ("2024-06-30", 6.0)],
+            table="price_daily_qfq",
         )
-        for offset, price in [("2026-06-30", 10.0), ("2025-06-30", 8.0), ("2024-06-30", 6.0)]:
-            duck.write_query(
-                """INSERT INTO price_daily_qfq (stock_code, trade_date, close)
-                   VALUES (?, ?, ?)""",
-                [stock_code, offset, price],
-            )
-    duck.write_query(
-        """INSERT INTO income_statement (stock_code, report_date, parent_net_profit)
-           VALUES ('000001', '2026-06-30', 1000000),
-                  ('000001', '2025-06-30', 800000),
-                  ('000002', '2026-06-30', 2000000),
-                  ('000002', '2025-06-30', 1000000)"""
-    )
+    for stock_code, report_date, parent_net_profit in [
+        ("000001", "2026-06-30", 1000000),
+        ("000001", "2025-06-30", 800000),
+        ("000002", "2026-06-30", 2000000),
+        ("000002", "2025-06-30", 1000000),
+    ]:
+        seed.income(stock_code, report_date, parent_net_profit=parent_net_profit)
 
 
 def test_resolve_sw_constituents_by_industry_name(duckdb_store: DuckDBStore) -> None:

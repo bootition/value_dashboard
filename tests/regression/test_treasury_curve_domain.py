@@ -104,20 +104,20 @@ def _seed_stock(duck: DuckDBStore, code: str = "600519") -> None:
     按数据质量遮蔽股息率/利差）。"""
     from tests.conftest import insert_minimum_screenable_data
 
-    duck.write_query(
-        """INSERT INTO stock_meta
-           (stock_code, name, exchange, listing_date, is_st, is_suspended, is_listed)
-           VALUES (?, ?, 'SSE', '2020-01-01', false, false, true)""",
-        [code, code],
+    # `stock_meta` → `Seed.stock()`；`exchange='SSE'` 逐字保留（不靠代码前缀推断——
+    # 这条种子用的是历史值，用例断言不以交易所为口径）。
+    Seed(duck).stock(
+        code, name=code, exchange="SSE",
+        listing_date="2020-01-01", is_st=False, is_suspended=False, is_listed=True,
     )
     insert_minimum_screenable_data(duck, code)
 
 
 def _seed_price(duck: DuckDBStore, code: str, trade_date: date, close: float) -> None:
-    duck.write_query(
-        """INSERT INTO price_daily_raw (stock_code, trade_date, close)
-           VALUES (?, ?, ?) ON CONFLICT DO NOTHING""",
-        [code, trade_date, close],
+    # 原 SQL 带 `ON CONFLICT DO NOTHING`（同一行重复播种不报错）→ `if_exists="ignore"`；
+    # 逐行入口 `prices()` 不开放 `if_exists`，故走 `prices_bulk()`（单行批次）。
+    Seed(duck).prices_bulk(
+        [(code, trade_date, close)], if_exists="ignore",
     )
 
 
@@ -419,15 +419,19 @@ def test_daily_success_resolves_only_matching_daily_retry(
     """daily 成功只能删除对应 daily 重试条目，history 未解决条目必须保留。"""
     history_extra = json.dumps({"mode": "history", "tenor": 10.0}, ensure_ascii=False)
     daily_extra = json.dumps({"mode": "daily", "work_date": "2026-08-07"}, ensure_ascii=False)
+    # `retry_list` → `SeedSqlite.retry()`；两条在主键 `request` 五件套上不同
+    # （`extra_json` 的 mode/tenor 不同），所以能在同一个事务里共存。
     with sqlite_store.transaction() as conn:
-        conn.executemany(
-            """INSERT INTO retry_list
-               (stock_code, data_type, adapter, error, retry_count, last_attempt, extra_json)
-               VALUES ('__market__', 'treasury_yield_curve', 'czb_mof', ?, 0, ?, ?)""",
-            [
-                ("history boom", datetime.now(UTC).isoformat(), history_extra),
-                ("daily boom", datetime.now(UTC).isoformat(), daily_extra),
-            ],
+        retry_seed = SeedSqlite(sqlite_store).join(conn)
+        retry_seed.retry(
+            "__market__", "treasury_yield_curve", adapter="czb_mof",
+            error="history boom", last_attempt=datetime.now(UTC).isoformat(),
+            extra_json=history_extra,
+        )
+        retry_seed.retry(
+            "__market__", "treasury_yield_curve", adapter="czb_mof",
+            error="daily boom", last_attempt=datetime.now(UTC).isoformat(),
+            extra_json=daily_extra,
         )
     daily = [{
         "curve_date": "2026-08-07", "tenor_years": 10.0, "yield_pct": 1.70,
@@ -945,12 +949,14 @@ def test_refresh_if_due_gates_on_marker(
     assert len(fake.calls) == calls_after_first
 
     # 标记过期（两天前）→ 重新执行
-    sqlite_store.execute(
-        """INSERT INTO data_refresh_state (key, value, updated_at)
-           VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-        [REFRESH_MARKER_KEY,
-         (datetime.now(UTC) - timedelta(days=2)).isoformat(),
-         datetime.now(UTC).isoformat()],
+    # `data_refresh_state` → `SeedSqlite.refresh_state()`。新鲜度判据读的是
+    # **`value`**（`TreasuryCurveUpdater._refreshed_today()` 只看 value），所以
+    # 把 value 写成"两天前"就够；`overwrite=True` 覆盖工厂先前写下的那一行。
+    SeedSqlite(sqlite_store).refresh_state(
+        REFRESH_MARKER_KEY,
+        (datetime.now(UTC) - timedelta(days=2)).isoformat(),
+        updated_at=datetime.now(UTC).isoformat(),
+        overwrite=True,
     )
     third = updater.refresh_if_due()
     assert third["status"] != "skipped"

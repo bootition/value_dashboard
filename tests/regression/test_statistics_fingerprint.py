@@ -17,6 +17,7 @@ from __future__ import annotations
 from app.core.statistics import StatisticsBuilder
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
+from tests.support.seed import Seed
 
 _CAP_ROWS = [
     # (stock_code, effective_date, total_shares, verified)
@@ -30,26 +31,23 @@ _CAP_ROWS = [
 
 
 def _seed(store: DuckDBStore) -> None:
+    seed = Seed(store)
     for code in ("000001", "000002", "000003"):
-        store.write_query(
-            """INSERT INTO stock_meta (stock_code, name, exchange, listing_date,
-                                       is_st, is_suspended, total_shares, circ_shares)
-               VALUES (?, ?, 'SZSE', '2020-01-01', false, false, 100, 80)""",
-            [code, f"Test{code}"],
+        # `stock_meta` → `Seed.stock()`：`exchange='SZSE'` 与代码前缀推断一致（不额外指定）。
+        seed.stock(
+            code,
+            name=f"Test{code}",
+            listing_date="2020-01-01",
+            is_st=False,
+            is_suspended=False,
+            total_shares=100,
+            circ_shares=80,
         )
-        store.write_query(
-            """INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)
-               VALUES (?, DATE '2024-01-02', 10, 100)""",
-            [code],
-        )
+        # `price_daily_raw` → `Seed.prices()`：`volume` 是逐行业务列，仍逐字出现。
+        seed.prices(code, [("2024-01-02", 10)], volume=100)
     for code, effective_date, shares, verified in _CAP_ROWS:
-        store.write_query(
-            """INSERT INTO share_capital_history
-                   (stock_code, effective_date, total_shares, verified,
-                    source, raw_hash, batch_id)
-               VALUES (?, ?, ?, ?, 'test', 'hash-test', 'batch-test')""",
-            [code, effective_date, shares, verified],
-        )
+        # `share_capital_history` → `Seed.shares()`：`verified` 逐行不同，走 `**cols`。
+        seed.shares(code, [(effective_date, shares)], verified=verified)
 
 
 def test_verifying_one_stock_does_not_invalidate_everyone(
@@ -86,16 +84,19 @@ def test_global_verified_count_no_longer_feeds_per_stock_fingerprint(
     builder = StatisticsBuilder(duck=duckdb_store, sqlite=sqlite_store)
     before = builder._stock_fingerprints(["000001"])
 
-    duckdb_store.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date,
-                                   is_st, is_suspended, total_shares, circ_shares)
-           VALUES ('000004', 'Test4', 'SZSE', '2020-01-01', false, false, 100, 80)"""
+    seed = Seed(duckdb_store)
+    # `stock_meta` + `share_capital_history` → 工厂（此处**没有** lastrowid 回捞，
+    # 新增行本身只是"别处多了一条已核验记录"）。
+    seed.stock(
+        "000004",
+        name="Test4",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
+        total_shares=100,
+        circ_shares=80,
     )
-    duckdb_store.write_query(
-        """INSERT INTO share_capital_history
-               (stock_code, effective_date, total_shares, verified, source, raw_hash, batch_id)
-           VALUES ('000004', '2020-01-01', 400, TRUE, 'test', 'hash-test', 'batch-test')"""
-    )
+    seed.shares("000004", [("2020-01-01", 400)], verified=True)
 
     after = builder._stock_fingerprints(["000001"])
     assert after["000001"] == before["000001"]

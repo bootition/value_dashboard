@@ -80,7 +80,10 @@ def _seed_synthetic_pool(
             10.0 + (i % 100) / 10, 0.05 + (i % 50) / 1000, 0.3 + (i % 50) / 100,
         ))
 
+    # 留（第 6 类·库侧相对时间）：`calculated_at` 写库侧 `CURRENT_TIMESTAMP`，
     with duckdb_store.write_connection() as connection:
+        # 留（第 4 类·多站点缺口）：5,000 只股票的 `stock_meta` 是**程序化生成**的 11 列批量行，
+        # 留（第 4 类·多站点缺口）：5,000 只股票的 `stock_meta` 是**程序化生成**的 11 列批量行，
         connection.executemany(
             """INSERT INTO stock_meta
                (stock_code, name, exchange, listing_date, is_listed, is_st, is_suspended,
@@ -88,6 +91,7 @@ def _seed_synthetic_pool(
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             meta_rows,
         )
+        # 留（第 6 类·库侧相对时间）：`calculated_at` 写库侧 `CURRENT_TIMESTAMP`，
         connection.executemany(
             """INSERT INTO indicator_snapshot
                (stock_code, report_date, latest_close, latest_price_date, pe_ttm, pb_mrq,
@@ -97,7 +101,9 @@ def _seed_synthetic_pool(
         )
 
     content_hash = hashlib.sha256(COMPOSITE_EXPRESSION.encode("utf-8")).hexdigest()
+    # 留（第 4 类·多站点缺口）：`dsl_expressions.content_hash` 必须与本用例现算的
     with sqlite_store.transaction() as connection:
+        # 留（第 4 类·多站点缺口）：`dsl_expressions.content_hash` 必须与本用例现算的
         connection.execute(
             """INSERT INTO dsl_expressions
                (name, version, expression_text, status, description, direction,

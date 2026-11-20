@@ -72,6 +72,7 @@ def test_year_start_maps_to_previous_annual() -> None:
 
 def _seed_indirect(duck: DuckDBStore, rows: list[tuple[str, str, float | None]]) -> None:
     for code, report_date, dep in rows:
+        # 留（第 6 类·库侧相对时间）：`cash_flow_indirect` 无工厂方法，`fetch_time` 又是库侧
         duck.write_query(
             """INSERT INTO cash_flow_indirect
                    (stock_code, report_date, report_type, fixed_asset_depreciation,

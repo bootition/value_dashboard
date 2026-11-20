@@ -19,6 +19,7 @@ from app.core.storage.sqlite_store import SQLiteStore
 from app.core.storage.update_lock import _pid_creation_time
 from app.web.api.screening import _require_current_screenability, router
 from tests.conftest import insert_matching_trading_calendar, insert_minimum_screenable_data
+from tests.support.seed import Seed
 
 
 class _FakeRequest:
@@ -40,9 +41,13 @@ def _write_live_lock(path) -> None:
 
 
 def _seed_screenable(duck: DuckDBStore, sqlite: SQLiteStore) -> None:
-    duck.write_query(
-        """INSERT INTO stock_meta (stock_code, name, exchange, listing_date, is_st, is_suspended)
-           VALUES ('000001', 'Test', 'SZSE', '2020-01-01', false, false)"""
+    Seed(duck).stock(
+        "000001",
+        name="Test",
+        exchange="SZSE",
+        listing_date="2020-01-01",
+        is_st=False,
+        is_suspended=False,
     )
     insert_minimum_screenable_data(duck)
     insert_matching_trading_calendar(duck, sqlite)
@@ -297,6 +302,7 @@ def test_screening_readiness_cache_stale_while_revalidate_read(
 
     def _store(age_seconds: int) -> None:
         updated = (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+        # 留（第 6 类·库侧相对时间 / 论点构造）：`data_refresh_state.updated_at` 必须是
         sqlite_store.execute(
             """INSERT INTO data_refresh_state (key, value, updated_at)
                VALUES (?, ?, ?)
