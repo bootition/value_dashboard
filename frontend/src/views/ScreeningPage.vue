@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, nextTick, h } from 'vue'
+import { ref, reactive, onMounted, computed, nextTick, h, watch } from 'vue'
 import type { VNode } from 'vue'
 import { NButton, NInput, NInputNumber, NSelect, NEmpty, NModal, NAlert, NTooltip, useMessage, useDialog } from 'naive-ui'
 import { NEllipsis } from 'naive-ui'
@@ -17,9 +17,16 @@ import type {
 } from '../types/screening.ts'
 import { generateRuleId } from '../types/screening.ts'
 import { useAutoUpdateRunning } from '../composables/useAutoUpdatePolling.ts'
-import { useScreeningColumns, DEFAULT_RESULT_COLUMNS, encodeResultColumn } from '../composables/useScreeningColumns.ts'
+import { useScreeningColumns, DEFAULT_RESULT_COLUMNS, DEFAULT_RESULT_COLUMNS_VERSION, encodeResultColumn } from '../composables/useScreeningColumns.ts'
 import { useScreeningDraft } from '../composables/useScreeningDraft.ts'
 import { useScreeningRules } from '../composables/useScreeningRules.ts'
+import {
+  clearRunSnapshot,
+  markRunExpired,
+  refreshRunExpiry,
+  saveRunSnapshot,
+  screeningSession,
+} from '../stores/screening-session.ts'
 import { readinessNotice } from '../utils/readiness-notice.ts'
 import type { ReadinessNotice } from '../utils/readiness-notice.ts'
 import { collectRuleFields, computeUntrustedFields } from '../helpers/screening-quality.ts'
@@ -58,15 +65,34 @@ const renamedIndicators = computed(() =>
 const trulyUnavailableIndicators = computed(() =>
   unavailableIndicators.value.filter((item) => item.reason !== 'deprecated'),
 )
-const loading = ref(false)
-const results = ref<readonly ScreeningResult[]>([])
-const executionTime = ref(0)
-const basePoolSize = ref(0)
-const dataDate = ref<string | null>(null)
-const runId = ref<string | null>(null)
-const truncated = ref(false)
-const totalMatched = ref(0)
+const loading = ref(screeningSession.running)
+/**
+ * ─── 跨挂载保活的运行结果（g5「切页保状态」，2026-11-24）─────────────────
+ * 路由切换会卸载本组件（`App.vue` 的 `<router-view />` 没有 keep-alive），页面里的
+ * `ref()` 全部销毁 —— 这就是「跑完结果、去数据状态页、切回来就没了」的根因。
+ *
+ * 结果类状态改由模块级单例 `stores/screening-session.ts` 保管：组件卸载不销毁模块，
+ * 切回来时在这里把上次的运行结果原样回填；F5 重建 JS 上下文 → 模块回到空态
+ * （「F5 才重置」这条语义因此**天然成立**，不需要额外的文档生命周期标记）。
+ *
+ * 过期判定放在 setup 里先跑一次：过期的运行凭据只停用保存入口，**不清空结果**。
+ */
+refreshRunExpiry()
+/** 本次文档里最近一次成功运行（`null` = 首次进入 / F5 之后）。 */
+const restoredRun = screeningSession.run
+const results = ref<readonly ScreeningResult[]>(restoredRun?.results ?? [])
+const executionTime = ref(restoredRun?.executionTime ?? 0)
+const basePoolSize = ref(restoredRun?.basePoolSize ?? 0)
+const dataDate = ref<string | null>(restoredRun?.dataDate ?? null)
+const runId = ref<string | null>(restoredRun?.runId ?? null)
+const truncated = ref(restoredRun?.truncated ?? false)
+const totalMatched = ref(restoredRun?.totalMatched ?? 0)
 const resultsAnchor = ref<HTMLElement | null>(null)
+/**
+ * 运行凭据（`runId`）已失效：结果照常展示，只停用「保存结果 / 导出 / 加入自选」。
+ * 见 `stores/screening-session.ts` 顶部关于 24h TTL 的说明。
+ */
+const runExpired = computed(() => screeningSession.run?.expired === true)
 
 /**
  * 显式运行状态（2026-11-24 P0）。
@@ -84,7 +110,21 @@ const resultsAnchor = ref<HTMLElement | null>(null)
  * - `failed`  失败：清空旧结果 + 记下原因，页面可原地重试
  */
 type RunState = 'idle' | 'running' | 'ok' | 'empty' | 'failed'
-const runState = ref<RunState>('idle')
+/**
+ * `runState` 与「切页保状态」的接缝（g5）。
+ *
+ * 两者管的是**不同问题**，必须共存：
+ * - `runState` 回答"屏幕上的这批结果还可信/可保存吗"（主线 P0 语义：失败即清空）；
+ * - `screeningSession.run` 回答"切走再回来还要不要在"（用户语义：不按 F5 就保持）。
+ *
+ * 共存规则（唯一一条）：挂载时若有上一次成功运行的快照，就把它**如实**映射成
+ * `ok`/`empty` —— 否则面板会因为 `idle` 而把保存入口永远置灰（表格还在、按钮却
+ * 点不了）。反过来，运行失败时主线语义优先：`clearRunArtifacts()` 会连会话里的
+ * 快照一起清掉，避免下一次挂载把"已作废"的结果又复活。
+ */
+const runState = ref<RunState>(
+  restoredRun === null ? 'idle' : (restoredRun.results.length > 0 ? 'ok' : 'empty'),
+)
 /** 最近一次运行失败的用户可读原因（仅 `failed` 态有值）。 */
 const lastRunError = ref<string | null>(null)
 /**
@@ -97,24 +137,26 @@ interface ScreeningWarning {
   readonly severity?: string
   readonly detail?: string
 }
-const screeningWarnings = ref<readonly ScreeningWarning[]>([])
+const screeningWarnings = ref<readonly ScreeningWarning[]>(restoredRun?.screeningWarnings ?? [])
 // reports/79 方案 A: 更新窗口内快照口径运行标注
-const autoUpdateSnapshot = ref(false)
-const snapshotAsOf = ref<string | null>(null)
+const autoUpdateSnapshot = ref(restoredRun?.autoUpdateSnapshot ?? false)
+const snapshotAsOf = ref<string | null>(restoredRun?.snapshotAsOf ?? null)
 // 自动更新状态轮询（更新中 → 10s，空闲 → 60s；卸载时清 timer）
 const { autoUpdateRunning, refreshAutoUpdate, startAutoUpdatePolling } = useAutoUpdateRunning()
 
 // 2026-08-27：运行按钮不再被少数股票的数据缺口全局禁用。
 // 引擎会排除缺口股，后端只拦截真正的全库硬性阻断。
 const runEnabled = computed(() => true)
-const warningCodes = ref<readonly WarningCode[]>([])
-const qualityStatus = ref<'loading' | 'available' | 'failed'>('loading')
-const dataReady = ref<boolean | null>(null)
+// g5：披露告警与质量状态是「这次运行当时」的事实，切页回来必须原样保留 ——
+// 否则回填的结果旁边会挂上现在的质量结论，等于把用户看到的披露偷偷改掉。
+const warningCodes = ref<readonly WarningCode[]>(restoredRun?.warningCodes ?? [])
+const qualityStatus = ref<'loading' | 'available' | 'failed'>(restoredRun?.qualityStatus ?? 'loading')
+const dataReady = ref<boolean | null>(restoredRun?.dataReady ?? null)
 // 2026-08-14 红队 P2-4：严格模式空结果反馈文案（来自 /run 响应）
-const strictModeWarning = ref<string | null>(null)
+const strictModeWarning = ref<string | null>(restoredRun?.strictModeWarning ?? null)
 // 2026-11-23 后端新增：按设计豁免字段级 strict 校验的自算派生字段。
 // 只用于把"这不是你的条件写错了"讲清楚，不影响筛选结果。
-const strictExemptFields = ref<string[]>([])
+const strictExemptFields = ref<string[]>([...(restoredRun?.strictExemptFields ?? [])])
 
 /**
  * 从 /run 响应里读一个**可选**字符串数组字段。
@@ -192,6 +234,10 @@ function clearRunArtifacts(): void {
   strictModeWarning.value = null
   strictExemptFields.value = []
   screeningWarnings.value = []
+  // g5 关键：会话里的**上一次成功运行**也一起丢掉。只清页面 ref 的话，下一次
+  // 切页回来会把它从模块单例重新回填 —— "失败即清空"等于没发生，用户会对着
+  // 一份已经作废的结果点保存。
+  clearRunSnapshot()
 }
 
 /**
@@ -300,10 +346,17 @@ const indicatorOptions = computed(() =>
   indicators.value.map((i) => ({ label: indicatorDisplayName(i), value: i.name })),
 )
 
-// ─── 结果展示列（合成值编解码 / 下拉选项）────────────────────────────────
+// ─── 结果展示列（合成值编解码 / 下拉选项 / 条件自动并入）────────────────────
 // 2026-11-22：列定义、合成值编解码、下拉选项整块抽到 composables/useScreeningColumns.ts。
-const { selectedResultColumns, resultColumnOptions, selectedColumnsForRequest } =
-  useScreeningColumns({ indicators, rankModes, indicatorOptions })
+// g4（2026-11-24）：传 `ruleTree` 进去 —— 条件里用到的字段会自动并入结果列
+//（筛 ROCE 就要看得见 ROCE），并且用户手动删掉的条件列不会被加回来。
+const {
+  selectedResultColumns,
+  manuallyRemovedResultColumns,
+  resultColumnsSelection,
+  resultColumnOptions,
+  selectedColumnsForRequest,
+} = useScreeningColumns({ indicators, rankModes, indicatorOptions, ruleTree })
 
 /**
  * 结果列多选的中文兜底（reports/148）：旧规则里的排名字段不在下拉里时不能露英文。
@@ -424,6 +477,12 @@ async function runScreening() {
   // 并禁用保存/导出/加入自选；本次一旦失败则整体清空（见 catch）。
   runState.value = 'running'
   lastRunError.value = null
+  // g5：在飞的运行也要跨挂载保住 —— 切走再切回来时按钮仍是 loading，
+  // 且不会因为重新挂载而再发一次 /run。
+  screeningSession.running = true
+  // 这次运行到底按哪个规则版本跑的：必须在发请求前定格，await 期间用户可能保存
+  // 新版本。结果面板的「执行规则」与保存入口都以这份定格为准，否则结果会对错规则。
+  const runRule = activeRule.value
   try {
     const resp = await axios.post<ScreeningRunResponse>('/api/screening/run', {
       rule_id: activeRule.value.id,
@@ -459,6 +518,34 @@ async function runScreening() {
     strictExemptFields.value = readOptionalStringList(resp.data, 'strict_exempt_fields')
     // 2026-11-24（reports/150）：disclose 级告警随 200 一起返回 —— 必须看见，但不挡路。
     screeningWarnings.value = readScreeningWarnings(resp.data)
+    // 一次性把整份可展示产物写进模块级会话：组件随后被卸载（用户切到别的页）
+    // 也不影响，切回来时 setup 会原样回填 —— 包括 runId、披露告警与定格规则。
+    saveRunSnapshot({
+      results: rows,
+      runId: runId.value,
+      totalMatched: totalMatched.value,
+      executionTime: executionTime.value,
+      basePoolSize: basePoolSize.value,
+      dataDate: dataDate.value,
+      truncated: truncated.value,
+      autoUpdateSnapshot: autoUpdateSnapshot.value,
+      snapshotAsOf: snapshotAsOf.value,
+      readinessHint: readinessHint.value,
+      strictModeWarning: strictModeWarning.value,
+      strictExemptFields: strictExemptFields.value,
+      screeningWarnings: screeningWarnings.value,
+      warningCodes: warningCodes.value,
+      qualityStatus: qualityStatus.value,
+      dataReady: dataReady.value,
+      // 用户裁定：严格模式开关已移除，口径固定「包含近似数据」。快照里如实写 false，
+      // 面板的 strict 说明仍由后端自己下发的信号驱动。
+      strictOnly: false,
+      context: {
+        ruleId: runRule?.id ?? null,
+        ruleVersion: runRule?.version ?? null,
+        ruleName: runRule?.name ?? '',
+      },
+    })
     // 成功也要区分「有结果」与「成功但 0 条」：后者不是错误，是条件太严。
     runState.value = rows.length > 0 ? 'ok' : 'empty'
     if (resp.data.truncated) {
@@ -486,6 +573,7 @@ async function runScreening() {
     scrollToResults()
   } finally {
     loading.value = false
+    screeningSession.running = false
   }
 }
 
@@ -509,7 +597,11 @@ const {
   basePool,
   strictOnly,
   selectedResultColumns,
+  // g4：手动移除过的条件自动列要跟着草稿走，否则换个页面/刷新回来会被强行加回。
+  removedResultColumns: manuallyRemovedResultColumns,
   defaultResultColumns: DEFAULT_RESULT_COLUMNS,
+  // g4：默认列版本号 —— 旧草稿若是「旧 8 列 / 旧 12 列默认集合」，载入时迁移成 15 列。
+  defaultResultColumnsVersion: DEFAULT_RESULT_COLUMNS_VERSION,
   encodeResultColumn,
   notify: message,
 })
@@ -521,6 +613,7 @@ const {
   activeRule,
   ruleName,
   ruleOptions,
+  savedRules,
   loadSavedRules,
   isDraftDirty,
   autoRuleName,
@@ -539,11 +632,35 @@ const {
   dialog,
 })
 
+// ─── 结果面板的"这批结果是谁跑出来的"（g5）──────────────────────────────
+// 切页回来时 `savedRules` 要重新拉取（`activeRule` 会短暂为 null），若面板直接吃
+// `activeRule`，回填结果的头几百毫秒里 ruleId 是 null → 保存入口被误置灰闪一下。
+// 有历史结果时以运行快照里定格的为准；没有历史结果时保持原行为（跟随编辑区当前规则）。
+const runRuleId = computed(() => screeningSession.run?.context.ruleId ?? activeRule.value?.id ?? null)
+const runRuleVersion = computed(
+  () => screeningSession.run?.context.ruleVersion ?? activeRule.value?.version ?? null,
+)
+const runRuleName = computed(
+  () => screeningSession.run?.context.ruleName ?? activeRule.value?.name ?? '',
+)
+
 onMounted(async () => {
+  // 2026-11-24「切页保状态」：挂载时**不再重跑任何会产生结果的请求**。
+  // 这里只做两件"不改变已跑结果"的事：恢复草稿（编辑区，服务端持久化）
+  // 与重取规则/指标目录（它们只影响下拉选项）。
+  // 关键不变量：这里没有任何代码把 results/runId 置空，也没有任何一次 /run。
   await restoreDraft()
   markDraftHydrated()
   await loadSavedRules()
-  
+
+  // 切回来时把编辑区重新绑回上次选中的规则版本：否则 selectedRuleId 归零 →
+  // activeRule 变 null → 结果面板拿到 ruleId=null → 保存入口被误置灰。
+  if (screeningSession.ruleName) ruleName.value = screeningSession.ruleName
+  const lastRuleId = screeningSession.activeRuleId
+  if (lastRuleId > 0 && savedRules.value.some((rule) => rule.id === lastRuleId)) {
+    selectedRuleId.value = lastRuleId
+  }
+
   try {
     const resp = await axios.get<{
       indicators?: readonly ScreeningIndicator[]
@@ -569,15 +686,21 @@ onMounted(async () => {
     message.warning('无法加载指标列表')
   }
 
-  try {
-    const resp = await axios.get<DataStatusSummaryResponse>('/api/data-status/summary')
-    warningCodes.value = resp.data.data_quality.warning_codes
-    dataReady.value = resp.data.data_quality.minimum_data_readiness.ready
-    qualityStatus.value = 'available'
-  } catch {
-    dataReady.value = null
-    qualityStatus.value = 'failed'
-    message.warning('无法加载数据质量状态')
+  // 数据质量披露（warning_codes / 就绪结论）是**这次运行当时**的披露内容。
+  // 本文档里已经跑过结果时不再重取：否则切回来会拿"现在的"状态覆盖结果旁边的
+  // 告警，等于把用户看到的披露偷偷改掉（用户要的是"界面保持在那里"）。
+  // 真要看最新数据状态，用户会去数据状态页，或者重新运行。
+  if (restoredRun === null) {
+    try {
+      const resp = await axios.get<DataStatusSummaryResponse>('/api/data-status/summary')
+      warningCodes.value = resp.data.data_quality.warning_codes
+      dataReady.value = resp.data.data_quality.minimum_data_readiness.ready
+      qualityStatus.value = 'available'
+    } catch {
+      dataReady.value = null
+      qualityStatus.value = 'failed'
+      message.warning('无法加载数据质量状态')
+    }
   }
 
   // reports/79 方案 A: 更新窗口内允许以最近完整快照运行（后端同口径）
@@ -587,6 +710,10 @@ onMounted(async () => {
   // 2026-11-22：轮询+单飞+卸载清理已抽到 composables/useAutoUpdatePolling.ts。
   startAutoUpdatePolling(10000)
 })
+
+// 编辑区绑定（当前规则 / 规则名）随会话保存：切走再回来，"当前规则"仍是同一个版本。
+watch(selectedRuleId, (id) => { screeningSession.activeRuleId = id })
+watch(ruleName, (name) => { screeningSession.ruleName = name })
 </script>
 
 <template>
@@ -684,8 +811,11 @@ onMounted(async () => {
 
         <div class="screening-section">
           <div class="screening-section-title"><div><b>02</b><h3>结果展示列</h3></div><p>运行前可自由增加或删减展示信息；修改展示列不会产生新的规则版本。</p></div>
+          <!-- g4：条件是"筛什么"，列是"看什么"。条件里用到的字段会自动并入这张表
+               （排在默认列之后），所以这里展示的是"实际生效"的列集合
+               （`resultColumnsSelection` = 用户手选/默认列 + 条件自动列 − 手动移除）。 -->
           <n-select
-            v-model:value="selectedResultColumns"
+            v-model:value="resultColumnsSelection"
             :options="resultColumnOptions"
             :fallback-option="fallbackResultColumnOption"
             multiple
@@ -695,6 +825,9 @@ onMounted(async () => {
             size="small"
             placeholder="选择要在结果表展示的信息"
           />
+          <p class="result-columns-note">
+            条件里用到的字段会自动加入结果列（排在默认列之后）；手动删掉的条件列不会被自动加回。
+          </p>
         </div>
 
         <DslIndicatorManager class="dsl-manager" />
@@ -743,15 +876,17 @@ onMounted(async () => {
         :quality-status="qualityStatus"
         :rule-tree="ruleTree"
         :run-id="runId"
-        :rule-id="activeRule?.id ?? null"
-        :rule-version="activeRule?.version ?? null"
-        :rule-name="activeRule?.name ?? ''"
+        :rule-id="runRuleId"
+        :rule-version="runRuleVersion"
+        :rule-name="runRuleName"
         :locked-indicators="activeRule?.locked_indicators ?? {}"
         :base-pool-config="basePool"
         :truncated="truncated"
         :total-matched="totalMatched"
+        :run-expired="runExpired"
         @retry="runScreening"
         @run-invalidated="handleRunInvalidated"
+        @run-expired="markRunExpired"
       />
     </div>
 
@@ -873,6 +1008,7 @@ onMounted(async () => {
 .unavailable-tooltip p { margin: 2px 0; }
 .unavailable-tooltip-message { color: #d9d2b8; }
 .dsl-manager { margin-top: 4px; }
+.result-columns-note { margin: 8px 0 0; color: #9aa69f; font-size: 10px; line-height: 1.5; }
 .screening-run-panel { position: sticky; top: 28px; align-self: start; padding: 25px; border-radius: 16px; background: #eff7f1; box-shadow: 0 5px 17px rgba(47, 114, 74, .055); }
 .screening-ready { display: flex; align-items: center; gap: 6px; color: #659d75; font-size: 10px; }
 .screening-ready i { width: 6px; height: 6px; border-radius: 50%; background: #82ba94; }

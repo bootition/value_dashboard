@@ -5,6 +5,7 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 import { NMessageProvider, NDialogProvider } from 'naive-ui'
 import ScreeningPage from '../../src/views/ScreeningPage.vue'
 import ScreeningResultsPanel from '../../src/components/ScreeningResultsPanel.vue'
+import { resetScreeningSession } from '../../src/stores/screening-session.ts'
 
 vi.mock('axios', () => {
   const mock = {
@@ -134,6 +135,11 @@ async function chooseRuleAndRun(wrapper: ReturnType<typeof mountScreeningPage>['
 describe('ScreeningPage 显式运行状态（P0：失败不得残留旧结果）', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // 「切页保状态」把运行结果提到了模块级单例（stores/screening-session.ts）：
+    // 一个 it 就是一次新的页面加载（= F5），必须整体重置，否则上一个用例跑出来的
+    // 结果会漏到下一个用例里，测试变成顺序相关（本文件断言的是"页面级状态机"，
+    // 与"会话是否保活"无关 —— 那条由 screening-page-state.test.ts 守护）。
+    resetScreeningSession()
     ;(axios.put as Mock).mockResolvedValue({ data: { revision: 1 } })
     mockPageGets()
   })

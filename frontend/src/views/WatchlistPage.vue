@@ -1,16 +1,19 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, h, watch } from 'vue'
+import { ref, onMounted, computed, h } from 'vue'
+import type { VNodeChild } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import {
   NAlert, NInput, NButton, NDataTable,
-  NEmpty, useMessage, useDialog, NCheckboxGroup, NCheckbox, NTag
+  NEmpty, useMessage, useDialog, NCheckbox, NTag
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
 import { isIndicatorUntrusted } from '../types/data-quality.ts'
 import type { IndicatorTrust } from '../types/data-quality.ts'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
-import { fieldDisplayName, fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
+import { formatFieldValue } from '../utils/screening-format.ts'
+import { useWatchlistColumns, resolveDropPosition } from '../composables/useWatchlistColumns.ts'
+import type { WatchlistColumnSpec } from '../composables/useWatchlistColumns.ts'
 
 interface WatchlistItem {
   stock_code: string
@@ -122,56 +125,114 @@ function resolveSelectedGroup(list: WatchlistGroup[]): string | null {
     ?? null
 }
 
-// L1-7（报告42）: 列配置记忆（localStorage），无历史配置时用默认列
-const DEFAULT_COLUMNS = ['stock_code', 'name', 'exchange', 'group_name', 'listing_date', 'total_market_cap', 'latest_close', 'pe_ttm', 'pb_mrq', 'roe', 'gross_margin', 'debt_ratio', 'source']
-const COLUMNS_STORAGE_KEY = 'vd.watchlist.columns'
+// ── 列配置（2026-11-25 用户实测：表头固定、「想看 PE 每次都得拉到最右边」）──
+// 可选列清单 / 默认顺序 / 默认可见集合 / 存储格式全部在
+// `composables/useWatchlistColumns.ts` 单源维护（改造前页内三份同源清单已合并成一份）。
+// 这里只做三件事：表头拖动交互、列设置面板（勾选 + ▲▼ + 恢复默认）、把可见列渲染成表格列。
+// 存储 key 按分组隔离（`vd.watchlist.columns.<编码分组名>`）→ 用户要的「固定在这个分组上」；
+// 没配置过的分组 = 出厂默认 13 列，用户看到的表与改造前逐字相同。
+const {
+  visibleColumnSpecs, orderedColumnSpecs, visibleColumnKeySet,
+  columnOrder, moveColumn, toggleColumnVisible, showAllColumns, shiftColumn, resetColumns,
+} = useWatchlistColumns({ groupName: selectedGroup })
 
-function loadSavedColumns(): string[] {
+// ── 表头拖动排序 ────────────────────────────────────────────────────────────
+// 用原生 HTML5 drag 事件（naive-ui 2.44 的 n-data-table 没有列拖动能力，
+// 项目也没装 sortablejs/vuedraggable，不为这一个交互新增依赖）。
+const dragColumnKey = ref<string | null>(null)
+const dropTargetKey = ref<string | null>(null)
+const dropPosition = ref<'before' | 'after'>('before')
+// 拖放结束紧跟的那一次 click 属于「放下」，不能当成「点表头排序」：
+// 由 `onHeaderTitleClick` 在冒泡阶段拦掉（n-data-table 的排序监听挂在 <th> 上，
+// 见 naive-ui TableParts/Header.mjs 的 th onClick），所以子节点 stopPropagation 就能挡住。
+// 这个"抑制"不需要定时器解除：真实的点表头一定先有 mousedown，
+// 而 mousedown 一到就解除（`onHeaderTitleMousedown`）—— 拖放的幽灵 click 没有 mousedown。
+const suppressHeaderClick = ref(false)
+
+function onHeaderDragStart(key: string, event: DragEvent) {
+  dragColumnKey.value = key
+  dropTargetKey.value = null
+  suppressHeaderClick.value = false
+  if (!event.dataTransfer) return // jsdom 里没有 dataTransfer，拖动逻辑不能因此抛错
+  event.dataTransfer.effectAllowed = 'move'
   try {
-    const raw = localStorage.getItem(COLUMNS_STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    // Firefox 不 setData 不会真正进入拖动状态
+    event.dataTransfer.setData('text/plain', key)
   } catch {
-    return []
+    // 某些环境的 dataTransfer 是只读桩
   }
 }
 
-// 列选项必须先于 loadSavedColumns 的过滤逻辑声明：
-// 2026-08-14 红队 F5 —— 此前 allColumnOptions 声明在其后（TDZ），
-// 用户配置过列后每次进入自选页都在 :filter 回调中抛
-// ReferenceError: Cannot access 'allColumnOptions' before initialization，
-// 导致整页白屏。
-const allColumnOptions = [
-  { label: '股票代码', value: 'stock_code' },
-  { label: '股票名称', value: 'name' },
-  { label: '交易所', value: 'exchange' },
-  { label: '分组', value: 'group_name' },
-  { label: '上市日期', value: 'listing_date' },
-  { label: fieldDisplayName('total_market_cap'), value: 'total_market_cap' },
-  { label: fieldDisplayName('circ_market_cap'), value: 'circ_market_cap' },
-  { label: fieldDisplayName('latest_close'), value: 'latest_close' },
-  { label: fieldDisplayName('pe_ttm'), value: 'pe_ttm' },
-  { label: fieldDisplayName('pb_mrq'), value: 'pb_mrq' },
-  { label: fieldDisplayName('roe'), value: 'roe' },
-  { label: fieldDisplayName('gross_margin'), value: 'gross_margin' },
-  { label: fieldDisplayName('net_margin'), value: 'net_margin' },
-  { label: fieldDisplayName('debt_ratio'), value: 'debt_ratio' },
-  { label: fieldDisplayName('revenue_yoy'), value: 'revenue_yoy' },
-  { label: '来源', value: 'source' },
-]
+function onHeaderDragOver(key: string, event: DragEvent) {
+  const source = dragColumnKey.value
+  if (!source || source === key) return
+  // 不 preventDefault 就不会触发 drop —— 这是 HTML5 拖放的硬要求
+  event.preventDefault()
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'move'
+  dropTargetKey.value = key
+  dropPosition.value = resolveDropPosition(columnOrder.value, source, key)
+}
 
-const savedColumns = loadSavedColumns()
-const validSaved = savedColumns.filter((col) => allColumnOptions.some((o) => o.value === col))
-const selectedColumns = ref<string[]>(validSaved.length > 0 ? validSaved : [...DEFAULT_COLUMNS])
+function onHeaderDragLeave(key: string) {
+  if (dropTargetKey.value === key) dropTargetKey.value = null
+}
 
-watch(selectedColumns, (cols) => {
-  try {
-    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(cols))
-  } catch {
-    // localStorage 不可用时静默降级
+function endHeaderDrag() {
+  dragColumnKey.value = null
+  dropTargetKey.value = null
+  // 拖完紧跟的那一次 click 一律拦掉（见 suppressHeaderClick 的注释）
+  suppressHeaderClick.value = true
+}
+
+function onHeaderDrop(key: string, event: DragEvent) {
+  event.preventDefault()
+  const source = dragColumnKey.value
+  const position = dropTargetKey.value === key
+    ? dropPosition.value
+    : resolveDropPosition(columnOrder.value, source ?? '', key)
+  endHeaderDrag()
+  if (!source || source === key) return
+  moveColumn(source, key, position) // 放下即生效，并写入本分组配置
+}
+
+function onHeaderTitleClick(event: MouseEvent) {
+  if (!suppressHeaderClick.value) return
+  suppressHeaderClick.value = false
+  event.stopPropagation()
+  event.preventDefault()
+}
+
+function onHeaderTitleMousedown() {
+  // 新的按压 = 新的操作意图，允许它正常冒泡到 th 触发排序
+  suppressHeaderClick.value = false
+}
+
+/** 表头标题：拖动把手 + 列名。整个标题可拖，拖动时半透明、目标列显示插入位置。 */
+function renderColumnTitle(spec: WatchlistColumnSpec): VNodeChild {
+  const classes = ['wl-col-drag']
+  if (dragColumnKey.value === spec.key) classes.push('wl-col-drag--dragging')
+  if (dropTargetKey.value === spec.key && dragColumnKey.value !== null) {
+    classes.push(dropPosition.value === 'before' ? 'wl-col-drag--drop-before' : 'wl-col-drag--drop-after')
   }
-}, { deep: true })
+  return h('span', {
+    class: classes,
+    draggable: 'true',
+    'data-column-key': spec.key,
+    title: '按住拖动可调整列顺序；点一下仍然按这列排序',
+    onClick: onHeaderTitleClick,
+    // 真实的「点表头排序」一定先有 mousedown（拖放结束后那次幽灵 click 没有），
+    // 所以 mousedown 一到就解除抑制：用户拖完立刻点排序不会丢第一下。
+    onMousedown: onHeaderTitleMousedown,
+    onDragstart: (event: DragEvent) => onHeaderDragStart(spec.key, event),
+    onDragover: (event: DragEvent) => onHeaderDragOver(spec.key, event),
+    onDragleave: () => onHeaderDragLeave(spec.key),
+    onDrop: (event: DragEvent) => onHeaderDrop(spec.key, event),
+    onDragend: endHeaderDrag,
+  }, [
+    h('span', { class: 'wl-col-drag__grip', 'aria-hidden': 'true' }, '⠿'),
+    h('span', { class: 'wl-col-drag__label' }, spec.header),
+  ])
+}
 
 // L1-7（报告42）: 一键复制股票代码
 async function copyStockCode(code: string) {
@@ -198,42 +259,55 @@ function trustedRender(field: NumericField) {
   }
 }
 
-const tableColumns = computed(() => {
+/**
+ * 各列**单元格**渲染。列顺序 / 表头 / 宽度 / 是否可排序都不在这里 ——
+ * 那是 `useWatchlistColumns.ts` 里 `WATCHLIST_COLUMN_CATALOG` 的职责（一个事实一份实现）。
+ * 表头单位化（`fieldTitleWithUnit`）与 sorter 由那份清单带过来，这里只管"格子里画什么"。
+ */
+const columnRenders: Record<string, (row: WatchlistItem) => VNodeChild> = {
+  // L1-7: 代码列可点进详情 + 一键复制
+  stock_code: (r) => h('span', { style: 'white-space: nowrap;' }, [
+    h(RouterLink, { to: `/stock/${encodeURIComponent(r.stock_code)}`, class: 'stock-link' }, { default: () => r.stock_code }),
+    h(NButton, {
+      text: true, size: 'tiny', type: 'primary', class: 'copy-btn',
+      title: `复制 ${r.stock_code}`,
+      onClick: () => void copyStockCode(r.stock_code),
+    }, { default: () => '复制' }),
+  ]),
+  // 降级时名称取不到（DuckDB 正在更新）：用代码兜底，绝不留一列空白。
+  name: (r) => r.name || r.stock_code,
+  exchange: (r) => r.exchange || '—',
+  // `default` 只作为后端内部 key：用户可见处一律走 displayGroupName 归一成「手动收录」。
+  group_name: (r) => displayGroupName(r.group_name),
+  listing_date: (r) => r.listing_date || '—',
+  total_market_cap: trustedRender('total_market_cap'),
+  circ_market_cap: trustedRender('circ_market_cap'),
+  latest_close: trustedRender('latest_close'),
+  pe_ttm: trustedRender('pe_ttm'),
+  pb_mrq: trustedRender('pb_mrq'),
+  roe: trustedRender('roe'),
+  gross_margin: trustedRender('gross_margin'),
+  net_margin: trustedRender('net_margin'),
+  debt_ratio: trustedRender('debt_ratio'),
+  revenue_yoy: trustedRender('revenue_yoy'),
+  source: (r) => (r.source_result_id ? '筛选' : (r.source_rule_id ? '规则' : '手动')),
+}
+
+const tableColumns = computed<DataTableColumns<WatchlistItem>>(() => {
   const cols: DataTableColumns<WatchlistItem> = []
-  const colDefs: Record<string, DataTableColumns<WatchlistItem>[number]> = {
-    // L1-7: 代码列首列（名称列紧随其后），保持滚动可读由用户调整窗口宽度
-    stock_code: {
-      title: '代码', key: 'stock_code', width: 130,
-      render: (r) => h('span', { style: 'white-space: nowrap;' }, [
-        h(RouterLink, { to: `/stock/${encodeURIComponent(r.stock_code)}`, class: 'stock-link' }, { default: () => r.stock_code }),
-        h(NButton, {
-          text: true, size: 'tiny', type: 'primary', class: 'copy-btn',
-          title: `复制 ${r.stock_code}`,
-          onClick: () => void copyStockCode(r.stock_code),
-        }, { default: () => '复制' }),
-      ]),
-    },
-    // 降级时名称取不到（DuckDB 正在更新）：用代码兜底，绝不留一列空白。
-    name: { title: '名称', key: 'name', width: 100, render: (r) => r.name || r.stock_code },
-    exchange: { title: '交易所', key: 'exchange', width: 70, render: (r) => r.exchange || '—' },
-    group_name: { title: '分组', key: 'group_name', width: 90, render: (r) => displayGroupName(r.group_name) },
-    listing_date: { title: '上市日期', key: 'listing_date', width: 96, sorter: 'default', render: (r) => r.listing_date || '—' },
-    total_market_cap: { title: fieldTitleWithUnit('total_market_cap', '总市值'), key: 'total_market_cap', width: 110, sorter: 'default', render: trustedRender('total_market_cap') },
-    circ_market_cap: { title: fieldTitleWithUnit('circ_market_cap', '流通市值'), key: 'circ_market_cap', width: 110, sorter: 'default', render: trustedRender('circ_market_cap') },
-    latest_close: { title: fieldTitleWithUnit('latest_close', '收盘价'), key: 'latest_close', width: 80, sorter: 'default', render: trustedRender('latest_close') },
-    pe_ttm: { title: fieldTitleWithUnit('pe_ttm', 'PE'), key: 'pe_ttm', width: 70, sorter: 'default', render: trustedRender('pe_ttm') },
-    pb_mrq: { title: fieldTitleWithUnit('pb_mrq', 'PB'), key: 'pb_mrq', width: 70, sorter: 'default', render: trustedRender('pb_mrq') },
-    roe: { title: fieldTitleWithUnit('roe', 'ROE'), key: 'roe', width: 80, sorter: 'default', render: trustedRender('roe') },
-    gross_margin: { title: fieldTitleWithUnit('gross_margin', '毛利率'), key: 'gross_margin', width: 80, sorter: 'default', render: trustedRender('gross_margin') },
-    net_margin: { title: fieldTitleWithUnit('net_margin', '净利率'), key: 'net_margin', width: 80, sorter: 'default', render: trustedRender('net_margin') },
-    debt_ratio: { title: fieldTitleWithUnit('debt_ratio', '负债率'), key: 'debt_ratio', width: 80, sorter: 'default', render: trustedRender('debt_ratio') },
-    revenue_yoy: { title: fieldTitleWithUnit('revenue_yoy', '营收YoY'), key: 'revenue_yoy', width: 90, sorter: 'default', render: trustedRender('revenue_yoy') },
-    source: { title: '来源', key: 'source', width: 80, render: (r) => r.source_result_id ? '筛选' : (r.source_rule_id ? '规则' : '手动') },
+  for (const spec of visibleColumnSpecs.value) {
+    const render = columnRenders[spec.key]
+    if (!render) continue
+    cols.push({
+      // 函数式 title：表头文字外面包了拖动把手（点表头排序照旧走 column.sorter）
+      title: () => renderColumnTitle(spec),
+      key: spec.key,
+      width: spec.width,
+      sorter: spec.sortable ? 'default' : undefined,
+      render,
+    })
   }
-  for (const col of selectedColumns.value) {
-    const def = colDefs[col]
-    if (def) cols.push(def)
-  }
+  // 「操作」列固定在最右、不参与配置（用户说的是数据列，不是行操作）
   cols.push({
     title: '操作', key: 'actions', width: 120,
     render: (r) => h('div', [
@@ -372,8 +446,26 @@ onMounted(fetchWatchlist)
         <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" class="watchlist-warning">当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <div class="watchlist-card">
           <template v-if="hasVisibleGroups">
-            <div class="watchlist-card-heading"><div><p>{{ selectedIsManual ? '手动加入' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedIsManual ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><div class="watchlist-actions"><span v-if="items.length > 0">显示 {{ items.length }} 家公司</span><n-button v-if="hasRefreshableRule" size="small" :loading="refreshing" @click="refreshGroup">按最新数据重新筛选</n-button><n-button v-if="items.length > 0" size="small" @click="showColumnSettings = !showColumnSettings">配置列</n-button></div></div>
-            <div v-if="showColumnSettings && items.length > 0" class="watchlist-toolbar"><n-checkbox-group v-model:value="selectedColumns"><n-checkbox v-for="opt in allColumnOptions" :key="opt.value" :value="opt.value" :label="opt.label" size="small" /></n-checkbox-group></div>
+            <div class="watchlist-card-heading"><div><p>{{ selectedIsManual ? '手动加入' : '筛选规则来源' }}</p><h2>{{ selectedGroupLabel }}</h2><span>{{ selectedIsManual ? '手动加入或未关联筛选来源的公司。' : '来自该筛选规则的已保存结果。' }}</span></div><div class="watchlist-actions"><span v-if="items.length > 0">显示 {{ items.length }} 家公司</span><n-button v-if="hasRefreshableRule" size="small" :loading="refreshing" @click="refreshGroup">按最新数据重新筛选</n-button><n-button v-if="items.length > 0" size="small" @click="showColumnSettings = !showColumnSettings">列设置</n-button></div></div>
+            <div v-if="showColumnSettings && items.length > 0" class="watchlist-toolbar">
+              <div class="column-settings-head">
+                <p class="column-settings-hint">按住表头可拖动调整列顺序，放下即保存到「{{ selectedGroupLabel }}」这个分组；不常看的列可以取消勾选，随时勾回来。</p>
+                <div class="column-settings-actions">
+                  <n-button size="tiny" quaternary @click="showAllColumns">全部显示</n-button>
+                  <n-button size="tiny" quaternary @click="resetColumns">恢复默认</n-button>
+                </div>
+              </div>
+              <ul class="column-settings-list">
+                <li v-for="(spec, index) in orderedColumnSpecs" :key="spec.key" :class="{ 'is-hidden': !visibleColumnKeySet.has(spec.key) }">
+                  <n-checkbox :checked="visibleColumnKeySet.has(spec.key)" :label="spec.label" size="small" @update:checked="(checked: boolean) => toggleColumnVisible(spec.key, checked)" />
+                  <span class="column-settings-move">
+                    <n-button text size="tiny" :disabled="index === 0" :title="`上移「${spec.label}」`" @click="shiftColumn(spec.key, -1)">▲</n-button>
+                    <n-button text size="tiny" :disabled="index === orderedColumnSpecs.length - 1" :title="`下移「${spec.label}」`" @click="shiftColumn(spec.key, 1)">▼</n-button>
+                  </span>
+                </li>
+              </ul>
+              <p class="column-settings-hint">「操作」列固定在最右，不参与配置。顺序与勾选按分组记住，刷新页面也还在。</p>
+            </div>
             <n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped />
             <n-empty v-else-if="!loading" class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">去筛选规则页跑一次规则，把命中结果保存到自选，就能在这里看到公司。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
             <p v-else class="watchlist-empty-hint watchlist-loading">正在加载自选…</p>
@@ -388,4 +480,22 @@ onMounted(fetchWatchlist)
 
 <style scoped>
 .watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.n-button) { justify-content: space-between; height: auto; margin-top: 5px; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.n-button.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.n-button__content) { display: flex; justify-content: space-between; width: 100%; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }.groups-empty { margin: 14px 10px 0; color: #99a39c; font-size: 11px; line-height: 1.7; }.watchlist-empty-extra { display: grid; gap: 12px; justify-items: center; max-width: 460px; }.watchlist-empty-hint { margin: 0; color: #829087; font-size: 12px; line-height: 1.7; text-align: center; }.watchlist-empty-actions { display: flex; align-items: center; gap: 12px; }.watchlist-empty-link { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 6px; background: #eff8f1; color: #55966d; font-size: 13px; text-decoration: none; }.watchlist-empty-link:hover { background: #e2f2e7; }.watchlist-loading { padding: 40px; color: #99a39c; }
+/* 列设置面板（勾选显示哪些列 + ▲▼ 调顺序 + 全部显示/恢复默认） */
+.column-settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.column-settings-actions { display: flex; flex: none; gap: 6px; white-space: nowrap; }
+.column-settings-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 4px 12px; margin: 10px 0; padding: 0; list-style: none; }
+.column-settings-list li { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 2px 6px; border-radius: 6px; }
+.column-settings-list li.is-hidden { background: #f5f8f5; }
+.column-settings-list li.is-hidden :deep(.n-checkbox__label) { color: #a7b1aa; }
+.column-settings-move { display: inline-flex; flex: none; gap: 2px; color: #97a199; }
+.column-settings-hint { margin: 0; color: #97a199; font-size: 11px; line-height: 1.6; }
+/* 表头拖动把手：标题由 renderColumnTitle() 在运行时生成（不在本组件的 render 里），
+   拿不到 scoped 的 data-v 属性，所以用 :deep() 从 .watchlist-page 往下命中。 */
+.watchlist-page :deep(.wl-col-drag) { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; padding: 1px 3px; border-radius: 4px; cursor: grab; user-select: none; transition: background-color .15s ease, box-shadow .15s ease, opacity .15s ease; }
+.watchlist-page :deep(.wl-col-drag:hover) { background: #eff6f1; }
+.watchlist-page :deep(.wl-col-drag:active) { cursor: grabbing; }
+.watchlist-page :deep(.wl-col-drag--dragging) { opacity: .4; }
+.watchlist-page :deep(.wl-col-drag__grip) { color: #bcc7bf; font-size: 9px; letter-spacing: -1px; }
+.watchlist-page :deep(.wl-col-drag--drop-before) { box-shadow: inset 2px 0 0 #55966d; }
+.watchlist-page :deep(.wl-col-drag--drop-after) { box-shadow: inset -2px 0 0 #55966d; }
 </style>

@@ -281,7 +281,9 @@ describe('筛选页「切页保状态」', () => {
     await flushPromises()
 
     expect(wrapper.text()).not.toContain('600519')
-    expect(wrapper.text()).toContain('运行筛选后显示候选公司')
+    // 主线空态文案（idle 态唯一真相，见 screening-run-state.test.ts）
+    expect(wrapper.find('#run-idle-state').exists()).toBe(true)
+    expect(wrapper.text()).toContain('还没有运行筛选')
     const panel = wrapper.findComponent(ScreeningResultsPanel)
     expect(panel.props('runId')).toBeNull()
     expect(runCalls(post)).toBe(0)
@@ -289,12 +291,14 @@ describe('筛选页「切页保状态」', () => {
     wrapper.unmount()
   })
 
-  it('草稿回灌 strict_only 不再触发自动重跑（原 watch(strictOnly) 的口子）', async () => {
-    // 上一次已经跑出结果，且当时用的是非 strict 口径
-    seedRun({ strictOnly: false })
+  it('草稿回灌编辑区不再触发自动重跑（原 watch(strictOnly) 的口子）', async () => {
+    // 上一次已经跑出结果
+    seedRun()
     screeningSession.activeRuleId = 7
-    // 服务端草稿里 strict_only=true：旧实现下 restoreDraft 写回 ref 会喂给
-    // `watch(strictOnly)` → 400ms 后自动发一次 /run（正是用户说的"切回来自己又跑一遍"）。
+    // 服务端草稿会把编辑区整块回灌（条件 / 范围 / 结果列 / 历史 strict_only）。
+    // 旧实现里 `watch(strictOnly)` 被程序化赋值也会触发 → 400ms 后自动发一次 /run
+    // （正是用户说的"切回来自己又跑一遍"）。主线已删除该开关与那个 watch，
+    // 本用例钉死的是：**草稿回灌这条路径**无论如何都不许产生新的 /run。
     mockApis({
       draft: {
         conditions: { logic: 'AND', rules: [{ field: 'pe_ttm', op: '<', value: 15 }] },
@@ -307,15 +311,67 @@ describe('筛选页「切页保状态」', () => {
     const { wrapper } = mountPage()
     await flushPromises()
 
-    // 草稿确实回灌了（strict 开关被打开），说明走的不是"忽略草稿"的捷径
+    // 结果快照没有被挂载流程动过
     expect(screeningSession.run?.runId).toBe('run-abc')
-    expect(wrapper.text()).toContain('仅使用严格可信数据')
     // 等过旧的 400ms 防抖窗口，仍然一次 /run 都没有
     await new Promise((resolve) => setTimeout(resolve, 500))
     await flushPromises()
     expect(runCalls(axios.post as Mock)).toBe(0)
     // 结果也没有被重跑冲掉
     expect(wrapper.text()).toContain('600519')
+
+    wrapper.unmount()
+  })
+
+  it('保存时后端回 400「server screening run not found」→ 结果不动，只停用保存入口', async () => {
+    // 24h TTL 之外的第二条过期路径：服务端已经不认这张运行凭据（`/save` 400）。
+    // 用户裁定：这时**仍然原样展示结果**，只把落库入口置灰 + 一条提示。
+    seedRun()
+    mockApis()
+    ;(axios.post as Mock).mockImplementation((url: string) => {
+      if (url === '/api/screening/save') {
+        return Promise.reject({
+          isAxiosError: true,
+          response: { status: 400, data: { detail: 'server screening run not found' } },
+        })
+      }
+      return Promise.resolve({ data: {} })
+    })
+
+    const { wrapper } = mountPage()
+    await flushPromises()
+
+    // 点「保存结果」→ 填标题 → 确认（与线上操作路径一致）
+    await wrapper.find('#save-btn').trigger('click')
+    await flushPromises()
+    const titleInput = document.body.querySelector(
+      'input[placeholder="给这次筛选结果起个名字"]',
+    ) as HTMLInputElement | null
+    expect(titleInput).toBeTruthy()
+    titleInput!.value = '过期运行'
+    titleInput!.dispatchEvent(new Event('input'))
+    await flushPromises()
+    const confirmSave = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === '保存',
+    )
+    expect(confirmSave).toBeTruthy()
+    confirmSave!.click()
+    await flushPromises()
+
+    // ① 结果没有被清空，也没有落到失败态
+    expect(wrapper.text()).toContain('600519')
+    expect(wrapper.text()).toContain('贵州茅台')
+    const panel = wrapper.findComponent(ScreeningResultsPanel)
+    expect(panel.props('runState')).toBe('ok')
+    expect(panel.props('results')).toHaveLength(1)
+    // ② 会话标记为过期 → 保存入口置灰 + 明确提示
+    expect(screeningSession.run?.expired).toBe(true)
+    expect((wrapper.find('#save-btn').element as HTMLButtonElement).disabled).toBe(true)
+    expect((wrapper.find('#export-btn').element as HTMLButtonElement).disabled).toBe(true)
+    expect((wrapper.find('#watchlist-btn').element as HTMLButtonElement).disabled).toBe(true)
+    expect(wrapper.find('#run-expired-alert').exists()).toBe(true)
+    // ③ 仍然没有自动重跑
+    expect(runCalls(axios.post as Mock)).toBe(0)
 
     wrapper.unmount()
   })

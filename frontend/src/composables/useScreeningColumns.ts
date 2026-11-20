@@ -14,7 +14,7 @@
 
 import { computed, ref } from 'vue'
 import type { ComputedRef, Ref } from 'vue'
-import type { RankMode, ResultColumn, ScreeningIndicator } from '../types/screening.ts'
+import type { RankMode, ResultColumn, ScreeningIndicator, ScreeningRuleNode } from '../types/screening.ts'
 import { fieldDisplayName, fieldTitleWithUnit } from '../utils/screening-format.ts'
 
 /** 结果列合成值里的参数分隔符（与 decodeResultColumn 保持一致）。 */
@@ -72,14 +72,35 @@ export const RESULT_METADATA_COLUMNS: Array<{ label: string; value: string }> = 
  * （engine.py:800 `referenced_fields = ... | set(columns_spec)`），
  * 默认列里塞它会让**每一次**默认运行都冒一条 `field_deprecated:` 警告。
  */
-export const DEFAULT_RESULT_COLUMNS = [
+export const DEFAULT_RESULT_COLUMNS: readonly string[] = [
+  // 基础
   'stock_code', 'name', 'exchange',
-  'total_market_cap',
-  'pe_ttm', 'pb_mrq',
-  'roe', 'roce_10y_median',
-  'ttm_dividend_yield',
+  // 估值
+  'pe_ttm', 'pb_mrq', 'ttm_dividend_yield', 'total_market_cap', 'circ_market_cap',
+  // 盈利 / 质量
+  'roe', 'roce_10y_median', 'gross_margin', 'net_margin', 'debt_ratio',
+  // 成长
   'revenue_yoy', 'net_profit_yoy',
-  'latest_close',
+]
+
+/**
+ * 默认列版本号（g4，2026-11-24）：草稿里的列若是**旧默认集合**，按版本号迁移。
+ *
+ * 只比较**集合**，不比较顺序：旧草稿可能被 JSON 序列化/去重过。用户自己增删过
+ * 的列（不等于任何旧默认集合）绝不覆盖 —— 那些才代表用户的真实意图。
+ */
+export const DEFAULT_RESULT_COLUMNS_VERSION = 2
+
+/** 历史默认列（集合）—— 用于识别"用户从没自定义过"的旧草稿。 */
+export const LEGACY_DEFAULT_RESULT_COLUMNS: ReadonlyArray<readonly string[]> = [
+  // 2026-11 之前：8 列，全是基础元数据 + 收盘价，一个指标都没有。
+  ['stock_code', 'name', 'exchange', 'listing_date', 'csrc_l1', 'csrc_l2', 'latest_close', 'total_market_cap'],
+  // 上一轮：12 列，已经带核心指标，但仍缺流通市值/毛利率/净利率/负债率。
+  [
+    'stock_code', 'name', 'exchange', 'total_market_cap', 'pe_ttm', 'pb_mrq',
+    'roe', 'roce_10y_median', 'ttm_dividend_yield', 'revenue_yoy',
+    'net_profit_yoy', 'latest_close',
+  ],
 ]
 
 /** 排名口径列合成值。 */
@@ -127,6 +148,133 @@ export function encodeResultColumn(column: ResultColumn): string {
 }
 
 /**
+ * 合成值 → 下拉选项的中文标签（带单位）。
+ *
+ * 用于兜底：条件自动列/历史 rank_mode 列不在 `/indicators` 当前清单时，
+ * naive-ui 会直接把 `roce_10y_median` 或 `pe_ttm::rank::market_rank` 当文字渲染。
+ */
+export function resultColumnOptionLabel(
+  value: string,
+  rankModes: ReadonlyArray<{ label: string; value: string }> = [],
+): { label: string; value: string } {
+  const decoded = decodeResultColumn(value)
+  if (typeof decoded === 'string') return metadataColumn(decoded)
+  const record = decoded as unknown as Record<string, unknown>
+  let field = String(record.field ?? '')
+  if (typeof record.cagr_years === 'number') field += String(record.cagr_years)
+  else if (typeof record.tenor === 'string' && record.tenor) field += `_${record.tenor}`
+  if (typeof record.rank_mode === 'string' && record.rank_mode) {
+    // 先得出参数展开后的基名标签（带单位），再拼排名口径，避免
+    // `fieldDisplayName(pe_ttm_market_rank)` 与 mode label 重复一次「全市场排名」。
+    const baseLabel = fieldTitleWithUnit(field, fieldDisplayName(field, field))
+    const rankField = `${field}_${record.rank_mode}`
+    const modeLabel = rankModes.find((mode) => mode.value === record.rank_mode)?.label
+    return {
+      label: modeLabel
+        ? `${baseLabel} · ${modeLabel}`
+        : fieldTitleWithUnit(rankField, fieldDisplayName(rankField, baseLabel)),
+      value,
+    }
+  }
+  return {
+    label: fieldTitleWithUnit(field, fieldDisplayName(field, field)),
+    value,
+  }
+}
+
+/** 去重并保持首次出现顺序。 */
+function uniqueColumns(columns: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const column of columns) {
+    if (!column || seen.has(column)) continue
+    seen.add(column)
+    out.push(column)
+  }
+  return out
+}
+
+/** 判断一组列是否**恰好等于**某个历史默认集合（顺序无关）。 */
+export function isLegacyDefaultResultColumns(columns: readonly ResultColumn[]): boolean {
+  if (columns.length === 0) return false
+  const actual = new Set(columns.map(encodeResultColumn))
+  return LEGACY_DEFAULT_RESULT_COLUMNS.some((legacy) => {
+    if (legacy.length !== actual.size) return false
+    return legacy.every((column) => actual.has(column))
+  })
+}
+
+/**
+ * 迁移草稿里的结果列（g4）。
+ *
+ * - 版本号已是最新：原样保留（哪怕用户手动选回了旧默认集合）；
+ * - 旧版本/无版本，且列恰好是旧默认集合：替换成新默认；
+ * - 其它情况（用户自定义过）：原样保留。
+ *
+ * ⚠️ 页面里真正生效的是 `useScreeningDraft::restoreDraft` 里的同一套判断
+ * （它需要在回填 `selectedResultColumns` 之前决定），本函数供其它入口/测试复用，
+ * 两者必须保持同一判据 —— 判据的唯一实现在 `isLegacyDefaultResultColumns`。
+ */
+export function migrateDraftResultColumns(
+  columns: readonly ResultColumn[],
+  savedVersion?: number,
+): { columns: string[]; migrated: boolean } {
+  const encoded = uniqueColumns(columns.map(encodeResultColumn))
+  if (savedVersion !== DEFAULT_RESULT_COLUMNS_VERSION && isLegacyDefaultResultColumns(encoded)) {
+    return { columns: [...DEFAULT_RESULT_COLUMNS], migrated: true }
+  }
+  return { columns: encoded, migrated: false }
+}
+
+/** 单个条件（叶子）在结果表里对应的合成列。 */
+function conditionColumnValues(condition: Record<string, unknown>): string[] {
+  const rawField = condition.field
+  if (typeof rawField !== 'string' || !rawField) return []
+
+  // 参数化字段（reports/143 §2）：条件上的参数后缀必须原样带到展示列，
+  // 否则 `revenue_cagr@cagr_years=5` 会被当成裸 `revenue_cagr` → 后端算不出。
+  let value = rawField
+  if (typeof condition.cagr_years === 'number') {
+    value += `${PARAM_COLUMN_SEP}cagr_years=${condition.cagr_years}`
+  } else if (typeof condition.tenor === 'string' && condition.tenor) {
+    value += `${PARAM_COLUMN_SEP}tenor=${condition.tenor}`
+  }
+
+  const out = [value]
+  const rankMode = condition.rank_mode
+  if (typeof rankMode === 'string' && rankMode) {
+    // 带排名口径的条件：既显示原始值，也显示排名口径值。
+    out.push(rankColumnValue(value, rankMode))
+  }
+  return out
+}
+
+/**
+ * 从当前规则树收集「条件字段」对应的展示列（g4）。
+ *
+ * 用户原话：「筛 ROCE 就要看得见 ROCE」。递归全部 AND/OR 组；同时纳入
+ * `right_field`（指标间比较的右值）。去重后由调用方接在默认列之后。
+ */
+export function conditionResultColumns(node: ScreeningRuleNode): string[] {
+  const out: string[] = []
+  const walk = (current: ScreeningRuleNode): void => {
+    if (!current || !Array.isArray(current.rules)) return
+    for (const item of current.rules) {
+      if ('logic' in item && item.logic) {
+        walk(item as ScreeningRuleNode)
+        continue
+      }
+      const condition = item as unknown as Record<string, unknown>
+      out.push(...conditionColumnValues(condition))
+      const rightField = condition.right_field
+      if (typeof rightField === 'string' && rightField) out.push(rightField)
+    }
+  }
+  walk(node)
+  return uniqueColumns(out)
+}
+
+/**
  * 结果列选择的**共享存储**（模块级单例）。
  *
  * 2026-11-20（审计实证）：同一个筛选页上有**两个**「选择要显示的列」入口 ——
@@ -159,11 +307,66 @@ export interface ScreeningColumnsDeps {
    * 传 `useSharedResultColumnSelection()` = 与其它入口共用同一份状态。
    */
   selection?: Ref<string[]>
+  /**
+   * 当前规则树（g4）。传入后，条件里用到的字段会**自动并入**展示列；
+   * 不传则保持旧行为（只显示默认列/用户手选），便于单测与独立使用。
+   *
+   * 这里收 `reactive` 对象本身即可：computed 在读取 `ruleTree.rules` 时会建立
+   * 依赖追踪，条件一改，自动列跟着变，不需要调用方额外 watch。
+   */
+  ruleTree?: ScreeningRuleNode
 }
 
 export function useScreeningColumns(deps: ScreeningColumnsDeps) {
-  const { indicators, rankModes, indicatorOptions } = deps
+  const { indicators, rankModes, indicatorOptions, ruleTree } = deps
+  /**
+   * 用户**自己选择**的列。用空数组表示"还没自定义 → 使用默认列"。
+   * 条件自动列不写进这里，否则条件删掉后会留下幽灵列，也分不清是谁移除的。
+   */
   const selectedResultColumns = deps.selection ?? ref<string[]>([])
+  /** 用户明确从结果表移除过的条件自动列（持久化到草稿，条件重新出现也不强塞）。 */
+  const manuallyRemovedResultColumns = ref<string[]>([])
+
+  const automaticResultColumns = computed(() =>
+    ruleTree ? conditionResultColumns(ruleTree) : [],
+  )
+
+  /** 实际展示/提交的列 = 默认或用户选择 + 条件自动列（去重、手动移除的除外、排在默认列之后）。 */
+  const effectiveResultColumns = computed(() => {
+    const removed = new Set(manuallyRemovedResultColumns.value)
+    const base = selectedResultColumns.value.length > 0
+      ? selectedResultColumns.value
+      : DEFAULT_RESULT_COLUMNS
+    const merged = base.filter((column) => !removed.has(column))
+    for (const column of automaticResultColumns.value) {
+      if (removed.has(column) || merged.includes(column)) continue
+      merged.push(column)
+    }
+    return merged
+  })
+
+  /**
+   * 结果列下拉真正的 v-model。用户改选时：
+   * - 条件自动列单独由规则驱动，不写进 `selectedResultColumns`；
+   * - 从当前条件自动列里去掉的 → 记入「手动移除」，刷新/重跑不再加回；
+   * - 重新勾上的 → 清掉移除记录。
+   */
+  const resultColumnsSelection = computed<string[]>({
+    get: () => effectiveResultColumns.value,
+    set: (next) => {
+      const unique = uniqueColumns(next)
+      const nextSet = new Set(unique)
+      const autoNow = new Set(automaticResultColumns.value)
+      selectedResultColumns.value = unique.filter((column) => !autoNow.has(column))
+
+      const removed = new Set(manuallyRemovedResultColumns.value)
+      for (const column of autoNow) {
+        if (nextSet.has(column)) removed.delete(column)
+        else removed.add(column)
+      }
+      manuallyRemovedResultColumns.value = [...removed]
+    },
+  })
 
   const resultColumnOptions = computed(() => {
     const seen = new Set(RESULT_METADATA_COLUMNS.map(item => item.value))
@@ -204,15 +407,15 @@ export function useScreeningColumns(deps: ScreeningColumnsDeps) {
         })
       }
     }
-    // 默认列的中文 + 单位兜底（2026-11-20）：默认列里可能有个别指标当前不在
-    // `/api/screening/indicators` 的可用清单里（覆盖率不足 → 进 unavailable）。
-    // 缺失时 naive-ui 的 n-select 会拿原值当 label 渲染 → 用户看到 `roce_10y_median`
+    // 默认列 / 条件自动列的中文 + 单位兜底（2026-11-20，g4 扩到自动列）：
+    // 字段当前不在 `/indicators` 可用清单里时（覆盖率不足 → 进 unavailable），
+    // naive-ui 的 n-select 会拿原值当 label 渲染 → 用户看到 `roce_10y_median`
     // 这种裸英文。这里用 `fieldDisplayName`（唯一中文词表）+ `fieldTitleWithUnit`
-    // 补一条，保证**每一个默认列**在页面下拉里都是「中文名(单位)」。
-    for (const field of DEFAULT_RESULT_COLUMNS) {
+    // 补一条，保证任何会自动出现的列在下拉里都是「中文名(单位)」。
+    for (const field of [...DEFAULT_RESULT_COLUMNS, ...automaticResultColumns.value]) {
       if (seen.has(field)) continue
       seen.add(field)
-      options.push(metadataColumn(field))
+      options.push(resultColumnOptionLabel(field, rankModes.value))
     }
     return options
   })
@@ -220,15 +423,22 @@ export function useScreeningColumns(deps: ScreeningColumnsDeps) {
   /**
    * 提交给后端的 columns（方案 C）：把合成取值解码成 `{field, rank_mode}`。
    * 空选择时回落到默认列，保证结果表不会只剩代码。
+   *
+   * g4 起用 `effectiveResultColumns`：条件字段会自动进请求列，否则后端算出来的
+   * 指标在结果表里根本没有那一列（用户筛 ROCE 却看不见 ROCE）。
    */
   function selectedColumnsForRequest(): ResultColumn[] {
-    const picked = selectedResultColumns.value
+    const picked = effectiveResultColumns.value
     if (picked.length === 0) return [...DEFAULT_RESULT_COLUMNS]
     return picked.map(decodeResultColumn)
   }
 
   return {
     selectedResultColumns,
+    manuallyRemovedResultColumns,
+    automaticResultColumns,
+    effectiveResultColumns,
+    resultColumnsSelection,
     resultColumnOptions,
     selectedColumnsForRequest,
   }

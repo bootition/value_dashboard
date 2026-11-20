@@ -44,6 +44,22 @@ export interface ScreeningRunContext {
   readonly ruleName: string
 }
 
+/**
+ * disclose 级告警（`screening_warnings: [{code, severity, detail}]`）。
+ *
+ * 与 `warningCodes`（数据质量**硬阻断/遮蔽**码）语义不同：这里的东西**不阻断**
+ * 筛选，但用户必须看见（黄色提示条）。它同样是"这次运行当时"的披露内容，
+ * 切页回来必须原样保留，不能被"现在的"数据状态覆盖。
+ *
+ * 类型与 `ScreeningPage.vue` / `ScreeningResultsPanel.vue` 里的同形结构对齐
+ * （`types/screening.ts` 是跨页面共享契约，不在本轮改动范围内）。
+ */
+export interface ScreeningDisclosedWarning {
+  readonly code: string
+  readonly severity?: string
+  readonly detail?: string
+}
+
 /** 一次成功 `/api/screening/run` 的全部可展示产物 + 当时的披露告警。 */
 export interface ScreeningRunSnapshot {
   results: readonly ScreeningResult[]
@@ -60,6 +76,8 @@ export interface ScreeningRunSnapshot {
   readinessHint: ReadinessNotice | null
   strictModeWarning: string | null
   strictExemptFields: readonly string[]
+  /** disclose 级告警（黄色提示条）。 */
+  screeningWarnings?: readonly ScreeningDisclosedWarning[]
   /** 数据质量披露（warning_codes）与当时的质量状态 —— 切页回来必须原样保留。 */
   warningCodes: readonly WarningCode[]
   qualityStatus: 'loading' | 'available' | 'failed'
@@ -108,6 +126,20 @@ export function saveRunSnapshot(snapshot: Omit<ScreeningRunSnapshot, 'createdAt'
 /** 标记当前运行凭据已失效（服务端 TTL 到期，或 `/save` 报 run not found）。 */
 export function markRunExpired(): void {
   if (screeningSession.run) screeningSession.run.expired = true
+}
+
+/**
+ * 丢掉"上一次成功运行"的整份产物（结果 / runId / 披露告警 …）。
+ *
+ * 谁该调用它：**只有运行失败**那种"本次运行产物作废"的场景（页面 `runState`
+ * 落到 `failed` 时，"失败即清空"是主线语义 —— 留着旧结果会让用户把上一次的
+ * 股票当成当前规则的结果，保存进自选就是数据污染）。
+ *
+ * 统一从这里清，而不是让页面逐个字段回写：否则「切页保状态」会在下一次挂载时
+ * 把这些字段重新读回来，失败态的清空等于没发生过。
+ */
+export function clearRunSnapshot(): void {
+  screeningSession.run = null
 }
 
 /**

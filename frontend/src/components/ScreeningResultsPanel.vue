@@ -22,6 +22,7 @@ import axios from 'axios'
 import { friendlyErrorMessage } from '../helpers/api-error.ts'
 import { warningCodeLabel } from '../types/data-quality.ts'
 import { fieldDisplayName, fieldTitleWithUnit, formatFieldValue } from '../utils/screening-format.ts'
+import { isLegacyDefaultResultColumns } from '../composables/useScreeningColumns.ts'
 
 /**
  * disclose 级告警（后端 200 随结果下发：`screening_warnings: [{code, severity, detail}]`）。
@@ -75,11 +76,24 @@ const props = defineProps<{
   lastRunError?: string | null
   /** disclose 级告警（黄色提示条；不是错误）。 */
   screeningWarnings?: readonly ScreeningWarning[]
+  /**
+   * 这次运行的凭据（`runId`）已在服务端失效（g5，2026-11-24）。
+   *
+   * 两种来源：① 本地 TTL 判定（后端只保留 24h，见 `stores/screening-session.ts`）；
+   * ② 保存时后端回 400 `server screening run not found`。
+   *
+   * 语义（用户裁定）：**仍然原样展示结果**，只把"要落库/要回服务端"的入口
+   * （保存结果 / 导出 CSV / 保存到自选）置灰并说明原因 —— 绝不能因为凭据过期
+   * 就把整页清空，那正是用户最讨厌的行为。
+   */
+  runExpired?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'retry'): void
   (e: 'run-invalidated', reason: string): void
+  /** 服务端已经不认这次运行凭据：页面保留结果、只置灰保存入口。 */
+  (e: 'run-expired'): void
 }>()
 
 /** disclose 级告警（缺省空数组，旧调用方不传时什么都不渲染）。 */
@@ -91,15 +105,32 @@ const saveTitle = ref('')
 const saveNote = ref('')
 const savedResultId = ref<number | null>(null)
 
-// L1-7（报告42）: 列配置记忆（localStorage），刷新/重进页面不丢失
-const COLUMNS_STORAGE_KEY = 'vd.screening.columns'
+// L1-7（报告42）: 列配置记忆（localStorage），刷新/重进页面不丢失。
+// v2（g4，2026-11-24 用户实测）：旧键只存一个数组、没有版本号。旧版本把
+// 「旧 8 列默认集合」写进 localStorage 后，即使 `/run` 已经返回 PE/ROCE 等新列，
+// 面板也会把它们过滤掉 —— 用户就只看到股票代码/证监会行业。新键用对象包一层
+// 版本号；旧键里的**用户自定义**列仍照常迁移，只有恰好等于旧默认集合的才丢弃。
+const COLUMNS_STORAGE_KEY = 'vd.screening.columns.v2'
+const LEGACY_COLUMNS_STORAGE_KEY = 'vd.screening.columns'
+const COLUMNS_STORAGE_VERSION = 2
+
+function stringColumns(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
 
 function loadSavedColumns(): string[] {
   try {
     const raw = localStorage.getItem(COLUMNS_STORAGE_KEY)
-    if (!raw) return []
-    const parsed = JSON.parse(raw) as unknown
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown
+      if (parsed && typeof parsed === 'object' && 'columns' in parsed) {
+        return stringColumns((parsed as { columns?: unknown }).columns)
+      }
+      return stringColumns(parsed)
+    }
+    const legacy = stringColumns(JSON.parse(localStorage.getItem(LEGACY_COLUMNS_STORAGE_KEY) ?? '[]'))
+    // 旧默认列集合不是用户自定义 → 直接让本次新结果全量展示。
+    return isLegacyDefaultResultColumns(legacy) ? [] : legacy
   } catch {
     return []
   }
@@ -132,6 +163,8 @@ const operationsOnlyWarnings = computed(
     props.warningCodes.length > 0 &&
     props.warningCodes.every((c) => OPERATIONS_ONLY_CODES.has(c)),
 )
+/** 运行凭据失效（g5）：结果照常显示，只是不能落库。 */
+const runExpiredNow = computed(() => props.runExpired === true)
 // 2026-08-27：数据质量警告不再直接阻止保存/导出。
 // 保存/导出仍要求存在有效运行与规则；部分股票缺口由引擎排除，
 // 警告仅作披露，不再把整个结果变成不可导出。
@@ -139,6 +172,7 @@ const durableActionsDisabled = computed(
   () =>
     props.results.length > 0 &&
     (
+      runExpiredNow.value ||
       props.qualityStatus === 'failed' ||
       props.ruleId === null ||
       props.runId === null ||
@@ -157,10 +191,17 @@ const durableEntryDisabled = computed(
 // 自选列表只保存股票代码与规则来源，不保存当前不可信数值，
 // 因此即使存在数据质量警告，也允许用户把“本次筛选命中的公司”固定到自选。
 const watchlistDisabled = computed(
-  () => runStateBlocksActions.value || props.runId === null || props.results.length === 0,
+  () =>
+    runExpiredNow.value ||
+    runStateBlocksActions.value ||
+    props.runId === null ||
+    props.results.length === 0,
 )
 /** 为什么入口被禁用（灰字，避免用户对着灰按钮猜）。 */
 const actionsBlockedReason = computed(() => {
+  if (runExpiredNow.value) {
+    return '这次运行的保存凭据已过期（服务端只保留 24 小时）：结果仍然照常显示，但保存/导出/加入自选已停用；请重新运行筛选。'
+  }
   if (runFailed.value) {
     return '筛选失败：上一次结果已清空，没有可保存/导出/加入自选的数据。请点「重试运行」重新筛选。'
   }
@@ -176,10 +217,12 @@ const actionsBlockedReason = computed(() => {
 /**
  * 禁用按钮的 `aria-describedby` 指向真正解释原因的那块内容。
  *
- * 质量状态异常时解释在 `#quality-alert`；其余情况（运行失败/进行中/无 runId）
- * 解释在灰字 `#run-actions-reason`。指向不存在的 id 比不写更糟。
+ * 凭据过期 → `#run-expired-alert`；质量状态异常 → `#quality-alert`；
+ * 其余情况（运行失败/进行中/无 runId）→ 灰字 `#run-actions-reason`。
+ * 指向不存在的 id 比不写更糟。
  */
 const actionsDescribedBy = computed(() => {
+  if (runExpiredNow.value) return 'run-expired-alert'
   if (props.qualityStatus !== 'available' || hasWarnings.value) return 'quality-alert'
   return actionsBlockedReason.value ? 'run-actions-reason' : undefined
 })
@@ -213,6 +256,18 @@ function isRunInvalidatedError(e: unknown): boolean {
   )
 }
 
+/**
+ * 后端说"这次运行凭据不在了"（g5）。
+ *
+ * `app/web/api/screening.py::save_screening_result` 在 `screening_runs` 里找不到
+ * run_id 时回 400 `server screening run not found` —— 典型原因是服务端 24h TTL
+ * 到期，或这个 run 已被 `/save` 消费过。此时**不能**污名化成"结果无效"：
+ * 结果仍然是对当前规则的如实产出，只是再也落不了库。
+ */
+function isStaleRunCredentialError(e: unknown): boolean {
+  return /run not found/i.test(runErrorDetail(e))
+}
+
 /** 从 axios 错误里取 detail 原文（不引入 isAxiosError 依赖，测试 mock 也能走）。 */
 function runErrorDetail(e: unknown): string {
   if (e && typeof e === 'object' && 'response' in e) {
@@ -239,6 +294,12 @@ function reportActionError(e: unknown, fallback: string): void {
     emit('run-invalidated', reason)
     return
   }
+  if (isStaleRunCredentialError(e)) {
+    // g5：凭据过期 ≠ 结果无效。保留结果，只把落库入口置灰 + 一条提示。
+    message.warning(`这次运行的保存凭据已过期（${text}）；结果仍可查看，请重新运行后再保存。`)
+    emit('run-expired')
+    return
+  }
   message.error(text)
 }
 
@@ -262,7 +323,10 @@ watch(allAvailableColumns, (newCols) => {
 
 watch(selectedColumns, (cols) => {
   try {
-    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify(cols))
+    localStorage.setItem(COLUMNS_STORAGE_KEY, JSON.stringify({
+      version: COLUMNS_STORAGE_VERSION,
+      columns: cols,
+    }))
   } catch {
     // localStorage 不可用时静默降级（不阻断功能）
   }
@@ -687,6 +751,21 @@ async function addToWatchlist() {
     >
       匹配总数 {{ props.totalMatched ?? '超过上限' }} 条，仅展示前 5000 条。请调整筛选条件缩小范围，
       否则保存的结果与导出的 CSV 同样只包含这 5000 条。
+    </n-alert>
+
+    <!-- 运行凭据过期（g5，2026-11-24 用户裁定）：**结果照常显示**，
+         只把保存/导出/加入自选停用并把原因讲清楚。绝不因为凭据过期清空页面。 -->
+    <n-alert
+      v-if="runExpiredNow && !runFailed"
+      id="run-expired-alert"
+      type="warning"
+      title="这次结果已过期，请重新运行"
+      :show-icon="true"
+      style="margin-bottom: 16px"
+    >
+      服务端只保留最近 24 小时的运行结果，本次运行的保存凭据已失效。
+      <b>结果仍然照常显示</b>，但「保存结果 / 导出 CSV / 保存到自选」已停用 ——
+      请点「运行筛选」重新跑一次，再保存。
     </n-alert>
 
     <!-- 失败态（P0）：上一次结果已被页面清空。卡片留在"结果曾经出现的地方"，
