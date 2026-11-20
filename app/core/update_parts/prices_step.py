@@ -59,7 +59,7 @@ import json
 import logging
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -92,6 +92,9 @@ class PriceScope:
     end_date: str
     xdxr_codes: set[str]
     raw_full_refetch: bool
+    # 本轮因"源侧 qfq 还没发"（gap < price_qfq_lag_bars 且本交易日已尝试满）
+    # 被**延迟**的股票：既不抓取、也不算失败、不降级 partial、不写待重算名单。
+    deferred_codes: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -106,6 +109,332 @@ class PricePipelineOutcome:
     write_batch_sizes: list[int]
     observed_concurrency: int
     started_at: float
+
+
+# ─── 源侧 qfq 发布滞后：候选 + 裁决（reports/151 §1）──────────────────────
+#
+# 事故：选股 SQL 里的 ``qfq.latest_qfq_date < ?target`` 对"最新交易日"在
+# **当晚 raw 已发、qfq 未发**的那几个小时里对全市场恒真 → 每轮重选 5400+ 只，
+# 单轮从 3 分 40 秒变成 36–90 分钟（限速锁把单轮钉死在 ~150 股/分钟，只能
+# 减少"扫的次数"，提不快单轮）。
+#
+# 修法：``qfq < raw``（复权序列没跟上自己的日线）**只作候选**，再由两条判据裁决：
+#   1. gap = 该股自己 raw K 线里排在 qfq 最新日之后的根数。
+#      gap ≥ ``price_qfq_lag_bars``（默认 2）= 真滞后 → **无条件重选**；
+#   2. gap 更小（默认 1 = 源侧正常发布节奏）时，看同一 ``(raw, qfq)`` 水位在
+#      **同一交易日**里已成功尝试的次数：≥ ``price_qfq_catchup_max_attempts``
+#      （默认 2）→ 本轮跳过。
+#
+# 硬缺口（raw/qfq 为 NULL、raw < target、两个血缘缺失、在 qfq 待重拉集合里）
+# 一律在上面两步之前就归入"必须抓"，延迟逻辑碰不到它们；判不出原因
+# （gap 查不到 / 记录对不上 / 状态读失败）时默认**不延迟**——方向是宁可多扫
+# 一轮，绝不漏更新。
+_QFQ_CATCHUP_ATTEMPTS_KEY = "price_qfq_catchup_attempts"
+#: 尝试记录的条目上限（正常只存"今天且仍落后"的股票，极端源故障时防无限膨胀）。
+_QFQ_CATCHUP_ATTEMPTS_LIMIT = 8000
+_QFQ_LAG_BARS_DEFAULT = 2
+_QFQ_CATCHUP_MAX_ATTEMPTS_DEFAULT = 2
+
+
+def _day_text(value: Any) -> str | None:
+    """把 DATE / 字符串水位统一成 ``YYYY-MM-DD``；判不出就返回 ``None``。"""
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text[:10] or None
+
+
+def _positive_int(value: Any, default: int) -> int:
+    """读旋钮：非正整数（含缺省/手写坏值）一律回退到给定默认值。"""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed >= 1 else default
+
+
+def _flag(row: dict, key: str) -> bool:
+    """把 SQL 的布尔列读成 Python bool；列缺失/不可判定 → ``False``（保守=硬缺口）。"""
+    value = row.get(key)
+    return value is not None and bool(value)
+
+
+def load_qfq_catchup_attempts(owner: Any) -> dict[str, dict[str, Any]]:
+    """读取 ``data_refresh_state['price_qfq_catchup_attempts']``。
+
+    形如 ``{code: {"raw": ..., "qfq": ..., "date": ..., "n": ...}}``：记录"这只
+    股票在 ``date`` 那天以 ``(raw, qfq)`` 这个水位被抓过、且成功落库了 ``n`` 次"。
+    读不出 / 格式非法一律返回空字典 —— 没有"已尝试"证据就不许延迟。
+    """
+    state_key = _QFQ_CATCHUP_ATTEMPTS_KEY
+    try:
+        raw = owner._read_refresh_state(state_key)
+    except Exception:  # noqa: BLE001 - 状态读失败不改变选股语义
+        return {}
+    if not isinstance(raw, str) or not raw.strip():
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    attempts: dict[str, dict[str, Any]] = {}
+    for code, record in parsed.items():
+        if not isinstance(record, dict):
+            continue
+        raw_day = _day_text(record.get("raw"))
+        qfq_day = _day_text(record.get("qfq"))
+        try:
+            count = int(record.get("n"))
+        except (TypeError, ValueError):
+            continue
+        if not code or raw_day is None or qfq_day is None or count < 1:
+            continue
+        attempts[str(code)] = {
+            "raw": raw_day,
+            "qfq": qfq_day,
+            "date": _day_text(record.get("date")),
+            "n": count,
+        }
+    return attempts
+
+
+def mark_qfq_catchup_attempts(
+    owner: Any,
+    watermarks: dict[str, tuple[str | None, str | None]],
+    *,
+    on_date: str,
+) -> int:
+    """记一次"本交易日以该 ``(raw, qfq)`` 水位成功落库"的尝试，返回记账只数。
+
+    ``watermarks`` 必须是**落库之后**的水位（抓取失败不写 → 下轮照旧重试）。
+    同一 ``(raw, qfq)`` + 同一交易日 → ``n+1``；任一水位变化 → 重新从 1 记
+    （水位前进说明源侧已经动过，旧记录的"已尝试满"不再成立）。
+    换交易日整表作废 —— 这就是"最迟下个交易日必重试"的落地机制。
+    """
+    day = _day_text(on_date)
+    if day is None or not watermarks:
+        return 0
+    loaded = load_qfq_catchup_attempts(owner)
+    attempts = {
+        code: record for code, record in loaded.items() if record.get("date") == day
+    }
+    marked = 0
+    for code, (raw_value, qfq_value) in watermarks.items():
+        raw_day = _day_text(raw_value)
+        qfq_day = _day_text(qfq_value)
+        # 没落后（qfq 已跟上自己的 raw）或判不出水位 → 不需要尝试记录。
+        if raw_day is None or qfq_day is None or qfq_day >= raw_day:
+            continue
+        code = str(code)
+        record = attempts.get(code)
+        if (
+            isinstance(record, dict)
+            and record.get("raw") == raw_day
+            and record.get("qfq") == qfq_day
+        ):
+            record["n"] = int(record.get("n") or 0) + 1
+        else:
+            attempts[code] = {"raw": raw_day, "qfq": qfq_day, "date": day, "n": 1}
+        marked += 1
+    if not marked and attempts == loaded:
+        return 0
+    if len(attempts) > _QFQ_CATCHUP_ATTEMPTS_LIMIT:
+        overflow = len(attempts) - _QFQ_CATCHUP_ATTEMPTS_LIMIT
+        for code in sorted(attempts)[:overflow]:
+            attempts.pop(code, None)
+    try:
+        owner._write_refresh_state(
+            _QFQ_CATCHUP_ATTEMPTS_KEY,
+            json.dumps(attempts, ensure_ascii=False, sort_keys=True),
+        )
+    except Exception as error:  # noqa: BLE001 - 记账失败只影响"能不能延迟"
+        logger = getattr(owner, "logger", None)
+        if logger is not None:
+            logger.warning("写入 qfq 追平尝试记录失败: %s", error)
+        return 0
+    return marked
+
+
+def raw_bars_beyond_qfq(
+    owner: Any, codes: Any, *, logger: logging.Logger,
+) -> dict[str, int]:
+    """每只股票**自己的** raw K 线里排在它 qfq 最新日之后的根数（= gap）。
+
+    用该股自己的 raw 序列计数，天然跳过停牌与节假日（不按日历天算）。
+    没有 qfq 行 / 查不出结果的股票**不在**返回字典里：调用方按"判不出 → 不延迟"。
+    """
+    requested = [str(code) for code in dict.fromkeys(codes) if code]
+    if not requested:
+        return {}
+    try:
+        rows = owner.duck.read_query(
+            """WITH target AS (
+                   SELECT unnest(?::VARCHAR[]) AS stock_code
+               ), qfq AS (
+                   SELECT price.stock_code, MAX(price.trade_date) AS latest_qfq
+                   FROM price_daily_qfq price
+                   JOIN target ON target.stock_code = price.stock_code
+                   GROUP BY price.stock_code
+               )
+               SELECT price.stock_code AS stock_code,
+                      COUNT(*) AS bars_beyond
+               FROM price_daily_raw price
+               JOIN qfq ON qfq.stock_code = price.stock_code
+               WHERE price.trade_date > qfq.latest_qfq
+               GROUP BY price.stock_code""",
+            [requested],
+        )
+    except Exception as error:  # noqa: BLE001 - 判不出 gap 时调用方按"不延迟"处理
+        logger.warning("统计 qfq 落后自己 raw 的 K 线根数失败（本轮不延迟）: %s", error)
+        return {}
+    gaps: dict[str, int] = {}
+    for row in rows:
+        try:
+            gaps[str(row["stock_code"])] = int(row["bars_beyond"])
+        except (KeyError, TypeError, ValueError):
+            continue
+    return gaps
+
+
+def qfq_raw_watermarks(
+    owner: Any, codes: Any, *, logger: logging.Logger,
+) -> dict[str, tuple[str | None, str | None]]:
+    """读取一批股票**落库后**的 ``(raw 最新日, qfq 最新日)``（尝试记录的入参）。"""
+    requested = [str(code) for code in dict.fromkeys(codes) if code]
+    if not requested:
+        return {}
+    try:
+        rows = owner.duck.read_query(
+            """WITH target AS (
+                   SELECT unnest(?::VARCHAR[]) AS stock_code
+               ), raw AS (
+                   SELECT price.stock_code, MAX(price.trade_date) AS latest_raw
+                   FROM price_daily_raw price
+                   JOIN target ON target.stock_code = price.stock_code
+                   GROUP BY price.stock_code
+               ), qfq AS (
+                   SELECT price.stock_code, MAX(price.trade_date) AS latest_qfq
+                   FROM price_daily_qfq price
+                   JOIN target ON target.stock_code = price.stock_code
+                   GROUP BY price.stock_code
+               )
+               SELECT target.stock_code AS stock_code,
+                      CAST(raw.latest_raw AS VARCHAR) AS latest_raw,
+                      CAST(qfq.latest_qfq AS VARCHAR) AS latest_qfq
+               FROM target
+               LEFT JOIN raw ON raw.stock_code = target.stock_code
+               LEFT JOIN qfq ON qfq.stock_code = target.stock_code""",
+            [requested],
+        )
+    except Exception as error:  # noqa: BLE001 - 读不出水位 = 不记尝试（下轮照旧重试）
+        logger.warning("读取落库后 raw/qfq 水位失败（本轮不记追平尝试）: %s", error)
+        return {}
+    return {
+        str(row["stock_code"]): (
+            _day_text(row.get("latest_raw")), _day_text(row.get("latest_qfq")),
+        )
+        for row in rows
+    }
+
+
+def defer_qfq_source_lag(
+    owner: Any,
+    candidates: dict[str, tuple[str, str]],
+    *,
+    logger: logging.Logger,
+) -> set[str]:
+    """裁决："``qfq < raw`` 的候选里，本轮哪些可以**跳过**"。
+
+    只返回**同时**满足下列三条的代码（缺一条就照旧重选）：
+
+    * ``1 ≤ gap < price_qfq_lag_bars`` —— 只差源侧发布节奏那一根；
+    * 尝试记录的水位 ``(raw, qfq)`` 与**当前**水位逐字相等 —— 水位一动记录作废；
+    * 记录的 ``date`` 就是**今天**且 ``n ≥ price_qfq_catchup_max_attempts``。
+
+    gap ≥ ``price_qfq_lag_bars``（真滞后）在这里直接跳过判断 → 无条件重选；
+    gap 查不到（``None``）同样不延迟。
+    """
+    if not candidates:
+        return set()
+    lag_bars = _positive_int(
+        getattr(owner, "price_qfq_lag_bars", None), _QFQ_LAG_BARS_DEFAULT,
+    )
+    max_attempts = _positive_int(
+        getattr(owner, "price_qfq_catchup_max_attempts", None),
+        _QFQ_CATCHUP_MAX_ATTEMPTS_DEFAULT,
+    )
+    gaps = raw_bars_beyond_qfq(owner, candidates, logger=logger)
+    attempts = load_qfq_catchup_attempts(owner)
+    today = cn_today().strftime("%Y-%m-%d")
+    deferred: set[str] = set()
+    for code, (raw_day, qfq_day) in candidates.items():
+        gap = gaps.get(code)
+        if gap is None or gap < 1 or gap >= lag_bars:
+            continue
+        record = attempts.get(code)
+        if not isinstance(record, dict):
+            continue
+        if record.get("raw") != raw_day or record.get("qfq") != qfq_day:
+            continue
+        if record.get("date") != today:
+            continue
+        try:
+            count = int(record.get("n") or 0)
+        except (TypeError, ValueError):
+            continue
+        if count < max_attempts:
+            continue
+        deferred.add(code)
+    return deferred
+
+
+def _split_qfq_scope_rows(
+    owner: Any,
+    rows: list[dict],
+    *,
+    pending_set: set[str],
+    target_date: str,
+    logger: logging.Logger,
+) -> tuple[list[dict], list[str]]:
+    """把选股结果切成"本轮要抓"与"源侧滞后、本轮延迟"两半（顺序保持不变）。
+
+    硬缺口（``raw``/``qfq`` 为 NULL、``raw < target``、两个血缘缺失、在
+    ``qfq_refetch_pending`` 里）**一个都不许进延迟集合**：这里的判据与选股 SQL
+    的 WHERE 逐条对应（血缘标志由同一条 SQL 的 SELECT 列给出），任何一项判不出
+    都按硬缺口处理（方向 = 多扫一轮，不是漏更新）。
+    """
+    if not rows:
+        return list(rows), []
+    candidates: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        code = str(row["stock_code"])
+        raw_day = _day_text(row.get("latest_raw_date"))
+        qfq_day = _day_text(row.get("latest_qfq_date"))
+        hard_gap = (
+            raw_day is None
+            or qfq_day is None
+            or raw_day < target_date
+            or not _flag(row, "raw_lineaged")
+            or not _flag(row, "qfq_lineaged")
+            or code in pending_set
+        )
+        if not hard_gap:
+            candidates[code] = (raw_day, qfq_day)
+    deferred = defer_qfq_source_lag(owner, candidates, logger=logger)
+    if not deferred:
+        return list(rows), []
+    logger.warning(
+        "[增量] 源侧 qfq 滞后：%d/%d 只与自己的 raw 只差不到 %s 根且本交易日已尝试满"
+        " → 本轮跳过（不算失败、不降级 partial）: %s",
+        len(deferred),
+        len(rows),
+        getattr(owner, "price_qfq_lag_bars", _QFQ_LAG_BARS_DEFAULT),
+        ", ".join(sorted(deferred)[:20]),
+    )
+    kept = [row for row in rows if str(row["stock_code"]) not in deferred]
+    return kept, sorted(deferred)
 
 
 def _plan_price_scope(
@@ -129,8 +458,9 @@ def _plan_price_scope(
     # 2026-11-13 P0（B）：待重拉 qfq 的股票必须强制进入本轮目标集，
     # 否则它们"价格已最新"就不会被选中，xdxr_codes 也就无从生效。
     pending_qfq_codes = owner._load_qfq_refetch_pending()
+    pending_set = set(pending_qfq_codes)
     pending_filter = ""
-    query_params: list[Any] = [target_date, target_date]
+    query_params: list[Any] = [target_date]
     if pending_qfq_codes:
         pending_slots = ", ".join("?" for _ in pending_qfq_codes)
         pending_filter = f" OR stock.stock_code IN ({pending_slots})"
@@ -142,10 +472,32 @@ def _plan_price_scope(
 
     # 按股票自己的最新日期选择缺口，不能用全库 MAX 代表全部股票。
     # 每只成功股票立即提交，进程中断后下一轮可从剩余缺口继续。
+    #
+    # 2026-11-20（reports/151 §1）：``qfq < target`` 改成 ``qfq < raw``（候选）。
+    # 前者在"当晚 raw 已发、qfq 未发"的几小时里对全市场恒真 → 每轮重选 5400+ 只。
+    # 硬缺口的四个子句（raw/qfq 为 NULL、raw < target、两个血缘 NOT EXISTS）
+    # 一字未改；候选的最终去留由 `_split_qfq_scope_rows` 裁决，判定"硬缺口"所需的
+    # 血缘标志由同一条 SQL 的 SELECT 列（raw_lineaged / qfq_lineaged）给出。
     try:
         stocks = owner.duck.read_query(
             f"""SELECT stock.stock_code, stock.exchange,
-                          raw.latest_raw_date, qfq.latest_qfq_date
+                          raw.latest_raw_date, qfq.latest_qfq_date,
+                          EXISTS (
+                              SELECT 1 FROM source_audit audit
+                              JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+                              WHERE audit.stock_code = stock.stock_code
+                                AND audit.field_name = 'latest_close'
+                                AND audit.report_date = raw.latest_raw_date
+                                AND batch.data_type = 'price_daily_raw'
+                          ) AS raw_lineaged,
+                          EXISTS (
+                              SELECT 1 FROM source_audit audit
+                              JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
+                              WHERE audit.stock_code = stock.stock_code
+                                AND audit.field_name = 'latest_close'
+                                AND audit.report_date = qfq.latest_qfq_date
+                                AND batch.data_type = 'price_daily_qfq'
+                          ) AS qfq_lineaged
                    FROM stock_meta stock
                    LEFT JOIN (
                      SELECT stock_code, MAX(trade_date) AS latest_raw_date
@@ -157,7 +509,8 @@ def _plan_price_scope(
                    ) qfq ON qfq.stock_code = stock.stock_code
                    WHERE stock.is_listed IS TRUE AND COALESCE(stock.is_suspended, FALSE) IS FALSE
                       AND (raw.latest_raw_date IS NULL OR qfq.latest_qfq_date IS NULL
-                           OR raw.latest_raw_date < ? OR qfq.latest_qfq_date < ?
+                           OR raw.latest_raw_date < ?
+                           OR qfq.latest_qfq_date < raw.latest_raw_date
                            OR NOT EXISTS (
                                SELECT 1 FROM source_audit audit
                                JOIN fetch_batch batch ON batch.batch_id = audit.fetch_batch_id
@@ -184,7 +537,22 @@ def _plan_price_scope(
         logger.info("[增量] 所有非停牌股票价格已是最新，无需更新")
         return {"status": "skipped", "reason": "prices_up_to_date"}
 
-    target_stocks = stocks
+    # 候选 + 裁决：硬缺口全部留下，``qfq < raw`` 里"只差源侧那一根且已尝试满"的
+    # 才本轮跳过（不算失败、不降级 partial、不写待重算名单）。
+    target_stocks, deferred_codes = _split_qfq_scope_rows(
+        owner, stocks,
+        pending_set=pending_set,
+        target_date=target_date,
+        logger=logger,
+    )
+    if not target_stocks:
+        logger.info(
+            "[增量] 所有非停牌股票价格已是最新，无需更新（其中 %d 只源侧 qfq 滞后，"
+            "本交易日已尝试满，本轮不重扫）",
+            len(deferred_codes),
+        )
+        return {"status": "skipped", "reason": "prices_up_to_date"}
+
     try:
         priority_codes = {
             row["stock_code"]
@@ -193,7 +561,6 @@ def _plan_price_scope(
     except Exception as error:
         priority_codes = set()
         logger.warning("读取研究优先名单失败，保持代码顺序: %s", error)
-    pending_set = set(pending_qfq_codes)
     if priority_codes or pending_set:
         # 待重拉 qfq = 复权因子已过期（正确性），必须排在研究名单之前。
         target_stocks = sorted(
@@ -266,6 +633,7 @@ def _plan_price_scope(
         end_date=end_date,
         xdxr_codes=xdxr_codes,
         raw_full_refetch=raw_full_refetch,
+        deferred_codes=deferred_codes,
     )
 
 
@@ -592,6 +960,15 @@ def _finalize_price_step(
     cleared_qfq_pending = owner._clear_qfq_refetch_pending(
         [code for code in updated_codes if code in scope.pending_in_targets]
     )
+    # 2026-11-20（reports/151 §1）：记"本交易日以这个 (raw, qfq) 水位成功抓过"。
+    # 水位取**落库之后**的值（`updated_codes` 只含成功落库的股票 → 失败不写 →
+    # 下轮照旧重试）。同一水位当日记满 `price_qfq_catchup_max_attempts` 次后，
+    # 下一轮"只差源侧那一根"的候选才会被延迟；水位/交易日一变记录立刻作废。
+    attempts_marked = mark_qfq_catchup_attempts(
+        owner,
+        qfq_raw_watermarks(owner, updated_codes, logger=logger),
+        on_date=cn_today().strftime("%Y-%m-%d"),
+    )
     logger.info(f"[增量] 价格更新完成: 成功 {success_count}, 失败 {fail_count}")
     if failed_codes:
         logger.warning(
@@ -674,6 +1051,12 @@ def _finalize_price_step(
         "write_batch_sizes": write_batch_sizes[:50],
         "max_batch_stocks": max(write_batch_sizes) if write_batch_sizes else 0,
         "qfq_refetch_pending_cleared": cleared_qfq_pending,
+        # 源侧 qfq 滞后（reports/151 §1）的可观测性：本轮延迟了哪些、记了几只尝试。
+        # 被延迟的股票**不在** target_stocks 里 → 既不算失败、也不参与
+        # `partial(qfq_lagged)` 降级判定、不进 tech_recompute_pending。
+        "qfq_catchup_deferred_count": len(scope.deferred_codes),
+        "qfq_catchup_deferred_codes": scope.deferred_codes[:20],
+        "qfq_catchup_attempts_marked": attempts_marked,
         # 依据 S7 §2.2 J6：本轮因 qfq<raw 而进入"技术指标待重算名单"的股票
         "tech_recompute_lag_count": len(tech_lag_codes),
         "tech_recompute_pending_marked": tech_pending_marked,

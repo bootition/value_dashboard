@@ -389,6 +389,15 @@ class IncrementalUpdater:
         self.price_fetch_scale_up_seconds: int = self._load_update_config(
             "price_fetch_scale_up_seconds", default=300
         )
+        # 源侧 qfq 发布滞后（reports/151 §1，语义与判据见 prices_step）：qfq 落后
+        # 自己 raw ≥ lag_bars 根 = 真滞后（无条件重选）；只差 1 根且同一 (raw,qfq)
+        # 水位本交易日已成功尝试 ≥ max_attempts 次 → 本轮跳过。硬缺口不受影响。
+        self.price_qfq_lag_bars: int = self._load_update_config(
+            "price_qfq_lag_bars", default=2
+        )
+        self.price_qfq_catchup_max_attempts: int = self._load_update_config(
+            "price_qfq_catchup_max_attempts", default=2
+        )
         # universe 步骤（股票池/上市状态）按日节流：全市场 stock_list 约
         # 51s + listing_info 约 53s，后台线程可接受但无需每轮重拉（默认 1 天）
         self.universe_refresh_interval_days: int = self._load_update_config(
@@ -4190,6 +4199,23 @@ class IncrementalUpdater:
             source_error_kind=_source_error_kind,
             clock=lambda: time.monotonic(),
         )
+
+    def _load_qfq_catchup_attempts(self) -> dict[str, dict[str, Any]]:
+        """读 `data_refresh_state['price_qfq_catchup_attempts']`（实现见 `prices_step`）。"""
+        return prices_step.load_qfq_catchup_attempts(self)
+
+    def _mark_qfq_catchup_attempts(
+        self,
+        watermarks: dict[str, tuple[str | None, str | None]],
+        *,
+        on_date: str,
+    ) -> int:
+        """记"本交易日以该 `(raw, qfq)` 水位成功落库"（实现见 `prices_step`）。"""
+        return prices_step.mark_qfq_catchup_attempts(self, watermarks, on_date=on_date)
+
+    def _raw_bars_beyond_qfq(self, codes: Iterable[str]) -> dict[str, int]:
+        """每只股票自己的 raw K 线里排在 qfq 最新日之后的根数（实现见 `prices_step`）。"""
+        return prices_step.raw_bars_beyond_qfq(self, codes, logger=logger)
 
     def _latest_expected_trading_date(self, today: str, *, now: datetime | None = None) -> str:
         """Use the latest closed session, not today's still-open trading date."""
