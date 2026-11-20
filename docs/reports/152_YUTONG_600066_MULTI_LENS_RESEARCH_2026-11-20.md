@@ -1,13 +1,18 @@
 ---
 title: 宇通客车（600066.SH）多视角深度研究：国内舆论场 + 9 位投资大师独立审判
-status: approved
+status: superseded
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
+superseded-by: reports/153_YUTONG_600066_RESEARCH_V2_CORRECTION_2026-11-20.md
 data-source: data/valuedashboard.duckdb（data_version=audit-safe-v1，指标快照 2026-09-30，行情 2026-11-19）
 ---
 
 # 宇通客车（600066.SH）多视角深度研究
+
+> ⚠️ **本报告已被 `reports/153_YUTONG_600066_RESEARCH_V2_CORRECTION_2026-11-20.md` 取代（superseded）。**
+> 三处表述**不得再引用**：①"公司停发中期分红"（事实为 2026 半年度未提预案，2025 年度 44.28 亿已于 2026-05-15 全额派发）；②"1 亿美元基金 = 资本配置信号转向"（实为占总资产 2.2% 的小额邻主业投资）；③"股息率 6.31%"（未声明口径，年度口径应为 7.62%）。
+> 本报告的 2014-2025 财务表、ROCE 序列、分部结构、20+ 条国内舆论链接仍然有效。
 
 > **本文的两个方向**
 > 1. **国内投资者怎么说** —— 雪球 7 篇、知乎 4 篇、财经媒体/券商研报/互动平台 11 篇，全部附真实链接与原文引用。
