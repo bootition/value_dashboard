@@ -6,9 +6,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
+from collections.abc import Mapping
 from datetime import UTC, date, datetime, timedelta
+from typing import Any
 
 from app.core.financial_period import cn_today
 from app.core.missing_conditions import actionable_missing_condition
@@ -1256,13 +1259,16 @@ def _has_complete_trading_calendar(duck: DuckDBStore, sqlite: SQLiteStore) -> bo
 # 2026-11-12 契约 §3：股本完整性地板的唯一 SQL。
 # 违规 = NOT(total>0 AND circ>0 AND circ<=total)，且不满足
 # 「上市 ≤90 天且 total/circ 皆为 NULL」的新股豁免。
+# RG1 时区单源（2026-11-21）：'今天'由 `cn_today()` 在 Python 侧算出后以
+# `$today` 绑定进来，SQL 里**不许**写 `CURRENT_DATE`（= 进程本地时区，
+# UTC 机器上会差 1 天，且与 readiness 的"今天"不同源）。
 _SHARE_CAPITAL_FLOOR_SQL = """
     SELECT stock_code
     FROM stock_meta
     WHERE is_listed IS TRUE
       AND NOT (
           listing_date IS NOT NULL
-          AND listing_date >= CURRENT_DATE - INTERVAL '90 days'
+          AND listing_date >= $today::DATE - INTERVAL '90 days'
           AND total_shares IS NULL AND circ_shares IS NULL
        )
       AND NOT (
@@ -1276,7 +1282,14 @@ _SHARE_CAPITAL_FLOOR_SQL = """
 
 def _strict_share_capital_gap_codes(duck: DuckDBStore) -> list[str]:
     """Raw share-capital floor query; raises so callers can fail closed."""
-    rows = duck.read_query(_SHARE_CAPITAL_FLOOR_SQL)
+    rows = duck.read_query(
+        _SHARE_CAPITAL_FLOOR_SQL,
+        _bind_named_params(
+            _SHARE_CAPITAL_FLOOR_SQL,
+            {"today": cn_today().isoformat()},
+            context="share_capital_floor",
+        ),
+    )
     return [str(row["stock_code"]) for row in rows]
 
 
@@ -1505,6 +1518,49 @@ def snapshot_period_mismatches(duck: DuckDBStore) -> list[dict]:
     )
 
 
+#: SQL 里的具名参数引用（DuckDB 的 `$name` 语法）。
+_NAMED_PARAM_REF = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _bind_named_params(
+    sql: str,
+    params: Mapping[str, Any],
+    *,
+    context: str,
+) -> dict[str, Any]:
+    """把 `$name` 具名参数绑到 SQL 上，并**强制**引用集合与键集合逐字相等。
+
+    为什么需要这个函数（2026-11-21 事故，`reports/152` §B）：`minimum_data_readiness`
+    的长 SQL 用 6 个位置参数 `?`，参数表里多插了一个
+    `PRICE_FRESHNESS_MAX_AGE_DAYS`，于是**从第 3 个 `?` 起全部错位**——
+    快照新鲜度窗口从 7 天变成 1300 天（偏偏能跑、能算、还"看起来合理"），
+    而 `has_raw_history` 的观测下限从 1300 掉到 7。位置参数下"第 k 个 `?`
+    绑谁"只存在于作者脑子里，改 SQL 里的任何一个 `?` 都会静默移位。
+
+    具名参数把绑定关系写进 SQL 文本本身，顺序不再有语义；本函数再补两道
+    结构性断言（错就抛，不静默错算）：
+      ① 不许混入 `?`：一旦有人把某个 `$name` 改回 `?`，DuckDB 会把 `?`
+         当成"第 n 个位置参数"而调用方传的是 dict —— 那只会得到一条宿主
+         语言的 TypeError。这里直接给出可读的失败原因。
+      ② SQL 引用的 `$name` 集合必须与传入的键集合**完全相等**（双向）：
+         漏传会 RuntimeError，多传说明有人删了判据却留着参数（口径漂移）。
+    """
+    if "?" in sql:
+        raise ValueError(
+            f"{context}: SQL 混入了位置参数 `?`；本函数只支持 `$name` 具名参数"
+            "（位置参数错位曾把 7 天新鲜度窗口变成 1300 天，见 reports/152 §B）"
+        )
+    referenced = set(_NAMED_PARAM_REF.findall(sql))
+    bound = set(params)
+    if referenced != bound:
+        raise ValueError(
+            f"{context}: 具名参数与 SQL 引用不一致；"
+            f"SQL 引用但未传值={sorted(referenced - bound)}，"
+            f"传了值但 SQL 未引用={sorted(bound - referenced)}"
+        )
+    return dict(params)
+
+
 def minimum_data_readiness(
     duck: DuckDBStore,
     sqlite: SQLiteStore | None = None,
@@ -1527,12 +1583,12 @@ def minimum_data_readiness(
             "schema_compatibility": compatibility,
         }
 
-    rows = duck.read_query(
-        """
+    # SQL 与参数分开两处：参数一律**具名**（`$name`），见末尾 `_bind_named_params`。
+    readiness_sql = """
         WITH clock AS (
             -- RG1 时区单源：'今天'只来自 `cn_today()`（Python 绑定），
             -- 不用 DuckDB CURRENT_DATE（= 进程本地时区，UTC 机器上会差 1 天）。
-            SELECT ?::DATE AS today, ?::DATE AS price_stale_before
+            SELECT $today::DATE AS today, $price_stale_before::DATE AS price_stale_before
         ), raw AS (
             SELECT stock_code, MIN(trade_date) AS first_date, MAX(trade_date) AS last_date,
                    COUNT(*) AS observation_count,
@@ -1580,14 +1636,14 @@ def minimum_data_readiness(
             (m.listing_date IS NULL OR m.listing_date >= clock.today - INTERVAL '90 days'
              OR (raw.first_date IS NOT NULL
                  AND raw.first_date <= GREATEST(m.listing_date, clock.today - INTERVAL '5 years') + INTERVAL '30 days'
-                 AND raw.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
+                 AND raw.observation_count >= LEAST($minimum_history_observations, GREATEST(1, CAST(CEIL(
                      date_diff('day', GREATEST(m.listing_date, clock.today - INTERVAL '5 years'), clock.today) * 0.45
                  ) AS INTEGER)))))
                 AS has_raw_history,
             (m.listing_date IS NULL OR m.listing_date >= clock.today - INTERVAL '90 days'
              OR (qfq.first_date IS NOT NULL
                  AND qfq.first_date <= GREATEST(m.listing_date, clock.today - INTERVAL '5 years') + INTERVAL '30 days'
-                 AND qfq.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
+                 AND qfq.observation_count >= LEAST($minimum_history_observations, GREATEST(1, CAST(CEIL(
                      date_diff('day', GREATEST(m.listing_date, clock.today - INTERVAL '5 years'), clock.today) * 0.45
                  ) AS INTEGER)))))
                 AS has_qfq_history,
@@ -1600,7 +1656,7 @@ def minimum_data_readiness(
                      AND qfq.last_date >= clock.price_stale_before))
                 AS has_fresh_prices,
             (m.listing_date IS NULL OR m.listing_date >= clock.today - INTERVAL '90 days'
-             OR raw.volume_count >= LEAST(?, GREATEST(1, CAST(CEIL(
+             OR raw.volume_count >= LEAST($minimum_volume_observations, GREATEST(1, CAST(CEIL(
                  date_diff('day', GREATEST(m.listing_date, clock.today - INTERVAL '5 years'), clock.today) * 0.45
              ) AS INTEGER)))) AS has_meaningful_volume,
             complete_financials.report_date >= clock.today - INTERVAL '18 months'
@@ -1671,7 +1727,7 @@ def minimum_data_readiness(
                   AND snapshot_bar.close IS NOT NULL
                   AND ABS(snapshot.latest_close - snapshot_bar.close)
                       <= GREATEST(ABS(snapshot_bar.close), 1.0) * 0.000001
-                  AND snapshot.latest_price_date >= raw.last_date - ?
+                  AND snapshot.latest_price_date >= raw.last_date - $price_freshness_max_age_days
             ) AS has_coherent_snapshot,
             -- P0-4/5: 快照期必须等于最新完整三表期（与筛选引擎共用判定）。
             -- 若任一张报表存在晚于完整期的新行，属"数据源未就绪"的披露项
@@ -1697,17 +1753,36 @@ def minimum_data_readiness(
         ) lc ON true
         WHERE m.is_listed IS TRUE
         ORDER BY m.stock_code
-        """,
-        [
-            # clock：'今天' 与 '价格陈旧截止日' 都从 cn_today() 派生（RG1 单源）。
-            today.isoformat(),
-            (today - timedelta(days=PRICE_FRESHNESS_MAX_AGE_DAYS)).isoformat(),
-            # 快照价格日相对该股最新 bar 允许落后的天数（同一常量）。
-            PRICE_FRESHNESS_MAX_AGE_DAYS,
-            minimum_history_observations,
-            minimum_history_observations,
-            minimum_volume_observations,
-        ],
+        """
+    rows = duck.read_query(
+        readiness_sql,
+        # ─── 命名参数（2026-11-21 修复 `reports/152` 的位置参数错位）─────────
+        # 事故：本查询原来用 6 个 `?`，参数表却是
+        #   [today, today-7, PRICE_FRESHNESS_MAX_AGE_DAYS, history, history, volume]
+        # 于是第 6 个 `?`（快照价格日的新鲜度窗口）绑到了
+        # `minimum_volume_observations`(1300)，新鲜度判据实际边界 = **1300 天**；
+        # 同一个错位又把 `has_raw_history` 的观测下限从 1300 压到 7。
+        # 只要还是位置参数，"谁绑谁"就只存在于人脑里。改用 DuckDB 的 `$name`
+        # 具名参数后，绑定关系写在 SQL 里与参数名上，顺序不再有语义；
+        # `_bind_named_params` 还会强制「SQL 里的 `$name` 集合 == 这里的键集合」
+        # 且禁止混入 `?`，错位/漏绑直接抛错而不是静默错算。
+        _bind_named_params(
+            readiness_sql,
+            {
+                # RG1 单源：'今天' 与 '价格陈旧截止日' 都从 cn_today() 派生。
+                "today": today.isoformat(),
+                "price_stale_before": (
+                    today - timedelta(days=PRICE_FRESHNESS_MAX_AGE_DAYS)
+                ).isoformat(),
+                # 快照价格日相对该股最新 bar 允许落后的天数（同一常量，>7 天即拦）。
+                "price_freshness_max_age_days": PRICE_FRESHNESS_MAX_AGE_DAYS,
+                # 历史/成交量观测下限：两者默认都是 1300，但**语义不同**，
+                # 用同名参数就会再次把两个口径悄悄合并，故分开两个名字。
+                "minimum_history_observations": minimum_history_observations,
+                "minimum_volume_observations": minimum_volume_observations,
+            },
+            context="minimum_data_readiness",
+        ),
     )
     issues: dict[str, list[str]] = {
         "pool_metadata": [], "raw_history": [], "qfq_history": [],
@@ -1839,8 +1914,7 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
     """
     if not readiness_rows:
         return []
-    rows = duck.read_query(
-        """
+    sql = """
         WITH valid_hashes AS (
             SELECT raw_response_hash FROM raw_response_archive_valid_hash
             UNION ALL
@@ -1981,12 +2055,28 @@ def _missing_lineage_coverage(duck: DuckDBStore, readiness_rows: list[dict]) -> 
         )
           -- 新股（上市不足 90 天）与停牌股（最近 bar 超过 7 天前，无法抓取
           -- 新数据）的原始响应仍在积累/冻结中，属披露项，不阻断筛选。
+          -- RG1 时区单源（2026-11-21）：'今天'用 `$today`（cn_today() 绑定），
+          -- 停牌窗口用 `$price_stale_before`（= 今天 - PRICE_FRESHNESS_MAX_AGE_DAYS，
+          -- 与 has_fresh_prices / has_coherent_snapshot 同一常量），不写 CURRENT_DATE。
           AND (flags.listing_date IS NULL
-               OR flags.listing_date < CURRENT_DATE - INTERVAL '90 days')
+               OR flags.listing_date < $today::DATE - INTERVAL '90 days')
           AND (flags.raw_last_date IS NULL
-               OR flags.raw_last_date >= CURRENT_DATE - INTERVAL '7 days')
+               OR flags.raw_last_date >= $price_stale_before::DATE)
         ORDER BY flags.stock_code
         """
+    today = cn_today()
+    rows = duck.read_query(
+        sql,
+        _bind_named_params(
+            sql,
+            {
+                "today": today.isoformat(),
+                "price_stale_before": (
+                    today - timedelta(days=PRICE_FRESHNESS_MAX_AGE_DAYS)
+                ).isoformat(),
+            },
+            context="lineage_coverage",
+        ),
     )
     return [row["stock_code"] for row in rows]
 

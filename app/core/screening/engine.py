@@ -91,13 +91,59 @@ class _BatchedReader:
     （如 `app.core.data_quality.snapshot_period_mismatches`），保证**只有一处真相**。
     """
 
-    __slots__ = ("_conn",)
+    __slots__ = ("_conn", "_opener", "_closed", "_entered")
 
-    def __init__(self, conn: Any) -> None:
+    def __init__(self, conn: Any = None, *, opener: Any = None) -> None:
+        """两种构造方式：
+
+        * `_BatchedReader(conn)` —— 连接已就绪；
+        * `_BatchedReader(opener=<contextmanager 工厂>)` —— **惰性**：首次
+          `read_query()` 才真的 `__enter__()`。这是必须的：`_read_scope()`
+          在 `run()` 早期进入，而"参数全显式给值"的调用（上限校验失败等）
+          **一次库查询都不该发**。改成急开连接后，连"库文件不存在"的调用
+          都会先去开库 → 把本该是 `ValueError` 的参数校验变成
+          `FileNotFoundError`（2026-11-21 S1 实测踩到）。
+        """
         self._conn = conn
+        self._opener = opener
+        self._closed = False
+        # 只有真的 `__enter__()` 过才允许 `__exit__()`：`read_connection()` 是
+        # `@contextlib.contextmanager` 生成的，**没进过就退出**会抛
+        # `RuntimeError: generator didn't yield`（2026-11-21 实测）。
+        self._entered = False
+
+    def _ensure_conn(self) -> Any:
+        if self._conn is None:
+            if self._opener is None:
+                raise ValueError("_BatchedReader has neither conn nor opener")
+            self._conn = self._opener.__enter__()
+            self._entered = True
+        return self._conn
+
+    def close(self) -> None:
+        """关闭惰性打开的连接；未打开过则纯 no-op。"""
+        if self._closed:
+            return
+        self._closed = True
+        opener, self._opener = self._opener, None
+        self._conn = None
+        if opener is not None and self._entered:
+            self._entered = False
+            opener.__exit__(None, None, None)
 
     def read_query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
-        cursor = self._conn.execute(sql, params or [])
+        # 「恰好一条 SELECT」校验必须与 `DuckDBStore.read_query()` 逐字一致：
+        # 2026-11-25 独立审查实测，`SELECT 1 AS a; SELECT 2 AS b` 在这里会被
+        # **执行并返回最后一条**（store 则抛 ValueError）。`_read_scope()` 拿的是
+        # `read_connection()`，写锁回退窗口里它可能是读写连接 —— 于是"多语句"
+        # 就等于多出一条没人审过的可执行语句。成本 <1ms，别为省这点把它删了。
+        import duckdb
+
+        conn = self._ensure_conn()
+        statements = conn.extract_statements(sql)
+        if len(statements) != 1 or statements[0].type != duckdb.StatementType.SELECT:
+            raise ValueError("read_query accepts exactly one SELECT statement")
+        cursor = conn.execute(sql, params or [])
         columns = [description[0] for description in cursor.description]
         return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
@@ -712,6 +758,23 @@ MAX_RESULT_ROWS = 5_000
 MAX_POOL_LISTING_YEARS = 100
 # 已发布 statement overrides 的 VALUES 上限；超过则拒绝执行而不是无限膨胀 SQL
 MAX_OVERRIDE_VALUES = 10_000
+# 内容指纹的**耗时预算**（毫秒）。超出就放弃缓存（直接现算）：这条缓存只省
+# ~180ms 的探针，令牌本身比它贵就等于白折腾，而"算不准/算不动"更不许变成回放旧值。
+#
+# 为什么是 90 而不是最初设想的 20（2026-11-25 实测，正式库，每次一条新只读连接
+# —— 也就是生产路径的真实形状）：
+#   * 旧指纹（行数 + 最大报告期）**本来就要 ~41ms**（36.6–40.9ms 中位）；
+#   * 新的**合并**指纹（行数 + 最大期 + 5 张表 `SUM(hash(...))`）**~39ms**
+#     （同一条连接上重复跑 ~28ms，单看摘要部分热连接 ~7.6ms）。
+# 也就是说：20ms 是"热连接上的摘要本身"，而正式库上任何一条单语句指纹（**包括
+# 改造前的旧版**）都跑不进 20ms —— 冷页 I/O 与库大小是绑死的，不是摘要带来的。
+# 把预算定在 20ms 的后果是"缓存永远不命中"，等于用 180ms 的探针换 39ms 的白算。
+# 于是按**收益的一半**定预算：超过 90ms（≈180ms/2）才算"摘要真的变贵了"→ 不缓存。
+MAX_CONTENT_FINGERPRINT_MS = 90.0
+#: 进程内**第一个**内容指纹会额外付一次"查询规划 + 绑定 `hash()`"的一次性成本
+#: （测试库实测 29–46ms，与库大小无关）。它不属于"这条库的内容摘要太贵"，所以首个
+#: 指纹只记账不否决；之后按 `MAX_CONTENT_FINGERPRINT_MS` 严格执行。
+_CONTENT_FINGERPRINT_WARMED = False
 
 # ─── 历史研究统计字段（P4，依据 S1 §5/§6）────────────────────────────
 # 已发布统计域字段：<metric>_stat_<window>y_<method>；筛选引擎 join 最新版本。
@@ -803,12 +866,16 @@ class ScreeningEngine:
             finally:
                 self._reader = previous
             return
-        with open_connection() as conn:
-            self._reader = _BatchedReader(conn)
-            try:
-                yield self._reader
-            finally:
-                self._reader = previous
+        # 惰性：`_read_scope()` 在 `run()` 早期进入，而"参数全显式给值"的调用
+        # （上限校验失败、规则非法等）**一次库查询都不该发**。急开连接会把
+        # 本该是 `ValueError` 的参数校验变成 `FileNotFoundError`（2026-11-21 实测）。
+        reader = _BatchedReader(opener=open_connection())
+        self._reader = reader
+        try:
+            yield reader
+        finally:
+            self._reader = previous
+            reader.close()
 
     def _read_query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
         """当前读作用域内走共用连接；域外退回 store 的 open-per-query。"""
@@ -1989,10 +2056,22 @@ LIMIT {MAX_RESULT_ROWS}
         2026-11-21（`.planning/2026-screening-latency`）：这条探针的 SQL 本身只有
         ~90ms，但 open-per-query 下每次运行要多付 ~80ms 开连接，合计 ~180ms，
         而且**每次运行都重算同一份结果**。现在按**内容令牌**记住它（见
-        `read_cache.serve_by_content`）：令牌 = `content_epoch`（每个成功写事务
-        +1，就地 UPDATE 也会变）+ 本库廉价内容指纹（行数 / 最大报告期，用来兜住
-        "绕过 store 直连写、不记账"的新增）。**令牌取不到就现算、不缓存** ——
-        宁可慢，也绝不让"不知道数据变没变"变成"当作没变"。
+        `read_cache.serve_by_content`）。
+
+        2026-11-25（独立审查证伪「不会假绿」）：旧令牌 = `content_epoch` + 行数 /
+        最大报告期。审查构造实测：绕过 store 用裸 `duckdb.connect()` **就地改一个
+        值**（`income_statement.revenue` NULL→123，把某期从"不完整"变成"完整"）
+        → 行数不变、`MAX(report_date)` 不变、纪元不变 → 缓存回放旧名单 → 少剔除
+        1 只、筛选**多算 1 只**，全程静默。两处都补了：
+
+        1. `content_epoch` 之外再加一层**真正的内容摘要**（主防线，见
+           `_mixed_report_content_fingerprint`）：对判定 SQL 真正读到的列做
+           `SUM(hash(...))`，就地改值必变；
+        2. `_guarded_duckdb_connect` 在裸**可写**连接打开时也推进纪元（同进程内的
+           裸写连 epoch 都绕不过去）。
+
+        **令牌取不到 / 算不出 / 超预算就现算、不缓存** —— 宁可慢，也绝不让
+        "不知道数据变没变"变成"当作没变"。
         """
         from app.core.data_quality import snapshot_period_mismatches
         from app.core.storage import read_cache
@@ -2008,6 +2087,9 @@ LIMIT {MAX_RESULT_ROWS}
             # 没有纪元 = 无法判断数据变没变 → 一律现算，不写缓存。
             return compute()
         fingerprint = self._mixed_report_content_fingerprint()
+        if fingerprint is None:
+            # 指纹算不出/太慢 = 无法判断内容变没变 → 同样不缓存（兜底原则）。
+            return compute()
         return list(
             read_cache.serve_by_content(
                 self.duck,
@@ -2017,28 +2099,94 @@ LIMIT {MAX_RESULT_ROWS}
             )
         )
 
-    def _mixed_report_content_fingerprint(self) -> tuple[Any, ...]:
-        """混合报告期判定的**廉价内容指纹**（一条聚合，全部走元数据/zone map）。
+    def _mixed_report_content_fingerprint(self) -> tuple[Any, ...] | None:
+        """混合报告期判定的**内容指纹**（一条 SQL；算不出/太慢返回 `None`）。
 
-        覆盖这条判定的全部输入：股票池规模 + 快照期 + 三表各表的行数与最大报告期。
-        `content_epoch` 抓"就地改值"，这里抓"新增/回滚行"（即使写入方没走
-        `DuckDBStore` 因而没 bump 纪元，只要行数或最大期变了缓存就失效）。
+        令牌的"内容敏感"那一半。旧版只有行数 + 最大报告期 → **看不见就地改值**
+        （2026-11-25 审查构造：只 UPDATE 一个 `revenue` 值，三个廉价信号全不变，
+        缓存回放旧判定，筛选静默多算 1 只）。
+
+        现在对**判定真正读到的列**做单遍聚合 `SUM(hash(...))`（列清单逐条对齐
+        `data_quality.snapshot_period_mismatches`）：
+
+        * `stock_meta`：`stock_code, is_listed`（股票池 + `is_listed IS TRUE`）；
+        * `indicator_snapshot`：`stock_code, report_date`（每只股票的快照期）；
+        * `balance_sheet`：`stock_code, report_date, total_assets,
+          total_liabilities, total_equity_parent, total_equity`
+          （join 键 + `IS NOT NULL` 判据 + `COALESCE(...)` 两支）；
+        * `income_statement`：`stock_code, report_date, revenue, parent_net_profit`；
+        * `cash_flow`：`stock_code, report_date, cf_from_operating`。
+
+        为什么哈希**值**而不只哈希"是否 NULL"：判定当前只用到非空性，但口径随时
+        可能加条件；哈希整列值只会多失效（性能），绝不会漏失效（正确性）。
+        `SUM` 对 `HUGEINT` 精确且与行序无关 → 同一份内容永远同一个摘要。
+
+        行数 / 最大报告期仍一起取（zone map + 元数据，几乎免费）：它们能兜住
+        "摘要碰撞"这种理论情形，也让令牌在摘要函数不可用时至少还有旧信号 ——
+        但**只有摘要存在时才会缓存**（`SUM(hash())` 抛错 → `None` → 现算）。
+
+        成本（正式库 28GB、5 表合计 ~110 万行，2026-11-25 实测，**每次一条新只读
+        连接**＝生产路径的真实形状）：合并后的整条指纹 **~39ms**；改造前的旧指纹
+        （只有行数+最大期）**~41ms** —— 摘要的**边际成本 ≈ 0**（同一条连接上热跑
+        整条 ~28ms，单看摘要部分 ~7.6ms）。超过 `MAX_CONTENT_FINGERPRINT_MS`
+        或任何异常 → 返回 `None`，调用方不缓存。
         """
-        row = self._read_query(
-            """
-            SELECT
-                (SELECT COUNT(*) FROM stock_meta) AS n_meta,
-                (SELECT COUNT(*) FROM stock_meta WHERE is_listed IS TRUE) AS n_listed,
-                (SELECT COUNT(*) FROM indicator_snapshot) AS n_snapshot,
-                CAST((SELECT MAX(report_date) FROM indicator_snapshot) AS VARCHAR) AS max_snapshot,
-                (SELECT COUNT(*) FROM balance_sheet) AS n_balance,
-                CAST((SELECT MAX(report_date) FROM balance_sheet) AS VARCHAR) AS max_balance,
-                (SELECT COUNT(*) FROM income_statement) AS n_income,
-                CAST((SELECT MAX(report_date) FROM income_statement) AS VARCHAR) AS max_income,
-                (SELECT COUNT(*) FROM cash_flow) AS n_cashflow,
-                CAST((SELECT MAX(report_date) FROM cash_flow) AS VARCHAR) AS max_cashflow
-            """
-        )[0]
+        global _CONTENT_FINGERPRINT_WARMED
+
+        started = time.perf_counter()
+        try:
+            row = self._read_query(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM stock_meta) AS n_meta,
+                    (SELECT COUNT(*) FROM stock_meta WHERE is_listed IS TRUE) AS n_listed,
+                    (SELECT COUNT(*) FROM indicator_snapshot) AS n_snapshot,
+                    CAST((SELECT MAX(report_date) FROM indicator_snapshot) AS VARCHAR) AS max_snapshot,
+                    (SELECT COUNT(*) FROM balance_sheet) AS n_balance,
+                    CAST((SELECT MAX(report_date) FROM balance_sheet) AS VARCHAR) AS max_balance,
+                    (SELECT COUNT(*) FROM income_statement) AS n_income,
+                    CAST((SELECT MAX(report_date) FROM income_statement) AS VARCHAR) AS max_income,
+                    (SELECT COUNT(*) FROM cash_flow) AS n_cashflow,
+                    CAST((SELECT MAX(report_date) FROM cash_flow) AS VARCHAR) AS max_cashflow,
+                    CAST((SELECT SUM(hash(stock_code, is_listed))
+                          FROM stock_meta) AS VARCHAR) AS digest_meta,
+                    CAST((SELECT SUM(hash(stock_code, report_date))
+                          FROM indicator_snapshot) AS VARCHAR) AS digest_snapshot,
+                    CAST((SELECT SUM(hash(stock_code, report_date, total_assets,
+                                          total_liabilities, total_equity_parent,
+                                          total_equity))
+                          FROM balance_sheet) AS VARCHAR) AS digest_balance,
+                    CAST((SELECT SUM(hash(stock_code, report_date, revenue,
+                                          parent_net_profit))
+                          FROM income_statement) AS VARCHAR) AS digest_income,
+                    CAST((SELECT SUM(hash(stock_code, report_date, cf_from_operating))
+                          FROM cash_flow) AS VARCHAR) AS digest_cashflow
+                """
+            )[0]
+        except Exception as error:  # noqa: BLE001 - 指纹算不出只影响缓存命中率
+            logger.warning(
+                "混合报告期内容指纹计算失败，本次不缓存（直接现算）: %s", error
+            )
+            return None
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        # 预算只对**纯查询成本**成立：`_reader is None` 时 `_read_query()` 退回
+        # open-per-query，elapsed 里混着 ~30-80ms 的开连接，那不是内容摘要的账。
+        # 生产路径（`run()` → `_read_scope()`）永远有 reader，所以预算对生产是真实的。
+        if elapsed_ms > MAX_CONTENT_FINGERPRINT_MS and self._reader is not None:
+            if _CONTENT_FINGERPRINT_WARMED:
+                logger.warning(
+                    "混合报告期内容指纹耗时 %.1fms > 预算 %.1fms，本次不缓存（直接现算）",
+                    elapsed_ms,
+                    MAX_CONTENT_FINGERPRINT_MS,
+                )
+                return None
+            logger.info(
+                "首个内容指纹耗时 %.1fms（含一次性查询规划成本，不否决本次缓存；"
+                "之后的指纹按 %.1fms 预算执行）",
+                elapsed_ms,
+                MAX_CONTENT_FINGERPRINT_MS,
+            )
+        _CONTENT_FINGERPRINT_WARMED = True
         return tuple(sorted((key, str(value)) for key, value in row.items()))
 
     @staticmethod

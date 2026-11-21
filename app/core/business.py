@@ -101,14 +101,21 @@ class BusinessOverviewUpdater:
     # ─── 索引 ↔ 堆自愈 ────────────────────────────────────────────
 
     def _ensure_index_fresh(self, *, reason: str) -> dict[str, Any] | None:
-        """本轮第一次写库前重建 `business_breakdown` 的二级索引（幂等，实测 0.45s）。
+        """本轮第一次写库前重建 `business_breakdown` 的二级索引（2026-11-21 起是 no-op）。
 
         为什么是"无条件重建"而不是"先检测再修"：
-        * 失联的是**二级索引**（`idx_business_breakdown_stock_report`）。它不参与
-          任何读查询的规划（EXPLAIN 一律 SEQ_SCAN，没有 index-scan/index-join
-          可对照），所以**读不出**；`INSERT ... ON CONFLICT` 探针只查主键 ART，
+        * 失联的是**二级索引**（`idx_business_breakdown_stock_report`）。DuckDB 没有
+          "把索引条目读出来跟堆逐行比对"的入口：`EXPLAIN`/`EXPLAIN ANALYZE` 只能说明
+          计划**用没用**索引（实测在 22.9M 行的 `source_audit` 上真会走 `Type: Index Scan`），
+          读不出索引里**有哪些行**；`INSERT ... ON CONFLICT` 探针只查主键 ART，
           对二级索引**完全盲**（实测：探针报 consistent，紧接着的 DELETE 照样
           FATAL）。唯一能"测出来"的办法就是真的 DELETE —— 而 DOOM 就在那里。
+        * **根上已经没有了（schema v50，reports/151）**：30 个二级索引全部删除
+          （`DROPPED_SECONDARY_INDEXES`），`business_breakdown` 上不再有任何二级索引，
+          所以 `reindex_table()` 现在是**安全 no-op**（`indexes_rebuilt == []`）。
+          保留这条调用是为了"如果有人又建了索引"时行为不变（幂等重建），
+          不是为了现在还有索引可修：删掉它们的前提是**列与真实查询形状不匹配**
+          （代码里没有 `col = 字面量` 这种查询），不是因为"优化器弃之不用"。
         * 重建只要 0.45s（101 万行），而一轮更新 ~900s。**把检测问题换成幂等的
           重建**，代价 0.05%，收益是这一类猝死整类消失。
         * 幂等：索引由堆数据遍历生成，重建后条目与堆逐行对应；重复执行结果相同。

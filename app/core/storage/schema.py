@@ -24,17 +24,22 @@ DUCKDB_SCHEMA_VERSION = 50
 SQLITE_SCHEMA_VERSION = 20
 
 # ─── v50：被判「没用」的二级索引全清单（唯一来源）─────────────────────────
-# 依据 reports/151（2026-11-21 逐索引 A/B 实测，副本上真跑，每索引 3 次取中位数）：
-#   · 42 条**真实代码路径**查询的 EXPLAIN，在 30 个索引全在时与全删后**全部都是 SEQ_SCAN**
-#     —— DuckDB 1.5.5 的优化器对这批谓词一次都没选 ART 索引（不是"选了但没好处"，是没选）。
-#   · 删掉后没有一条查询变慢 ≥2 倍；反而 5 条明显变快（source_audit 溯源子查询 22 倍、
-#     financial_report_dates 按公告日 5.6 倍、indicator_ext 单期 4.3 倍、source_audit
-#     按批次 4.6 倍、import 写路径见下）。
+# 依据 reports/151（2026-11-21 逐索引 A/B 实测，副本上真跑，每索引 3 次取中位数）
+# ＋ 2026-11-21 独立审查对"机制解释"的纠正（下面第 1 条就是纠正，别再翻回旧说法）：
+#   · **DuckDB 1.5.5 是会选这批 ART 索引的**：`EXPLAIN ANALYZE` 下等值查询的计划节点就是
+#     `Type: Index Scan`（22.9M 行 source_audit 实测 0.49ms；DROP 后同一查询 24.57ms；
+#     重建索引后 0.42ms）。普通 `EXPLAIN` 不打印 `INDEX_SCAN`，所以
+#     "EXPLAIN 全是 SEQ_SCAN ⇒ 这批 ART 索引被优化器弃用"是**错的机制解释，已作废**。
+#   · 真正的判决理由：**这些索引的列与真实查询形状不匹配** —— 代码里做的是 JOIN /
+#     `IN (子查询)` / 范围扫描，**没有任何 `col = 字面量`** 这种形状；42 条真实代码路径
+#     查询删索引后**没有一条变慢 ≥2 倍**（最慢 1.43 倍、绝对值 <2ms）。
 #   · 30 个里有 11 个的列是 PRIMARY KEY 的**严格前缀**（PK 的 ART 已经覆盖前缀查找）。
 #   · 留在库里的代价是真实的：每次 DELETE/INSERT 都要维护 ART；CREATE INDEX 在
 #     source_audit（22.9M 行）上要 34s，索引一旦与堆失步就抛
 #     `DuckDBIndexInconsistencyError`，把整轮自动更新打死（reports/136 §7 事故链）。
-# 维护纪律：**不要再建**。新增索引前先拿真实 SQL 跑 EXPLAIN 证明它被选中，再跑 A/B 证明 ≥2 倍。
+# 维护纪律：**不要再建**。若将来真要加，必须先找到一条**真实**的 `col = 字面量` 查询
+# （静态扫描守卫在 tests/regression/test_schema_secondary_index_removal.py），
+# 再用 `EXPLAIN ANALYZE` 证明它走 Index Scan、A/B 证明 ≥2 倍 —— 三条缺一条就继续不要索引。
 DROPPED_SECONDARY_INDEXES: tuple[str, ...] = (
     "idx_ah_market_snapshot_asof",
     "idx_balance_sheet_ext_date",
@@ -1557,11 +1562,24 @@ def drop_useless_secondary_indexes(store: DuckDBStore) -> dict[str, Any]:
     **失败不阻塞启动**：任何一条抛错只记 warning，返回里如实列出 `failed`。
     索引是性能设施，清理失败不该让整站起不来。
 
-    返回值给测试/CLI 用：``{"present_before": [...], "dropped": [...], "failed": {...}, "remaining": [...]}``
+    **但"不阻塞启动"≠"假装清完了"**：返回值里带 ``complete``，只有
+    「索引目录读得到 + 无失败项 + 无残留」才算完成；调用方
+    （`init_duckdb_schema` 的 v50 记账）据此决定要不要写 `schema_migrations.version=50`。
+    没清干净就不写 → `MAX(version)` 停在 49 → 快速启动不跳过 → 下次启动自动重试。
+
+    返回值给测试/CLI 用：
+    ``{"present_before": [...], "dropped": [...], "failed": {...}, "remaining": [...], "complete": bool}``
     """
-    present = _secondary_index_names(store)
     dropped: list[str] = []
     failed: dict[str, str] = {}
+    catalog_readable = True
+    try:
+        present = {str(row["index_name"]) for row in store.read_query("SELECT index_name FROM duckdb_indexes()")}
+    except Exception as error:  # noqa: BLE001 - 读不出清单就不能声称"清干净了"
+        present = set()
+        catalog_readable = False
+        failed["<duckdb_indexes()>"] = f"{type(error).__name__}: {error}"
+        logger.warning("v50: 读不出二级索引清单（不写迁移记账，下次启动重试）: %s", error)
     for name in DROPPED_SECONDARY_INDEXES:
         if name not in present:
             continue
@@ -1582,6 +1600,7 @@ def drop_useless_secondary_indexes(store: DuckDBStore) -> dict[str, Any]:
         "dropped": dropped,
         "failed": failed,
         "remaining": remaining,
+        "complete": catalog_readable and not failed and not remaining,
     }
 
 
@@ -2518,17 +2537,58 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
     # CREATE INDEX 落在同一事务里触发的；这里只 DROP，且一条一个事务（见函数 docstring）。
     # 放在事务外的第二个理由：索引清理失败不能回滚/阻塞主 schema 迁移。
     result = drop_useless_secondary_indexes(store)
-    with store.transaction() as connection:
-        connection.execute(
-            """
-            INSERT INTO schema_migrations (version, description)
-            VALUES (50, '删除全部二级索引(逐索引A/B实测:优化器从不选,删后无查询变慢≥2x)')
-            ON CONFLICT (version) DO NOTHING
-            """
-        )
-    if result["failed"]:
-        logger.warning("v50: %d 个索引清理失败，将在下次启动重试: %s", len(result["failed"]), result["failed"])
+    _record_v50_drop_migration(store, result)
     logger.info("DuckDB schema 初始化完成")
+
+
+#: v50 记账行的描述（唯一来源；测试按它核对「谁写的 50」）。
+V50_DROP_DESCRIPTION = (
+    "删除全部二级索引(列与真实查询形状不匹配:无 col=字面量;删后无真实查询变慢≥2x/最慢1.43倍)"
+)
+
+
+def _record_v50_drop_migration(store: DuckDBStore, result: dict[str, Any]) -> bool:
+    """v50 记账：**只有真清干净了才写 50**，否则一行都不写，让下次启动重试。
+
+    为什么不能无条件写（2026-11-21 独立审查缺陷 1）：`schema_migrations.max(version)`
+    就是 `init_all_schema(skip_if_current=True)` 快速启动的唯一依据
+    （`_schemas_at_current_version` 只比较 `MAX(version) == DUCKDB_SCHEMA_VERSION`）。
+    记账一旦写成 50，之后**再也不跑 DDL** —— 于是「某次 DROP 失败」或「从 v49 备份恢复」
+    留下的索引永远不会被再清一次，静静躺到下次踩同款 `DuckDBIndexInconsistencyError`
+    FATAL。审查实测：把 30 个索引全建回来再跑一次完整启动 → 30 个全在。
+
+    所以这里把记账变成**清理完成的证书**：
+    * `result["complete"]` 为真（目录读得到 + 无 failed + 无 remaining）→ 写 50；
+    * 否则**不写**，并且把已存在的 50 行**删掉**（防"早先写过 50、后来索引又回来了"
+      把自己锁死），使 `MAX(version)` 停在 49 → 下次启动必跑完整 init → 自动重试。
+
+    其它迁移步（v12–v49）不受影响：它们都在自己的事务里，失败即回滚即不记账，
+    语义本来就是"没成功就没有记录"，这里只是把 v50 这种**容错型**步骤对齐到同一条契约。
+
+    Returns: 是否写成了 v50 记账。
+    """
+    healthy = bool(result.get("complete")) and not result.get("failed") and not result.get("remaining")
+    with store.transaction() as connection:
+        if not healthy:
+            connection.execute("DELETE FROM schema_migrations WHERE version = 50")
+        else:
+            connection.execute(
+                """
+                INSERT INTO schema_migrations (version, description)
+                VALUES (50, ?)
+                ON CONFLICT (version) DO NOTHING
+                """,
+                [V50_DROP_DESCRIPTION],
+            )
+    if healthy:
+        return True
+    logger.warning(
+        "v50: 索引未清干净（failed=%s, remaining=%d）→ **不写 v50 记账**，"
+        "下次启动会重跑完整 init 并重试删除（跳过快速启动）",
+        result.get("failed"),
+        len(result.get("remaining") or []),
+    )
+    return False
 
 
 def init_sqlite_schema(store: SQLiteStore) -> None:

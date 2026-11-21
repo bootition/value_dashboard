@@ -7,6 +7,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.core.data_quality import (
+    PRICE_FRESHNESS_MAX_AGE_DAYS,
+    _bind_named_params,
     _published_override_stale_snapshot_codes,
     minimum_data_readiness,
     screening_readiness,
@@ -50,11 +52,13 @@ def test_readiness_requires_complete_history_fresh_prices_and_coherent_snapshot(
     assert minimum_data_readiness(
         duckdb_store, minimum_volume_observations=1,
     )["missing_counts"] == {
-        # 删掉 3 年 raw 之后，"成交量观测数"也确实不够了 ——
-        # 2026-11-21 放宽新鲜度判据时顺带把 `meaningful_volume` 暴露了出来
-        # （以前它被同一个用例的 `raw_history` 掩盖，没人注意）。逐字相等断言保留。
+        # 只有 `raw_history` 命中 —— 这是 2026-11-21 位置参数错位修复后的
+        # **原语义**，不是放宽：本调用显式把成交量下限设成 1
+        # （`minimum_volume_observations=1`），782 根带量 bar 当然达标。
+        # 错位期间该参数被忽略、实际按 `minimum_history_observations`(1300) 判，
+        # 于是"3 年 raw 被删"顺带报出 `meaningful_volume` —— 那个多余项
+        # 是参数错位的症状（绑到了 1300），不是新发现的口径，故删除。
         "raw_history": 1,
-        "meaningful_volume": 1,
     }
 
     insert_minimum_screenable_data(duckdb_store)
@@ -62,6 +66,248 @@ def test_readiness_requires_complete_history_fresh_prices_and_coherent_snapshot(
         "UPDATE indicator_snapshot SET latest_close = 11 WHERE stock_code = '000001'"
     )
     assert minimum_data_readiness(duckdb_store)["missing_counts"] == {"snapshot_price_coherence": 1}
+
+
+def _shift_snapshot_price_date(duck: DuckDBStore, lag_days: int) -> None:
+    """把快照价格日改到「该股自己最新 bar 日 - `lag_days`」，并保证那根 bar 存在、收盘一致。
+
+    构造要点（2026-11-21 `reports/152` §B）：`has_coherent_snapshot` 拆成
+    「证据」与「新鲜度」两件事。这里让证据恒成立（bar 存在 + 收盘逐字一致），
+    `lag_days` 才是唯一变量 —— 否则一个周末日会让"bar 不存在"抢先命中，
+    测不到新鲜度窗口本身。
+    """
+    last_bar = duck.read_query(
+        "SELECT CAST(MAX(trade_date) AS DATE) AS d FROM price_daily_raw"
+        " WHERE stock_code = '000001'"
+    )[0]["d"]
+    target = last_bar - timedelta(days=lag_days)
+    duck.write_query(
+        "INSERT INTO price_daily_raw (stock_code, trade_date, close, volume)"
+        " VALUES ('000001', ?, 10, 100) ON CONFLICT DO NOTHING",
+        [target],
+    )
+    duck.write_query(
+        "INSERT INTO price_daily_qfq (stock_code, trade_date, close, volume)"
+        " VALUES ('000001', ?, 10, 100) ON CONFLICT DO NOTHING",
+        [target],
+    )
+    duck.write_query(
+        "UPDATE indicator_snapshot SET latest_price_date = ?, latest_close = 10"
+        " WHERE stock_code = '000001'",
+        [target],
+    )
+
+
+@pytest.mark.parametrize("lag_days", [1, 3, PRICE_FRESHNESS_MAX_AGE_DAYS])
+def test_snapshot_price_date_inside_the_freshness_window_is_ready(
+    duckdb_store: DuckDBStore, lag_days: int,
+) -> None:
+    """落后 1 / 3 / 7 天（= 恰好边界）且 bar 存在、收盘一致 → 放行。
+
+    2026-11-21 事故回归：这条用例在修复前会**通过**（因为真实的错位让窗口
+    变成 1300 天），所以它必须与下面那条"超过边界要拦"的用例**成对存在**
+    —— 单看放行侧永远发现不了窗口被放大。
+    """
+    assert lag_days <= PRICE_FRESHNESS_MAX_AGE_DAYS
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    _shift_snapshot_price_date(duckdb_store, lag_days)
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is True
+    assert "snapshot_price_coherence" not in readiness["missing_counts"]
+
+
+@pytest.mark.parametrize(
+    "lag_days",
+    [PRICE_FRESHNESS_MAX_AGE_DAYS + 1, 30, 100, 1299, 1400],
+)
+def test_snapshot_price_date_beyond_the_freshness_window_blocks(
+    duckdb_store: DuckDBStore, lag_days: int,
+) -> None:
+    """落后 8 / 30 / 100 / 1299 / 1400 天 → 必须拦（边界 = `> 7` 天）。
+
+    修复前实测：8 / 30 / 100 / 1299 天**全部放行**，1400 天才拦 —— 因为
+    `snapshot.latest_price_date >= raw.last_date - ?` 的第 6 个 `?` 绑到了
+    `minimum_volume_observations`(1300)。同一个错位还让
+    `minimum_volume_observations=1` 反而**收紧**了新鲜度窗口（见
+    `test_freshness_window_does_not_follow_the_volume_threshold`）。
+    """
+    assert lag_days > PRICE_FRESHNESS_MAX_AGE_DAYS
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    _shift_snapshot_price_date(duckdb_store, lag_days)
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"] == {"snapshot_price_coherence": 1}
+
+
+def test_freshness_window_does_not_follow_the_volume_threshold(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """交叉铁证：「落后 3 天」的快照，结果不得随 `minimum_volume_observations` 变化。
+
+    修复前实测：默认参数放行，`minimum_volume_observations=1` 反被拦 ——
+    两个语义无关的参数互相串了位，这类错误只有"改一个、另一个跟着动"才看得见。
+    """
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    _shift_snapshot_price_date(duckdb_store, 3)
+
+    assert minimum_data_readiness(duckdb_store)["ready"] is True
+    assert minimum_data_readiness(
+        duckdb_store, minimum_volume_observations=1,
+    )["ready"] is True
+    assert minimum_data_readiness(
+        duckdb_store, minimum_history_observations=1,
+    )["ready"] is True
+
+
+def test_snapshot_price_date_must_be_a_bar_that_exists(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """快照声称的价格日在库里**没有** bar（周末/节假日/从未入库）→ 拦。"""
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    last_bar = duckdb_store.read_query(
+        "SELECT CAST(MAX(trade_date) AS DATE) AS d FROM price_daily_raw"
+        " WHERE stock_code = '000001'"
+    )[0]["d"]
+    missing_bar = next(
+        d
+        for d in (last_bar - timedelta(days=offset) for offset in range(1, 8))
+        if not duckdb_store.read_query(
+            "SELECT COUNT(*) AS n FROM price_daily_raw WHERE stock_code = '000001'"
+            " AND trade_date = ?",
+            [d],
+        )[0]["n"]
+    )
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET latest_price_date = ? WHERE stock_code = '000001'",
+        [missing_bar],
+    )
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"]["snapshot_price_coherence"] == 1
+
+
+def test_snapshot_price_date_whose_bar_was_deleted_blocks(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """bar 曾经存在、后来被删掉 → 同样拦（不能因为"那天的快照看起来新"就放行）。"""
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    last_bar = duckdb_store.read_query(
+        "SELECT CAST(MAX(trade_date) AS DATE) AS d FROM price_daily_raw"
+        " WHERE stock_code = '000001'"
+    )[0]["d"]
+    duckdb_store.write_query(
+        "DELETE FROM price_daily_raw WHERE stock_code = '000001' AND trade_date = ?",
+        [last_bar],
+    )
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET latest_price_date = ? WHERE stock_code = '000001'",
+        [last_bar],
+    )
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"]["snapshot_price_coherence"] == 1
+
+
+def test_snapshot_close_within_one_percent_still_blocks(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """收盘价差 1% → 拦（容差是 1e-6，不是 1%。"差不多"不是证据）。"""
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET latest_close = 10.1 WHERE stock_code = '000001'"
+    )
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"] == {"snapshot_price_coherence": 1}
+
+
+def test_snapshot_without_a_price_date_blocks(duckdb_store: DuckDBStore) -> None:
+    """快照价格日 NULL（= 快照从未记过价格日）→ 拦。"""
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET latest_price_date = NULL WHERE stock_code = '000001'"
+    )
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"]["snapshot_price_coherence"] == 1
+
+
+def test_snapshot_for_a_stock_that_never_had_a_bar_blocks(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """该股从未有过任何 bar（快照对着空气）→ 拦，且 `raw_history` 同时命中。"""
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    duckdb_store.write_query("DELETE FROM price_daily_raw WHERE stock_code = '000001'")
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"]["snapshot_price_coherence"] == 1
+    assert readiness["missing_counts"]["raw_history"] == 1
+
+
+def test_raw_history_floor_stays_at_the_default_threshold(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """只留 7 根 raw bar → `raw_history` 必须报缺口（下限是 1300，不是 7）。
+
+    2026-11-21 事故回归：位置参数错位让 `has_raw_history` 的 `LEAST(?, …)`
+    绑到了 `PRICE_FRESHNESS_MAX_AGE_DAYS`(7)，于是只剩 3 年 782 根 bar 也
+    不报缺口 —— 这条用例把它钉回 1300。
+    """
+    _ready_stock(duckdb_store)
+    insert_minimum_screenable_data(duckdb_store)
+    duckdb_store.write_query(
+        "DELETE FROM price_daily_raw WHERE stock_code = '000001' AND trade_date NOT IN ("
+        "  SELECT trade_date FROM price_daily_raw WHERE stock_code = '000001'"
+        "  ORDER BY trade_date LIMIT 7)"
+    )
+    # 快照价格日跟到剩下的最后一根 bar：让口径唯一落在"观测数不够"上。
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET latest_price_date = ("
+        "  SELECT MAX(trade_date) FROM price_daily_raw WHERE stock_code = '000001')"
+        " WHERE stock_code = '000001'"
+    )
+
+    readiness = minimum_data_readiness(duckdb_store)
+
+    assert readiness["ready"] is False
+    assert readiness["missing_counts"]["raw_history"] == 1
+
+
+def test_named_param_binding_refuses_positional_placeholders() -> None:
+    """具名参数守卫①：SQL 里混入 `?` 直接抛错（位置参数错位的事故入口）。"""
+    with pytest.raises(ValueError, match="位置参数"):
+        _bind_named_params("SELECT ?::DATE AS today", {"today": "2026-01-01"}, context="t")
+
+
+def test_named_param_binding_requires_an_exact_key_set() -> None:
+    """具名参数守卫②：SQL 引用的 `$name` 与传入键必须**双向**相等。"""
+    with pytest.raises(ValueError, match="不一致"):
+        _bind_named_params("SELECT $a, $b", {"a": 1}, context="t")
+    with pytest.raises(ValueError, match="不一致"):
+        _bind_named_params("SELECT $a", {"a": 1, "b": 2}, context="t")
+    assert _bind_named_params("SELECT $a", {"a": 1}, context="t") == {"a": 1}
 
 
 @pytest.mark.parametrize(

@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date, timedelta
 from typing import Any
 
 import pytest
@@ -1276,3 +1277,366 @@ def test_trading_calendar_unchanged_keeps_steady_state_skipping(
         assert step.get("changed_sources", {}).get("trading_calendar_changed", 0) == 0, (
             round_index, step.get("changed_sources"),
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑩ 日历"部分股票覆盖"的日期增删（2026-11-21 独立审查缺陷 #13）
+#
+# 修前缺口指纹是 `日历 − SELECT DISTINCT trade_date FROM price_daily_raw`
+# （**全市场并集**）：任意一只股票那天有 bar，该日就被从缺口集合里剔掉。
+# 于是"日历新增/删除一个只有 1/5 只股票有行情的日期"完全不触发重算，
+# 另外 4 只的 ma10/20/60/120/250 与 annualized_volatility 永久停在旧日历
+# 算出来的值（实测 24 格错 / 4 只）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _price_row_count(duckdb_store, code: str, day: str) -> int:
+    rows = duckdb_store.read_query(
+        "SELECT COUNT(*) AS c FROM price_daily_raw WHERE stock_code = ? AND trade_date = ?",
+        [code, day],
+    )
+    return int(rows[0]["c"])
+
+
+def _drop_price_rows(duckdb_store, code: str, day: str) -> None:
+    """把某只股票某天的行情行删掉（raw + qfq 同步，模拟"那天它没成交/没抓到"）。"""
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"DELETE FROM {table} WHERE stock_code = ? AND trade_date = ?",
+            [code, day],
+        )
+
+
+def _insert_price_rows(duckdb_store, code: str, day: str, close: float = 10.0) -> None:
+    """给某只股票补一天行情（raw + qfq 同步）。"""
+    for table in ("price_daily_raw", "price_daily_qfq"):
+        duckdb_store.write_query(
+            f"INSERT INTO {table} (stock_code, trade_date, close, volume) "
+            "VALUES (?, ?, ?, 100)",
+            [code, day, close],
+        )
+
+
+def _partial_coverage_day(duckdb_store, codes: list[str]) -> str:
+    """近窗口内一天：只保留 `codes[0]` 的行情行，其余股票那天**没有** bar。
+
+    为什么是 1/5：这就是审查实测的形态（"那天只有 1/5 只股票有行情"）。
+    """
+    day = str(_recent_trade_date(duckdb_store, codes[0], 5))[:10]
+    for code in codes[1:]:
+        _drop_price_rows(duckdb_store, code, day)
+    return day
+
+
+def test_trading_calendar_partial_coverage_add_recomputes_and_matches_full(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑩a 日历**新增**一个"只有部分股票有 bar"的日期 → 必须重算，结果 == 全量。
+
+    修前（缺陷 #13）：`mode=incremental / reason=no_changed_stocks / 0 重算`，
+    而没有那天行情行的 4 只股票的技术列永久停在"那天不存在"的旧序列上。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["recomputed_count"] == 0, steady
+
+    # 造现场：这一天只在日历里"短暂消失"且只有 codes[0] 有行情行。
+    day = _partial_coverage_day(duckdb_store, codes)
+    sqlite_store.execute("DELETE FROM trading_dates WHERE trade_date = ?", [day])
+    setup = updater.run_incremental_update()["steps"]["indicators"]
+    assert setup["mode"] == "incremental", setup
+    assert sorted(setup["recomputed_codes"]) == sorted(codes[1:]), setup["recomputed_codes"]
+    before = _snapshot_map(duckdb_store)
+    assert _price_row_count(duckdb_store, codes[1], day) == 0
+
+    # 缺陷现场：把这一天加回日历 —— 只有 1/5 只股票那天有 bar。
+    sqlite_store.execute("INSERT OR IGNORE INTO trading_dates (trade_date) VALUES (?)", [day])
+
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert step["mode"] == "full", (
+        f"日历新增一个'只有 1/5 只股票有 bar'的日期却被判成无需重算："
+        f"mode={step['mode']} reason={step['reason']} planned={step['planned_count']}"
+    )
+    assert step["reason"] == "trading_calendar_changed", step["reason"]
+    assert step["changed_sources"].get("trading_calendar_changed", 0) >= 1, step["changed_sources"]
+    assert step["recomputed_count"] == len(codes), step
+
+    after = _snapshot_map(duckdb_store)
+    moved = {
+        code: [
+            column for column in _ma_volume_columns()
+            if before[code].get(column) != after[code].get(column)
+        ]
+        for code in codes[1:]
+    }
+    assert all(moved.values()), (
+        f"没有那天行情的股票技术列没变 —— 用例失去证明力："
+        f"{ {c: v for c, v in moved.items() if not v} }"
+    )
+
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(after, full)
+    mismatches = sum(len(columns) for columns in delta.values())
+    assert mismatches == 0, (
+        f"部分覆盖日期新增后增量与全量不一致 {mismatches} 个格子（{len(delta)} 只）；"
+        f"首例 {list(delta.items())[0]}"
+    )
+    assert len(next(iter(after.values()))) >= 70, "比对的是全列（除时间戳）"
+
+
+def test_trading_calendar_partial_coverage_delete_recomputes_and_matches_full(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑩b 日历**删除**一个"只有部分股票有 bar"的日期 → 必须重算，结果 == 全量。
+
+    删除这类日期会**合上**缺行那几只的缺口（序列变长 → MA 从 NULL 变回数值），
+    与新增方向相反，同样必须被发现。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    # 造现场：日历里保留这一天，但只有 codes[0] 有行情行 → 其余 4 只在日历上
+    # 张着缺口。**必须在建基线之前造** —— 缺口水位是"上次日历内容变化时"算的，
+    # 基线里就带着这一天，删除它才能被识别成"缺口合上"。
+    day = _partial_coverage_day(duckdb_store, codes)
+    updater.run_incremental_update()
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["recomputed_count"] == 0, steady
+    before = _snapshot_map(duckdb_store)
+
+    # 缺陷现场：把这一天从日历里删掉 → 缺口合上。
+    sqlite_store.execute("DELETE FROM trading_dates WHERE trade_date = ?", [day])
+
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert step["mode"] == "full", (
+        f"日历删除一个'只有 1/5 只股票有 bar'的日期却被判成无需重算："
+        f"mode={step['mode']} reason={step['reason']} planned={step['planned_count']}"
+    )
+    assert step["reason"] == "trading_calendar_changed", step["reason"]
+    assert step["recomputed_count"] == len(codes), step
+
+    after = _snapshot_map(duckdb_store)
+    moved = {
+        code: [
+            column for column in _ma_volume_columns()
+            if before[code].get(column) != after[code].get(column)
+        ]
+        for code in codes[1:]
+    }
+    assert all(moved.values()), (
+        f"缺口合上后技术列没变 —— 用例失去证明力："
+        f"{ {c: v for c, v in moved.items() if not v} }"
+    )
+
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(after, full)
+    mismatches = sum(len(columns) for columns in delta.values())
+    assert mismatches == 0, (
+        f"部分覆盖日期删除后增量与全量不一致 {mismatches} 个格子（{len(delta)} 只）；"
+        f"首例 {list(delta.items())[0]}"
+    )
+
+
+def test_trading_calendar_add_fully_covered_date_is_not_a_change(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑩c 反向：日历**新增**一个"所有股票都有 bar"的日期 → 不许重算。
+
+    这条和 ⑨ 的反向用例（删除全覆日期）配对，防"日历一动就全量"
+    —— `_update_trading_dates` 每天都在 INSERT OR REPLACE 整份日历。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+
+    # 造现场：一个周末日期，**每只**股票都有行情行（= 全覆日期）。
+    day = _calendar_date_without_prices(duckdb_store)
+    for code in codes:
+        _insert_price_rows(duckdb_store, code, day)
+    setup = updater.run_incremental_update()["steps"]["indicators"]
+    assert sorted(setup["recomputed_codes"]) == sorted(codes), setup["recomputed_codes"]
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["recomputed_count"] == 0, steady
+    before = _snapshot_map(duckdb_store)
+
+    sqlite_store.execute("INSERT OR IGNORE INTO trading_dates (trade_date) VALUES (?)", [day])
+
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert step["mode"] == "incremental", (
+        f"新增的日历日**所有股票都有行情行**，不该全量：reason={step['reason']}"
+    )
+    assert step["recomputed_count"] == 0, step["recomputed_codes"]
+    after = _snapshot_map(duckdb_store)
+    assert after == before, "全覆日期不该改变任何格子"
+
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(after, full)
+    assert not delta, f"不重算的判断是错的：{list(delta.items())[0]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑪ 国债曲线被**外部改写**（2026-11-21 独立审查缺陷 #14）
+#
+# 修前：曲线变化只在 `_refresh_treasury_curve` 的 before/after 里被发现，而且
+# "写完后抛异常"的分支连 `curve_changed` 都不返回 → 外部改写
+# `treasury_yield_curve` 一轮 0 重算，`div_yield_spread_*` 永久停在旧曲线
+# （实测停在 3.5 / 2.0，全量应为 1.5 / 0.0）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+#: 关键期限收益率（%）。1y=6.5 / 10y=8.0 → TTM 股息率 10% 的利差正是
+#: 审查实测的 3.5 / 2.0；整体 +2 之后应当是 1.5 / 0.0。
+_TREASURY_YIELDS: dict[float, float] = {
+    0.25: 1.5, 0.5: 1.6, 1: 6.5, 2: 6.8, 3: 7.0, 5: 7.5, 7: 7.8, 10: 8.0, 30: 8.2,
+}
+
+
+def _seed_treasury_curves(duckdb_store, curve_date: str, bump: float = 0.0) -> None:
+    """在 `curve_date` 落 9 个关键期限的收益率（`bump` 用来整体平移）。"""
+    seed = Seed(duckdb_store)
+    for tenor, base in _TREASURY_YIELDS.items():
+        seed.treasury_yield_curve(
+            curve_date, float(tenor), base + bump, if_exists="ignore",
+        )
+
+
+def test_external_treasury_curve_change_recomputes_whole_market(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑪ 外部 UPDATE 国债曲线 → 必须重算全市场，`div_yield_spread_*` == 全量。"""
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    price_day = str(_recent_trade_date(duckdb_store, codes[0], 0))[:10]
+    # 利差 = TTM 股息率 − 曲线收益率，TTM 股息率只认"价格日前 12 个月内已除权"
+    # 的分红；conftest 那条 2025-06-30 的分红早已过期 → 这里给每只补一条近 30 天的。
+    price_date = date.fromisoformat(price_day)
+    recent_div = (price_date - timedelta(days=30)).isoformat()
+    seed = Seed(duckdb_store)
+    for code in codes:
+        seed.dividends(
+            code, [(recent_div, (price_date - timedelta(days=60)).isoformat(), 1.0)],
+            if_exists="ignore",
+        )
+    _seed_treasury_curves(duckdb_store, price_day)
+
+    updater.run_incremental_update()                     # 第一轮：全量建基线
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["recomputed_count"] == 0, steady
+    before = _snapshot_map(duckdb_store)
+    # 清洗后基线：股息率 10%（dps=1 / 收盘 10） − 1y 6.5% = 3.5；− 10y 8.0% = 2.0
+    assert before[codes[0]]["div_yield_spread_1y"] == pytest.approx(3.5), before[codes[0]]
+    assert before[codes[0]]["div_yield_spread_10y"] == pytest.approx(2.0), before[codes[0]]
+
+    # 缺陷现场：绕过 `_refresh_treasury_curve` 直接改曲线（+2%）。
+    duckdb_store.write_query("UPDATE treasury_yield_curve SET yield_pct = yield_pct + 2.0")
+
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert step["mode"] == "full", (
+        f"国债曲线被外部改写却 0 重算 → 利差永久陈旧："
+        f"mode={step['mode']} reason={step['reason']} planned={step['planned_count']}"
+    )
+    assert step["reason"] == "treasury_curve_changed", step["reason"]
+    assert step["changed_sources"].get("treasury_curve_changed", 0) == len(codes), step[
+        "changed_sources"
+    ]
+    assert step["recomputed_count"] == len(codes), step
+
+    after = _snapshot_map(duckdb_store)
+    assert after[codes[0]]["div_yield_spread_1y"] == pytest.approx(1.5), (
+        f"利差停在旧曲线：{after[codes[0]]['div_yield_spread_1y']}"
+    )
+    assert after[codes[0]]["div_yield_spread_10y"] == pytest.approx(0.0), (
+        f"利差停在旧曲线：{after[codes[0]]['div_yield_spread_10y']}"
+    )
+
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(after, full)
+    mismatches = sum(len(columns) for columns in delta.values())
+    assert mismatches == 0, (
+        f"国债曲线改写后增量与全量不一致 {mismatches} 个格子（{len(delta)} 只）；"
+        f"首例 {list(delta.items())[0]}"
+    )
+    # 水位必须推进：下一轮不许又全量。
+    again = updater.run_incremental_update()["steps"]["indicators"]
+    assert again["mode"] == "incremental", again
+    assert again["recomputed_count"] == 0, again
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑫ bootstrap 吞掉周期兜底 / 吸收损坏快照（2026-11-21 独立审查缺陷 N5）
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_bootstrap_does_not_swallow_due_periodic_full(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """⑫a `bootstrap_indicator_scope` **不重算**，却把周期全量的水位写成"刚刚"。
+
+    修前：把已经到期的周期全量吞掉 → "periodic_full 只在真全量成功后刷新"
+    这条保证根本不成立。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from app.core.update_parts import indicator_scope as scope_module
+
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    monkeypatch.setattr(scope_module, "periodic_full_days", lambda: 7)
+    eight_days_ago = (datetime.now(UTC) - timedelta(days=8)).isoformat()
+    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, eight_days_ago)
+
+    bootstrap_indicator_scope(updater)
+
+    assert updater._read_refresh_state(scope_module.PERIODIC_FULL_KEY) == eight_days_ago, (
+        "bootstrap 不重算却刷新了周期全量水位 —— 已到期的兜底被吞掉"
+    )
+    plan = plan_indicator_scope(updater, sources={})
+    assert plan.mode == "full", f"bootstrap 之后周期全量没触发：{plan.reason}"
+    assert plan.reason == "periodic_full_refresh", plan.reason
+
+
+def test_bootstrap_does_not_absorb_corrupt_snapshot(duckdb_store, sqlite_store) -> None:
+    """⑫b bootstrap 不许把损坏快照（`roe=-999` / 旧 `data_version`）吸收成基线。
+
+    修前：基线一写，这行就再也没人管 → 该格**永久错**。修后必须 log + 把这些
+    股票列为待重算（下一轮进 full 组），且重算结果与全量逐行一致。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+
+    corrupt, stale_version = codes[2], codes[4]
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET roe = -999.0 WHERE stock_code = ?", [corrupt],
+    )
+    duckdb_store.write_query(
+        "UPDATE indicator_snapshot SET data_version = 'calc=stale' WHERE stock_code = ?",
+        [stale_version],
+    )
+
+    info = bootstrap_indicator_scope(updater)
+    rejected = set(info.get("rejected_snapshot_codes") or [])
+    assert rejected == {corrupt, stale_version}, (
+        f"损坏/旧口径快照被当成基线吸收了：rejected={sorted(rejected)}"
+    )
+
+    plan = plan_indicator_scope(updater, sources={})
+    assert plan.mode == "incremental", f"待重算股票没进集合：{plan.reason}"
+    assert set(plan.full_codes) == {corrupt, stale_version}, plan.full_codes
+
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert set(step["recomputed_codes"]) == {corrupt, stale_version}, step["recomputed_codes"]
+    fixed = _snapshot_map(duckdb_store)
+    assert fixed[corrupt]["roe"] != pytest.approx(-999.0), fixed[corrupt]["roe"]
+    assert fixed[stale_version]["data_version"] != "calc=stale", fixed[stale_version]
+
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(fixed, full)
+    assert not delta, f"损坏快照重算后仍与全量不一致：{list(delta.items())[0]}"

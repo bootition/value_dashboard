@@ -1,26 +1,38 @@
-"""Repair the share_capital_history ART index (2026-08-14 red-team F1).
+"""**已作废的 no-op**：`idx_share_capital_history_stock` 自 schema v50 起已不存在。
 
-Root cause: DuckDB 1.5.5's ART index on (stock_code, effective_date) became
-inconsistent for stock 300479 — DELETE raises
+历史（2026-08-14 红队 F1，见 reports/81 §1）：`share_capital_history` 上那条
+(``stock_code``, ``effective_date``) 的 ART 索引与堆失步，DELETE 抛
 ``FatalException: Failed to delete all rows from index. Only deleted 0 out of 38 rows``
-and the connection is invalidated afterwards. Every auto-update round then dies
-at the retry step (retry_count never increments, endless loop).
+并让连接失效，整轮自动更新死在重试步。当时的修法是"DROP INDEX + CREATE INDEX 重建它"。
 
-Fix (verified on a copy of the formal DB before writing this script):
-  1. DROP INDEX + CREATE INDEX inside one write transaction.
-  2. Verify: in a second transaction, DELETE the affected stock's rows and
-     ROLLBACK — the delete path proving the index is healthy again, with zero
-     net data change.
+为什么现在改成 no-op（2026-11-21，schema v50 + 独立审查缺陷 2）：
 
-Usage (single-writer window; ensure the service is stopped):
+1. **这条索引已经不在了**。v50（reports/151 逐索引 A/B 实测）把全部 30 个二级索引
+   （含 ``idx_share_capital_history_stock``，它的列与主键完全相同）都删了；
+   ``DROPPED_SECONDARY_INDEXES`` 是唯一清单，建库 DDL 里也不再有 ``CREATE INDEX``。
+   跑旧脚本唯一的效果是**把 v50 亲手删掉的索引又建回来**，让"索引与堆失步"这个
+   整类 FATAL 重新具备发生条件。
+2. **它用的正是已登记的 D2 危险写法**。旧脚本先 ``DROP INDEX`` 再 ``CREATE INDEX``，
+   两者落在同一个写事务里 —— 而这正是 DuckDB 1.5.5
+   ``InternalException: BoundIndex::CreateDeltaIndex is not supported for this index type``
+   （连接被 invalidate）的触发条件。文档里写着"必须分两个独立事务"，代码里却用
+   ``with store.transaction()`` 包住两步，自相矛盾。
+
+所以本脚本**不再触碰任何数据库**（连只读连接都不开），只打印"无需修复"并退出 0。
+保留文件而不是删掉，是因为 reports/81 与知识库 D2 引用了这个路径；改成 no-op 后
+"跑到它就是误操作"这句话仍然可查、可执行。
+
+如果将来真的需要给某张表重建索引，正确做法写在 app/core/storage/duckdb_store.py 的
+``reindex_table()``：**DROP 与 CREATE 逐条自动提交**（不同事务），且只在
+``duckdb_indexes()`` 里真有该索引时才重建。但按 v50 的判决：**默认不要建**。
+
+Usage（现在跑只会打印 no-op；不需要停服务，也不会打开库）：
     .venv\\Scripts\\python.exe scripts\\repair_share_capital_history_index.py
 """
 
 from __future__ import annotations
 
-import argparse
 import json
-import logging
 import sys
 from pathlib import Path
 
@@ -28,112 +40,33 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.core.storage.duckdb_store import DuckDBStore
-from app.core.storage.path_policy import PathIsolationError, require_formal_maintenance_paths
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-logger = logging.getLogger(__name__)
-
+#: 旧脚本重建的那条索引（保留常量：报告/知识库按名字引用它，且它仍在
+#: ``DROPPED_SECONDARY_INDEXES`` 清单里，重建它 == 撤销 v50 判决）。
 INDEX_NAME = "idx_share_capital_history_stock"
-INDEX_DDL = (
-    f"CREATE INDEX IF NOT EXISTS {INDEX_NAME} "
-    "ON share_capital_history (stock_code, effective_date)"
+
+REASON = (
+    "schema v50 起 DuckDB 库里已无任何二级索引（DROPPED_SECONDARY_INDEXES/DROPPED 全清单见 "
+    "app/core/storage/schema.py）：该索引的列与真实查询形状不匹配，"
+    "且重建它会在同一事务里 DROP+CREATE，正是知识库 D2 的 FATAL 写法。"
 )
 
 
-def _existing_indexes(store: DuckDBStore) -> dict[str, str]:
-    rows = store.read_query(
-        "SELECT index_name, sql FROM duckdb_indexes() WHERE database_name = current_database()"
-    )
-    return {row["index_name"]: (row["sql"] or "") for row in rows}
-
-
-def _affected_stock_codes(store: DuckDBStore) -> list[str]:
-    rows = store.read_query(
-        "SELECT DISTINCT stock_code FROM share_capital_history "
-        "WHERE stock_code IN (SELECT DISTINCT stock_code FROM share_capital_history "
-        "GROUP BY stock_code HAVING COUNT(*) >= 1) ORDER BY stock_code"
-    )
-    return [row["stock_code"] for row in rows]
-
-
-def repair(store: DuckDBStore) -> dict:
-    indexes = _existing_indexes(store)
-    had_index = INDEX_NAME in indexes
-    logger.info("索引现状: %s=%s", INDEX_NAME, indexes.get(INDEX_NAME) or "缺失")
-
-    # 1. 重建索引 —— 必须分两个独立事务（拷贝库实验已证）：
-    #    DROP+CREATE 在同一事务提交时触发 DuckDB 1.5.5 InternalException
-    #    "BoundIndex::CreateDeltaIndex is not supported for this index type"，
-    #    且连接被 invalidated。分开提交则 CREATE 走全量索引构建，健康。
-    with store.transaction() as conn:
-        conn.execute(f"DROP INDEX IF EXISTS {INDEX_NAME}")
-    with store.transaction() as conn:
-        conn.execute(INDEX_DDL)
-    indexes_after = _existing_indexes(store)
-    logger.info("重建后: %s", indexes_after.get(INDEX_NAME) or "缺失")
-
-    # 2. 验证：对抽样股票 DELETE 后 ROLLBACK（净零数据变化），
-    #    证明索引删除路径健康。300479 为曾触发 FATAL 的股票必验；
-    #    其余随机抽样（避免对数千只股票逐个开写事务）。
-    codes = _affected_stock_codes(store)
-    must_verify = ["300479"]
-    sample_codes = codes[:]
-    import random
-
-    random.Random(20260814).shuffle(sample_codes)
-    verify_codes: list[str] = []
-    for code in must_verify + sample_codes:
-        if code not in verify_codes and code in codes:
-            verify_codes.append(code)
-    verify_codes = verify_codes[:1 + 9]  # 300479 + 9 只抽样
-    verified: dict[str, str] = {}
-    for code in verify_codes:
-        try:
-            with store.transaction() as conn:
-                conn.execute(
-                    "DELETE FROM share_capital_history WHERE stock_code = ?", [code]
-                )
-            verified[code] = "ok"
-        except Exception as error:
-            verified[code] = f"FAILED: {type(error).__name__}: {error}"
-            logger.error("验证 DELETE %s 失败: %s", code, error)
-    logger.info(
-        "验证完成: %d/%d 通过%s",
-        sum(1 for v in verified.values() if v == "ok"),
-        len(verify_codes),
-        "" if all(v == "ok" for v in verified.values()) else "（存在失败，见下方报告）",
-    )
-
+def repair() -> dict:
+    """no-op：只回报状态，不打开数据库、不发任何 DDL。"""
     return {
+        "script": "repair_share_capital_history_index.py",
+        "status": "noop",
         "index": INDEX_NAME,
-        "existed_before": had_index,
-        "recreated": True,
-        "ddl": INDEX_DDL,
-        "delete_verify": verified,
+        "action_taken": None,
+        "database_touched": False,
+        "reason": REASON,
     }
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--no-verify", action="store_true", help="跳过 DELETE+ROLLBACK 验证")
-    parser.parse_args()
-
-    try:
-        paths = require_formal_maintenance_paths()
-    except PathIsolationError as error:
-        parser.error(str(error))
-
-    store = DuckDBStore(paths=paths)
-    logger.info("正式库: %s", paths.duckdb_path)
-    result = repair(store)
-    print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
-    all_ok = all(v == "ok" for v in result["delete_verify"].values())
-    return 0 if all_ok else 2
+    result = repair()
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
 
 
 if __name__ == "__main__":

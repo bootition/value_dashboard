@@ -97,6 +97,16 @@ def _seed_scope_baseline(updater: IncrementalUpdater, duckdb_store) -> None:
         [indicator_data_version()],
     )
     bootstrap_indicator_scope(updater)
+    # 2026-11-21（独立审查缺陷 N5）：`bootstrap_indicator_scope` **不再**刷新
+    # `indicator_periodic_full_last_at` —— 它一只股票都不重算，凭什么声明"刚全量过"？
+    # 本文件用 FakeCalculator 打桩、永远不落真实的 step，所以必须由**本助手**显式
+    # 声明"上一轮是刚做完的全量"，否则 planner 会按周期兜底判 `periodic_full_refresh`
+    # 走全量（那是对的行为，只是本文件测的不是它）。
+    from datetime import UTC, datetime
+
+    from app.core.update_parts.indicator_scope import PERIODIC_FULL_KEY
+
+    updater._write_refresh_state(PERIODIC_FULL_KEY, datetime.now(UTC).isoformat())
 
 
 def test_tdx_declines_adjusted_prices_before_fetch() -> None:

@@ -393,6 +393,14 @@ def run_incremental_update_flow(
     funding_changed_codes = list(funding_step.get("changed_codes", []))
     # 国债曲线变化会改变所有股票快照中的 div_yield_spread_*。旧流程在
     # 指标重算之后才刷曲线，利差字段会整轮陈旧；现在提前并触发全量重算。
+    #
+    # 2026-11-21 独立审查缺陷 #14：`curve_changed` **只是本步骤自己的 before/after**，
+    # 它看不见"外部脚本直接 UPDATE 曲线"，而且这一步"写完抛异常"的分支连
+    # `curve_changed` 都返回不了（返回的是 `{"status": "failed"}`）。所以判定权已经
+    # 收到 `indicator_scope` 的标量指纹面（`treasury_curve_fingerprint` 跨轮水位 →
+    # `reason=treasury_curve_changed` 全量）：本步既然跑在范围裁决**之前**，无论是
+    # 自己写的还是外部改的，那一轮的裁决都看得见。这里保留 `curve_changed` 的快路径
+    # （只刷两列利差，秒级）作为全量之外的补充。
     treasury_step = report_step("treasury_curve", owner._refresh_treasury_curve())
     treasury_changed_codes = []
     if treasury_step.get("curve_changed"):
@@ -512,6 +520,10 @@ def run_incremental_update_flow(
         # 变了可能把 MA/量能整列变 NULL，而行情行一个都没变。
         "trading_calendar_fingerprint": scope_plan.trading_calendar_fingerprint,
         "trading_calendar_changed": scope_plan.trading_calendar_semantics_changed,
+        # 国债曲线（2026-11-21 独立审查缺陷 #14）：外部改写曲线也算变化，
+        # 受影响面是全市场的 div_yield_spread_* / ttm_dividend_yield。
+        "treasury_curve_fingerprint": scope_plan.treasury_curve_fingerprint,
+        "treasury_curve_changed": scope_plan.treasury_curve_changed,
     }
     # 日历"内容变了但语义没变"（新增/删除的日期在行情表里有行）→ 不需要重算，
     # 但水位必须在这里推进：这一轮不会调 commit_indicator_scope（没算东西），

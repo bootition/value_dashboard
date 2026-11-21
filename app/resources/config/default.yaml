@@ -118,6 +118,11 @@ update:
   indicator_periodic_full_days: 7
   #   运维开关：true = 下一轮指标重算整表全量（跑完自动回到增量）。
   indicator_force_full: false
+  #   交易日历缺口的**覆盖度阈值**（2026-11-21 独立审查缺陷 #13）：
+  #   某日历日「有 bar 的股票数 < 阈值 × 上市股票数」就算缺口，增删该日期必须重算。
+  #   不能设成 1.0：真实市场每天都有几十只停牌股票，"缺一只就算缺口"会把日历
+  #   每天例行的整份重写变成每天一轮 35 分钟全量。取值被夹在 [0.05, 0.95]。
+  indicator_calendar_coverage_ratio: 0.5
   csrc_refresh_interval_days: 30
   # 业务概览低频域（reports/67）：价格优先后按月有界续传，自选股票优先；
   # 失败保留旧值，绝不阻断价格/财务/readiness。

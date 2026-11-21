@@ -253,12 +253,17 @@ class DuckDBReadLockedError(Exception):
 # 追加型库文件的表数据再存一份，因此只当索引重建无效时的兜底）。
 #
 # ## 为什么不做"检测"
-# 二级索引**读不出来**：优化器对 `WHERE stock_code = ?` 一律走 SEQ_SCAN（实测
-# EXPLAIN），没有 index-scan/index-join 可对照；`INSERT ... ON CONFLICT DO NOTHING`
-# 探针只查主键 ART，对二级索引**完全盲** —— 实测探针报 `consistent=True`，紧接着
-# 同一笔 DELETE 照样 FATAL（本轮就是被这个假绿骗过一次）。唯一"测得出来"的动作
-# 就是真 DELETE，而那就是猝死点本身。既然重建只要 0.45s（一轮 ~900s），
-# 就把检测问题换成**幂等重建**：每轮第一次写库前重建一次，代价 0.05%。
+# 二级索引**读不出来**：DuckDB 1.5.5 **会**选 ART 索引（`EXPLAIN ANALYZE` 显示
+# `Type: Index Scan`；22.9M 行实测 0.49ms → DROP 后 24.57ms → 重建 0.42ms = 50 倍），
+# 但**普通 `EXPLAIN` 在 1.5.5 里不打印扫描类型**，所以"全是 SEQ_SCAN"什么也没证明。
+# 何况这批二级索引被删的正当性从来不是"优化器没选索引"，而是**列与真实查询形状
+# 不匹配**（我们做的是 JOIN / `IN (子查询)` / 范围扫描，没有 `col = 字面量`），且实测
+# 删后真实查询不变慢（最慢 1.43 倍、绝对值 <2ms）；反过来，索引坏了也没有任何
+# SQL 能把它读出来 —— `INSERT ... ON CONFLICT DO NOTHING` 探针只查主键 ART，
+# 对二级索引**完全盲**（实测探针报 `consistent=True`，紧接着同一笔 DELETE 照样
+# FATAL，本轮就是被这个假绿骗过一次）。唯一"测得出来"的动作就是真 DELETE，
+# 而那就是猝死点本身。既然重建只要 0.45s（一轮 ~900s），就把检测问题换成
+# **幂等重建**：每轮第一次写库前重建一次，代价 0.05%。
 _INDEX_INCONSISTENCY_MARKERS: tuple[str, ...] = (
     "Failed to delete all rows from index",
     "Failed to update all rows in index",
@@ -436,19 +441,33 @@ def _close_quietly(conn: Any) -> None:
 # -- 「裸 connect」守卫 -------------------------------------------------------
 # 同进程 read_only 与读写连接不能共存（见上文约束 1）。缓存只读连接一旦存在，
 # 本进程里**任何**绕过 store 的裸 `duckdb.connect(path)`（测试自建表、脚本、
-# 冷库工具……）都会撞 "different configuration"。与其去逐个改调用点，这里在
-# 缓存首次启用时装一个薄包装：裸 connect 进来之前先把该库文件的缓存只读连接
-# 关掉。store 自己开的连接走 `_INTERNAL_CONNECT` 线程本地标记，不触发清理
+# 冷库工具……）都会撞 "different configuration"。与其去逐个改调用点，这里装
+# 一个薄包装：裸 connect 进来之前先把该库文件的缓存只读连接**关掉**。
+# store 自己开的连接走 `_INTERNAL_CONNECT` 线程本地标记，不触发清理
 # （否则每个新线程热身都会把别的线程的缓存打断）。
+#
+# 2026-11-25（独立审查）：这个包装原来**只关连接、不记账**，于是裸写方的就地
+# UPDATE 不会推进 `content_epoch` —— 按纪元键控的内容缓存会回放旧值（假绿）。
+# 现在同一个包装里再加一条：裸**可写**连接打开时推进纪元（`reason` 可区分）。
+# 2026-11-25 起守卫由 `DuckDBStore.__init__` **无条件**安装（不再只在开启只读
+# 连接复用的环境装）：它现在承担的是"内容账"职责，与连接复用开关无关。
 _CONNECT_GUARD_LOCK = threading.Lock()
 _CONNECT_GUARD_LOCAL = threading.local()
 _ORIGINAL_DUCKDB_CONNECT = duckdb.connect
 _CONNECT_GUARD_TARGET = _ORIGINAL_DUCKDB_CONNECT
 _CONNECT_GUARD_INSTALLED = False
+#: 规范化 duckdb 文件路径 → 该库的 sqlite（内容纪元落点）。由 `DuckDBStore.__init__`
+#: 登记；裸 connect 要用它才知道"这条 duckdb 的内容账记在哪个 sqlite 里"。
+_CONTENT_EPOCH_TARGETS: dict[str, Any] = {}
+
+
+def _register_content_epoch_target(db_path: Any, sqlite_path: Any) -> None:
+    with _CONNECT_GUARD_LOCK:
+        _CONTENT_EPOCH_TARGETS[_cache_key(db_path)] = sqlite_path
 
 
 def _install_connect_guard() -> None:
-    """装一次就够（进程级）。只在**开启缓存**的环境装，正式环境不装。"""
+    """装一次就够（进程级）。"""
     global _CONNECT_GUARD_INSTALLED, _CONNECT_GUARD_TARGET
     with _CONNECT_GUARD_LOCK:
         if _CONNECT_GUARD_INSTALLED:
@@ -460,11 +479,65 @@ def _install_connect_guard() -> None:
         duckdb.connect = _guarded_duckdb_connect  # type: ignore[assignment]
 
 
+def _connect_read_only(args: tuple[Any, ...], kwargs: dict[str, Any]) -> bool:
+    """`duckdb.connect(database, read_only=False, config=None)` 的只读判定。"""
+    if "read_only" in kwargs:
+        return bool(kwargs["read_only"])
+    return bool(args[0]) if args else False
+
+
+def _note_bare_writable_connect(
+    database: Any, args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> None:
+    """裸**可写**连接打开时，立刻推进内容纪元（让按纪元键控的缓存全部失效）。
+
+    2026-11-25（独立审查证伪"缓存不会假绿"）：`content_epoch` 原先只在
+    `write_connection()` / `transaction()` 成功提交后 +1，于是
+    **绕过 store 的裸 `duckdb.connect(path)` 写**（仓库里确实有这种脚本）既关了
+    缓存只读连接、又能就地改值而不留任何痕迹。审查构造实测：只
+    `UPDATE income_statement SET revenue=123`（行数 / 最大报告期 / 纪元全不变）
+    → 混合报告期探针回放旧名单 → 筛选静默多算 1 只。
+
+    为什么只能"**打开即记账**"，做不到"看到写语句才记账"：`duckdb.connect()`
+    返回 C 扩展对象 `DuckDBPyConnection`，`execute/executemany/sql/append` 都是
+    只读属性，挂不上钩子；包一层 Python 代理会改变 `isinstance(...)`、
+    `.cursor()`、`with conn`、链式 `conn.execute(...).fetchall()` 等一大批语义，
+    而仓库里有 20+ 处裸 connect 用法各异 —— 代理的回归风险远大于收益。
+    于是取保守解：**只要有人以可写方式裸开这条库，就当内容可能变了**。
+    多失效的代价只是一次重算；少失效的代价是假绿。
+
+    精度边界（必须明说）：
+    * 覆盖**本进程内**的裸写（守卫只在装了它的进程里生效）；
+    * 跨进程写脚本（自动更新子进程 / `python scripts/xxx.py`）不在覆盖范围 ——
+      抓它们靠的是**内容摘要**（`ScreeningEngine._mixed_report_content_fingerprint`，
+      对判定读到的列做 `SUM(hash(...))`），那才是主防线；
+    * 记账发生在连接**打开时**（早于任何语句），所以它只能缩短"写前缓存"的
+      窗口，不能单独构成证明 —— 与内容摘要一起才闭环。
+    """
+    if _connect_read_only(args, kwargs):
+        return
+    if not isinstance(database, (str, os.PathLike)):
+        return
+    target = str(database)
+    if not target.strip() or target == ":memory:":
+        return
+    with _CONNECT_GUARD_LOCK:
+        sqlite_path = _CONTENT_EPOCH_TARGETS.get(_cache_key(database))
+    if sqlite_path is None:
+        return
+    from app.core.storage import content_epoch
+
+    content_epoch.bump(sqlite_path, reason="bare_duckdb_connect")
+
+
 def _guarded_duckdb_connect(database: Any = ":memory:", *args: Any, **kwargs: Any) -> Any:
     if not getattr(_CONNECT_GUARD_LOCAL, "internal", False):
         with contextlib.suppress(Exception):
             for cache in _live_read_caches(_cache_key(database)):
                 cache.invalidate()
+        # 关缓存连接只是"别把写挡住"；能让内容缓存不假绿的是这行记账。
+        with contextlib.suppress(Exception):
+            _note_bare_writable_connect(database, args, kwargs)
     return _CONNECT_GUARD_TARGET(database, *args, **kwargs)
 
 
@@ -685,6 +758,14 @@ class DuckDBStore:
             "duckdb_preserve_insertion_order", "false"
         )
 
+        # 「裸 connect」守卫（2026-11-25 起**无条件**安装）：
+        # * 关缓存只读连接 —— 没有缓存时是空操作；
+        # * 裸可写连接推进内容纪元 —— 与连接复用开关无关，正式环境同样需要
+        #   （否则进程内裸写方会让按纪元键控的内容缓存回放假值）。
+        # 先登记"这条 duckdb 的账记在哪个 sqlite"，再装包装。
+        _register_content_epoch_target(self._db_path, self._path_set.sqlite_path)
+        _install_connect_guard()
+
         # 只读连接缓存（见模块内「只读连接复用」一节）。`None` = 保持
         # open-per-query 老行为。
         self._read_cache = self._build_read_cache()
@@ -705,7 +786,6 @@ class DuckDBStore:
             return None
         cache = _ReadConnectionCache(db_path=self._db_path, ttl_seconds=ttl)
         _register_read_cache(self._path_key, cache)
-        _install_connect_guard()
         return cache
 
     def _load_read_cache_ttl(self) -> float:

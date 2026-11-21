@@ -210,7 +210,10 @@ def test_cold_archive_tables_are_not_declared_in_schema() -> None:
     assert "CREATE TABLE IF NOT EXISTS financial_sector_items" in DUCKDB_SCHEMA_V1, (
         "financial_sector_items 含 2025Q2+ 东财补采热数据，DDL 必须留在 schema.py"
     )
-    assert "idx_financial_sector_items_stock" in DUCKDB_SCHEMA_V1
+    # 2026-11-21：v50 起库里**不再有任何二级索引**（30 个全删，见
+    # `test_schema_secondary_index_removal.py`）。表还在，但建表语句里不许再出现
+    # 该索引 —— 反过来断言，防止有人把索引加回来。
+    assert "idx_financial_sector_items_stock" not in DUCKDB_SCHEMA_V1
 
 
 def test_accounting_identity_anchor_available(duckdb_store: DuckDBStore) -> None:

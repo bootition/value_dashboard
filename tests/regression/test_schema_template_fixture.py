@@ -41,7 +41,8 @@ _MATERIALIZING_RUNS: list[str] = []
 
 #: 一次真实 init 建出的表数（实测 49；取宽松下界，只用来发现「模板是空的」）。
 _MIN_EXPECTED_TABLES = 40
-#: schema_migrations 的终态（实测记录 48 条，最大版本 49）。
+#: schema_migrations 的终态（最大版本 50）。v50 是**条件记账**：只有二级索引真清干净了
+#: 才写 50，否则不写并让下次启动重试 —— 见 test_schema_secondary_index_removal.py ①。
 _EXPECTED_MAX_MIGRATION_VERSION = 50
 
 #: 上一条隔离性用例留下的痕迹（见 ``test_previous_test_writes_are_invisible_here``）。

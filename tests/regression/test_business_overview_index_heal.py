@@ -89,7 +89,8 @@ def test_rebuild_table_restores_index_and_keeps_data(database_paths) -> None:
     """重建 = 从堆数据重新建 heap + 索引；数据、主键一条不能少。
 
     2026-11-21（schema v50，reports/151）：``business_breakdown`` 的二级索引已按
-    「优化器从不选它、删后无查询变慢 ≥2x」的实测结论永久删除，所以这里断言的
+    「列与真实查询形状不匹配（代码里没有 ``col = 字面量`` 这种查询）＋删后真实查询
+    不变慢（最慢 1.43 倍、绝对值 <2ms）」的实测结论永久删除，所以这里断言的
     「索引一条不能少」变成**二级索引必须一条都没有**（主键 ART 由 DDL 重建，仍有）。
     重建机制本身（``rebuild_table``）必须照常工作 —— 它是索引损坏事故的兜底。
     """

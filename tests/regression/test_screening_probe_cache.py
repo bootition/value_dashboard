@@ -7,8 +7,12 @@
 1. `_read_scope()`：一次 `run()` 内的多条 DuckDB 探针共用**一条**只读连接；
 2. 黑名单 + "有没有已发布覆写"探针共用**一条** SQLite 连接；
 3. `_published_statement_overrides()`：没有 published 覆写 → 直接返回 `[]`；
-4. `_load_mixed_report_date_codes()`：按**内容令牌**（`content_epoch` + 廉价内容
-   指纹）记住结果。
+4. `_load_mixed_report_date_codes()`：按**内容令牌**（`content_epoch` + 内容摘要）记住结果。
+
+2026-11-25（独立审查证伪）：这条缓存的令牌原来只有"行数 + 最大报告期"，**看不见
+就地改值** —— 绕过 store 的裸 `duckdb.connect()` 只 UPDATE 一个 `revenue`
+（行数/最大期/纪元全不变）就能让它回放旧名单，筛选静默多算 1 只。本文件 3b 节
+逐字复刻了那个构造，并分别钉住两条防线（同进程裸写记账 / 跨进程裸写靠内容摘要）。
 
 本文件锁的是"**快但不错**"这一半 —— 每条优化都必须能被证明"不会少算、不会
 拿旧数据冒充新数据"：
@@ -22,9 +26,13 @@
 from __future__ import annotations
 
 import contextlib
+import subprocess
+import sys
 
+import duckdb
 import pytest
 
+from app.core.screening import engine as engine_module
 from app.core.screening.engine import ScreeningEngine, _BatchedReader
 from app.core.storage import content_epoch, read_cache
 from app.core.storage.duckdb_store import DuckDBStore
@@ -207,8 +215,274 @@ def test_mixed_report_date_probe_does_not_cache_without_content_epoch(
     assert len(calls) == 2
 
 
-# ─── 4. 批量化不改变 run() 的结果集（逐股逐列）──────────────────────────
+# ─── 3b. 裸写就地改**一个值**：两条防线都必须让缓存失效（2026-11-25 审查构造）──
+#
+# 独立审查原文：「防线完全依赖'所有写都走 DuckDBStore'；仓库里存在裸
+# `duckdb.connect(path)` 的写脚本，`_guarded_duckdb_connect` 只关缓存连接、
+# 不 bump epoch。现有 11 条测试没有覆盖这个场景。」
+#
+# 审查的实际构造（本节的用例逐字复刻它的形状）：
+#   UPDATE income_statement SET revenue=123 …（**只改一个值**）
+#   → 行数没变、MAX(report_date) 没变、content_epoch 没变（裸 connect 不记账）
+#   → 缓存回放旧名单 → 真值多出 1 只被剔除的股票 → 筛选**多算 1 只**，全程静默。
 
+
+def _seed_one_value_away_from_mismatch(
+    duckdb_store: DuckDBStore, *, mismatched: tuple[str, ...] = ("000001", "000003")
+) -> None:
+    """`mismatched` 里的股票真不一致；`000002` 只差 `revenue` **一个值**。
+
+    000002 的证据形状（整条缺陷的关键，别改成"加一行/加一期"）：
+    * 2025-12-31 三表齐全 → 完整期 = 快照期 → 一致；
+    * 2026-03-31 三表**都有行**，但 `income_statement.revenue IS NULL`
+      → 该期不构成完整期，`cp.complete_date` 仍是 2025-12-31 → 仍一致；
+    * 把 revenue 改成任意非空值 → 2026-03-31 变成完整期 → 快照期与之不一致。
+    整个过程**行数、MAX(report_date)、content_epoch 三样都不变** —— 旧指纹全瞎。
+    """
+    # 整段绑在**一条**写连接上：几十条 INSERT 各自提交（每条一次 WAL fsync）要
+    # 2s+；绑一条连接只提交一次，语义不变（`Seed(..., conn=...)` 的既定用法）。
+    with duckdb_store.write_connection() as conn:
+        seed = Seed(duckdb_store, conn=conn)
+        for code in (*mismatched, "000002"):
+            seed.stock(code, name=f"N{code}", exchange="SZSE", is_listed=True,
+                       is_st=False, is_suspended=False, listing_date="2020-01-01")
+            seed.snapshot(code, "2025-12-31", pe_ttm=8, latest_close=10)
+        for code in mismatched:
+            for period in ("2025-09-30", "2025-12-31"):
+                seed.balance(code, period, total_assets=100, total_liabilities=20,
+                             total_equity=80)
+                seed.income(code, period, revenue=100, parent_net_profit=10)
+                seed.cash_flow(code, period, cf_from_operating=10)
+            # 2025-12-31 的 revenue 抹成 NULL（行还在）→ 该期不构成完整期
+            conn.execute(
+                "UPDATE income_statement SET revenue = NULL "
+                "WHERE stock_code = ? AND report_date = '2025-12-31'",
+                [code],
+            )
+        for period in ("2025-12-31", "2026-03-31"):
+            seed.balance("000002", period, total_assets=100, total_liabilities=20,
+                         total_equity=80)
+            seed.cash_flow("000002", period, cf_from_operating=10)
+        seed.income("000002", "2025-12-31", revenue=100, parent_net_profit=10)
+        seed.income("000002", "2026-03-31", revenue=None, parent_net_profit=10)
+
+
+def _external_single_value_update(db_path) -> None:
+    """在**另一个进程**里裸 `duckdb.connect()` 就地改一个值。
+
+    为什么必须真起子进程：`_guarded_duckdb_connect` 只在本进程生效，而仓库里的
+    裸写脚本（`scripts/rebuild_duckdb.py` / `scripts/repair_*.py` 等）都是**独立
+    进程** —— 它们既关不掉本进程的只读缓存，也不会推进本进程看到的账本。
+    这正是审查构造的真实形状，也是"去掉内容摘要必须变红"的变异靶子。
+    """
+    code = (
+        "import duckdb\n"
+        f"conn = duckdb.connect({str(db_path)!r})\n"
+        "conn.execute(\"UPDATE income_statement SET revenue = 123 \"\n"
+        "             \"WHERE stock_code = '000002' \"\n"
+        "             \"AND report_date = '2026-03-31'\")\n"
+        "conn.close()\n"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr[-2000:]
+
+
+def test_batched_reader_rejects_multi_statement_select(duckdb_store: DuckDBStore) -> None:
+    """`_BatchedReader` 必须与 `read_query()` 同样拒绝多语句（审查点名的语义差异）。
+
+    实测差异：`SELECT 1 AS a; SELECT 2 AS b` 会被执行并返回**最后一条**
+    （`[{'b': 2}]`），而 store 抛 `ValueError`。`_read_scope()` 拿的是
+    `read_connection()`，写锁回退窗口里它可能是读写连接 —— 多语句就等于多出一条
+    没人审过的可执行语句。
+    """
+    with duckdb_store.read_connection() as conn:
+        with pytest.raises(ValueError, match="exactly one SELECT"):
+            _BatchedReader(conn).read_query("SELECT 1 AS a; SELECT 2 AS b")
+        # 单条 SELECT 照常可用（校验不能把正常路径搞坏）
+        assert _BatchedReader(conn).read_query("SELECT 1 AS a") == [{"a": 1}]
+
+    # 与 store 逐字一致（同一条 SQL 两边都拒绝）
+    with pytest.raises(ValueError, match="exactly one SELECT"):
+        duckdb_store.read_query("SELECT 1 AS a; SELECT 2 AS b")
+
+
+def test_content_fingerprint_is_content_sensitive_not_just_counts_and_max(
+    duckdb_store: DuckDBStore,
+) -> None:
+    """就地改**一个值**：内容摘要必变，而"行数 + 最大报告期"必不变。
+
+    这条直接钉住旧指纹的盲区：把 `digest_*` 退回"行数 + 最大期"（变异）→ 必红。
+    """
+    _seed_one_value_away_from_mismatch(duckdb_store)
+    engine = ScreeningEngine(duck=duckdb_store)
+
+    before = engine._mixed_report_content_fingerprint()
+    assert before is not None
+    cheap_before = [item for item in before if item[0].startswith(("n_", "max_"))]
+    digest_before = [item for item in before if item[0].startswith("digest_")]
+    assert len(digest_before) == 5, before  # 5 张表各一份内容摘要
+
+    with duckdb_store.write_connection() as conn:
+        conn.execute(
+            "UPDATE income_statement SET revenue = 123 "
+            "WHERE stock_code = '000002' AND report_date = '2026-03-31'"
+        )
+
+    after = engine._mixed_report_content_fingerprint()
+    assert after is not None
+    assert [item for item in after if item[0].startswith(("n_", "max_"))] == cheap_before, (
+        "行数/最大期本来就不该变 —— 这正是旧指纹抓不到就地改值的原因"
+    )
+    assert [item for item in after if item[0].startswith("digest_")] != digest_before, (
+        "就地改了一个值但内容摘要没变 → 缓存会回放假名单 → 筛选静默多算/少算"
+    )
+
+
+def test_bare_connect_single_value_update_bumps_epoch_and_recomputes(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """防线 1：**进程内**裸 `duckdb.connect()` 也是可写连接 → 打开即推进纪元。
+
+    审查实测旧行为：裸 connect 只关缓存只读连接、**不 bump 纪元**，于是按纪元
+    键控的缓存原样回放。现在同一个包装里也要记账。
+    """
+    _seed_one_value_away_from_mismatch(duckdb_store)
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert engine._load_mixed_report_date_codes() == ["000001", "000003"]
+    assert engine._load_mixed_report_date_codes() == ["000001", "000003"]  # 命中缓存
+
+    before_epoch = content_epoch.current(sqlite_store.paths.sqlite_path)
+    connection = duckdb.connect(str(duckdb_store.db_path))
+    try:
+        connection.execute(
+            "UPDATE income_statement SET revenue = 123 "
+            "WHERE stock_code = '000002' AND report_date = '2026-03-31'"
+        )
+    finally:
+        connection.close()
+
+    assert content_epoch.current(sqlite_store.paths.sqlite_path) > before_epoch, (
+        "裸可写 connect 没有推进内容纪元：第一层防线还是缺口"
+    )
+    assert engine._load_mixed_report_date_codes() == ["000001", "000002", "000003"]
+
+
+def test_external_script_single_value_update_recomputes_without_epoch_bump(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """防线 2（主防线）：**另一个进程**的裸写不记账 → 只有内容摘要能发现。
+
+    与上一条的分工：上一条钉"同进程裸写要记账"，这一条钉"跨进程裸写即使纪元
+    完全没动，也必须靠内容摘要重算"。把 `SUM(hash(...))` 退回"行数 + 最大期"
+    （变异）→ 这条必红。
+    """
+    _seed_one_value_away_from_mismatch(duckdb_store)
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert engine._load_mixed_report_date_codes() == ["000001", "000003"]
+    assert engine._load_mixed_report_date_codes() == ["000001", "000003"]  # 命中缓存
+
+    # 先还掉本进程的只读句柄：跨进程写脚本运行时，本进程本来就不该持着它。
+    duckdb_store.close()
+    before_epoch = content_epoch.current(sqlite_store.paths.sqlite_path)
+    _external_single_value_update(duckdb_store.db_path)
+
+    assert content_epoch.current(sqlite_store.paths.sqlite_path) == before_epoch, (
+        "另一个进程的裸写本来就不记账 —— 这条用例的前提被打破了"
+    )
+    assert engine._load_mixed_report_date_codes() == ["000001", "000002", "000003"], (
+        "内容摘要没抓住就地改值 → 缓存回放旧名单 → 筛选多算 1 只"
+    )
+
+
+def test_cached_empty_list_recomputed_when_truth_turns_non_empty(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+) -> None:
+    """反向：缓存的是**空名单**，真值变成 1 只 → 同样必须重算（不许回放 []）。"""
+    _seed_one_value_away_from_mismatch(duckdb_store, mismatched=())
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+
+    assert engine._load_mixed_report_date_codes() == []
+    assert engine._load_mixed_report_date_codes() == []  # 缓存命中空名单
+
+    duckdb_store.close()
+    before_epoch = content_epoch.current(sqlite_store.paths.sqlite_path)
+    _external_single_value_update(duckdb_store.db_path)
+
+    assert content_epoch.current(sqlite_store.paths.sqlite_path) == before_epoch
+    assert engine._load_mixed_report_date_codes() == ["000002"], (
+        "缓存了 [] 就永远返回 [] → 本该剔除的股票留在池里，筛选多算"
+    )
+
+
+def test_mixed_report_date_probe_does_not_cache_without_fingerprint(
+    duckdb_store: DuckDBStore,
+    sqlite_store: SQLiteStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """兜底原则：指纹**算不出**（`None`）→ 一次都不许缓存，直接现算。"""
+    content_epoch.bump(sqlite_store.paths.sqlite_path, reason="seed")
+    calls: list[int] = []
+    engine = ScreeningEngine(duck=duckdb_store, sqlite=sqlite_store)
+
+    def fake_mismatches(duck) -> list[dict]:
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(engine, "_mixed_report_content_fingerprint", lambda: None)
+    monkeypatch.setattr(
+        "app.core.data_quality.snapshot_period_mismatches", fake_mismatches
+    )
+
+    engine._load_mixed_report_date_codes()
+    engine._load_mixed_report_date_codes()
+
+    assert len(calls) == 2
+
+
+def test_content_fingerprint_returns_none_when_over_budget(
+    duckdb_store: DuckDBStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """兜底原则：指纹**太慢**（超预算）→ 返回 `None` → 调用方不缓存。
+
+    预算只对"纯查询成本"生效（`_reader` 存在时）；直连调用（`_reader is None`）
+    的开连接开销不算在内容摘要头上。
+    """
+    engine = ScreeningEngine(duck=duckdb_store)
+    monkeypatch.setattr(engine_module, "_CONTENT_FINGERPRINT_WARMED", True)
+    monkeypatch.setattr(
+        engine, "_read_query", lambda sql, params=None: [{"digest_meta": "1"}]
+    )
+    monkeypatch.setattr(engine, "_reader", object())
+
+    monkeypatch.setattr(engine_module, "MAX_CONTENT_FINGERPRINT_MS", 0.0)
+    assert engine._mixed_report_content_fingerprint() is None
+
+    monkeypatch.setattr(engine_module, "MAX_CONTENT_FINGERPRINT_MS", 1e9)
+    assert engine._mixed_report_content_fingerprint() == (("digest_meta", "1"),)
+
+    # 算不出（例如 DuckDB 没有 `hash()`、列缺失）→ 同样是 `None`（不缓存）
+    def boom(sql: str, params=None):
+        raise RuntimeError("hash() 不可用")
+
+    monkeypatch.setattr(engine, "_read_query", boom)
+    assert engine._mixed_report_content_fingerprint() is None
+
+
+# ─── 4. 批量化不改变 run() 的结果集（逐股逐列）──────────────────────────
 def test_run_results_identical_with_and_without_read_scope(
     duckdb_store: DuckDBStore,
     sqlite_store: SQLiteStore,

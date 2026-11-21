@@ -11,10 +11,12 @@
 
 * **增量集合** = 所有"输入可能变了"的信号之并集（财务代码集 / 股本+上市状态+
   行业指纹差异集 / 价格代码集 / 待重算名单 / 重试成功 / 分红事件 / 回购融资）。
-* **全量**只由四个可解释的原因触发：`computation_version`（口径版本 bump）、
+* **全量**只由可解释的原因触发：`computation_version`（口径版本 bump）、
   `first_run`（快照为空）、`input_fingerprint_bootstrap`（首次部署本机制，
   没有上一轮指纹可比）、`incremental_over_threshold`（增量集合超过全市场
-  60%，一次全扫更省）、`forced_full`（显式强制）。
+  60%，一次全扫更省）、`trading_calendar_changed` / `treasury_curve_changed`
+  （两个**全市场共用的标量输入面**变了，受影响集合说不出"只这几只"）、
+  `periodic_full_refresh`（周期兜底）、`forced_full`（显式强制）。
 
 ## "不会漏算"靠什么证明
 
@@ -42,7 +44,7 @@
 | 回购/融资事件 | cumulative_*_amount、dividend_financing_ratio_pct | `corporate_event` |
 | **交易日历** `trading_dates`（SQLite，被源端订正/外部脚本改写） | MA5/10/20/60/120/250、avg_volume、turnover_rate、period_return、annualized_volatility、max_drawdown（`_calc_technical` 用它判定"连续窗口"） | `trading_calendar_fingerprint` + `trading_calendar_gap_fingerprint` → 命中走 `trading_calendar_changed`（仅全量） |
 | 计算口径（公式改） | 全部 149 列 | `computation_version`（仅全量） |
-| 国债曲线 | ttm_dividend_yield、div_yield_spread_* | 走 `refresh_treasury_spreads` 专用批量，不进本集合 |
+| **国债曲线** `treasury_yield_curve`（被源端订正/外部脚本改写） | ttm_dividend_yield、div_yield_spread_0p25y…30y（全市场共用一条曲线） | `treasury_curve_fingerprint`（全表内容哈希）→ 命中走 `treasury_curve_changed`（仅全量） |
 
 ## 故意**不**哈希的列 / 只靠周期兜底的盲区（2026-11-21 复核，别再重复怀疑）
 
@@ -59,7 +61,9 @@
 | 三元摘要 `(count, Σhash, XORhash)` **同时**碰撞 | 会（理论上） | 只靠 `periodic_full` | 三个聚合同时撞才漏一只，概率可忽略；撞了也只影响那一只，7 天兜底一轮 |
 | plan 之后、commit 之前的并发改写 | 会（本轮） | 只靠下一轮 | 水位只在 step 成功后推进，且推进的是**plan 时刻**的指纹 → 并发改写留下的新值下一轮必然进差异集，不丢信号 |
 | 公式/口径变更 | 会 | `INDICATOR_COMPUTATION_VERSION` bump | 指纹管"输入变没变"，不管"同样输入算出什么"；口径版本一改就全量 |
-| `trading_dates` 只覆盖部分股票的日期被删 | 会（个别股票） | 只靠 `periodic_full` | "日期在日历里有、行情表整列都没有"才是本次覆盖的语义指纹；某天只有**部分**股票缺行时，删除该日历日只影响缺行的那几只。要精确覆盖得按股 join 8,797×N 行窗口，成本远超收益，7 天兜底 |
+| `trading_dates` 增删"**只有很少股票**有行情"的日期 | **不会**（2026-11-21 修复 #13） | 覆盖度判据（见 `trading_calendar_gap_fingerprint`） | 缺口集合现在按"日历日 → 当天有 bar 的股票数"算，覆盖面低于 `update.indicator_calendar_coverage_ratio`（默认 0.5）× 上市只数就算缺口 → 增删这类日期必然被看见 |
+| `trading_dates` 增删"**绝大多数股票**有行情、只差几只（停牌/新股）"的日期 | 会（那几只） | 只靠 `periodic_full` | 真实市场每天都有几十只停牌，"缺一只就算缺口"会让日历的每日例行刷新变成每天一轮 35 分钟全量；阈值 0.5 相对实测覆盖率（近 3 年 ≥99.8%）留了 500 倍余量，代价是"只差几只"这类日期不触发。7 天兜底 |
+| 两次日历内容变化**之间**某天的覆盖度掉了（行情行被删/回补），随后又增删该日期 | 会（该日） | 只靠 `periodic_full` | 缺口水位是"上次日历内容变化时"算的快照：覆盖度在两次变化之间掉下去时，那份快照还记着旧覆盖。修前（并集判据）同样漏，且方向只影响这一天的处理；7 天兜底 |
 | `price_daily_*` 之外的行情副本（ETF/港股/`index_valuation`） | 不会（对本表） | 另域另刷新 | 那些表喂的是别的派生域，不进 `indicator_snapshot` |
 """
 
@@ -80,6 +84,7 @@ __all__ = [
     "INCREMENTAL_FULL_RATIO_THRESHOLD",
     "TRADING_CALENDAR_FP_KEY",
     "TRADING_CALENDAR_GAP_FP_KEY",
+    "TREASURY_CURVE_FP_KEY",
     "IndicatorScopePlan",
     "bootstrap_indicator_scope",
     "commit_indicator_scope",
@@ -98,6 +103,7 @@ __all__ = [
     "snapshot_version_mismatch_codes",
     "trading_calendar_fingerprint",
     "trading_calendar_gap_fingerprint",
+    "treasury_curve_fingerprint",
     "universe_fingerprints",
 ]
 
@@ -137,13 +143,28 @@ TRADING_CALENDAR_FP_KEY = "indicator_trading_calendar_fingerprint:v1"
 # 日历的**语义**指纹：只摘要"日历里有、行情表整列都没有"的那些日期
 # （= 会让某个连续窗口断开的日期）。内容指纹变了才去算它（DuckDB DISTINCT 一遍
 # 行情日期 ~20 ms），所以常态轮根本不读行情大表。
-TRADING_CALENDAR_GAP_FP_KEY = "indicator_trading_calendar_gap_fingerprint:v1"
+TRADING_CALENDAR_GAP_FP_KEY = "indicator_trading_calendar_gap_fingerprint:v2"
+# 国债曲线（`treasury_yield_curve`）**全表内容**指纹（2026-11-21 独立审查 #14）：
+# `div_yield_spread_*` 与 `ttm_dividend_yield` 是"全市场共用一条曲线"的派生列，
+# 而修前曲线变化**只在** `_refresh_treasury_curve` 的 before/after 里被发现：
+# 外部脚本直接 UPDATE 曲线（或那一步"写完后抛异常"）时本轮 0 重算，
+# 利差永久停在旧曲线上。表很小（个位数十万行内），全表哈希 <5 ms，每轮都算得起。
+TREASURY_CURVE_FP_KEY = "indicator_treasury_curve_fingerprint:v1"
+# 日历缺口的**覆盖度阈值**：某日历日有 bar 的股票数 < 阈值 × 上市股票数 就算缺口。
+# 为什么不是 1.0（"缺一只就算缺口"）：真实市场每天都有几十只停牌股票，
+# 1.0 会把日历每天例行的 INSERT OR REPLACE 变成一轮 35 分钟全量。
+# 为什么是 0.5 而不是更贴近实测的值（近 3 年每日覆盖率 ≥99.8%）：阈值越低越安全
+# （越不会把"正常的停牌日"判成缺口），代价只是"只差几只股票"的日期不触发。
+# 0.5 相对实测覆盖率留了约 500 倍余量，相对"只有 1/5 只股票有行情"这种真事故
+# 留了 2.5 倍余量。
+DEFAULT_CALENDAR_COVERAGE_RATIO = 0.5
 # `indicator_snapshot` 逐股内容摘要：外部改坏/半写靠它当场发现（#3）。
 SNAPSHOT_FP_KEY = "indicator_snapshot_fingerprint:v1"
 COMPUTATION_VERSION_KEY = "indicator_computation_version"
 LAST_SCOPE_KEY = "indicator_last_scope_decision"
-# 周期全量兜底的"上次全量时间"。**只在真的全量成功后刷新**（增量轮不刷新），
-# 否则常跑的实例永远不会到期。
+# 周期全量兜底的"上次全量时间"。**只在真的全量成功后刷新**（增量轮不刷新，
+# `bootstrap_indicator_scope` 也不刷新——它不重算任何股票），否则常跑的实例
+# 永远不会到期。
 PERIODIC_FULL_KEY = "indicator_periodic_full_last_at"
 
 DEFAULT_PERIODIC_FULL_DAYS = 7
@@ -177,6 +198,10 @@ SOURCE_DOMAIN: dict[str, str] = {
     # 实际触发点不在 sources 里（见 `_plan_indicator_scope` 的日历判定），这里登记
     # 是为了"任何来源键都必须有明确归属"这条自证。
     "trading_calendar_changed": "full",
+    # 2026-11-21 独立审查 #14：国债曲线是全市场共用的标量输入面，变了之后
+    # `div_yield_spread_*` / `ttm_dividend_yield` 全市场都要重算（说不出"只这几只"）。
+    # 触发点在 `_plan_indicator_scope` 的曲线判定里，这里登记同样是自证。
+    "treasury_curve_changed": "full",
 }
 
 # stock_meta 里**不进指纹**的列：`updated_at` 每次 listing_info 刷新都会变，
@@ -225,6 +250,10 @@ class IndicatorScopePlan:
     trading_calendar_gap_fingerprint: str | None = None
     trading_calendar_fingerprint_changed: bool = False
     trading_calendar_semantics_changed: bool = False
+    # 国债曲线同样是**标量**输入面（全市场共用一条曲线，不是逐股映射）：
+    # 内容指纹每轮都算（<5 ms），变了 → `treasury_curve_changed` 全量。
+    treasury_curve_fingerprint: str | None = None
+    treasury_curve_changed: bool = False
     fingerprint_error: str | None = None
     # 范围裁决整体失败（异常/读不出/算不出）时的原始异常与栈：必须进报告，
     # 不许静默吞掉（`scope_planning_failed` 只是给用户看的那一句）。
@@ -549,47 +578,159 @@ def trading_calendar_fingerprint(owner: Any) -> str:
     return _digest_dates(trading_calendar_dates(owner))
 
 
+def calendar_coverage_ratio() -> float:
+    """日历缺口判据的覆盖度阈值（`update.indicator_calendar_coverage_ratio`）。
+
+    配置项只允许在 `[0.05, 0.95]` 里取值：1.0 等于"缺一只股票就算缺口"，
+    会把日历每天例行的整份重写变成每天一轮全量；0 等于"永远没有缺口"。
+    """
+    raw = _update_config().get(
+        "indicator_calendar_coverage_ratio", DEFAULT_CALENDAR_COVERAGE_RATIO,
+    )
+    try:
+        ratio = float(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_CALENDAR_COVERAGE_RATIO
+    return min(0.95, max(0.05, ratio))
+
+
+def trading_calendar_coverage(owner: Any) -> dict[str, int]:
+    """每个交易日有多少只股票有 bar（覆盖度，2026-11-21 缺陷 #13 的判据来源）。
+
+    修前用的是 `SELECT DISTINCT trade_date`（**全市场并集**）：任意一只股票那天
+    有 bar，该日就被从缺口集合里剔掉 —— 于是"日历新增/删除一个只有 1/5 只股票
+    有行情的日期"完全不触发重算，另外 4 只的 ma10…ma250 与波动率永久停在旧
+    日历算出来的值（独立审查实测 24 格错 / 4 只）。
+
+    修后按 `GROUP BY trade_date` 拿**每天的行数**（= 当天有 bar 的股票数；主键
+    `(stock_code, trade_date)` 保证一行一股），再与上市只数比阈值。
+
+    成本（真库 1,758.9 万行、threads=2、只读实测）：`GROUP BY trade_date` +
+    `COUNT(*)` **63–67 ms**，比它替换掉的 `DISTINCT CAST(trade_date AS VARCHAR)`
+    （**313 ms**，字符串转换是全表的开销）快 **4.7 倍**，而且信息严格更多
+    （并集只是"行数 ≥ 1"的特例）。与原来一样**只在日历内容变了才调用**。
+    """
+    rows = owner.duck.read_query(
+        """SELECT CAST(trade_date AS VARCHAR) AS trade_date, COUNT(*) AS n
+           FROM price_daily_raw
+           GROUP BY trade_date"""
+    )
+    return {str(row["trade_date"])[:10]: int(row["n"]) for row in rows}
+
+
+def _calendar_gap_dates(
+    calendar: Iterable[str],
+    coverage: Mapping[str, int],
+    listed_count: int,
+) -> set[str]:
+    """缺口日期集合 = 日历里**当天有 bar 的股票数不够**的那些日期。
+
+    判据：`coverage(D) < max(1, ratio × 上市只数)`。
+
+    为什么用"覆盖率"而不是"有没有"：`calculator._trailing_contiguous_closes` 是
+    **逐股**判定的 —— 日期 D 要改变某只股票的结果，必须 D 是预期交易日、而**该股
+    自己**没有 D 这一行。所以"全市场并集非空"完全不能证明"每只股票都有 D"。
+
+    为什么不是"缺一只就算缺口"：真实市场每天都有几十只停牌股票，`ratio=1` 会把
+    日历每天例行的整份 `INSERT OR REPLACE` 变成每天一轮 35 分钟全量。默认
+    `ratio=0.5` 相对实测覆盖率（近 3 年每日 ≥99.8%，见
+    `docs/runbooks/ops-knowledge-base.md`）留了极大余量，同时"只有 1/5 只股票
+    有行情"这种真事故仍然 2.5 倍超阈值。
+    """
+    days = {str(day)[:10] for day in calendar}
+    denominator = int(listed_count or 0)
+    if denominator <= 0:
+        # 上市名单读不出来（或全库空表）→ 用"历史上单日最多有多少只股票有 bar"
+        # 当分母；两者都没有时 floor=1，任何"有日历没行情"的日期都算缺口。
+        denominator = max(coverage.values(), default=0)
+    floor = max(1, int(denominator * calendar_coverage_ratio()))
+    return {day for day in days if int(coverage.get(day, 0)) < floor}
+
+
 def trading_calendar_gap_fingerprint(
     owner: Any, calendar_dates: Iterable[str] | None = None,
 ) -> str:
-    """日历的**语义**指纹：`日历 - 行情里真实存在的日期`。
+    """日历的**语义**指纹：哪些日历日"当天的覆盖度不够"，会让技术列改变。
 
     为什么是这个集合（2026-11-21 实测，见 `reports/`「盲区复核」与
-    `tests/regression/test_indicator_incremental_scope.py` 的 ⑨ 组）：
+    `tests/regression/test_indicator_incremental_scope.py` 的 ⑨⑩ 组）：
 
     * `calculator._trailing_contiguous_closes` 只在"**两个相邻行情行之间**夹着
       一个预期交易日"时截断序列。一个日历日期 D 要改变结果，必须 D 是预期交易日
       而**该股没有 D 这一行**；
     * 行情行本身变了 → `price_fingerprints` 逐股摘要必然变 → 价格域重算，
       与本指纹无关；
-    * 于是"日历"这一侧唯一需要盯的是**凭空出现的缺口**：D 在日历里、行情表里
-      整列都没有。新增这样的 D 会让缺口张开（MA/量能整列变 NULL），删除这样的
-      D 会让缺口合上（序列变长）——两个方向都必须重算；
-    * 反过来，D 在日历里**并且**有行情行（哪怕只是部分股票有）时，增删 D 不会
-      改变任何"两行之间有预期日缺失"的判定 → 不重算（这条是性能关键：正常日子
-      里日历每天都会新增当天日期，而当天行情行是存在的）。
+    * 于是"日历"这一侧唯一需要盯的是**缺口日期集合**：新增这样的 D 会让缺口张开
+      （MA/量能整列变 NULL），删除这样的 D 会让缺口合上（序列变长）——两个方向
+      都必须重算；
+    * **"该股没有 D 这一行"是逐股的事实，不能用"全市场有没有 D 这一行"近似**
+      （2026-11-21 独立审查缺陷 #13 的原话：任意一只股票那天有 bar，该日就被从
+      缺口集合里剔掉）。所以判据是**覆盖度**：D 当天有 bar 的股票数少于
+      `ratio × 上市只数` 就把 D 算作缺口 → 见 :func:`_calendar_gap_dates`。
+    * 反过来，D 的覆盖度足够（近满员）时，增删 D 不会改变任何"两行之间有预期日
+      缺失"的判定 → 不重算（这条是性能关键：正常日子里日历每天都会新增当天日期，
+      而当天行情行基本都在）。
 
-    残留盲区（**故意**，由 `periodic_full` 兜底）：某天只有**部分**股票缺行时，
-    删除该日历日只影响缺行的那几只。精确覆盖要按股 join 窗口（8,797 × N 行），
-    成本远超收益；而且这类改动本身来自"日历被删日期"这种极罕见事件。
+    残留盲区（**故意**，由 `periodic_full` 兜底）：覆盖度在阈值**之上**、只差几只
+    股票（当天停牌/新股）的日期增删时，那几只不触发重算。要精确到"逐股 × 8,797
+    天"就得按股 join 窗口（8,797 × N 行），成本远超收益；阈值 0.5 相对实测每日
+    覆盖率（≥99.8%）留了 500 倍余量，7 天兜底一轮。
 
-    成本：`SELECT DISTINCT CAST(trade_date AS VARCHAR)` 走一遍 `price_daily_raw`
-    （1,759 万行实测 20–25 ms），**只在内容指纹变了才调用**。
+    成本：`GROUP BY trade_date, COUNT(*)` 走一遍 `price_daily_raw`
+    （1,758.9 万行实测 **63–67 ms**），**只在内容指纹变了才调用**；修前那句
+    `SELECT DISTINCT CAST(trade_date AS VARCHAR)` 实测 313 ms。
     """
     calendar = (
         {str(day)[:10] for day in calendar_dates}
         if calendar_dates is not None
         else set(trading_calendar_dates(owner))
     )
-    rows = owner.duck.read_query(
-        "SELECT DISTINCT CAST(trade_date AS VARCHAR) AS trade_date FROM price_daily_raw"
+    gaps = _calendar_gap_dates(
+        calendar, trading_calendar_coverage(owner), listed_stock_count(owner),
     )
-    priced = {str(row["trade_date"])[:10] for row in rows}
     # `cal` 位：日历**整表为空**时 `_expected_trading_dates` 返回 None，
     # `_calc_technical` 会 fail-closed 把 MA/量能**整列写 NULL**。所以
-    # "空日历 → 有日历"（哪怕新增的日期全都有行情行）也是真的语义变化，
+    # "空日历 → 有日历"（哪怕新增的日期覆盖度都够）也是真的语义变化，
     # 必须能和"日期集合没动"区分开 —— 一个 bit 就够，成本 0。
-    return _digest_dates(calendar - priced, salt=f"cal={int(bool(calendar))}")
+    return _digest_dates(gaps, salt=f"cal={int(bool(calendar))}")
+
+
+def treasury_curve_fingerprint(owner: Any) -> str:
+    """国债曲线的**全表内容**指纹（2026-11-21 独立审查缺陷 #14）。
+
+    修前曲线变化**只在** `update.py::_refresh_treasury_curve` 的
+    before/after 里被发现，而且那一步"写完之后抛异常"的分支连 `curve_changed`
+    都不返回 —— 外部脚本直接 `UPDATE treasury_yield_curve` 时本轮
+    `incremental / no_changed_stocks / 0 重算`，全市场的 `div_yield_spread_*`
+    永久停在旧曲线（实测停在 3.5/2.0，全量应为 1.5/0.0）。
+
+    为什么是**全表**而不是"最新曲线日 + 行数"：利差对齐的是"不晚于该股价格日的
+    最近曲线点"，停牌/价格滞后股票可以引用任意历史日期；订正某个历史日期的收益率
+    同样必须被看见。表很小（真库 51,849 行 = 曲线日 × 9 个关键期限），每轮都算得起。
+
+    摘要形状与逐股指纹**同构**：`(行数, Σhash, XOR hash)` 三元聚合（不是
+    `string_agg + md5`）—— 后者要把 5 万行拼成一个大字符串，真库只读实测
+    **24.6 ms**；`hash()` 是向量化整数哈希，同一张表 **1.79 ms**（14 倍）。
+    碰撞概率同本模块其它输入面（三元同时撞才漏），另有 `periodic_full` 兜底。
+
+    与 `update.py::_treasury_curve_fingerprint` 的关系：那一个是**单个步骤内**的
+    before/after 对比（回答"这一轮这一步改了没有"），本函数是**跨轮水位**
+    （回答"自上轮指标计算以来曲线变了没有"）。两者的判定入口不同、不能互相替代
+    （缺陷 #14 正是"只有前者"造成的），但语义相同：都只认
+    `curve_date/tenor_years/yield_pct` 三列，来源/批次等簿记列不进指纹。
+    """
+    rows = owner.duck.read_query(
+        """SELECT count(*) AS n,
+                  sum(hash(curve_date, tenor_years, yield_pct)) AS s,
+                  bit_xor(hash(curve_date, tenor_years, yield_pct)) AS x
+           FROM treasury_yield_curve"""
+    )
+    row = rows[0] if rows else {}
+    payload = "{}:{}:{}".format(
+        int(row.get("n") or 0), int(row.get("s") or 0), int(row.get("x") or 0),
+    )
+    # 空表也是稳定值（"空 → 有 / 有 → 空"都必须算变化）。
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:16]
 
 
 def manual_override_fingerprints(owner: Any) -> dict[str, str]:
@@ -650,6 +791,50 @@ def snapshot_version_mismatch_codes(owner: Any) -> list[str]:
 def snapshot_row_count(owner: Any) -> int:
     rows = owner.duck.read_query("SELECT COUNT(*) AS c FROM indicator_snapshot")
     return int(rows[0]["c"]) if rows else 0
+
+
+#: bootstrap **不许**吸收成基线的百分比列（2026-11-21 独立审查 N5）。
+#: 只登记"单位是百分数、且真实值不可能到三位数"的格子：`roe=-999` 这类哨兵值
+#: 一把就能抓到，而 48 只真实 ROE > 100% 的老股东权益公司不会被误伤（阈值 900）。
+#: 这里的判据只用来**决定要不要重算这一只**，绝不改任何值（R4：不许用护栏
+#: 掩盖看不懂的数字）。
+_BOOTSTRAP_SENTINEL_ABS = 900.0
+_BOOTSTRAP_SENTINEL_COLUMNS = (
+    "roe", "roa", "gross_margin", "net_margin", "roic",
+    "debt_ratio", "goodwill_ratio", "payout_ratio", "ttm_dividend_yield",
+)
+
+
+def bootstrap_rejected_snapshot_codes(owner: Any) -> list[str]:
+    """bootstrap 时**不许当基线吸收**的快照行（缺陷 N5）。
+
+    两类：
+    1. `data_version` 与当前口径不符（NULL / 旧 `calc=...`）—— 该行不是这版公式
+       算的，把它当基线等于"承认它是当前的"；
+    2. 明显异常值（`abs(roe) >= 900`、`latest_close <= 0`）—— 独立审查实测的
+       `roe=-999` 就是这样被吸收成基线、然后**永久错**的。
+
+    修前 `bootstrap_indicator_scope` 把"当前库里的内容"无条件写成基线：它既不
+    重算也不核对，于是损坏行从此再也不会被任何指纹差异带进重算集合。
+    """
+    from app.core.indicators.calculator import indicator_data_version
+
+    columns = set(_table_columns(owner, "indicator_snapshot", _SNAPSHOT_EXCLUDED_COLUMNS))
+    guards = [
+        f'abs("{name}") >= {_BOOTSTRAP_SENTINEL_ABS}'
+        for name in _BOOTSTRAP_SENTINEL_COLUMNS
+        if name in columns
+    ]
+    if "latest_close" in columns:
+        guards.append('"latest_close" <= 0')
+    where = "data_version IS DISTINCT FROM ?"
+    if guards:
+        where = f"{where} OR " + " OR ".join(guards)
+    rows = owner.duck.read_query(
+        f"SELECT DISTINCT stock_code FROM indicator_snapshot WHERE {where}",
+        [indicator_data_version()],
+    )
+    return sorted(str(row["stock_code"]) for row in rows)
 
 
 def listed_stock_count(owner: Any) -> int:
@@ -738,16 +923,22 @@ def _periodic_full_due(owner: Any, *, now: datetime | None = None) -> tuple[bool
 
 def _full_reason(
     owner: Any, *, force_full: bool, trading_calendar_changed: bool = False,
+    treasury_curve_changed: bool = False,
 ) -> tuple[str | None, dict[str, Any]]:
     """可解释的全量原因（按"最需要解释"的优先级）。
 
-    `forced_full` → `first_run` → `computation_version` → `trading_calendar_changed`
-    → `periodic_full_refresh`。周期兜底排最后：它是**兜底**，有更具体的理由时
-    优先报更具体的那个。
+    `forced_full` → `first_run` → `computation_version` → `treasury_curve_changed`
+    → `trading_calendar_changed` → `periodic_full_refresh`。周期兜底排最后：
+    它是**兜底**，有更具体的理由时优先报更具体的那个。
+
+    `treasury_curve_changed`（2026-11-21 独立审查 #14）：国债曲线的**全表内容**
+    变了（外部脚本改写 / 源端订正历史日期 / 那一步写完抛异常）。曲线是
+    **全市场共用**的输入，一条收益率就能挪动 5,575 只股票的
+    `div_yield_spread_*` 与 `ttm_dividend_yield` → 走全量。
 
     `trading_calendar_changed`（2026-11-21）：交易日历的语义指纹变了（多出/少了
-    "日历里有、行情整列没有"的日期）。日历是**全市场共用**的输入，一个日期就能让
-    每只股票的连续窗口断开（MA/量能整列变 NULL），受影响集合说不出"只这几只"
+    "覆盖度不够"的日期）。日历是**全市场共用**的输入，一个日期就能让每只股票的
+    连续窗口断开（MA/量能整列变 NULL），受影响集合说不出"只这几只"
     → 走全量（与 `incremental_over_threshold` 同一条经济账：与其逐股维护，
     不如一次批量 staging 发布），但 reason 必须是这个具体原因，不许糊成阈值。
     """
@@ -761,6 +952,8 @@ def _full_reason(
         return "computation_version", {
             "computation_version": version, "stored_computation_version": stored,
         }
+    if treasury_curve_changed:
+        return "treasury_curve_changed", {"computation_version": version}
     if trading_calendar_changed:
         return "trading_calendar_changed", {"computation_version": version}
     due, last_run = _periodic_full_due(owner)
@@ -861,6 +1054,29 @@ def _plan_trading_calendar(
     return content, semantic, True, changed, False
 
 
+def _plan_treasury_curve(owner: Any) -> tuple[str, bool, bool]:
+    """国债曲线的**一级**判定：全表内容指纹 vs 上轮水位（缺陷 #14）。
+
+    返回 `(当前指纹, 是否变化, 基线是否缺失)`。
+
+    只有一级（不像日历有"内容/语义"两级）：曲线表很小，全表哈希 1–3 ms，
+    而且"内容变了"在这里**就等于**"利差列会变"——没有"改了但不影响任何列"的
+    情形（任何一天的任何一个期限都会改变某只股票的对齐结果）。
+    """
+    current = treasury_curve_fingerprint(owner)
+    stored = _read_scalar(owner, TREASURY_CURVE_FP_KEY)
+    if stored is None:
+        # 首次部署本输入面 → 交给 `input_fingerprint_bootstrap` 建基线。
+        return current, False, True
+    if stored == current:
+        return current, False, False
+    logger.info(
+        "国债曲线内容变化 → 全市场 div_yield_spread_* 必须重算（%s → %s）",
+        stored, current,
+    )
+    return current, True, False
+
+
 def _plan_indicator_scope(
     owner: Any,
     *,
@@ -871,8 +1087,10 @@ def _plan_indicator_scope(
         calendar_content, calendar_semantic, calendar_touched, calendar_changed,
         calendar_baseline_missing,
     ) = _plan_trading_calendar(owner)
+    treasury_fp, treasury_changed, treasury_baseline_missing = _plan_treasury_curve(owner)
     reason, meta = _full_reason(
         owner, force_full=force_full, trading_calendar_changed=calendar_changed,
+        treasury_curve_changed=treasury_changed,
     )
     version = str(meta["computation_version"])
     listed_count = listed_stock_count(owner)
@@ -899,6 +1117,10 @@ def _plan_indicator_scope(
             # 交易日历是**标量**面，不在 `_FINGERPRINT_SURFACES` 里；没有上轮
             # 水位同样"无法证明它没变"→ 一次全量建基线（与 ⑦⑧ 两次补面同一条规矩）。
             missing.append("trading_calendar")
+        if treasury_baseline_missing:
+            # 国债曲线同理（缺陷 #14 新增的标量面）：没有上轮水位就证明不了
+            # "曲线没变"，而利差是全市场共用输出 → 一次全量建基线。
+            missing.append("treasury_curve")
         if missing:
             logger.info("指标指纹基线缺失(%s)，本轮全量建立基线", ",".join(missing))
             reason = "input_fingerprint_bootstrap"
@@ -942,12 +1164,17 @@ def _plan_indicator_scope(
         trading_calendar_gap_fingerprint=calendar_semantic,
         trading_calendar_fingerprint_changed=calendar_touched,
         trading_calendar_semantics_changed=calendar_changed,
+        treasury_curve_fingerprint=treasury_fp,
+        treasury_curve_changed=treasury_changed,
     )
     if calendar_changed:
         # 日历变了必须留痕：`changed_sources` 是运维唯一能读到的"谁把谁带进集合"。
         # 受影响面是全市场（每只股票的连续窗口都可能断在同一个日期），
         # 所以计数用上市只数，而不是编一个假的代码列表。
         plan.changed_sources["trading_calendar_changed"] = listed_count
+    if treasury_changed:
+        # 同上：曲线是全市场共用的标量输入，计数用上市只数。
+        plan.changed_sources["treasury_curve_changed"] = listed_count
 
     # 阈值只看**完整重算组**（整股 149 列），不看价格域组：
     # "今天全市场都成交了"是日常形态，价格域增量本身就会跳过没变的收盘价，
@@ -995,28 +1222,55 @@ def plan_indicator_scope(
 def bootstrap_indicator_scope(owner: Any) -> dict[str, Any]:
     """把"当前输入指纹 + 当前口径版本"直接写成基线（**不重算任何股票**）。
 
-    三个正当用途：
+    它到底做了什么、**没做什么**（2026-11-21 独立审查 N5 修正）：
+
+    * ✅ 建的是**输入基线**：七个逐股输入面 + 交易日历 + 国债曲线两个标量面 +
+      口径版本号。下一轮按这些水位做集合差异，只算变化的部分。
+    * ❌ **不代表做过全量**：`indicator_periodic_full_last_at`（周期兜底水位）
+      **不写**。修前它写 `now()`，于是一次 bootstrap 就把**已经到期**的周期全量
+      吞掉了 —— "periodic_full 水位只在真全量成功后刷新"这条保证当场不成立。
+      现在 bootstrap 之后该到期还是到期（下一轮 `reason=periodic_full_refresh`）。
+    * ❌ **不吸收损坏快照当基线**：`data_version` 与当前口径不符、或明显异常值
+      （`roe=-999` 这类）的行会被**排除在快照基线之外**并 log 警告 —— 它们下一轮
+      自动进 `snapshot_state_mismatch`（full 组）重算。修前这类行一进基线就再也
+      没人看，那一格**永久错**。
+
+    正当用途：
     1. 运维：明确知道现网快照就是当前口径、只想立刻切到增量模式时，用它建立
        基线，避免升级后的第一轮全量；
-    2. 回归测试：钉住"上一轮水位"，让用例只验证本轮的变化来源；
-    3. 周期兜底的"今天已经全量过了"声明（同时重置 `periodic_full` 计时）。
+    2. 回归测试：钉住"上一轮水位"，让用例只验证本轮的变化来源。
 
     常规路径**不需要**调用它：没有基线时 `plan_indicator_scope` 会判
     `input_fingerprint_bootstrap` 并跑一次全量建立基线。
     """
     current = _collect_fingerprints(owner)
+    rejected = bootstrap_rejected_snapshot_codes(owner)
+    if rejected:
+        dropped = set(rejected)
+        current["snapshot"] = {
+            code: fingerprint
+            for code, fingerprint in current["snapshot"].items()
+            if code not in dropped
+        }
+        logger.warning(
+            "指标指纹 bootstrap 拒绝吸收 %d 只股票的损坏/旧口径快照"
+            "（口径版本不符或明显异常值）：%s —— 它们不写进快照基线，"
+            "下一轮自动进 full 组重算",
+            len(rejected), rejected[:20],
+        )
     for surface, key, _source in _FINGERPRINT_SURFACES:
         _write_json_map(owner, key, current[surface])
     # 交易历是**标量**输入面（不是逐股映射），水位单独写：
     #   * 内容指纹：每轮都算的那个；
-    #   * 语义指纹：日历里有、行情整列没有的日期集合。基线必须两个都建，
+    #   * 语义指纹：日历里"覆盖度不够"的日期集合。基线必须两个都建，
     #     否则下一轮会把"日历语义变了"误判成真的变化（或反过来漏掉）。
     _write_scalar(owner, TRADING_CALENDAR_FP_KEY, trading_calendar_fingerprint(owner))
     _write_scalar(
         owner, TRADING_CALENDAR_GAP_FP_KEY, trading_calendar_gap_fingerprint(owner),
     )
+    # 国债曲线：同样是标量面，同样必须建（否则下一轮判 input_fingerprint_bootstrap）。
+    _write_scalar(owner, TREASURY_CURVE_FP_KEY, treasury_curve_fingerprint(owner))
     owner._write_refresh_state(COMPUTATION_VERSION_KEY, current_computation_version())
-    owner._write_refresh_state(PERIODIC_FULL_KEY, datetime.now(UTC).isoformat())
     return {
         "universe_codes": len(current["universe"]),
         "financial_codes": len(current["financial"]),
@@ -1025,6 +1279,10 @@ def bootstrap_indicator_scope(owner: Any) -> dict[str, Any]:
         "price_codes": len(current["price"]),
         "manual_override_codes": len(current["manual_override"]),
         "snapshot_codes": len(current["snapshot"]),
+        # 被拒绝吸收成基线的股票：下一轮进 full 组（可解释、可断言）。
+        "rejected_snapshot_codes": rejected,
+        # 明示"bootstrap 不代表全量"：周期兜底水位没有被刷新。
+        "periodic_full_watermark_written": False,
     }
 
 
@@ -1126,6 +1384,12 @@ def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> d
             _write_scalar(
                 owner, TRADING_CALENDAR_GAP_FP_KEY,
                 plan.trading_calendar_gap_fingerprint,
+            )
+        # 国债曲线（缺陷 #14）：曲线变了必然走全量，本轮的利差列已经按新曲线重算
+        # → step 成功就推进水位。失败轮不写，下一轮重新判 `treasury_curve_changed`。
+        if plan.treasury_curve_fingerprint:
+            _write_scalar(
+                owner, TREASURY_CURVE_FP_KEY, plan.treasury_curve_fingerprint,
             )
     owner._write_refresh_state(
         LAST_SCOPE_KEY,
