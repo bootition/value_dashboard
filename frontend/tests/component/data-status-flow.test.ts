@@ -187,8 +187,15 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
     expect(text).toContain('2026-07-20')
     expect(text).toContain('2026-08-01T08:00:00+00:00')
     expect(text).toContain('2026-07-01T00:00:00+00:00')
-    // 最近一次更新执行来自 job_logs（partial/failed 也会刷新该时间）；时间为本地化显示
-    expect(text).toContain('最近一次更新执行: 2026/8/1 17:00:00')
+    // 2026-11-21 用户要求：**不显示历史完成结果**（"最近一次更新执行 / 上次成功 / 最近结果"全删）。
+    // 反向断言，防止以后有人又把它们加回来。
+    expect(text).not.toContain('最近一次更新执行')
+    expect(text).not.toContain('上次完整任务成功')
+    expect(text).not.toContain('不可见的历史行')
+    expect(text).not.toContain('最近执行')
+    expect(text).not.toContain('上次成功')
+    expect(text).not.toContain('最近结果')
+    // 但"实际价格日期"是数据新鲜度的硬事实，保留
     expect(text).toContain('实际价格日期: 2026-07-31')
   })
 

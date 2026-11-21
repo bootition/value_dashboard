@@ -146,12 +146,6 @@ const updateLivePct = computed(() => {
   if (!live || !live.total) return 0
   return Math.min(Math.round((live.done / live.total) * 100), 100)
 })
-function updateStatusLabel(status?: string | null): string {
-  if (status === 'success') return '成功'
-  if (status === 'partial') return '部分完成'
-  if (status === 'failed') return '失败'
-  return status || '—'
-}
 
 const updateEtaLabel = computed(() => {
   const seconds = updateLive.value?.eta_seconds
@@ -202,12 +196,6 @@ const csrcIndustryPct = computed(() => summary.value ? pct(summary.value.csrc_in
 const indicatorSnapshotPct = computed(() => summary.value ? pct(summary.value.indicator_snapshot_count, summary.value.stock_count) : '0%')
 
 // 后端时间均为 UTC ISO 字符串，展示为本地时间
-function formatLocalTime(iso: string | null | undefined): string {
-  if (!iso) return '—'
-  const d = new Date(iso)
-  if (Number.isNaN(d.getTime())) return iso
-  return d.toLocaleString('zh-CN', { hour12: false })
-}
 
 // 轻量路径：只拉自动更新状态，递归轮询，绝不阻塞于 summary。
 async function fetchAutoOverview(): Promise<void> {
@@ -409,16 +397,6 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
   return 'default'
 }
 
-function skipReasonLabel(reason: string | null | undefined): string {
-  const labels: Record<string, string> = {
-    another_update_running: '另一更新占用写入锁',
-    already_running: '更新任务已在运行',
-    auto_update_disabled: '自动更新已关闭',
-    auto_update_paused: '自动更新已暂停',
-    prices_up_to_date: '价格已经是最新日期',
-  }
-  return reason ? (labels[reason] || reason) : '—'
-}
 
 </script>
 
@@ -445,21 +423,14 @@ function skipReasonLabel(reason: string | null | undefined): string {
       <n-alert v-if="error" type="error" title="提示" style="margin-bottom: 16px;">
         {{ error }}
       </n-alert>
-      <n-alert
-        v-if="summary && (summary.updating || summary.stale)"
-        type="warning"
-        title="自动更新正在运行"
-        style="margin-bottom: 16px;"
-      >
-        下面的覆盖统计是更新开始前的缓存快照（缓存时间：{{ formatLocalTime(summary.summary_as_of) }}）。
-        实时阶段和进度请看上方“更新运行中”的进度条，更新完成后本提示会自动消失。
-      </n-alert>
       <template v-if="summary">
         <!-- L2 V3: 第一问"数据可研究吗" -->
+        <!-- 2026-11-21 用户要求：更新中**不再**弹"以下为快照口径"的黄色提示。
+             就绪态只反映数据本身可不可研究（绿/红），更新进行中由"自动更新"卡片里的
+             中文进度说明，不再在前置位置重复告警。 -->
         <n-alert
           :type="
             summary.data_quality.minimum_data_readiness.checking ? 'info'
-            : (summary.updating || summary.stale) ? 'warning'
             : summary.data_quality.minimum_data_readiness.ready ? 'success'
             : 'error'
           "
@@ -470,9 +441,7 @@ function skipReasonLabel(reason: string | null | undefined): string {
             {{
               summary.data_quality.minimum_data_readiness.checking
                 ? '正在核对数据'
-                : (summary.updating || summary.stale)
-                  ? '自动更新中：以下为快照口径'
-                  : summary.data_quality.minimum_data_readiness.ready
+                : summary.data_quality.minimum_data_readiness.ready
                     ? '数据可研究'
                     : '数据尚未就绪'
             }}
@@ -480,22 +449,15 @@ function skipReasonLabel(reason: string | null | undefined): string {
           {{
             summary.data_quality.minimum_data_readiness.checking
               ? '正在后台核对数据完整性，完成后会显示最终状态。'
-              : (summary.updating || summary.stale)
-                ? '当前覆盖统计与指标为最近一次快照，实时进度见上方“自动更新”卡片；更新完成后自动恢复绿色状态。'
-                : summary.data_quality.minimum_data_readiness.ready
-                  ? `数据可研究：价格截至 ${summary.data_quality.dates?.price || '—'}，财报报告期截至 ${summary.data_quality.dates?.balance_sheet?.latest_complete || '—'}。最近一次更新执行: ${formatLocalTime(summary.last_update)}（${updateStatusLabel(summary.last_update_status)}）。`
+              : summary.data_quality.minimum_data_readiness.ready
+                  ? `数据可研究：价格截至 ${summary.data_quality.dates?.price || '—'}，财报报告期截至 ${summary.data_quality.dates?.balance_sheet?.latest_complete || '—'}。`
                   : `数据尚未完全就绪，有 ${summary.data_quality.warning_codes.length} 个警告；当前更新完成后会自动恢复。`
           }}
         </n-alert>
 
-        <p style="color: #999; margin-bottom: 16px;">
-          最近一次更新执行: {{ formatLocalTime(summary.last_update) }}（{{ updateStatusLabel(summary.last_update_status) }}）
-          <span v-if="summary.last_full_success_at" style="margin-left: 12px;">
-            上次完整任务成功: {{ formatLocalTime(summary.last_full_success_at) }}
-          </span>
-          <span v-if="summary.data_quality.dates?.price" style="margin-left: 12px;">
-            实际价格日期: {{ summary.data_quality.dates.price }}
-          </span>
+        <!-- 2026-11-21 用户要求：不显示"历史完成结果"。只保留数据新鲜度的硬事实（实际价格日期）。 -->
+        <p v-if="summary.data_quality.dates?.price" style="color: #999; margin-bottom: 16px;">
+          实际价格日期: {{ summary.data_quality.dates.price }}
         </p>
       </template>
 
@@ -529,19 +491,21 @@ function skipReasonLabel(reason: string | null | undefined): string {
               <span v-else style="color:#999">—</span>
             </n-descriptions-item>
             <n-descriptions-item label="作业ID">{{ autoUpdate.progress?.job_id || '—' }}</n-descriptions-item>
-            <n-descriptions-item label="最近执行">{{ formatLocalTime(autoUpdate.updated_at) }}</n-descriptions-item>
-            <n-descriptions-item label="上次成功">{{ formatLocalTime(autoUpdate.last_success_at) }}</n-descriptions-item>
-            <n-descriptions-item label="最近结果">
-              {{ autoUpdate.last_result || '尚未执行' }}
-              <span v-if="autoUpdate.last_result === 'skipped'" style="color:#d48806;">
-                （{{ skipReasonLabel(autoUpdate.last_skip_reason) }}）
-              </span>
-            </n-descriptions-item>
-            <n-descriptions-item label="最后错误">
-              <span v-if="autoUpdate.last_error" style="color:#d03050;">{{ autoUpdate.last_error }}</span>
-              <span v-else>—</span>
-            </n-descriptions-item>
+            <!-- 2026-11-21 用户要求：**删掉"最近执行 / 上次成功 / 最近结果 / 最后错误"这一整行**
+                 ——「我不需要看到历史完成的结果，只需要看到正在做的就行」。
+                 唯一例外：**真出错时**仍要看得见（错误是"现在有问题"，不是历史成绩），
+                 所以改成下面那条只在 last_error 非空时出现的红色提示。 -->
           </n-descriptions>
+          <n-alert
+            v-if="autoUpdate.last_error && !effectiveRunning"
+            id="auto-update-last-error"
+            type="error"
+            :show-icon="true"
+            style="margin-top: 12px"
+            title="上次更新失败"
+          >
+            {{ autoUpdate.last_error }}
+          </n-alert>
           <n-alert
             v-if="effectiveRunning && autoUpdate.current_stage !== 'running'"
             type="info"
