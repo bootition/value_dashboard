@@ -110,19 +110,18 @@ describe('App 全局更新进度条（任何页面可见）', () => {
     })
     await flushPromises()
 
-    // 页面内容照常渲染（进度条是布局层悬浮，不是路由级遮罩）
+    // 页面内容照常渲染
     expect(wrapper.text()).toContain('筛选页内容')
-    const bar = wrapper.find('.auto-update-progress')
-    expect(bar.exists()).toBe(true)
-    expect(bar.text()).toContain('正在重算指标快照')
-    expect(bar.text()).toContain('2500 / 5575')
-    expect(bar.text()).toContain('45%')
-    // 侧边徽标也同步显示更新中（两处口径一致）
+    // 2026-11-21 用户要求：**去掉所有页面共用的悬浮进度条**，
+    // 进度只在「数据中心」页里看。这里钉住"布局层不再出现全局进度条"，
+    // 防止以后有人又把它挂回 App.vue。
+    expect(wrapper.find('.auto-update-progress').exists()).toBe(false)
+    // 侧边徽标仍同步显示更新中（这是用户要保留的）
     expect(wrapper.find('.app-data-status').text()).toContain('更新中')
     wrapper.unmount()
   })
 
-  it('空闲：布局层不显示进度条', async () => {
+  it('空闲：布局层不显示进度条（与更新中一致，布局层永远没有全局进度条）', async () => {
     const wrapper = mountAppWithAutoUpdate({
       state: 'enabled',
       current_stage: 'finished',

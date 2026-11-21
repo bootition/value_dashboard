@@ -133,6 +133,33 @@ export function isAutoUpdateRunning(status?: AutoUpdateStatusPayload | null): bo
   return status.current_stage === 'running' || status.latest_job?.status === 'running'
 }
 
+/**
+ * 单个更新步骤的**中文状态**（后端 `progress.steps[k]` 是 `success/skipped/failed/...`）。
+ * 与 `stageLabel()` 配成一对：步骤名用 `stageLabel(key)`，状态用本函数。
+ * 未知状态兜底成"进行中"以外的中性文案，**绝不把原始英文串抛给用户**。
+ */
+export function updateStepStatusLabel(status?: string | null): string {
+  const key = typeof status === 'string' ? status.trim().toLowerCase() : ''
+  switch (key) {
+    case 'success':
+      return '完成'
+    case 'partial':
+      return '部分完成'
+    case 'skipped':
+      return '跳过'
+    case 'failed':
+      return '失败'
+    case 'running':
+      return '进行中'
+    case 'blocked':
+      return '受阻'
+    case 'pending':
+      return '等待中'
+    default:
+      return key ? '未知状态' : '—'
+  }
+}
+
 /** 已完成/总数 → 0–100 的整数百分比；没有总数时返回 null（不确定进度）。 */
 export function updatePercent(done?: number | null, total?: number | null): number | null {
   const d = Number(done)

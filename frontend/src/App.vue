@@ -1,15 +1,11 @@
 <script setup lang="ts">
-import { ref, onMounted, computed, provide } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
 import { RouterLink, RouterView } from 'vue-router'
 import axios from 'axios'
 import type { DataQualityStatus } from './types/data-quality.ts'
-import AutoUpdateProgressBar from './components/AutoUpdateProgressBar.vue'
-import {
-  AUTO_UPDATE_STATUS_KEY,
-  useAutoUpdateRunning,
-} from './composables/useAutoUpdatePolling.ts'
+import { useAutoUpdateRunning } from './composables/useAutoUpdatePolling.ts'
 
 const route = useRoute()
 
@@ -17,17 +13,14 @@ type Summary = { data_quality: DataQualityStatus }
 const quality = ref<DataQualityStatus | null>(null)
 const qualityFailed = ref(false)
 // 自动更新状态轮询只此一份：useAutoUpdatePolling 内部用 usePollTimer 管生命周期，
-// 更新中 10s / 空闲 60s；App 把同一份状态 provide 给页面（详情页据此显示进度），
+// 更新中 10s / 空闲 60s。**进度只显示在「数据中心」页（DataStatusPage）里**，
+// 不再做悬浮全局进度条（2026-11-21 用户要求：全局那条去掉，只在数据中心界面看）。
 // 页面不得再自建第二个轮询器。
 const {
   autoUpdateRunning,
-  autoUpdateStatus,
   refreshAutoUpdate,
   startAutoUpdatePolling,
 } = useAutoUpdateRunning()
-provide(AUTO_UPDATE_STATUS_KEY, autoUpdateStatus)
-// 进度条显示期间给内容区留出底部高度（进度条本身是悬浮 + pointer-events:none）。
-const updateBarActive = computed(() => autoUpdateRunning.value)
 
 onMounted(async () => {
   try {
@@ -132,10 +125,8 @@ const themeOverrides = {
               id="main-content"
               tabindex="-1"
               class="app-main-content"
-              :class="{ 'app-main-content--with-update': updateBarActive }"
             >
               <router-view />
-              <AutoUpdateProgressBar :status="autoUpdateStatus" />
             </n-layout-content>
           </n-layout>
         </n-layout>

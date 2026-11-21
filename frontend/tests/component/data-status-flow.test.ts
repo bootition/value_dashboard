@@ -82,6 +82,88 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
     })
   })
 
+  it('更新中：数据中心页必须看得到中文进度（2026-11-21 用户要求）', async () => {
+    const get = axios.get as Mock
+    const base = get.getMockImplementation()!
+    get.mockImplementation((url: string) => {
+      if (url === '/api/data-status/auto-update') {
+        return Promise.resolve({
+          data: {
+            state: 'enabled', enabled: true, paused: false,
+            current_stage: 'running',
+            progress: {
+              phase: 'step:indicators', job_id: 'job-9',
+              started_at: new Date(Date.now() - 125000).toISOString(),
+              live: { step: 'indicators', done: 2500, total: 5575, current: '000672', eta_seconds: 1800 },
+              steps: { prices: 'success', universe: 'skipped', announcements: 'success' },
+              log: [{ t: '20:26:18', msg: '指标快照 进行中 2500/5575 000672' }],
+            },
+            last_error: null, last_success_at: '2026-08-01T09:00:00+00:00',
+            latest_job: { id: 257, status: 'running' },
+          },
+        })
+      }
+      return base(url as string)
+    })
+
+    const router = createRouter({ history: createMemoryHistory(), routes: [] })
+    const wrapper = mount(NMessageProvider, {
+      slots: { default: () => h(DataStatusPage) },
+      global: { plugins: [router] },
+    })
+    await flushPromises()
+
+    const block = wrapper.find('#update-progress')
+    expect(block.exists()).toBe(true)
+    const text = block.text()
+    // 中文阶段名（不是 `running` / `step:indicators` 这种原始英文）
+    expect(text).toContain('正在重算指标快照')
+    expect(text).not.toContain('step:indicators')
+    // 计数 + 百分比 + 已耗时 + 预计剩余
+    expect(text).toContain('2500 / 5575')
+    expect(text).toContain('45%')
+    expect(text).toContain('已耗时')
+    expect(text).toContain('预计剩余')
+    // 已完成步骤也用中文名 + 中文状态（不是 `prices:success`）
+    const page = wrapper.text()
+    expect(page).toContain('正在更新股票价格·完成')
+    expect(page).toContain('股票池与股本·跳过')
+    expect(page).not.toContain('prices:success')
+    wrapper.unmount()
+  })
+
+  it('无计数步骤（如抓公告）也要显示中文阶段与不确定进度条', async () => {
+    const get = axios.get as Mock
+    const base = get.getMockImplementation()!
+    get.mockImplementation((url: string) => {
+      if (url === '/api/data-status/auto-update') {
+        return Promise.resolve({
+          data: {
+            state: 'enabled', enabled: true, paused: false,
+            current_stage: 'running',
+            progress: { phase: 'step:announcements', job_id: 'job-9', steps: { prices: 'success' }, log: [] },
+            last_error: null, last_success_at: null,
+            latest_job: { id: 257, status: 'running' },
+          },
+        })
+      }
+      return base(url as string)
+    })
+
+    const router = createRouter({ history: createMemoryHistory(), routes: [] })
+    const wrapper = mount(NMessageProvider, {
+      slots: { default: () => h(DataStatusPage) },
+      global: { plugins: [router] },
+    })
+    await flushPromises()
+
+    const block = wrapper.find('#update-progress')
+    expect(block.exists()).toBe(true)
+    expect(block.text()).toContain('正在抓取公告')
+    expect(block.text()).toContain('没有逐股计数')
+    wrapper.unmount()
+  })
+
   it('渲染覆盖统计、警告、自动更新与各数据域最新日期', async () => {
     const router = createRouter({ history: createMemoryHistory(), routes: [] })
     const wrapper = mount(NMessageProvider, {

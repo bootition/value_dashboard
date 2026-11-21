@@ -8,6 +8,12 @@ import { warningCodeLabel } from '../types/data-quality'
 import { fmtStoredPercent } from '../utils/formatters.ts'
 import { usePollTimer } from '../composables/usePolling.ts'
 import { isPackaged } from '../helpers/runtime.ts'
+import {
+  formatElapsed,
+  stageLabel,
+  stepFromPhase,
+  updateStepStatusLabel,
+} from '../helpers/auto-update-progress.ts'
 
 // 打包版 / 开发版的 CLI 前缀不同（见 helpers/runtime.ts）
 const packagedRuntime = ref(false)
@@ -114,6 +120,26 @@ const effectiveRunning = computed(() =>
 )
 
 const updateLive = computed(() => autoUpdate.value?.progress?.live || null)
+// 阶段/步骤名一律走中文映射：后端 `current_stage` 是 `running`、`progress.phase` 是
+// `step:indicators`、`progress.steps` 的键是 `prices/universe/...` —— 直接显示就是英文，
+// 用户看不懂（2026-11-21 用户明确要求"数据中心界面能看到正在做什么"）。
+const updateStageLabel = computed(() => {
+  const status = autoUpdate.value
+  const step = stepFromPhase(status?.progress?.phase) || status?.current_stage || ''
+  return stageLabel(step)
+})
+const updateStepChips = computed(() => {
+  const steps = (autoUpdate.value?.progress?.steps ?? {}) as Record<string, string>
+  return Object.entries(steps).map(([key, value]) => ({
+    key,
+    label: stageLabel(key),
+    statusLabel: updateStepStatusLabel(value),
+    status: String(value),
+  }))
+})
+const updateElapsedLabel = computed(() =>
+  formatElapsed(autoUpdate.value?.progress?.started_at ?? null),
+)
 const updateLog = computed(() => autoUpdate.value?.progress?.log || [])
 const updateLivePct = computed(() => {
   const live = updateLive.value
@@ -486,12 +512,21 @@ function skipReasonLabel(reason: string | null | undefined): string {
                 style="color:#999; margin-left:8px;"
               >（启动后自动更新）</span>
             </n-descriptions-item>
-            <n-descriptions-item label="当前阶段">{{ autoUpdate.current_stage || '—' }}</n-descriptions-item>
-            <n-descriptions-item label="阶段进度">
-              {{ autoUpdate.progress?.phase || '—' }}
-              <span v-if="autoUpdate.progress?.steps && Object.keys(autoUpdate.progress.steps).length > 0">
-                （{{ Object.entries(autoUpdate.progress.steps).map(([k, v]) => `${k}:${v}`).join('、') }}）
-              </span>
+            <n-descriptions-item label="当前阶段">
+              <strong>{{ updateStageLabel }}</strong>
+            </n-descriptions-item>
+            <n-descriptions-item label="已完成步骤">
+              <n-space v-if="updateStepChips.length" size="small">
+                <n-tag
+                  v-for="chip in updateStepChips"
+                  :key="chip.key"
+                  size="small"
+                  :type="chip.status === 'failed' ? 'error' : chip.status === 'skipped' ? 'default' : 'success'"
+                >
+                  {{ chip.label }}·{{ chip.statusLabel }}
+                </n-tag>
+              </n-space>
+              <span v-else style="color:#999">—</span>
             </n-descriptions-item>
             <n-descriptions-item label="作业ID">{{ autoUpdate.progress?.job_id || '—' }}</n-descriptions-item>
             <n-descriptions-item label="最近执行">{{ formatLocalTime(autoUpdate.updated_at) }}</n-descriptions-item>
@@ -517,24 +552,39 @@ function skipReasonLabel(reason: string | null | undefined): string {
             界面控制器尚未刷新到 running 状态，但 job_logs 中的更新作业
             #{{ autoUpdate.latest_job?.id }} 仍在推进；本页会持续轮询。
           </n-alert>
-          <!-- 实时逐股进度（运行中由 detail_cb 提供） -->
-          <div v-if="updateLive" class="update-live">
+          <!-- 更新进度：**只要在跑就显示**（2026-11-21 用户要求"数据中心界面能看到正在做什么"）。
+               有逐股计数时用实进度条；没有计数（公告/财务等无总数的步骤）用不确定进度条，
+               阶段名照样是中文 —— 不再出现"只有指标步才看得见"的空窗。 -->
+          <div v-if="effectiveRunning" id="update-progress" class="update-live">
             <div class="update-live-title">
-              <n-tag size="small" type="info">{{ updateLive.label }}</n-tag>
-              <span>{{ updateLive.done }} / {{ updateLive.total }}</span>
+              <n-tag size="small" type="info">{{ updateStageLabel }}</n-tag>
+              <span v-if="updateLive && updateLive.total">
+                {{ updateLive.done }} / {{ updateLive.total }} · {{ updateLivePct }}%
+              </span>
+              <span v-else style="color:#999">处理中…</span>
             </div>
             <n-progress
+              v-if="updateLive && updateLive.total"
               type="line"
               :percentage="updateLivePct"
               :height="10"
               :show-indicator="false"
               processing
             />
+            <n-progress
+              v-else
+              type="line"
+              :percentage="0"
+              :height="10"
+              :show-indicator="false"
+              processing
+            />
             <p class="update-live-hint">
-              正在更新 {{ updateLive.current || '—' }}
-              <span v-if="updateLive.rate_per_minute">· {{ updateLive.rate_per_minute }} 股/分</span>
+              <span v-if="updateLive?.current">正在更新 {{ updateLive.current }}</span>
+              <span v-else>正在执行「{{ updateStageLabel }}」，该步骤没有逐股计数</span>
+              <span v-if="updateLive?.rate_per_minute">· {{ updateLive.rate_per_minute }} 股/分</span>
               <span v-if="updateEtaLabel">· 预计剩余 {{ updateEtaLabel }}</span>
-              <span v-if="updateLive.updated_at">· {{ new Date(updateLive.updated_at).toLocaleTimeString('zh-CN', { hour12: false }) }}</span>
+              <span v-if="updateElapsedLabel">· 已耗时 {{ updateElapsedLabel }}</span>
             </p>
           </div>
           <!-- 更新日志（最近 10 条） -->
