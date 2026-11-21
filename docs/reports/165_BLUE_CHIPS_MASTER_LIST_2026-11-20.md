@@ -1,6 +1,7 @@
 ---
 title: 蓝筹白马名单（45 家）——为什么 ROCE 榜会漏掉美的、福耀
-status: approved
+status: superseded
+superseded-by: reports/167_BLUE_CHIP_AND_WHITE_HORSE_LISTS_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -8,6 +9,8 @@ data-source: data/valuedashboard.duckdb（2026-11-20 收盘）+ 报表十年 ROE
 ---
 
 # 蓝筹白马名单（45 家）
+
+> ⚠️ **本文已 superseded，请读 `reports/167`。** 本文有两个缺口：① 银行被 `ROE ≥ 12%` 门槛系统性排除（工行 ROE 9.0%、招行 11.5%）；② 只列了蓝筹，没列白马（宁德时代、工业富联、药明康德等被"分红≥10年"挡掉）。**本文 §0 关于 ROCE vs ROE 分母差异的分析仍然有效。**
 
 > 起因：您注意到「美的、福耀这种好企业容易被指标遗漏」。**结论先说：它们不是被 ROE 漏掉的，是被 ROCE 榜漏掉的——而两者漏掉的机制完全不同。**
 
