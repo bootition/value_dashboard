@@ -468,6 +468,7 @@ def run_incremental_update_flow(
         force_full_requested,
         periodic_full_days,
         plan_indicator_scope,
+        settle_trading_calendar_fingerprint,
     )
 
     calculator = IndicatorCalculator(duck=owner.duck, sqlite=owner.sqlite)
@@ -507,7 +508,15 @@ def run_incremental_update_flow(
         "fingerprint_error": scope_plan.fingerprint_error,
         "planning_error": scope_plan.planning_error,
         "periodic_full_days": periodic_full_days(),
+        # 交易日历（2026-11-21 盲区复核 #1）：它是全市场共用的标量输入面，
+        # 变了可能把 MA/量能整列变 NULL，而行情行一个都没变。
+        "trading_calendar_fingerprint": scope_plan.trading_calendar_fingerprint,
+        "trading_calendar_changed": scope_plan.trading_calendar_semantics_changed,
     }
+    # 日历"内容变了但语义没变"（新增/删除的日期在行情表里有行）→ 不需要重算，
+    # 但水位必须在这里推进：这一轮不会调 commit_indicator_scope（没算东西），
+    # 不推进就每轮重复探测同一处变更。
+    settle_trading_calendar_fingerprint(owner, scope_plan)
     if scope_plan.fingerprint_error:
         logger.warning("指标输入指纹不可用，本轮退回全量: %s", scope_plan.fingerprint_error)
 

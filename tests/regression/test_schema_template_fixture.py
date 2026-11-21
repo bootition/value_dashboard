@@ -42,7 +42,7 @@ _MATERIALIZING_RUNS: list[str] = []
 #: 一次真实 init 建出的表数（实测 49；取宽松下界，只用来发现「模板是空的」）。
 _MIN_EXPECTED_TABLES = 40
 #: schema_migrations 的终态（实测记录 48 条，最大版本 49）。
-_EXPECTED_MAX_MIGRATION_VERSION = 49
+_EXPECTED_MAX_MIGRATION_VERSION = 50
 
 #: 上一条隔离性用例留下的痕迹（见 ``test_previous_test_writes_are_invisible_here``）。
 _PREVIOUS_WRITES: dict[str, object] = {}

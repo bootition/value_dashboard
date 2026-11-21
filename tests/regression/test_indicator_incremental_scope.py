@@ -1108,3 +1108,171 @@ def test_periodic_full_refresh_fires_after_configured_days(
     assert decision["reason"] == "periodic_full_refresh"
     refreshed = updater._read_refresh_state(scope_module.PERIODIC_FULL_KEY)
     assert refreshed != eight_days_ago, "全量成功后必须刷新周期水位，否则每轮都全量"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ⑨ 交易日历（`trading_dates`，SQLite）被外部改写 —— 2026-11-21 盲区复核
+#
+# 为什么它是**真**盲区：`calculator._calc_technical` 的 `_expected_trading_dates`
+# 会读 `trading_dates` 决定"连续窗口"的边界 —— 两个相邻行情行之间只要插进一个
+# **预期交易日**（那天没有行情行），`_trailing_contiguous_closes` 就地截断，
+# MA5/10/20/60/120/250、avg_volume、turnover_rate、period_return、
+# annualized_volatility、max_drawdown 全部改变。而**行情行一个都没变** →
+# `price_fingerprints` 逐股内容摘要完全一样 → 修前 `skipped / planned_count=0`，
+# 快照永久停在旧日历算出来的技术指标上。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _calendar_date_without_prices(duckdb_store) -> str:
+    """最近窗口里一个"日历可以考虑、行情表整列都没有"的日期（周末）。
+
+    真实形态：源端补了一个调休交易日 / 日历被订正，而行情还没重拉。
+    """
+    rows = duckdb_store.read_query(
+        """SELECT CAST(day AS VARCHAR) AS d
+           FROM generate_series(
+                    CURRENT_DATE - INTERVAL '13 days',
+                    CURRENT_DATE - INTERVAL '1 day',
+                    INTERVAL '1 day') AS t(day)
+           WHERE EXTRACT(ISODOW FROM day) IN (6, 7)
+           ORDER BY day DESC
+           LIMIT 1"""
+    )
+    assert rows, "fixture 的近两周里必须有周末日期"
+    return str(rows[0]["d"])[:10]
+
+
+def _calendar_date_with_prices(duckdb_store, code: str, offset: int) -> str:
+    """该股票倒数第 `offset+1` 个行情行（有行 = 日历删掉它不改变任何序列）。"""
+    return str(_recent_trade_date(duckdb_store, code, offset))[:10]
+
+
+def _ma_volume_columns() -> tuple[str, ...]:
+    return (
+        "ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
+        "avg_volume", "turnover_rate", "period_return",
+        "annualized_volatility", "max_drawdown",
+    )
+
+
+def test_trading_calendar_change_recomputes_and_matches_full(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑨ 日历多出一个"没有行情的交易日" → 必须重算，且增量结果 == 全量重算。
+
+    修前本用例红在 `mode`/`mismatches`：日历变了但所有指纹都说"没变"，
+    快照里的 ma5/ma10/…/avg_volume 还是旧日历算出来的值。
+    """
+    codes = _audit_codes(6)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+
+    first = updater.run_incremental_update()["steps"]["indicators"]
+    assert first["mode"] == "full", first
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["mode"] == "incremental", steady
+    assert steady["recomputed_count"] == 0, steady
+    before = _snapshot_map(duckdb_store)
+
+    # 外部改日历：插入一个行情表里整列都没有的日期（周末）。
+    gap_day = _calendar_date_without_prices(duckdb_store)
+    sqlite_store.execute(
+        "INSERT OR IGNORE INTO trading_dates (trade_date) VALUES (?)", [gap_day],
+    )
+
+    report = updater.run_incremental_update()
+    step = report["steps"]["indicators"]
+
+    assert step["mode"] == "full", (
+        f"日历变了却走增量 → 技术指标永久停在旧日历：mode={step['mode']} "
+        f"reason={step['reason']} planned={step['planned_count']}"
+    )
+    assert step["reason"] == "trading_calendar_changed", (
+        f"日历变化必须给可解释的 reason：{step['reason']}"
+    )
+    assert step.get("changed_sources", {}).get("trading_calendar_changed", 0) >= 1, (
+        f"日历变化没留痕：{step.get('changed_sources')}"
+    )
+    assert step["recomputed_count"] == len(codes), step
+
+    incremental = _snapshot_map(duckdb_store)
+    # 变化必须是真的：受影响股票的技术列相对上一轮**确实变了**
+    #（否则本用例只是在验证"全量照跑"，证明不了旧值是错的）。
+    moved = {
+        code: [
+            column for column in _ma_volume_columns()
+            if before[code].get(column) != incremental[code].get(column)
+        ]
+        for code in codes
+    }
+    assert any(moved.values()), (
+        "插入一个没有行情的交易日之后所有技术列都没变 —— 本用例失去了证明力"
+    )
+    assert all(moved.values()), (
+        f"日历是全市场共用的输入，但只有部分股票的技术列变了："
+        f"{ {code: cols for code, cols in moved.items() if not cols} }"
+    )
+
+    # 金标准：同一份数据（同一份日历）全量重算，逐行逐列相等。
+    full_report = IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    assert full_report["status"] == "success", full_report
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(incremental, full)
+    mismatches = sum(len(columns) for columns in delta.values())
+    assert mismatches == 0, (
+        f"日历变化后增量与全量不一致 {mismatches} 个格子（{len(delta)} 只）；"
+        f"首例 {list(delta.items())[0]}"
+    )
+    assert len(next(iter(incremental.values()))) >= 70, "比对的是全列（除时间戳）"
+
+
+def test_trading_calendar_growth_with_existing_prices_is_not_a_change(
+    duckdb_store, sqlite_store,
+) -> None:
+    """日历删掉一个**有行情行**的日期 = 对任何序列都没有影响 → 不许重算。
+
+    这条防的是"只要 `trading_dates` 变过就全量"的粗暴实现：那等于把
+    `_update_trading_dates` 每天的 `INSERT OR REPLACE` 变成一轮 35 分钟全量。
+    `_trailing_contiguous_closes` 只在"两个行情行之间的**预期**交易日缺失"时
+    截断；被删的日期本来就有行情行，删不删都不构成缺口。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    before = _snapshot_map(duckdb_store)
+
+    covered_day = _calendar_date_with_prices(duckdb_store, codes[0], 3)
+    sqlite_store.execute("DELETE FROM trading_dates WHERE trade_date = ?", [covered_day])
+
+    report = updater.run_incremental_update()
+    step = report["steps"]["indicators"]
+    assert step["mode"] == "incremental", (
+        f"删掉一个有行情行的日历日不该触发全量：reason={step['reason']}"
+    )
+    assert step["recomputed_count"] == 0, (
+        f"删掉一个有行情行的日历日不该重算任何股票：{step['recomputed_codes']}"
+    )
+
+    # 等价性仍然是硬约束：不重算的结论必须与"用新日历全量重算"一致。
+    after = _snapshot_map(duckdb_store)
+    assert after == before, "行情行没变、日历变化不构成缺口，快照不该有任何差异"
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(after, full)
+    assert not delta, f"不重算的判断是错的：{list(delta.items())[0]}"
+
+
+def test_trading_calendar_unchanged_keeps_steady_state_skipping(
+    duckdb_store, sqlite_store,
+) -> None:
+    """日历**不变**时稳态仍然 0 重算（新指纹面不许变成"每轮都算"）。"""
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+
+    for round_index in range(3):
+        step = updater.run_incremental_update()["steps"]["indicators"]
+        assert step["mode"] == "incremental", (round_index, step)
+        assert step["recomputed_count"] == 0, (round_index, step)
+        assert step.get("changed_sources", {}).get("trading_calendar_changed", 0) == 0, (
+            round_index, step.get("changed_sources"),
+        )

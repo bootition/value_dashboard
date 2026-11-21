@@ -10,6 +10,7 @@ SQLite 表：操作数据（DSL、规则、自选、覆写、计划、日志）
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
@@ -19,8 +20,53 @@ logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（依据 S3 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
-DUCKDB_SCHEMA_VERSION = 49
+DUCKDB_SCHEMA_VERSION = 50
 SQLITE_SCHEMA_VERSION = 20
+
+# ─── v50：被判「没用」的二级索引全清单（唯一来源）─────────────────────────
+# 依据 reports/151（2026-11-21 逐索引 A/B 实测，副本上真跑，每索引 3 次取中位数）：
+#   · 42 条**真实代码路径**查询的 EXPLAIN，在 30 个索引全在时与全删后**全部都是 SEQ_SCAN**
+#     —— DuckDB 1.5.5 的优化器对这批谓词一次都没选 ART 索引（不是"选了但没好处"，是没选）。
+#   · 删掉后没有一条查询变慢 ≥2 倍；反而 5 条明显变快（source_audit 溯源子查询 22 倍、
+#     financial_report_dates 按公告日 5.6 倍、indicator_ext 单期 4.3 倍、source_audit
+#     按批次 4.6 倍、import 写路径见下）。
+#   · 30 个里有 11 个的列是 PRIMARY KEY 的**严格前缀**（PK 的 ART 已经覆盖前缀查找）。
+#   · 留在库里的代价是真实的：每次 DELETE/INSERT 都要维护 ART；CREATE INDEX 在
+#     source_audit（22.9M 行）上要 34s，索引一旦与堆失步就抛
+#     `DuckDBIndexInconsistencyError`，把整轮自动更新打死（reports/136 §7 事故链）。
+# 维护纪律：**不要再建**。新增索引前先拿真实 SQL 跑 EXPLAIN 证明它被选中，再跑 A/B 证明 ≥2 倍。
+DROPPED_SECONDARY_INDEXES: tuple[str, ...] = (
+    "idx_ah_market_snapshot_asof",
+    "idx_balance_sheet_ext_date",
+    "idx_business_breakdown_stock_report",
+    "idx_buyback_events_stock",
+    "idx_cash_flow_activity_date",
+    "idx_cash_flow_indirect_date",
+    "idx_company_employee_history_stock",
+    "idx_etf_daily_code",
+    "idx_field_coverage_history_field",
+    "idx_financial_report_dates_announce",
+    "idx_financial_report_dates_stock",
+    "idx_financial_sector_items_stock",
+    "idx_funding_events_stock",
+    "idx_hk_dividends_stock",
+    "idx_hk_price_daily_date",
+    "idx_index_valuation_code",
+    "idx_indicator_ext_date",
+    "idx_indicator_null_reason_field",
+    "idx_industry_history_stock",
+    "idx_institution_holdings_report_date",
+    "idx_report_metadata_stock",
+    "idx_research_statistics_lookup",
+    "idx_roce_history_date",
+    "idx_share_capital_history_stock",
+    "idx_source_audit_archive_hash",
+    "idx_source_audit_archive_stock_date_field",
+    "idx_source_audit_fetch_batch",
+    "idx_source_audit_hash",
+    "idx_source_audit_stock_date_field",
+    "idx_treasury_yield_curve_date",
+)
 
 # ─── 依据索引（本文件所有「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）───
 # schema 有 3000 行 DDL + 60 条迁移历史，同一个报告的小节号曾被逐行重复十几次，
@@ -434,12 +480,6 @@ CREATE TABLE IF NOT EXISTS source_audit (
     override_id       BIGINT,
     created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
-CREATE INDEX IF NOT EXISTS idx_source_audit_stock_date_field
-    ON source_audit (stock_code, report_date, field_name);
-CREATE INDEX IF NOT EXISTS idx_source_audit_fetch_batch
-    ON source_audit (fetch_batch_id);
-CREATE INDEX IF NOT EXISTS idx_source_audit_hash
-    ON source_audit (raw_response_hash);
 
 -- Legacy records removed from active research remain available as evidence.
 CREATE TABLE IF NOT EXISTS source_audit_quarantine (
@@ -526,8 +566,6 @@ CREATE TABLE IF NOT EXISTS business_breakdown (
     batch_id     VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date, type, item_name)
 );
-CREATE INDEX IF NOT EXISTS idx_business_breakdown_stock_report
-    ON business_breakdown (stock_code, report_date);
 
 -- 财政部-中国国债收益率曲线（依据 S1 P3 独立低频基准域）
 -- 每个点保存曲线日期、期限、收益率、来源、抓取时间、原始响应哈希和置信度；
@@ -623,8 +661,6 @@ CREATE TABLE IF NOT EXISTS institution_holdings (
     batch_id       VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date, holder_type)
 );
-CREATE INDEX IF NOT EXISTS idx_institution_holdings_report_date
-    ON institution_holdings (report_date, holder_type);
 
 CREATE TABLE IF NOT EXISTS treasury_yield_curve (
     curve_date   DATE NOT NULL,        -- 曲线日期（交易日）
@@ -637,8 +673,6 @@ CREATE TABLE IF NOT EXISTS treasury_yield_curve (
     batch_id     VARCHAR NOT NULL,     -- 批次
     PRIMARY KEY (curve_date, tenor_years)
 );
-CREATE INDEX IF NOT EXISTS idx_treasury_yield_curve_date
-    ON treasury_yield_curve (curve_date);
 
 -- 历史总股本链（P4，依据 S1 §3 主链：CNINFO p_stock2215）
 -- 半年/年报期末锚点 + 变动事件共同构成历史骨架；verified 由东财 F10 近邻交叉核验。
@@ -655,8 +689,6 @@ CREATE TABLE IF NOT EXISTS share_capital_history (
     batch_id       VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, effective_date)
 );
-CREATE INDEX IF NOT EXISTS idx_share_capital_history_stock
-    ON share_capital_history (stock_code, effective_date);
 
 -- 历史研究统计域（P4，依据 S1 §5/§6 独立只读域）
 -- 每股票×序列×窗口×方法一行；staging→原子发布，版本+输入指纹；筛选只能 join 已发布域。
@@ -676,8 +708,6 @@ CREATE TABLE IF NOT EXISTS research_statistics (
     published_at     TIMESTAMP NOT NULL,
     PRIMARY KEY (stock_code, metric, window_years, method, version)
 );
-CREATE INDEX IF NOT EXISTS idx_research_statistics_lookup
-    ON research_statistics (metric, window_years, method, version);
 
 -- 融资事件域（2026-08-25，数据补全：分红融资比指标的数据前置）
 -- 覆盖 IPO 首发 / A 股增发 / 配股三类历史融资事件；
@@ -702,8 +732,6 @@ CREATE TABLE IF NOT EXISTS funding_events (
     confidence      VARCHAR NOT NULL,   -- strict / approximate / missing
     batch_id        VARCHAR NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_funding_events_stock
-    ON funding_events (stock_code);
 
 -- 回购/注销事件域（2026-08-26，分红融资比“广义分红”数据补充）
 -- 东财回购明细全市场单次低频拉取；金额为“已回购金额”（元），
@@ -721,8 +749,6 @@ CREATE TABLE IF NOT EXISTS buyback_events (
     confidence      VARCHAR NOT NULL,
     batch_id        VARCHAR NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_buyback_events_stock
-    ON buyback_events (stock_code);
 
 -- 港股分红域（2026-09-04，总市场分红融资比数据前置之一）
 -- 仅覆盖 stock_zh_ah_spot() 能映射到 A 股 stock_meta 的 A+H 公司；
@@ -746,8 +772,6 @@ CREATE TABLE IF NOT EXISTS hk_dividends (
     batch_id                VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, ex_date, plan_explain)
 );
-CREATE INDEX IF NOT EXISTS idx_hk_dividends_stock
-    ON hk_dividends (stock_code);
 
 -- 指数估值域（2026-08-25，数据补全：沪深300 ERP 指标的数据前置）
 -- 2026-09-05 v21：扩展为多指数四源——乐咕宽基月度 PE/PB（主）、申万一级行业
@@ -768,8 +792,6 @@ CREATE TABLE IF NOT EXISTS index_valuation (
     extra        VARCHAR,               -- 附加字段 JSON 字符串
     PRIMARY KEY (index_code, trade_date, source)
 );
-CREATE INDEX IF NOT EXISTS idx_index_valuation_code
-    ON index_valuation (index_code, trade_date);
 
 -- ETF 日线行情域（2026-09-05，同花顺官方 Financial-API 主源）
 -- 供 ETF 轮动工作台的网格价/持仓盈亏计算；源失败保留旧值，不阻断个股主链。
@@ -792,8 +814,6 @@ CREATE TABLE IF NOT EXISTS etf_daily (
     batch_id    VARCHAR NOT NULL,
     PRIMARY KEY (etf_code, trade_date, source)
 );
-CREATE INDEX IF NOT EXISTS idx_etf_daily_code
-    ON etf_daily (etf_code, trade_date);
 
 -- 间接法现金流量表（2026-09-19 v24，Phase B 数据层）
 -- 来源：CSMAR C17 的 FS_Comscfi.dta（216,862 行，1997-06-30 ~ 2025-03-31），
@@ -842,8 +862,6 @@ CREATE TABLE IF NOT EXISTS cash_flow_indirect (
     raw_data                            VARCHAR,
     PRIMARY KEY (stock_code, report_date)
 );
-CREATE INDEX IF NOT EXISTS idx_cash_flow_indirect_date
-    ON cash_flow_indirect (report_date);
 
 -- 财报公布日期域（2026-09-19 v24，Phase B「时点可见性」）
 -- 来源：CSMAR C17 的 FAR_Finidx.Annodt（1990-2024 年报）。实测覆盖率 97.7%
@@ -861,10 +879,6 @@ CREATE TABLE IF NOT EXISTS financial_report_dates (
     batch_id       VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date, source)
 );
-CREATE INDEX IF NOT EXISTS idx_financial_report_dates_announce
-    ON financial_report_dates (announce_date);
-CREATE INDEX IF NOT EXISTS idx_financial_report_dates_stock
-    ON financial_report_dates (stock_code, report_date);
 
 -- 投资/筹资活动现金流量补充域（2026-09-19 v25，Phase B）
 -- 来源：CSMAR C17 的 FS_Comscfd.dta（直接法现金流量表）中本项目此前未映射的
@@ -905,8 +919,6 @@ CREATE TABLE IF NOT EXISTS cash_flow_activity (
     batch_id                      VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date)
 );
-CREATE INDEX IF NOT EXISTS idx_cash_flow_activity_date
-    ON cash_flow_activity (report_date);
 
 -- 扩展指标域（2026-09-19 v25，Phase B「缺失指标族」）
 -- 用途：承载本项目此前完全没有、且 CSMAR C17 也无法直接采用（三色灯 yellow）的
@@ -949,8 +961,6 @@ CREATE TABLE IF NOT EXISTS indicator_ext (
     data_version                  INTEGER NOT NULL,
     PRIMARY KEY (stock_code, report_date)
 );
-CREATE INDEX IF NOT EXISTS idx_indicator_ext_date
-    ON indicator_ext (report_date);
 -- 指标空值原因（2026-11-14，依据 S5 §5 P2-1）。
 -- 为什么需要：indicator_snapshot / indicator_ext 的 NULL 至少有 6 种含义
 -- （源缺失 / 不适用 / 分母无效 / 没去抓 / 被遮蔽 / 该算没算），前端统一渲染成
@@ -966,8 +976,6 @@ CREATE TABLE IF NOT EXISTS indicator_null_reason (
     computed_at  TIMESTAMP NOT NULL,
     PRIMARY KEY (stock_code, report_date, field_name)
 );
-CREATE INDEX IF NOT EXISTS idx_indicator_null_reason_field
-    ON indicator_null_reason (field_name, report_date);
 
 -- 字段覆盖率历史（2026-11-14，依据 S5 §5 C2 覆盖率看门狗基线）。
 -- 为什么需要：现在"某字段覆盖率从 99.9% 掉到 1.8%"没有任何人知道
@@ -983,8 +991,6 @@ CREATE TABLE IF NOT EXISTS field_coverage_history (
     coverage_pct   DOUBLE    NOT NULL,
     PRIMARY KEY (run_id, domain, field_name)
 );
-CREATE INDEX IF NOT EXISTS idx_field_coverage_history_field
-    ON field_coverage_history (domain, field_name, recorded_at);
 
 -- ─── 2026-11-14 第二批修复新增域（依据 S7）─────────────────────────
 
@@ -1004,8 +1010,6 @@ CREATE TABLE IF NOT EXISTS industry_history (
     fetched_at     TIMESTAMP NOT NULL,
     PRIMARY KEY (stock_code, effective_date, source)
 );
-CREATE INDEX IF NOT EXISTS idx_industry_history_stock
-    ON industry_history (stock_code, effective_date);
 
 -- 港股日行情（依据 S8 §2.7 J12；行业口径总市值 = A 价 × 总股本，H 股按 A 价计）。
 -- 只覆盖 A+H 映射表里的 H 股代码（约 202 只），日频、体量很小。
@@ -1017,8 +1021,6 @@ CREATE TABLE IF NOT EXISTS hk_price_daily (
     fetched_at TIMESTAMP NOT NULL,
     PRIMARY KEY (stock_code, trade_date)
 );
-CREATE INDEX IF NOT EXISTS idx_hk_price_daily_date
-    ON hk_price_daily (trade_date);
 
 -- 汇率日表（当前只需要 HKDCNY；设计成通用 pair 以便以后加 USDCNY）。
 CREATE TABLE IF NOT EXISTS fx_rate_daily (
@@ -1044,8 +1046,6 @@ CREATE TABLE IF NOT EXISTS report_metadata (
     fetched_at   TIMESTAMP NOT NULL,
     PRIMARY KEY (stock_code, report_date, source)
 );
-CREATE INDEX IF NOT EXISTS idx_report_metadata_stock
-    ON report_metadata (stock_code, report_date);
 
 -- A+H「H 股市值」快照（v41，依据 S8 §2.7 J12 的落地出口；依据 S9 补 API）。
 -- 为什么需要：`app/core/ah_metrics.py::build_ah_snapshot()` 早已算出 203 只
@@ -1093,8 +1093,6 @@ CREATE TABLE IF NOT EXISTS ah_market_snapshot (
     fetch_time               TIMESTAMP NOT NULL,
     PRIMARY KEY (stock_code, as_of)
 );
-CREATE INDEX IF NOT EXISTS idx_ah_market_snapshot_asof
-    ON ah_market_snapshot (as_of);
 
 -- 资产负债表补充域（2026-09-19 v27，"榨干数据包" R7）。
 -- 为什么单独建表：这三项是主链 balance_sheet 未映射、但价值投资常用且**无法自算**的科目。
@@ -1120,8 +1118,6 @@ CREATE TABLE IF NOT EXISTS balance_sheet_ext (
     batch_id                  VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date)
 );
-CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date
-    ON balance_sheet_ext (report_date);
 
 -- 已动用资本回报率 ROCE 的**年度序列**（v42，2026-11-16，依据 S11）。
 -- 为什么单独建表：ROCE 的正确用法是「历史 ROCE 的中位数」（书中原文：
@@ -1149,7 +1145,6 @@ CREATE TABLE IF NOT EXISTS roce_history (
     data_version  INTEGER NOT NULL,
     PRIMARY KEY (stock_code, report_date)
 );
-CREATE INDEX IF NOT EXISTS idx_roce_history_date ON roce_history (report_date);
 
 -- 员工人数历史域（2026-09-19 v28，"榨干数据包" R8）。
 -- 用途：计算「人均创收 / 人均创利」——判断公司是真高效还是靠堆人。
@@ -1167,8 +1162,6 @@ CREATE TABLE IF NOT EXISTS company_employee_history (
     batch_id        VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date, source)
 );
-CREATE INDEX IF NOT EXISTS idx_company_employee_history_stock
-    ON company_employee_history (stock_code, report_date);
 
 -- 金融行业专用科目域（2026-09-19 v29，"榨干数据包" R9）。
 -- 来源：CSMAR C17 的 FS_Combas / FS_Comins 中 A0b*(银行) / A0i*(保险) /
@@ -1227,8 +1220,6 @@ CREATE TABLE IF NOT EXISTS financial_sector_items (
     batch_id                       VARCHAR NOT NULL,
     PRIMARY KEY (stock_code, report_date)
 );
-CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock
-    ON financial_sector_items (stock_code, report_date);
 
 
 -- CSMAR 每股指标历史域（2026-09-19 v31，"榨干数据包" R11）。
@@ -1551,6 +1542,58 @@ CREATE TABLE IF NOT EXISTS config (
 """
 
 
+def drop_useless_secondary_indexes(store: DuckDBStore) -> dict[str, Any]:
+    """v50：幂等删除 `DROPPED_SECONDARY_INDEXES` 里的全部二级索引。
+
+    **为什么逐条独立提交、而不是塞进主迁移事务**：DuckDB 1.5.5 里 `DROP INDEX` 与
+    `CREATE INDEX` 落在同一事务会抛
+    ``InternalException: BoundIndex::CreateDeltaIndex is not supported for this index type``
+    且连接被 invalidate（知识库 D2）。只 DROP 不 CREATE 没有这个问题 —— 副本实测 30 条
+    全部删完 **0.0s**（元数据操作，不重写堆），数据零变更。
+    这里仍然一条一个事务：单条失败不影响其余索引，也不污染主迁移事务。
+
+    幂等：`DROP INDEX IF EXISTS` + 只在 `duckdb_indexes()` 里存在时才发语句，
+    重复执行第二遍是纯 no-op（`dropped=[]`）。
+    **失败不阻塞启动**：任何一条抛错只记 warning，返回里如实列出 `failed`。
+    索引是性能设施，清理失败不该让整站起不来。
+
+    返回值给测试/CLI 用：``{"present_before": [...], "dropped": [...], "failed": {...}, "remaining": [...]}``
+    """
+    present = _secondary_index_names(store)
+    dropped: list[str] = []
+    failed: dict[str, str] = {}
+    for name in DROPPED_SECONDARY_INDEXES:
+        if name not in present:
+            continue
+        try:
+            # 复用 DuckDBStore 的唯一标识符校验（拼进 SQL 的值不允许绕过）
+            safe_name = store._assert_simple_identifier(name)
+            with store.transaction() as connection:
+                connection.execute(f"DROP INDEX IF EXISTS {safe_name}")
+            dropped.append(name)
+        except Exception as error:  # noqa: BLE001 - 索引清理失败不得阻塞启动
+            failed[name] = f"{type(error).__name__}: {error}"
+            logger.warning("v50: DROP INDEX %s 失败（忽略，不阻塞启动）: %s", name, error)
+    remaining = sorted(_secondary_index_names(store) & set(DROPPED_SECONDARY_INDEXES))
+    if dropped:
+        logger.info("v50: 已删除 %d 个无用二级索引（剩余待删 %d）", len(dropped), len(remaining))
+    return {
+        "present_before": sorted(present & set(DROPPED_SECONDARY_INDEXES)),
+        "dropped": dropped,
+        "failed": failed,
+        "remaining": remaining,
+    }
+
+
+def _secondary_index_names(store: DuckDBStore) -> set[str]:
+    """当前库里**全部二级索引**名（PRIMARY KEY 的 ART 不在 `duckdb_indexes()` 里）。"""
+    try:
+        rows = store.read_query("SELECT index_name FROM duckdb_indexes()")
+    except Exception:  # noqa: BLE001 - 读不到就当没有，交给调用方幂等重试
+        return set()
+    return {str(row["index_name"]) for row in rows}
+
+
 def init_duckdb_schema(store: DuckDBStore) -> None:
     """初始化 DuckDB 分析库 schema"""
     logger.info("初始化 DuckDB schema...")
@@ -1728,10 +1771,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
                 f"ALTER TABLE indicator_snapshot ADD COLUMN IF NOT EXISTS {column}"
             )
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_treasury_yield_curve_date "
-            "ON treasury_yield_curve (curve_date)"
-        )
-        connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (9, 'Treasury yield curve domain and dividend yield spread columns')
@@ -1740,14 +1779,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         )
         # v10: 历史总股本链 + 历史研究统计域（P4，依据 S1）
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_share_capital_history_stock "
-            "ON share_capital_history (stock_code, effective_date)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_research_statistics_lookup "
-            "ON research_statistics (metric, window_years, method, version)"
-        )
-        connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (10, 'Share capital history chain and research statistics domain')
@@ -1755,14 +1786,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v11: 融资事件域 + 指数估值域（数据补全 2026-08-25，依据 S4）
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_funding_events_stock "
-            "ON funding_events (stock_code)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_index_valuation_code "
-            "ON index_valuation (index_code, trade_date)"
-        )
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -1793,9 +1816,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             """
         )
         # v14: 回购/注销事件域（2026-08-26，广义分红数据补充）
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_buyback_events_stock ON buyback_events (stock_code)"
-        )
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -1991,18 +2011,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         )
         connection.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_source_audit_archive_stock_date_field
-                ON source_audit_archive (stock_code, report_date, field_name)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_source_audit_archive_hash
-                ON source_audit_archive (raw_response_hash)
-            """
-        )
-        connection.execute(
-            """
             CREATE OR REPLACE VIEW source_audit_all AS
             SELECT id, stock_code, field_name, report_date, value, source,
                    fetch_batch_id, fetch_time, raw_response_hash, confidence,
@@ -2029,10 +2037,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # 域纪律：独立于 A 股 readiness；写路径走
         # app/core/hk_dividends.py + 单写者锁，不进入指标快照公式。
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_hk_dividends_stock "
-            "ON hk_dividends (stock_code)"
-        )
-        connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (20, 'Hong Kong dividend events for A+H dual-listed stocks')
@@ -2058,10 +2062,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # v22: ETF 日线行情域（2026-09-05，同花顺官方 Financial-API）。
         # 表 DDL 在 DUCKDB_SCHEMA_V1；此处补索引与迁移记录。
         # 域纪律：独立于 A 股 readiness；失败不阻断主链。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_etf_daily_code "
-            "ON etf_daily (etf_code, trade_date)"
-        )
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2091,18 +2091,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # 域纪律：均为独立低频域，不进入 A 股 readiness 门禁；写路径走
         # scripts/import_csmar_phase_b.py + 单写者锁。
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cash_flow_indirect_date "
-            "ON cash_flow_indirect (report_date)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_financial_report_dates_announce "
-            "ON financial_report_dates (announce_date)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_financial_report_dates_stock "
-            "ON financial_report_dates (stock_code, report_date)"
-        )
-        connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
             VALUES (24, 'CSMAR C17: indirect cash flow statement + annual report publish dates')
@@ -2117,14 +2105,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         #    自由现金流族（FI_T6，yellow：公式透明但口径需自行定义）。
         # 两表 DDL 在 DUCKDB_SCHEMA_V1 中，这里补齐索引与迁移记录。
         # 域纪律：独立低频域，不进入 indicator_snapshot 主链与 readiness 门禁。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cash_flow_activity_date "
-            "ON cash_flow_activity (report_date)"
-        )
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_indicator_ext_date "
-            "ON indicator_ext (report_date)"
-        )
         connection.execute(
             """
             INSERT INTO schema_migrations (version, description)
@@ -2166,10 +2146,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # 其他应收款合计」；indicator_ext 新增 shareholder_occupation。
         # 表 DDL 在 DUCKDB_SCHEMA_V1 中，这里补索引与迁移记录。
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_balance_sheet_ext_date "
-            "ON balance_sheet_ext (report_date)"
-        )
-        connection.execute(
             "ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS shareholder_occupation DOUBLE"
         )
         connection.execute(
@@ -2182,10 +2158,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # v28: 员工人数历史域 + 人效指标（2026-09-19）。
         # company_employee_history 承载逐年员工数；indicator_ext 新增
         # employee_count / revenue_per_employee / profit_per_employee。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_company_employee_history_stock "
-            "ON company_employee_history (stock_code, report_date)"
-        )
         for column in ("employee_count", "revenue_per_employee", "profit_per_employee"):
             connection.execute(
                 f"ALTER TABLE indicator_ext ADD COLUMN IF NOT EXISTS {column} DOUBLE"
@@ -2202,10 +2174,6 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
         # 放进全市场字段表会制造「98% 股票无数据」的伪条件）。
         # 2026-11-15：本表**不是静态冷库表** —— 2025Q2+ 由 supplement.FINANCIAL_SECTOR
         # 补采（source='eastmoney_f10'）持续写入，物理表与索引必须留在主库。
-        connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_financial_sector_items_stock "
-            "ON financial_sector_items (stock_code, report_date)"
-        )
         # 冷库表（csmar_per_share_history / csmar_disclosure_metrics）的索引/列迁移
         # 语句已删除：它们已转为 read_parquet 视图，CREATE INDEX / ALTER TABLE
         # 打在视图上会抛错（清单见 config/cold_archive.yaml）。
@@ -2544,6 +2512,22 @@ def init_duckdb_schema(store: DuckDBStore) -> None:
             ON CONFLICT (version) DO NOTHING
             """
         )
+
+    # v50（2026-11-21，依据 reports/151 逐索引实测）：删除全部二级索引。
+    # **必须在上面那个 `with store.transaction()` 之外**：D2 的 FATAL 就是 DROP INDEX 与
+    # CREATE INDEX 落在同一事务里触发的；这里只 DROP，且一条一个事务（见函数 docstring）。
+    # 放在事务外的第二个理由：索引清理失败不能回滚/阻塞主 schema 迁移。
+    result = drop_useless_secondary_indexes(store)
+    with store.transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO schema_migrations (version, description)
+            VALUES (50, '删除全部二级索引(逐索引A/B实测:优化器从不选,删后无查询变慢≥2x)')
+            ON CONFLICT (version) DO NOTHING
+            """
+        )
+    if result["failed"]:
+        logger.warning("v50: %d 个索引清理失败，将在下次启动重试: %s", len(result["failed"]), result["failed"])
     logger.info("DuckDB schema 初始化完成")
 
 

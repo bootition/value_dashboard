@@ -25,9 +25,11 @@ PRD §12.3 (SC11): 排名分母只由基础股票池预设决定，
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
+from collections.abc import Iterator
 from typing import Any
 
 from app.core.blacklist import blacklisted_codes, exclusion_condition
@@ -43,6 +45,61 @@ from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
+
+# ─── 只读探针批量化（2026-11-21，`.planning/2026-screening-latency`）──────
+#
+# 正式库实测：`DuckDBStore.read_query()` 是 open-per-query，**每次查询新开一条
+# 只读连接要 ~75-85ms**；同一条连接上的后续查询只要 0.2-0.8ms。一次筛选以前要
+# 开 6-8 条连接（混合报告期 / 基础池 / 数据日期 / 覆盖值配对 / 严格血缘 …），
+# 光"开连接"就吃掉 ~500-700ms。
+#
+# 做法：一次 `run()` 里开**一条**连接，把几条互不依赖的探针挤在同一批里跑。
+# 关键约束（别改成"长期持有连接"）：连接生命周期只覆盖一批探针，
+# 用完立刻还回去 —— 本进程长期握着只读句柄会让自动更新子进程打不开库文件
+# （见 `DuckDBStore._build_read_cache` 的实测记录）。正式环境的连接复用开关
+# 仍然关着，这里只是**少开几条**，不是**一直开着**。
+
+def _rows_as_dicts(cursor: Any) -> list[dict]:
+    """把 sqlite3 游标的结果整批转成字典列表（列名取 `cursor.description`）。"""
+    columns = [description[0] for description in cursor.description]
+    return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+
+
+class _BatchedSqlite:
+    """把多条只读 SQLite 查询挤进同一条连接（同 `_BatchedReader` 的理由）。
+
+    SQLite 侧同样是 open-per-query（`SQLiteStore.query()` 每次开一条只读连接），
+    正式库实测**每开一条 ~27-47ms**。只暴露 `query(sql, params)` —— 与
+    `SQLiteStore` 同签名，因此可直接喂给 `blacklist.blacklisted_codes()` 这类
+    "只调用 `.query()`"的共享函数，不复制判定逻辑。
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
+        return _rows_as_dicts(self._conn.execute(sql, params or []))
+
+
+class _BatchedReader:
+    """把多条只读查询挤进同一条 DuckDB 连接，语义与 `read_query()` 一致。
+
+    只暴露 `read_query(sql, params)` —— 与 `DuckDBStore` 同签名，因此可以当
+    "鸭子类型的 store" 直接喂给只吃 `read_query` 的共享判定函数
+    （如 `app.core.data_quality.snapshot_period_mismatches`），保证**只有一处真相**。
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def read_query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
+        cursor = self._conn.execute(sql, params or [])
+        columns = [description[0] for description in cursor.description]
+        return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
 # ─── 操作符 → SQL 映射 ─────────────────────────────────────────────
 
@@ -706,9 +763,59 @@ class ScreeningEngine:
         # 警告一并冒泡 —— 用户看到的是指标名，看不到它内部用了哪一列）。
         self._compiled_field_refs: set[str] = set()
         self._mixed_report_date_codes: list[str] = []
+        #: 当前读作用域（一次 `run()` 内多条探针共用一条只读连接）。
+        #: `None` = 不在作用域里 → 每条查询各自 open-per-query（与改造前一致）。
+        self._reader: _BatchedReader | None = None
+        #: 本次运行"有没有已发布 statement 覆写"（`run()` 里与黑名单同一条 SQLite
+        #: 连接一次读出）；`None` = 还没探过 → `_published_statement_overrides()`
+        #: 自己探一次（直调本方法的测试路径保持原样）。
+        self._published_overrides_present: bool | None = None
         #: 用户黑名单代码（`app/core/blacklist.py`）；在 `run()` 里从 SQLite 重读，
         #: 不在 `__init__` 里缓存——用户随时可能增删，缓存会造出「刚移出却还看不见」。
         self._blacklist_codes: list[str] = []
+
+    @contextlib.contextmanager
+    def _read_scope(self) -> Iterator[_BatchedReader | None]:
+        """开一条只读连接，作用域内的探针共用它（一次 `run()` 少开 4-5 条）。
+
+        异常/退出时立刻还连接；`DuckDBReadLockedError` 照旧从 `read_connection()`
+        冒出去（`/run` 的 `read_cache` 回退与快照兜底逻辑一行都不用改）。
+
+        **退化分支**：注入的 store 可能是只有 `read_query()` 的鸭子类型
+        （`screening_snapshot.SnapshotStore` 就是这样，它读的是物化快照库）。
+        没有 `read_connection()` 就**不共用连接**，域内每条查询照旧各开一条 ——
+        语义与改造前逐字一致，只是不省那点开销。绝不允许因为"想快"而换一条
+        读不到数据的路径。
+        """
+        previous = self._reader
+        # 只对**真** `DuckDBStore` 复用连接：任何鸭子类型封装（物化快照库
+        # `SnapshotStore`、测试里的写锁桩 `LockedDuck`）都自带自己的读语义
+        # （快照库读的是另一个文件；锁桩故意让"开连接"也失败），
+        # 绕过它们唯一暴露的 `read_query()` 去另开连接等于绕过它们的存在理由。
+        open_connection = (
+            getattr(self.duck, "read_connection", None)
+            if isinstance(self.duck, DuckDBStore) else None
+        )
+        if open_connection is None:
+            self._reader = None
+            try:
+                yield None
+            finally:
+                self._reader = previous
+            return
+        with open_connection() as conn:
+            self._reader = _BatchedReader(conn)
+            try:
+                yield self._reader
+            finally:
+                self._reader = previous
+
+    def _read_query(self, sql: str, params: list[Any] | None = None) -> list[dict]:
+        """当前读作用域内走共用连接；域外退回 store 的 open-per-query。"""
+        reader = self._reader
+        if reader is not None:
+            return reader.read_query(sql, params)
+        return self.duck.read_query(sql, params)
 
     def run(
         self,
@@ -769,96 +876,148 @@ class ScreeningEngine:
                 f"min_listing_years 必须在 0-{MAX_POOL_LISTING_YEARS} 之间"
             )
 
-        self._require_known_pool_status(
-            include_st,
-            include_suspended,
-            min_listing_years,
-        )
+        # ── 探针批量化（2026-11-21）：以下整段共用**一条**只读连接。
+        # 正式库 open-per-query 每条连接 ~80ms，一次筛选原本要开 6-8 条；
+        # 这里把「池元数据完整性 / 混合报告期剔除 / strict 派生豁免 / 覆盖值
+        # 配对」四条互不依赖的探针挤进同一批。连接只覆盖这一步，退出即关
+        # （绝不长期持有：会挡住自动更新子进程打开库文件）。
+        with self._read_scope():
+            self._require_known_pool_status(
+                include_st,
+                include_suspended,
+                min_listing_years,
+            )
 
-        # 1. 解析规则
-        #    方案 C（2026-11-16）：条件的 `rank_mode` 在此展开成排名字段后缀，
-        #    之后全流程沿用既有的排名 SQL（无需第二套实现）。
-        conditions = expand_rank_modes(rule.get("conditions", {}))
-        sort_spec = expand_rank_modes(rule.get("sort", []))
-        # 结果列支持 `{field, rank_mode}` 对象写法（方案 C 的第三块）
-        columns_spec = normalize_columns(rule.get("columns", []))
-        if not isinstance(sort_spec, list) or any(
-            not isinstance(item, dict) for item in sort_spec
-        ):
-            raise ValueError("排序项必须是对象")
-        # 条件数量上限（`screening.max_conditions`，缺省 20）。此前只有
-        # `_build_where` 里一个 100 条的 SQL 保护上限，配置项无人读取。
-        self._enforce_condition_budget(conditions)
+            # 1. 解析规则
+            #    方案 C（2026-11-16）：条件的 `rank_mode` 在此展开成排名字段后缀，
+            #    之后全流程沿用既有的排名 SQL（无需第二套实现）。
+            conditions = expand_rank_modes(rule.get("conditions", {}))
+            sort_spec = expand_rank_modes(rule.get("sort", []))
+            # 结果列支持 `{field, rank_mode}` 对象写法（方案 C 的第三块）
+            columns_spec = normalize_columns(rule.get("columns", []))
+            if not isinstance(sort_spec, list) or any(
+                not isinstance(item, dict) for item in sort_spec
+            ):
+                raise ValueError("排序项必须是对象")
+            # 条件数量上限（`screening.max_conditions`，缺省 20）。此前只有
+            # `_build_where` 里一个 100 条的 SQL 保护上限，配置项无人读取。
+            self._enforce_condition_budget(conditions)
 
-        self._compiled_field_refs = set()
-        compiled_indicators = self._compile_published_indicators(locked_indicators or {})
-        self._custom_fields = set(compiled_indicators)
+            self._compiled_field_refs = set()
+            # 每次运行的 SQLite 探针结果都要重读（用户随时可能加/删覆写）。
+            self._published_overrides_present = None
+            compiled_indicators = self._compile_published_indicators(locked_indicators or {})
+            self._custom_fields = set(compiled_indicators)
 
-        # 2. 提取条件中引用的排名指标
-        strict_referenced_fields = self._extract_fields(conditions)
-        strict_referenced_fields.update(item.get("field", "") for item in sort_spec)
-        referenced_fields = strict_referenced_fields | set(columns_spec)
-        rank_fields = {
-            base for field in referenced_fields
-            if (base := self._rank_base(field)) is not None
-        }
-        strict_fields = {
-            base
-            for field in referenced_fields
-            for base in (field, self._rank_base(field))
-            if base in SNAPSHOT_COLUMNS or base in NORMALIZED_FIELDS or base in self._custom_fields
-        }
+            # 2. 提取条件中引用的排名指标
+            strict_referenced_fields = self._extract_fields(conditions)
+            strict_referenced_fields.update(item.get("field", "") for item in sort_spec)
+            referenced_fields = strict_referenced_fields | set(columns_spec)
+            rank_fields = {
+                base for field in referenced_fields
+                if (base := self._rank_base(field)) is not None
+            }
+            strict_fields = {
+                base
+                for field in referenced_fields
+                for base in (field, self._rank_base(field))
+                if base in SNAPSHOT_COLUMNS or base in NORMALIZED_FIELDS or base in self._custom_fields
+            }
 
-        # 2.1 字段级遮蔽（依据 S3 §2.3 J9）：字段当前不可信 → 拒绝执行。
-        #     检查 rank 基名（`free_cash_flow_market_rank` 引用的是
-        #     `free_cash_flow`），否则遮蔽会被排名列绕过。
-        self._reject_masked_fields(referenced_fields, masked_fields)
+            # 2.1 字段级遮蔽（依据 S3 §2.3 J9）：字段当前不可信 → 拒绝执行。
+            #     检查 rank 基名（`free_cash_flow_market_rank` 引用的是
+            #     `free_cash_flow`），否则遮蔽会被排名列绕过。
+            self._reject_masked_fields(referenced_fields, masked_fields)
 
-        # 2.2 废弃字段（依据 S3 §2.6 J5）：仍可执行，但结果必须自带警告，
-        #     否则用户不知道自己在用一个会随"今天"漂移的旧口径列。
-        # 2.2b 跨年口径断点原始列（依据 S5 §9.2 P0-7 / P0-8）：同样仍可执行，
-        #     但必须提示"跨断点不可直接比较"并指向归一化派生字段。
-        deprecation_warnings = deprecated_field_warnings(referenced_fields)
-        # 已发布 DSL 指标内部的原始列引用也要冒泡（指标名本身看不出用了哪一列）
-        break_warnings = series_break_field_warnings(
-            referenced_fields | self._compiled_field_refs
-        )
+            # 2.2 废弃字段（依据 S3 §2.6 J5）：仍可执行，但结果必须自带警告，
+            #     否则用户不知道自己在用一个会随"今天"漂移的旧口径列。
+            # 2.2b 跨年口径断点原始列（依据 S5 §9.2 P0-7 / P0-8）：同样仍可执行，
+            #     但必须提示"跨断点不可直接比较"并指向归一化派生字段。
+            deprecation_warnings = deprecated_field_warnings(referenced_fields)
+            # 已发布 DSL 指标内部的原始列引用也要冒泡（指标名本身看不出用了哪一列）
+            break_warnings = series_break_field_warnings(
+                referenced_fields | self._compiled_field_refs
+            )
 
-        # 2026-08-27：不再因个别股票存在快照/完整期不一致而阻断全市场筛选。
-        # 改为把这类股票从本次基础池中排除，其他正常股票照常筛选/导出。
-        self._mixed_report_date_codes = self._load_mixed_report_date_codes()
-        # 2026-11-22：黑名单股票同样从基础池排除。必须加在池里而不是前端过滤——
-        # 排名/分位是跑在 base_pool 之上的窗口函数，池里剔掉才能让排名分母与
-        # 页面可见行数自洽（见 app/core/blacklist.py 模块 docstring「与排名口径的关系」）。
-        self._blacklist_codes = blacklisted_codes(self.sqlite)
+            # 2026-08-27：不再因个别股票存在快照/完整期不一致而阻断全市场筛选。
+            # 改为把这类股票从本次基础池中排除，其他正常股票照常筛选/导出。
+            self._mixed_report_date_codes = self._load_mixed_report_date_codes()
+            # 2026-11-22：黑名单股票同样从基础池排除。必须加在池里而不是前端过滤——
+            # 排名/分位是跑在 base_pool 之上的窗口函数，池里剔掉才能让排名分母与
+            # 页面可见行数自洽（见 app/core/blacklist.py 模块 docstring「与排名口径的关系」）。
+            # SQLite 侧同样是 open-per-query（~27-47ms/条）：黑名单与"有没有
+            # 已发布覆写"这两条互不依赖的小查询共用**一条**连接读出来。
+            # 同理：store 没有 `connection()`（鸭子类型）就退回每次单开一条。
+            open_sqlite = (
+                getattr(self.sqlite, "connection", None)
+                if self.sqlite is not None else None
+            )
+            if open_sqlite is not None:
+                with open_sqlite() as sqlite_conn:
+                    sqlite_batch = _BatchedSqlite(sqlite_conn)
+                    self._blacklist_codes = blacklisted_codes(sqlite_batch)
+                    self._published_overrides_present = (
+                        self._probe_published_statement_overrides(sqlite_batch)
+                    )
+            else:
+                self._blacklist_codes = blacklisted_codes(self.sqlite)
+                if self.sqlite is not None:
+                    self._published_overrides_present = (
+                        self._probe_published_statement_overrides(self.sqlite)
+                    )
 
-        # 2.4 strict 模式：派生字段豁免（语义与 fail-closed 判据见模块常量
-        #     `DERIVED_AUDIT_SOURCE` 的注释）。豁免只发生在**派生**字段上；
-        #     源数据字段一个都不放过 —— 那是 strict 模式唯一的安全底线。
-        strict_exempt: set[str] = (
-            self._strict_exempt_derived_fields(strict_fields) if strict_only else set()
-        )
-        strict_enforced: set[str] = set(strict_fields) - strict_exempt
-        if strict_only:
-            # 派生字段的输入原始列仍可查值 → strict 检查下沉一层继续做。
-            for field in sorted(strict_exempt):
-                strict_enforced.update(derived_input_fields(field))
+            # 2.4 strict 模式：派生字段豁免（语义与 fail-closed 判据见模块常量
+            #     `DERIVED_AUDIT_SOURCE` 的注释）。豁免只发生在**派生**字段上；
+            #     源数据字段一个都不放过 —— 那是 strict 模式唯一的安全底线。
+            strict_exempt: set[str] = (
+                self._strict_exempt_derived_fields(strict_fields) if strict_only else set()
+            )
+            strict_enforced: set[str] = set(strict_fields) - strict_exempt
+            if strict_only:
+                # 派生字段的输入原始列仍可查值 → strict 检查下沉一层继续做。
+                for field in sorted(strict_exempt):
+                    strict_enforced.update(derived_input_fields(field))
 
-        # 3. 构建 SQL
-        sql, params = self._build_sql(
-            conditions=conditions,
-            sort_spec=sort_spec,
-            columns_spec=columns_spec,
-            include_st=include_st,
-            include_suspended=include_suspended,
-            min_listing_years=min_listing_years,
-            rank_fields=rank_fields,
-            strict_fields=strict_enforced if strict_only else set(),
-            compiled_indicators=compiled_indicators,
-        )
+            # 3. 构建 SQL
+            sql, params = self._build_sql(
+                conditions=conditions,
+                sort_spec=sort_spec,
+                columns_spec=columns_spec,
+                include_st=include_st,
+                include_suspended=include_suspended,
+                min_listing_years=min_listing_years,
+                rank_fields=rank_fields,
+                strict_fields=strict_enforced if strict_only else set(),
+                compiled_indicators=compiled_indicators,
+            )
 
-        # 4. 执行
-        results = self.duck.read_query(sql, params)
+        # 4. 执行 —— 主查询与两条后置探针（基础池 / 数据日期）共用一条只读连接：
+        #    open-per-query 下这两条探针各要 ~80ms 开连接（`_BatchedReader` 注释）。
+        #    strict 血缘可用性探针同样塞进这一批（它不依赖结果，只依赖字段清单）。
+        audit_name_of: dict[str, str] = {}
+        audit_rows: list[dict] = []
+        with self._read_scope():
+            results = self._read_query(sql, params)
+            base_pool_size = self._get_base_pool_size(
+                include_st, include_suspended, min_listing_years
+            )
+            data_date = self._get_latest_data_date()
+            if strict_only and strict_fields:
+                # 审计表里 `field_name` 是裸列名（`income.revenue` → `revenue`），
+                # 旧实现拿点号全名去查 → 归一化字段永远"查不到"，误报成缺血缘。
+                audit_name_of = {
+                    self._audit_field_name(field): field
+                    for field in sorted(strict_enforced)
+                }
+                if audit_name_of:
+                    names = sorted(audit_name_of)
+                    placeholders = ", ".join(["?"] * len(names))
+                    audit_rows = self._read_query(
+                        "SELECT field_name, COUNT(*) AS n FROM source_audit "
+                        f"WHERE confidence = 'strict' AND field_name IN ({placeholders}) "
+                        "GROUP BY field_name",
+                        names,
+                    )
         # C14修复(报告41): 复用单次窗口计数 COUNT(*) OVER () 替代二次计数查询，
         # total 语义不变（真实匹配数，分母跟随基础池）；行数超上限时显式 truncated。
         total_matched = int(results[0]["_vd_total"]) if results else 0
@@ -874,21 +1033,7 @@ class ScreeningEngine:
         strict_availability: dict[str, int] = {}
         strict_mode_warning: str | None = None
         if strict_only and strict_fields:
-            # 审计表里 `field_name` 是裸列名（`income.revenue` → `revenue`），
-            # 旧实现拿点号全名去查 → 归一化字段永远"查不到"，误报成缺血缘。
-            audit_name_of = {
-                self._audit_field_name(field): field
-                for field in sorted(strict_enforced)
-            }
             if audit_name_of:
-                names = sorted(audit_name_of)
-                placeholders = ", ".join(["?"] * len(names))
-                audit_rows = self.duck.read_query(
-                    "SELECT field_name, COUNT(*) AS n FROM source_audit "
-                    f"WHERE confidence = 'strict' AND field_name IN ({placeholders}) "
-                    "GROUP BY field_name",
-                    names,
-                )
                 strict_availability = {
                     audit_name_of[r["field_name"]]: int(r["n"])
                     for r in audit_rows
@@ -902,14 +1047,6 @@ class ScreeningEngine:
                 exempt_fields=sorted(strict_exempt),
                 enforced_fields=enforced_fields,
             )
-
-        # 5. 获取基础池大小（用于报告）
-        base_pool_size = self._get_base_pool_size(
-            include_st, include_suspended, min_listing_years
-        )
-
-        # 6. 获取数据日期
-        data_date = self._get_latest_data_date()
 
         logger.info(
             f"筛选完成: {len(results)} 条结果"
@@ -1514,11 +1651,24 @@ LIMIT {MAX_RESULT_ROWS}
         此前把 manual_overrides 全表 published 行塞进 VALUES，行数随覆写历史
         无限膨胀。现在先按基础池口径取出每只股票的最新快照期，再按
         (stock_code, report_date) 精确对查询 SQLite，并设硬上限。
+
+        2026-11-21（`.planning/2026-screening-latency`）：正式库实测本函数
+        **~500ms/次**，而 `manual_overrides` 当时是**空表** —— 这 500ms 全花在
+        "取 5,222 个池内 (代码, 报告期) 对"（+85ms）和随后 **14 条**分块查询上
+        （SQLite 也是 open-per-query，每开一条连接 ~27ms，再加上 400 个 OR
+        条件的编译开销）。于是加两道与结果无关的短路：
+        1. **没有 published 覆写 → 直接返回空**（一条 `LIMIT 1` 探针，~27ms），
+           省掉整段配对查询与分块；
+        2. 有覆写时分块**共用一条 SQLite 连接**（`SQLiteStore.connection()`）。
+        两条都不改变"查哪些对、返回哪些行"的语义 —— 空表时原实现的两个循环
+        在数学上就是恒等于 `[]`。
         """
         if self.sqlite is None:
             return []
+        if not self._has_published_statement_overrides():
+            return []
         statement_fields = {field for fields in STATEMENT_FIELDS.values() for field in fields}
-        pairs_rows = self.duck.read_query(
+        pairs_rows = self._read_query(
             f"""
             SELECT m.stock_code, CAST(s.report_date AS VARCHAR) AS report_date
             FROM stock_meta m
@@ -1542,35 +1692,72 @@ LIMIT {MAX_RESULT_ROWS}
             return []
 
         rows: list[tuple[str, str, str, float]] = []
-        for offset in range(0, len(pairs), 400):
-            chunk = pairs[offset:offset + 400]
-            or_clauses = " OR ".join("(stock_code = ? AND report_date = ?)" for _ in chunk)
-            params: list[Any] = [value for pair in chunk for value in pair]
-            chunk_rows = self.sqlite.query(
-                f"""SELECT stock_code, report_date, field_name, override_value
-                    FROM manual_overrides
-                    WHERE status = 'published' AND rolled_back_at IS NULL
-                      AND report_date IS NOT NULL
-                      AND ({or_clauses})""",
-                params,
-            )
-            for row in chunk_rows:
-                if row["field_name"] not in statement_fields:
-                    continue
-                rows.append(
-                    (
-                        row["stock_code"],
-                        str(row["report_date"])[:10],
-                        row["field_name"],
-                        row["override_value"],
-                    )
+        with contextlib.ExitStack() as stack:
+            # 分块查询共用**一条** SQLite 连接（open-per-query 每开一条 ~27-47ms）；
+            # store 没有 `connection()`（鸭子类型）就退回 `query()`，语义相同。
+            open_conn = getattr(self.sqlite, "connection", None)
+            if open_conn is None:
+                def run_chunk(sql: str, params: list[Any]) -> list[dict]:
+                    return self.sqlite.query(sql, params)
+            else:
+                sqlite_conn = stack.enter_context(open_conn())
+
+                def run_chunk(sql: str, params: list[Any]) -> list[dict]:
+                    return _rows_as_dicts(sqlite_conn.execute(sql, params))
+            for offset in range(0, len(pairs), 400):
+                chunk = pairs[offset:offset + 400]
+                or_clauses = " OR ".join("(stock_code = ? AND report_date = ?)" for _ in chunk)
+                params: list[Any] = [value for pair in chunk for value in pair]
+                chunk_rows = run_chunk(
+                    f"""SELECT stock_code, report_date, field_name, override_value
+                        FROM manual_overrides
+                        WHERE status = 'published' AND rolled_back_at IS NULL
+                          AND report_date IS NOT NULL
+                          AND ({or_clauses})""",
+                    params,
                 )
-                if len(rows) > MAX_OVERRIDE_VALUES:
-                    raise ValueError(
-                        f"published statement overrides exceed the {MAX_OVERRIDE_VALUES}-row SQL limit; "
-                        "narrow the pool or reconcile overrides"
+                for row in chunk_rows:
+                    if row["field_name"] not in statement_fields:
+                        continue
+                    rows.append(
+                        (
+                            row["stock_code"],
+                            str(row["report_date"])[:10],
+                            row["field_name"],
+                            row["override_value"],
+                        )
                     )
+                    if len(rows) > MAX_OVERRIDE_VALUES:
+                        raise ValueError(
+                            f"published statement overrides exceed the {MAX_OVERRIDE_VALUES}-row SQL limit; "
+                            "narrow the pool or reconcile overrides"
+                        )
         return rows
+
+    @staticmethod
+    def _probe_published_statement_overrides(sqlite: Any) -> bool:
+        """本库有**任何**一条已发布 statement 覆写吗？（`LIMIT 1` 探针）
+
+        用途只是"没有就整段跳过"：空表时 `_published_statement_overrides` 的任何
+        分块查询都只会返回空，所以短路**不改变返回结果**（返回值恒为 `[]`）。
+        有覆写时照旧走完整配对流程 —— 这条探针只是把"没有"这个常见情形的
+        ~500ms 变成 ~27ms。
+        """
+        rows = sqlite.query(
+            """SELECT 1 AS present FROM manual_overrides
+               WHERE status = 'published' AND rolled_back_at IS NULL
+                 AND report_date IS NOT NULL
+               LIMIT 1"""
+        )
+        return bool(rows)
+
+    def _has_published_statement_overrides(self) -> bool:
+        """本次运行是否可能存在 statement 覆写（`run()` 已探过就直接复用）。"""
+        if self._published_overrides_present is not None:
+            return self._published_overrides_present
+        if self.sqlite is None:
+            return False
+        return self._probe_published_statement_overrides(self.sqlite)
 
     def _raw_field_expr(
         self, table: str, field: str, alias: str, has_overrides: bool,
@@ -1755,7 +1942,7 @@ LIMIT {MAX_RESULT_ROWS}
         }
         names = sorted(audit_name_of)
         placeholders = ", ".join(["?"] * len(names))
-        rows = self.duck.read_query(
+        rows = self._read_query(
             "SELECT field_name, COUNT(*) AS n, "
             "COUNT(*) FILTER (WHERE source = ?) AS n_derived "
             f"FROM source_audit WHERE field_name IN ({placeholders}) "
@@ -1798,11 +1985,61 @@ LIMIT {MAX_RESULT_ROWS}
 
         These stocks are excluded from the screening base pool instead of
         aborting the whole universe; other stocks remain fully usable.
+
+        2026-11-21（`.planning/2026-screening-latency`）：这条探针的 SQL 本身只有
+        ~90ms，但 open-per-query 下每次运行要多付 ~80ms 开连接，合计 ~180ms，
+        而且**每次运行都重算同一份结果**。现在按**内容令牌**记住它（见
+        `read_cache.serve_by_content`）：令牌 = `content_epoch`（每个成功写事务
+        +1，就地 UPDATE 也会变）+ 本库廉价内容指纹（行数 / 最大报告期，用来兜住
+        "绕过 store 直连写、不记账"的新增）。**令牌取不到就现算、不缓存** ——
+        宁可慢，也绝不让"不知道数据变没变"变成"当作没变"。
         """
         from app.core.data_quality import snapshot_period_mismatches
+        from app.core.storage import read_cache
 
-        rows = snapshot_period_mismatches(self.duck)
-        return [str(row["stock_code"]) for row in rows]
+        def compute() -> list[str]:
+            # 走当前读作用域（若有）→ 与同批其它探针共用一条连接；
+            # 判定 SQL 的唯一真源仍是 `data_quality.snapshot_period_mismatches`。
+            reader = self._reader if self._reader is not None else self.duck
+            return [str(row["stock_code"]) for row in snapshot_period_mismatches(reader)]
+
+        token = read_cache.content_epoch_token(self.sqlite)
+        if token <= 0:
+            # 没有纪元 = 无法判断数据变没变 → 一律现算，不写缓存。
+            return compute()
+        fingerprint = self._mixed_report_content_fingerprint()
+        return list(
+            read_cache.serve_by_content(
+                self.duck,
+                ("screening", "mixed_report_date_codes"),
+                (token, *fingerprint),
+                compute,
+            )
+        )
+
+    def _mixed_report_content_fingerprint(self) -> tuple[Any, ...]:
+        """混合报告期判定的**廉价内容指纹**（一条聚合，全部走元数据/zone map）。
+
+        覆盖这条判定的全部输入：股票池规模 + 快照期 + 三表各表的行数与最大报告期。
+        `content_epoch` 抓"就地改值"，这里抓"新增/回滚行"（即使写入方没走
+        `DuckDBStore` 因而没 bump 纪元，只要行数或最大期变了缓存就失效）。
+        """
+        row = self._read_query(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM stock_meta) AS n_meta,
+                (SELECT COUNT(*) FROM stock_meta WHERE is_listed IS TRUE) AS n_listed,
+                (SELECT COUNT(*) FROM indicator_snapshot) AS n_snapshot,
+                CAST((SELECT MAX(report_date) FROM indicator_snapshot) AS VARCHAR) AS max_snapshot,
+                (SELECT COUNT(*) FROM balance_sheet) AS n_balance,
+                CAST((SELECT MAX(report_date) FROM balance_sheet) AS VARCHAR) AS max_balance,
+                (SELECT COUNT(*) FROM income_statement) AS n_income,
+                CAST((SELECT MAX(report_date) FROM income_statement) AS VARCHAR) AS max_income,
+                (SELECT COUNT(*) FROM cash_flow) AS n_cashflow,
+                CAST((SELECT MAX(report_date) FROM cash_flow) AS VARCHAR) AS max_cashflow
+            """
+        )[0]
+        return tuple(sorted((key, str(value)) for key, value in row.items()))
 
     @staticmethod
     def _audit_field_name(field: str) -> str:
@@ -1835,7 +2072,7 @@ LIMIT {MAX_RESULT_ROWS}
             conds.append(blacklist_pred)
             params.extend(blacklist_params)
         where = " AND ".join(conds) if conds else "1=1"
-        rows = self.duck.read_query(
+        rows = self._read_query(
             f"SELECT COUNT(*) as cnt FROM stock_meta WHERE {where}", params
         )
         return rows[0]["cnt"] if rows else 0
@@ -1856,7 +2093,7 @@ LIMIT {MAX_RESULT_ROWS}
             unknown_conditions.append("listing_date IS NULL")
         if not unknown_conditions:
             return
-        unknown_count = self.duck.read_query(
+        unknown_count = self._read_query(
             "SELECT COUNT(*) AS count FROM stock_meta "
             f"WHERE is_listed IS TRUE AND ({' OR '.join(unknown_conditions)})"
         )[0]["count"]
@@ -1868,7 +2105,7 @@ LIMIT {MAX_RESULT_ROWS}
 
     def _get_latest_data_date(self) -> str | None:
         """获取最新数据日期"""
-        rows = self.duck.read_query(
+        rows = self._read_query(
             "SELECT MAX(report_date) as latest FROM indicator_snapshot"
         )
         if rows and rows[0]["latest"]:

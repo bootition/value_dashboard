@@ -49,7 +49,13 @@ def test_readiness_requires_complete_history_fresh_prices_and_coherent_snapshot(
     )
     assert minimum_data_readiness(
         duckdb_store, minimum_volume_observations=1,
-    )["missing_counts"] == {"raw_history": 1}
+    )["missing_counts"] == {
+        # 删掉 3 年 raw 之后，"成交量观测数"也确实不够了 ——
+        # 2026-11-21 放宽新鲜度判据时顺带把 `meaningful_volume` 暴露了出来
+        # （以前它被同一个用例的 `raw_history` 掩盖，没人注意）。逐字相等断言保留。
+        "raw_history": 1,
+        "meaningful_volume": 1,
+    }
 
     insert_minimum_screenable_data(duckdb_store)
     duckdb_store.write_query(

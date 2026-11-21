@@ -40,8 +40,27 @@
 | 行情 price_daily_raw/qfq | latest_close/date、估值价格域、MA/波动率/回撤/区间收益/成交量/换手 | `price` / `technical_pending` |
 | 分红 dividends / 除权 xdxr | dividend_yield、连续分红年数、DPS、分红融资比 | `dividend_event` / `corporate_event` |
 | 回购/融资事件 | cumulative_*_amount、dividend_financing_ratio_pct | `corporate_event` |
+| **交易日历** `trading_dates`（SQLite，被源端订正/外部脚本改写） | MA5/10/20/60/120/250、avg_volume、turnover_rate、period_return、annualized_volatility、max_drawdown（`_calc_technical` 用它判定"连续窗口"） | `trading_calendar_fingerprint` + `trading_calendar_gap_fingerprint` → 命中走 `trading_calendar_changed`（仅全量） |
 | 计算口径（公式改） | 全部 149 列 | `computation_version`（仅全量） |
 | 国债曲线 | ttm_dividend_yield、div_yield_spread_* | 走 `refresh_treasury_spreads` 专用批量，不进本集合 |
+
+## 故意**不**哈希的列 / 只靠周期兜底的盲区（2026-11-21 复核，别再重复怀疑）
+
+这一节是给"以后又有人怀疑指纹漏了某个格子"准备的清单：每条都写了
+**为什么不算错**或**为什么只能兜底**，以及判据出处。新增指纹面前先读这里。
+
+| 格子 | 会不会算错 | 处理 | 为什么 |
+|---|---|---|---|
+| `price_daily_raw.open/high/low` | **不会** | 不哈希（见 `_PRICE_FINGERPRINT_TABLES`） | `calculator.py` 通篇只读 raw 的 `trade_date/close/volume/turnover/turnover_rate` 与 qfq 的 `close`（`_calc_technical` / `_get_latest_price` / `compute_price_fields_for_stock` 三处 SQL 逐字核对）；开高低不参与任何快照列 |
+| `price_daily_qfq.volume/turnover/turnover_rate/open/high/low` | **不会** | 不哈希 | 同上：qfq 只提供 `close`（区间收益/波动率/回撤的复权序列），其余列没有任何读取方 |
+| `share_capital_history.change_reason/is_anchor/verified/source/raw_hash/batch_id` | **不会** | 不哈希（见 `_SHARE_CAPITAL_COLUMNS`） | 计算只读 `effective_date`/`total_shares`（`_get_cumulative_dividend_amount` 的窗口函数 + `market_cap.resolve_shares_asof`）；`verified` 属统计披露域（`extended.py` / capital 报表），`source/raw_hash/batch_id` 每次重抓都换（`capital.py` 全删全插）——哈希它们等于每轮全量 |
+| `stock_meta.updated_at/name/pinyin/exchange` | **不会** | 不哈希（见 `_UNIVERSE_META_COLUMNS`） | 每轮 listing_info 刷新都会变；不进任何指标列 |
+| `dividends/buyback/funding` 的 fetch_time/raw_hash/batch_id/source/confidence | **不会** | 不哈希（见 `_EVENT_EXCLUDED_COLUMNS`） | 抓取簿记列，不是值 |
+| 三元摘要 `(count, Σhash, XORhash)` **同时**碰撞 | 会（理论上） | 只靠 `periodic_full` | 三个聚合同时撞才漏一只，概率可忽略；撞了也只影响那一只，7 天兜底一轮 |
+| plan 之后、commit 之前的并发改写 | 会（本轮） | 只靠下一轮 | 水位只在 step 成功后推进，且推进的是**plan 时刻**的指纹 → 并发改写留下的新值下一轮必然进差异集，不丢信号 |
+| 公式/口径变更 | 会 | `INDICATOR_COMPUTATION_VERSION` bump | 指纹管"输入变没变"，不管"同样输入算出什么"；口径版本一改就全量 |
+| `trading_dates` 只覆盖部分股票的日期被删 | 会（个别股票） | 只靠 `periodic_full` | "日期在日历里有、行情表整列都没有"才是本次覆盖的语义指纹；某天只有**部分**股票缺行时，删除该日历日只影响缺行的那几只。要精确覆盖得按股 join 8,797×N 行窗口，成本远超收益，7 天兜底 |
+| `price_daily_*` 之外的行情副本（ETF/港股/`index_valuation`） | 不会（对本表） | 另域另刷新 | 那些表喂的是别的派生域，不进 `indicator_snapshot` |
 """
 
 from __future__ import annotations
@@ -50,6 +69,7 @@ import hashlib
 import json
 import logging
 import traceback
+import zlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -58,6 +78,8 @@ from typing import Any
 __all__ = [
     "DEFAULT_PERIODIC_FULL_DAYS",
     "INCREMENTAL_FULL_RATIO_THRESHOLD",
+    "TRADING_CALENDAR_FP_KEY",
+    "TRADING_CALENDAR_GAP_FP_KEY",
     "IndicatorScopePlan",
     "bootstrap_indicator_scope",
     "commit_indicator_scope",
@@ -69,10 +91,13 @@ __all__ = [
     "manual_override_fingerprints",
     "plan_indicator_scope",
     "price_fingerprints",
+    "settle_trading_calendar_fingerprint",
     "share_capital_fingerprints",
     "snapshot_fingerprints",
     "snapshot_row_count",
     "snapshot_version_mismatch_codes",
+    "trading_calendar_fingerprint",
+    "trading_calendar_gap_fingerprint",
     "universe_fingerprints",
 ]
 
@@ -104,6 +129,15 @@ SHARE_CAPITAL_FP_KEY = "indicator_share_capital_fingerprint:v1"
 PRICE_FP_KEY = "indicator_price_fingerprint:v1"
 # `manual_overrides` 里 status='published' 的行（PRD §9.5 R7 官方纠正路径）。
 OVERRIDE_FP_KEY = "indicator_manual_override_fingerprint:v1"
+# 交易日历（SQLite `trading_dates`）**内容**指纹（2026-11-21 盲区复核 #1）：
+# `_calc_technical` 的 `_expected_trading_dates` 拿它判定"连续窗口"，日历一变
+# MA/量能整列可能变 NULL，而**行情行一个都没变** → 行情指纹看不见。
+# 两级：v1 = 全表内容（实测 ~7 ms/轮，天天算得起）；语义见下面 _GAP 那个 key。
+TRADING_CALENDAR_FP_KEY = "indicator_trading_calendar_fingerprint:v1"
+# 日历的**语义**指纹：只摘要"日历里有、行情表整列都没有"的那些日期
+# （= 会让某个连续窗口断开的日期）。内容指纹变了才去算它（DuckDB DISTINCT 一遍
+# 行情日期 ~20 ms），所以常态轮根本不读行情大表。
+TRADING_CALENDAR_GAP_FP_KEY = "indicator_trading_calendar_gap_fingerprint:v1"
 # `indicator_snapshot` 逐股内容摘要：外部改坏/半写靠它当场发现（#3）。
 SNAPSHOT_FP_KEY = "indicator_snapshot_fingerprint:v1"
 COMPUTATION_VERSION_KEY = "indicator_computation_version"
@@ -138,6 +172,11 @@ SOURCE_DOMAIN: dict[str, str] = {
     # 2026-11-20 验收实测的最后 2 类漏算（⑦⑧）：
     "share_capital_fingerprint": "full",      # 历史股本链（⑦）→ 估值/分红口径全变
     "price_fingerprint": "price",             # 行情表被外部改写（⑧）→ 只重算价格域
+    # 2026-11-21 盲区复核 #1：日历是全市场共用的输入，一个日期就能让**全市场**的
+    # 连续窗口断开（MA/量能整列变 NULL），受影响集合说不出"只这几只" → 归 full 组。
+    # 实际触发点不在 sources 里（见 `_plan_indicator_scope` 的日历判定），这里登记
+    # 是为了"任何来源键都必须有明确归属"这条自证。
+    "trading_calendar_changed": "full",
 }
 
 # stock_meta 里**不进指纹**的列：`updated_at` 每次 listing_info 刷新都会变，
@@ -176,6 +215,16 @@ class IndicatorScopePlan:
     # 收盘价/日期可能没变（改的是历史行或 qfq/成交量），`compute_price_sensitive`
     # 的"最新价相同就跳过"自检会把它们当成没事 → 必须强制重算。
     price_fingerprint_codes: list[str] = field(default_factory=list)
+    # 交易日历（全市场共用的**标量**输入面，不是逐股映射）：
+    #   * `trading_calendar_fingerprint`：本轮日历内容摘要（每轮都算，~5 ms）；
+    #   * `trading_calendar_gap_fingerprint`：内容变了才去算的语义摘要
+    #     （日历里有、行情表整列没有的日期），没变时为 None；
+    #   * `trading_calendar_fingerprint_changed`：内容与上轮水位不同；
+    #   * `trading_calendar_semantics_changed`：语义不同 = **真的**会让技术列变。
+    trading_calendar_fingerprint: str | None = None
+    trading_calendar_gap_fingerprint: str | None = None
+    trading_calendar_fingerprint_changed: bool = False
+    trading_calendar_semantics_changed: bool = False
     fingerprint_error: str | None = None
     # 范围裁决整体失败（异常/读不出/算不出）时的原始异常与栈：必须进报告，
     # 不许静默吞掉（`scope_planning_failed` 只是给用户看的那一句）。
@@ -267,6 +316,19 @@ def _read_json_map(owner: Any, key: str) -> dict[str, str] | None:
 
 def _write_json_map(owner: Any, key: str, mapping: Mapping[str, str]) -> None:
     owner._write_refresh_state(key, json.dumps(dict(sorted(mapping.items())), ensure_ascii=False))
+
+
+def _read_scalar(owner: Any, key: str) -> str | None:
+    """全市场共用的**标量**输入指纹水位（逐股映射走 `_read_json_map`）。"""
+    raw = owner._read_refresh_state(key)
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    return text or None
+
+
+def _write_scalar(owner: Any, key: str, value: str) -> None:
+    owner._write_refresh_state(key, str(value))
 
 
 # ─── 输入指纹 ────────────────────────────────────────────────────────────
@@ -448,6 +510,88 @@ def price_fingerprints(owner: Any) -> dict[str, str]:
     return {code: _combine_digest(aggs) for code, aggs in collected.items()}
 
 
+def _digest_dates(dates: Iterable[str], *, salt: str = "") -> str:
+    """日期集合 → `(count, max, Σcrc32, XOR crc32)` 摘要。
+
+    与逐股指纹的三元聚合**同构**（行数 + 求和 + 异或）：同样的"三重同撞才漏"
+    概率论，但日历是全局标量，撞了也只是少一次全量，另有 `periodic_full` 兜底。
+    用 `zlib.crc32`（C 实现）而不是 `hash()`：SQLite 侧没有向量化 `hash()`。
+    """
+    ordered = sorted({str(value)[:10] for value in dates if str(value)[:10]})
+    total = 0
+    xor = 0
+    for day in ordered:
+        value = zlib.crc32(day.encode("utf-8"))
+        total += value
+        xor ^= value
+    payload = f"{salt}|{len(ordered)}:{ordered[-1] if ordered else ''}:{total}:{xor}"
+    return hashlib.md5(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def trading_calendar_dates(owner: Any) -> list[str]:
+    """SQLite `trading_dates` 的全部日期（`YYYY-MM-DD`，已排序）。
+
+    真库 8,797 行实测（只读连接、同进程连测 7 次）：读取 + 摘要
+    **7.2–7.5 ms**（中位 7.29 ms；其中 SQLite 侧读取约 4.2 ms，其余是摘要素）。
+    """
+    rows = owner.sqlite.query("SELECT trade_date FROM trading_dates ORDER BY trade_date")
+    return [str(row["trade_date"])[:10] for row in rows]
+
+
+def trading_calendar_fingerprint(owner: Any) -> str:
+    """交易日历的**内容**指纹（每轮都算，成本 ~5 ms）。
+
+    只用来回答"这一轮日历被动过吗"。内容变了**不等于**要重算（见
+    :func:`trading_calendar_gap_fingerprint`）：`_update_trading_dates` 每天
+    `INSERT OR REPLACE` 整份列表，Sina 源给的是**整年**日期表 —— 把"日历长得
+    和昨天不一样"直接判成全量，等于把每天例行的日历刷新变成一轮 35 分钟全扫。
+    """
+    return _digest_dates(trading_calendar_dates(owner))
+
+
+def trading_calendar_gap_fingerprint(
+    owner: Any, calendar_dates: Iterable[str] | None = None,
+) -> str:
+    """日历的**语义**指纹：`日历 - 行情里真实存在的日期`。
+
+    为什么是这个集合（2026-11-21 实测，见 `reports/`「盲区复核」与
+    `tests/regression/test_indicator_incremental_scope.py` 的 ⑨ 组）：
+
+    * `calculator._trailing_contiguous_closes` 只在"**两个相邻行情行之间**夹着
+      一个预期交易日"时截断序列。一个日历日期 D 要改变结果，必须 D 是预期交易日
+      而**该股没有 D 这一行**；
+    * 行情行本身变了 → `price_fingerprints` 逐股摘要必然变 → 价格域重算，
+      与本指纹无关；
+    * 于是"日历"这一侧唯一需要盯的是**凭空出现的缺口**：D 在日历里、行情表里
+      整列都没有。新增这样的 D 会让缺口张开（MA/量能整列变 NULL），删除这样的
+      D 会让缺口合上（序列变长）——两个方向都必须重算；
+    * 反过来，D 在日历里**并且**有行情行（哪怕只是部分股票有）时，增删 D 不会
+      改变任何"两行之间有预期日缺失"的判定 → 不重算（这条是性能关键：正常日子
+      里日历每天都会新增当天日期，而当天行情行是存在的）。
+
+    残留盲区（**故意**，由 `periodic_full` 兜底）：某天只有**部分**股票缺行时，
+    删除该日历日只影响缺行的那几只。精确覆盖要按股 join 窗口（8,797 × N 行），
+    成本远超收益；而且这类改动本身来自"日历被删日期"这种极罕见事件。
+
+    成本：`SELECT DISTINCT CAST(trade_date AS VARCHAR)` 走一遍 `price_daily_raw`
+    （1,759 万行实测 20–25 ms），**只在内容指纹变了才调用**。
+    """
+    calendar = (
+        {str(day)[:10] for day in calendar_dates}
+        if calendar_dates is not None
+        else set(trading_calendar_dates(owner))
+    )
+    rows = owner.duck.read_query(
+        "SELECT DISTINCT CAST(trade_date AS VARCHAR) AS trade_date FROM price_daily_raw"
+    )
+    priced = {str(row["trade_date"])[:10] for row in rows}
+    # `cal` 位：日历**整表为空**时 `_expected_trading_dates` 返回 None，
+    # `_calc_technical` 会 fail-closed 把 MA/量能**整列写 NULL**。所以
+    # "空日历 → 有日历"（哪怕新增的日期全都有行情行）也是真的语义变化，
+    # 必须能和"日期集合没动"区分开 —— 一个 bit 就够，成本 0。
+    return _digest_dates(calendar - priced, salt=f"cal={int(bool(calendar))}")
+
+
 def manual_override_fingerprints(owner: Any) -> dict[str, str]:
     """逐股 `manual_overrides` 里 published 覆写的指纹（PRD §9.5 R7 官方纠正路径）。
 
@@ -593,12 +737,19 @@ def _periodic_full_due(owner: Any, *, now: datetime | None = None) -> tuple[bool
 
 
 def _full_reason(
-    owner: Any, *, force_full: bool,
+    owner: Any, *, force_full: bool, trading_calendar_changed: bool = False,
 ) -> tuple[str | None, dict[str, Any]]:
     """可解释的全量原因（按"最需要解释"的优先级）。
 
-    `forced_full` → `first_run` → `computation_version` → `periodic_full_refresh`。
-    周期兜底排最后：它是**兜底**，有更具体的理由时优先报更具体的那个。
+    `forced_full` → `first_run` → `computation_version` → `trading_calendar_changed`
+    → `periodic_full_refresh`。周期兜底排最后：它是**兜底**，有更具体的理由时
+    优先报更具体的那个。
+
+    `trading_calendar_changed`（2026-11-21）：交易日历的语义指纹变了（多出/少了
+    "日历里有、行情整列没有"的日期）。日历是**全市场共用**的输入，一个日期就能让
+    每只股票的连续窗口断开（MA/量能整列变 NULL），受影响集合说不出"只这几只"
+    → 走全量（与 `incremental_over_threshold` 同一条经济账：与其逐股维护，
+    不如一次批量 staging 发布），但 reason 必须是这个具体原因，不许糊成阈值。
     """
     version = current_computation_version()
     if force_full:
@@ -610,6 +761,8 @@ def _full_reason(
         return "computation_version", {
             "computation_version": version, "stored_computation_version": stored,
         }
+    if trading_calendar_changed:
+        return "trading_calendar_changed", {"computation_version": version}
     due, last_run = _periodic_full_due(owner)
     if due:
         return "periodic_full_refresh", {
@@ -669,13 +822,58 @@ def _failed_plan(owner: Any, error: BaseException) -> IndicatorScopePlan:
     )
 
 
+def _plan_trading_calendar(
+    owner: Any,
+) -> tuple[str, str | None, bool, bool, bool]:
+    """交易日历的两级判定：内容指纹 → （只有内容变了才）语义指纹。
+
+    返回 `(内容指纹, 语义指纹或 None, 内容变了, 语义变了, 基线缺失)`。
+
+    两级的理由（性能硬约束：稳态 ≤2 s，当前 1.05–1.4 s）：
+    * 一级 `trading_calendar_fingerprint` **每轮都算**，只读 SQLite 8,797 行
+      实测 **7.2–7.5 ms**（真库只读连接，同进程 7 连测中位 7.29 ms）；它回答
+      "日历被碰过吗"；
+    * 二级 `trading_calendar_gap_fingerprint` 要扫一遍 `price_daily_raw` 的
+      日期（1,759 万行 ≈ 20–25 ms），**只在内容变了才跑** —— 常态轮一分钱不花。
+
+    "内容变了但不能证明语义变了"（新增的日期在行情表里本来就有行）= 不重算，
+    只把水位推进（见 :func:`settle_trading_calendar_fingerprint`）。
+    """
+    content = trading_calendar_fingerprint(owner)
+    stored_content = _read_scalar(owner, TRADING_CALENDAR_FP_KEY)
+    if stored_content is None:
+        # 首次部署本输入面：交给 `input_fingerprint_bootstrap` 建基线，
+        # 这里不额外判定（否则会和"没有任何上一轮水位"叠成两个 full 理由）。
+        # 基线必须**两个水位都建**：语义指纹在这里一并算出来交给 commit 落盘，
+        # 否则 `_GAP` 这个 key 永远缺失 → 下一次日历内容变化时
+        # `stored_semantic is None != semantic` → 无谓地判成"语义变了"→ 全量。
+        return content, trading_calendar_gap_fingerprint(owner), False, False, True
+    if stored_content == content:
+        return content, None, False, False, False
+    semantic = trading_calendar_gap_fingerprint(owner)
+    stored_semantic = _read_scalar(owner, TRADING_CALENDAR_GAP_FP_KEY)
+    changed = stored_semantic != semantic
+    logger.info(
+        "交易日历内容变化（语义%s）：content=%s gap=%s",
+        "也变了 → 需要重算技术指标" if changed else "没变 → 只推进水位",
+        content, semantic,
+    )
+    return content, semantic, True, changed, False
+
+
 def _plan_indicator_scope(
     owner: Any,
     *,
     sources: Mapping[str, Iterable[str]],
     force_full: bool,
 ) -> IndicatorScopePlan:
-    reason, meta = _full_reason(owner, force_full=force_full)
+    (
+        calendar_content, calendar_semantic, calendar_touched, calendar_changed,
+        calendar_baseline_missing,
+    ) = _plan_trading_calendar(owner)
+    reason, meta = _full_reason(
+        owner, force_full=force_full, trading_calendar_changed=calendar_changed,
+    )
     version = str(meta["computation_version"])
     listed_count = listed_stock_count(owner)
 
@@ -697,6 +895,10 @@ def _plan_indicator_scope(
             surface for surface, _key, _src in _FINGERPRINT_SURFACES
             if previous[surface] is None
         ]
+        if calendar_baseline_missing:
+            # 交易日历是**标量**面，不在 `_FINGERPRINT_SURFACES` 里；没有上轮
+            # 水位同样"无法证明它没变"→ 一次全量建基线（与 ⑦⑧ 两次补面同一条规矩）。
+            missing.append("trading_calendar")
         if missing:
             logger.info("指标指纹基线缺失(%s)，本轮全量建立基线", ",".join(missing))
             reason = "input_fingerprint_bootstrap"
@@ -734,7 +936,18 @@ def _plan_indicator_scope(
         price_fingerprint_codes=sorted({
             str(code) for code in (merged_sources.get("price_fingerprint") or []) if code
         }),
+        trading_calendar_fingerprint=calendar_content,
+        # 语义指纹只有"内容也变了"那一轮才有：稳态轮不写它，避免把作废的
+        # 语义水位当成"我核对过"。
+        trading_calendar_gap_fingerprint=calendar_semantic,
+        trading_calendar_fingerprint_changed=calendar_touched,
+        trading_calendar_semantics_changed=calendar_changed,
     )
+    if calendar_changed:
+        # 日历变了必须留痕：`changed_sources` 是运维唯一能读到的"谁把谁带进集合"。
+        # 受影响面是全市场（每只股票的连续窗口都可能断在同一个日期），
+        # 所以计数用上市只数，而不是编一个假的代码列表。
+        plan.changed_sources["trading_calendar_changed"] = listed_count
 
     # 阈值只看**完整重算组**（整股 149 列），不看价格域组：
     # "今天全市场都成交了"是日常形态，价格域增量本身就会跳过没变的收盘价，
@@ -794,6 +1007,14 @@ def bootstrap_indicator_scope(owner: Any) -> dict[str, Any]:
     current = _collect_fingerprints(owner)
     for surface, key, _source in _FINGERPRINT_SURFACES:
         _write_json_map(owner, key, current[surface])
+    # 交易历是**标量**输入面（不是逐股映射），水位单独写：
+    #   * 内容指纹：每轮都算的那个；
+    #   * 语义指纹：日历里有、行情整列没有的日期集合。基线必须两个都建，
+    #     否则下一轮会把"日历语义变了"误判成真的变化（或反过来漏掉）。
+    _write_scalar(owner, TRADING_CALENDAR_FP_KEY, trading_calendar_fingerprint(owner))
+    _write_scalar(
+        owner, TRADING_CALENDAR_GAP_FP_KEY, trading_calendar_gap_fingerprint(owner),
+    )
     owner._write_refresh_state(COMPUTATION_VERSION_KEY, current_computation_version())
     owner._write_refresh_state(PERIODIC_FULL_KEY, datetime.now(UTC).isoformat())
     return {
@@ -893,6 +1114,19 @@ def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> d
                 # computation_version。增量路径只有在版本一致时才会走到这里。
                 owner._write_refresh_state(COMPUTATION_VERSION_KEY, plan.computation_version)
             committed_codes = len(plan.full_codes)
+        # 交易日历的**标量**水位：算过（step 成功）就推进。
+        # 语义变了但没有推进代价——这一轮本来就是全量，技术列已经按新日历重算完；
+        # 语义没变（新增/删除的日期在行情表里有行）时由
+        # `settle_trading_calendar_fingerprint` 提前推进，走不到这里有代价。
+        if plan.trading_calendar_fingerprint:
+            _write_scalar(
+                owner, TRADING_CALENDAR_FP_KEY, plan.trading_calendar_fingerprint,
+            )
+        if plan.trading_calendar_gap_fingerprint:
+            _write_scalar(
+                owner, TRADING_CALENDAR_GAP_FP_KEY,
+                plan.trading_calendar_gap_fingerprint,
+            )
     owner._write_refresh_state(
         LAST_SCOPE_KEY,
         json.dumps({
@@ -909,3 +1143,32 @@ def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> d
         }, ensure_ascii=False),
     )
     return {"committed_codes": committed_codes, "succeeded": succeeded}
+
+
+def settle_trading_calendar_fingerprint(
+    owner: Any, plan: IndicatorScopePlan,
+) -> bool:
+    """把"日历内容变了、但语义没变"的那一次变更水位推进掉（返回是否推进）。
+
+    为什么需要一条**绕过 step 成功门禁**的推进路径：逐股水位必须"算成功才推进"
+    （否则下次会把自己没算过的东西当已消费）；但日历的语义结论是**纯判定结论**——
+    "新增/删除的日期在行情表里本来就有行，任何股票的时间序列都不会改变"。
+    这种情况下本轮 0 重算，`flow` 根本不会调 `commit_indicator_scope`（没算东西
+    就没有 step），水位就会永远停在旧值 → 每轮重新探测同一处变更（常态轮多付
+    ~30 ms，还会让报告里常年挂着一次"日历变了"）。
+
+    反过来，**语义真的变了**时这里拒绝推进：那一轮必须走全量，推进留给
+    `commit_indicator_scope` 的"step 成功"分支 —— 全量失败就下一轮再来。
+    """
+    if not plan.trading_calendar_fingerprint:
+        return False
+    if not plan.trading_calendar_fingerprint_changed:
+        return False
+    if plan.trading_calendar_semantics_changed:
+        return False
+    _write_scalar(owner, TRADING_CALENDAR_FP_KEY, plan.trading_calendar_fingerprint)
+    if plan.trading_calendar_gap_fingerprint:
+        _write_scalar(
+            owner, TRADING_CALENDAR_GAP_FP_KEY, plan.trading_calendar_gap_fingerprint,
+        )
+    return True

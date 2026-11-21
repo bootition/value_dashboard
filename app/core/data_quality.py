@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import UTC, date, datetime, timedelta
 
+from app.core.financial_period import cn_today
 from app.core.missing_conditions import actionable_missing_condition
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.sqlite_store import SQLiteStore
@@ -18,6 +19,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MINIMUM_HISTORY_OBSERVATIONS = 1_300
 DEFAULT_MINIMUM_VOLUME_OBSERVATIONS = 1_300
+# 价格/快照价格日的「陈旧上限」（PRD §6.4 D7：允许陈旧但必须显示日期）。
+# 2026-11-21 前这个 7 天在 `has_fresh_prices` 的 SQL 字面量、`SNAPSHOT_STALE`
+# 的 `_is_stale(..., days=7)`、以及快照价格日的一致性判据里各写一份（或根本
+# 没有容差）。现在收敛成唯一常量：**改口径只改这里**。
+PRICE_FRESHNESS_MAX_AGE_DAYS = 7
 READINESS_CACHE_KEY = "minimum_data_readiness"
 READINESS_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
 # ─── 筛选门禁的告警三级（2026-11-20 裁定，依据 reports/122 §2.3 J9 + S2 §2.3）───
@@ -1507,6 +1513,7 @@ def minimum_data_readiness(
     minimum_volume_observations: int = DEFAULT_MINIMUM_VOLUME_OBSERVATIONS,
 ) -> dict:
     """Evaluate the current, per-stock screening floor without mutating data."""
+    today = cn_today()
     if minimum_history_observations < 1 or minimum_volume_observations < 1:
         raise ValueError("readiness observation thresholds must be positive")
     compatibility = _live_schema_compatibility(duck)
@@ -1522,7 +1529,11 @@ def minimum_data_readiness(
 
     rows = duck.read_query(
         """
-        WITH raw AS (
+        WITH clock AS (
+            -- RG1 时区单源：'今天'只来自 `cn_today()`（Python 绑定），
+            -- 不用 DuckDB CURRENT_DATE（= 进程本地时区，UTC 机器上会差 1 天）。
+            SELECT ?::DATE AS today, ?::DATE AS price_stale_before
+        ), raw AS (
             SELECT stock_code, MIN(trade_date) AS first_date, MAX(trade_date) AS last_date,
                    COUNT(*) AS observation_count,
                    COUNT(*) FILTER (WHERE volume IS NOT NULL AND volume > 0) AS volume_count
@@ -1558,7 +1569,7 @@ def minimum_data_readiness(
             -- 元数据管线回填）。此时无法证明它是老股，按近期上市豁免深度检查；
             -- 否则一只新股就会让 /api/ready 永久 503（实测 920309 N菊乐）。
             (m.listing_date IS NULL
-             OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days') AS is_recent_listing,
+             OR m.listing_date >= clock.today - INTERVAL '90 days') AS is_recent_listing,
             raw.last_date AS raw_last_date,
             qfq.last_date AS qfq_last_date,
             complete_financials.report_date AS financial_report_date,
@@ -1566,33 +1577,33 @@ def minimum_data_readiness(
                 AS has_pool_metadata,
             -- 新股（上市不足 90 天）仍在积累历史与成交量，属于市场真实状态，
             -- 不阻断筛选（披露项），因此对这些检查豁免。
-            (m.listing_date IS NULL OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+            (m.listing_date IS NULL OR m.listing_date >= clock.today - INTERVAL '90 days'
              OR (raw.first_date IS NOT NULL
-                 AND raw.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
+                 AND raw.first_date <= GREATEST(m.listing_date, clock.today - INTERVAL '5 years') + INTERVAL '30 days'
                  AND raw.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
-                     date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
+                     date_diff('day', GREATEST(m.listing_date, clock.today - INTERVAL '5 years'), clock.today) * 0.45
                  ) AS INTEGER)))))
                 AS has_raw_history,
-            (m.listing_date IS NULL OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+            (m.listing_date IS NULL OR m.listing_date >= clock.today - INTERVAL '90 days'
              OR (qfq.first_date IS NOT NULL
-                 AND qfq.first_date <= GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years') + INTERVAL '30 days'
+                 AND qfq.first_date <= GREATEST(m.listing_date, clock.today - INTERVAL '5 years') + INTERVAL '30 days'
                  AND qfq.observation_count >= LEAST(?, GREATEST(1, CAST(CEIL(
-                     date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
+                     date_diff('day', GREATEST(m.listing_date, clock.today - INTERVAL '5 years'), clock.today) * 0.45
                  ) AS INTEGER)))))
                 AS has_qfq_history,
             -- 价格允许陈旧但必须显示日期（PRD §6.4 D7）：已有数据但超过
-            -- 7 天无新 bar 的股票视为停牌，新鲜度缺口属披露项，不阻断。
-            -- 完全没有数据的股票仍为缺口（数据损坏类）。
+            -- `PRICE_FRESHNESS_MAX_AGE_DAYS` 天无新 bar 的股票视为停牌，
+            -- 新鲜度缺口属披露项，不阻断。完全没有数据的股票仍为缺口（数据损坏类）。
             (raw.last_date IS NOT NULL
-             AND (raw.last_date < CURRENT_DATE - INTERVAL '7 days'
-                  OR raw.last_date >= CURRENT_DATE - INTERVAL '7 days'
-                     AND qfq.last_date >= CURRENT_DATE - INTERVAL '7 days'))
+             AND (raw.last_date < clock.price_stale_before
+                  OR raw.last_date >= clock.price_stale_before
+                     AND qfq.last_date >= clock.price_stale_before))
                 AS has_fresh_prices,
-            (m.listing_date IS NULL OR m.listing_date >= CURRENT_DATE - INTERVAL '90 days'
+            (m.listing_date IS NULL OR m.listing_date >= clock.today - INTERVAL '90 days'
              OR raw.volume_count >= LEAST(?, GREATEST(1, CAST(CEIL(
-                 date_diff('day', GREATEST(m.listing_date, CURRENT_DATE - INTERVAL '5 years'), CURRENT_DATE) * 0.45
+                 date_diff('day', GREATEST(m.listing_date, clock.today - INTERVAL '5 years'), clock.today) * 0.45
              ) AS INTEGER)))) AS has_meaningful_volume,
-            complete_financials.report_date >= CURRENT_DATE - INTERVAL '18 months'
+            complete_financials.report_date >= clock.today - INTERVAL '18 months'
                 AS has_complete_financial_period,
             EXISTS (SELECT 1 FROM xdxr action WHERE action.stock_code = m.stock_code)
               AND EXISTS (
@@ -1634,18 +1645,33 @@ def minimum_data_readiness(
                        AND audit.fetch_time > snapshot.calculated_at
                    )
             ) AS has_current_snapshot_inputs,
+            -- 2026-11-21（reports/152 §B）：快照价格日的一致性判据。
+            -- 旧判据要求 `snapshot.latest_price_date` **逐字等于**该股最新 bar 日，
+            -- 于是"今天收盘的股价刚入库、快照还是昨天算的"这个窗口（几分钟到
+            -- 几小时；自动更新正在重算快照时则是整轮）会把全市场判成不达标
+            -- （实测该窗口内 5,567/5,567 只全部命中，见 reports/152 §A2）。
+            -- 新判据拆成两件事，两件都必须成立：
+            --   ① 证据（不许放宽）：快照声称的价格日必须在库里真有那一根 bar，
+            --      且 `ABS(快照收盘 - 那根 bar 的收盘) <= max(|close|,1)*1e-6`
+            --      —— 这是"快照用的确实是那根 bar"的凭据，缺 bar 或对不上仍阻断；
+            --   ② 新鲜度：该价格日距**该股自己最新 bar**不超过
+            --      `PRICE_FRESHNESS_MAX_AGE_DAYS` 天（与 `has_fresh_prices` /
+            --      `SNAPSHOT_STALE` 同一常量，不另造口径）。超过就是真过期，
+            --      仍然阻断（防止用户拿一年前的陈旧快照做决策）。
+            -- 停牌股不受影响：它们的 `raw.last_date` 自己就是旧的，① ② 都按
+            -- 它自己的最新 bar 判，与 `has_fresh_prices` 的停牌豁免同向。
             EXISTS (
                 SELECT 1 FROM indicator_snapshot snapshot
-                JOIN price_daily_raw current_raw
-                  ON current_raw.stock_code = snapshot.stock_code
-                 AND current_raw.trade_date = raw.last_date
+                JOIN price_daily_raw snapshot_bar
+                  ON snapshot_bar.stock_code = snapshot.stock_code
+                 AND snapshot_bar.trade_date = snapshot.latest_price_date
                 WHERE snapshot.stock_code = m.stock_code
                   AND snapshot.report_date = complete_financials.report_date
-                  AND snapshot.latest_price_date = raw.last_date
                   AND snapshot.latest_close IS NOT NULL
-                  AND current_raw.close IS NOT NULL
-                  AND ABS(snapshot.latest_close - current_raw.close)
-                      <= GREATEST(ABS(current_raw.close), 1.0) * 0.000001
+                  AND snapshot_bar.close IS NOT NULL
+                  AND ABS(snapshot.latest_close - snapshot_bar.close)
+                      <= GREATEST(ABS(snapshot_bar.close), 1.0) * 0.000001
+                  AND snapshot.latest_price_date >= raw.last_date - ?
             ) AS has_coherent_snapshot,
             -- P0-4/5: 快照期必须等于最新完整三表期（与筛选引擎共用判定）。
             -- 若任一张报表存在晚于完整期的新行，属"数据源未就绪"的披露项
@@ -1656,6 +1682,7 @@ def minimum_data_readiness(
                 OR lc.max_cashflow IS NOT NULL AND lc.max_cashflow > complete_financials.report_date
             )) AS has_pending_incomplete_period
         FROM stock_meta m
+        CROSS JOIN clock
         LEFT JOIN raw ON raw.stock_code = m.stock_code
         LEFT JOIN qfq ON qfq.stock_code = m.stock_code
         LEFT JOIN complete_financials ON complete_financials.stock_code = m.stock_code
@@ -1672,6 +1699,11 @@ def minimum_data_readiness(
         ORDER BY m.stock_code
         """,
         [
+            # clock：'今天' 与 '价格陈旧截止日' 都从 cn_today() 派生（RG1 单源）。
+            today.isoformat(),
+            (today - timedelta(days=PRICE_FRESHNESS_MAX_AGE_DAYS)).isoformat(),
+            # 快照价格日相对该股最新 bar 允许落后的天数（同一常量）。
+            PRICE_FRESHNESS_MAX_AGE_DAYS,
             minimum_history_observations,
             minimum_history_observations,
             minimum_volume_observations,
@@ -2481,7 +2513,10 @@ def build_data_quality_status(
         or income_dates["latest_record"] != income_dates["latest_complete"]
     ):
         warning_codes.append("FINANCIAL_SHELL_ROWS")
-    if _is_stale(dates["price"], dates["indicator_snapshot"]["latest_price_date"], days=7):
+    if _is_stale(
+        dates["price"], dates["indicator_snapshot"]["latest_price_date"],
+        days=PRICE_FRESHNESS_MAX_AGE_DAYS,
+    ):
         warning_codes.append("SNAPSHOT_STALE")
     if dividends["active_missing_announcement_rows"]:
         warning_codes.append("DIVIDEND_DATES_UNVERIFIED")

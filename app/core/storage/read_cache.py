@@ -424,3 +424,91 @@ def clear_cache() -> None:
         _warm_last.clear()
     with _last_good_guard:
         _last_good.clear()
+    with _content_guard:
+        _content_entries.clear()
+
+
+# ─── 4. 内容纪元键控的派生值缓存（2026-11-21，筛选探针）─────────────────
+#
+# 背景（`.planning/2026-screening-latency`）：正式库 `read_query()` 是
+# open-per-query —— 每次查询要新开一条只读连接，实测**每次 ~75-85ms**（同一条
+# 连接上后续查询只有 0.2-0.8ms）。于是筛选引擎里那条"混合报告期"探针
+# （`snapshot_period_mismatches`，本身 ~90ms）实际要花 ~180ms，而且**每次运行
+# 都重算一遍**，即使数据一个字都没变。
+#
+# 这一层只做一件事：把"只由库内容决定"的派生值按**内容令牌**记住。
+#
+# 三条铁律（假绿防线）：
+# 1. **令牌取不到就不缓存**：`content_epoch` 读不到（返回 0：库还没记账 /
+#    状态表没建 / 任何异常）时 `serve_by_content()` 直接现算，绝不写缓存。
+#    "不知道数据变没变"必须等价于"当它变了"。
+# 2. **令牌必须对内容敏感**：主令牌是 `content_epoch`（每个成功的 DuckDB 写
+#    事务 +1，就地 UPDATE 也会变，见 `app/core/storage/content_epoch.py`），
+#    调用方还会再拼一段**自己的**廉价内容指纹（行数 / 最大报告期）。
+#    epoch 抓"就地改值"，行数/最大期抓"绕过 store 的直连写（不记账）"新增。
+# 3. **库身份进键**：同一进程里测试夹具/多 app 的不同库绝不串数据，
+#    与 `serve()` 的 `_store_key()` 同口径。
+
+#: 内容键控缓存条目上限（正常只有个位数；测试里每个用例一个临时库，必须封顶）。
+MAX_CONTENT_ENTRIES = 256
+
+
+@dataclass(frozen=True)
+class _ContentEntry:
+    value: Any
+    token: tuple[Any, ...]
+    as_of: str
+    monotonic: float
+
+
+_content_guard = threading.Lock()
+_content_entries: dict[tuple[Any, ...], _ContentEntry] = {}
+
+
+def content_epoch_token(sqlite: Any) -> int:
+    """当前库的内容纪元；**取不到一律返回 0**（= 调用方不得缓存）。
+
+    `0` 在 `content_epoch.current()` 里的语义正是"读不到"，所以这里直接把
+    `<=0` 归一成 `0`，让"不知道"与"没变化"永远不可混淆。
+    """
+    path = getattr(getattr(sqlite, "paths", None), "sqlite_path", None)
+    if path is None:
+        return 0
+    from app.core.storage import content_epoch
+
+    try:
+        return max(0, int(content_epoch.current(path)))
+    except Exception:  # noqa: BLE001 - 令牌读不到只影响命中率，绝不阻断筛选
+        logger.debug("读取 content_epoch 失败，本次不缓存派生值", exc_info=True)
+        return 0
+
+
+def serve_by_content(
+    duck: Any,
+    key: Sequence[Any],
+    token: Sequence[Any] | None,
+    factory: Callable[[], Any],
+) -> Any:
+    """按**内容令牌**回放 `factory()` 的结果；令牌不可用/不一致就重算并覆盖。
+
+    与 `serve()` 的区别（别混用）：`serve()` 是"写锁期间的陈旧回退"，允许返回
+    旧值并标注 `stale=True`；这里是**纯加速**，命中与否都不改变新鲜度语义 ——
+    令牌不一致就现算，没有"降级回放"这回事，所以调用方拿到的值永远等价于
+    现算值。
+    """
+    if token is None or not all(part is not None for part in token):
+        return factory()
+    store_key = _store_key(duck)
+    full_key = (store_key, *key)
+    frozen = tuple(token)
+    with _content_guard:
+        entry = _content_entries.get(full_key)
+        if entry is not None and entry.token == frozen:
+            return entry.value
+    value = factory()
+    entry = _ContentEntry(value=value, token=frozen, as_of=_now_iso(), monotonic=time.monotonic())
+    with _content_guard:
+        _content_entries[full_key] = entry
+        while len(_content_entries) > MAX_CONTENT_ENTRIES:
+            _content_entries.pop(next(iter(_content_entries)), None)
+    return value

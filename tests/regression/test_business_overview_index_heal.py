@@ -86,7 +86,13 @@ def _breakdown_rows(duck: DuckDBStore, code: str) -> int:
 
 
 def test_rebuild_table_restores_index_and_keeps_data(database_paths) -> None:
-    """重建 = 从堆数据重新建 heap + 索引；数据、主键、二级索引一条不能少。"""
+    """重建 = 从堆数据重新建 heap + 索引；数据、主键一条不能少。
+
+    2026-11-21（schema v50，reports/151）：``business_breakdown`` 的二级索引已按
+    「优化器从不选它、删后无查询变慢 ≥2x」的实测结论永久删除，所以这里断言的
+    「索引一条不能少」变成**二级索引必须一条都没有**（主键 ART 由 DDL 重建，仍有）。
+    重建机制本身（``rebuild_table``）必须照常工作 —— 它是索引损坏事故的兜底。
+    """
     duck, _ = _stores(database_paths)
     updater = BusinessOverviewUpdater(
         duck=duck, sqlite=SQLiteStore(paths=database_paths),
@@ -105,7 +111,7 @@ def test_rebuild_table_restores_index_and_keeps_data(database_paths) -> None:
             "SELECT index_name FROM duckdb_indexes() WHERE table_name = ?", [TABLE],
         )
     }
-    assert "idx_business_breakdown_stock_report" in indexes
+    assert indexes == set(), f"v50 之后 {TABLE} 不该再有任何二级索引: {indexes}"
     # 主键仍然生效（重建后的 ART 由 DDL 里的 PRIMARY KEY 重新建出来）。
     with pytest.raises(Exception, match="(?i)constraint|conflict|duplicate"):
         duck.write_query(
@@ -120,7 +126,12 @@ def test_rebuild_table_restores_index_and_keeps_data(database_paths) -> None:
 
 
 def test_reindex_table_rebuilds_secondary_index_without_touching_data(database_paths) -> None:
-    """首要修法：只重建二级索引（不动堆数据），重建后写入照常。"""
+    """首要修法：只重建二级索引（不动堆数据），重建后写入照常。
+
+    2026-11-21（schema v50）：表上已无二级索引，``reindex_table`` 变成**安全 no-op**
+    （``indexes_rebuilt == []``）——这正是「从根上不让索引事故再发生」的形态：
+    没有索引可修，也就不存在索引与堆失步。保留本用例是为了锁住 no-op 契约本身。
+    """
     duck, _ = _stores(database_paths)
     updater = BusinessOverviewUpdater(
         duck=duck, sqlite=SQLiteStore(paths=database_paths),
@@ -131,7 +142,7 @@ def test_reindex_table_rebuilds_secondary_index_without_touching_data(database_p
 
     result = duck.reindex_table(TABLE)
 
-    assert result["indexes_rebuilt"] == ["idx_business_breakdown_stock_report"]
+    assert result["indexes_rebuilt"] == []
     assert duck.read_query(f"SELECT count(*) AS n FROM {TABLE}")[0]["n"] == total_before
     assert updater.update_stock("002185")["status"] == "success"
 
