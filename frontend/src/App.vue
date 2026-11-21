@@ -1,39 +1,33 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, provide } from 'vue'
 import { useRoute } from 'vue-router'
 import { NConfigProvider, NLayout, NLayoutContent, NLayoutSider, NMessageProvider, NDialogProvider, zhCN, dateZhCN } from 'naive-ui'
 import { RouterLink, RouterView } from 'vue-router'
 import axios from 'axios'
 import type { DataQualityStatus } from './types/data-quality.ts'
-import { usePollTimer } from './composables/usePolling.ts'
+import AutoUpdateProgressBar from './components/AutoUpdateProgressBar.vue'
+import {
+  AUTO_UPDATE_STATUS_KEY,
+  useAutoUpdateRunning,
+} from './composables/useAutoUpdatePolling.ts'
 
 const route = useRoute()
 
 type Summary = { data_quality: DataQualityStatus }
-type AutoUpdateStatus = {
-  state?: string
-  current_stage?: string
-  latest_job?: { status?: string } | null
-}
 const quality = ref<DataQualityStatus | null>(null)
 const qualityFailed = ref(false)
-const autoUpdateRunning = ref(false)
-// 自动更新状态轮询：30s 固定节奏（2026-11-22 收敛到 composables/usePolling.ts，
-// 卸载清理由 usePollTimer 的 onScopeDispose 负责，页面不再自己 maintain timer）。
-const autoUpdatePoll = usePollTimer()
-
-async function refreshAutoUpdateStatus() {
-  try {
-    const resp = await axios.get<AutoUpdateStatus>(
-      '/api/data-status/auto-update',
-      { timeout: 8000 },
-    )
-    autoUpdateRunning.value = resp.data.current_stage === 'running'
-      || resp.data.latest_job?.status === 'running'
-  } catch {
-    autoUpdateRunning.value = false
-  }
-}
+// 自动更新状态轮询只此一份：useAutoUpdatePolling 内部用 usePollTimer 管生命周期，
+// 更新中 10s / 空闲 60s；App 把同一份状态 provide 给页面（详情页据此显示进度），
+// 页面不得再自建第二个轮询器。
+const {
+  autoUpdateRunning,
+  autoUpdateStatus,
+  refreshAutoUpdate,
+  startAutoUpdatePolling,
+} = useAutoUpdateRunning()
+provide(AUTO_UPDATE_STATUS_KEY, autoUpdateStatus)
+// 进度条显示期间给内容区留出底部高度（进度条本身是悬浮 + pointer-events:none）。
+const updateBarActive = computed(() => autoUpdateRunning.value)
 
 onMounted(async () => {
   try {
@@ -43,25 +37,10 @@ onMounted(async () => {
     quality.value = null
     qualityFailed.value = true
   }
-  await refreshAutoUpdateStatus()
+  // 先立即读一次再挂轮询链：徽标/进度条不能等 10s 才第一次出现。
+  await refreshAutoUpdate()
   startAutoUpdatePolling()
 })
-
-/**
- * 30s 固定节奏轮询。用"跑完再排下一次"的递归链取代 setInterval：
- * 语义等价（固定间隔、链不断），但天然不会在慢请求时叠加并发请求。
- * try/finally 保证即使 refreshAutoUpdateStatus 抛错，轮询链也不会断
- * （这一点与原先 setInterval 一致）。
- */
-function startAutoUpdatePolling() {
-  autoUpdatePoll.schedule(30000, async () => {
-    try {
-      await refreshAutoUpdateStatus()
-    } finally {
-      startAutoUpdatePolling()
-    }
-  })
-}
 
 const statusTag = computed(() => {
   const q = quality.value
@@ -149,8 +128,14 @@ const themeOverrides = {
                 <p>本地 A 股研究</p>
               </div>
             </n-layout-sider>
-            <n-layout-content id="main-content" tabindex="-1" class="app-main-content">
+            <n-layout-content
+              id="main-content"
+              tabindex="-1"
+              class="app-main-content"
+              :class="{ 'app-main-content--with-update': updateBarActive }"
+            >
               <router-view />
+              <AutoUpdateProgressBar :status="autoUpdateStatus" />
             </n-layout-content>
           </n-layout>
         </n-layout>
@@ -158,3 +143,15 @@ const themeOverrides = {
     </n-message-provider>
   </n-config-provider>
 </template>
+
+<style scoped>
+/* 悬浮进度条不挡点击，但仍给内容留出高度，避免最后一行被卡片压住 */
+.app-main-content--with-update {
+  padding-bottom: 132px;
+}
+@media (max-width: 640px) {
+  .app-main-content--with-update {
+    padding-bottom: 156px;
+  }
+}
+</style>

@@ -1004,24 +1004,227 @@ def store_screening_readiness_cache(
         logger.warning("screening readiness cache write failed", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# 启动预热（2026-11-21，用户点名的第 2 件事）
+#
+# 现象：服务重启后**第一次**点「运行筛选」墙钟 58.9s（引擎只占 734ms），
+# 第二三次 1.46–1.6s。58s 全在请求线程里冷算「全库数据体检」
+# （`_require_current_screenability` → `screening_readiness` →
+# `build_data_quality_status`，副本实测分段见 docs/reports）。
+#
+# 启动时其实**已经**跑过一次「后台数据就绪核对」，但它算的是
+# `minimum_data_readiness()` 这一份**子集**，落在
+# `data_refresh_state["minimum_data_readiness"]`（给 /api/ready 用）；
+# 筛选门禁要的是 `screening_readiness()` 的**完整**决策，落在
+# `data_refresh_state["screening_readiness_cache"]`（带指纹），
+# 两者键不同、粒度不同 → 筛选复用不到。旧代码确实有预热调用，但它排在
+# 「启动自动更新子进程」**之后**（等几小时），所以对"重启后第一次筛选"
+# 毫无帮助，还会与 `read_warning_codes()` 的后台重建线程各算一遍同一份
+# 全库体检（副本实测：预热 36.5s 与 warning-codes 重建 37.3s 并发重复）。
+#
+# 修法：**启动维护线程里、自动更新之前**先预热一次，并把这份决策里的
+# `readiness` 直接当作启动核对结果（不再另算一次 `minimum_data_readiness`）。
+# 三条纪律写死在这个函数里：
+#   1. 只读 + 写锁感知：写窗口内**不抢**（`DuckDBReadLockedError` 只会
+#      log，绝不向上抛，启动不受影响）；
+#   2. 失败不落盘、不返回旧结论 → 第一次筛选照旧走冷算（fail open，
+#      绝不假绿）；
+#   3. 失效沿用既有 `content_epoch` + 指纹（`screening_readiness_cache_key`
+#      已经把 content_epoch / 内容摘要 / 日历 / 人工覆盖吃进哈希），不另造一套。
+#: 预热的终态（供 /api/maintenance/screening-readiness 观测）。
+_SCREENING_PREWARM_TERMINAL = frozenset({"done", "cache_hit", "skipped", "failed"})
+#: 请求线程最多等「启动预热」多久（超过就自己冷算，绝不无限等）。
+#: 依据：正式库一次完整体检实测 20–60s，留一倍余量给慢盘/并发查询。
+SCREENING_PREWARM_WAIT_SECONDS = 120.0
+_screening_prewarm_lock = threading.Lock()
+#: 预热到终态（done/cache_hit/skipped/failed）时 set；idle 状态初始为 set。
+_screening_prewarm_done = threading.Event()
+_screening_prewarm_done.set()
+_screening_prewarm_state: dict[str, Any] = {
+    "status": "idle",          # idle | running | done | cache_hit | skipped | failed
+    "reason": None,            # startup / post_update / ...
+    "started_at": None,
+    "finished_at": None,
+    "duration_seconds": None,
+    "cache_source": None,      # computed | cache
+    "decision_ready": None,
+    "blocking_warnings": None,
+    "fingerprint": None,
+    "error": None,
+    "attempts": 0,
+}
+
+
+def _screening_prewarm_update(**fields: Any) -> None:
+    with _screening_prewarm_lock:
+        _screening_prewarm_state.update(fields)
+        if fields.get("status") in _SCREENING_PREWARM_TERMINAL:
+            _screening_prewarm_state["attempts"] = int(
+                _screening_prewarm_state.get("attempts") or 0
+            ) + 1
+    # 终态一定要唤醒等待中的请求线程（否则它会白等到超时才冷算）。
+    if fields.get("status") in _SCREENING_PREWARM_TERMINAL:
+        _screening_prewarm_done.set()
+
+
+def screening_readiness_prewarm_active() -> bool:
+    """Is this process currently computing the screening 体检 in the background?"""
+    with _screening_prewarm_lock:
+        return _screening_prewarm_state.get("status") == "running"
+
+
+def wait_for_screening_readiness_prewarm(timeout: float) -> bool:
+    """Wait for the in-flight prewarm to reach a terminal state (bounded)."""
+    return bool(_screening_prewarm_done.wait(timeout=max(0.0, float(timeout))))
+
+
+def screening_readiness_prewarm_status(
+    sqlite: SQLiteStore | None = None,
+) -> dict:
+    """Observability payload: is the screening 体检 already computed for this process?
+
+    ``prewarmed`` 为真只说明**本进程**已经把决策算完/命中缓存（第一次筛选
+    可以直接复用）；``cache`` 是落盘那一行的**元信息**（不重算指纹，故
+    ``decision_ready`` 只代表"库里那行怎么写的"，不是对当前数据的断言——
+    真正的当前性由请求路径上的指纹比对保证）。
+    """
+    with _screening_prewarm_lock:
+        state = dict(_screening_prewarm_state)
+    payload: dict[str, Any] = {
+        "prewarmed": state.get("status") in {"done", "cache_hit"},
+        "prewarm": state,
+        "cache": _screening_readiness_cache_row(sqlite) if sqlite is not None else None,
+    }
+    return payload
+
+
+def _screening_readiness_cache_row(sqlite: SQLiteStore) -> dict:
+    """Cheap metadata view of the persisted screening decision (never raises)."""
+    try:
+        rows = sqlite.query(
+            "SELECT value, updated_at FROM data_refresh_state WHERE key = ?",
+            [SCREENING_READINESS_CACHE_KEY],
+        )
+        if not rows:
+            return {"present": False, "updated_at": None, "fingerprint": None,
+                    "decision_ready": None}
+        payload = json.loads(rows[0]["value"] or "{}")
+        if not isinstance(payload, dict):
+            payload = {}
+        decision = payload.get("decision") or {}
+        return {
+            "present": True,
+            "updated_at": rows[0].get("updated_at"),
+            "fingerprint": payload.get("fingerprint"),
+            "fingerprint_confident": payload.get("fingerprint_confident") is True,
+            "decision_ready": decision.get("ready"),
+            "decision_updated_at": payload.get("updated_at"),
+        }
+    except Exception:
+        logger.warning("读取筛选就绪缓存元信息失败(非致命)", exc_info=True)
+        return {"present": False, "updated_at": None, "fingerprint": None,
+                "decision_ready": None}
+
+
 def warm_screening_readiness_cache(
-    duck: DuckDBStore, sqlite: SQLiteStore,
+    duck: DuckDBStore, sqlite: SQLiteStore, *, reason: str = "startup",
 ) -> dict | None:
     """Compute and persist the screening decision when no fresh cache exists.
 
     Startup maintenance calls this off the web request path so the first
     user-triggered screening run normally hits the persistent cache instead
     of paying the full data-quality scan inline.
+
+    2026-11-21：**从不抛异常**。返回 ``None`` 表示"这次没算成"（写锁活跃 /
+    指纹算不出来 / 计算失败），调用方必须退回冷算路径（fail open）；
+    成功返回的是 ``screening_readiness()`` 的决策字典（与
+    :func:`screening_readiness` 同形），可以顺带把 ``decision["readiness"]``
+    当作启动核对结果，避免同一份全库体检算两遍。
     """
-    fingerprint = screening_readiness_cache_key(duck, sqlite)
-    if not fingerprint:
+    started = time.perf_counter()
+    with _screening_prewarm_lock:
+        if _screening_prewarm_state.get("status") == "running":
+            logger.info("筛选就绪体检预热已在运行，跳过重复触发: reason=%s", reason)
+            return None
+        _screening_prewarm_state.update({
+            "status": "running",
+            "reason": reason,
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None,
+            "duration_seconds": None,
+            "error": None,
+        })
+        _screening_prewarm_done.clear()
+
+    def _finish(status: str, **fields: Any) -> None:
+        _screening_prewarm_update(
+            status=status,
+            finished_at=datetime.now(UTC).isoformat(),
+            duration_seconds=round(time.perf_counter() - started, 3),
+            **fields,
+        )
+
+    try:
+        fingerprint = screening_readiness_cache_key(duck, sqlite)
+        if not fingerprint:
+            _finish("failed", error="fingerprint_unavailable")
+            logger.warning(
+                "筛选就绪体检预热失败: reason=%s 原因=指纹不可用，第一次筛选将走冷算",
+                reason,
+            )
+            return None
+        cached = load_screening_readiness_cache(sqlite, fingerprint)
+        if cached is not None:
+            _finish(
+                "cache_hit",
+                cache_source="cache",
+                decision_ready=bool(cached.get("ready")),
+                blocking_warnings=list(cached.get("warning_codes") or []),
+                fingerprint=fingerprint,
+            )
+            logger.info(
+                "筛选就绪体检预热命中缓存: reason=%s 耗时=%.2fs ready=%s blocking=%s",
+                reason, time.perf_counter() - started, cached.get("ready"),
+                cached.get("warning_codes") or [],
+            )
+            return cached
+        from app.core.storage.update_lock import any_write_lock_active
+
+        if any_write_lock_active(duck.db_path):
+            _finish("skipped", error="write_lock_active", fingerprint=fingerprint)
+            logger.warning(
+                "筛选就绪体检预热跳过(写锁活跃，不抢写窗口): reason=%s 耗时=%.2fs",
+                reason, time.perf_counter() - started,
+            )
+            return None
+        decision = screening_readiness(duck, sqlite)
+        store_screening_readiness_cache(sqlite, fingerprint, decision)
+        _finish(
+            "done",
+            cache_source="computed",
+            decision_ready=bool(decision.get("ready")),
+            blocking_warnings=list(decision.get("warning_codes") or []),
+            fingerprint=fingerprint,
+        )
+        logger.info(
+            "筛选就绪体检预热完成: reason=%s 耗时=%.1fs ready=%s blocking=%s",
+            reason, time.perf_counter() - started, decision.get("ready"),
+            decision.get("warning_codes") or [],
+        )
+        return decision
+    except Exception as error:  # noqa: BLE001 - 预热绝不能让启动失败
+        detail = f"{type(error).__name__}: {error}"[:500]
+        _finish("failed", error=detail)
+        logger.warning(
+            "筛选就绪体检预热失败(非致命，第一次筛选将走冷算): reason=%s 耗时=%.2fs 错误=%s",
+            reason, time.perf_counter() - started, detail,
+        )
         return None
-    cached = load_screening_readiness_cache(sqlite, fingerprint)
-    if cached is not None:
-        return cached
-    decision = screening_readiness(duck, sqlite)
-    store_screening_readiness_cache(sqlite, fingerprint, decision)
-    return decision
+    finally:
+        # 兜底：任何路径都不能把状态永久卡在 running（否则后续重试被误判为
+        # "已在运行"而全部跳过 → 永远不预热）。
+        if _screening_prewarm_state.get("status") == "running":
+            _finish("failed", error="unknown_termination")
 
 
 

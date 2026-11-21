@@ -85,11 +85,14 @@ test('usePollTimer 实现了"清旧 + 设新 + 卸载清理"三件事', () => {
 })
 
 test('轮询大户（应用外壳 / 数据状态页 / 筛选页）已改为 usePollTimer', () => {
-  // 应用外壳：30s 自动更新状态轮询
+  // 应用外壳：全局自动更新状态轮询必须复用 useAutoUpdatePolling（内部 usePollTimer），
+  // 不允许 App.vue 再手写第二套 timer。
   const app = codeOnly(readFileSync(join(srcDir, 'App.vue'), 'utf-8'))
-  assert.match(app, /usePollTimer\(\)/, 'App.vue 的 30s 轮询必须用 usePollTimer')
+  assert.match(app, /useAutoUpdateRunning\(\)/, 'App.vue 必须复用 useAutoUpdatePolling')
+  assert.match(app, /startAutoUpdatePolling\(/, 'App.vue 必须调用 startAutoUpdatePolling')
   assert.ok(!/setInterval/.test(app), 'App.vue 不应再用 setInterval')
   assert.ok(!/clearInterval|clearTimeout/.test(app), 'App.vue 不应再自己清 timer')
+  assert.ok(!/setTimeout\s*\(/.test(app), 'App.vue 不应再自己排 timer（交给 usePollTimer）')
 
   // 数据状态页：三套轮询（自动更新状态 / 指标重算 / 重量摘要）各自一个 timer
   const dataStatus = codeOnly(readFileSync(join(srcDir, 'views/DataStatusPage.vue'), 'utf-8'))

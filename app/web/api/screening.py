@@ -272,7 +272,12 @@ def _require_current_screenability(request: Request) -> dict:
             "readiness_age_seconds": None,
         }
 
-    from app.core.data_quality import screening_readiness
+    from app.core.data_quality import (
+        SCREENING_PREWARM_WAIT_SECONDS,
+        screening_readiness,
+        screening_readiness_prewarm_active,
+        wait_for_screening_readiness_prewarm,
+    )
 
     cache_key = screening_readiness_cache_key(request.app.state.duck, request.app.state.sqlite)
     if cache_key:
@@ -294,6 +299,20 @@ def _require_current_screenability(request: Request) -> dict:
                 ensure_screening_readiness_refresh(
                     request.app.state.duck, request.app.state.sqlite, cache_key,
                 )
+        if (
+            entry is None
+            and screening_readiness_prewarm_active()
+            # 2026-11-21（用户点名的第 2 件事）：启动预热**正在算同一份**全库体检。
+            # 这里再同步重算一遍 = 同一份扫描跑两次（副本实测：并发 59.5s vs 等
+            # 预热 32s，且 CPU/磁盘互相拖慢）。等它落盘再读一次；预热失败/跳过
+            # 时事件同样会被 set（终态），于是自然退回下面的冷算路径 —— 既不会
+            # 返回过期结论，也不会无限等。
+            and wait_for_screening_readiness_prewarm(SCREENING_PREWARM_WAIT_SECONDS)
+        ):
+            entry = load_screening_readiness_entry(
+                request.app.state.sqlite, cache_key, allow_stale=True,
+            )
+            freshness = _freshness_payload(entry, source="cache")
         if entry is not None:
             cached = entry.get("decision") or {}
             request.app.state.startup_readiness = cached.get("readiness") or {}

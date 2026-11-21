@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, inject, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NAlert, NButton, NResult, NSpace, NSpin, NTag,
@@ -22,6 +22,8 @@ import { loadKlineSettings, pageStorage } from '../utils/kline-settings.ts'
 // 组件只剩：路由代码 → ref 绑定 → 模板。详见两个 composable 的头注释。
 import { useStockDetailLoad } from '../composables/useStockDetailLoad.ts'
 import { useTocFollow } from '../composables/useTocFollow.ts'
+import { AUTO_UPDATE_STATUS_KEY } from '../composables/useAutoUpdatePolling.ts'
+import { buildUpdateProgressView } from '../helpers/auto-update-progress.ts'
 
 const route = useRoute()
 const message = useMessage()
@@ -32,6 +34,15 @@ const stockCode = computed(() => {
   return typeof code === 'string' ? code.trim() : ''
 })
 const hasStockCodeError = computed(() => !stockCode.value)
+
+// 后台更新进度：由 App.vue 布局层唯一的自动更新轮询 provide 下来（不在这里发请求）。
+// 没有注入（独立挂载/测试）时为 null，退回服务端在指标响应里标注的
+// `auto_update_in_progress` 提示。
+const autoUpdateStatus = inject(AUTO_UPDATE_STATUS_KEY, null)
+const backgroundUpdate = computed(() => {
+  const view = buildUpdateProgressView(autoUpdateStatus?.value ?? null)
+  return view?.kind === 'running' ? view : null
+})
 
 // K线配置（localStorage 全局记忆，非法值回退默认）
 const initialKlineSettings = loadKlineSettings(pageStorage())
@@ -127,6 +138,35 @@ const safetyMetricOptions = [
       <p v-if="servedFromCache" id="detail-cache-note" class="detail-cache-note">
         已即时显示上次成功加载的内容{{ cacheAsOf ? `（数据截至 ${cacheAsOf}）` : '' }}，正在后台刷新…
       </p>
+      <!-- 后台自动更新进行中：明确告知"现在看到的是上次成功的数据 + 更新到第几步"。
+           这是页内提示条，不是遮罩/加载态：下面的读功能全部保持可用。 -->
+      <div
+        v-if="backgroundUpdate"
+        id="detail-update-note"
+        class="detail-update-note"
+        data-update-running="1"
+        role="status"
+        aria-live="polite"
+      >
+        <div class="detail-update-head">
+          <strong>{{ backgroundUpdate.title }}</strong>
+          <span v-if="backgroundUpdate.counts" class="detail-update-counts">{{ backgroundUpdate.counts }}</span>
+          <span v-if="backgroundUpdate.percent !== null" class="detail-update-percent">{{ backgroundUpdate.percent }}%</span>
+        </div>
+        <div class="detail-update-track">
+          <span
+            v-if="backgroundUpdate.percent !== null"
+            class="detail-update-fill"
+            :style="{ width: `${backgroundUpdate.percent}%` }"
+          ></span>
+        </div>
+        <p class="detail-update-hint">
+          当前显示的是上次成功加载的内容{{ cacheAsOf ? `（数据截至 ${cacheAsOf}）` : '' }}，页面可正常查看；
+          后台更新{{ backgroundUpdate.counts ? `已到 ${backgroundUpdate.counts}` : '进行中' }}<template
+            v-if="backgroundUpdate.elapsed"
+          >（已耗时 {{ backgroundUpdate.elapsed }}）</template>，完成后刷新即可看到最新数据。
+        </p>
+      </div>
       <p class="caliber-note">
         口径提示：本页默认是重述回看口径（最新重述值），回测请用『当时可见』。
       </p>
@@ -178,7 +218,7 @@ const safetyMetricOptions = [
             <BusinessOverviewSection :data="businessOverview" mode="overview" />
 
             <div class="data-status-block">
-              <n-alert v-if="autoUpdateInProgress" type="info" :show-icon="true">
+              <n-alert v-if="autoUpdateInProgress && !backgroundUpdate" type="info" :show-icon="true">
                 数据正在自动更新，以下指标截至 {{ indicators?.latest_price_date ?? '最新价格日' }}，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。
               </n-alert>
               <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true">
@@ -284,6 +324,53 @@ const safetyMetricOptions = [
   background: #f2f7f3;
   color: #4b6b57;
   font-size: 12px;
+}
+/* 后台更新进行中的页内提示条（非遮罩，读功能不受影响） */
+.detail-update-note {
+  margin: 4px 0 8px;
+  padding: 9px 12px 10px;
+  border: 1px solid #dbe6df;
+  border-left: 3px solid #70a986;
+  border-radius: 8px;
+  background: #f7fbf8;
+  color: #355142;
+  font-size: 12px;
+}
+.detail-update-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+}
+.detail-update-head strong {
+  font-weight: 650;
+  color: #2f4d3c;
+}
+.detail-update-counts,
+.detail-update-percent {
+  color: #4b6b57;
+  font-variant-numeric: tabular-nums;
+}
+.detail-update-track {
+  position: relative;
+  height: 6px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #e9f0eb;
+}
+.detail-update-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #70a986;
+  transition: width 0.3s ease;
+}
+.detail-update-hint {
+  margin: 6px 0 0;
+  color: #5f7166;
+  font-size: 11px;
+  line-height: 1.5;
 }
 .stock-detail-page {
   max-width: 1380px;

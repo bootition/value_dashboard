@@ -520,6 +520,11 @@ def run_incremental_update_flow(
         # 变了可能把 MA/量能整列变 NULL，而行情行一个都没变。
         "trading_calendar_fingerprint": scope_plan.trading_calendar_fingerprint,
         "trading_calendar_changed": scope_plan.trading_calendar_semantics_changed,
+        # 缺口日期数（#13-b）：缺口集合是"日历 × 逐日覆盖度 × 上市只数"的函数，
+        # 覆盖度在两次日历变化之间变了也要重算（行情指纹差异门控）。
+        # 报告里只放**个数**：缺口集合本身在状态表里（有序差值编码）。
+        "trading_calendar_gap_days": len(scope_plan.trading_calendar_gap_days),
+        "trading_calendar_gap_refreshed": scope_plan.trading_calendar_gap_refreshed,
         # 国债曲线（2026-11-21 独立审查缺陷 #14）：外部改写曲线也算变化，
         # 受影响面是全市场的 div_yield_spread_* / ttm_dividend_yield。
         "treasury_curve_fingerprint": scope_plan.treasury_curve_fingerprint,

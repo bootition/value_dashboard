@@ -371,6 +371,58 @@ def format_readiness_log(current: dict) -> tuple[int, str]:
     return logging.WARNING, message
 
 
+def _prewarm_screening_readiness(
+    duck: DuckDBStore, sqlite: SQLiteStore, *, reason: str,
+) -> dict | None:
+    """启动预热筛选体检（2026-11-21，用户点名的第 2 件事）。
+
+    放在启动维护线程里、**自动更新之前**跑：等服务起完、用户第一次点
+    「运行筛选」时，门禁要的那份 `screening_readiness()` 决策已经在
+    `data_refresh_state["screening_readiness_cache"]` 里，直接命中
+    （副本实测：改前 40.5s → 改后 0.4s）。
+
+    纪律（缺一条就叫假绿/拖垮启动）：
+      * 绝不抛异常：预热失败只 log，HTTP 早已可用；第一次筛选照旧冷算。
+      * 写锁窗口不抢：`warm_screening_readiness_cache()` 内部先查
+        `any_write_lock_active`，活跃就 skipped 返回 None。
+      * 返回值里的 `readiness` 直接当启动核对结果用，避免同一份全库体检
+        再算一遍 `minimum_data_readiness()`（旧代码就是算了两遍）。
+    """
+    from app.core.data_quality import warm_screening_readiness_cache
+
+    started = time.perf_counter()
+    logger.info("筛选就绪体检预热开始: reason=%s", reason)
+    try:
+        decision = warm_screening_readiness_cache(duck, sqlite, reason=reason)
+    except Exception as error:  # noqa: BLE001 - 预热失败绝不能让启动失败
+        logger.warning(
+            "筛选就绪体检预热异常(非致命，第一次筛选将走冷算): reason=%s 耗时=%.2fs 错误=%s",
+            reason, time.perf_counter() - started, error,
+        )
+        return None
+    elapsed = time.perf_counter() - started
+    if not isinstance(decision, dict):
+        logger.warning(
+            "筛选就绪体检未完成(非致命，第一次筛选将走冷算): reason=%s 耗时=%.2fs",
+            reason, elapsed,
+        )
+        return None
+    logger.info(
+        "筛选就绪体检已就绪: reason=%s 耗时=%.2fs ready=%s blocking=%s disclosed=%s",
+        reason, elapsed, decision.get("ready"), decision.get("warning_codes") or [],
+        decision.get("disclosed_warnings") or [],
+    )
+    return decision
+
+
+def _readiness_from_screening_decision(decision: dict | None) -> dict | None:
+    """把筛选决策里的 `readiness` 取出来当启动核对结果（同一次计算，不重算）。"""
+    readiness = (decision or {}).get("readiness")
+    if isinstance(readiness, dict) and "ready" in readiness:
+        return dict(readiness)
+    return None
+
+
 def _run_startup_maintenance(
     duck: DuckDBStore,
     sqlite: SQLiteStore,
@@ -415,10 +467,25 @@ def _run_startup_maintenance(
         }
         logger.warning("后台最小初始化失败: %s", error)
 
+    # 2026-11-21（用户点名的第 2 件事）：**先预热筛选体检，再干别的**。
+    # 旧顺序把这件事排在「启动自动更新子进程」之后（可能几小时后），等于对
+    # "重启后第一次筛选"毫无帮助；而且在同一份全库体检上叠了两次计算
+    # （minimum_data_readiness 一次 + screening_readiness 一次）。
+    # 现在：这次预热算出来的 readiness 就是启动核对结论（合并，只算一遍），
+    # 第一次筛选直接命中缓存。预热不成就退回原来的同步核对（冷算路径不变）。
+    prewarm_decision = _prewarm_screening_readiness(duck, sqlite, reason="startup")
+    prewarmed_readiness = _readiness_from_screening_decision(prewarm_decision)
+
     try:
         current = store_cached_data_readiness(
-            sqlite, readiness_with_low_memory(),
+            sqlite,
+            prewarmed_readiness
+            if prewarmed_readiness is not None
+            else readiness_with_low_memory(),
         )
+        if prewarmed_readiness is not None:
+            # 如实标注这份 readiness 与被筛选门禁复用的是**同一次**体检。
+            current["screening_readiness_prewarmed"] = True
         if initialization_report is not None:
             current["initialization"] = initialization_report
         if initialization_error:
@@ -470,24 +537,29 @@ def _run_startup_maintenance(
     except Exception as error:
         logger.warning("后台自动更新失败(非致命): %s", error)
 
+    # 2026-11-21：更新跑完之后数据变了（content_epoch +1 → 指纹变），这里必须
+    # **重算同一份**筛选体检：既当"更新后数据就绪复核"，也把新指纹的决策存好，
+    # 让更新后的第一次筛选照旧命中缓存。仍然是合并（一次计算两用）。
+    post_update_decision = _prewarm_screening_readiness(
+        duck, sqlite, reason="post_update",
+    )
+    post_update_readiness = _readiness_from_screening_decision(post_update_decision)
     try:
         current = store_cached_data_readiness(
-            sqlite, readiness_with_low_memory(),
+            sqlite,
+            post_update_readiness
+            if post_update_readiness is not None
+            else readiness_with_low_memory(),
         )
         if initialization_report is not None:
             current["initialization"] = initialization_report
         current = _with_quality_warning_codes(current, duck, sqlite)
+        if post_update_readiness is not None:
+            current["screening_readiness_prewarmed"] = True
         if readiness_cb is not None:
             readiness_cb(current)
     except Exception as error:
         logger.warning("自动更新后数据就绪复核失败(非致命): %s", error)
-
-    try:
-        from app.core.data_quality import warm_screening_readiness_cache
-
-        warm_screening_readiness_cache(duck, sqlite)
-    except Exception as error:
-        logger.warning("筛选就绪缓存预热失败(非致命): %s", error)
 
     # C8/C16修复(报告41): 启动时对有界操作表做 GC（过期 plan / 旧 job_logs /
     # 已解析 missing_list），幂等、保守、不涉及审计记录。
@@ -868,6 +940,22 @@ def create_app(
         return getattr(
             request.app.state, "startup_maintenance", {"status": "idle", "error": None}
         )
+
+    @app.get("/api/maintenance/screening-readiness")
+    def screening_readiness_status(request: Request) -> dict:
+        """筛选体检预热的状态（2026-11-21，用户点名的第 2 件事）。
+
+        回答"现在点运行筛选用不用等全库体检"：
+          * ``prewarmed`` —— 本进程是否已把筛选决策算完/命中缓存；
+          * ``prewarm.status`` —— idle/running/done/cache_hit/skipped/failed
+            （skipped = 写窗口不抢锁；failed = 只能等下一条启动维护或冷算）；
+          * ``prewarm.duration_seconds`` / ``fingerprint`` / ``error``；
+          * ``cache`` —— 落盘那一行的元信息（present/updated_at/fingerprint），
+            **不**重算指纹，故它只是"库里写了什么"，不是对当前数据的断言。
+        """
+        from app.core.data_quality import screening_readiness_prewarm_status
+
+        return screening_readiness_prewarm_status(request.app.state.sqlite)
 
     # ─── 前端静态资源托管 ────────────────────────────────────────
     static_dir = (

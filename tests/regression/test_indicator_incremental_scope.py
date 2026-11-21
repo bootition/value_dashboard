@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 from datetime import date, timedelta
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -1080,9 +1081,14 @@ def test_forced_full_switch_is_wired(duckdb_store, sqlite_store) -> None:
 
 
 def test_periodic_full_refresh_fires_after_configured_days(
-    duckdb_store, sqlite_store, monkeypatch,
+    duckdb_store, sqlite_store,
 ) -> None:
-    """周期全量兜底：超过 N 天没有全量成功 → reason=`periodic_full_refresh`。"""
+    """周期全量兜底：**到期才**触发 —— 未到期不触发，超过 15 天后 reason=`periodic_full_refresh`。
+
+    2026-11-21 用户裁决：兜底周期 7 天 → 15 天（半个月）。用例跟着改成 15 天，
+    并**同时钉住边界两侧**（14 天前 = 不许全量、16 天前 = 必须全量），
+    否则"把周期改回 7 天"这类回归只会让"到期"那一半变红、另一半看不出来。
+    """
     from app.core.update_parts import indicator_scope as scope_module
 
     codes = _audit_codes(4)
@@ -1091,24 +1097,57 @@ def test_periodic_full_refresh_fires_after_configured_days(
     bootstrap_indicator_scope(updater)
     assert plan_indicator_scope(updater, sources={}).mode == "incremental"
 
-    # 把"上次全量"改成 8 天前（默认兜底 7 天）→ 下一轮必须全量。
-    monkeypatch.setattr(scope_module, "periodic_full_days", lambda: 7)
+    # 周期本身必须是 15 天（不 mock：读的就是生效配置 `update.indicator_periodic_full_days`
+    # 与代码默认值）——"把周期改回 7 天"会让下面"14 天前不许全量"当场变红。
+    assert scope_module.DEFAULT_PERIODIC_FULL_DAYS == 15, scope_module.DEFAULT_PERIODIC_FULL_DAYS
+    assert scope_module.periodic_full_days() == 15, scope_module.periodic_full_days()
     from datetime import UTC, datetime, timedelta
 
-    eight_days_ago = (datetime.now(UTC) - timedelta(days=8)).isoformat()
-    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, eight_days_ago)
+    # 边界内侧：距上次全量 14 天 < 15 天 → **不许**触发（周期从 7 改 15 的正是这一条）。
+    fourteen_days_ago = (datetime.now(UTC) - timedelta(days=14)).isoformat()
+    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, fourteen_days_ago)
+    early = updater.run_incremental_update()["steps"]["indicators"]
+    assert early["mode"] == "incremental", f"周期兜底提前触发了（未满 15 天）：{early}"
+    assert early["reason"] != "periodic_full_refresh", early["reason"]
+
+    # 把"上次全量"改成 16 天前（默认兜底 15 天）→ 下一轮必须全量。
+    sixteen_days_ago = (datetime.now(UTC) - timedelta(days=16)).isoformat()
+    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, sixteen_days_ago)
 
     report = updater.run_incremental_update()
     step = report["steps"]["indicators"]
     assert step["mode"] == "full", f"周期兜底没生效：{step}"
     assert step["reason"] == "periodic_full_refresh"
+    assert report["indicator_scope"]["periodic_full_days"] == 15, (
+        report["indicator_scope"]
+    )
     # 兜底必须留痕：状态表里能查到 reason，且水位被刷新到"刚刚"。
     import json as _json
 
     decision = _json.loads(updater._read_refresh_state(scope_module.LAST_SCOPE_KEY))
     assert decision["reason"] == "periodic_full_refresh"
     refreshed = updater._read_refresh_state(scope_module.PERIODIC_FULL_KEY)
-    assert refreshed != eight_days_ago, "全量成功后必须刷新周期水位，否则每轮都全量"
+    assert refreshed != sixteen_days_ago, "全量成功后必须刷新周期水位，否则每轮都全量"
+
+
+def test_periodic_full_days_config_matches_in_both_default_yamls() -> None:
+    """周期全量的天数在**两份** `default.yaml` 里都必须是 15 天（半个月）。
+
+    用户 2026-11-21 裁决：7 天 → 15 天。仓库里有两份默认配置（仓库根 `config/`
+    与打包进 wheel 的 `app/resources/config/`），只改一份就会出现"开发环境 15 天、
+    安装版仍是 7 天"的分裂；这条用例把它们钉成同一个值。
+    """
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    values = {}
+    for relative in ("config/default.yaml", "app/resources/config/default.yaml"):
+        payload = yaml.safe_load((repo_root / relative).read_text(encoding="utf-8"))
+        values[relative] = payload["update"]["indicator_periodic_full_days"]
+    assert values == {
+        "config/default.yaml": 15,
+        "app/resources/config/default.yaml": 15,
+    }, values
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1479,6 +1518,207 @@ def test_trading_calendar_add_fully_covered_date_is_not_a_change(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ⑬ 两次日历变化**之间**覆盖度掉了（2026-11-21 残留盲区 #13-b）
+#
+# ⑨⑩ 组修的是"日历一变就看覆盖度"，但缺口快照本身是**上次日历变化时**算的：
+# 行情行在两次日历变化之间被删（某天覆盖度掉到阈值之下）时，那份快照还记着旧
+# 覆盖。随后再增删该日期 → 判成"缺口集合没变"→ 0 重算 → 那几只的
+# ma10…ma250 / annualized_volatility / max_drawdown 永久停在旧序列上。
+# 修法：缺口判据不再只由"日历内容变化"触发，**行情行变化**（逐股行情指纹差异，
+# 本来就每轮免费算）也触发；缺口日期集合落盘（有序差值编码，几字节到几 KB），
+# 靠集合差判"这个缺口是刚张开的还是刚合上的"。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_calendar_gap_snapshot_follows_coverage_between_calendar_changes(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑬a #13-b：日历**不动**、只删行情行导致覆盖度掉下去，缺口快照必须跟着走。
+
+    时间线（D = 近窗口里某一天；基线时 5 只股票在 D 都有 bar）：
+      T0 基线：D 覆盖 5/5 → 不是缺口；
+      T1 **日历不动**，删掉 codes[1:] 在 D 的行情行 → D 覆盖 1/5 → 变成缺口。
+         这一轮只该有那 4 只进价格域（**不是全量**），但缺口快照必须同时刷新；
+      T2 日历**删掉** D —— D 的缺口其实"合上"了，缺行那 4 只的连续序列要变长
+         → 必须全量重算（行情行没变，价格域看不见这件事）。
+
+    修前（#13-b）：T1 只在"日历内容变了"时才重算缺口快照 → 它仍记着"D 不是缺口"
+    （旧覆盖）；T2 用当前覆盖度算出的缺口集合（D 已不在日历里 → 空集）与那张旧
+    快照**相等** → 判成"日历变化没改变缺口"→ `incremental / 0 重算` → 4 只的
+    技术列永久停在"D 那天不存在"的旧值。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()  # first_run → full，同时建缺口基线
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["recomputed_count"] == 0, steady
+    before = _snapshot_map(duckdb_store)
+
+    # T1：日历不动，只把 codes[1:] 在 D 的行情行删掉（D 仍在日历里）。
+    day = str(_recent_trade_date(duckdb_store, codes[0], 5))[:10]
+    for code in codes[1:]:
+        _drop_price_rows(duckdb_store, code, day)
+    assert _price_row_count(duckdb_store, codes[1], day) == 0
+
+    t1 = updater.run_incremental_update()["steps"]["indicators"]
+    assert t1["mode"] == "incremental", (
+        f"删行情行不该直接触发全量（受影响集合说得出来）：{t1['mode']} "
+        f"reason={t1['reason']} planned={t1['planned_count']}"
+    )
+    assert sorted(t1["recomputed_codes"]) == sorted(codes[1:]), t1["recomputed_codes"]
+    mid = _snapshot_map(duckdb_store)
+    truncated = {
+        code: [
+            column for column in _ma_volume_columns()
+            if before[code].get(column) != mid[code].get(column)
+        ]
+        for code in codes[1:]
+    }
+    assert all(truncated.values()), (
+        f"D 缺行后技术列没被截断 —— 本用例失去证明力："
+        f"{ {c: v for c, v in truncated.items() if not v} }"
+    )
+    assert mid[codes[0]] == before[codes[0]], (
+        "只有 4 只的行情行变了，第 5 只不该被重算后产生差异"
+    )
+    # 缺口快照刷新后不许变成"每轮都判一次"：下一轮仍然 0 重算。
+    quiet = updater.run_incremental_update()["steps"]["indicators"]
+    assert quiet["recomputed_count"] == 0, (
+        f"覆盖度刷新后稳态被打破（缺口快照没推进水位）：{quiet['recomputed_codes']}"
+    )
+
+    # T2：日历删掉 D —— 缺口合上，缺行那 4 只的连续序列必须变长 → 全量。
+    sqlite_store.execute("DELETE FROM trading_dates WHERE trade_date = ?", [day])
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert step["mode"] == "full", (
+        f"#13-b：日历删掉一个'覆盖度在两次日历变化之间掉下去'的日期，"
+        f"缺口快照还记着旧覆盖 → 判成不必重算：mode={step['mode']} "
+        f"reason={step['reason']} planned={step['planned_count']}"
+    )
+    assert step["reason"] == "trading_calendar_changed", step["reason"]
+    assert step["changed_sources"].get("trading_calendar_changed", 0) >= 1, (
+        step["changed_sources"]
+    )
+    assert step["recomputed_count"] == len(codes), step
+
+    after = _snapshot_map(duckdb_store)
+    restored = {
+        code: [
+            column for column in _ma_volume_columns()
+            if mid[code].get(column) != after[code].get(column)
+        ]
+        for code in codes[1:]
+    }
+    assert all(restored.values()), (
+        f"缺口合上后技术列没恢复（= 用例只是在验证'全量照跑'）："
+        f"{ {c: v for c, v in restored.items() if not v} }"
+    )
+
+    # 金标准：同一份数据（同一份日历）全量重算，逐行逐列相等。
+    IndicatorCalculator(duck=duckdb_store, sqlite=sqlite_store).compute_snapshot_for_all()
+    full = _snapshot_map(duckdb_store)
+    delta = _diff_snapshot(after, full)
+    mismatches = sum(len(columns) for columns in delta.values())
+    assert mismatches == 0, (
+        f"#13-b 修复后增量与全量仍不一致 {mismatches} 个格子（{len(delta)} 只）；"
+        f"首例 {list(delta.items())[0]}"
+    )
+    assert len(next(iter(after.values()))) >= 70, "比对的是全列（除时间戳）"
+
+
+def test_price_rows_change_keeping_coverage_out_of_gap_is_not_a_full(
+    duckdb_store, sqlite_store,
+) -> None:
+    """⑬b 反向：行情行变了但**缺口集合没动** → 不许全量（#13-b 不许变成"行情一动就全量"）。
+
+    两段，都是"行情行变化但覆盖度没跨过阈值"：
+      1. 只改一只股票的收盘价（行数不变、覆盖度不变）；
+      2. 删掉一只股票某天的行情行，覆盖度 4/5 = 80% ≫ 阈值 0.5 → 该日仍不是缺口。
+    两段都必须停在**价格域**，且只算那一只。第 2 段同时钉住阈值判据的代价
+    （那一只的 ma10… 会被截断而另外 4 只不受影响）—— 那是文档里**故意**保留的
+    盲区（覆盖度在阈值之上、只差几只），由 15 天兜底，不是 #13-b。
+    """
+    codes = _audit_codes(5)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+    steady = updater.run_incremental_update()["steps"]["indicators"]
+    assert steady["recomputed_count"] == 0, steady
+
+    # 1) 改收盘价：行数/覆盖度都没变。
+    target = codes[0]
+    day_value = _recent_trade_date(duckdb_store, target, 2)
+    duckdb_store.write_query(
+        "UPDATE price_daily_raw SET close = close * 1.05 "
+        "WHERE stock_code = ? AND trade_date = ?",
+        [target, day_value],
+    )
+    price_step = updater.run_incremental_update()["steps"]["indicators"]
+    assert price_step["mode"] == "incremental", price_step
+    assert price_step["recomputed_codes"] == [target], price_step["recomputed_codes"]
+
+    # 2) 删一只股票某天的行情行：4/5 覆盖 ≫ 阈值 → 那天仍然不是缺口。
+    target2 = codes[1]
+    day = str(_recent_trade_date(duckdb_store, target2, 5))[:10]
+    _drop_price_rows(duckdb_store, target2, day)
+    row_step = updater.run_incremental_update()["steps"]["indicators"]
+    assert row_step["mode"] == "incremental", (
+        f"行情行变化但覆盖度仍在阈值之上，却被判成全量："
+        f"mode={row_step['mode']} reason={row_step['reason']} "
+        f"planned={row_step['planned_count']}"
+    )
+    assert row_step["recomputed_codes"] == [target2], row_step["recomputed_codes"]
+    assert row_step["changed_sources"].get("trading_calendar_changed", 0) == 0, (
+        row_step["changed_sources"]
+    )
+    # 稳态：缺口快照刷新之后不许每轮重复判（下一轮 0 重算）。
+    quiet = updater.run_incremental_update()["steps"]["indicators"]
+    assert quiet["recomputed_count"] == 0, quiet["recomputed_codes"]
+
+
+def test_steady_state_never_scans_price_coverage(
+    duckdb_store, sqlite_store, monkeypatch,
+) -> None:
+    """性能护栏：#13-b 的第二个触发条件必须是**免费**的。
+
+    覆盖度要在 1,759 万行的 `price_daily_raw` 上 `GROUP BY trade_date`（真库实测
+    63–67 ms；合成 1,759 万行本机 20.4 ms），所以它只能由"逐股行情指纹差异非空"
+    （本来就每轮免费算）门控：**稳态轮一个字节都不许多扫**，行情行一旦变了又
+    **必须**扫（否则覆盖度变化看不见 = #13-b 原样复发）。
+    """
+    from app.core.update_parts import indicator_scope as scope_module
+
+    codes = _audit_codes(4)
+    updater = _audit_env(duckdb_store, sqlite_store, codes)
+    updater.run_incremental_update()
+
+    # 先抓住原函数：下面 `monkeypatch.setattr` 会把模块属性换成 boom。
+    original = scope_module.trading_calendar_coverage
+
+    def boom(*args, **kwargs):
+        raise AssertionError(
+            "稳态轮扫了一遍 price_daily_raw 算覆盖度 —— #13-b 的门控退化成每轮全表扫描"
+        )
+
+    monkeypatch.setattr(scope_module, "trading_calendar_coverage", boom)
+    for _ in range(2):
+        step = updater.run_incremental_update()["steps"]["indicators"]
+        assert step["recomputed_count"] == 0, step
+
+    # 反面：行情行变了 → 必须重算缺口集合（这里把原函数包一层计数）。
+    calls: list[int] = []
+
+    def counting(owner):
+        calls.append(1)
+        return original(owner)
+
+    monkeypatch.setattr(scope_module, "trading_calendar_coverage", counting)
+    _drop_price_rows(duckdb_store, codes[1], str(_recent_trade_date(duckdb_store, codes[1], 4))[:10])
+    step = updater.run_incremental_update()["steps"]["indicators"]
+    assert step["recomputed_codes"] == [codes[1]], step["recomputed_codes"]
+    assert calls, "行情行变了却没有重算缺口集合 —— 覆盖度变化又看不见了（#13-b 复发）"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # ⑪ 国债曲线被**外部改写**（2026-11-21 独立审查缺陷 #14）
 #
 # 修前：曲线变化只在 `_refresh_treasury_curve` 的 before/after 里被发现，而且
@@ -1587,13 +1827,13 @@ def test_bootstrap_does_not_swallow_due_periodic_full(
     codes = _audit_codes(4)
     updater = _audit_env(duckdb_store, sqlite_store, codes)
     updater.run_incremental_update()
-    monkeypatch.setattr(scope_module, "periodic_full_days", lambda: 7)
-    eight_days_ago = (datetime.now(UTC) - timedelta(days=8)).isoformat()
-    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, eight_days_ago)
+    monkeypatch.setattr(scope_module, "periodic_full_days", lambda: 15)
+    sixteen_days_ago = (datetime.now(UTC) - timedelta(days=16)).isoformat()
+    updater._write_refresh_state(scope_module.PERIODIC_FULL_KEY, sixteen_days_ago)
 
     bootstrap_indicator_scope(updater)
 
-    assert updater._read_refresh_state(scope_module.PERIODIC_FULL_KEY) == eight_days_ago, (
+    assert updater._read_refresh_state(scope_module.PERIODIC_FULL_KEY) == sixteen_days_ago, (
         "bootstrap 不重算却刷新了周期全量水位 —— 已到期的兜底被吞掉"
     )
     plan = plan_indicator_scope(updater, sources={})
