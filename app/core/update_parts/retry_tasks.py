@@ -203,6 +203,25 @@ def retry_failed_tasks(
                 except Exception as error:
                     outcome = {"status": "failed", "error": f"{type(error).__name__}: {error}"}
                 error_text = outcome.get("error") or ""
+                # 2026-11-21 事故：`etf_meta` 里的合成伪代码 `ALL_A`（全A指数）被当基金抓，
+                # 同花顺回 `code=3001: Fund not found`（正确），却被反复重试 →
+                # 每轮 `retries` 都 failed，整轮永远 partial。伪代码/确定性 not-found
+                # 一律结算成 missing 并移出重试队列。
+                from app.core.etf_prices import (
+                    _is_definitive_not_found,
+                    is_price_fetchable,
+                )
+
+                if not is_price_fetchable(stock_code) or _is_definitive_not_found(error_text):
+                    owner._record_missing(stock_code, data_type, "source_unsupported")
+                    owner.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
+                    resolved_non_retryable += 1
+                    logger.info(
+                        "[增量] %s %s 不是可抓行情的交易所代码或源侧确定性 not-found，"
+                        "登记 missing(source_unsupported) 并移出重试队列（错误=%s）",
+                        stock_code, data_type, error_text[:80],
+                    )
+                    continue
                 if outcome["status"] == "success":
                     owner.sqlite.execute("DELETE FROM retry_list WHERE id = ?", [retry_id])
                     success_count += 1

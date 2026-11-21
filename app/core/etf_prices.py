@@ -30,6 +30,43 @@ from app.core.storage.sqlite_store import SQLiteStore
 logger = logging.getLogger(__name__)
 
 __all__ = ["EtfPriceUpdater", "MAX_YEARS"]
+# ─── 伪代码（不是交易所上市品种）必须挡在"抓行情/进重试"之外 ─────────────
+# 2026-11-21 实测事故：`etf_meta` 里有一条 `ALL_A`（全A指数伪代码，
+# 见 `app/core/etf_fundamentals.py::ALL_A_CODE`），它是**合成指数不是基金**，
+# 但 `enabled=1` 且被行情步骤照抓 → 同花顺每次回 `code=3001: Fund not found`
+# （完全正确）→ `_record_retry` 把它塞进 retry_list → 每轮重试、每轮失败 →
+# 整轮 `retries=partial/failed`，永远好不了。
+# 结论：这类代码**不进行情管道、不进重试队列**；基本面域照旧用它，互不影响。
+_PSEUDO_CODES = frozenset({"ALL_A"})
+
+
+_NOT_FOUND_MARKERS = (
+    "fund not found",
+    "code=3001",
+    "not found",
+    "no such",
+    "不存在",
+    "无此",
+)
+
+
+def _is_definitive_not_found(error: str | None) -> bool:
+    """源侧"标的根本不存在"的确定性错误（重试无意义）。"""
+    text = str(error or "").lower()
+    return any(marker in text for marker in _NOT_FOUND_MARKERS)
+
+
+def is_price_fetchable(code: str | None) -> bool:
+    """该代码是否真的能抓日线行情（排除合成伪代码与非法长度）。"""
+    if not code:
+        return False
+    text = str(code).strip().upper()
+    if text in _PSEUDO_CODES:
+        return False
+    # 真实 ETF/LOF 是 6 位数字（沪 5xxxxx / 深 15xxxx、16xxxx 等）。
+    return len(text) == 6 and text.isdigit()
+
+
 
 MAX_YEARS = 5  # THS ETF 日线端点单窗口最长 5 自然年
 
@@ -99,6 +136,16 @@ class EtfPriceUpdater:
         return result
 
     def update_etf(self, etf_code: str, *, years: int = MAX_YEARS) -> dict[str, Any]:
+        if not is_price_fetchable(etf_code):
+            # 伪代码/非法代码：如实登记 missing 并清掉历史重试条目，
+            # 绝不写 retry（否则每轮都会"重试一个永远不会成功的代码"）。
+            self._record_missing(etf_code, "source_unsupported")
+            self._resolve_retry(etf_code)
+            return {
+                "status": "missing",
+                "reason": "pseudo_or_invalid_code",
+                "error": f"{etf_code} 不是可抓行情的交易所代码",
+            }
         years = max(1, min(int(years), MAX_YEARS))
         thscode = normalize_thscode(etf_code)
         end = cn_today()
@@ -236,7 +283,10 @@ class EtfPriceUpdater:
         metas = self.sqlite.query(
             "SELECT etf_code, enabled FROM etf_meta ORDER BY etf_code"
         )
-        selected = [row["etf_code"] for row in metas if bool(row["enabled"])]
+        selected = [
+            row["etf_code"] for row in metas
+            if bool(row["enabled"]) and is_price_fetchable(row["etf_code"])
+        ]
         if codes:
             wanted = set(selected)
             selected = [c for c in codes if c in wanted]
@@ -265,8 +315,11 @@ class EtfPriceUpdater:
                 })
         if report["summary"]["failed"]:
             report["status"] = "partial"
-        if report["deferred"] and report["status"] == "success":
-            report["status"] = "partial"
+        # 2026-11-21：`deferred`（本轮到预算上限，顺延到下一轮继续推进）**不是失败**。
+        # 旧实现把它判成 partial，于是每轮都 partial（实测 job 262：20/20 全成功、
+        # failed=0、只因为 deferred=14 就 partial）→ 用户被训练成"忽略这个状态"，
+        # 真失败反而看不出来。只有真失败才降级。
+        # 保留可观测性：deferred 数量仍在 report["deferred"] 里如实给出。
         report["elapsed_seconds"] = round(time.time() - started, 2)
         logger.info(
             "ETF 行情批量: targeted=%d deferred=%d success=%d missing=%d failed=%d elapsed=%.1fs",
@@ -301,6 +354,12 @@ class EtfPriceUpdater:
         # 清理历史重试条目，避免状态页把配置问题永久显示为"待重试"。
         if "HITHINK_FINANCE_API_KEY" in error:
             self._record_missing(etf_code, "source_unconfigured")
+            self._resolve_retry(etf_code)
+            return
+        # 2026-11-21：源明确说"这个标的没有/不存在"是**确定性结论**，
+        # 重试一万次也是同一个答案。继续挂 retry 只会让整轮永远 partial。
+        if _is_definitive_not_found(error):
+            self._record_missing(etf_code, "source_unsupported")
             self._resolve_retry(etf_code)
             return
         try:

@@ -178,6 +178,18 @@ class TreasuryCurveUpdater:
 
     # ─── 日终增量 ─────────────────────────────────────────────────
 
+    def _trading_days_upto(self, today: date) -> set[str]:
+        """截止今天的交易日集合；读不到就返回空集（退化为"不判断"，绝不误跳）。"""
+        try:
+            rows = self.sqlite.query(
+                "SELECT trade_date FROM trading_dates WHERE trade_date <= ?",
+                [str(today)],
+            )
+            return {str(r["trade_date"])[:10] for r in rows}
+        except Exception as error:  # noqa: BLE001 - 日历读不到不影响抓取
+            logger.warning("国债日报：查询交易日历失败（本次不做交易日判定）: %s", error)
+            return set()
+
     def update_daily(
         self,
         work_dates: list[str] | None = None,
@@ -192,12 +204,25 @@ class TreasuryCurveUpdater:
         targets = work_dates or [str(_cn_today())]
         results: dict[str, dict[str, Any]] = {}
         failed: list[str] = []
+        skipped_days: list[str] = []
+        trading_days = self._trading_days_upto(_cn_today())
         for work_time in targets:
             try:
                 work_date = date.fromisoformat(str(work_time)[:10])
             except ValueError:
                 failed.append(work_time)
                 results[work_time] = {"status": "failed", "reason": "invalid_date"}
+                continue
+            # 2026-11-21 实测事故：周六/周日跑更新时，国债日报**不看日历直接抓今天**
+            # → 源侧必然 `source_empty` → 该步骤记 `failed` → 整轮 `partial`。
+            # 非交易日是**合法无数据**，如实 skipped，不进 failed、不登记 missing。
+            day_text = work_date.isoformat()
+            if trading_days and day_text not in trading_days:
+                skipped_days.append(day_text)
+                results[work_time] = {
+                    "status": "skipped", "work_date": day_text,
+                    "reason": "not_a_trading_day",
+                }
                 continue
             if work_date > _cn_today():
                 failed.append(work_time)
@@ -210,12 +235,23 @@ class TreasuryCurveUpdater:
             if progress_cb is not None:
                 progress_cb(work_time, outcome)
 
+        # 非交易日全跳过 → `skipped`（合法无数据），不是 success 也不是 failed：
+        # 状态页/聚合据此不会把"周末跑更新"记成异常。
+        if not failed and skipped_days and len(skipped_days) == len(targets):
+            status = "skipped"
+        elif not failed:
+            status = "success"
+        elif not results or len(failed) == len(targets):
+            status = "failed"
+        else:
+            status = "partial"
         return {
-            "status": "success" if not failed else ("failed" if not results or len(failed) == len(targets) else "partial"),
+            "status": status,
             "targeted": len(targets),
-            "succeeded": len(targets) - len(failed),
+            "succeeded": len(targets) - len(failed) - len(skipped_days),
             "failed": failed,
             "results": results,
+            "skipped_days": skipped_days,
         }
 
     def _update_daily_one(self, work_date: date) -> dict[str, Any]:

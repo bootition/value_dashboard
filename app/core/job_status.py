@@ -38,7 +38,14 @@ def aggregate_job_status(steps: dict[str, Any]) -> str:
         str(step.get("status", "partial")) if isinstance(step, dict) else str(step)
         for step in steps.values()
     ]
-    executed = [status for status in statuses if status != "skipped"]
+    # `deferred` = 本轮预算/冷却用完、顺延到下一轮继续（有界续传），**不是失败**。
+    # 2026-11-21 实测：cashflow_supplement / balance_sheet_ext / deducted_profit /
+    # fixed_assets 常态 `deferred`（`all_pending_in_cooldown`），旧聚合把它们当
+    # "非 success" → 整轮永远 partial → 真失败被淹没。按 `skipped` 同级处理，
+    # deferred 的数量仍在各自 step 的 details 里如实可查。
+    executed = [
+        status for status in statuses if status not in {"skipped", "deferred"}
+    ]
     if not executed or all(status in {"success", "ok"} for status in executed):
         return "success"
     if all(status in {"failed", "error"} for status in executed):
