@@ -517,6 +517,9 @@ def test_general_announcement_page_cap_is_20_from_config_and_truncation_only_war
     updater = IncrementalUpdater(
         duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=adapter,
     )
+    # 2026-11-22 起 general 默认关闭（详情页时间线已删）→ 本用例显式打开，
+    # 验证"打开时页上限取配置 20、截断只进 warning"这条契约仍然成立。
+    updater.announcement_general_enabled = True
 
     result = updater._check_new_announcements(persist=False, lookback_days=1)
 
@@ -583,3 +586,74 @@ def test_cninfo_single_day_still_truncates_at_the_20_page_cap(
     assert "total=3719" in (result.metadata.reason or "")
     assert "fetched=600" in (result.metadata.reason or "")
     client.close()
+
+
+class _RecordingAdapter:
+    """记录每次 `fetch` 请求里带的 `category`，用于验证"关 general"真的少发了一条请求。"""
+
+    def __init__(self) -> None:
+        self.categories: list[str | None] = []
+
+    def fetch(self, request):
+        category = (request.extra_params or {}).get("category")
+        self.categories.append(category)
+        # 每个类别都回一条，让链路完整走通
+        return FetchResult(
+            data=[{
+                "announcement_id": f"id-{category or 'general'}",
+                "announcement_time": "2026-11-20T00:00:00Z",
+                "title": f"{category or 'general'} 公告",
+                "stock_code": "000001",
+            }],
+            metadata=SourceMetadata(
+                source="cninfo", fetch_time=datetime.now(UTC),
+                raw_response_hash="b" * 64, confidence="strict",
+            ),
+        )
+
+
+def _announcement_probe(duckdb_store, sqlite_store, *, enabled: bool):
+    adapter = _RecordingAdapter()
+    updater = IncrementalUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=adapter,
+    )
+    updater.announcement_general_enabled = enabled
+    result = updater._check_new_announcements(persist=False)
+    return adapter.categories, result
+
+
+def test_general_announcements_are_not_fetched_by_default(duckdb_store, sqlite_store) -> None:
+    """2026-11-22 用户裁决：非财务公告（general 全文列表）默认不抓。
+
+    它唯一的消费者是详情页「公告时间线」（已删除）。关掉它每轮省约 2 分钟。
+    **财务与分红/除权必须照抓** —— 这是本用例的核心断言，不是"少抓点"就完事。
+    """
+    categories, result = _announcement_probe(duckdb_store, sqlite_store, enabled=False)
+
+    # general = category 为 None 的那次调用：必须**没有**
+    assert None not in categories, categories
+    # 财务四类 + dividend 必须都在
+    for category in ("semi_annual", "q1", "q3", "annual", "dividend"):
+        assert category in categories, (category, categories)
+    # 分红公告仍然被识别（链路没被削弱）
+    assert result["status"] == "available"
+    assert any(
+        item.get("_announcement_category") == "dividend"
+        for items in result["all_new_announcements"].values()
+        for item in items
+    ), result["all_new_announcements"]
+
+
+def test_general_announcements_are_fetched_when_enabled(duckdb_store, sqlite_store) -> None:
+    """开关打开 → general 照旧抓（保留恢复能力，别把路彻底焊死）。"""
+    categories, _ = _announcement_probe(duckdb_store, sqlite_store, enabled=True)
+    assert None in categories, categories
+    for category in ("semi_annual", "q1", "q3", "annual", "dividend"):
+        assert category in categories
+
+
+def test_general_cap_config_defaults_off_and_keeps_dividend_cap(duckdb_store, sqlite_store) -> None:
+    """配置层：general 默认关闭；分红/财务仍是 450 页额度（两者互不影响）。"""
+    updater = IncrementalUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    assert updater.announcement_general_enabled is False
+    assert updater.announcement_financial_max_pages == 450

@@ -24,7 +24,6 @@ export const STOCK_DETAIL_TOC_ITEMS: readonly TocItem[] = [
   { id: 'overview', label: '概览' },
   { id: 'valuation', label: '估值与市场' },
   { id: 'point-in-time', label: '当时可见' },
-  { id: 'announcements', label: '公告时间线' },
   { id: 'operations', label: '经营与成长' },
   { id: 'safety', label: '财务安全' },
   { id: 'return', label: '股东回报' },

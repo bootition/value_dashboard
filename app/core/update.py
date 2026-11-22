@@ -326,6 +326,15 @@ class IncrementalUpdater:
         self.announcement_general_max_pages: int = self._load_update_config(
             "announcement_general_max_pages", default=20
         )
+        # 2026-11-22（用户裁决）：**非财务公告（general 全文列表）默认不再抓**。
+        # 它唯一的消费者是个股详情页的「公告时间线」，而用户明确不看；关掉它每轮省
+        # 约 2 分钟（20 页 × ~1.5s/页）。**财务与分红/除权完全不受影响**：
+        #   * 财报刷新走 `_ANNOUNCEMENT_FINANCIAL_CATEGORIES`（年报/半年报/一季报/三季报）
+        #   * 分红/除权走独立的 `dividend` 类别
+        # 两者都是**按类别精确查询**、额度 450 页，与 general 是两条独立请求。
+        self.announcement_general_enabled: bool = bool(self._load_update_config(
+            "announcement_general_enabled", default=False
+        ))
         # CSRC 行业低频刷新间隔（天）：行业归属变化极低，避免每次更新
         # 逐股查询 CNINFO（约 1.5s/股）占用数小时（默认 30 天）
         self.csrc_refresh_interval_days: int = self._load_update_config(
@@ -2750,9 +2759,18 @@ class IncrementalUpdater:
         # general 全文列表只用于"非财务公告登记"（可选簿记）；分红/除权公告
         # 已由上面的 dividend 类别精确覆盖，general 截断不再阻断游标推进，
         # 否则每个公告量大日都会把更新打成 partial 并反复重查同一窗口。
-        general_items, general_error, general_truncated = fetch_items(
-            None, general_start, general_max_pages,
-        )
+        general_items: list[dict[str, Any]] = []
+        general_error: str | None = None
+        general_truncated = False
+        if self.announcement_general_enabled:
+            general_items, general_error, general_truncated = fetch_items(
+                None, general_start, general_max_pages,
+            )
+        else:
+            logger.info(
+                "公告：非财务公告（general 全文列表）已按配置关闭，本轮跳过"
+                "（只抓财务/分红类别；详情页公告时间线因此不再新增）",
+            )
         all_items.extend(general_items)
         # 2026-11-13 P1（C）：general 全文列表只用于"非财务公告登记"（可选簿记），
         # 它截断时**不得**把整轮 job 打成 partial —— 否则每轮都 partial，

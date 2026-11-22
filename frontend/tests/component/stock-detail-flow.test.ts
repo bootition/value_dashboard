@@ -320,23 +320,24 @@ describe('StockDetailPage 研究工作台（P1 重构）', () => {
     localStorage.clear()
   })
 
-  it('渲染粘性目录的七个章节', async () => {
+  it('渲染粘性目录的六个章节', async () => {
     setupAxiosMock()
     const { wrapper } = await mountDetailWithCode('600519')
     await flushPromises()
 
     const links = wrapper.findAll('.toc-link')
-    // 2026-11-14（reports/119 §5 D 类）：估值与市场之后新增两个锚点
-    // 「当时可见」「公告时间线」，目录从 5 项变为 7 项。
+    // 2026-11-22 用户裁决：删掉「公告时间线」卡片（其唯一数据源是 CNINFO general
+    // 全文列表，每轮约 2 分钟，用户不看）→ 目录从 7 项回到 6 项。
     expect(links.map((n) => n.text())).toEqual([
       '概览',
       '估值与市场',
       '当时可见',
-      '公告时间线',
       '经营与成长',
       '财务安全',
       '股东回报',
     ])
+    // 反向断言：不许再出现公告时间线条目（防止有人把卡片加回来）
+    expect(links.map((n) => n.text())).not.toContain('公告时间线')
   })
 
   it('渲染概览与四个摘要章节', async () => {

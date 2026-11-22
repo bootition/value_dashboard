@@ -203,7 +203,8 @@ describe('StockDetailPage 5 路并发拉取与逐路降级', () => {
     expect(wrapper.text()).not.toContain('股票不存在或暂无数据')
     // 身份区（来自 /info）与目录仍在
     expect(wrapper.find('#overview').text()).toContain('贵州茅台')
-    expect(wrapper.findAll('.toc-link')).toHaveLength(7)
+    // 2026-11-22：公告时间线卡片已删除 → 目录 6 项
+    expect(wrapper.findAll('.toc-link')).toHaveLength(6)
   })
 
   it('K 线失败：仅清空 K 线数据并告警，其余 4 路不受影响', async () => {
@@ -317,10 +318,9 @@ describe('StockDetailPage TOC 滚动跟随（锚点计算）', () => {
     overview: 0,
     valuation: 900,
     'point-in-time': 1400,
-    announcements: 1700,
-    operations: 2200,
-    safety: 2800,
-    return: 3400,
+    operations: 1700,
+    safety: 2300,
+    return: 2900,
   }
 
   let scrollY = 0

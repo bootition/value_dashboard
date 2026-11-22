@@ -12,7 +12,6 @@ import StockTocNav from '../components/StockTocNav.vue'
 import BusinessOverviewSection from '../components/BusinessOverviewSection.vue'
 import ResearchStatisticsCard from '../components/ResearchStatisticsCard.vue'
 import PointInTimeCard from '../components/PointInTimeCard.vue'
-import AnnouncementTimelineCard from '../components/AnnouncementTimelineCard.vue'
 import MetricHistoryChart from '../components/MetricHistoryChart.vue'
 import DataFreshnessCard from '../components/DataFreshnessCard.vue'
 import { fmt } from '../utils/formatters.ts'
@@ -209,12 +208,12 @@ const safetyMetricOptions = [
             <div class="section-inner-block">
               <ResearchStatisticsCard :stock-code="stockCode" default-metric="pe_ttm" />
             </div>
-            <!-- reports/119 §5 D 类：时点可见财务值 + 公告时间线（挨着历史研究统计） -->
+            <!-- reports/119 §5 D 类：时点可见财务值（挨着历史研究统计）。
+                 2026-11-22 用户裁决：**「公告时间线」卡片已删除** —— 用户不看它，
+                 而它的唯一数据源（CNINFO general 全文列表）每轮要花约 2 分钟。
+                 关掉 general 抓取后它只会越来越空，留着等于一个永远过期的空面板。 -->
             <div id="point-in-time" :ref="setSectionRef('point-in-time')" class="section-inner-block stock-section">
               <PointInTimeCard :stock-code="stockCode" />
-            </div>
-            <div id="announcements" :ref="setSectionRef('announcements')" class="section-inner-block stock-section">
-              <AnnouncementTimelineCard :stock-code="stockCode" />
             </div>
           </IndicatorGroupSection>
 

@@ -102,6 +102,14 @@ update:
   # general 截断只进 warnings、不把整轮 job 打成 partial（见 update.py 的
   # `general_warnings` 段与 `ops-knowledge-base.md` S22）。
   announcement_general_max_pages: 20
+  # 2026-11-22（用户裁决）：**非财务公告全文列表默认不抓**。
+  #   · 它唯一的消费者是个股详情页的「公告时间线」，用户明确不看 → 时间线已移除。
+  #   · 关掉它每轮省约 2 分钟（20 页 × ~1.5 秒/页），整轮 5 分钟 → 3 分钟量级。
+  #   · **财报与分红/除权完全不受影响**：它们走按类别精确查询的两条独立请求
+  #     （`_ANNOUNCEMENT_FINANCIAL_CATEGORIES` 与 `dividend`，都是 450 页额度），
+  #     与 general 全文列表无关（见 update.py 里 general 分支上方的注释）。
+  #   · 想恢复时间线：把它设成 true，并把 announcement_general_max_pages 调回需要的页数。
+  announcement_general_enabled: false
   price_fetch_concurrency: 8  # 自适应起始并发（HTTP 源；socket 源强制串行）
   price_fetch_max_concurrency: 16  # 连续 5 分钟无长尾/失败时每次 +4，最多 16
   price_fetch_concurrency_step: 4
