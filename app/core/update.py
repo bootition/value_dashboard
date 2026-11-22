@@ -319,8 +319,12 @@ class IncrementalUpdater:
         self.announcement_financial_max_pages: int = self._load_update_config(
             "announcement_financial_max_pages", default=450
         )
+        # 非财务公告 general 单窗口页上限。**以配置为准**：`config/default.yaml`
+        # 的 `announcement_general_max_pages`（2026-11-22 起 = 20，覆盖 vs 时间的
+        # 折中，见该键上方注释）。这里的 20 只是**配置缺失时的兜底**，两份数必须
+        # 同值——历史上这里写死 40 而配置写 5，读代码的人会得出相反的结论。
         self.announcement_general_max_pages: int = self._load_update_config(
-            "announcement_general_max_pages", default=40
+            "announcement_general_max_pages", default=20
         )
         # CSRC 行业低频刷新间隔（天）：行业归属变化极低，避免每次更新
         # 逐股查询 CNINFO（约 1.5s/股）占用数小时（默认 30 天）
@@ -2673,7 +2677,9 @@ class IncrementalUpdater:
             )
             financial_start = (now - timedelta(days=financial_window)).strftime("%Y-%m-%d")
         financial_max_pages = getattr(self, "announcement_financial_max_pages", 450)
-        general_max_pages = getattr(self, "announcement_general_max_pages", 40)
+        # 兜底 20 与 `__init__` 的 `_load_update_config` 默认值、两份
+        # `config/default.yaml` 的同名键保持同值（配置缺失/对象未经 __init__ 时生效）。
+        general_max_pages = getattr(self, "announcement_general_max_pages", 20)
 
         category_labels = {
             "semi_annual": "半年报", "q1": "一季报", "q3": "三季报",

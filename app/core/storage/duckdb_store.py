@@ -1168,6 +1168,7 @@ class DuckDBStore:
         """
         last_error: Exception | None = None
         delays = (0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0)
+        started = time.monotonic()
         for attempt in range(len(delays) + 1):
             try:
                 return _store_connect(
@@ -1176,6 +1177,17 @@ class DuckDBStore:
             except Exception as error:
                 last_error = error
                 if attempt < len(delays):
+                    # 2026-11-22（独立性能审查实测）：这段退避原来**一个字都不打**，
+                    # 于是"另一个进程持只读句柄"时写路径会**静默卡住**（实测 52.65s
+                    # 才成功），日志里看不出任何原因。现在每次重试都留 WARNING：
+                    # 已等待时长 + 下一次等待 + 原始错误关键字。只加日志，不改退避曲线。
+                    logger.warning(
+                        "写连接被占用，等待后重试（第 %d/%d 次，已等 %.1fs，"
+                        "下次再等 %.1fs）: %s",
+                        attempt + 1, len(delays),
+                        time.monotonic() - started, delays[attempt],
+                        str(error)[:160],
+                    )
                     time.sleep(delays[attempt])
         assert last_error is not None
         raise last_error
@@ -1227,6 +1239,11 @@ class DuckDBStore:
 
     def reindex_table(self, table: str, *, timeout: float = 300.0) -> dict[str, Any]:
         """重建 `table` 的**全部二级索引**（DROP + 按 `duckdb_indexes()` 里的 SQL 重建）。
+
+        ⚠️ **2026-11-22 起：库里已经没有二级索引可重建了**（schema v50 把 30 个
+        二级索引全删且不再建，只保留主键 ART）。所以本方法对正常库是**安全 no-op**；
+        它只在"从 v49 及更早的备份恢复、且索引确实不一致"这种历史场景下才有事可做。
+        **不要**因为它存在就去调它 —— 重建一个本就该没有的索引等于撤销 v50 的判决。
 
         这是修 `DuckDBIndexInconsistencyError` 的首选手段：只重写索引、不动堆数据，
         实测 `business_breakdown`（101 万行）**0.45s**（整表重建要 4.2s 且会让

@@ -384,3 +384,57 @@ def test_put_legacy_duplicate_name_rows_do_not_collide_on_version(
         ])
     }
     assert versions == {2, 3}
+
+
+def test_add_to_watchlist_tolerates_a_deleted_rule(sqlite_store, duckdb_store):
+    """规则已删 → 加自选必须成功（`source_rule_id` 置 NULL），不能 500。
+
+    2026-11-22：`watchlist.source_rule_id` 带 `REFERENCES screening_rules(id)`，
+    而规则现在可以删（只保留 `screening_runs`）。照抄悬空的 `result.rule_id`
+    会 `IntegrityError` → 500。CLI 侧已修（`rule_provenance=rule_deleted`），
+    这里是 web 端的同型缺陷。
+    """
+    from tests.support.seed import Seed
+
+    seed = Seed(duckdb_store)
+    seed.stock(
+        "600519", name="贵州茅台", exchange="SSE",
+        listing_date="2020-01-01", is_st=False, is_suspended=False,
+    )
+    seed.snapshot("600519", "2025-12-31", pe_ttm=10)
+    insert_minimum_screenable_data(duckdb_store)
+    insert_matching_trading_calendar(duckdb_store, sqlite_store)
+    sqlite_store.execute(
+        "INSERT INTO screening_rules (id, name, version, rule_json, locked_indicators, status)"
+        " VALUES (7, '待删规则', 1, '{}', '{}', 'saved')"
+    )
+    sqlite_store.execute(
+        """INSERT INTO screening_results
+           (title, rule_id, rule_version, data_date, result_json, columns_json)
+           VALUES ('r', 7, 1, '2026-11-20', ?, '[]')""",
+        ['[{"stock_code": "600519", "name": "贵州茅台"}]'],
+    )
+    result_id = sqlite_store.query("SELECT id FROM screening_results WHERE rule_id = 7")[0]["id"]
+    # 规则被删（结果/运行历史按设计保留 → 制造"悬空 rule_id"的历史状态）。
+    # ⚠️ 必须在**同一个**连接里关掉外键（`SQLiteStore` 每次 execute 都新开连接且
+    # 固定 `foreign_keys=ON`），所以这里用裸 sqlite3 造这条历史脏数据。
+    raw = sqlite3.connect(str(sqlite_store._db_path))
+    try:
+        raw.execute("PRAGMA foreign_keys=OFF")
+        raw.execute("DELETE FROM screening_rules WHERE id = 7")
+        raw.commit()
+    finally:
+        raw.close()
+
+    client = _client(sqlite_store, duckdb_store)
+    response = client.post(
+        "/api/screening/add_to_watchlist",
+        json={"result_id": result_id, "group_name": "g", "stock_codes": ["600519"]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["added"] == 1
+    assert body["rule_provenance"] == "rule_deleted"
+    rows = sqlite_store.query("SELECT source_rule_id, source_result_id FROM watchlist")
+    assert rows[0]["source_rule_id"] is None
+    assert rows[0]["source_result_id"] == result_id

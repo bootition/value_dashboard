@@ -1100,6 +1100,14 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
             raise HTTPException(status_code=400, detail="stock codes must come from the saved result")
         if requested_codes & blocked_codes:
             raise HTTPException(status_code=400, detail="blacklisted stock codes cannot be added")
+        # 2026-11-22：规则现在可以被删除（只保留运行历史），`screening_results.rule_id`
+        # 因此可能出现悬空值。`watchlist.source_rule_id` 带外键，照抄悬空 id 会
+        # `IntegrityError` → 500。这里先查一次：规则还在就照抄，不在就写 NULL
+        # （`source_result_id` 仍能溯源到结果本身），并如实告诉调用方溯源降级了。
+        rule_still_exists = conn.execute(
+            "SELECT 1 FROM screening_rules WHERE id = ?", [result["rule_id"]],
+        ).fetchone() is not None
+        source_rule_id = result["rule_id"] if rule_still_exists else None
         conn.executemany(
             """INSERT INTO watchlist
                (stock_code, group_name, source_rule_id, source_result_id)
@@ -1109,13 +1117,18 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
                  source_result_id=excluded.source_result_id,
                  added_at=CURRENT_TIMESTAMP""",
             [
-                (code, group_name, result["rule_id"], result_id)
+                (code, group_name, source_rule_id, result_id)
                 for code in unique_codes
             ],
         )
         added = len(unique_codes)
 
-    return {"status": "ok", "added": added}
+    return {
+        "status": "ok",
+        "added": added,
+        # 规则已被删除时溯源只能落到结果本身（rule_provenance=rule_deleted）
+        "rule_provenance": "rule_deleted" if source_rule_id is None else "ok",
+    }
 
 
 def _field_provenance(duck: Any, sqlite: Any, results: list[dict[str, Any]], columns: list[str]) -> list[dict[str, Any]]:

@@ -1,7 +1,7 @@
 ---
 status: approved
 category: report
-last-reviewed: 2026-11-19
+last-reviewed: 2026-11-22
 ---
 
 # 151 · 指标重算只算变化的部分（增量集合 + 全量判据 + 结果等价实测）
@@ -204,3 +204,34 @@ update.py 行数 5,179 ≤ 5,226（棘轮未动）
 2. **`refresh_treasury_spreads` 仍单独发布**：它与指标步是两次 `report_step("indicators")`
    合并，`mode/reason` 只描述指标集合本身。
 3. **价格域固定开销 6 s** 值得下一轮优化（`_derived_columns_guard` 的 ROCE 重建按 scope 全量跑）。
+
+## 10. 附录：v50 索引决策的 supersede 说明（2026-11-22 追加，正文未改）
+
+**这一节是"引用的更正"，不是"正文被推翻"** —— 本节写入前按 `AGENTS.md` §3 口径
+复核过：本报告正文**从未**出现索引相关内容
+（`grep -cE "SEQ_SCAN|优化器|索引|EXPLAIN" docs/reports/151_*.md` = 0），
+所以下面没有"被取代的原文"，只有两类必须钉死的事实：
+
+### 10.1 作废的机制解释（不要再引用）
+
+- ❌ 「`EXPLAIN` 全是 `SEQ_SCAN` ⇒ 优化器压根不选这批 ART 索引」——
+  **在 DuckDB 1.5.5 上已被证伪**：同一查询在 `EXPLAIN ANALYZE` 下的计划节点就是
+  `Type: Index Scan`（等值查询带索引比 DROP 后快约 **50 倍**，量级级读数见证据 JSON）。
+  普通 `EXPLAIN` 在 1.5.5 里**不打印扫描类型**，连主键等值都印 `SEQ_SCAN`，
+  所以"全是 SEQ_SCAN"什么都没证明 —— 是**仪器不成立**，不是结论对。
+- ✅ 现行判决理由（唯一来源：`app/core/storage/schema.py` 顶部 v50 段注释）：
+  **这些索引的列与真实查询形状不匹配** —— 代码里是 JOIN / `IN (子查询)` / 范围扫描，
+  没有任何 `col = 字面量` 形状；42 条真实代码路径删索引后无一条变慢 ≥2 倍
+  （最慢 1.43 倍、绝对值 <2ms）。30 个里 11 个的列是主键的严格前缀（PK 的 ART 已覆盖）。
+- 维护纪律：**不要再建二级索引**。真要建，必须同时拿齐「真实 `col = 字面量` 查询 +
+  `EXPLAIN ANALYZE` 证明走 Index Scan + A/B 证明 ≥2 倍」三条，缺一条就继续不要。
+
+### 10.2 引用勘误（给下一个人省一轮）
+
+`app/core/storage/schema.py` 的 v50 段写作"依据 reports/151 逐索引实测"，
+但**逐索引 A/B 的原始数据不在本报告里**（本报告是指标增量重算，2026-11-19）。
+真实的 A/B 记录在证据产物 `docs/evidence/evidence-s1/index-ab-2026-11-21-query-set.json`
+（按 `.gitignore:64` 不入库，只在本机）与 2026-11-21 那次独立审查的会话工作区
+（`.planning/audit-index/REPORT.md`，同样不入库）—— **两者都不是可引用的常驻结论**。
+因此 v50 索引决策的**常驻依据**只有两处：`app/core/storage/schema.py` v50 段注释与
+`docs/runbooks/ops-knowledge-base.md` D2；`docs/STATUS.md` 的"长期待办"已据此关闭。

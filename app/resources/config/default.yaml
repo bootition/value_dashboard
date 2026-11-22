@@ -85,10 +85,23 @@ update:
   announcement_lookback_days: 3  # 全市场公告检查的日期回看窗口
   announcement_catchup_days: 45  # 公告游标缺失时的首次追补窗口（覆盖中报季）
   announcement_financial_max_pages: 450  # CNINFO 每页固定 30 条；财务类别追补上限
-  # 非财务公告 general 窗口的**单窗口**页上限（每页 30 条 → 5 页=150 条）。
+  # 非财务公告 general 窗口的**单窗口**页上限（每页 30 条 → 20 页=600 条）。
   # 窗口被截断且跨度 >1 天时，适配器按日期二分递归补齐（每个子窗口仍受本上限
   # 约束）；单日/单选仍超限才标记 metadata.truncated 并返回已抓到的数据。
-  announcement_general_max_pages: 5
+  #
+  # 为什么是 20（2026-11-22 由 5 上调）：这是**覆盖 vs 时间**的折中。
+  #   · 覆盖侧：5 页=150 条时，正式库 `announcement_registry` 的单日登记量只有
+  #     CNINFO 当日 general 全文列表的十分之一量级（实测同日：登记表三百条量级，
+  #     源侧千条量级）。20 页=600 条把单日覆盖率从约 15% 提到约 50% —— 但**做不到
+  #     全量**：千条量级的一天要约 45 页才能一条不落，所以 20 页是"先做 20 页"的
+  #     已知折中（用户 2026-11-22 裁决），不是全量方案。
+  #   · 时间侧：CNINFO 每页约 1.5 秒，5→20 页让公告步从一分钟量级涨到两分钟量级，
+  #     整轮自动更新从三分钟量级涨到五分钟量级。
+  # 边界（必须记住）：本项**只影响非财务公告登记**（general 全文列表 → 可选簿记），
+  # 不参与财务/分红类别的追补（那是 `announcement_financial_max_pages: 450`）；
+  # general 截断只进 warnings、不把整轮 job 打成 partial（见 update.py 的
+  # `general_warnings` 段与 `ops-knowledge-base.md` S22）。
+  announcement_general_max_pages: 20
   price_fetch_concurrency: 8  # 自适应起始并发（HTTP 源；socket 源强制串行）
   price_fetch_max_concurrency: 16  # 连续 5 分钟无长尾/失败时每次 +4，最多 16
   price_fetch_concurrency_step: 4

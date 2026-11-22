@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -173,6 +174,45 @@ def test_packaged_config_matches_repo_config() -> None:
         "请运行 `uv run --locked python scripts/sync_packaged_config.py` 同步（构建时会自动执行），"
         "否则安装版会用到过期/被禁止的配置（例如 cninfo 分红源、2GB 内存上限）"
     )
+
+
+def test_announcement_general_max_pages_is_20_in_config_and_in_code_fallbacks() -> None:
+    """`announcement_general_max_pages` 的**所有落点**必须同值 20（2026-11-22 由 5 上调）。
+
+    背景：正式库 `announcement_registry` 的单日登记量只有 CNINFO 当日 general 全文
+    列表的十分之一量级（登记表三百条量级 vs 源侧千条量级），因为本项只有 5
+    （5×30=150 条/窗口）；20 页=600 条把单日覆盖率从约 15% 提到约 50%，是用户
+    认可的折中（千条量级的一天要约 45 页才全量）。折中理由与边界写在
+    `config/default.yaml` 该键上方的注释里。
+
+    为什么必须钉三处：同一语义有三个落点，历史上**已经分裂过** ——
+    `config/default.yaml` = 5，而 `app/core/update.py` 的
+    `_load_update_config(..., default=40)` 与 `getattr(..., 40)` 都是 40。
+    读代码的人会得出"上限是 40"的相反结论，而实际生效的是配置的 5。
+    """
+    values = {}
+    for relative in ("config/default.yaml", "app/resources/config/default.yaml"):
+        payload = yaml.safe_load((_PROJECT_ROOT / relative).read_text(encoding="utf-8"))
+        values[relative] = payload["update"]["announcement_general_max_pages"]
+    assert values == {
+        "config/default.yaml": 20,
+        "app/resources/config/default.yaml": 20,
+    }, values
+
+    source = (_PROJECT_ROOT / "app" / "core" / "update.py").read_text(encoding="utf-8")
+    fallbacks = {
+        "配置缺失时 _load_update_config 的兜底": re.search(
+            r'"announcement_general_max_pages",\s*default=(\d+)', source,
+        ),
+        "对象未经 __init__ 时 getattr 的兜底": re.search(
+            r'getattr\(\s*self,\s*"announcement_general_max_pages",\s*(\d+)\s*\)', source,
+        ),
+    }
+    for label, match in fallbacks.items():
+        assert match is not None, f"app/core/update.py 里找不到「{label}」的数值"
+        assert match.group(1) == "20", (
+            f"「{label}」仍是 {match.group(1)}，与两份 default.yaml 的 20 分裂"
+        )
 
 
 # ---------------------------------------------------------------------------

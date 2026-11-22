@@ -21,7 +21,26 @@ qfq 历史重算只改已有行的数值、不新增行，指纹看不出来 →
 纪律
 ----
 - **读操作绝不 bump**（否则缓存永远失效 = 等于没有缓存）。
-  bump 点只在 `DuckDBStore.write_connection()` 成功退出时，别处不许调。
+  写路径的 bump 点只有**三处**，且三处都**必须** bump —— 少一处就等于把那一条
+  写路径的"就地改动"重新变成无痕，筛选缓存从那个口子假绿回去：
+  1. `duckdb_store.DuckDBStore.write_connection()` **成功退出**时
+     （`reason="duckdb_write"`）——主写入路径；
+  2. `duckdb_store.DuckDBStore.transaction()` **提交成功**时
+     （`reason="duckdb_transaction"`）—— analyst_forecast / archive / backfill /
+     backup / business 等生产写入全走这条路；它当初**漏了** bump，于是这些写入
+     对指纹完全不可见（补记的现场说明就在该函数里）；
+  3. **裸 `duckdb.connect(path)` 以可写方式打开**时
+     （`duckdb_store._note_bare_writable_connect`，`reason="bare_duckdb_connect"`）
+     —— 仓库里确有绕过 store 的脚本：它们既关掉缓存只读连接、又能就地改值，
+     不记账就一点痕迹都不留（独立审查构造实测：只 `UPDATE` 一行，行数/最大报告期
+     都不变 → 探针回放旧名单 → 筛选静默多算一只）。之所以取"打开即记账"而不是
+     "看到写语句才记账"，见该函数的 docstring（`DuckDBPyConnection` 的
+     `execute/executemany/sql/append` 是只读属性，挂不上钩子）。
+  为什么必须三处都记账：指纹（行数 / 最大时间 / 内容摘要）对"就地 UPDATE"天生
+  不敏感，**任何一条写路径漏记账 = 缓存命中旧值 = 假绿**（返回的名单是旧的，
+  但没有任何状态显示它旧）；反过来多见几次 bump 的代价只是多算一次。
+  跨进程写（自动更新子进程 / `python scripts/xxx.py`）不靠这里，靠
+  `ScreeningEngine._mixed_report_content_fingerprint` 的内容摘要兜底。
 - **fail-open**：记账失败绝不能让业务写入失败（它只是缓存新鲜度的提示）。
   取不到纪元时 `current()` 返回 0，指纹退化成"不含纪元"，与旧行为等价。
 """

@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from app.core.adapters.base import FetchResult, SourceMetadata
+import httpx
+import pytest
+
+from app.core.adapters.base import FetchRequest, FetchResult, SourceMetadata
+from app.core.adapters.cninfo_adapter import CNINFOAdapter
 from app.core.update import IncrementalUpdater, classify_announcement
 from tests.support.seed import Seed
 from tests.support.seed_sqlite import SeedSqlite, sql_now
@@ -442,3 +446,140 @@ def test_pending_financial_refresh_keeps_announcement_pending_and_retries(duckdb
         "data_type": "announcements",
         "error": "financial data source not yet ready; announcement remains pending",
     }]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# general 公告页上限 5 → 20（2026-11-22，覆盖 vs 时间的折中）
+#
+# 背景：正式库 `announcement_registry` 的单日登记量只有 CNINFO 当日 general
+# 全文列表的十分之一量级（登记表三百条量级 vs 源侧千条量级），因为
+# `announcement_general_max_pages` 只有 5（5×30=150 条/窗口）。用户裁决"先做 20 页"
+# （20×30=600 条；千条量级的一天要 ~45 页才全量，那是没做的部分）。
+# 口径与折中理由写在 `config/default.yaml` 该键上方注释里。
+#
+# 这里钉住两件事：① 上限**走配置**而不是代码里写死的第二份数（历史上
+# `_load_update_config(..., default=40)` / `getattr(..., 40)` 与配置的 5 分裂）；
+# ② 上限放大**没有**削弱截断告警 —— 单日/单选仍超限时照样 `truncated_ok`
+# + warnings，绝不把"抓了 600 条"说成"抓全了"。
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_general_announcement_page_cap_is_20_from_config_and_truncation_only_warns(
+    duckdb_store, sqlite_store,
+) -> None:
+    """`max_pages` 取配置的 20；general 截断只进 `warnings`，不把整轮打成 partial。
+
+    `config/default.yaml` 与 `app/resources/config/default.yaml` 都声明 20，所以
+    `__init__` 经 `_load_update_config` 读到的就是 20（真实生效值）。适配器收到的
+    `max_pages` 必须是它 —— 而不是某个写死在调用点的数字。
+    """
+
+    class GeneralTruncatedAdapter:
+        """6 个类别查询：财务/分红给空、general 给"截断的 600 条"。"""
+
+        def __init__(self) -> None:
+            self.max_pages_seen: dict[str | None, int] = {}
+
+        def fetch(self, request):
+            category = request.extra_params.get("category")
+            self.max_pages_seen[category] = int(
+                request.extra_params.get("max_pages") or 0
+            )
+            if category is not None:
+                return FetchResult(
+                    data=[],
+                    metadata=SourceMetadata(
+                        source="cninfo", fetch_time=datetime.now(UTC),
+                        raw_response_hash="a" * 64, confidence="strict",
+                    ),
+                )
+            # general 全文列表：单日仍超 20 页 → 适配器如实声明截断（契约 §1）
+            return FetchResult(
+                data=[
+                    {
+                        "announcement_id": f"general-{index}",
+                        "stock_code": "000001",
+                        "title": "关于召开临时股东大会的通知",
+                        "_announcement_category": None,
+                    }
+                    for index in range(600)
+                ],
+                metadata=SourceMetadata(
+                    source="cninfo", fetch_time=datetime.now(UTC),
+                    raw_response_hash="a" * 64, confidence="approximate",
+                    error_kind="truncated_ok",
+                    reason="announcements truncated: total=1300 fetched=600",
+                    truncated=True,
+                ),
+            )
+
+    adapter = GeneralTruncatedAdapter()
+    updater = IncrementalUpdater(
+        duck=duckdb_store, sqlite=sqlite_store, adapter_mgr=adapter,
+    )
+
+    result = updater._check_new_announcements(persist=False, lookback_days=1)
+
+    assert adapter.max_pages_seen[None] == 20, (
+        f"general 页上限必须取配置的 20，实际 {adapter.max_pages_seen[None]}"
+    )
+    assert {
+        pages for category, pages in adapter.max_pages_seen.items() if category is not None
+    } == {450}, "财务/分红类别仍用 announcement_financial_max_pages=450，不受本项影响"
+
+    # ② 截断仍然"如实"：warning 带条数与边界，且不升级成 partial
+    warnings = result["warnings"]
+    assert len(warnings) == 1, warnings
+    assert "general 窗口截断" in warnings[0]
+    assert "已取 600 条" in warnings[0], warnings[0]
+    assert "只影响非财务公告登记" in warnings[0], warnings[0]
+    assert result["status"] == "available", result["status"]
+    assert result["truncated"] is False
+    assert result["truncated_categories"] == []
+    # 20 页 × 30 条 = 600 条必须真的进了登记候选（不是只改了个数字）
+    assert len(result["all_new_announcements"]["000001"]) == 600
+
+
+def test_cninfo_single_day_still_truncates_at_the_20_page_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """20 页上限下，单日 3,700+ 条照样截断：600 行 + `truncated_ok`，不静默当全量。
+
+    5→20 只是把"丢多少"从约 85% 降到约 50%，不是"覆盖完整"。这条用例防止
+    以后有人把上限调大顺手把截断标记删掉 —— 那样 registry 会重新变成假绿。
+    """
+    raw = {
+        "secCode": "000001",
+        "secName": "平安银行",
+        "announcementId": "ann-1",
+        "announcementTitle": "关于召开临时股东大会的通知",
+        "announcementTime": 1785964800000,
+        "adjunctUrl": "",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"announcements": [raw] * 30, "totalRecordNum": 3719},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapter = CNINFOAdapter(rate_limit=0)
+    monkeypatch.setattr(adapter, "_resolve_org_id", lambda code: "org-1")
+    monkeypatch.setattr(adapter, "_get_client", lambda: client)
+
+    result = adapter.fetch(FetchRequest(
+        data_type="announcements",
+        stock_codes=["000001"],
+        start_date="2026-11-20",
+        end_date="2026-11-20",
+        extra_params={"max_pages": 20},
+    ))
+
+    assert len(result.data) == 600, "20 页 × 30 条：已抓到的 600 条不得丢弃"
+    assert result.metadata.truncated is True
+    assert result.metadata.error_kind == "truncated_ok"
+    assert result.metadata.error is None, "截断不是错误，不得填 error（会污染熔断判定）"
+    assert "total=3719" in (result.metadata.reason or "")
+    assert "fetched=600" in (result.metadata.reason or "")
+    client.close()

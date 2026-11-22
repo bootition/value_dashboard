@@ -1810,6 +1810,28 @@ def screening_save(
         if run is None:
             typer.echo(json.dumps(make_response("screening.save_result", error_code="E001", error_message="server screening run not found"), ensure_ascii=False))
             return
+        # 2026-11-25：规则可以被删除，而运行日志行**保留**为审计（`delete_rule`
+        # 有意留下悬空 `rule_id`，见 `app/web/api/screening.py::delete_rule`）。
+        # 拿这种"所属规则已被删"的运行记录保存结果，会直接撞
+        # `screening_results.rule_id` 的 FOREIGN KEY → 裸 IntegrityError 崩 CLI。
+        # 与 web `POST /api/screening/save` 的 400 `run rule was deleted` 同口径：
+        # 写入前先查一次规则行，缺失就中文提示 + 非 0 退出码，让用户重跑一次。
+        live_rule = conn.execute(
+            "SELECT 1 FROM screening_rules WHERE id = ?", [run["rule_id"]],
+        ).fetchone()
+        if live_rule is None:
+            typer.echo(json.dumps(make_response(
+                "screening.save_result",
+                error_code="E001",
+                error_message=(
+                    "这条运行记录所属的规则已被删除，无法保存为结果；"
+                    "请重新运行筛选后再保存。"
+                ),
+                data={"reason": "run_rule_deleted", "run_id": run_id},
+            ), ensure_ascii=False))
+            # 非 0 退出码：脚本/OpenCode 靠退出码判定这条命令没成功。
+            # 事务里尚未 DML，rollback 后运行记录原样保留，用户仍可重跑。
+            raise typer.Exit(code=1)
         cursor = conn.execute(
             """INSERT INTO screening_results
                (title, rule_id, rule_version, data_date, result_json, columns_json, sort_json,
@@ -2732,6 +2754,17 @@ def screening_export_csv(
         [record["rule_id"], record["rule_version"]],
     )
     if not rule:
+        # 2026-11-25：与 web `POST /api/screening/export_csv` 同口径 —— 改条件走
+        # **原地升版本**（`PUT /rules/{id}` 把同一 id 的 version +1），于是历史结果里
+        # 记的 `rule_version` 不再对应规则行上的版本号。这不是"溯源缺失"：id 还在，
+        # 只是版本号往前走了，不能拿 400/E001 挡住用户导出自己的历史结果。
+        # CSV 表头照旧打印结果自己的 run-time 版本号（`record["rule_version"]`），
+        # 只有指标锁降级用当前规则行 —— 与 web 逐字同义。
+        rule = sqlite.query(
+            "SELECT locked_indicators FROM screening_rules WHERE id = ?",
+            [record["rule_id"]],
+        )
+    if not rule:
         typer.echo(json.dumps(make_response(
             "screening.export_csv", error_code="E001", error_message="saved result rule provenance is missing",
         ), ensure_ascii=False))
@@ -2780,6 +2813,17 @@ def screening_add_to_watchlist(
     record = saved[0]
     results = json.loads(record["result_json"])
 
+    # 2026-11-25：`watchlist.source_rule_id` 带 FOREIGN KEY REFERENCES
+    # screening_rules(id)。历史/旧版本库里可能存在"结果还在、规则已被删"的行
+    # （现在的 `delete_rule` 会拦，但老数据拦不住），照抄 `record["rule_id"]`
+    # 写自选就撞外键 → 裸 IntegrityError 崩 CLI。规则行缺失时把来源降级成
+    # NULL（该列可空，`source_result_id` 仍然指向这条结果），并把这件事如实
+    # 披露到输出里，不再挡住用户"把股票加进自选"这个正当动作。
+    rule_alive = bool(sqlite.query(
+        "SELECT 1 FROM screening_rules WHERE id = ?", [record["rule_id"]],
+    ))
+    source_rule_id = record["rule_id"] if rule_alive else None
+
     added = 0
     with sqlite.transaction() as conn:
         for row in results:
@@ -2792,11 +2836,15 @@ def screening_add_to_watchlist(
                          source_rule_id=excluded.source_rule_id,
                          source_result_id=excluded.source_result_id,
                          added_at=CURRENT_TIMESTAMP""",
-                    [code, group, record["rule_id"], result_id],
+                    [code, group, source_rule_id, result_id],
                 )
                 added += 1
 
-    typer.echo(json.dumps(make_response("screening.add_to_watchlist", {"status": "ok", "added": added}), ensure_ascii=False))
+    payload: dict[str, object] = {"status": "ok", "added": added}
+    if not rule_alive:
+        payload["rule_provenance"] = "rule_deleted"
+        payload["note"] = "来源规则已被删除，自选记录只保留结果溯源（source_rule_id 置空）。"
+    typer.echo(json.dumps(make_response("screening.add_to_watchlist", payload), ensure_ascii=False))
 
 
 # ─── 凭据管理 (PRD §18.3 AR12) ───────────────────────────────────
