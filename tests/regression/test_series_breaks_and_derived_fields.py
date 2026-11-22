@@ -501,14 +501,34 @@ def test_indicators_endpoint_lists_derived_fields(
     # 单位期望值来自派生字段注册表本身（`unit=CNY → plain`、`unit=ratio → ratio`），
     # 不再写死 "plain"：`balance.advance_from_customers_ratio` 是倍数口径，
     # 一刀切断言"金额类"会让新增派生字段时立刻假红（reports/133 R1）。
-    unit_expectation = {"CNY": "plain", "ratio": "ratio", "percent": "percent"}
+    #
+    # 2026-11-22 强化：断言从「按 unit 查一张手抄表」升级为
+    # **「接口下发的单位必须等于该派生字段自己声明的单位」**——
+    # `DerivedField.unit` 直接用 `field_units.py` 的同一套五类词表
+    # （pct / percent / ratio / price / plain），唯一例外是金额类：
+    # 派生层声明 `CNY`（金额语义，不能丢），接口口径是 `plain`（金额不做百分比换算）。
+    # 这条映射只按**单位语义**分档、不按字段名开白名单，所以任何新增派生字段
+    # 一旦声明了没登记的 unit 或宣称 pct 却落到 ratio，这里立刻红。
+    from app.core.screening.field_units import field_unit
+
+    declared_to_interface = {"CNY": "plain", "pct": "pct", "percent": "percent", "ratio": "ratio"}
+    declared_units = {field.unit for field in DERIVED_FIELDS.values()}
+    assert declared_units <= set(declared_to_interface), (
+        f"派生字段声明了未登记的单位口径：{sorted(declared_units - set(declared_to_interface))}"
+        "（新增 unit 必须先在本表登记它下发给前端时该算哪一类，"
+        "否则前端会退回默认口径）"
+    )
     for key in DERIVED_FIELDS:
         assert key in by_name, f"{key} 必须出现在可选指标里"
         assert by_name[key]["rankable"] is True
         declared = DERIVED_FIELDS[key].unit
-        assert by_name[key]["unit"] == unit_expectation[declared], (
-            f"{key} 注册 unit={declared}，接口必须给 "
-            f"{unit_expectation[declared]}，实际 {by_name[key]['unit']}"
+        assert declared_to_interface[declared] == field_unit(key), (
+            f"{key} 声明 unit={declared}（→ {declared_to_interface[declared]}），"
+            f"但 field_units.field_unit() 给的是 {field_unit(key)}："
+            "注册表与声明口径漂移（100 倍误差风险）"
+        )
+        assert by_name[key]["unit"] == field_unit(key), (
+            f"{key} 接口下发 unit={by_name[key]['unit']} 与 field_unit() 不一致"
         )
     # 原始列仍在（保留可查），且没有被标成 deprecated
     for key in SERIES_BREAKS:

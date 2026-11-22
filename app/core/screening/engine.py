@@ -513,6 +513,10 @@ NORMALIZED_FIELDS = {f"{table}.{field}" for table, fields in STATEMENT_FIELDS.it
 #   income.credit_impairment_loss_positive     信用减值损失（损失为正）
 #   balance.advance_from_customers             预收款项 + 合同负债（跨 2020 连续）
 #   balance.advance_from_customers_ratio       客户占款率 =(预收+合同负债)/总资产
+#   balance.interest_bearing_debt              有息负债 = 短借+长借+应付债券（绝对值，元）
+#   balance.interest_bearing_debt_ratio        有息负债率 = 有息负债/总资产（段永平口径）
+#   balance.net_cash_to_assets                 净现金/总资产 =(货币资金−有息负债)/总资产
+#   balance.interest_bearing_debt_to_liabilities  有息负债/总负债（负债质量）
 #
 # 为什么登记进 NORMALIZED_FIELDS 而不是 EXTENDED_COLUMNS：
 #   - 它们的物理来源是 balance_sheet / income_statement，与快照期严格对齐

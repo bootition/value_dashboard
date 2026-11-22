@@ -24,6 +24,11 @@ PCT_DECIMAL_FIELDS: frozenset[str] = frozenset({
     # ROCE（v42）：与 ROE/ROA/ROIC 同族的**小数比例**（0.2034 = 20.34%）
     "roce_latest", "roce_5y_median", "roce_10y_median", "roce_20y_median",
     "gross_margin", "net_margin", "debt_ratio",
+    # 2026-11-22 负债质量三指标（段永平口径）：与 `debt_ratio` **同族**——
+    # 都是「小数值比例」（0.1315 = 13.15%），前端必须按 % 渲染，不能显示成「0.13 倍」。
+    "balance.interest_bearing_debt_ratio",
+    "balance.net_cash_to_assets",
+    "balance.interest_bearing_debt_to_liabilities",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     # reports/131 P0-4 同比双口径：`*_yoy_fy` 与 `*_yoy` 同为小数比例
     # （0.0529 = 5.29%），只是口径不同（TTM vs 年报），单位必须一致。

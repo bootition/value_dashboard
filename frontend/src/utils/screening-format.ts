@@ -231,6 +231,12 @@ const BALANCE_FIELD_LABELS: Readonly<Record<string, string>> = {
   long_term_payables: '长期应付款',
   advance_from_customers: '预收款项及合同负债（合并口径）',
   advance_from_customers_ratio: '客户占款率（预收+合同负债）/总资产',
+  // 负债质量三指标（段永平口径，2026-11-22）：口径写进标签，避免用户按
+  // `debt_ratio`（资产负债率，含预收/应付）理解。
+  interest_bearing_debt: '有息负债（短借+长借+应付债券）',
+  interest_bearing_debt_ratio: '有息负债率',
+  net_cash_to_assets: '净现金占总资产',
+  interest_bearing_debt_to_liabilities: '有息负债占总负债',
   monetary_funds: '货币资金',
   trading_financial_assets: '交易性金融资产',
   notes_receivable: '应收票据',
@@ -367,6 +373,12 @@ return fallback || field
 
 /** 小数比例存储的百分比字段（条件输入 ÷100、展示 ×100+%）。 */
 const PCT_FIELDS = new Set([
+  // 2026-11-22 负债质量三指标（段永平口径）：与 `debt_ratio` 同族（0–1 的小数比例，
+  // 0.1315 = 13.15%）→ 走 pct，展示 ×100 带 %，输入按 % 填（scale 0.01）。
+  // 后端 field_units.py 的 PCT_DECIMAL_FIELDS 同批登记，RG3 双向对拍要求两边成对出现。
+  'balance.interest_bearing_debt_ratio',
+  'balance.net_cash_to_assets',
+  'balance.interest_bearing_debt_to_liabilities',
   'fcf_margin',  // 扩展指标域：自由现金流率按小数比例存储
   'shareholder_occupation', 'book_to_market', 'accruals',
   'selling_expense_ratio', 'admin_expense_ratio', 'rd_expense_ratio',

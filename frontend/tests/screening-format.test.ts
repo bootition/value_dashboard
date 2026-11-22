@@ -284,6 +284,52 @@ test('百分比展示只有一处实现：小数比例 ×100、百分数原值�
   assert.equal(formatFieldValue('dividend_financing_ratio_pct', 5.29), '5.29%')
 })
 
+// 2026-11-22：负债质量三指标（段永平口径）随筛选引擎一起新增。
+// 断言的是**前后端同一口径 + 与资产负债率同族**：三个字段都在 PCT_FIELDS
+// （后端 field_units.py 的 PCT_DECIMAL_FIELDS），与 `debt_ratio` 同为「小数比例
+// 存储、展示 ×100 带 %」；输入按 % 填（scale 0.01），中文名走 balance.* 标签表。
+test('负债质量三指标：单位与资产负债率同族（pct），展示为百分数', () => {
+  const fields = [
+    'balance.interest_bearing_debt_ratio',
+    'balance.net_cash_to_assets',
+    'balance.interest_bearing_debt_to_liabilities',
+  ]
+  // 同族口径一致：资产负债率怎么显示，这三条就怎么显示
+  assert.equal(fieldFormat('debt_ratio'), 'pct')
+  for (const field of fields) {
+    assert.equal(FIELD_UNIT_SETS.pct.has(field), true, `${field} 必须在前端 PCT_FIELDS`)
+    assert.equal(FIELD_UNIT_SETS.ratio.has(field), false, `${field} 不得再登记为 ratio`)
+    assert.equal(fieldFormat(field), 'pct', field)
+    // 与 debt_ratio 同一展示口径：0.1315 → 13.15%
+    assert.equal(fieldInputUnit(field).label, '%', field)
+    assert.equal(fieldInputUnit(field).scale, 0.01, `${field} 存储为小数比例，输入按 % 填`)
+    // 中文名必须来自 balance.* 标签表，不能退回「资产负债表 · interest_bearing_debt_ratio」
+    const name = indicatorDisplayName({ name: field })
+    assert.equal(/[A-Za-z]{4,}/.test(name), false, `${field} 的中文名漏了标签：${name}`)
+  }
+  // 展示实测：小数 → 百分号（因为 ratio 口径不 ×100，这正是必须走 pct 的原因）
+  assert.equal(formatFieldValue('balance.interest_bearing_debt_ratio', 0.1315), '13.15%')
+  assert.equal(formatFieldValue('balance.net_cash_to_assets', -0.0118), '-1.18%')
+  assert.equal(
+    formatFieldValue('balance.interest_bearing_debt_to_liabilities', 0.3165),
+    '31.65%',
+  )
+  // 表头单位标签：pct 走 %，不能再出现「(倍)」
+  assert.equal(fieldTitleWithUnit('balance.interest_bearing_debt_ratio', '有息负债率'), '有息负债率(%)')
+  assert.equal(
+    indicatorDisplayName({ name: 'balance.interest_bearing_debt_ratio' }),
+    '资产负债表 · 有息负债率(%)',
+  )
+  assert.equal(
+    indicatorDisplayName({ name: 'balance.net_cash_to_assets' }),
+    '资产负债表 · 净现金占总资产(%)',
+  )
+  assert.equal(
+    indicatorDisplayName({ name: 'balance.interest_bearing_debt_to_liabilities' }),
+    '资产负债表 · 有息负债占总负债(%)',
+  )
+})
+
 // 2026-11-22：`indicatorDisplayName` 从 views/ScreeningPage.vue 抽到本模块
 // （指标下拉的全中文名）。抽文件时最容易把优先级顺序改掉，所以逐档钉死。
 test('指标全中文名：display_name（DSL）优先于 FIELD_LABELS，再退后端 label', () => {

@@ -37,6 +37,32 @@
   ``credit_impairment_loss`` / ``prepayments_received``）在 DSL 简写展开时
   落到派生字段（见 ``BARE_NAME_DEFAULTS``）；要取原始值必须写全路径
   （``income.asset_impairment_loss@LATEST``），并会收到口径断点警告。
+
+能力边界：本层只能取**本表列**（跨表比率做不了）
+------------------------------------------------
+``build_sql(alias, date_expr, raw)`` 的 ``raw`` 是 ``Callable[[str], str]``，只认
+「列名 → **该行本表**的 SQL 表达式」，且 ``alias`` 恒为 ``derived.table`` 那一个别名
+（筛选引擎 ``screening/engine.py::_derived_field_select`` 传 ``aliases[derived.table]``；
+DSL 代码生成 ``dsl/codegen.py::_gen_field`` 传 ``aliases[field.table]``）。因此：
+
+- **同表比率**（分子分母都在 ``balance_sheet``）→ 无障碍，本模块的
+  ``advance_from_customers_ratio`` / 负债质量三指标都是这一类。
+- **跨表比率**（如「有息负债 / 净利润」，分子在 ``balance_sheet``、分母在
+  ``income_statement``）→ **当前契约表达不出来**，且不许用硬编码别名绕过：
+  ``codegen.generate_select`` 只 JOIN ``_collect_tables(ast)`` 收来的表（由
+  ``FieldRef.table`` 决定，挂 ``balance`` 就不会 JOIN ``income_statement``），
+  而 ``_prior_year_same_period_sql`` / ``_quarter_value_sql`` / ``_ttm_sql`` 会把
+  **本表**重命名成 ``prior`` / ``q1..q3`` —— 写死的 ``ic.`` 在每一条 ``@YoY`` /
+  ``@TTM`` / ``@MRQ`` 展开里都指向不存在的别名（"能筛但详情页必错"的假成功）。
+- 要做跨表（TODO，未做）：① ``DerivedField`` 增 ``related_tables`` 并把 resolver
+  扩成按表取值（``raw(table, column)`` 或直接传 ``aliases`` 映射）；②
+  ``engine._derived_field_select`` 改传全表别名映射（base_pool 已同时 LEFT JOIN
+  三表，成本≈0）；③ ``codegen._gen_field`` / ``_column_sql`` 按表取别名，且
+  ``_collect_tables`` 把 ``related_tables`` 并入 join 集合；④ codegen 的
+  YoY/TTM/MRQ 子查询构造器要支持"两表同行"（``prior`` + ``prior_bs`` 双别名）——
+  这是主要工作量与回归风险点；⑤ ``derived_input_fields()`` 现在按 ``derived.table``
+  拼列名，跨表会静默漏掉 strict 血缘校验，必须同步改。
+  **在此之前，跨表口径一律不实现**（宁缺勿错）。
 """
 
 # 依据索引（本模块「为什么」的唯一落点；行内只写「依据 S<n>」，不再重复报告号）
@@ -147,6 +173,101 @@ def _advance_ratio_builder(alias: str, date_expr: str, raw: RawResolver) -> str:
     return f"CASE WHEN {assets} > 0 THEN ({advance}) / {assets} END"
 
 
+# ─── 负债质量（有息负债）派生字段：段永平 / 巴菲特口径 ───────────────────────
+#: 有息负债的成分科目 —— 段永平：「你要算他们的有息负债。预收款也是负债，
+#: 但意义差很多」「有息负债大概就是银行借贷或债券类的东西，到期要还的」。
+#:
+#: 与主链 `indicator_snapshot.interest_bearing_debt` **同口径同成分**
+#: （`indicators/calculator.py::_calc_interest_bearing_debt`），因此两者可以逐行对账。
+#: 刻意**不**含 `lease_liabilities`（租赁负债）/ `notes_payable`（应付票据）/
+#: `non_current_liab_due_1y`（一年内到期非流动负债，见 `balance_sheet_ext`）：
+#: 前者是使用权资产的对价、后者是经营性票据、后者另表低频，混进来会让
+#: 「有息负债」变成另一种东西。要更宽的口径应另立字段，不许就地改这一个。
+INTEREST_BEARING_DEBT_ACCOUNTS: tuple[str, ...] = (
+    "short_term_loans",
+    "long_term_loans",
+    "bonds_payable",
+)
+
+
+def _interest_bearing_debt_builder(alias: str, date_expr: str, raw: RawResolver) -> str:
+    """有息负债 = 短期借款 + 长期借款 + 应付债券（绝对值，单位元）。
+
+    缺失语义（照抄 `advance_from_customers` 的纪律，且与 calculator 的
+    `_calc_interest_bearing_debt` 逐字一致）：
+
+    - **三项全空 → NULL**。全空无法区分「真的没有借款」与「借款明细整段没采到」，
+      写 0 就是假零值（会把"没发债"和"没采到"混成一个数）→ fail-closed 返回 NULL。
+    - **至少一项非空 → 缺失侧按 0 计**。`bonds_payable` 全市场只有约 14 万行非空
+      （绝大多数公司本来就不发债），要求三项齐全会把覆盖率压到 11.8%（S8 P1-5 的教训）。
+    """
+    columns = [raw(column) for column in INTEREST_BEARING_DEBT_ACCOUNTS]
+    all_missing = " AND ".join(f"{column} IS NULL" for column in columns)
+    total = " + ".join(f"COALESCE({column}, 0)" for column in columns)
+    return f"CASE WHEN {all_missing} THEN NULL ELSE {total} END"
+
+
+def _interest_bearing_debt_ratio_builder(alias: str, date_expr: str, raw: RawResolver) -> str:
+    """有息负债率 = 有息负债 / 总资产（段永平口径）。
+
+    分母 ≤ 0 或缺失 → NULL（比率无业务含义；NULL 参与比较恒为假，不会误命中）。
+    分子 NULL（三项借款科目全空）→ 除法自然得 NULL。
+    """
+    debt = _interest_bearing_debt_builder(alias, date_expr, raw)
+    assets = raw("total_assets")
+    return f"CASE WHEN {assets} > 0 THEN ({debt}) / {assets} END"
+
+
+def _net_cash_to_assets_builder(alias: str, date_expr: str, raw: RawResolver) -> str:
+    """净现金 / 总资产 = (货币资金 − 有息负债) / 总资产（段永平的六个数之一）。
+
+    - 货币资金缺失 → **NULL**（不假定"现金为 0"：那会把"没采到"变成"这公司没钱"，
+      是比假零值更危险的方向）。
+    - 有息负债 NULL（三项借款科目全空）→ NULL，理由同上 builder。
+    - 分母 ≤ 0 或缺失 → NULL。
+    """
+    cash = raw("monetary_funds")
+    debt = _interest_bearing_debt_builder(alias, date_expr, raw)
+    assets = raw("total_assets")
+    return (
+        f"CASE WHEN {assets} > 0 AND {cash} IS NOT NULL "
+        f"THEN ({cash} - ({debt})) / {assets} END"
+    )
+
+
+def _interest_bearing_debt_to_liabilities_builder(
+    alias: str, date_expr: str, raw: RawResolver
+) -> str:
+    """有息负债 / 总负债 = 负债里真正要还本付息的那部分占比。
+
+    分母 ≤ 0 或缺失 → NULL（无负债的公司该比率无定义，不是 0）。
+    """
+    debt = _interest_bearing_debt_builder(alias, date_expr, raw)
+    liabilities = raw("total_liabilities")
+    return f"CASE WHEN {liabilities} > 0 THEN ({debt}) / {liabilities} END"
+
+
+#: 三条负债质量指标共用的免责/口径说明（每条的 doc 里都带，避免用户只看一条时漏掉）。
+#:
+#: 2026-11-22 实测（正式库只读）：`csrc_l1` 的取值是「**金融业**」（另有历史写法
+#: 「金融、保险业」），`csrc_l2` 再分「货币金融服务 / 保险业 / 资本市场服务 /
+#: 证券、期货业 / 其他金融业」。银行业负债率天然 90%+（负债就是它们的经营原料：
+#: 存款、保费准备金），但这些**不属于**「短期借款/长期借款/应付债券」，于是
+#: 有息负债率被系统性**低估**：工商银行 debt_ratio 92.4% 却有息负债率只有 5.2%、
+#: 招商银行 89.9% / 1.0%、中国平安 89.8% / 1.7%、中信证券 84.1% / 0.7%。
+#: 也就是说这个指标会让金融股**装作很安全**地混进"低负债"筛选结果 —— 比"银行
+#: 天生负债率高"更危险的一层误导。
+_FINANCE_SECTOR_WARNING = (
+    "【不适用于金融业】`csrc_l1` 为「金融业」（历史写法「金融、保险业」）的银行/保险/"
+    "证券，负债就是它们的经营原料（存款、保费准备金），负债率天然 90%+；而这些负债"
+    "**不在**本指标的分子里（不进短期借款/长期借款/应付债券），所以有息负债率会被系统性"
+    "**低估**：实测工商银行 debt_ratio 92.4% 而有息负债率仅 5.2%，招商银行 89.9% / 1.0%，"
+    "中国平安 89.8% / 1.7%。结果是金融股会「装作很安全」混进低负债筛选结果。"
+    "口径本身没 bug，但**别拿它给金融股排序**；要排除请自己在条件里加 `csrc_l1` 不等于"
+    "「金融业」（派生层不替用户偷偷排除）。"
+)
+
+
 DERIVED_FIELDS: dict[str, DerivedField] = {
     field.key: field
     for field in (
@@ -200,6 +321,80 @@ DERIVED_FIELDS: dict[str, DerivedField] = {
             raw_columns=("prepayments_received", "contract_liabilities", "total_assets"),
             build_sql=_advance_ratio_builder,
             doc="客户占款率 = (预收款项 + 合同负债) / 总资产（占款类指标的合并口径）。",
+        ),
+        DerivedField(
+            key="balance.interest_bearing_debt",
+            table="balance",
+            unit="CNY",
+            period_type="point_in_time",
+            historical_capable=True,
+            raw_columns=INTEREST_BEARING_DEBT_ACCOUNTS,
+            build_sql=_interest_bearing_debt_builder,
+            doc=(
+                "有息负债（绝对值，元）= 短期借款 + 长期借款 + 应付债券。段永平：「你要算"
+                "他们的有息负债。预收款也是负债，但意义差很多」「有息负债大概就是银行借贷"
+                "或债券类的东西，到期要还的」。与 `indicator_snapshot.interest_bearing_debt` "
+                "同口径（可直接对账）。缺失语义：三项全空 → NULL（无法区分「真没借款」与"
+                "「明细没采到」，不回退 0）；任一项非空 → 缺失侧按 0 计（多数公司本就不发债，"
+                "要求三项齐全会把覆盖率压到 11.8%，见 S8 P1-5）。不含应付票据/租赁负债/"
+                "一年内到期非流动负债（那些是另一种东西）。"
+            ),
+        ),
+        DerivedField(
+            key="balance.interest_bearing_debt_ratio",
+            table="balance",
+            unit="pct",
+            period_type="point_in_time",
+            historical_capable=True,
+            raw_columns=(*INTEREST_BEARING_DEBT_ACCOUNTS, "total_assets"),
+            build_sql=_interest_bearing_debt_ratio_builder,
+            doc=(
+                "有息负债率 = (短期借款 + 长期借款 + 应付债券) / 总资产。**单位是小数比例："
+                "0.25 = 25%**（不是百分数）。段永平口径：「有息负债大概就是银行借贷或债券类"
+                "的东西，到期要还的」—— 它只数要还本付息的负债，不像 `debt_ratio` 把预收款、"
+                "应付款也算进来，所以「高负债率 + 低有息负债率」往往说明这家公司在占上下游的钱。"
+                "缺失语义：分母（总资产）≤ 0 或缺失 → NULL，不是 0；分子三项借款科目全空 → "
+                "NULL（fail-closed，见 `balance.interest_bearing_debt`）。"
+                + _FINANCE_SECTOR_WARNING
+            ),
+        ),
+        DerivedField(
+            key="balance.net_cash_to_assets",
+            table="balance",
+            unit="pct",
+            period_type="point_in_time",
+            historical_capable=True,
+            raw_columns=("monetary_funds", *INTEREST_BEARING_DEBT_ACCOUNTS, "total_assets"),
+            build_sql=_net_cash_to_assets_builder,
+            doc=(
+                "净现金 / 总资产 = (货币资金 − 有息负债) / 总资产。**单位是小数比例：0.25 = 25%**"
+                "（可为负）。段永平「净现金 > 0 = 手头的钱够还掉所有要付息的债」，是他的六个数"
+                "之一；`> 0` 即可作为「手上有余粮」的一票。缺失语义：货币资金缺失 → NULL（不假定"
+                "现金为 0，否则「没采到」会被读成「这公司没现金」）；有息负债三项全空 → NULL；"
+                "分母（总资产）≤ 0 或缺失 → NULL。都不是 0。"
+                + _FINANCE_SECTOR_WARNING
+            ),
+        ),
+        DerivedField(
+            key="balance.interest_bearing_debt_to_liabilities",
+            table="balance",
+            unit="pct",
+            period_type="point_in_time",
+            historical_capable=True,
+            raw_columns=(*INTEREST_BEARING_DEBT_ACCOUNTS, "total_liabilities"),
+            build_sql=_interest_bearing_debt_to_liabilities_builder,
+            doc=(
+                "有息负债 / 总负债 = 负债里真正要还本付息的那部分占比。**单位是小数比例："
+                "0.25 = 25%**。量化段永平那句「预收款也是负债，但意义差很多」：值越低，负债越是"
+                "「占用上下游资金」（预收/应付），越不是银行借贷；值接近 1 说明负债几乎全是要还"
+                "本付息的钱。与 `debt_ratio` 正交，可组合成「高负债率 + 高有息占比」的排雷条件。"
+                "缺失语义：分母（总负债）≤ 0 或缺失 → NULL（无负债公司该比率无定义，不是 0）；"
+                "分子三项借款科目全空 → NULL。"
+                "**注意：这不是巴菲特的「有息负债/净利润＝几年还清」口径**（那个需要 "
+                "`income_statement.parent_net_profit`，属跨表比率，当前派生层只能取本表列，"
+                "见模块顶部 TODO），只是同表可算的替代。"
+                + _FINANCE_SECTOR_WARNING
+            ),
         ),
     )
 }

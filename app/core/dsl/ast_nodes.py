@@ -219,6 +219,10 @@ for _field in (
 #   income.credit_impairment_loss_positive    信用减值损失（损失为正，跨 2018 可比）
 #   balance.advance_from_customers            预收款项 + 合同负债（合并口径，跨 2020 连续）
 #   balance.advance_from_customers_ratio      客户占款率 =(预收+合同负债)/总资产
+#   balance.interest_bearing_debt             有息负债 = 短借+长借+应付债券（绝对值，元）
+#   balance.interest_bearing_debt_ratio       有息负债率 = 有息负债/总资产（段永平口径）
+#   balance.net_cash_to_assets                净现金/总资产 =(货币资金−有息负债)/总资产
+#   balance.interest_bearing_debt_to_liabilities  有息负债/总负债（负债质量，段永平口径）
 # 原始列（income.asset_impairment_loss / credit_impairment_loss /
 # balance.prepayments_received / contract_liabilities）**不删不改**，只加
 # `series_break` 元数据：校验器据此给出"跨断点不可直接比较"的 warning，
