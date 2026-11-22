@@ -76,7 +76,7 @@ import logging
 from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.adapters.base import FetchRequest
@@ -113,6 +113,9 @@ class PriceScope:
     deferred_codes: list[str] = field(default_factory=list)
     # 候选裁决的逐条计数（为什么延迟 / 为什么没延迟），供报告与日志自证。
     defer_reasons: dict[str, int] = field(default_factory=dict)
+    # 2026-11-22：被"源侧空数据负缓存"挡下的股票（源侧确认无数据、24h 内已试过）。
+    # 它们**仍是硬缺口**，只是本轮不打网络；报告里单列，缺口不会被隐藏。
+    source_empty_cached_codes: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -801,6 +804,152 @@ def defer_qfq_source_lag(
     return deferred
 
 
+# ─── 源侧"永远没有这只股票的数据"的负缓存（2026-11-22） ──────────────────
+# 实测事故：`002122`（ST汇洲）在库里**一根 K 线都没有**，源侧对目标交易日
+# 始终不返回数据；而选股 SQL 把"raw 缺失"判为**硬缺口**（这是对的：缺口必须
+# 可见，不许延迟）。于是它**每一轮都被重抓一次**，白花约 10 秒/轮（占整轮 5%），
+# 且永远不可能成功。
+#
+# 处理方式刻意保守，只解决"永远填不上的空账户"：
+#   * **只缓存"库里一行都没有"的股票**（`raw` 行数 = 0）。有历史行、只是落后
+#     一两天的股票**不缓存** —— 源侧随时可能补发，缓存会拖慢正常更新。
+#   * 缓存按 `(code, target_date)` 记，**TTL 24 小时**到期自动重试一次。
+#   * 缺口**不会被隐藏**：报告里单列 `source_empty_cached_count/codes`，
+#     日志一行说明，用户照样看得到"这几只源侧没数据"。
+SOURCE_EMPTY_CACHE_KEY = "price_source_empty_cache"
+SOURCE_EMPTY_TTL_SECONDS = 24 * 3600
+
+
+def _load_source_empty_cache(owner: Any) -> dict[str, dict[str, Any]]:
+    raw = owner._read_refresh_state(SOURCE_EMPTY_CACHE_KEY)
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_source_empty_cache(
+    owner: Any, cache: dict[str, dict[str, Any]], *, logger: logging.Logger,
+) -> None:
+    """写回负缓存，顺手丢掉过期条目（别让它无限长）。"""
+    now = datetime.now(UTC)
+    pruned: dict[str, dict[str, Any]] = {}
+    for code, entry in cache.items():
+        try:
+            last = datetime.fromisoformat(str(entry.get("last_attempt") or ""))
+        except ValueError:
+            continue
+        if (now - last).total_seconds() <= SOURCE_EMPTY_TTL_SECONDS:
+            pruned[code] = entry
+    try:
+        owner._write_refresh_state(
+            SOURCE_EMPTY_CACHE_KEY, json.dumps(pruned, ensure_ascii=False),
+        )
+    except Exception as error:  # noqa: BLE001 - 缓存写失败绝不影响更新
+        logger.debug("价格源侧空数据负缓存写入失败: %s", error)
+
+
+def _apply_source_empty_cache(
+    owner: Any, target_stocks: list[dict], target_date: str, *,
+    logger: logging.Logger,
+) -> tuple[list[dict], list[str]]:
+    """把"源侧确认无数据且 TTL 未到"的股票从本轮抓取集合里摘掉。
+
+    返回 `(保留的股票, 被缓存挡下的代码)`。缓存读不出来/格式坏 → **原样放行**
+    （宁可多扫一轮，也不能因为缓存问题漏更新）。
+    """
+    cache = _load_source_empty_cache(owner)
+    if not cache:
+        return list(target_stocks), []
+    now = datetime.now(UTC)
+    kept: list[dict] = []
+    cached: list[str] = []
+    for stock in target_stocks:
+        code = str(stock["stock_code"])
+        entry = cache.get(code)
+        if (
+            entry
+            and str(entry.get("target_date") or "") == str(target_date)
+            and entry.get("had_bars") is False
+        ):
+            try:
+                last = datetime.fromisoformat(str(entry.get("last_attempt") or ""))
+            except ValueError:
+                kept.append(stock)
+                continue
+            if (now - last).total_seconds() < SOURCE_EMPTY_TTL_SECONDS:
+                cached.append(code)
+                continue
+        kept.append(stock)
+    if cached:
+        logger.info(
+            "[增量] 源侧空数据负缓存命中 %d 只（目标日 %s 内已确认源侧无数据，"
+            "24 小时内不重复抓取；缺口仍然如实上报）: %s",
+            len(cached), target_date, ", ".join(sorted(cached)[:20]),
+        )
+    return kept, sorted(cached)
+
+
+def _refresh_source_empty_cache(
+    owner: Any, target_codes: list[str], target_date: str, *,
+    logger: logging.Logger,
+) -> None:
+    """按"本轮抓完后的真实水位"更新负缓存。
+
+    只有**库里一行都没有**（`had_bars=False`）的股票才进缓存；一只股票一旦
+    有了行情行，就把它的缓存条目删掉（说明源侧其实有数据，问题已消失）。
+    """
+    codes = [str(code) for code in dict.fromkeys(target_codes) if code]
+    if not codes:
+        return
+    try:
+        rows = owner.duck.read_query(
+            """SELECT price.stock_code AS stock_code,
+                      COUNT(*) AS bar_count,
+                      MAX(price.trade_date) AS latest_raw
+               FROM price_daily_raw price
+               WHERE price.stock_code IN (SELECT unnest(?::VARCHAR[]))
+               GROUP BY price.stock_code""",
+            [codes],
+        )
+    except Exception as error:  # noqa: BLE001
+        logger.debug("价格源侧空数据负缓存：读取行情水位失败: %s", error)
+        return
+    stats = {
+        str(row["stock_code"]): (
+            int(row.get("bar_count") or 0),
+            _day_text(row.get("latest_raw")),
+        )
+        for row in rows
+    }
+    cache = _load_source_empty_cache(owner)
+    now_iso = datetime.now(UTC).isoformat()
+    changed = False
+    for code in codes:
+        bar_count, latest_raw = stats.get(code, (0, None))
+        if bar_count == 0:
+            # 源侧确实没有这只股票的行情：记下来，24 小时内别再抓。
+            cache[code] = {
+                "target_date": str(target_date),
+                "last_attempt": now_iso,
+                "had_bars": False,
+            }
+            changed = True
+        else:
+            # **只要有行情行就一律移出缓存** —— 不管有没有追平。
+            # 反例（2026-11-22 自查抓到的自查 bug）：一只股票先被缓存（那时它一行
+            # 都没有），后来源侧有了历史行但还没追平；旧实现在这个分支什么都不做，
+            # 于是**过期条目继续压制它最多 24 小时**。有历史行说明源侧是有数据的，
+            # 就该恢复正常每轮重试。
+            if cache.pop(code, None) is not None:
+                changed = True
+    if changed:
+        _save_source_empty_cache(owner, cache, logger=logger)
+
+
 def _split_qfq_scope_rows(
     owner: Any,
     rows: list[dict],
@@ -1054,7 +1203,19 @@ def _plan_price_scope(
     elif latest_local:
         logger.info(f"[增量] 本地价格截至 {latest_local}，从该日期增量补缺口（不整段重拉）")
 
+    # 2026-11-22：摘掉"源侧确认无数据且 24h 内已试过"的股票（只针对库里一行
+    # 都没有的；有历史行只是落后的不动）。缺口照样进报告，只是本轮不打网络。
+    target_stocks, source_empty_cached_codes = _apply_source_empty_cache(
+        owner, target_stocks, target_date, logger=logger,
+    )
+    if not target_stocks:
+        logger.info(
+            "[增量] 全部 %d 只候选都被'源侧空数据负缓存'挡下（源侧确认无数据，"
+            "24 小时内不重复抓取）: %s",
+            len(source_empty_cached_codes), ", ".join(source_empty_cached_codes[:20]),
+        )
     return PriceScope(
+        source_empty_cached_codes=source_empty_cached_codes,
         target_stocks=target_stocks,
         priority_codes=priority_codes,
         pending_qfq_codes=pending_qfq_codes,
@@ -1539,6 +1700,11 @@ def _finalize_price_step(
         # `partial(qfq_lagged)` 降级判定、不进 tech_recompute_pending。
         "deferred_qfq_source_lag_count": len(scope.deferred_codes),
         "deferred_qfq_source_lag_codes": scope.deferred_codes[:20],
+        # 2026-11-22：被"源侧空数据负缓存"挡下的股票（源侧确认无数据、24h 内不重抓）。
+        # **缺口照样如实上报**：它仍是硬缺口，只是本轮没打网络。看这两项就知道
+        # "为什么这轮没抓它、但它依然缺"。
+        "source_empty_cached_count": len(scope.source_empty_cached_codes),
+        "source_empty_cached_codes": scope.source_empty_cached_codes[:20],
         # 记账只看**成功落库**的股票 → 抓取/落库失败的下一轮照旧重试。
         "qfq_catchup_attempts_marked": attempts_marked,
         # 记账落盘证据（"批次走一次写"而不是"每只一次写"的实测口径）：
@@ -1593,5 +1759,14 @@ def update_prices_incremental(
         source_error_kind=source_error_kind,
         clock=clock,
         detail_cb=detail_cb,
+    )
+    # 2026-11-22：按"抓完之后的真实水位"更新源侧空数据负缓存。
+    # 只有库里一行都没有的股票才进缓存（有历史行只是落后的不进），
+    # 追平的股票会被自动移出。失败只记 debug，绝不影响更新结果。
+    _refresh_source_empty_cache(
+        owner,
+        [str(stock["stock_code"]) for stock in scope.target_stocks],
+        scope.target_date,
+        logger=logger,
     )
     return _finalize_price_step(owner, scope, outcome, logger=logger, clock=clock)
