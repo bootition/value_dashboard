@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
-import { NMessageProvider } from 'naive-ui'
+import { NMessageProvider, NTag } from 'naive-ui'
 import { h } from 'vue'
 import DataStatusPage from '../../src/views/DataStatusPage.vue'
 
@@ -126,7 +126,7 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
     expect(text).toContain('预计剩余')
     // 已完成步骤也用中文名 + 中文状态（不是 `prices:success`）
     const page = wrapper.text()
-    expect(page).toContain('正在更新股票价格·完成')
+    expect(page).toContain('更新股票价格·完成')
     expect(page).toContain('股票池与股本·跳过')
     expect(page).not.toContain('prices:success')
     wrapper.unmount()
@@ -161,6 +161,90 @@ describe('DataStatusPage 数据状态展示（PRD §15）', () => {
     expect(block.exists()).toBe(true)
     expect(block.text()).toContain('正在抓取公告')
     expect(block.text()).toContain('没有逐股计数')
+    wrapper.unmount()
+  })
+
+  it('更新结束后：阶段必须说"完成"，不能还在说"正在更新数据"（截图实证缺陷）', async () => {
+    const get = axios.get as Mock
+    const base = get.getMockImplementation()!
+    get.mockImplementation((url: string) => {
+      if (url === '/api/data-status/auto-update') {
+        return Promise.resolve({
+          data: {
+            state: 'enabled', enabled: true, paused: false,
+            current_stage: 'finished',
+            progress: { phase: 'done', status: 'success', steps: { prices: 'success' } },
+            last_error: null, last_success_at: '2026-11-22T01:51:41+00:00',
+            latest_job: { id: 263, status: 'success' },
+          },
+        })
+      }
+      return base(url as string)
+    })
+
+    const router = createRouter({ history: createMemoryHistory(), routes: [] })
+    const wrapper = mount(NMessageProvider, {
+      slots: { default: () => h(DataStatusPage) },
+      global: { plugins: [router] },
+    })
+    await flushPromises()
+    const page = wrapper.text()
+    expect(page).toContain('数据更新完成')
+    expect(page).not.toContain('正在更新数据')
+    wrapper.unmount()
+  })
+
+  it('deferred / skipped 都显示中文，且都算"绿"（不是灰、不是未知状态）', async () => {
+    const get = axios.get as Mock
+    const base = get.getMockImplementation()!
+    get.mockImplementation((url: string) => {
+      if (url === '/api/data-status/auto-update') {
+        return Promise.resolve({
+          data: {
+            state: 'enabled', enabled: true, paused: false,
+            current_stage: 'finished',
+            progress: {
+              phase: 'done', status: 'success',
+              steps: {
+                prices: 'success',
+                universe: 'skipped',
+                cashflow_supplement: 'deferred',
+                balance_sheet_ext: 'deferred',
+                etf_prices: 'failed',
+              },
+            },
+            last_error: null, last_success_at: null,
+            latest_job: { id: 264, status: 'success' },
+          },
+        })
+      }
+      return base(url as string)
+    })
+
+    const router = createRouter({ history: createMemoryHistory(), routes: [] })
+    const wrapper = mount(NMessageProvider, {
+      slots: { default: () => h(DataStatusPage) },
+      global: { plugins: [router] },
+    })
+    await flushPromises()
+    const page = wrapper.text()
+    // 中文状态（不再是 `deferred` 原始串，也不是"未知状态"）
+    expect(page).toContain('顺延下一轮')
+    expect(page).not.toContain('未知状态')
+    expect(page).toContain('跳过')
+    expect(page).toContain('失败')
+    // 颜色口径（用户原话：「不需要继续做了就直接跳成绿色，为什么还要留成灰色？」）：
+    // 只有失败是红，其余（完成/跳过/顺延）一律绿。
+    // naive-ui 的 Tag 不输出 `n-tag--success` 这类类名（类型走 CSS 变量），
+    // 所以断言**组件 props**，而不是 class。
+    const tags = wrapper.findAllComponents(NTag)
+    const typeOf = (needle: string) =>
+      tags.find((tag) => tag.text().includes(needle))?.props('type')
+    expect(typeOf('更新股票价格')).toBe('success')
+    expect(typeOf('股票池与股本')).toBe('success')
+    expect(typeOf('补充现金流数据')).toBe('success')   // deferred → 也是绿
+    expect(typeOf('资产负债表扩展')).toBe('success')   // deferred → 也是绿
+    expect(typeOf('ETF 行情')).toBe('error')           // 真失败才是红
     wrapper.unmount()
   })
 

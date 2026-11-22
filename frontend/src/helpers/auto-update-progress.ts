@@ -52,10 +52,22 @@ export const AUTO_UPDATE_STAGE_LABELS: Readonly<Record<string, string>> = {
   check: '正在检查更新条件',
 }
 
-/** `progress.phase` 不是 `step:*` 时的阶段文案。 */
+/**
+ * `progress.phase` 不是 `step:*` 时的阶段文案。
+ *
+ * 2026-11-22 实测缺陷：更新结束后后端 `current_stage='finished'`、`phase='done'`，
+ * 而这里**没有** `finished`/`idle`/`enabled` 这些终态名 → `stageLabel()` 落到
+ * 兜底文案「正在更新数据」→ 用户明明看到"自动更新完成"的日志，页头却还在说
+ * "正在更新数据"（截图实证）。终态必须是"已完成/空闲"，不能是进行时。
+ */
 export const AUTO_UPDATE_PHASE_LABELS: Readonly<Record<string, string>> = {
   starting: '正在准备更新',
   done: '数据更新完成',
+  finished: '数据更新完成',
+  idle: '空闲（等待下次自动更新）',
+  enabled: '空闲（等待下次自动更新）',
+  disabled: '自动更新已关闭',
+  paused: '自动更新已暂停',
 }
 
 /** 未知步骤的兜底：宁可只说"正在更新数据"，也不显示原始英文 key。 */
@@ -155,6 +167,18 @@ export function updateStepStatusLabel(status?: string | null): string {
       return '受阻'
     case 'pending':
       return '等待中'
+    // `deferred` = 本轮预算/冷却用完、顺延到下一轮继续（有界续传）。
+    // 2026-11-22 实测缺陷：漏登记这个状态 → 页面上显示成"未知状态"（截图实证）。
+    case 'deferred':
+      return '顺延下一轮'
+    case 'ok':
+      return '完成'
+    case 'done':
+      return '完成'
+    case 'unavailable':
+      return '数据源不可用'
+    case 'missing':
+      return '源侧无数据'
     default:
       return key ? '未知状态' : '—'
   }

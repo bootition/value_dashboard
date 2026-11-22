@@ -132,11 +132,28 @@ const updateStepChips = computed(() => {
   const steps = (autoUpdate.value?.progress?.steps ?? {}) as Record<string, string>
   return Object.entries(steps).map(([key, value]) => ({
     key,
-    label: stageLabel(key),
+    // 步骤已结束时用"更新股票价格·完成"而不是"正在更新股票价格·完成"
+    // （进行时态 + 完成态拼在一起自相矛盾）。
+    label: stageLabel(key).replace(/^正在/, ''),
     statusLabel: updateStepStatusLabel(value),
     status: String(value),
   }))
 })
+/**
+ * 步骤标签的颜色（2026-11-22 用户要求：「如果不需要继续做了，那就直接跳成绿色，
+ * 为什么还要留成灰色？」）。
+ *
+ * 口径：**只有真失败是红、部分完成是黄**；其余状态（完成 / 跳过 / 顺延下一轮 /
+ * 源侧无数据 …）全都是**绿的 "已完成"**——因为它们都表示"这轮对它没有待办"，
+ * 灰色会让人以为"没做完"。
+ */
+function stepChipType(status: string): 'success' | 'warning' | 'error' {
+  const key = (status || '').toLowerCase()
+  if (key === 'failed' || key === 'error' || key === 'blocked') return 'error'
+  if (key === 'partial') return 'warning'
+  return 'success'
+}
+
 const updateElapsedLabel = computed(() =>
   formatElapsed(autoUpdate.value?.progress?.started_at ?? null),
 )
@@ -477,13 +494,13 @@ function autoUpdateTagType(state: string): 'success' | 'warning' | 'error' | 'in
             <n-descriptions-item label="当前阶段">
               <strong>{{ updateStageLabel }}</strong>
             </n-descriptions-item>
-            <n-descriptions-item label="已完成步骤">
+            <n-descriptions-item label="步骤状态">
               <n-space v-if="updateStepChips.length" size="small">
                 <n-tag
                   v-for="chip in updateStepChips"
                   :key="chip.key"
                   size="small"
-                  :type="chip.status === 'failed' ? 'error' : chip.status === 'skipped' ? 'default' : 'success'"
+                  :type="stepChipType(chip.status)"
                 >
                   {{ chip.label }}·{{ chip.statusLabel }}
                 </n-tag>
