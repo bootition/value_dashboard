@@ -1898,7 +1898,15 @@ class SupplementFetcher:
                 "source": SOURCE,
                 "api_version": spec.api_version,
                 "codes": sorted(c for c, _ in pending),
-                "periods": [str(p)[:10] for p in periods],
+                # 2026-11-22 修：这里原来写的是**入参** `periods`（默认 None），
+                # 而 `refresh()` 的绝大多数调用方**不传 periods**（让它按
+                # `backfill_periods` 自动解析）→ `for p in None` →
+                # `TypeError: 'NoneType' object is not iterable`。
+                # 这个坑长期没暴露，是因为四个补采数据集长期处于 `deferred /
+                # all_pending_in_cooldown`（7 天冷却）**在到达这一行之前就 return 了**；
+                # 冷却期一过、真有待补工作，就立刻全崩（job 270 实测三个数据集同时 failed）。
+                # 必须用解析后的 `resolved_periods`（受 period_floor 过滤）。
+                "periods": [str(p)[:10] for p in resolved_periods],
                 "fetched_at": fetched_at.isoformat(),
             },
             ensure_ascii=False,

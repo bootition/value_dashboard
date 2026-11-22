@@ -2766,7 +2766,10 @@ class IncrementalUpdater:
         general_items: list[dict[str, Any]] = []
         general_error: str | None = None
         general_truncated = False
-        if self.announcement_general_enabled:
+        # `getattr(..., False)`：本模块多处用 `IncrementalUpdater.__new__` 做
+        # 局部构造（`__init__` 不跑），硬取属性会 AttributeError。缺省=关闭，
+        # 与配置默认值一致，不会因为"没初始化"而意外多抓一轮。
+        if getattr(self, "announcement_general_enabled", False):
             general_items, general_error, general_truncated = fetch_items(
                 None, general_start, general_max_pages,
             )
