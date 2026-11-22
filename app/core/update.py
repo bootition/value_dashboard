@@ -1268,7 +1268,11 @@ class IncrementalUpdater:
             if caught_up or step.get("reason") == "no_pending_codes":
                 self._mark_domain_refreshed(state_key)
         except Exception as error:  # noqa: BLE001 - 补采失败绝不阻断主链
-            logger.warning("补采步骤失败(非致命) dataset=%s: %s", dataset, error)
+            # 2026-11-22：原来只 `logger.warning` 一句话，**不留栈** —— 于是
+            # job_logs 里只看到 `exception: TypeError: 'NoneType' object is not
+            # iterable`，却无从定位（实测就是这么卡住的）。`logger.exception`
+            # 把 traceback 打进日志；诊断代价从"重跑+猜"降到"看日志"。
+            logger.exception("补采步骤失败(非致命) dataset=%s: %s", dataset, error)
             step["status"] = "failed"
             step["reason"] = f"exception: {type(error).__name__}: {error}"
         finally:
