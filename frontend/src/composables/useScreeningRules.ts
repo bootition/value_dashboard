@@ -14,7 +14,7 @@
  * 3. 保存成功后刷新快照（`syncEditorSnapshot`）并重新拉取规则列表。
  */
 
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { Ref } from 'vue'
 import axios from 'axios'
 import type { ScreeningRuleNode } from '../types/screening.ts'
@@ -82,6 +82,17 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
   const selectedRuleId = ref<number>(0)
   const activeRule = computed(() => savedRules.value.find(rule => rule.id === selectedRuleId.value) || null)
   const ruleName = ref('')
+  /**
+   * 规则名输入框的就地校验提示（空名字时显示在输入框下方）。
+   *
+   * 2026-11-25 用户投诉「不要自动保存成一条新规则，应该让我自己来命名」：
+   * 既然名字由用户决定，就必须有**看得见**的"还没命名"反馈，而不是原来那句
+   * `autoRuleName()` 静默造出来的「未命名规则 2026-11-25 14:03」。
+   */
+  const ruleNameError = ref('')
+  watch(ruleName, () => {
+    ruleNameError.value = ''
+  })
 
   async function loadSavedRules() {
     try {
@@ -105,12 +116,6 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
     return conditionsDirty
   }
 
-  function autoRuleName(): string {
-    const now = new Date()
-    const pad = (n: number) => String(n).padStart(2, '0')
-    return `未命名规则 ${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
-  }
-
   async function persistRule(name: string): Promise<{ rule_id: number; version: number } | null> {
     try {
       const resp = await axios.post<{ rule_id: number; version: number }>('/api/screening/rules/save', {
@@ -125,7 +130,7 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
       await loadSavedRules()
       selectedRuleId.value = resp.data.rule_id
       syncEditorSnapshot()
-      notify.success(`规则已保存为 v${resp.data.version}`)
+      notify.success(`已保存为一套新规则：${name}（v${resp.data.version}）`)
       return resp.data
     } catch (e: unknown) {
       notify.error(apiErrorText(e, '保存规则失败'))
@@ -133,10 +138,59 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
     }
   }
 
+  /**
+   * 原地更新当前规则（`PUT /rules/{id}`）：**同一 id / 同一 name**，后端把
+   * `version` +1。
+   *
+   * 这是 2026-11-25 投诉的核心修复：以前草稿脏了就 `POST /rules/save`，
+   * 后端 `MAX(version)+1` 追加一行同名规则 → 下拉里堆出一串 V1/V2/V3，
+   * 用户看不出"这其实是同一套规则被改过"。现在改条件只更新这一行。
+   */
+  async function updateRuleInPlace(): Promise<{ rule_id: number; version: number } | null> {
+    const rule = activeRule.value
+    if (!rule) return null
+    try {
+      const resp = await axios.put<{ rule_id: number; version: number }>(
+        `/api/screening/rules/${rule.id}`,
+        {
+          rule_json: {
+            conditions: ruleTree,
+            columns: selectedColumnsForRequest(),
+          },
+          locked_indicators: rule.locked_indicators ?? {},
+          // 乐观并发：告诉后端"我编辑的是这一版"，被别人改过就 409。
+          expected_version: rule.version,
+        },
+      )
+      await loadSavedRules()
+      // 服务端返回的 version 是权威值；重新拉取若因缓存/时序仍是旧版，以它为准，
+      // 保证紧接着的 /run 用的是**刚保存的那个版本**（否则会报"版本不存在"）。
+      const index = savedRules.value.findIndex(item => item.id === resp.data.rule_id)
+      if (index >= 0) {
+        savedRules.value[index] = {
+          ...savedRules.value[index],
+          version: resp.data.version,
+          rule_json: {
+            ...savedRules.value[index].rule_json,
+            conditions: cloneScreeningRule(ruleTree),
+          },
+        }
+      }
+      syncEditorSnapshot()
+      notify.success(`规则「${rule.name}」已更新为 v${resp.data.version}（同一套规则，未新建）`)
+      return resp.data
+    } catch (e: unknown) {
+      notify.error(apiErrorText(e, '更新规则失败'))
+      return null
+    }
+  }
+
   async function saveRule(): Promise<{ rule_id: number; version: number } | null> {
     const name = ruleName.value.trim()
     if (!name) {
-      notify.warning('请输入规则名称')
+      // 不许再静默造名（旧 `autoRuleName()` 已删除）：名字空 = 不发请求。
+      ruleNameError.value = '请先输入规则名称'
+      notify.warning(ruleNameError.value)
       return null
     }
     return persistRule(name)
@@ -147,7 +201,7 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
     if (!rule) return
     dialog.warning({
       title: '删除选中的规则？',
-      content: `将删除「${rule.name} v${rule.version}」。已有保存结果或自选来源的规则不能删除。`,
+      content: `将删除「${rule.name} v${rule.version}」。已被「已保存的筛选结果」或「自选记录」引用的规则不能删除（只跑过、没保存结果的规则可以删）。`,
       positiveText: '删除',
       negativeText: '取消',
       onPositiveClick: async () => {
@@ -221,13 +275,17 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
   }
 
   const ruleOptions = computed(() => {
-    const options: Array<{ label: string; value: number }> = [
+    // 一套规则 = 下拉里一行（`label` 是规则名，`version` 由页面渲染成副标题）。
+    // 2026-11-25 之前这里是 `${name} v${version}` 拼接，而编辑又会追加同名新行
+    // → 用户看到的是一串"看起来不同的规则"（V1/V2/V3），实际是同一套。
+    const options: Array<{ label: string; value: number; version?: number }> = [
       { label: '选择已保存的规则...', value: 0 },
     ]
     for (const r of savedRules.value) {
       options.push({
-        label: `${r.name} v${r.version}`,
+        label: r.name,
         value: r.id,
+        version: r.version,
       })
     }
     return options
@@ -238,11 +296,12 @@ export function useScreeningRules(deps: ScreeningRulesDeps) {
     selectedRuleId,
     activeRule,
     ruleName,
+    ruleNameError,
     ruleOptions,
     loadSavedRules,
     isDraftDirty,
-    autoRuleName,
     persistRule,
+    updateRuleInPlace,
     saveRule,
     deleteSelectedRule,
     applyLoadedRule,

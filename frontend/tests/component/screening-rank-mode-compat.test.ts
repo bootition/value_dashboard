@@ -255,11 +255,15 @@ describe('页面级：载入带 rank_mode 的已保存规则 → 运行 → 提�
   })
 
   it('条件行不显示排名口径；改一个数值再运行，规则 payload 仍带 rank_mode', async () => {
-    const post = axios.post as Mock
-    post.mockImplementation((url: string) => {
-      if (url === '/api/screening/rules/save') {
+    const put = axios.put as Mock
+    put.mockImplementation((url: string) => {
+      if (url === '/api/screening/rules/7') {
         return Promise.resolve({ data: { rule_id: 7, version: 2 } })
       }
+      return Promise.resolve({ data: {} })
+    })
+    const post = axios.post as Mock
+    post.mockImplementation((url: string) => {
       if (url === '/api/screening/run') {
         return Promise.resolve({
           data: {
@@ -289,7 +293,8 @@ describe('页面级：载入带 rank_mode 的已保存规则 → 运行 → 提�
     expect(wrapper.text()).not.toContain('排名口径')
     expect(wrapper.find('[aria-label="排名口径"]').exists()).toBe(false)
 
-    // ② 改一个数值 → 变成草稿有新内容 → 点运行会先保存规则
+    // ② 改一个数值 → 草稿脏了 → 点运行会先**原地更新**这套规则
+    //（2026-11-25：不再 POST /rules/save 追加一行同名新版本）
     await rows[0].vm.$emit('update:value', 25)
     await flushPromises()
 
@@ -299,10 +304,16 @@ describe('页面级：载入带 rank_mode 的已保存规则 → 运行 → 提�
     await flushPromises()
 
     // ③ 提交给后端的规则 payload 里 rank_mode 必须还在（数据不丢）
-    const saveCall = post.mock.calls.find(([url]) => url === '/api/screening/rules/save')
-    expect(saveCall, '没有发出规则保存请求').toBeTruthy()
-    const payload = saveCall![1] as {
+    const updateCall = put.mock.calls.find(([url]) => url === '/api/screening/rules/7')
+    expect(updateCall, '没有发出原地更新请求（PUT /rules/7）').toBeTruthy()
+    // 也不许再新建同名规则
+    expect(
+      post.mock.calls.find(([url]) => url === '/api/screening/rules/save'),
+      '草稿脏了还在 POST /rules/save 新建规则',
+    ).toBeUndefined()
+    const payload = updateCall![1] as {
       rule_json: { conditions: { rules: Array<Record<string, unknown>> } }
+      expected_version: number
     }
     const submitted = payload.rule_json.conditions.rules[0]
     expect(submitted).toMatchObject({
@@ -311,5 +322,7 @@ describe('页面级：载入带 rank_mode 的已保存规则 → 运行 → 提�
       value: 25,
       rank_mode: 'industry_rank',
     })
+    // 乐观并发：带上"我编辑的是哪一版"
+    expect(payload.expected_version).toBe(1)
   })
 })

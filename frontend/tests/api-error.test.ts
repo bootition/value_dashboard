@@ -139,7 +139,6 @@ test('刷新解决不了的 409 给准确动作，而不是让人白刷新', () 
   const cases: ReadonlyArray<[string, RegExp, RegExp]> = [
     ['snapshot_values_untrusted', /快照整体不可信/, /刷新页面不会恢复/],
     ['masked_untrusted', /不可信的字段/, /刷新页面不会恢复/],
-    ['rule_has_provenance_refs', /不能删除/, /刷新页面不会解除引用/],
   ]
   for (const [code, titleRe, actionRe] of cases) {
     const guidance = describeApiError(axiosError(409, { reason_code: code }))
@@ -147,4 +146,28 @@ test('刷新解决不了的 409 给准确动作，而不是让人白刷新', () 
     assert.match(guidance.action ?? '', actionRe, `${code} 动作不对：${guidance.action ?? ''}`)
     assertNoMachineResidue(`${guidance.title}；${guidance.action ?? ''}`)
   }
+
+  // rule_has_provenance_refs（2026-11-25）：具体条数由后端 detail.message 动态拼，
+  // 映射表只兜底标题 —— 但**绝不能**教用户刷新（引用关系不会因刷新解除）。
+  const ruleRefs = describeApiError(axiosError(409, { reason_code: 'rule_has_provenance_refs' }))
+  assert.match(ruleRefs.title, /不能删除/)
+  assert.doesNotMatch(ruleRefs.action ?? '', /刷新/)
+  assertNoMachineResidue(ruleRefs.title)
+})
+
+test('rule_has_provenance_refs：后端动态条数原样透传，不再叠一句泛化 action', () => {
+  // 用户投诉原话（2026-11-25）：「自选列表里面明明没有这个运行规则显示的分组，
+  // 为什么它还删不掉？」—— 后端现在点名"已保存的筛选结果 / 自选记录 + 条数"，
+  // 前端必须原样显示，不许替换成「请先删除引用它的筛选结果或自选记录」这种泛化句。
+  const message =
+    '该规则有 8 条已保存的筛选结果、573 条自选记录引用，不能删除；请先删除这些筛选结果或自选记录'
+  const text = friendlyErrorMessage(
+    axiosError(409, { reason_code: 'rule_has_provenance_refs', message, refs: { results: 8, watchlist: 573, runs: 0 } }),
+    '删除规则失败',
+  )
+  assert.match(text, /8 条已保存的筛选结果/)
+  assert.match(text, /573 条自选记录/)
+  assert.doesNotMatch(text, /运行结果/)
+  assert.doesNotMatch(text, /刷新页面不会解除引用/)
+  assertNoMachineResidue(text)
 })

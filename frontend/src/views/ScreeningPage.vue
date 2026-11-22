@@ -44,6 +44,12 @@ import type { UnavailableIndicator } from '../utils/screening-unavailable.ts'
 const message = useMessage()
 const dialog = useDialog()
 
+/**
+ * 规则名称输入框的 DOM 句柄：无 activeRule 时点「运行筛选」要把焦点送回这里，
+ * 让用户当场起名（2026-11-25：不再静默 `autoRuleName()` 造名）。
+ */
+const ruleNameInputRef = ref<InstanceType<typeof NInput> | null>(null)
+
 const indicators = ref<readonly ScreeningIndicator[]>([])
 /** 条件级排名口径（方案 C，后端 /indicators 下发）：空 = 原始值 */
 const rankModes = ref<Array<{ label: string; value: string }>>([])
@@ -342,11 +348,25 @@ const opOptions = [
  * 用户看到「原…」「全…」「证…」只能猜。这里用 NEllipsis 的 tooltip 模式：
  * 截断处仍显示省略号，鼠标悬浮弹出完整名称。
  */
-function renderOptionLabel(option: { label?: string }): VNode {
+/**
+ * 规则下拉的渲染：**规则名做主标题，当前版本做副标题**（2026-11-25）。
+ *
+ * 以前 label 直接拼成 `name v1`，而"改条件再运行"又会追加一行同名新版本 →
+ * 下拉里出现两条看起来像不同规则的项（用户原话：搞成一大堆 V1、V2、V3，
+ * 我以后怎么分辨）。现在一套规则只有一行，版本只是名字后面的一行小字。
+ */
+function renderOptionLabel(option: { label?: string; version?: number }): VNode {
   return h(
     NEllipsis,
     { tooltip: { placement: 'right', contentStyle: 'max-width: 520px; white-space: normal;' } },
-    { default: () => option.label ?? '' },
+    {
+      default: () => [
+        option.label ?? '',
+        option.version
+          ? h('span', { style: 'color:#8a8a8a;font-size:12px' }, ` v${option.version}`)
+          : '',
+      ],
+    },
   )
 }
 
@@ -484,29 +504,24 @@ function scrollToResults(): void {
 }
 
 async function runScreening() {
-  // 2026-08-26 UX：没有已保存规则时不再要求用户手动命名/先保存，
-  // 自动把当前草稿保存为一个可追溯规则版本，然后直接运行。
+  // 2026-11-25 用户截图投诉后的语义（两条都是"用户路径"，改前请先读）：
+  //
+  // A. **没有已保存规则**时不再自动命名：旧代码 `ruleName.value = autoRuleName()`
+  //    会静默造出「未命名规则 2026-11-25 14:03」再保存，用户回头只看到一堆
+  //    自己没起过名的规则。现在把焦点送回名称输入框并要求确认（「保存并运行」）。
+  // B. **已有规则被改过**（草稿脏）时**原地更新那一行**（PUT /rules/{id}），
+  //    不再 POST /rules/save 追加同名新版本 —— 那正是"V1/V2/V3 分不清"的根因。
   if (activeRule.value === null) {
-    if (!ruleName.value.trim()) {
-      ruleName.value = autoRuleName()
-    }
-    const saved = await saveRule()
-    if (!saved || activeRule.value === null) {
-      message.error('自动保存规则失败，请刷新后重试或手动输入规则名称')
-      return
-    }
+    ruleNameError.value = '请先给这套规则起个名字，再点「保存并运行」'
+    message.warning(ruleNameError.value)
+    ruleNameInputRef.value?.focus()
+    return
   }
-  // 如果当前编辑区相对已保存规则有修改，也自动保存为新版本再运行，
-  // 避免“屏幕条件与实际运行条件不一致”的困扰。
   if (isDraftDirty()) {
-    if (!ruleName.value.trim()) {
-      ruleName.value = activeRule.value?.name || autoRuleName()
-    }
-    const saved = await saveRule()
-    if (!saved || activeRule.value === null) {
-      message.error('自动保存规则失败，请刷新后重试或手动输入规则名称')
-      return
-    }
+    const updated = await updateRuleInPlace()
+    // 更新失败（例如 409 并发 / 400 字段校验）已经由 composable 提示过；
+    // 这里直接中止，绝不用"旧版本 + 新条件"的口径去跑一次骗人的筛选。
+    if (!updated) return
   }
   loading.value = true
   // 进入 running：旧结果暂时留在屏幕上，但会由面板显式标注「上一次运行的结果」
@@ -630,6 +645,35 @@ async function runScreening() {
   }
 }
 
+/**
+ * 首次使用（还没有 activeRule）的确认出口：用户把名字填好后点「保存并运行」。
+ *
+ * 语义边界：**用户点这一下 = 确认名字**，所以这里才允许 POST /rules/save；
+ * 点「运行筛选」本身永远不建规则（见 `runScreening` 的 A 分支）。
+ */
+async function saveAndRunScreening() {
+  if (activeRule.value !== null) {
+    await runScreening()
+    return
+  }
+  const saved = await saveRule()
+  if (!saved) return
+  await runScreening()
+}
+
+/**
+ * 「另存为新规则」= 新建一套规则（必须自己填名字），当前规则不受影响。
+ *
+ * 与"改了点数字就自动存成新版本"的区别：这是**用户主动、显式**的新建；
+ * 名字空时不发请求（composable 里 `saveRule()` 已负责提示），名字重复时后端 400
+ * 并提示「已存在同名规则，请换个名字或直接编辑那一条」。
+ */
+async function saveRuleAsNew() {
+  const saved = await saveRule()
+  if (!saved) return
+  message.info('已另存为一套新规则；如需修改原规则，请重新选中它')
+}
+
 // L0-3（报告42）原本在这里挂了一个「strict-only 切换时自动按服务端口径重跑」的
 // 防抖 watch。用户裁定移除严格模式开关后，页面内不再有任何东西能改变 strict_only
 // → 该 watch 永远不可能触发，随开关一起删除（重跑逻辑仍由「运行筛选」按钮承担）。
@@ -665,11 +709,12 @@ const {
   selectedRuleId,
   activeRule,
   ruleName,
+  ruleNameError,
   ruleOptions,
   savedRules,
   loadSavedRules,
   isDraftDirty,
-  autoRuleName,
+  updateRuleInPlace,
   saveRule,
   deleteSelectedRule,
   loadRule,
@@ -798,8 +843,10 @@ onUnmounted(() => {
             :render-label="renderOptionLabel"
             @update:value="loadRule"
           />
-          <n-input v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称" />
-          <n-button size="small" @click="saveRule">保存新版本</n-button>
+          <n-input ref="ruleNameInputRef" v-model:value="ruleName" aria-label="规则名称" size="small" placeholder="规则名称（必填）" />
+          <n-button v-if="activeRule === null" size="small" type="primary" @click="saveAndRunScreening">保存并运行</n-button>
+          <n-button v-else size="small" @click="saveRuleAsNew">另存为新规则</n-button>
+          <span v-if="ruleNameError" class="rule-name-hint" role="alert">{{ ruleNameError }}</span>
           <n-button v-if="selectedRuleId > 0" size="small" quaternary type="error" @click="deleteSelectedRule">删除选中规则</n-button>
         </div>
 
@@ -1040,6 +1087,8 @@ onUnmounted(() => {
 .screening-card-heading span { color: #829087; font-size: 11px; }
 .rule-load-row { display: grid; grid-template-columns: auto minmax(180px, 1fr) minmax(150px, .65fr) auto; align-items: center; gap: 10px; margin: 25px 0; padding: 13px 14px; border-radius: 9px; background: #fafcf9; }
 .rule-load-row > span, .control-label { color: #89958c; font-size: 10px; }
+/* 规则名为空时的就地校验（2026-11-25：名字必须由用户决定，空名字不许发请求）。 */
+.rule-load-row > .rule-name-hint { color: #b4544a; font-size: 10px; }
 .screening-section { padding: 21px 0; border-top: 1px solid #edf1ee; }
 .rule-load-row + .screening-section { border-top: 1px solid #edf1ee; }
 .screening-section-title > div { display: flex; align-items: baseline; gap: 11px; }

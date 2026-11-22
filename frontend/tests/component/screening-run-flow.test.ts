@@ -128,26 +128,25 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     expect(wrapper.text()).toContain('贵州茅台')
   })
 
-  it('没有已保存规则时自动保存草稿并直接运行（不强制手动命名）', async () => {
+  it('首次使用（无 activeRule）点运行不建规则、提示先命名；填名后「保存并运行」才 POST 一次', async () => {
+    // 2026-11-25 用户投诉：以前这里会 `autoRuleName()` 静默造一个名字再保存，
+    // 于是用户回头看到一堆自己没起过名的"未命名规则"。新语义：名字由用户决定。
     const get = axios.get as Mock
+    let savedRule: {
+      id: number
+      name: string
+      version: number
+      rule_json: { conditions: { logic: string, rules: unknown[] }, columns?: string[] }
+      locked_indicators: Record<string, unknown>
+      status: string
+      created_at: string
+    } | null = null
     get.mockImplementation((url: string) => {
       if (url === '/api/screening/draft') {
         return Promise.resolve({ data: { draft: null, revision: 0 } })
       }
       if (url === '/api/screening/rules') {
-        return Promise.resolve({
-          data: {
-            rules: [{
-              id: 42, name: '未命名规则 2026-08-26 12:00', version: 1,
-              rule_json: {
-                conditions: { logic: 'AND', rules: [] },
-                sort: [],
-                columns: ['stock_code'],
-              },
-              locked_indicators: {}, status: 'saved', created_at: '2026-08-26',
-            }],
-          },
-        })
+        return Promise.resolve({ data: { rules: savedRule ? [savedRule] : [] } })
       }
       if (url === '/api/screening/indicators') {
         return Promise.resolve({
@@ -165,8 +164,17 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
       return Promise.resolve({ data: {} })
     })
     const post = axios.post as Mock
-    post.mockImplementation((url: string) => {
+    post.mockImplementation((url: string, payload?: unknown) => {
       if (url === '/api/screening/rules/save') {
+        savedRule = {
+          id: 42,
+          name: (payload as { name: string }).name,
+          version: 1,
+          rule_json: (payload as { rule_json: { conditions: { logic: string, rules: unknown[] }, columns?: string[] } }).rule_json,
+          locked_indicators: {},
+          status: 'saved',
+          created_at: '2026-11-25',
+        }
         return Promise.resolve({ data: { status: 'ok', rule_id: 42, version: 1 } })
       }
       if (url === '/api/screening/run') {
@@ -184,14 +192,33 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     const { wrapper } = mountScreeningPage()
     await flushPromises()
 
+    // ① 首次使用点「运行筛选」：**不发任何保存请求**，也不跑
     const runButton = wrapper.findAll('button').find((b) => b.text().includes('运行筛选'))
     expect(runButton).toBeTruthy()
     await runButton!.trigger('click')
     await flushPromises()
 
+    const saveCalls = () => post.mock.calls.filter(([url]) => url === '/api/screening/rules/save')
+    const runCalls = () => post.mock.calls.filter(([url]) => url === '/api/screening/run')
+    expect(saveCalls()).toHaveLength(0)
+    expect(runCalls()).toHaveLength(0)
+    // ② 页面里有"先命名"的就地提示（不是一闪而过的 toast）
+    expect(wrapper.text()).toContain('请先给这套规则起个名字')
+
+    // ③ 用户自己填名字 → 点「保存并运行」= 用户确认 → 才发保存请求
+    const nameInput = wrapper.findAll('input').find((input) => (input.attributes('placeholder') ?? '').includes('规则名称'))
+    expect(nameInput).toBeTruthy()
+    await nameInput!.setValue('我的价值规则')
+    await flushPromises()
+    const saveAndRun = wrapper.findAll('button').find((b) => b.text().includes('保存并运行'))
+    expect(saveAndRun, '缺少「保存并运行」确认按钮').toBeTruthy()
+    await saveAndRun!.trigger('click')
+    await flushPromises()
+
+    expect(saveCalls()).toHaveLength(1)
     expect(post).toHaveBeenCalledWith(
       '/api/screening/rules/save',
-      expect.objectContaining({ name: expect.stringContaining('未命名规则') }),
+      expect.objectContaining({ name: '我的价值规则' }),
     )
     expect(post).toHaveBeenCalledWith(
       '/api/screening/run',
@@ -200,7 +227,7 @@ describe('ScreeningPage 运行筛选流程（PRD §12 SC8）', () => {
     )
     // 全新用户（无草稿、未手选列）：/run 必须自带初级指标默认列，
     // 不能再只请求 stock_code/name/交易所/证监会行业。
-    const runCall = post.mock.calls.find(([url]) => url === '/api/screening/run')
+    const runCall = runCalls()[0]
     const runPayload = runCall?.[1] as { columns?: string[] } | undefined
     expect(runPayload?.columns).toEqual(expect.arrayContaining([
       'pe_ttm', 'pb_mrq', 'ttm_dividend_yield', 'total_market_cap',

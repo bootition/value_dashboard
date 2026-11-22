@@ -55,11 +55,16 @@ const DETAIL_RULES: ReadonlyArray<DetailRule> = [
   { match: /minimum_data_not_ready/, title: '基础数据尚未就绪', action: '请前往「数据状态」页查看更新进度，就绪后再试' },
   { match: /snapshot_values_untrusted/, title: '当前指标快照整体不可信，筛选已拒绝执行', action: '请到「数据状态」页修复阻断级数据质量告警后再试（刷新页面不会恢复）' },
   { match: /masked_untrusted/, title: '规则引用了当前不可信的字段，筛选已拒绝执行', action: '请到「数据状态」页修复对应告警后再试，或先移除条件里对这些字段的引用（刷新页面不会恢复）' },
-  { match: /rule_has_provenance_refs/, title: '该规则已被引用，不能删除', action: '请先删除引用它的筛选结果或自选记录（刷新页面不会解除引用）' },
+  // 2026-11-25：后端 message 已按**真实引用类型与条数**拼好（「该规则有 8 条已保存的
+  // 筛选结果、573 条自选记录引用，不能删除；请先删除……」），所以这里**不再**补一句
+  // 泛化的 action —— 叠在后端消息后面只会变成同义反复。这条映射只负责在旧后端/
+  // 只有 reason_code 没有 message 时给出标题。
+  { match: /rule_has_provenance_refs/, title: '该规则已被引用，不能删除' },
   { match: /draft revision conflict|draft_revision_conflict/, title: '筛选草稿已被其他页面更新', action: '请选择「加载服务器草稿」或「保留本地副本」' },
   { match: /concurrent rule save conflict|concurrent_rule_save_conflict/, title: '规则被其他操作同时修改', action: '请刷新页面后重试保存' },
   { match: /saved rule version not found/, title: '所选规则版本不存在', action: '请重新选择或保存规则' },
   { match: /server screening run not found/, title: '筛选运行记录已失效', action: '请重新运行筛选后再保存' },
+  { match: /run rule was deleted/, title: '这条运行记录所属的规则已被删除', action: '请重新运行筛选后再保存结果' },
   { match: /saved result lacks report-date provenance/, title: '筛选结果缺少报告期溯源', action: '请重新运行筛选后再保存' },
   { match: /saved result not found/, title: '保存的筛选结果不存在', action: '可能已被清理，请重新运行并保存' },
   { match: /no results to export/, title: '没有可导出的结果', action: '请先运行筛选并保存结果' },
@@ -101,7 +106,8 @@ const REASON_CODE_RULES: Readonly<Record<string, GuidanceText>> = {
   minimum_data_not_ready: { title: '基础数据尚未就绪', action: '请前往「数据状态」页查看更新进度，就绪后再试' },
   snapshot_values_untrusted: { title: '当前指标快照整体不可信，筛选已拒绝执行', action: '请到「数据状态」页修复阻断级数据质量告警后再试（刷新页面不会恢复）' },
   masked_untrusted: { title: '规则引用了当前不可信的字段，筛选已拒绝执行', action: '请到「数据状态」页修复对应告警后再试，或先移除条件里对这些字段的引用（刷新页面不会恢复）' },
-  rule_has_provenance_refs: { title: '该规则已被引用，不能删除', action: '请先删除引用它的筛选结果或自选记录（刷新页面不会解除引用）' },
+  // 动态条数来自后端 `detail.message`（见 DETAIL_RULES 同码注释），此处只兜底标题。
+  rule_has_provenance_refs: { title: '该规则已被引用，不能删除' },
   draft_revision_conflict: { title: '筛选草稿已被其他页面更新', action: '请选择「加载服务器草稿」或「保留本地副本」' },
   concurrent_rule_save_conflict: { title: '规则被其他操作同时修改', action: '请刷新页面后重试保存' },
 }

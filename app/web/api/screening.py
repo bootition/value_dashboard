@@ -937,6 +937,14 @@ def save_result(req: SaveResultRequest, request: Request) -> dict:
         ).fetchone()
         if run is None:
             raise HTTPException(status_code=400, detail="server screening run not found")
+        # 2026-11-25：规则可以被删除，而运行日志行会**保留**（悬空 rule_id）。
+        # 拿这种"规则已被删"的运行记录保存结果会撞 screening_results.rule_id 的
+        # 外键 → 500。这里提前拦住并让用户重新跑一次，别再抛 IntegrityError。
+        live_rule = conn.execute(
+            "SELECT 1 FROM screening_rules WHERE id = ?", [run["rule_id"]]
+        ).fetchone()
+        if live_rule is None:
+            raise HTTPException(status_code=400, detail="run rule was deleted")
         cursor = conn.execute(
             """INSERT INTO screening_results
                 (title, note, rule_id, rule_version, data_date,
@@ -1013,6 +1021,15 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
         "SELECT locked_indicators FROM screening_rules WHERE id = ? AND version = ?",
         [record["rule_id"], record["rule_version"]],
     )
+    if not rule:
+        # 2026-11-25：`PUT /rules/{id}` 是**原地升版本**，于是历史结果里记的
+        # `rule_version` 不会再对应规则行上的版本号（同一 id 仍在，规则改名/换
+        # 条件了）。这不是"溯源缺失"，不能拿 400 挡住用户导出自己的历史结果：
+        # CSV 表头照旧打印结果自己的 run-time 版本号，只有指标锁降级用当前行。
+        rule = sqlite.query(
+            "SELECT locked_indicators FROM screening_rules WHERE id = ?",
+            [record["rule_id"]],
+        )
     if not rule:
         raise HTTPException(status_code=400, detail="saved result rule provenance is missing")
     summary = json.loads(record.get("confidence_summary") or "{}")
@@ -1759,15 +1776,36 @@ class SaveRuleRequest(BaseModel):
     status: str = "draft"
 
 
-@router.post("/rules/save")
-def save_rule(req: SaveRuleRequest, request: Request) -> dict:
-    """保存筛选规则 (PRD §12.2: 规则编辑必须版本化)"""
-    sqlite = request.app.state.sqlite
-    if len(json.dumps(req.rule_json, ensure_ascii=False).encode("utf-8")) > MAX_RULE_JSON_BYTES:
+class UpdateRuleRequest(BaseModel):
+    """原地更新一套已保存规则请求（`PUT /rules/{rule_id}`）。
+
+    2026-11-25 UX（用户投诉「改了点数字就自动存成 V1/V2/V3，我以后怎么分辨」）：
+    同一套规则的编辑**不再追加一行同名规则**，而是原地改写 `rule_json` /
+    `locked_indicators` 并把 `version` +1；`id` 与 `name` 都不变。
+    """
+    rule_json: dict[str, Any]
+    locked_indicators: dict[str, Any] | None = None
+    # 乐观并发：客户端声明"我编辑的是哪一版"。版本已被别处推进 → 409。
+    expected_version: int | None = None
+
+
+def _validated_rule_payload(
+    sqlite: Any,
+    rule_json: dict[str, Any],
+    locked_indicators: dict[str, Any] | None,
+) -> tuple[str, str]:
+    """规则写库前的统一校验，返回 `(rule_json_text, locked_indicators_text)`。
+
+    `POST /rules/save` 与 `PUT /rules/{id}` **共用这一份**（R1：一个事实只能有
+    一个实现），否则两条写入路径迟早分叉出"保存校验了、更新没校验"的漏洞。
+
+    依据 S9 P3-4: 保存时即校验字段名（与 engine.run 运行时校验同口径），
+    未知字段/排序/结果列在保存时拒绝，不再拖到运行筛选才报错。
+    指标锁同样在这里解析/校验（过期锁 → 400）。
+    """
+    if len(json.dumps(rule_json, ensure_ascii=False).encode("utf-8")) > MAX_RULE_JSON_BYTES:
         raise HTTPException(status_code=400, detail="rule JSON is too large")
 
-    # 依据 S9 P3-4: 保存时即校验字段名（与 engine.run 运行时校验同口径），
-    # 未知字段/排序/结果列在保存时拒绝，不再拖到运行筛选才报错。
     from app.core.screening.engine import validate_rule_fields
 
     try:
@@ -1777,44 +1815,142 @@ def save_rule(req: SaveRuleRequest, request: Request) -> dict:
                 "SELECT name FROM dsl_expressions WHERE status = 'published'"
             )
         }
-        validate_rule_fields(req.rule_json, published_names)
+        validate_rule_fields(rule_json, published_names)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     try:
-        locks = resolve_rule_indicator_locks(sqlite, req.rule_json, req.locked_indicators or {})
+        locks = resolve_rule_indicator_locks(sqlite, rule_json, locked_indicators or {})
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
-    with sqlite.transaction() as conn:
-        # Check if rule with same name exists
-        existing = conn.execute(
-            "SELECT MAX(version) as max_version FROM screening_rules WHERE name = ?",
-            [req.name],
-        ).fetchone()
+    return (
+        json.dumps(rule_json, ensure_ascii=False),
+        json.dumps(locks, ensure_ascii=False),
+    )
 
-        version = existing[0] + 1 if existing and existing[0] is not None else 1
+
+@router.post("/rules/save")
+def save_rule(req: SaveRuleRequest, request: Request) -> dict:
+    """保存筛选规则 (PRD §12.2: 规则编辑必须版本化)
+
+    2026-11-25 用户裁定（投诉「一堆 V1、V2、V3 分不清」）：同名规则**不再**追加
+    `v2/v3` 新行 —— 那种历史行为让下拉里出现两条看起来不同的规则，实际是同一套
+    被改过两次。现在同名已存在就直接 400，引导用户去「编辑那一条」（PUT）。
+    """
+    sqlite = request.app.state.sqlite
+    name = req.name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="rule name is required")
+    rule_json_text, locks_text = _validated_rule_payload(
+        sqlite, req.rule_json, req.locked_indicators
+    )
+
+    with sqlite.transaction() as conn:
+        # 同名只允许"编辑那一条"（PUT），不允许再插一行新版本。
+        existing = conn.execute(
+            "SELECT id FROM screening_rules WHERE name = ? LIMIT 1", [name]
+        ).fetchone()
+        if existing is not None:
+            raise HTTPException(
+                status_code=400,
+                detail="已存在同名规则，请换个名字或直接编辑那一条",
+            )
 
         try:
             cursor = conn.execute(
                 """INSERT INTO screening_rules (name, version, rule_json, locked_indicators, status)
                    VALUES (?, ?, ?, ?, ?)""",
                 [
-                    req.name,
-                    version,
-                    json.dumps(req.rule_json, ensure_ascii=False),
-                    json.dumps(locks, ensure_ascii=False),
+                    name,
+                    1,
+                    rule_json_text,
+                    locks_text,
                     # C6修复(报告41): 服务端固定状态机，忽略客户端提交的 status
                     "saved",
                 ],
             )
         except Exception as error:
+            # 唯一索引兜底（并发下同名两行同时插入）：与 save 既有风格一致的 409。
             raise HTTPException(
                 status_code=409, detail="concurrent rule save conflict; retry"
             ) from error
         rule_id = cursor.lastrowid
 
-    return {"status": "ok", "rule_id": rule_id, "version": version}
+    return {"status": "ok", "rule_id": rule_id, "version": 1}
+
+
+@router.put("/rules/{rule_id}")
+def update_rule(rule_id: int, req: UpdateRuleRequest, request: Request) -> dict:
+    """原地更新一套已保存规则（同一 `id` / 同一 `name`，`version` +1）。
+
+    契约与 `POST /rules/save` 对齐（前端同一条分支即可处理）：
+
+    - 校验复用 `_validated_rule_payload`（字段名 / 指标锁 / 体积，与 save 同口径）
+    - 规则不存在 → 404 `rule not found`
+    - 并发冲突（`expected_version` 落后，或 UPDATE 落空）→ 409
+      `concurrent_rule_save_conflict`（前端已有中文映射，刷新后重试）
+    - 成功 → `{status, rule_id, version}`，`version` 为 +1 后的新版本
+
+    为什么必须原地改而不是再插一行：`screening_runs.rule_version` 是运行日志的
+    历史读数，用户视角的"一套规则"只能对应 `screening_rules` 的一行；多行同名
+    规则在下拉里就是 V1/V2/V3 那堆分不清的东西（用户原话）。
+    """
+    sqlite = request.app.state.sqlite
+    rule_json_text, locks_text = _validated_rule_payload(
+        sqlite, req.rule_json, req.locked_indicators
+    )
+
+    with sqlite.transaction() as conn:
+        current = conn.execute(
+            "SELECT id, name, version FROM screening_rules WHERE id = ?", [rule_id]
+        ).fetchone()
+        if current is None:
+            raise HTTPException(status_code=404, detail="rule not found")
+
+        current_version = int(current["version"])
+        if req.expected_version is not None and int(req.expected_version) != current_version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "reason_code": "concurrent_rule_save_conflict",
+                    "message": (
+                        f"规则「{current['name']}」已被其他操作改成 v{current_version}，"
+                        f"你编辑的是 v{int(req.expected_version)}；请刷新后重试"
+                    ),
+                },
+            )
+
+        next_version = current_version + 1
+        # 历史遗留的同名多行（如正式库 49=v1 / 50=v2，都是修复前的产物）：
+        # `UNIQUE(name, version)` 会让"49 从 v1 升到 v2"撞上 50 那一行。取
+        # 「该名字下现有最大版本 + 1」即可原地升版本且永不撞车（干净数据里
+        # max == current_version，等价于 +1）。不要求用户先清理历史数据。
+        highest = conn.execute(
+            "SELECT MAX(version) AS max_version FROM screening_rules WHERE name = ?",
+            [current["name"]],
+        ).fetchone()
+        if highest is not None and highest["max_version"] is not None:
+            next_version = max(next_version, int(highest["max_version"]) + 1)
+        try:
+            cursor = conn.execute(
+                """UPDATE screening_rules
+                      SET rule_json = ?, locked_indicators = ?, version = ?, status = 'saved'
+                    WHERE id = ? AND version = ?""",
+                [rule_json_text, locks_text, next_version, rule_id, current_version],
+            )
+            if cursor.rowcount != 1:
+                raise HTTPException(
+                    status_code=409, detail="concurrent rule update conflict; retry"
+                )
+        except HTTPException:
+            raise
+        except Exception as error:
+            raise HTTPException(
+                status_code=409, detail="concurrent rule update conflict; retry"
+            ) from error
+
+    return {"status": "ok", "rule_id": rule_id, "version": next_version}
 
 
 def _collect_rule_fields(node: dict[str, Any]) -> set[str]:
@@ -1912,11 +2048,44 @@ def get_rule(rule_id: int, request: Request) -> dict:
     return rule
 
 
+def _rule_delete_blocked_message(results_count: int, watchlist_count: int) -> str:
+    """按**真实条数**拼"删不掉"的文案（哪种引用、几条，动态拼）。
+
+    2026-11-25 用户投诉现场：错误文案写「已被运行结果或自选列表引用」，用户去
+    自选列表翻了一圈 —— 那里当然没有这个分组，因为挡住删除的是运行日志
+    `screening_runs`。所以这里只允许点名**真正的溯源锚点**：
+    「已保存的筛选结果」与「自选记录」，并逐项带条数；"运行结果"这种指向不明
+    的词永远不再出现。
+    """
+    if results_count and watchlist_count:
+        return (
+            f"该规则有 {results_count} 条已保存的筛选结果、{watchlist_count} 条自选记录"
+            "引用，不能删除；请先删除这些筛选结果或自选记录"
+        )
+    if results_count:
+        return (
+            f"该规则有 {results_count} 条已保存的筛选结果引用，不能删除；"
+            "请先删除这些筛选结果"
+        )
+    return (
+        f"该规则有 {watchlist_count} 条自选记录引用，不能删除；请先删除这些自选记录"
+    )
+
+
 @router.delete("/rules/{rule_id}")
 def delete_rule(rule_id: int, request: Request) -> dict:
-    """删除未产生持久化结果/自选来源的筛选规则（2026-08-27 UX）。
+    """删除没有被「已保存结果 / 自选记录」引用的筛选规则。
 
-    有保存结果或自选来源的规则不得删除，避免破坏溯源链。
+    2026-11-25 修 UX（投诉「自选列表里明明没有这个分组，为什么它还删不掉」）：
+    旧守卫把 `screening_runs` 也算引用 —— 那是"每跑一次加一行"的**运行日志**，
+    用户不会去删它，于是**规则只要跑过一次就永远删不掉**。现在的口径：
+
+    - 真正拦删除的只有两个溯源锚点：`screening_results.rule_id`（用户保存的
+      筛选结果）与 `watchlist.source_rule_id`（自选记录来源）；
+    - `screening_runs` 行**保留**（审计日志），删除规则后它们的 `rule_id` 成为
+      悬空历史值。本仓库没有"按 run 反查规则"的读取方（`save_result` 只用 run
+      行上的 rule_id/rule_version 副本，规则已被删时按 400 提示重新运行），
+      所以悬空 id 不会让任何读取路径崩。
     """
     sqlite = request.app.state.sqlite
     rows = sqlite.query("SELECT id FROM screening_rules WHERE id = ?", [rule_id])
@@ -1925,18 +2094,26 @@ def delete_rule(rule_id: int, request: Request) -> dict:
 
     refs = sqlite.query(
         """SELECT
-               (SELECT COUNT(*) FROM screening_runs WHERE rule_id = ?) AS runs,
                (SELECT COUNT(*) FROM screening_results WHERE rule_id = ?) AS results,
-               (SELECT COUNT(*) FROM watchlist WHERE source_rule_id = ?) AS watchlist""",
+               (SELECT COUNT(*) FROM watchlist WHERE source_rule_id = ?) AS watchlist,
+               (SELECT COUNT(*) FROM screening_runs WHERE rule_id = ?) AS runs""",
         [rule_id, rule_id, rule_id],
     )[0]
-    if int(refs["runs"] or 0) or int(refs["results"] or 0) or int(refs["watchlist"] or 0):
+    results_count = int(refs["results"] or 0)
+    watchlist_count = int(refs["watchlist"] or 0)
+    if results_count or watchlist_count:
         raise HTTPException(status_code=409, detail={
             "reason_code": "rule_has_provenance_refs",
-            "message": "该规则已被运行结果或自选列表引用，不能删除",
+            "message": _rule_delete_blocked_message(results_count, watchlist_count),
+            # refs 同时带回运行日志条数（只做展示/排障，不参与拦截判定）。
             "refs": refs,
         })
 
     with sqlite.transaction() as conn:
+        # `screening_runs.rule_id` 在 schema v7 带 FOREIGN KEY，而连接固定
+        # `PRAGMA foreign_keys=ON` —— 不关掉的话，只要跑过一次就删不掉规则。
+        # 这里只在本连接（事务刚开、尚无 DML）关掉外键检查：delete 规则行，
+        # 运行日志行原样保留为审计记录（悬空 rule_id 是**有意**的历史读数）。
+        conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("DELETE FROM screening_rules WHERE id = ?", [rule_id])
     return {"status": "ok", "deleted_rule_id": rule_id}
