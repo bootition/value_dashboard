@@ -1,6 +1,7 @@
 ---
 title: 勘误（格雷厄姆那句话）+ 深挖层雷点扫描（专攻"没雷"的公司）
-status: approved
+status: superseded
+superseded-by: reports/173_FINAL_UNIVERSE_LIST_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -9,6 +10,8 @@ data-source: data/valuedashboard.duckdb（csmar_risk_factors / csmar_disclosure_
 ---
 
 # 勘误 + 深挖层雷点扫描
+
+> ⚠️ **本文已 superseded，请读 `reports/173`（最终名单）。** 本文只列了「挖出的雷」，未区分「绝对有雷」与「只是小问题」；173 号将此重整为禁投池 171 家 + 可选池 311 家。
 
 > **用户两点指正，都对：**
 > ① 「**这不是最优秀的 14 家：宁德时代、美的、海尔都比这里多数公司更优秀**」——**这不是说美的很优秀吗？**
