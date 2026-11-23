@@ -48,16 +48,44 @@ _RAW_ARCHIVE_COLUMNS = (
 
 
 def _recreate_raw_archive_view(conn: Any) -> None:
+    """把登记表里的分区 UNION 成 `raw_response_archive_all` 视图。
+
+    ⚠️ 2026-11-23 生产事故（更新卡死数小时）：本函数原来**无条件相信登记表**，
+    把每一行都拼进 `UNION ALL`。而登记表里有 4 条指向**已被删除的实体表**
+    （`raw_response_archive_20260917_044324` 等，表没了但登记行还在），
+    于是视图创建失败 → **每一次价格落库都报**
+    `Catalog Error: Table with name raw_response_archive_20260917_044324 does not exist`
+    → 单只股票价格写入 100% 失败、整轮永远跑不完、日志刷屏几小时。
+
+    修法：**以库里的实体表为准**过滤登记行（`duckdb_tables()`），并打 WARNING
+    把死链暴露出来（不静默）。登记表是"记账"，实体表才是"事实"——两者不一致时
+    以事实为准，绝不让一条脏记账拖垮整条写路径。
+    """
     rows = conn.execute(
         "SELECT partition_table FROM raw_response_archive_partitions "
         "ORDER BY created_at, partition_table"
     ).fetchall()
     if not rows:
         return
+    existing = {
+        str(r[0]) for r in conn.execute(
+            "SELECT table_name FROM duckdb_tables()"
+        ).fetchall()
+    }
+    usable = [str(row[0]) for row in rows if str(row[0]) in existing]
+    dangling = [str(row[0]) for row in rows if str(row[0]) not in existing]
+    if dangling:
+        logger.warning(
+            "归档分区登记表有 %d 条指向不存在的实体表，已跳过（视图只用存在的 %d 个）：%s。"
+            "这些登记行是脏记账，应清理（否则每次重建视图都要跳一次）",
+            len(dangling), len(usable), ", ".join(dangling[:5]),
+        )
+    if not usable:
+        return
     selects = " UNION ALL ".join(
         f"SELECT {', '.join(_RAW_ARCHIVE_COLUMNS)} "
-        f'FROM "{row[0]}"'
-        for row in rows
+        f'FROM "{name}"'
+        for name in usable
     )
     conn.execute(
         f"CREATE OR REPLACE VIEW raw_response_archive_all AS {selects}"
