@@ -477,6 +477,7 @@ def run_incremental_update_flow(
         periodic_full_days,
         plan_indicator_scope,
         settle_trading_calendar_fingerprint,
+        settle_treasury_curve_fingerprint,
     )
 
     calculator = IndicatorCalculator(duck=owner.duck, sqlite=owner.sqlite)
@@ -661,11 +662,29 @@ def run_incremental_update_flow(
         }
         report_step("indicators", skipped_step)
 
-    if treasury_changed_codes:
+    # 2026-11-23：国债曲线的「变化」有两个来源，**都必须走这条秒级快路径**：
+    #   ① `treasury_changed_codes` —— 本轮的 `_refresh_treasury_curve` 自己发现变了；
+    #   ② `scope_plan.treasury_curve_changed` —— 外部脚本改写 / 跨轮水位判定到变了。
+    # 旧代码只处理 ①，而 ② 被 `indicator_scope` 升格成**全量**（5,575 只 × 149 列
+    # ≈ 2.4 小时）。曲线**每交易日新增一行**，于是每天白烧一轮全量。
+    # 现在 ② 也走这里，并且必须作用于**全市场**（`None` = 所有有快照的股票），
+    # 因为"说不出只这几只"。顺序不变：仍在快照重算之后，用 merge 保护 rejected/partial。
+    treasury_scope_changed = bool(
+        getattr(scope_plan, "treasury_curve_changed", False)
+    )
+    if treasury_changed_codes or treasury_scope_changed:
         # 国债曲线变化只影响 ttm_dividend_yield / div_yield_spread_*，
         # 无需对全市场完整重算 PE/PB/成长/技术指标；专用批量刷新
         # 在正式库为秒级，取代旧的约 12 分钟全量重算。
-        treasury_step = calculator.refresh_treasury_spreads(treasury_changed_codes)
+        # ② 命中时传 None（全市场）；① 命中时用本轮检出的那批代码。
+        treasury_step = calculator.refresh_treasury_spreads(
+            None if treasury_scope_changed else treasury_changed_codes,
+        )
+        # 快路径**不算整股列** → 不会走 commit_indicator_scope → 国债水位没人推进。
+        # 不推进就会每轮重新判出"曲线变了"（每轮多刷一次全市场、报告常年挂着假变化），
+        # 所以这里在**成功后**单独推进水位；失败轮不写，下一轮重新判。
+        if treasury_scope_changed and str(treasury_step.get("status")) == "success":
+            settle_treasury_curve_fingerprint(owner, scope_plan)
         current = report["steps"].get("indicators")
         if current is not None:
             # rejected/partial 绝不能被国债利差刷新的 success 覆盖。

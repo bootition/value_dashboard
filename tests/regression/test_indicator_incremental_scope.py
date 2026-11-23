@@ -1775,15 +1775,27 @@ def test_external_treasury_curve_change_recomputes_whole_market(
     duckdb_store.write_query("UPDATE treasury_yield_curve SET yield_pct = yield_pct + 2.0")
 
     step = updater.run_incremental_update()["steps"]["indicators"]
-    assert step["mode"] == "full", (
-        f"国债曲线被外部改写却 0 重算 → 利差永久陈旧："
-        f"mode={step['mode']} reason={step['reason']} planned={step['planned_count']}"
+    # 2026-11-23 口径变更（用户实测"更新跑几个小时"的根因）：
+    # 曲线变化**不再**升级成"整股 149 列全量"。原因是曲线**每个交易日都新增一行**
+    # （`treasury_yield_curve` 每天一条 curve_date），全表指纹因此每交易日必变，
+    # 于是每天都白烧一轮全量（实测 39 只/分钟 × 5,575 只 ≈ 2.4 小时）。
+    # 现在改由秒级快路径 `refresh_treasury_spreads()` 覆盖**全市场**（传 None）。
+    #
+    # ⚠️ 正确性要求一个字都没松：全市场每一只的 `div_yield_spread_*` 都必须跟着
+    # 新曲线更新（下面两条 approx 断言 + 与全量重算的逐列对拍仍然保留）。
+    assert step.get("mode") != "full", (
+        f"国债曲线变化又被升级成全量了（每交易日白烧 2.4 小时）：{step}"
     )
-    assert step["reason"] == "treasury_curve_changed", step["reason"]
-    assert step["changed_sources"].get("treasury_curve_changed", 0) == len(codes), step[
-        "changed_sources"
+    # 快路径必须真的跑了、且覆盖全市场（不是只刷一小撮）。
+    # `merge_indicator_steps` 把利差刷新作为 sub_step 并入 indicators 步骤。
+    spread_runs = [
+        sub for sub in (step.get("sub_steps") or [])
+        if isinstance(sub, dict) and int(sub.get("total") or 0) >= len(codes)
+        and int(sub.get("success") or 0) >= len(codes)
     ]
-    assert step["recomputed_count"] == len(codes), step
+    assert spread_runs, (
+        f"曲线变了但利差快路径没有覆盖全市场（{len(codes)} 只）：{step.get('sub_steps')}"
+    )
 
     after = _snapshot_map(duckdb_store)
     assert after[codes[0]]["div_yield_spread_1y"] == pytest.approx(1.5), (

@@ -212,8 +212,10 @@ SOURCE_DOMAIN: dict[str, str] = {
     "trading_calendar_changed": "full",
     # 2026-11-21 独立审查 #14：国债曲线是全市场共用的标量输入面，变了之后
     # `div_yield_spread_*` / `ttm_dividend_yield` 全市场都要重算（说不出"只这几只"）。
-    # 触发点在 `_plan_indicator_scope` 的曲线判定里，这里登记同样是自证。
-    "treasury_curve_changed": "full",
+    # 2026-11-23 修正：**不再归 full**——曲线每天新增一行，归 full 等于每天烧 2.4 小时；
+    # 它影响的列属于价格域（利差），且真正干活的是 `refresh_treasury_spreads()` 快路径
+    # （秒级、一次批量 UPDATE）。这里登记为 `price` 只为"任何来源键都有明确归属"自证。
+    "treasury_curve_changed": "price",
 }
 
 # stock_meta 里**不进指纹**的列：`updated_at` 每次 listing_info 刷新都会变，
@@ -1092,8 +1094,17 @@ def _full_reason(
         return "computation_version", {
             "computation_version": version, "stored_computation_version": stored,
         }
-    if treasury_curve_changed:
-        return "treasury_curve_changed", {"computation_version": version}
+    # 2026-11-23 生产事故（更新每天都要跑 2.4 小时）：这里原来写
+    # `if treasury_curve_changed: return "treasury_curve_changed"`（→ 全量）。
+    # 但**国债曲线每个交易日都会新增一行**（`_refresh_treasury_curve` 每天落一条
+    # 新 curve_date），全表内容指纹因此**每交易日必变** → 每天一次
+    # 「5,575 只 × 149 列」的全量重算（实测 39 只/分钟 ≈ 2.4 小时）。
+    # 而这批变化真正影响的只有 `ttm_dividend_yield` + `div_yield_spread_*` 两族列，
+    # 早就有专门的秒级快路径 `calculator.refresh_treasury_spreads()`
+    # （一次批量 UPDATE + 衍生 lineage，注释写着"取代旧的约 12 分钟全量重算"）。
+    # 所以这里**不再**把曲线变化升级成全量；改由 flow 用那个快路径覆盖全市场。
+    # （`trading_calendar_changed` 不适用：日历变化会让 MA/量能的**连续窗口**整列断开，
+    #  那是真的 149 列全变，必须留全量。）
     if trading_calendar_changed:
         return "trading_calendar_changed", {"computation_version": version}
     due, last_run = _periodic_full_due(owner)
@@ -1647,6 +1658,38 @@ def commit_indicator_scope(owner: Any, plan: IndicatorScopePlan, step: Any) -> d
         }, ensure_ascii=False),
     )
     return {"committed_codes": committed_codes, "succeeded": succeeded}
+
+
+def settle_treasury_curve_fingerprint(
+    owner: Any, plan: IndicatorScopePlan,
+) -> bool:
+    """把「曲线变了、且利差快路径已成功刷新全市场」的那次变更水位推进掉。
+
+    为什么需要一条**绕过 step 成功门禁**的推进路径（与日历那条同型）：
+    曲线变化走的是秒级快路径 `refresh_treasury_spreads()`，它**不算任何整股列**，
+    所以 `scope_plan.planned_codes` 为空、`flow` 不会进"算过东西"的分支、
+    也就**不会调** `commit_indicator_scope()` —— 而国债水位恰好只在那里推进。
+    结果：水位永远停在旧指纹 → **每一轮**都重新判出 `treasury_curve_changed`
+    → 每轮多跑一次全市场利差刷新，报告里还常年挂着一次"曲线变了"，
+    真正变化的那一次反而看不出来（2026-11-23 由 `test_external_treasury_curve_change_*`
+    实测暴露）。
+
+    返回是否推进（调用方只在**快路径成功后**才调它；失败轮不写，下一轮重新判）。
+    """
+    if not plan.treasury_curve_changed or not plan.treasury_curve_fingerprint:
+        return False
+    _write_scalar(owner, TREASURY_CURVE_FP_KEY, plan.treasury_curve_fingerprint)
+    # 快路径**改了快照里的利差列**（全市场），所以快照内容指纹必须跟着重摘；
+    # 否则下一轮会把"我们自己刚写的利差"当成 `snapshot_state_mismatch`
+    # → 又把这批股票整股重算一遍（实测：不重摘时第三轮 recomputed_count=5≠0，
+    #   等于把省下的 2.4 小时换成"每天多算一轮增量"）。
+    # 这里对**全市场**重摘（快路径作用于全市场），成本是一次批量聚合，秒级。
+    stored = _read_json_map(owner, SNAPSHOT_FP_KEY) or {}
+    latest = snapshot_fingerprints(owner)
+    for code, digest in latest.items():
+        stored[code] = digest
+    _write_json_map(owner, SNAPSHOT_FP_KEY, stored)
+    return True
 
 
 def settle_trading_calendar_fingerprint(
