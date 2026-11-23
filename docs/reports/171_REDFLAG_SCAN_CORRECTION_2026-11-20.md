@@ -1,6 +1,7 @@
 ---
 title: 雷点扫描与九人会审 · 勘误与修正版（含美的定位）
-status: approved
+status: superseded
+superseded-by: reports/172_DEEP_REDFLAG_SCAN_AND_C_TIER_SPLIT_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -9,6 +10,8 @@ data-source: data/valuedashboard.duckdb + 用户自选两分组 + 蓝筹/白马 
 ---
 
 # 雷点扫描与九人会审 · 勘误与修正版
+
+> ⚠️ **本文已 superseded，请读 `reports/172`。** 本文 §0.2 把格雷厄姆的 C-2「投机价」桶当成「质量黑名单」是错的——格雷厄姆原话是说宁德时代、美的、海尔**比 A 桶多数公司更优秀**，只是**价格不合格**。美的应为**二档**，不是三档。
 
 > **用户提问**：「美的在哪里？你确定没有遗漏或者错误吗」
 > **答案：确实有错。** 本文列出全部 3 类错误 + 修正后结果。
