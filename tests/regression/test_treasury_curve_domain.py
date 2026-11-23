@@ -1004,3 +1004,41 @@ def test_today_not_published_yet_is_deferred_not_failed(duckdb_store, sqlite_sto
     # 关键：整步不许因为"今天没发布"变成 partial
     assert report.get("status") != "partial" or today_text not in (daily.get("failed") or []), report
     assert today_text not in (daily.get("failed") or []), daily.get("failed")
+
+
+def test_deferred_daily_does_not_consume_today_marker(duckdb_store, sqlite_store) -> None:
+    """当天曲线未发布 → `deferred` 时**不许**写"今天已刷新"标记。
+
+    否则凌晨那次 defer 会把当天标记消费掉 → 曲线要等到明天才补
+    → 全市场股息率/利差整整滞后一天（比"整轮 partial"严重得多）。
+    """
+    from datetime import UTC, datetime
+
+    from app.core.adapters.base import FetchResult, SourceMetadata
+    from app.core.treasury import REFRESH_MARKER_KEY, TreasuryCurveUpdater
+
+    class EmptyAdapter:
+        def fetch(self, request):
+            return FetchResult(
+                data=[],
+                metadata=SourceMetadata(
+                    source="czb_mof", fetch_time=datetime.now(UTC),
+                    raw_response_hash="d" * 64, confidence="strict",
+                ),
+            )
+
+    service = TreasuryCurveUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    service.adapter = EmptyAdapter()
+
+    first = service.refresh_if_due()
+    # 只断"当天窗口"这一步：本用例的假源对所有数据都回空，backfill 那条路径
+    # 也会失败（那是另一回事，与"当天未发布"无关）。
+    assert first["daily"]["status"] == "deferred", first["daily"]
+    # 关键：标记没被消费 → 下一轮还会再试
+    assert service._refreshed_today() is False, (
+        "deferred 之后不许标记今天已刷新（否则当天曲线要等到明天才补）"
+    )
+    rows = sqlite_store.query(
+        "SELECT value FROM data_refresh_state WHERE key = ?", [REFRESH_MARKER_KEY]
+    )
+    assert rows == [], rows

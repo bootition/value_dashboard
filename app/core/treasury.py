@@ -357,7 +357,12 @@ class TreasuryCurveUpdater:
                     stale_tenors, max_tenors=max_tenors_backfill,
                 )
             gap_fill = self.backfill_missing_days(max_days=max_gap_fill_days)
-            self._mark_refreshed()
+            # 2026-11-24：`deferred`（今天的曲线源侧还没发布）**不许**标记"今天已刷新"。
+            # 否则凌晨那次 defer 会把当天标记消费掉 → 曲线要等到明天才补
+            # → 全市场股息率/利差整整滞后一天（比"整轮 partial"严重得多）。
+            # 不标记就能让后续每轮（约 5 分钟一次）重试，直到源侧发布为止。
+            if daily["status"] != "deferred":
+                self._mark_refreshed()
             if daily["status"] == "failed" or backfill_report["status"] == "failed":
                 overall = "partial"
             elif daily["status"] == "deferred":
