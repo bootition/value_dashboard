@@ -808,6 +808,7 @@ class IndicatorCalculator:
 
         records: list[dict[str, Any]] = []
         failed_codes: list[str] = []
+        not_ready_codes: list[str] = []
         with self.duck.read_connection() as connection:
             self._calculation_read_connection = connection
             try:
@@ -815,12 +816,26 @@ class IndicatorCalculator:
                     try:
                         indicators = self.compute_all_for_stock(code)
                         if indicators.get("report_date") is None:
-                            failed_codes.append(code)
+                            # 2026-11-23：零财报新股（刚上市、还没披露）算不出报告期
+                            # 是**正常的**，记成 failed 会让整轮永远 partial → 而且
+                            # `commit_indicator_scope` 见 step 非成功就**不推进指纹水位**
+                            # → 下一轮把这 5,563 只**再算一遍**（实测每轮 8–15 分钟空转）。
+                            # 数据没到 ≠ 算错，必须分开记账。
+                            if _has_any_financials(self.duck, code):
+                                failed_codes.append(code)
+                            else:
+                                not_ready_codes.append(code)
                         else:
                             records.append(indicators)
                     except Exception as error:
-                        logger.debug("增量计算 %s 指标失败: %s", code, error)
-                        failed_codes.append(code)
+                        if _has_any_financials(self.duck, code):
+                            logger.debug("增量计算 %s 指标失败: %s", code, error)
+                            failed_codes.append(code)
+                        else:
+                            logger.debug(
+                                "增量计算 %s 跳过（零财报，新股尚未披露）: %s", code, error,
+                            )
+                            not_ready_codes.append(code)
                     if progress_cb is not None:
                         progress_cb({
                             "step": "indicators",
@@ -837,6 +852,9 @@ class IndicatorCalculator:
                 "status": "partial", "reason": "changed_stock_not_ready",
                 "total": len(requested_codes), "success": 0, "failed": len(failed_codes),
                 "failed_codes": failed_codes[:20],
+                # 零财报新股单独记账（不参与 status 判定）
+                "not_ready": len(not_ready_codes),
+                "not_ready_codes": not_ready_codes[:20],
                 **quarantine,
             }
 
@@ -861,6 +879,11 @@ class IndicatorCalculator:
             "reason": reason,
             "total": len(requested_codes), "success": len(records),
             "failed": len(failed_codes), "failed_codes": failed_codes[:20],
+            # 零财报新股：算不出指标是正常的，单独记账、**不参与 status 判定**。
+            # 否则 step 永远非成功 → `commit_indicator_scope` 不推进指纹水位
+            # → 下一轮把全市场再算一遍（实测每轮 8–15 分钟纯空转）。
+            "not_ready": len(not_ready_codes),
+            "not_ready_codes": not_ready_codes[:20],
             **quarantine,
         }
 
