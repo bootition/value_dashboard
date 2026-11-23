@@ -85,6 +85,24 @@ describe('自选页：删除整个分组（2026-11-25 用户实测：此前只�
     })
   })
 
+  it('删除按钮在分组行的角落、不在名字后面（用户反馈：字重叠了）', async () => {
+    // beforeEach 已把 /api/watchlist/list 与 /groups 都打桩好（分组 = GROUP，2 只）
+    const { wrapper } = mountPage()
+    await flushPromises()
+
+    const row = wrapper.findAll('.group-row').at(0)!
+    const del = row.find('.group-delete')
+    expect(del.exists()).toBe(true)
+    // ① 文案必须极短（"删除分组"4 个字塞进行内会挤掉分组名）——完整语义放 title tooltip
+    expect(del.text()).toBe('删除')
+    expect(del.attributes('title')).toBe(`删除分组「${GROUP}」`)
+    expect(del.attributes('aria-label')).toBe(`删除分组「${GROUP}」`)
+    // ② 必须是行的**同级**元素，不能嵌在 .group-select 里（嵌进去就是"名字后面的一块"）
+    expect(row.find('.group-select .group-delete').exists()).toBe(false)
+    // ③ 分组名仍然完整可读（省略号是 CSS 处理的视觉收束，DOM 里不丢字）
+    expect(row.find('.group-select b').text()).toBe(GROUP)
+  })
+
   it('对话框说明删多少只/是否连带删规则；勾选后 delete_rule=true', async () => {
     const del = axios.delete as Mock
     del.mockResolvedValue({
@@ -108,7 +126,7 @@ describe('自选页：删除整个分组（2026-11-25 用户实测：此前只�
     const { wrapper } = mountPage()
     await flushPromises()
 
-    const sidebarDelete = wrapper.findAll('button').find((b) => b.text() === '删除分组')
+    const sidebarDelete = wrapper.findAll('.group-delete').at(0)
     expect(sidebarDelete).toBeTruthy()
     await sidebarDelete!.trigger('click')
     await flushPromises()
@@ -162,7 +180,7 @@ describe('自选页：删除整个分组（2026-11-25 用户实测：此前只�
     await flushPromises()
     const callsBefore = get.mock.calls.filter(([url]) => url === '/api/watchlist/list').length
 
-    const sidebarDelete = wrapper.findAll('button').find((b) => b.text() === '删除分组')
+    const sidebarDelete = wrapper.findAll('.group-delete').at(0)
     await sidebarDelete!.trigger('click')
     await flushPromises()
     const confirm = modalButton('删除分组')
@@ -187,7 +205,7 @@ describe('自选页：删除整个分组（2026-11-25 用户实测：此前只�
     })
     const { wrapper } = mountPage()
     await flushPromises()
-    const sidebarDelete = wrapper.findAll('button').find((b) => b.text() === '删除分组')
+    const sidebarDelete = wrapper.findAll('.group-delete').at(0)
     await sidebarDelete!.trigger('click')
     await flushPromises()
     modalButton('删除分组')!.click()
@@ -223,7 +241,7 @@ describe('自选页：删除整个分组（2026-11-25 用户实测：此前只�
     })
     const { wrapper } = mountPage()
     await flushPromises()
-    const sidebarDelete = wrapper.findAll('button').find((b) => b.text() === '删除分组')
+    const sidebarDelete = wrapper.findAll('.group-delete').at(0)
     await sidebarDelete!.trigger('click')
     await flushPromises()
 

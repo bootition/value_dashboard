@@ -572,7 +572,16 @@ onMounted(fetchWatchlist)
         <div class="groups-heading"><p>自选列表</p><h2>公司分组</h2></div>
         <div v-for="group in visibleGroups" :key="group.group_name" class="group-row">
           <n-button class="group-select" :class="{ selected: selectedGroup === group.group_name }" text block @click="selectGroup(group.group_name)"><span><b>{{ displayGroupName(group.group_name) }}</b><small>{{ isManualGroup(group.group_name) ? '手动加入，不关联筛选规则' : '筛选规则来源' }}</small></span><em>{{ group.cnt }}</em></n-button>
-          <n-button class="group-delete" size="tiny" quaternary type="error" :title="`删除分组「${displayGroupName(group.group_name)}」`" @click.stop="openDeleteGroup(group)">删除分组</n-button>
+          <!-- 2026-11-22（用户反馈：按钮压在分组名上）：删除**不占行内宽度**，
+               改成右上角的小按钮，只在鼠标悬停/键盘聚焦时出现。
+               `.group-select` 右侧留 34px 给它，所以长分组名不会再被它挤出去。 -->
+          <button
+            class="group-delete"
+            type="button"
+            :title="`删除分组「${displayGroupName(group.group_name)}」`"
+            :aria-label="`删除分组「${displayGroupName(group.group_name)}」`"
+            @click.stop="openDeleteGroup(group)"
+          >删除</button>
         </div>
         <p v-if="!hasVisibleGroups && !loading" class="groups-empty">还没有分组，去筛选规则页运行规则并保存到自选即可生成。</p>
         <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="分组名（留空则为手动收录）" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
@@ -647,10 +656,27 @@ onMounted(fetchWatchlist)
 
 <style scoped>
 .watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.group-select) { justify-content: space-between; height: auto; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.group-select.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.group-select .n-button__content) { display: flex; justify-content: space-between; width: 100%; }
-/* 每个分组右侧的「删除分组」：与选中按钮同排，但不抢走分组点击区域。 */
-.group-row { display: flex; align-items: center; gap: 2px; margin-top: 5px; }
-.group-row .group-select { flex: 1; min-width: 0; }
-.group-row .group-delete { flex: none; height: auto; padding: 4px 6px; border-radius: 7px; font-size: 10px; white-space: nowrap; }
+/* 分组行：删除按钮**脱离文档流**放在右上角，只占视觉角落、不占文字宽度。
+   用户口径：「删除不应该直接放在名字后面……做得小一点、隐藏一点，放在某个角落」。 */
+.group-row { position: relative; margin-top: 5px; }
+.group-row .group-select { width: 100%; padding-right: 34px; }
+/* 分组名过长时省略，绝不与右上角按钮重叠 */
+.group-row .group-select b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-row .group-delete {
+  position: absolute; top: 5px; right: 5px;
+  height: 18px; padding: 0 4px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: #c05b5b;
+  font-size: 9px; line-height: 18px; white-space: nowrap;
+  cursor: pointer;
+  opacity: 0;                      /* 平时隐藏：自选列表不是用来删的 */
+  transition: opacity .12s ease, background .12s ease;
+}
+.group-row:hover .group-delete,
+.group-row:focus-within .group-delete { opacity: 1; }
+.group-row .group-delete:hover { background: #fdeeee; }
+/* 悬停时把计数徽标让开一点，避免与角落按钮视觉相撞 */
+.group-row:hover .group-select em { margin-right: 16px; }
 .delete-group-summary { margin: 0 0 10px; color: #39463d; font-size: 14px; }
 .delete-group-detail { margin: 0 0 12px; color: #6e7d73; font-size: 12px; line-height: 1.8; }
 .delete-group-hint { margin: 8px 0 0; color: #97a199; font-size: 11px; line-height: 1.7; }
