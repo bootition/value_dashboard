@@ -1,6 +1,7 @@
 ---
 title: 471 只全量雷点扫描 + 302 家九人会审（好企业 / 普通 / 黑名单）
-status: approved
+status: superseded
+superseded-by: reports/171_REDFLAG_SCAN_CORRECTION_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -8,6 +9,8 @@ data-source: data/valuedashboard.duckdb + 用户自选两分组（400）+ 蓝筹
 ---
 
 # 471 只全量雷点扫描 + 302 家九人会审
+
+> ⚠️ **本文已 superseded，请读 `reports/171`。** 本文有 3 处错误：① 遗漏 11 家已深度分析过的公司（宇宙应为 482 而非 471）；② 聚合解析把散文提及当桶内条目，格雷厄姆 A 桶把美的误算进去（美的实际在其 C 桶）；③ 海尔智家 A 桶应为 4 票而非 5 票。
 
 > **方法**：先用程序扫雷（16 条规则）→ P0 自动进黑名单 → 剩余 302 家分发给 9 位大师**并行会审**，各分三桶（好企业 / 普通 / 黑名单）。
 > **用户原则**：「单一雷不怕，哪怕单一雷的企业都会让我损失惨重。**活下去是最重要的。**」
