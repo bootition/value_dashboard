@@ -313,13 +313,57 @@ def test_second_batch_sees_data_written_between_batches(
     assert second["total_market_cap"] == pytest.approx(42 * 100)
 
 
+def test_second_batch_sees_share_capital_written_between_batches(
+    price_domain_calculator: IndicatorCalculator,
+) -> None:
+    """两批之间改了**股本历史** → 第二批必须读到新股本（跨批次缓存 = 假绿）。
+
+    `shares_asof` 是这一轮新加的一类预取：它缓存的是"某只股票在某个价格日的
+    时点股本"。若缓存跨批次存活，第二批会继续用批次之前的股本算市值 —— 那正是
+    本用例要钉死的假绿形态（市值 = 股本 × 价格，错在这里全市场 PE/PB 一起错）。
+    """
+    calculator = price_domain_calculator
+    code = "600519"
+    report_date = _report_date(calculator, code)
+    price = calculator._get_latest_price(code)
+    price_date = str(price["trade_date"])[:10]
+    close = float(price["close"])
+
+    # 第一批：stock_meta 的 100 股（该 fixture 没有历史股本行）→ 市值 10 × 100
+    first = calculator.compute_price_fields_for_stock(code, report_date)
+    assert first["total_market_cap"] == pytest.approx(close * 100)
+
+    # 批次之间写入一条**生效日早于价格日**的历史股本行（250 股）
+    with calculator.duck.write_connection() as connection:
+        connection.execute(
+            """INSERT INTO share_capital_history
+                   (stock_code, effective_date, total_shares, source, raw_hash, batch_id)
+               VALUES (?, CAST(? AS DATE), ?, 'cninfo_capital', 'seed', 'seed')""",
+            [code, "2020-01-02", 250],
+        )
+
+    second = calculator.compute_price_fields_for_stock(code, report_date)
+    assert second["total_market_cap"] == pytest.approx(close * 250), (
+        "第二批读到了批次之前的旧股本（shares_asof 缓存跨批次了）"
+    )
+
+    # 批次内命中不需要再发 SQL；同批换成另一个价格日必须 miss（键含 as_of）
+    with calculator.price_domain_batch([code], report_dates={code: report_date}):
+        key = calculator._asof_key(price_date)
+        hit, cached = calculator._prefetch_lookup("shares_asof", code, key)
+        assert hit is True and cached.shares == 250.0
+        assert calculator._prefetch_lookup("shares_asof", code, "1990-01-01")[0] is False
+        assert calculator._resolve_shares_asof(code, price_date).shares == 250.0
+        assert calculator._resolve_shares_asof(code, "1990-01-01").source == "meta"
+
+
 # ─── ④ 每类查询每批只发一次 ────────────────────────────────────────
 
 
 def test_batch_issues_each_query_kind_once(
     price_domain_calculator: IndicatorCalculator, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """3 只股票一批：13 条/只 → 每类 1 条/批 + 每股 1 条 as-of 股本。"""
+    """3 只股票一批：13 条/只 → 每类 1 条/批（含 as-of 股本）。"""
     calculator = price_domain_calculator
     codes = ["600519", "000001", "300750"]
     report_dates = {code: _report_date(calculator, code) for code in codes}
@@ -342,17 +386,19 @@ def test_batch_issues_each_query_kind_once(
         "FROM price_daily_raw WHERE stock_code IN": 1,
         "LEFT JOIN price_daily_qfq": 1,
         "FROM treasury_yield_curve": 1,
-        "(stock_code, as_of)": 2,          # TTM 窗口 / 滚动 12 个月每股分红
+        # TTM 窗口 / 滚动 12 个月每股分红 / 时点股本（market_cap 的批量 API）
+        "(stock_code, as_of)": 3,
     }
     for needle, expected in batch_kinds.items():
         actual = counter.count_containing(needle)
         assert actual == expected, (needle, actual)
 
-    # 按设计仍逐股的只有两类：
-    #   ① `_get_dividend_summary` 的历史全表聚合（多行求和顺序不可复现，S10）
-    #   ② `market_cap.resolve_shares_asof` 的 as-of 股本（在另一模块的租约里，
-    #     没有批量 API，硬拦它的 SQL 属于过耦合 —— 留作后续）
+    # 时点股本改走 `market_cap.resolve_shares_asof_batch`（一条 SQL 解一批）：
+    # 每股 1 条的热点消失，但**仍然只读** `share_capital_history` 这一张表。
+    assert counter.count_containing("share_capital_history") == 1, counter.sqls
+
+    # 按设计仍逐股的只有一类：`_get_dividend_summary` 的历史全表聚合
+    # （多行求和顺序不可复现 → 批量 GROUP BY 会漂 1 ULP，依据 S10）。
     assert counter.count_containing("FROM dividends") == len(codes)
-    assert counter.count_containing("FROM share_capital_history") == len(codes)
-    # 总量守门：改前 13 条/只 = 39 条；改后 8 条批量 + 2 条/只 = 14 条。
-    assert len(counter.sqls) <= len(codes) * 2 + 8, counter.sqls
+    # 总量守门：改前 13 条/只 = 39 条；改后 8 条批量 + 1 条/只 = 11 条。
+    assert len(counter.sqls) <= len(codes) + 8, counter.sqls

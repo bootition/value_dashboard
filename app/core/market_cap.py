@@ -20,6 +20,8 @@
 - :func:`resolve_shares_asof`：唯一的「时点股本」解析规则
   —— ``<= price_date`` 的最近一条 ``share_capital_history.total_shares``，
   缺失回退 ``stock_meta.total_shares``，并如实返回 ``source``；
+- :func:`resolve_shares_asof_batch`：**同一规则**的批量形态（一条 SQL 解一批），
+  单只入口 :func:`resolve_shares_asof` 就是它的「一批一只」委托；
 - :func:`latest_market_cap`：单点市值（指标主链用）；
 - :func:`market_cap_by_date`：按交易日聚合的市值序列（ETF 基本面用）；
 - :func:`asof_shares_join_sql` / :func:`asof_shares_value_sql`：同一规则的
@@ -39,6 +41,7 @@ test_market_cap_single_source.py`` 钉死）。因此：
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Protocol
@@ -54,6 +57,7 @@ __all__ = [
     "market_cap_by_date",
     "market_cap_from",
     "resolve_shares_asof",
+    "resolve_shares_asof_batch",
 ]
 
 SOURCE_HISTORY = "history"  # 来自 share_capital_history（当日或之前最近一条）
@@ -69,23 +73,50 @@ _HISTORY_SOURCE_SQL = (
     "FROM share_capital_history WHERE total_shares > 0"
 )
 
-# 标量 as-of 取数：直查基表（实测比套一层派生表快约 2 倍：
-# 300 只 1.15s → 0.60s，即每只 3.8ms → 2.0ms）。
-_ASOF_SHARES_SQL = """
-    WITH hist AS (
-        SELECT total_shares, effective_date FROM share_capital_history
-        WHERE stock_code = ? AND total_shares > 0 AND effective_date <= CAST(? AS DATE)
-        ORDER BY effective_date DESC
-        LIMIT 1
-    ), meta AS (
-        SELECT total_shares FROM stock_meta WHERE stock_code = ?
+# 批量 as-of 取数：**一条 SQL 解一批**（每批 ≤ `_BATCH_CHUNK` 条请求）。
+#
+# 与逐股口径逐字对应：
+# - `req` = 本批请求 `(stock_code, as_of)`；
+# - `hist` 里每股只留 `effective_date <= as_of` 的**最近一条正股本**行
+#   （`ROW_NUMBER()` = 逐股 SQL 的 `ORDER BY effective_date DESC LIMIT 1`）；
+# - 每只股票**恒出一行**（`req LEFT JOIN`），所以"历史缺行"等价于 history 列
+#   全 NULL，与逐股标量子查询（无行 → NULL）语义一致；
+# - `stock_meta` 回退也在同一条 SQL 里取，不需要第二次查询。
+# 参数：每行 `(CAST(? AS VARCHAR), CAST(? AS DATE))`，顺序 = 本批请求顺序。
+_BATCH_ASOF_SHARES_SQL = """
+    WITH req(stock_code, as_of) AS (
+        SELECT * FROM (VALUES {values}) AS v(stock_code, as_of)
+    ), hist AS (
+        SELECT r.stock_code AS stock_code,
+               h.total_shares AS total_shares,
+               h.effective_date AS effective_date,
+               ROW_NUMBER() OVER (
+                   PARTITION BY r.stock_code ORDER BY h.effective_date DESC
+               ) AS rn
+        FROM req r
+        JOIN share_capital_history h
+          ON h.stock_code = r.stock_code
+         AND h.total_shares > 0
+         AND h.effective_date <= r.as_of
     )
-    SELECT (SELECT total_shares FROM hist) AS history_shares,
-           (SELECT effective_date FROM hist) AS history_date,
-           (SELECT total_shares FROM meta) AS meta_shares
+    SELECT r.stock_code AS stock_code,
+           h.total_shares AS history_shares,
+           h.effective_date AS history_date,
+           m.total_shares AS meta_shares
+    FROM req r
+    LEFT JOIN hist h ON h.stock_code = r.stock_code AND h.rn = 1
+    LEFT JOIN stock_meta m ON m.stock_code = r.stock_code
 """
 
-_META_ONLY_SQL = "SELECT total_shares AS meta_shares FROM stock_meta WHERE stock_code = ?"
+# `price_date` 缺失（= 不做 as-of）那一组的批量形态：等价于逐股的 meta-only 查询。
+_BATCH_META_ONLY_SQL = (
+    "SELECT stock_code, total_shares AS meta_shares FROM stock_meta "
+    "WHERE stock_code IN ({placeholders})"
+)
+
+#: 一条批量 SQL 里塞多少条请求。每行 2 个占位符 → 500 行 = 1,000 个参数，
+#: 远低于任何实现的绑定参数上限；再大只是白占内存、不减少扫描次数。
+_BATCH_CHUNK = 500
 
 
 class QuerySource(Protocol):
@@ -168,12 +199,153 @@ def market_cap_from(close: Any, shares: Any) -> float | None:
 # ─── 唯一时点股本规则 ───────────────────────────────────────────────
 
 
+def _share_resolution(
+    code: str,
+    as_of: date | None,
+    *,
+    history_shares: Any = None,
+    history_date: Any = None,
+    meta_shares: Any = None,
+) -> ShareResolution:
+    """唯一的「三选一」判定：历史正股本 → 回退 meta 正股本 → none。
+
+    单只与批量两条取数路径都只把原始列交给它，判定逻辑（含 ``source`` 与
+    非法值归一）只有这一处。
+    """
+    history = _positive(history_shares)
+    if history is not None:
+        return ShareResolution(
+            stock_code=code,
+            shares=history,
+            source=SOURCE_HISTORY,
+            effective_date=_to_date(history_date),
+            price_date=as_of,
+        )
+    meta = _positive(meta_shares)
+    if meta is None:
+        return ShareResolution(
+            stock_code=code, shares=None, source=SOURCE_NONE, price_date=as_of,
+        )
+    return ShareResolution(
+        stock_code=code, shares=meta, source=SOURCE_META, price_date=as_of,
+    )
+
+
+def resolve_shares_asof_batch(
+    duck: QuerySource,
+    requests: Sequence[tuple[str, Any]],
+) -> dict[str, ShareResolution]:
+    """批量解析 ``(stock_code, price_date)`` 的时点股本 —— **一条 SQL 解一批**。
+
+    语义与逐个调用 :func:`resolve_shares_asof` **完全一致**（同 code 的
+    ``shares`` / ``source`` / ``effective_date`` / ``price_date`` 逐字段相同、
+    类型相同），只是把"每股 1 条 SQL"换成"每批 1 条 SQL"：
+
+    1. 有 ``price_date`` 的请求 → ``_BATCH_ASOF_SHARES_SQL``：``req`` 关系驱动，
+       每股取 ``effective_date <= as_of`` 的**最近一条**正股本行
+       （``source='history'``），同一条 SQL 里带上 ``stock_meta`` 回退；
+    2. ``price_date`` 为 None/无法解析的请求 → **不参与 as-of**，整组走
+       ``_BATCH_META_ONLY_SQL``（不做 as-of，不会用未来行充数）；
+    3. 历史表在旧库尚不存在时（``_is_missing_relation``）→ 该批整批按
+       "无历史"回退 meta-only，**不抛**（与单只行为一致）；
+    4. 两处都没有可用正股本 → ``shares=None``、``source='none'``。
+
+    返回的 dict 以**规范化后的股票代码**（``str(code).strip()``）为键，每条请求
+    恰好一个条目。``requests`` 为空 → 返回 ``{}`` 且**不发 SQL**。
+
+    重复 code 的处理（与 `dict` 的"首次出现优先"一致，已写进测试）：
+
+    - 同一个 code 出现多次 → **只保留第一次出现的 ``price_date``**，后续忽略；
+      该条结果等于 ``resolve_shares_asof(duck, code, 第一次的 price_date)``。
+      签名返回 ``dict[str, ShareResolution]``，同一 code 只能有一个条目，
+      所以"同一只股票两个 as_of 都返回"在这里没有意义。
+    - 规范化后为空串的 code（``""`` / ``"  "`` / ``None``）→ 直接
+      ``source='none'``（``price_date=None``），与单只入口的早退分支一致，
+      不参与任何 SQL。
+
+    批次大小：每 ``_BATCH_CHUNK`` 条请求一条 SQL（``VALUES`` 关系不无限长）。
+    """
+    wanted: dict[str, date | None] = {}
+    for raw_code, raw_as_of in requests:
+        code = str(raw_code or "").strip()
+        if code not in wanted:  # 首次出现优先（含 as_of）
+            wanted[code] = _to_date(raw_as_of)
+    if not wanted:
+        return {}
+
+    timed: list[tuple[str, date]] = []
+    meta_only: list[str] = []
+    for code, as_of in wanted.items():
+        if not code:
+            continue  # 空代码：下面直接给 none，不发 SQL
+        if as_of is None:
+            meta_only.append(code)
+        else:
+            timed.append((code, as_of))
+
+    history_parts: dict[str, tuple[Any, Any, Any]] = {}
+    for start in range(0, len(timed), _BATCH_CHUNK):
+        chunk = timed[start:start + _BATCH_CHUNK]
+        params: list[Any] = []
+        for code, as_of in chunk:
+            params.extend([code, as_of])
+        sql = _BATCH_ASOF_SHARES_SQL.format(
+            values=", ".join("(CAST(? AS VARCHAR), CAST(? AS DATE))" for _ in chunk),
+        )
+        try:
+            rows = duck.read_query(sql, params)
+        except Exception as error:  # noqa: BLE001 - 旧库没有该表时按「无历史」处理
+            if not _is_missing_relation(error):
+                raise
+            meta_only.extend(code for code, _ in chunk)
+            continue
+        for row in rows:
+            history_parts[str(row.get("stock_code"))] = (
+                row.get("history_shares"),
+                row.get("history_date"),
+                row.get("meta_shares"),
+            )
+
+    meta_values: dict[str, Any] = {}
+    for start in range(0, len(meta_only), _BATCH_CHUNK):
+        chunk = meta_only[start:start + _BATCH_CHUNK]
+        rows = duck.read_query(
+            _BATCH_META_ONLY_SQL.format(
+                placeholders=", ".join("?" for _ in chunk),
+            ),
+            list(chunk),
+        )
+        for row in rows:
+            meta_values[str(row.get("stock_code"))] = row.get("meta_shares")
+
+    resolved: dict[str, ShareResolution] = {}
+    for code, as_of in wanted.items():
+        if not code:
+            resolved[code] = ShareResolution(
+                stock_code="", shares=None, source=SOURCE_NONE,
+            )
+        elif code in history_parts:
+            history_shares, history_date, meta_shares = history_parts[code]
+            resolved[code] = _share_resolution(
+                code,
+                as_of,
+                history_shares=history_shares,
+                history_date=history_date,
+                meta_shares=meta_shares,
+            )
+        else:
+            resolved[code] = _share_resolution(
+                code, as_of, meta_shares=meta_values.get(code),
+            )
+    return resolved
+
+
 def resolve_shares_asof(
     duck: QuerySource,
     stock_code: str,
     price_date: Any = None,
 ) -> ShareResolution:
-    """解析 ``price_date`` 当日的总股本。
+    """解析 ``price_date`` 当日的总股本（单只入口 = 批量版的「一批一只」）。
 
     规则（唯一口径，不要在各调用点重写）：
 
@@ -187,43 +359,15 @@ def resolve_shares_asof(
     ``price_date`` 缺失（None/无法解析）时**不做 as-of**，直接走第 2 步的
     stock_meta 回退：没有价格日就没有「时点」，用任意历史行都可能引入未来
     数据泄漏。
+
+    实现上**没有第二套 SQL**：这里只是 :func:`resolve_shares_asof_batch` 的
+    「一批一只」委托，保证同一概念只有一处取数与判定。
     """
     code = str(stock_code or "").strip()
-    if not code:
+    resolution = resolve_shares_asof_batch(duck, [(code, price_date)]).get(code)
+    if resolution is None:  # 防御：批量版对每条请求都必定返回一个条目
         return ShareResolution(stock_code=code, shares=None, source=SOURCE_NONE)
-
-    as_of = _to_date(price_date)
-    rows: list[dict] = []
-    if as_of is not None:
-        try:
-            rows = duck.read_query(_ASOF_SHARES_SQL, [code, as_of, code])
-        except Exception as error:  # noqa: BLE001 - 旧库没有该表时按「无历史」处理
-            if not _is_missing_relation(error):
-                raise
-            rows = []
-    row = rows[0] if rows else {}
-
-    history = _positive(row.get("history_shares"))
-    if history is not None:
-        return ShareResolution(
-            stock_code=code,
-            shares=history,
-            source=SOURCE_HISTORY,
-            effective_date=_to_date(row.get("history_date")),
-            price_date=as_of,
-        )
-
-    meta = _positive(row.get("meta_shares"))
-    if meta is None:
-        meta_rows = duck.read_query(_META_ONLY_SQL, [code])
-        meta = _positive(meta_rows[0].get("meta_shares")) if meta_rows else None
-    if meta is None:
-        return ShareResolution(
-            stock_code=code, shares=None, source=SOURCE_NONE, price_date=as_of,
-        )
-    return ShareResolution(
-        stock_code=code, shares=meta, source=SOURCE_META, price_date=as_of,
-    )
+    return resolution
 
 
 # ─── 单点市值（指标主链） ───────────────────────────────────────────
@@ -263,11 +407,17 @@ def latest_market_cap(
     close: Any = None,
     price_date: Any = None,
     price_table: str = "price_daily_raw",
+    resolution: ShareResolution | None = None,
 ) -> dict[str, Any]:
     """单只股票的单点总市值（含股本来源）。
 
     ``close`` / ``price_date`` 可显式传入（调用方已经取过价格时避免重复查询）；
     缺失的一侧按 ``price_date`` 向前取 ``price_table`` 的最近一条收盘价。
+
+    ``resolution``：调用方**已经**解析过的时点股本（例如价格域批量预取的结果），
+    传入可省掉一次单只 SQL。只有当它的 ``price_date`` 与本函数最终确定的
+    as-of 完全一致时才会被采用，否则一律重新走
+    :func:`resolve_shares_asof`（口径不因这条捷径而变）。
 
     返回（键名稳定）::
 
@@ -294,7 +444,8 @@ def latest_market_cap(
         if as_of is None:
             as_of = _to_date(row.get("trade_date"))
 
-    resolution = resolve_shares_asof(duck, code, as_of)
+    if resolution is None or resolution.price_date != as_of:
+        resolution = resolve_shares_asof(duck, code, as_of)
     return {
         "stock_code": code,
         "price_date": as_of,

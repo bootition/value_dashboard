@@ -55,7 +55,13 @@ from typing import Any
 
 from app.core.adapters.czb_mof_adapter import CZB_CURVE_YIELD_TENOR_LABELS, KEY_TENORS
 from app.core.financial_period import cn_today
-from app.core.market_cap import latest_market_cap, market_cap_from
+from app.core.market_cap import (
+    ShareResolution,
+    latest_market_cap,
+    market_cap_from,
+    resolve_shares_asof,
+    resolve_shares_asof_batch,
+)
 from app.core.storage.duckdb_store import DuckDBStore, archive_raw_response_if_absent
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -1390,6 +1396,17 @@ class IndicatorCalculator:
                 [code for code, _ in chunk_pairs],
                 {code: as_of for code, as_of in chunk_pairs},
             ))
+        # 时点股本（`market_cap.resolve_shares_asof`）以**价格日**为 as_of，价格
+        # 预取完就能按批解析（`market_cap` 的公开批量 API，一条 SQL 解一批）。
+        # 本批里没有行情的股票给 `None`（= 不做 as-of，直接回退 stock_meta），与
+        # `_calc_valuation` 传 `price.get("trade_date")` 的单只路径逐字一致。
+        shares_asof_pairs: list[tuple[str, Any]] = []
+        for code in unique:
+            hit, price = self._prefetch_lookup("price", code)
+            shares_asof_pairs.append((code, price.get("trade_date") if hit else None))
+        for start in range(0, len(shares_asof_pairs), self._PREFETCH_CHUNK):
+            chunk_pairs = shares_asof_pairs[start:start + self._PREFETCH_CHUNK]
+            bump("shares_asof", self._prefetch_shares_asof(chunk_pairs))
         counts["treasury_curve"] = self._prefetch_treasury_curve()
         counts["calendar"] = self._prefetch_trading_calendar()
         return counts
@@ -1634,6 +1651,26 @@ class IndicatorCalculator:
                 self._prefetch_put("trailing_dps", code, key, {"dps": None})
         return len(found)
 
+    def _prefetch_shares_asof(self, pairs: list[tuple[str, Any]]) -> int:
+        """批量预取时点股本（`market_cap.resolve_shares_asof_batch`，依据 S10）。
+
+        一条 SQL 解一批，键 = ``(kind, code, as_of)``；``as_of`` 用规范化后的
+        价格日（与 :meth:`_resolve_shares_asof` 的查键同一函数）。批量失败
+        （非致命）时返回 0，由每个调用点 miss → 回落单只 `resolve_shares_asof`，
+        所以预取只可能是加速，不可能改变谁能取到什么。
+        """
+        if not pairs:
+            return 0
+        try:
+            resolved = resolve_shares_asof_batch(self, pairs)
+        except Exception as error:  # noqa: BLE001 - 预取失败就回落逐股（非致命）
+            logger.debug("批量解析时点股本失败 (非致命，回落逐股): %s", error)
+            return 0
+        for code, resolution in resolved.items():
+            key = self._asof_key(resolution.price_date)
+            self._prefetch_put("shares_asof", code, key, resolution)
+        return len(resolved)
+
     def _prefetch_treasury_curve(self) -> int:
         """国债曲线整表读一次（依据 S10；参照 `refresh_treasury_spreads` 的批量口径）。"""
         placeholders = ", ".join("?" for _ in KEY_TENORS)
@@ -1767,6 +1804,22 @@ class IndicatorCalculator:
                 "circ_shares": circ_shares,
             }
         return {"total_shares": None, "circ_shares": None}
+
+    def _resolve_shares_asof(self, stock_code: str, price_date: Any) -> ShareResolution:
+        """时点股本解析（依据 S10）：批次内命中预取，miss 回落单只唯一实现。
+
+        口径唯一真源是 `market_cap`：缓存里放的就是
+        `resolve_shares_asof_batch` 按**同一规则**算出的 `ShareResolution`，
+        查不到时直接调 `resolve_shares_asof`（它本身就是批量版的「一批一只」）。
+        `ShareResolution` 是 frozen dataclass（不可变），命中时无需拷贝。
+        """
+        code = str(stock_code or "").strip()
+        hit, cached = self._prefetch_lookup(
+            "shares_asof", code, self._asof_key(price_date),
+        )
+        if hit:
+            return cached
+        return resolve_shares_asof(self, code, price_date)
 
     def _get_ttm_data(self, stock_code: str, as_of_date: Any | None = None) -> dict[str, Any]:
         """计算TTM（滚动十二个月）数据
@@ -2045,8 +2098,18 @@ class IndicatorCalculator:
         """
         result: dict[str, Any] = {}
         close = price.get("close")
+        # 依据 S10：as-of 股本先走批次预取（`shares_asof`），miss 回落单只
+        # `market_cap.resolve_shares_asof`；解析结果再交给 `latest_market_cap`
+        # 复用，避免同一行里为了市值再发一次同样的 SQL。`price_date` 缺失时
+        # 不传（由 `latest_market_cap` 自己按价格表定 as-of 再解析，与旧行为一致）。
+        price_date = price.get("trade_date")
+        resolution = (
+            self._resolve_shares_asof(stock_code, price_date)
+            if price_date is not None else None
+        )
         cap = latest_market_cap(
-            self, stock_code, close=close, price_date=price.get("trade_date"),
+            self, stock_code, close=close, price_date=price_date,
+            resolution=resolution,
         )
         # 历史与元数据都取不到股本时，沿用调用方传入的总股本（与旧行为一致）
         if cap["shares"] is None and total_shares:
