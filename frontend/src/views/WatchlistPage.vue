@@ -4,7 +4,7 @@ import type { VNodeChild } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import {
   NAlert, NInput, NButton, NDataTable,
-  NEmpty, useMessage, useDialog, NCheckbox, NTag
+  NEmpty, NModal, useMessage, useDialog, NCheckbox, NTag
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
@@ -43,6 +43,39 @@ interface WatchlistItem {
 interface WatchlistGroup {
   group_name: string
   cnt: number
+  /** 该分组来自几次不同的已保存筛选结果（NULL 不计）；`GET /groups` 提供。 */
+  runs?: number
+  /** `source_result_id IS NULL` 的手动自选行数。 */
+  manual?: number
+  /** 该分组出现过的不同 `source_rule_id`（删分组对话框据此判断能否连带删规则）。 */
+  rule_ids?: number[]
+}
+
+/** `DELETE /api/watchlist/groups/{name}` 的响应契约（2026-11-25 新增）。 */
+interface RuleSkipInfo {
+  rule_id: number
+  reason_code: string
+  message: string
+  refs?: { results?: number; watchlist?: number; runs?: number } | null
+}
+
+interface DeleteGroupResponse {
+  status: string
+  group: string
+  deleted_rows: number
+  rule_deleted: boolean
+  deleted_rule_id: number | null
+  rule_delete_status: 'not_requested' | 'no_rule' | 'deleted' | 'skipped'
+  rule_delete_reason: string | null
+  skipped_rules: RuleSkipInfo[]
+}
+
+interface DeleteGroupTarget {
+  group_name: string
+  cnt: number
+  runs: number
+  manual: number
+  rule_ids: number[]
 }
 
 interface WatchlistResponse {
@@ -81,6 +114,15 @@ const selectedGroup = ref<string | null>(null)
 const showColumnSettings = ref(false)
 const addStockCode = ref('')
 const addGroupName = ref('')
+
+// ── 删除整个自选分组（2026-11-25 用户实测：此前只能一只一只删）───────────
+const showDeleteGroup = ref(false)
+const deleteGroupTarget = ref<DeleteGroupTarget | null>(null)
+const deleteGroupRule = ref(false)
+const deletingGroup = ref(false)
+const deleteGroupLoading = ref(false)
+/** 删除失败时把后端原因**留在对话框里**，而不是只闪一条 toast。 */
+const deleteGroupError = ref<string | null>(null)
 
 const warningCodes = computed(() => trust.value?.warning_codes ?? [])
 const hasUntrustedIndicators = computed(
@@ -427,6 +469,98 @@ function confirmRemove(code: string, group: string) {
   })
 }
 
+/** 对话框里「是否会连带删规则」的说明（没有规则 / 唯一规则 / 多个规则三种口径）。 */
+const deleteGroupRuleHint = computed(() => {
+  const target = deleteGroupTarget.value
+  if (!target) return ''
+  if (target.rule_ids.length === 0) {
+    return '该分组没有关联筛选规则，本次只会删除分组里的股票。'
+  }
+  if (target.rule_ids.length > 1) {
+    return `该分组来自 ${target.rule_ids.length} 个不同筛选规则（${target.rule_ids.map((id) => `#${id}`).join('、')}）；`
+      + '为避免误删，只删除分组，不删除任何规则。'
+  }
+  return `该分组来自筛选规则 #${target.rule_ids[0]}；勾选后会先删除分组，再尝试删除该规则。`
+    + '若规则仍被「已保存的筛选结果」引用，规则会保留，并在这里如实告诉你原因。'
+})
+
+/** 守卫拒绝删规则时，把「哪类引用、几条」拼进对话框正文。 */
+function ruleSkipMessage(skipped: RuleSkipInfo): string {
+  const refs = skipped.refs
+  const counts: string[] = []
+  if (refs?.results) counts.push(`已保存的筛选结果 ${refs.results} 条`)
+  if (refs?.watchlist) counts.push(`其它分组的自选记录 ${refs.watchlist} 条`)
+  return counts.length ? `${skipped.message}（当前引用：${counts.join('、')}）` : skipped.message
+}
+
+async function openDeleteGroup(group: WatchlistGroup) {
+  deleteGroupTarget.value = {
+    group_name: group.group_name,
+    cnt: group.cnt,
+    runs: group.runs ?? 0,
+    manual: group.manual ?? 0,
+    rule_ids: group.rule_ids ?? [],
+  }
+  deleteGroupRule.value = false
+  deleteGroupError.value = null
+  showDeleteGroup.value = true
+  // 侧栏计数来自 `/list`，规则来源要看 `/groups` 的 rule_ids：只有一次额外读取，
+  // 读到了才允许勾选「同时删除规则」，读不到就只删分组（绝不猜规则 id）。
+  deleteGroupLoading.value = true
+  try {
+    const resp = await axios.get<{ groups: WatchlistGroup[] }>('/api/watchlist/groups')
+    const detail = (resp.data.groups ?? []).find((g) => g.group_name === group.group_name)
+    if (detail) {
+      deleteGroupTarget.value = {
+        group_name: detail.group_name,
+        cnt: detail.cnt,
+        runs: detail.runs ?? 0,
+        manual: detail.manual ?? 0,
+        rule_ids: detail.rule_ids ?? [],
+      }
+    }
+  } catch {
+    deleteGroupError.value = '无法读取该分组的规则来源，本次只能删除分组、不能删除规则。'
+  } finally {
+    deleteGroupLoading.value = false
+  }
+}
+
+async function confirmDeleteGroup() {
+  const target = deleteGroupTarget.value
+  if (!target) return
+  deletingGroup.value = true
+  deleteGroupError.value = null
+  try {
+    const resp = await axios.delete<DeleteGroupResponse>(
+      `/api/watchlist/groups/${encodeURIComponent(target.group_name)}`,
+      { params: { delete_rule: deleteGroupRule.value } },
+    )
+    const data = resp.data
+    let text = `已删除自选分组「${displayGroupName(target.group_name)}」，共 ${data.deleted_rows} 只`
+    if (data.rule_deleted) text += `；同时删除了筛选规则 #${data.deleted_rule_id}`
+    message.success(text)
+    const skipped = data.skipped_rules?.[0]
+    if (!data.rule_deleted && data.rule_delete_status === 'skipped' && skipped) {
+      // 分组已经删了、规则没删：必须单独说清楚原因（引用类型 + 条数），
+      // 不能让用户以为规则也一起没了。
+      dialog.warning({
+        title: '分组已删除，但筛选规则没有删除',
+        content: ruleSkipMessage(skipped),
+        positiveText: '知道了',
+      })
+    } else if (!data.rule_deleted && data.rule_delete_status === 'no_rule') {
+      message.info('该分组没有关联筛选规则，只删除了分组')
+    }
+    showDeleteGroup.value = false
+    await fetchWatchlist()
+  } catch (e: unknown) {
+    deleteGroupError.value = friendlyErrorMessage(e, '删除分组失败')
+  } finally {
+    deletingGroup.value = false
+  }
+}
+
 onMounted(fetchWatchlist)
 </script>
 
@@ -436,7 +570,10 @@ onMounted(fetchWatchlist)
     <div class="watchlist-layout">
       <aside class="watchlist-groups">
         <div class="groups-heading"><p>自选列表</p><h2>公司分组</h2></div>
-        <n-button v-for="group in visibleGroups" :key="group.group_name" :class="{ selected: selectedGroup === group.group_name }" text block @click="selectGroup(group.group_name)"><span><b>{{ displayGroupName(group.group_name) }}</b><small>{{ isManualGroup(group.group_name) ? '手动加入，不关联筛选规则' : '筛选规则来源' }}</small></span><em>{{ group.cnt }}</em></n-button>
+        <div v-for="group in visibleGroups" :key="group.group_name" class="group-row">
+          <n-button class="group-select" :class="{ selected: selectedGroup === group.group_name }" text block @click="selectGroup(group.group_name)"><span><b>{{ displayGroupName(group.group_name) }}</b><small>{{ isManualGroup(group.group_name) ? '手动加入，不关联筛选规则' : '筛选规则来源' }}</small></span><em>{{ group.cnt }}</em></n-button>
+          <n-button class="group-delete" size="tiny" quaternary type="error" :title="`删除分组「${displayGroupName(group.group_name)}」`" @click.stop="openDeleteGroup(group)">删除分组</n-button>
+        </div>
         <p v-if="!hasVisibleGroups && !loading" class="groups-empty">还没有分组，去筛选规则页运行规则并保存到自选即可生成。</p>
         <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="分组名（留空则为手动收录）" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
       </aside>
@@ -475,11 +612,49 @@ onMounted(fetchWatchlist)
         </div>
       </section>
     </div>
+
+    <!-- 删除整个自选分组（2026-11-25 新增）。说明会删多少只、是否连带删规则；
+         规则删不掉时（被已保存结果引用）把后端原因原样展示。 -->
+    <n-modal v-model:show="showDeleteGroup" preset="dialog" title="删除自选分组" style="width: 560px">
+      <template v-if="deleteGroupTarget">
+        <p class="delete-group-summary">
+          确定删除自选分组「<b>{{ displayGroupName(deleteGroupTarget.group_name) }}</b>」吗？
+        </p>
+        <p class="delete-group-detail">
+          将删除该分组的 <b>{{ deleteGroupTarget.cnt }}</b> 只股票
+          （其中手动添加 {{ deleteGroupTarget.manual }} 只、来自
+          {{ deleteGroupTarget.runs }} 次历史筛选运行）。
+          只影响这个分组，其它分组不受影响。
+        </p>
+        <n-checkbox
+          v-model:checked="deleteGroupRule"
+          :disabled="deleteGroupTarget.rule_ids.length !== 1 || deleteGroupLoading"
+        >
+          同时删除对应的筛选规则（若有）
+        </n-checkbox>
+        <p class="delete-group-hint">{{ deleteGroupRuleHint }}</p>
+        <n-alert v-if="deleteGroupError" type="error" :show-icon="true" class="delete-group-error">
+          {{ deleteGroupError }}
+        </n-alert>
+      </template>
+      <template #action>
+        <n-button @click="showDeleteGroup = false">取消</n-button>
+        <n-button type="error" :loading="deletingGroup" @click="confirmDeleteGroup">删除分组</n-button>
+      </template>
+    </n-modal>
   </section>
 </template>
 
 <style scoped>
-.watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.n-button) { justify-content: space-between; height: auto; margin-top: 5px; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.n-button.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.n-button__content) { display: flex; justify-content: space-between; width: 100%; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }.groups-empty { margin: 14px 10px 0; color: #99a39c; font-size: 11px; line-height: 1.7; }.watchlist-empty-extra { display: grid; gap: 12px; justify-items: center; max-width: 460px; }.watchlist-empty-hint { margin: 0; color: #829087; font-size: 12px; line-height: 1.7; text-align: center; }.watchlist-empty-actions { display: flex; align-items: center; gap: 12px; }.watchlist-empty-link { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 6px; background: #eff8f1; color: #55966d; font-size: 13px; text-decoration: none; }.watchlist-empty-link:hover { background: #e2f2e7; }.watchlist-loading { padding: 40px; color: #99a39c; }
+.watchlist-page { max-width: 1380px; }.watchlist-header { margin-bottom: 27px; }.watchlist-header p, .watchlist-card-heading p, .groups-heading p { margin: 0; color: #97a199; font-size: 10px; }.watchlist-header h1 { margin: 8px 0 0; font-size: 25px; letter-spacing: -.05em; }.watchlist-header span { display: block; margin-top: 7px; color: #829087; font-size: 12px; }.watchlist-layout { display: grid; grid-template-columns: 250px minmax(0, 1fr); gap: 21px; }.watchlist-groups, .watchlist-card { border-radius: 16px; background: #fff; box-shadow: 0 4px 17px rgba(48, 82, 59, .045); }.watchlist-groups { align-self: start; padding: 22px 14px; }.groups-heading { padding: 0 10px 13px; border-bottom: 1px solid #edf1ee; }.groups-heading h2 { margin: 7px 0 0; font-size: 17px; }.watchlist-groups :deep(.group-select) { justify-content: space-between; height: auto; padding: 11px 10px; border-radius: 9px; color: #6e7d73; text-align: left; }.watchlist-groups :deep(.group-select.selected) { background: #eff8f1; color: #55966d; }.watchlist-groups :deep(.group-select .n-button__content) { display: flex; justify-content: space-between; width: 100%; }
+/* 每个分组右侧的「删除分组」：与选中按钮同排，但不抢走分组点击区域。 */
+.group-row { display: flex; align-items: center; gap: 2px; margin-top: 5px; }
+.group-row .group-select { flex: 1; min-width: 0; }
+.group-row .group-delete { flex: none; height: auto; padding: 4px 6px; border-radius: 7px; font-size: 10px; white-space: nowrap; }
+.delete-group-summary { margin: 0 0 10px; color: #39463d; font-size: 14px; }
+.delete-group-detail { margin: 0 0 12px; color: #6e7d73; font-size: 12px; line-height: 1.8; }
+.delete-group-hint { margin: 8px 0 0; color: #97a199; font-size: 11px; line-height: 1.7; }
+.delete-group-error { margin-top: 12px; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }.groups-empty { margin: 14px 10px 0; color: #99a39c; font-size: 11px; line-height: 1.7; }.watchlist-empty-extra { display: grid; gap: 12px; justify-items: center; max-width: 460px; }.watchlist-empty-hint { margin: 0; color: #829087; font-size: 12px; line-height: 1.7; text-align: center; }.watchlist-empty-actions { display: flex; align-items: center; gap: 12px; }.watchlist-empty-link { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 6px; background: #eff8f1; color: #55966d; font-size: 13px; text-decoration: none; }.watchlist-empty-link:hover { background: #e2f2e7; }.watchlist-loading { padding: 40px; color: #99a39c; }
 /* 列设置面板（勾选显示哪些列 + ▲▼ 调顺序 + 全部显示/恢复默认） */
 .column-settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .column-settings-actions { display: flex; flex: none; gap: 6px; white-space: nowrap; }

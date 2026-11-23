@@ -212,7 +212,19 @@ export interface ScreeningExportResponse {
  */
 export interface ScreeningWatchlistResponse {
   readonly status: string
+  /** 本次写入的唯一股票数（= inserted + updated），保持历史语义。 */
   readonly added: number
+  /**
+   * 2026-11-25 替换语义（用户实测：同一分组重复保存会累加成 591 行）：
+   * `replace_group=true` 时后端先删掉该分组里由**其它历史结果**带进来的行，
+   * 再 upsert 本次结果；手动自选（source_result_id IS NULL）永不删除。
+   * 旧后端不返回这些字段，因此全部可选。
+   */
+  readonly removed?: number
+  readonly inserted?: number
+  readonly updated?: number
+  readonly manual_rows_preserved?: number
+  readonly replaced?: boolean
 }
 
 /** Type guard: is the given rule item a nested group (vs a leaf condition)? */

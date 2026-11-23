@@ -407,10 +407,18 @@ class ExportCsvRequest(BaseModel):
 
 
 class AddToWatchlistRequest(BaseModel):
-    """加入自选列表请求"""
+    """加入自选列表请求。
+
+    `replace_group=False`（默认）保持历史语义：**累加**（同代码 upsert，其余
+    旧行原样保留），既有调用方/CLI/脚本不受影响。
+    `replace_group=True` 是用户显式选择的「替换」：先删除该分组里由**其它**
+    筛选结果带进来的行，再写入本次结果；`source_result_id IS NULL` 的
+    手动自选**永不删除**（用户手工加的股票不是筛选产物）。
+    """
     stock_codes: list[str]
     group: str = "default"
     result_id: int | None = None
+    replace_group: bool = False
 
 
 class ScreeningDraftRequest(BaseModel):
@@ -1083,6 +1091,10 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail="too many stocks (max 10000)")
 
     added = 0
+    removed = 0
+    inserted = 0
+    updated = 0
+    manual_rows_preserved = 0
     with sqlite.transaction() as conn:
         result = conn.execute(
             "SELECT rule_id, result_json FROM screening_results WHERE id = ?",
@@ -1108,6 +1120,27 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
             "SELECT 1 FROM screening_rules WHERE id = ?", [result["rule_id"]],
         ).fetchone() is not None
         source_rule_id = result["rule_id"] if rule_still_exists else None
+        if req.replace_group:
+            # 用户显式选「替换」：删掉该分组里**由历史筛选结果带进来**的行。
+            # 只按 `source_result_id` 判定，绝不按 `source_rule_id` 一刀切：
+            # `source_result_id IS NULL` = 用户手动加的自选，任何模式下都保留
+            # （本次结果恰好也命中的手动行会走下面的 upsert 补上溯源，但不会被删）。
+            removed = conn.execute(
+                "DELETE FROM watchlist WHERE group_name = ?"
+                " AND source_result_id IS NOT NULL AND source_result_id != ?",
+                [group_name, result_id],
+            ).rowcount
+        existing_codes: set[str] = set()
+        if unique_codes:
+            placeholders = ", ".join("?" for _ in unique_codes)
+            existing_codes = {
+                row["stock_code"]
+                for row in conn.execute(
+                    f"SELECT stock_code FROM watchlist WHERE group_name = ?"
+                    f" AND stock_code IN ({placeholders})",
+                    [group_name, *unique_codes],
+                ).fetchall()
+            }
         conn.executemany(
             """INSERT INTO watchlist
                (stock_code, group_name, source_rule_id, source_result_id)
@@ -1122,10 +1155,26 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
             ],
         )
         added = len(unique_codes)
+        inserted = len(requested_codes - existing_codes)
+        updated = len(requested_codes & existing_codes)
+        manual_rows_preserved = conn.execute(
+            "SELECT COUNT(*) AS c FROM watchlist"
+            " WHERE group_name = ? AND source_result_id IS NULL",
+            [group_name],
+        ).fetchone()["c"]
 
     return {
         "status": "ok",
         "added": added,
+        # 替换模式下删掉的「历史筛选结果行」条数；默认累加模式恒为 0。
+        "removed": removed,
+        # 本次真正新插入 / 覆盖更新的行数（added = inserted + updated）。
+        "inserted": inserted,
+        "updated": updated,
+        # 该分组里手动自选（source_result_id IS NULL）的现有条数：
+        # 前端据此如实告诉用户「替换不会动这些行」。
+        "manual_rows_preserved": manual_rows_preserved,
+        "replaced": req.replace_group,
         # 规则已被删除时溯源只能落到结果本身（rule_provenance=rule_deleted）
         "rule_provenance": "rule_deleted" if source_rule_id is None else "ok",
     }
@@ -2085,9 +2134,12 @@ def _rule_delete_blocked_message(results_count: int, watchlist_count: int) -> st
     )
 
 
-@router.delete("/rules/{rule_id}")
-def delete_rule(rule_id: int, request: Request) -> dict:
+def delete_rule_with_guards(sqlite: Any, rule_id: int) -> dict:
     """删除没有被「已保存结果 / 自选记录」引用的筛选规则。
+
+    这是规则删除的**唯一守卫实现**：web `DELETE /api/screening/rules/{id}` 与
+    `DELETE /api/watchlist/groups/{group}` 的 `delete_rule=True` 都只准调它，
+    不允许任何调用方复制一份"只查部分引用"的守卫（那样删分组就会绕过规则保护）。
 
     2026-11-25 修 UX（投诉「自选列表里明明没有这个分组，为什么它还删不掉」）：
     旧守卫把 `screening_runs` 也算引用 —— 那是"每跑一次加一行"的**运行日志**，
@@ -2099,8 +2151,11 @@ def delete_rule(rule_id: int, request: Request) -> dict:
       悬空历史值。本仓库没有"按 run 反查规则"的读取方（`save_result` 只用 run
       行上的 rule_id/rule_version 副本，规则已被删时按 400 提示重新运行），
       所以悬空 id 不会让任何读取路径崩。
+
+    返回 `{"status": "ok", "deleted_rule_id": id}`；规则不存在抛 404，
+    被引用时抛 409，detail 为 `{reason_code, message, refs}`（调用方必须原样
+    尊重这两个出口，不能把 409 吞成"看起来删掉了"）。
     """
-    sqlite = request.app.state.sqlite
     rows = sqlite.query("SELECT id FROM screening_rules WHERE id = ?", [rule_id])
     if not rows:
         raise HTTPException(status_code=404, detail="rule not found")
@@ -2130,3 +2185,9 @@ def delete_rule(rule_id: int, request: Request) -> dict:
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("DELETE FROM screening_rules WHERE id = ?", [rule_id])
     return {"status": "ok", "deleted_rule_id": rule_id}
+
+
+@router.delete("/rules/{rule_id}")
+def delete_rule(rule_id: int, request: Request) -> dict:
+    """删除筛选规则（守卫见 `delete_rule_with_guards`，本路由只是薄外壳）。"""
+    return delete_rule_with_guards(request.app.state.sqlite, rule_id)

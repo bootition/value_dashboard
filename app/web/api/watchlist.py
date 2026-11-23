@@ -12,7 +12,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.core.blacklist import blacklisted_code_set, exclusion_condition
@@ -479,10 +479,147 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
 
 @router.get("/groups")
 def list_groups(request: Request) -> dict:
-    """列出所有分组"""
+    """列出所有分组（含删分组对话框要用的事实）。
+
+    `cnt` 保持原语义（行数）；新增三个只读字段，避免前端靠猜：
+    - `runs`：该分组来自几次不同的**已保存筛选结果**（`COUNT(DISTINCT source_result_id)`，
+      NULL 不计）——替换确认框要如实说「来自 M 次历史运行」；
+    - `manual`：`source_result_id IS NULL` 的手动自选行数（替换永远不动它们）；
+    - `rule_ids`：该分组出现的不同 `source_rule_id`（删分组时判断能否连带删规则）。
+    """
     sqlite = request.app.state.sqlite
     groups = sqlite.query(
-        "SELECT group_name, COUNT(*) as cnt "
+        "SELECT group_name, COUNT(*) as cnt, "
+        "COUNT(DISTINCT source_result_id) as runs, "
+        "SUM(CASE WHEN source_result_id IS NULL THEN 1 ELSE 0 END) as manual "
         "FROM watchlist GROUP BY group_name ORDER BY group_name"
     )
+    rule_rows = sqlite.query(
+        "SELECT group_name, source_rule_id FROM watchlist "
+        "WHERE source_rule_id IS NOT NULL "
+        "GROUP BY group_name, source_rule_id ORDER BY group_name, source_rule_id"
+    )
+    rules_by_group: dict[str, list[int]] = {}
+    for row in rule_rows:
+        rules_by_group.setdefault(row["group_name"], []).append(int(row["source_rule_id"]))
+    for group in groups:
+        group["runs"] = int(group["runs"] or 0)
+        group["manual"] = int(group["manual"] or 0)
+        group["rule_ids"] = rules_by_group.get(group["group_name"], [])
     return {"groups": groups, "count": len(groups)}
+
+
+@router.delete("/groups/{group_name}")
+def delete_group(
+    group_name: str,
+    request: Request,
+    delete_rule: bool = Query(False),
+) -> dict:
+    """删除整个自选分组（可选同时删除该分组唯一的来源规则）。
+
+    2026-11-25 用户实测投诉：自选分组只能一只一只删，没有「删除分组」；
+    同型事故现场是「同一分组重复保存到自选」把两次运行累加成 591 行，
+    用户想整体重来却没有入口。
+
+    契约：
+    - **分组行一定删除**（这是用户点的主操作），`deleted_rows` 是真实删除行数；
+      分组不存在 → 404，不假装成功。
+    - `delete_rule=True`：仅当该分组只出现**一个**非空 `source_rule_id` 且规则
+      仍存在时，才尝试删规则；多个不同规则 → 不猜、只删分组，`skipped_rules`
+      逐条说明原因。
+    - 规则删除复用 `screening.delete_rule_with_guards`（同一套守卫：被已保存
+      结果或**其它分组**的自选记录引用时拒绝）。守卫拒绝时分组删除仍成功，
+      但响应 `rule_deleted=False` + `rule_delete_reason` + `skipped_rules`
+      如实说明「哪类引用、几条」，绝不让用户以为规则也删了。
+    """
+    sqlite = request.app.state.sqlite
+    name = group_name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="group_name is required")
+
+    summary = sqlite.query(
+        "SELECT COUNT(*) AS cnt FROM watchlist WHERE group_name = ?",
+        [name],
+    )[0]
+    if int(summary["cnt"] or 0) == 0:
+        raise HTTPException(status_code=404, detail="watchlist group not found")
+    rule_ids = [
+        int(row["source_rule_id"])
+        for row in sqlite.query(
+            "SELECT DISTINCT source_rule_id FROM watchlist "
+            "WHERE group_name = ? AND source_rule_id IS NOT NULL "
+            "ORDER BY source_rule_id",
+            [name],
+        )
+    ]
+
+    # 先删分组行，再让规则守卫统计引用：这样 `watchlist` 引用只剩**其它分组**
+    # 的残留，不会把本次正在删除的分组自己算成"规则删不掉"。
+    deleted_rows = sqlite.execute(
+        "DELETE FROM watchlist WHERE group_name = ?", [name]
+    )
+    response: dict[str, Any] = {
+        "status": "ok",
+        "group": name,
+        "deleted_rows": deleted_rows,
+        "delete_rule_requested": bool(delete_rule),
+        "rule_deleted": False,
+        "deleted_rule_id": None,
+        "rule_delete_status": "not_requested",
+        "rule_delete_reason": None,
+        "skipped_rules": [],
+    }
+    if not delete_rule:
+        return response
+    if not rule_ids:
+        response["rule_delete_status"] = "no_rule"
+        response["rule_delete_reason"] = "该分组没有关联筛选规则，本次只删除了分组。"
+        return response
+    if len(rule_ids) > 1:
+        message = (
+            f"该分组来自 {len(rule_ids)} 个不同筛选规则（"
+            + "、".join(str(rule_id) for rule_id in rule_ids)
+            + "），为避免误删，本次只删除分组、未删除任何规则。"
+        )
+        response["rule_delete_status"] = "skipped"
+        response["rule_delete_reason"] = message
+        response["skipped_rules"] = [
+            {
+                "rule_id": rule_id,
+                "reason_code": "multiple_source_rules",
+                "message": message,
+            }
+            for rule_id in rule_ids
+        ]
+        return response
+
+    # 局部导入避免 `watchlist` ↔ `screening` 模块级循环依赖；同时保证删分组
+    # 走的确实是 `DELETE /rules/{id}` 的同一套守卫（不是第二份实现）。
+    from app.web.api.screening import delete_rule_with_guards
+
+    rule_id = rule_ids[0]
+    try:
+        deleted_rule = delete_rule_with_guards(sqlite, rule_id)
+    except HTTPException as error:
+        detail = error.detail if isinstance(error.detail, dict) else {}
+        reason_code = str(detail.get("reason_code") or "rule_delete_failed")
+        if error.status_code == 404:
+            reason_code = "rule_not_found"
+            message = "该分组记录的筛选规则已不存在，本次只删除了分组。"
+        else:
+            message = str(detail.get("message") or "规则没有删除，原因未知。")
+        response["rule_delete_status"] = "skipped"
+        response["rule_delete_reason"] = message
+        response["skipped_rules"] = [{
+            "rule_id": rule_id,
+            "reason_code": reason_code,
+            "message": message,
+            # 守卫原样带回的引用计数：results / watchlist / runs（几条）。
+            "refs": detail.get("refs"),
+        }]
+        return response
+
+    response["rule_deleted"] = True
+    response["deleted_rule_id"] = deleted_rule["deleted_rule_id"]
+    response["rule_delete_status"] = "deleted"
+    return response

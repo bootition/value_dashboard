@@ -14,6 +14,8 @@ import {
   NInput,
   NAlert,
   NSelect,
+  NRadioGroup,
+  NRadio,
   useMessage,
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
@@ -104,6 +106,33 @@ const showSaveDialog = ref(false)
 const saveTitle = ref('')
 const saveNote = ref('')
 const savedResultId = ref<number | null>(null)
+
+// ── 保存到自选列表：替换 / 合并确认（2026-11-25 用户实测）──────────────
+// 现场：同一规则每次保存都用同一个分组名，后端旧语义只 upsert 不删旧行 →
+// 「往股东口袋装钱的大老公司」两次运行累成 591 行，其中 220 行来自旧结果
+// （63 只当前市值已 < 100 亿，而规则重跑只命中 533 只、最小 100.01 亿）。
+// 这里在写入**之前**先读 `<GET /api/watchlist/groups>`：分组已存在且非空时
+// 让用户明确选「替换（推荐）」或「合并」，并如实说明会删/保留哪些行。
+interface WatchlistGroupSummary {
+  readonly group_name: string
+  readonly cnt: number
+  readonly runs?: number
+  readonly manual?: number
+}
+
+interface WatchlistConfirmState {
+  readonly group: string
+  readonly count: number
+  readonly runs: number
+  readonly manual: number
+  readonly codes: readonly string[]
+}
+
+const showWatchlistConfirm = ref(false)
+const watchlistConfirm = ref<WatchlistConfirmState | null>(null)
+// 确认框**默认选中「替换」**（用户显式点保存时，最新结果才是他要的分组内容）；
+// 不弹框的自动路径（分组为空 / 读不到分组现状）一律按「合并」发送，保持旧行为。
+const watchlistMode = ref<'replace' | 'merge'>('replace')
 
 // L1-7（报告42）: 列配置记忆（localStorage），刷新/重进页面不丢失。
 // v2（g4，2026-11-24 用户实测）：旧键只存一个数组、没有版本号。旧版本把
@@ -620,6 +649,13 @@ async function exportCSV() {
   }
 }
 
+/** 读该分组现状（`GET /api/watchlist/groups` 是唯一事实来源，不靠本地缓存猜）。 */
+async function fetchWatchlistGroup(groupName: string): Promise<WatchlistGroupSummary | null> {
+  const resp = await axios.get<{ groups: WatchlistGroupSummary[] }>('/api/watchlist/groups')
+  const groups = resp.data?.groups ?? []
+  return groups.find((g) => g.group_name === groupName) ?? null
+}
+
 async function addToWatchlist() {
   // 失败态/无 runId 时按钮本就禁用，这里再兜一道：绝不能用旧 results 写自选。
   if (runStateBlocksActions.value || props.runId === null) {
@@ -628,6 +664,39 @@ async function addToWatchlist() {
   }
   const codes = displayedResults.value.map((r) => r.stock_code)
   if (!codes.length) return
+  // 筛选结果按规则名归组；手动加入的股票仍由自选列表使用默认组。
+  const groupName = props.ruleName || 'default'
+  try {
+    const existing = await fetchWatchlistGroup(groupName)
+    if (existing && existing.cnt > 0) {
+      // 分组已存在且非空：必须先让用户选「替换」还是「合并」，不能默默累加。
+      watchlistConfirm.value = {
+        group: groupName,
+        count: existing.cnt,
+        runs: existing.runs ?? 0,
+        manual: existing.manual ?? 0,
+        codes,
+      }
+      watchlistMode.value = 'replace'
+      showWatchlistConfirm.value = true
+      return
+    }
+  } catch {
+    // 读不到分组现状时**不猜**：按保守的「合并」继续（不删任何已有股票），
+    // 并在提示里说明原因，避免把一次查询失败变成静默的累加或误删。
+    message.warning('无法读取自选分组现状，本次按「合并」保存，不会删除任何已有股票')
+    await performAddToWatchlist(groupName, 'merge', codes)
+    return
+  }
+  // 分组为空/不存在：替换与合并结果等价，按旧行为发合并请求（不带 replace_group）。
+  await performAddToWatchlist(groupName, 'merge', codes)
+}
+
+async function performAddToWatchlist(
+  groupName: string,
+  mode: 'replace' | 'merge',
+  codes: readonly string[],
+) {
   try {
     // 自选列表只依赖“本次结果包含哪些股票”，不需要用户先手动保存结果。
     // 为保留筛选来源，这里自动保存一个结果记录，再写入自选。
@@ -645,16 +714,39 @@ async function addToWatchlist() {
       savedResultId.value = saved.data.result_id
       resultId = saved.data.result_id
     }
+    const replace = mode === 'replace'
     const resp = await axios.post<ScreeningWatchlistResponse>('/api/screening/add_to_watchlist', {
-        stock_codes: codes,
-        // 筛选结果按规则名归组；手动加入的股票仍由自选列表使用默认组。
-        group: props.ruleName || 'default',
+        stock_codes: [...codes],
+        group: groupName,
         result_id: resultId,
+        replace_group: replace,
     })
-    message.success(`已保存到自选列表: ${resp.data.added} 只`)
+    const data = resp.data
+    if (replace) {
+      const removed = data.removed ?? 0
+      const inserted = data.inserted ?? data.added
+      const keptManual = data.manual_rows_preserved ?? 0
+      message.success(
+        `已替换自选分组「${groupName}」：替换了 ${removed} 只历史结果 / 新增 ${inserted} 只`
+        + (keptManual > 0 ? `，另有 ${keptManual} 只手动添加的股票保持不变` : ''),
+      )
+    } else {
+      const inserted = data.inserted ?? data.added
+      const updated = data.updated ?? 0
+      message.success(
+        `已合并到自选分组「${groupName}」：新增 ${inserted} 只、更新 ${updated} 只（共 ${data.added} 只）`,
+      )
+    }
   } catch (e: unknown) {
     reportActionError(e, '保存到自选列表失败')
   }
+}
+
+async function confirmWatchlistSave() {
+  const banner = watchlistConfirm.value
+  if (!banner) return
+  showWatchlistConfirm.value = false
+  await performAddToWatchlist(banner.group, watchlistMode.value, banner.codes)
 }
 </script>
 
@@ -844,6 +936,50 @@ async function addToWatchlist() {
         </n-button>
       </template>
     </n-modal>
+
+    <!-- 保存到自选之前的分组现状确认（2026-11-25 用户实测：重复保存会累加）。
+         默认选中「替换」；「手动添加」的行在任何选项下都不会被删除。 -->
+    <n-modal
+      v-model:show="showWatchlistConfirm"
+      preset="dialog"
+      title="保存到自选列表"
+      style="width: 580px"
+    >
+      <template v-if="watchlistConfirm">
+        <p class="watchlist-confirm-summary">
+          自选分组「{{ watchlistConfirm.group }}」已有 <b>{{ watchlistConfirm.count }}</b> 只
+          （来自 {{ watchlistConfirm.runs }} 次历史运行<template v-if="watchlistConfirm.manual > 0">，其中
+          {{ watchlistConfirm.manual }} 只是你手动添加的</template>）。本次结果有
+          <b>{{ watchlistConfirm.codes.length }}</b> 只，请选择本次操作会怎样：
+        </p>
+        <n-radio-group v-model:value="watchlistMode" class="watchlist-mode-group">
+          <n-radio value="replace" class="watchlist-mode-option">
+            <span class="watchlist-mode-title">替换（推荐）：分组内容 = 本次结果的 {{ watchlistConfirm.codes.length }} 只</span>
+            <span class="watchlist-mode-desc">
+              先删掉该分组里由历史筛选结果带进来的行（本次结果里仍然命中的会更新为本次来源）；
+              手动添加的 {{ watchlistConfirm.manual }} 只股票永不删除。
+            </span>
+          </n-radio>
+          <n-radio value="merge" class="watchlist-mode-option">
+            <span class="watchlist-mode-title">合并：保留原有 {{ watchlistConfirm.count }} 只 + 追加本次结果</span>
+            <span class="watchlist-mode-desc">
+              不删除任何已有股票，但可能出现本次筛选已经排除的旧股票（分组会继续变大）。
+            </span>
+          </n-radio>
+        </n-radio-group>
+      </template>
+      <template #action>
+        <n-button @click="showWatchlistConfirm = false">取消</n-button>
+        <n-button
+          type="primary"
+          :disabled="durableEntryDisabled"
+          :aria-describedby="durableEntryDisabled ? actionsDescribedBy : undefined"
+          @click="confirmWatchlistSave"
+        >
+          确认保存
+        </n-button>
+      </template>
+    </n-modal>
   </div>
 </template>
 
@@ -859,4 +995,10 @@ async function addToWatchlist() {
 .disclosed-warning-detail { margin: 0; line-height: 1.6; }
 /* 入口被禁用时把原因写在按钮旁边（灰字），别让用户对着灰按钮猜。 */
 .action-blocked-reason { margin: 10px 0 12px; color: #9a8a6a; font-size: 11px; line-height: 1.6; }
+/* 保存到自选的替换/合并确认框：两个选项各自带一行解释，不能只写选项名。 */
+.watchlist-confirm-summary { margin: 0 0 14px; color: #536359; font-size: 13px; line-height: 1.8; }
+.watchlist-mode-group { display: grid; gap: 10px; }
+.watchlist-mode-option { display: flex; align-items: flex-start; padding: 10px 12px; border: 1px solid #e6ece8; border-radius: 9px; }
+.watchlist-mode-title { display: block; color: #39463d; font-size: 13px; font-weight: 600; }
+.watchlist-mode-desc { display: block; margin-top: 4px; color: #829087; font-size: 11px; line-height: 1.7; }
 </style>
