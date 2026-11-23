@@ -960,3 +960,47 @@ def test_refresh_if_due_gates_on_marker(
     )
     third = updater.refresh_if_due()
     assert third["status"] != "skipped"
+
+
+def test_today_not_published_yet_is_deferred_not_failed(duckdb_store, sqlite_store) -> None:
+    """当天国债曲线源侧还没发布 → `deferred`，**不许**记 failed 把整轮打成 partial。
+
+    2026-11-24 实测：凌晨 00:52 跑更新时去抓**当天**的国债日报，源侧必然 `source_empty`
+    → 本步 `failed` → `treasury_curve` 步骤 `partial` → 整轮 `partial`。
+    「今天的数据还没公布」不是失败，是"等一会儿再来"。
+    """
+    from app.core.treasury import TreasuryCurveUpdater
+
+    class EmptyTodayAdapter:
+        """源侧对任何日期都回空（模拟"今天还没发布"）。"""
+
+        def fetch(self, request):
+            from datetime import UTC, datetime
+
+            from app.core.adapters.base import FetchResult, SourceMetadata
+
+            return FetchResult(
+                data=[],
+                metadata=SourceMetadata(
+                    source="czb_mof", fetch_time=datetime.now(UTC),
+                    raw_response_hash="c" * 64, confidence="strict",
+                ),
+            )
+
+    service = TreasuryCurveUpdater(duck=duckdb_store, sqlite=sqlite_store)
+    service.adapter = EmptyTodayAdapter()
+
+    from app.core.treasury import _cn_today  # noqa: PLC0415 - 与生产同一口径
+
+    report = service.refresh_if_due()
+    daily = report.get("daily") or {}
+    results = daily.get("results") or {}
+    today_text = _cn_today().isoformat()
+
+    # 今天的这一天必须是 deferred（不是 failed）
+    if today_text in results:
+        assert results[today_text]["status"] == "deferred", results[today_text]
+        assert results[today_text]["reason"] == "source_not_published_yet"
+    # 关键：整步不许因为"今天没发布"变成 partial
+    assert report.get("status") != "partial" or today_text not in (daily.get("failed") or []), report
+    assert today_text not in (daily.get("failed") or []), daily.get("failed")

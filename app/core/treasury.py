@@ -204,6 +204,8 @@ class TreasuryCurveUpdater:
         targets = work_dates or [str(_cn_today())]
         results: dict[str, dict[str, Any]] = {}
         failed: list[str] = []
+        deferred_days: list[str] = []
+        succeeded_days: list[str] = []
         skipped_days: list[str] = []
         trading_days = self._trading_days_upto(_cn_today())
         for work_time in targets:
@@ -230,8 +232,14 @@ class TreasuryCurveUpdater:
                 continue
             outcome = self._update_daily_one(work_date)
             results[work_time] = outcome
-            if outcome["status"] != "success":
+            # 2026-11-24：`deferred`（今天的曲线源侧还没发布）**不许**记进 failed ——
+            # 否则凌晨跑更新时每天都会把整轮打成 partial。
+            if outcome["status"] == "failed":
                 failed.append(work_time)
+            elif outcome["status"] == "deferred":
+                deferred_days.append(work_time)
+            elif outcome["status"] == "success":
+                succeeded_days.append(work_time)
             if progress_cb is not None:
                 progress_cb(work_time, outcome)
 
@@ -239,6 +247,9 @@ class TreasuryCurveUpdater:
         # 状态页/聚合据此不会把"周末跑更新"记成异常。
         if not failed and skipped_days and len(skipped_days) == len(targets):
             status = "skipped"
+        elif not failed and deferred_days and not succeeded_days:
+            # 全是"今天还没发布" → deferred（与 skipped 同级，不把整轮拖成 partial）
+            status = "deferred"
         elif not failed:
             status = "success"
         elif not results or len(failed) == len(targets):
@@ -248,8 +259,9 @@ class TreasuryCurveUpdater:
         return {
             "status": status,
             "targeted": len(targets),
-            "succeeded": len(targets) - len(failed) - len(skipped_days),
+            "succeeded": len(succeeded_days),
             "failed": failed,
+            "deferred": deferred_days,
             "results": results,
             "skipped_days": skipped_days,
         }
@@ -265,6 +277,16 @@ class TreasuryCurveUpdater:
                     "error": result.metadata.error, "retained": True}
 
         if not result.data:
+            # 2026-11-24 实测：凌晨 00:52 跑更新时去抓**当天**的国债日报，源侧必然
+            # 还没发布 → `source_empty` → 本步 `failed` → 整轮 `partial`。
+            # 「今天的数据还没公布」不是失败，是**等一会儿再来**：
+            #   · `deferred`（不进 failed、不把整轮打成 partial）
+            #   · **不登记 missing**（否则 missing 表里会攒一堆"今天还没发布"的噪声，
+            #     并触发无意义的重试）
+            # 历史日期（补采旧报告期）的 source_empty 仍按失败处理 —— 那是真缺数据。
+            if work_date >= _cn_today():
+                return {"status": "deferred", "work_date": str(work_date),
+                        "reason": "source_not_published_yet", "retained": True}
             self._record_missing(None, "source_empty", work_date=str(work_date))
             return {"status": "failed", "work_date": str(work_date),
                     "reason": "source_empty", "retained": True}
@@ -336,10 +358,15 @@ class TreasuryCurveUpdater:
                 )
             gap_fill = self.backfill_missing_days(max_days=max_gap_fill_days)
             self._mark_refreshed()
+            if daily["status"] == "failed" or backfill_report["status"] == "failed":
+                overall = "partial"
+            elif daily["status"] == "deferred":
+                # 今天的曲线还没发布：如实报 deferred（与 skipped 同级，不进 failed）
+                overall = "deferred"
+            else:
+                overall = "success"
             return {
-                "status": "success"
-                if daily["status"] != "failed" and backfill_report["status"] != "failed"
-                else "partial",
+                "status": overall,
                 "daily": daily,
                 "backfill": backfill_report,
                 "gap_fill": gap_fill,
