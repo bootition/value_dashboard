@@ -177,6 +177,28 @@ class DatabasePathSet:
         return _validated_path_set(self.env, duckdb_path, sqlite_path, run_root)
 
 
+#: `shared_data_roots()` 的进程内缓存（2026-11-23 性能事故）。
+#:
+#: 事故现场：指标全量重算实测 **33–39 只/分钟**（5,575 只 ≈ 2.4 小时）。
+#: py-spy 抓栈发现每只股票都卡在这里：
+#:
+#:     Popen._execute_child            ← 正在 spawn 子进程！
+#:     shared_data_roots(path_policy)
+#:     DatabasePathSet.validate
+#:     SQLiteStore._revalidate
+#:     SQLiteStore.connection / query
+#:     IndicatorCalculator.compute_all_for_stock
+#:
+#: 也就是 **每一次 sqlite.query() 都 spawn 一个 `git rev-parse`**（Windows 上
+#: 进程创建 50–150 ms），每只股票要查好几次 → 单股 1.5 s。
+#: 这是纯开销：仓库根在一个进程的生命周期内不可能变。
+#:
+#: 缓存**不削弱任何安全语义**——路径隔离守卫每次都照跑（比较的还是这份算好的集合）；
+#: 真要换仓库根，换的是进程，缓存自然跟着换。
+#: 空结果也缓存：非 git 环境 / 没装 git 时若不缓存，每次查询都会再 spawn 一次失败。
+_SHARED_ROOTS_CACHE: tuple[Path, ...] | None = None
+
+
 def shared_data_roots() -> set[Path]:
     """同一仓库**所有工作树**共用的 `data/` 目录（reports/147）。
 
@@ -185,7 +207,16 @@ def shared_data_roots() -> set[Path]:
     - 链接工作树 → 同样返回**主检出**的 `.git`，因此得到主检出的 `data/`。
 
     取不到（非 git 仓库 / 没有 git）时返回空集合，调用方退回只看 `_DATA_ROOT`。
+
+    ⚠️ **结果在进程内缓存**（见 `_SHARED_ROOTS_CACHE`）：本函数被
+    `SQLiteStore._revalidate()` 在**每一次查询**时调用，不缓存等于每次查询
+    spawn 一个 git 进程（实测把指标全量重算拖到 2.4 小时）。
+    不加锁：GIL 下最坏情况是两个线程各多跑一次 git，结果相同、无副作用。
     """
+    global _SHARED_ROOTS_CACHE
+    cached = _SHARED_ROOTS_CACHE
+    if cached is not None:
+        return set(cached)
     try:
         completed = subprocess.run(
             ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
@@ -200,15 +231,20 @@ def shared_data_roots() -> set[Path]:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
+        _SHARED_ROOTS_CACHE = ()
         return set()
     if completed.returncode != 0 or not completed.stdout.strip():
+        _SHARED_ROOTS_CACHE = ()
         return set()
     git_dir = Path(completed.stdout.strip())
     if git_dir.name != ".git":
         # 裸仓库或异常布局：不做猜测
+        _SHARED_ROOTS_CACHE = ()
         return set()
     root = canonicalize_path(git_dir.parent)
-    return {canonicalize_path(root / "data")}
+    roots = (canonicalize_path(root / "data"),)
+    _SHARED_ROOTS_CACHE = roots
+    return set(roots)
 
 
 def _is_inside(child: Path, parent: Path) -> bool:

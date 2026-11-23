@@ -111,6 +111,23 @@ def derived_snapshot_domains() -> tuple[DerivedSnapshotDomain, ...]:
     )
 
 
+def _has_any_financials(duck: Any, stock_code: str) -> bool:
+    """该股票是否有**任何**财报行（用来区分"数据还没到"与"真算错"）。
+
+    刚上市的新股在首次披露前 `income_statement` 是空表；此时算不出 PE/ROE
+    指标准确地说不是缺陷。二零二六-11-23 实测 5 只（001381/688827/920085/
+    920306/920309，上市 10-29~11-17）因此被记成 failed，让整轮常年 partial。
+    """
+    try:
+        rows = duck.read_query(
+            "SELECT 1 AS ok FROM income_statement WHERE stock_code = ? LIMIT 1",
+            [stock_code],
+        )
+    except Exception:  # noqa: BLE001 - 判定失败时保守当"有财报"，宁可记 failed
+        return True
+    return bool(rows)
+
+
 class IndicatorCalculator:
     """内建指标计算器
 
@@ -337,6 +354,7 @@ class IndicatorCalculator:
 
         records: list[dict[str, Any]] = []
         failed_codes: list[str] = []
+        not_ready_codes: list[str] = []
         with self.duck.read_connection() as connection:
             self._calculation_read_connection = connection
             try:
@@ -347,8 +365,21 @@ class IndicatorCalculator:
                         )
                         records.append(indicators)
                     except Exception as error:
-                        logger.debug("价格域增量计算 %s 失败: %s", code, error)
-                        failed_codes.append(code)
+                        # 2026-11-23：新股（刚上市、**一条财报都没有**）算不出任何
+                        # 指标是**正常的**，不该算"失败"——否则每轮都把这批股票
+                        # 记成 failed → 整轮永远 partial（用户最反感的假告警形态）。
+                        # 这里把"数据还没到"与"真算错"分开记账：
+                        #   · 无任何 income_statement 行 → not_ready（不阻断整轮）
+                        #   · 有财报却算错 → 仍是 failed（要修）
+                        if _has_any_financials(self.duck, code):
+                            logger.debug("价格域增量计算 %s 失败: %s", code, error)
+                            failed_codes.append(code)
+                        else:
+                            logger.debug(
+                                "价格域增量计算 %s 跳过（零财报，新股尚未披露）: %s",
+                                code, error,
+                            )
+                            not_ready_codes.append(code)
                     if progress_cb is not None:
                         progress_cb({
                             "step": "indicators_price",
@@ -383,6 +414,9 @@ class IndicatorCalculator:
             "skipped": skipped,
             "failed": len(failed_codes) + int(full_report.get("failed") or 0),
             "failed_codes": (failed_codes + list(full_report.get("failed_codes") or []))[:20],
+            # 零财报新股：算不出指标是正常的，单独记账、**不参与 status 判定**。
+            "not_ready": len(not_ready_codes),
+            "not_ready_codes": not_ready_codes[:20],
             "full_recompute": full_report,
             **quarantine,
         }
