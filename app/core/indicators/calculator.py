@@ -28,6 +28,16 @@
 #     当 owned_columns（会漏掉非本计算器产出的列）。
 # S8  reports/119 P1-5 —— 利息保障倍数口径修复：不再要求「三项全部非空」。
 # S9  reports/97 —— Sina 明细 TEMP TABLE 合并写入（同思路：先落临时表再一次合并）。
+# S10 价格域批量预取（2026-11-25 实测）：`compute_price_fields_for_stock` 每股 13 条
+#     SQL，其中技术窗口的 `price_daily_raw LEFT JOIN price_daily_qfq` 与国债曲线
+#     整表重读是主要开销 → 改成"每批每类一次 + 进程内 dict 查找"，缓存生命周期
+#     = 一个批次（进场建、退场必清），miss 一律回落原逐股 SQL。口径/字段/单位零改动，
+#     `tests/regression/test_indicator_price_domain_prefetch.py` 用逐列 `==` 对拍钉死。
+# S11 连续性判定的复杂度：`_trailing_contiguous_closes/_rows` 原实现对"期望交易日"
+#     集合整表 `any()`，是 O(行数 × 期望日数) ≈ 6 万次比较/只，占 `_calc_technical`
+#     约 70%（cProfile: 36M genexpr 调用 / 200 只）。改为有序元组 + `bisect`，
+#     **判定语义逐值等价**（第一个 > older 的期望日是否 < newer），
+#     同一条对拍用例覆盖（`test_series_breaks_and_derived_fields.py` 钉断点行为）。
 
 
 from __future__ import annotations
@@ -37,7 +47,7 @@ import hashlib
 import logging
 import math
 import uuid
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable, Collection, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -158,6 +168,15 @@ class IndicatorCalculator:
         self.duck = duck
         self.sqlite = sqlite
 
+        # ─── 批次作用域预取缓存（依据 S10）──────────────────────────
+        # **生命周期 = 一个批次**：`prefetch_codes()` 建、`clear_prefetch()` 清，
+        # 一律在同一个 `price_domain_batch()` 的 try/finally 里。默认 None 表示
+        # "没有批次在跑"——此时每个 `_get_xxx` 都走原逐股查询，行为与提速前完全
+        # 一致（任何旧调用方都不会因为这次改动看到不同的取数路径）。
+        # 绝不做跨批次/进程级长期缓存：行情、财报、分红、日历、国债曲线每天都在
+        # 变，长期缓存 = 拿上一代数据算出"看起来成功"的快照（假绿）。
+        self._prefetch_cache: dict[tuple[str, str, str], Any] | None = None
+
     def compute_all_for_stock(self, stock_code: str) -> dict[str, Any]:
         """计算单只股票的全部内建指标
 
@@ -239,7 +258,17 @@ class IndicatorCalculator:
         2026-09-08 提速：日常价格更新只改变价格域字段，盈利/成长/安全/
         股东回报/分红融资比等基本面字段无需重算。report_date 必须等于
         当前最新完整报告期，否则调用方应走完整重算。
+
+        依据 S10：单只调用也走同一个批次作用域（"一批一只"）——批量调用方
+        （`compute_price_sensitive_for_codes`）已经在作用域里时直接复用它的
+        预取缓存，不会重复预取，也不会替外层清缓存。
         """
+        with self.price_domain_batch([stock_code], report_dates={stock_code: report_date}):
+            return self._compute_price_fields_for_stock(stock_code, report_date)
+
+    def _compute_price_fields_for_stock(
+        self, stock_code: str, report_date: Any,
+    ) -> dict[str, Any]:
         financials = self._get_latest_financials(stock_code)
         if str(financials.get("report_date") or "") != str(report_date or ""):
             raise ValueError(
@@ -355,41 +384,53 @@ class IndicatorCalculator:
         records: list[dict[str, Any]] = []
         failed_codes: list[str] = []
         not_ready_codes: list[str] = []
+        done = 0
         with self.duck.read_connection() as connection:
             self._calculation_read_connection = connection
             try:
-                for done, code in enumerate(changed, start=1):
-                    try:
-                        indicators = self.compute_price_fields_for_stock(
-                            code, existing[code]["report_date"],
-                        )
-                        records.append(indicators)
-                    except Exception as error:
-                        # 2026-11-23：新股（刚上市、**一条财报都没有**）算不出任何
-                        # 指标是**正常的**，不该算"失败"——否则每轮都把这批股票
-                        # 记成 failed → 整轮永远 partial（用户最反感的假告警形态）。
-                        # 这里把"数据还没到"与"真算错"分开记账：
-                        #   · 无任何 income_statement 行 → not_ready（不阻断整轮）
-                        #   · 有财报却算错 → 仍是 failed（要修）
-                        if _has_any_financials(self.duck, code):
-                            logger.debug("价格域增量计算 %s 失败: %s", code, error)
-                            failed_codes.append(code)
-                        else:
-                            logger.debug(
-                                "价格域增量计算 %s 跳过（零财报，新股尚未披露）: %s",
-                                code, error,
-                            )
-                            not_ready_codes.append(code)
-                    if progress_cb is not None:
-                        progress_cb({
-                            "step": "indicators_price",
-                            "label": "指标快照·价格域",
-                            "done": done,
-                            "total": len(changed),
-                            "current": code,
-                        })
+                # 依据 S10：按预取批次（默认 400 只）切片，每片进场预取、退场丢缓存。
+                # 为什么不在整批 5,000+ 只上一次性预取：技术窗口是每股 250 行，
+                # 全市场一次性驻留 ≈ 1.25M 行 dict（GB 级），比慢更难收拾。
+                for start in range(0, len(changed), self._PREFETCH_BATCH_CODES):
+                    chunk = changed[start:start + self._PREFETCH_BATCH_CODES]
+                    with self.price_domain_batch(
+                        chunk,
+                        report_dates={code: existing[code]["report_date"] for code in chunk},
+                    ):
+                        for code in chunk:
+                            done += 1
+                            try:
+                                indicators = self._compute_price_fields_for_stock(
+                                    code, existing[code]["report_date"],
+                                )
+                                records.append(indicators)
+                            except Exception as error:
+                                # 2026-11-23：新股（刚上市、**一条财报都没有**）算不出任何
+                                # 指标是**正常的**，不该算"失败"——否则每轮都把这批股票
+                                # 记成 failed → 整轮永远 partial（用户最反感的假告警形态）。
+                                # 这里把"数据还没到"与"真算错"分开记账：
+                                #   · 无任何 income_statement 行 → not_ready（不阻断整轮）
+                                #   · 有财报却算错 → 仍是 failed（要修）
+                                if _has_any_financials(self.duck, code):
+                                    logger.debug("价格域增量计算 %s 失败: %s", code, error)
+                                    failed_codes.append(code)
+                                else:
+                                    logger.debug(
+                                        "价格域增量计算 %s 跳过（零财报，新股尚未披露）: %s",
+                                        code, error,
+                                    )
+                                    not_ready_codes.append(code)
+                            if progress_cb is not None:
+                                progress_cb({
+                                    "step": "indicators_price",
+                                    "label": "指标快照·价格域",
+                                    "done": done,
+                                    "total": len(changed),
+                                    "current": code,
+                                })
             finally:
                 del self._calculation_read_connection
+                self.clear_prefetch()
 
         if records:
             self._update_snapshot_price_fields(records)
@@ -1185,13 +1226,459 @@ class IndicatorCalculator:
         """
         return self._read_query(sql, params)
 
+    # ─── 批次作用域预取（依据 S10）──────────────────────────────────
+    #
+    # 问题（2026-11-25 实测，40 只真实股票、正式库只读、共用一条只读连接）
+    # ------------------------------------------------------------------
+    # `compute_price_fields_for_stock` 每只股票要发 **13 条** SQL：
+    #   财报 / 覆写 / 最新价 / 股本 / TTM / 覆写 / 分红汇总 / 股息率 /
+    #   技术窗口 / 交易日历 / 国债基准的价 / 国债基准的分红 / 国债曲线
+    # 其中国债曲线是**全市场共用的一条**（51,960 行），却每股重读一遍；
+    # 技术窗口那条 `price_daily_raw LEFT JOIN price_daily_qfq` 每股要做一次
+    # 大表扫描（40.4 ms/只，占单只总耗时 66.5 ms 的 61%）。
+    #
+    # 做法：把"每类查询一次"从 **每股一次** 改成 **每批一次**，进程内只做 dict
+    # 查找；SQL 一律保持原样（同一 SELECT 列表、同一 WHERE、同一排序），只是把
+    # `stock_code = ?` 换成本批的 `IN (...)`（需要"每股取最新 N 行"的地方用
+    # `ROW_NUMBER() OVER (PARTITION BY stock_code ORDER BY ...)` 复现 `LIMIT N`）。
+    #
+    # 缓存纪律（三条，缺一条就会出假绿）
+    # ------------------------------------
+    # 1. **生命周期 = 一个批次**：`price_domain_batch()` 用 try/finally 保证批次
+    #    结束（含异常）就 `clear_prefetch()`；不写任何类/模块/进程级长期缓存。
+    # 2. **miss 一律回落原逐股查询**：每个 `_get_xxx` 都是"先查缓存、查不到就走
+    #    原来那条 SQL"，所以缓存只可能是加速，不可能改变谁能取到什么。
+    # 3. **缓存键带参数**：`(kind, stock_code, as_of)`。带 `as_of` 的三类取数
+    #    （TTM / 分红汇总 / 滚动 12 个月每股分红）键里含规范化后的日期，调用方
+    #    要的日期与预取日期不一致时**必然 miss** → 回落原查询，绝不会把
+    #    "另一个报告期"的结果返给调用方。
+    #
+    # 返回副本：缓存命中的 dict/list 一律浅拷贝再给调用方 —— `_calc_technical`
+    # 会 `rows.reverse()`、`_apply_published_overrides` 会就地改行，共享对象
+    # 会互相污染（这类脏读比慢更糟）。
+
+    #: 一条批量 SQL 里塞多少个占位符。SQLite 老版本 SQLITE_MAX_VARIABLE_NUMBER
+    #: 是 999，DuckDB 的 `VALUES` 关系共用同一个参数列表，取 400 两边都安全。
+    _PREFETCH_CHUNK = 400
+
+    #: 一个预取批次处理多少只股票。上限由**内存**定而不是速度定：技术窗口
+    #: 每股 250 行，400 只 ≈ 10 万行 dict（几十 MB）驻留；5,000 只一次性预取
+    #: 会到 GB 级，反而把机器拖死。批次结束缓存即丢（依据 S10）。
+    _PREFETCH_BATCH_CODES = 400
+
+    @staticmethod
+    def _asof_key(value: Any) -> str:
+        """把 as_of 参数规范成缓存键。
+
+        三条带日期的 SQL 都是 `CAST(? AS DATE)` 或 `<= CAST(? AS DATE)`，
+        只认日期部分；`None`/空串在所有调用点都表示"不加日期过滤"，统一成 ""。
+        """
+        if value is None:
+            return ""
+        text = str(value)
+        return text[:10] if text else ""
+
+    @property
+    def _prefetch_active(self) -> bool:
+        return self._prefetch_cache is not None
+
+    def _prefetch_lookup(
+        self, kind: str, code: str = "", discriminator: str = "",
+    ) -> tuple[bool, Any]:
+        cache = self._prefetch_cache
+        if cache is None:
+            return False, None
+        key = (kind, code, discriminator)
+        if key in cache:
+            return True, cache[key]
+        return False, None
+
+    def _prefetch_put(
+        self, kind: str, code: str, discriminator: str, value: Any,
+    ) -> None:
+        if self._prefetch_cache is None:
+            return
+        self._prefetch_cache[(kind, code, discriminator)] = value
+
+    def clear_prefetch(self) -> None:
+        """丢掉批次缓存（批次结束必须调用；重复调用无害）。"""
+        self._prefetch_cache = None
+
+    @contextlib.contextmanager
+    def price_domain_batch(
+        self,
+        codes: Collection[str],
+        *,
+        report_dates: dict[str, Any] | None = None,
+    ) -> Iterator[None]:
+        """价格域批次作用域：进场预取、**退场（含异常）清空**。
+
+        已经有外层批次在跑时直接复用它的缓存（不重建、也不替它清），所以
+        单只调用方与批量调用方可以任意嵌套。
+        """
+        if self._prefetch_cache is not None:
+            yield
+            return
+        try:
+            self.prefetch_codes(codes, report_dates=report_dates)
+            yield
+        finally:
+            self.clear_prefetch()
+
+    def prefetch_codes(
+        self,
+        codes: Collection[str],
+        *,
+        report_dates: dict[str, Any] | None = None,
+    ) -> dict[str, int]:
+        """把价格域用到的每类取数**按批**预取进内存（依据 S10）。
+
+        Args:
+            codes: 本批股票代码。
+            report_dates: 每股 as_of（价格域增量路径 = 快照里既有的报告期）。
+                为 None 时用刚预取的财报里的最新报告期（= `compute_all_for_stock`
+                的取法）。任一只算不出 as_of 时该类取数就不预取，让该股走回落。
+
+        Returns:
+            每类预取到的条目数（日志/测试用）。
+        """
+        unique = [str(code) for code in dict.fromkeys(codes)]
+        if not unique:
+            return {}
+        if self._prefetch_cache is None:
+            self._prefetch_cache = {}
+
+        counts: dict[str, int] = {}
+
+        def bump(kind: str, n: int) -> None:
+            counts[kind] = counts.get(kind, 0) + n
+
+        as_of_by_code: dict[str, Any] = {}
+        for start in range(0, len(unique), self._PREFETCH_CHUNK):
+            chunk = unique[start:start + self._PREFETCH_CHUNK]
+            bump("financials", self._prefetch_financials(chunk))
+            bump("overrides", self._prefetch_overrides(chunk))
+            bump("shares", self._prefetch_shares(chunk))
+            bump("price", self._prefetch_price(chunk))
+            bump("technical", self._prefetch_technical(chunk))
+            for code in chunk:
+                if report_dates is not None:
+                    as_of_by_code[code] = report_dates.get(code)
+                else:
+                    hit, financials = self._prefetch_lookup("financials", code)
+                    as_of_by_code[code] = financials.get("report_date") if hit else None
+            ttm_chunk = [c for c in chunk if self._asof_key(as_of_by_code[c]) or
+                         report_dates is None]
+            bump("ttm_rows", self._prefetch_ttm_rows(
+                ttm_chunk, {c: as_of_by_code[c] for c in ttm_chunk},
+            ))
+            # 分红汇总（`_get_dividend_summary`）**故意不批量预取**：它要
+            # COUNT/SUM/AVG 历史全表聚合，多行时求和顺序由执行计划决定（同一份
+            # 数据能差 1 ULP）。要 bit 级一致就只能发原逐股 SQL —— 这条按设计
+            # 留在 miss 回落的快路径上（实测 1.6 ms/只，换掉一个漂移来源）。
+        # 滚动 12 个月每股分红（股息率 + 国债基准共用）以**价格日**为 as_of，
+        # 价格刚预取完就能算。注意：报告期 as_of 的那一份**不**预取 —— 价格域
+        # 两个调用方要的都是价格日，预取错日期只会白算。
+        dps_pairs: list[tuple[str, Any]] = []
+        for code in unique:
+            hit, price = self._prefetch_lookup("price", code)
+            if hit and price.get("trade_date"):
+                dps_pairs.append((code, price.get("trade_date")))
+        for start in range(0, len(dps_pairs), self._PREFETCH_CHUNK):
+            chunk_pairs = dps_pairs[start:start + self._PREFETCH_CHUNK]
+            bump("trailing_dps", self._prefetch_trailing_dps(
+                [code for code, _ in chunk_pairs],
+                {code: as_of for code, as_of in chunk_pairs},
+            ))
+        counts["treasury_curve"] = self._prefetch_treasury_curve()
+        counts["calendar"] = self._prefetch_trading_calendar()
+        return counts
+
+    # ─── 批量取数（每条 SQL 都从原逐股 SQL 逐字搬来，只把 `code = ?` 换成批）──
+
+    def _prefetch_financials(self, codes: list[str]) -> int:
+        if not codes:
+            return 0
+        placeholders = ", ".join("?" for _ in codes)
+        rows = self._read_query(f"""
+            SELECT * FROM (
+                SELECT
+                    bs.stock_code,
+                    bs.report_date,
+                    bs.monetary_funds, bs.accounts_receivable, bs.inventory,
+                    bs.total_current_assets, bs.total_assets,
+                    bs.total_current_liabilities, bs.total_liabilities,
+                    bs.total_equity, bs.total_equity_parent,
+                    bs.paid_in_capital, bs.goodwill,
+                    bs.short_term_loans, bs.long_term_loans, bs.bonds_payable,
+                    bs.notes_receivable, bs.prepayments, bs.other_receivables,
+                    bs.fixed_assets, bs.intangible_assets,
+                    ic.revenue, ic.cost_of_revenue,
+                    (ic.revenue - ic.cost_of_revenue) AS gross_profit,
+                    ic.operating_profit, ic.net_profit,
+                    ic.parent_net_profit, ic.deducted_net_profit,
+                    ic.total_operating_revenue, ic.total_operating_cost,
+                    ic.selling_expenses, ic.administrative_expenses,
+                    ic.financial_expenses, ic.rd_expenses,
+                    ic.interest_expense, ic.investment_income,
+                    ic.total_profit, ic.income_tax, ic.basic_eps,
+                    cf.cf_from_operating, cf.cf_from_investing,
+                    cf.cf_from_financing, cf.cf_net,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY bs.stock_code ORDER BY bs.report_date DESC
+                    ) AS _prefetch_rn
+                FROM balance_sheet bs
+                LEFT JOIN income_statement ic
+                    ON bs.stock_code = ic.stock_code AND bs.report_date = ic.report_date
+                LEFT JOIN cash_flow cf
+                    ON bs.stock_code = cf.stock_code AND bs.report_date = cf.report_date
+                WHERE bs.stock_code IN ({placeholders})
+                  AND bs.total_assets IS NOT NULL
+                  AND bs.total_liabilities IS NOT NULL
+                  AND COALESCE(bs.total_equity_parent, bs.total_equity) IS NOT NULL
+                  AND ic.revenue IS NOT NULL
+                  AND ic.parent_net_profit IS NOT NULL
+                  AND cf.cf_from_operating IS NOT NULL
+            ) ranked WHERE _prefetch_rn = 1
+        """, list(codes))
+        for row in rows:
+            code = row.pop("stock_code")
+            row.pop("_prefetch_rn", None)
+            self._prefetch_put("financials", code, "", row)
+        return len(rows)
+
+    def _prefetch_overrides(self, codes: list[str]) -> int:
+        if not codes:
+            return 0
+        placeholders = ", ".join("?" for _ in codes)
+        try:
+            rows = self.sqlite.query(
+                f"""SELECT stock_code, field_name, report_date, override_value
+                    FROM manual_overrides
+                    WHERE stock_code IN ({placeholders})
+                      AND status = 'published' AND rolled_back_at IS NULL""",
+                list(codes),
+            )
+        except Exception as error:  # noqa: BLE001 - 覆写读不到就回落原路径（非致命）
+            logger.debug("批量读取人工覆写失败 (非致命): %s", error)
+            return 0
+        by_code: dict[str, list[dict[str, Any]]] = {code: [] for code in codes}
+        for row in rows:
+            code = str(row.pop("stock_code"))
+            by_code.setdefault(code, []).append(row)
+        for code, items in by_code.items():
+            self._prefetch_put("overrides", code, "", items)
+        return len(by_code)
+
+    def _prefetch_shares(self, codes: list[str]) -> int:
+        if not codes:
+            return 0
+        placeholders = ", ".join("?" for _ in codes)
+        rows = self._read_query(
+            f"""SELECT stock_code, total_shares, circ_shares
+                FROM stock_meta WHERE stock_code IN ({placeholders})""",
+            list(codes),
+        )
+        for row in rows:
+            code = row.pop("stock_code")
+            self._prefetch_put("shares", code, "", {
+                "total_shares": row.get("total_shares"),
+                "circ_shares": row.get("circ_shares"),
+            })
+        # 不在 stock_meta 里的股票：缓存"两项皆空"，与原实现返回同一个形状，
+        # 免得每只都回落一次 SQL（回落也得出同样的空值）。
+        for code in codes:
+            hit, _ = self._prefetch_lookup("shares", code)
+            if not hit:
+                self._prefetch_put("shares", code, "", {
+                    "total_shares": None, "circ_shares": None,
+                })
+        return len(rows)
+
+    def _prefetch_price(self, codes: list[str]) -> int:
+        if not codes:
+            return 0
+        placeholders = ", ".join("?" for _ in codes)
+        rows = self._read_query(f"""
+            SELECT stock_code, trade_date, close, volume, turnover FROM (
+                SELECT stock_code, trade_date, close, volume, turnover,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY stock_code ORDER BY trade_date DESC
+                       ) AS _prefetch_rn
+                FROM price_daily_raw
+                WHERE stock_code IN ({placeholders}) AND close IS NOT NULL
+            ) ranked WHERE _prefetch_rn = 1
+        """, list(codes))
+        for row in rows:
+            code = row.pop("stock_code")
+            row.pop("_prefetch_rn", None)
+            self._prefetch_put("price", code, "", row)
+        return len(rows)
+
+    def _prefetch_technical(self, codes: list[str]) -> int:
+        if not codes:
+            return 0
+        placeholders = ", ".join("?" for _ in codes)
+        rows = self._read_query(f"""
+            SELECT stock_code, trade_date, raw_close, volume, turnover, turnover_rate,
+                   qfq_close FROM (
+                SELECT raw.stock_code, raw.trade_date, raw.close AS raw_close, raw.volume,
+                       raw.turnover, raw.turnover_rate, qfq.close AS qfq_close,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY raw.stock_code ORDER BY raw.trade_date DESC
+                       ) AS _prefetch_rn
+                FROM price_daily_raw raw
+                LEFT JOIN price_daily_qfq qfq
+                  ON qfq.stock_code = raw.stock_code AND qfq.trade_date = raw.trade_date
+                WHERE raw.stock_code IN ({placeholders})
+            ) ranked WHERE _prefetch_rn <= 250
+            ORDER BY stock_code, trade_date DESC
+        """, list(codes))
+        windows: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            code = row.pop("stock_code")
+            row.pop("_prefetch_rn", None)
+            windows.setdefault(code, []).append(row)
+        for code, window in windows.items():
+            self._prefetch_put("technical", code, "", window)
+        return len(windows)
+
+    def _prefetch_ttm_rows(
+        self, codes: list[str], as_of_by_code: dict[str, Any],
+    ) -> int:
+        if not codes:
+            return 0
+        values = ", ".join("(?, CAST(? AS DATE))" for _ in codes)
+        params: list[Any] = []
+        for code in codes:
+            as_of = as_of_by_code.get(code)
+            params.extend([code, str(as_of) if as_of else None])
+        rows = self._read_query(f"""
+            SELECT * FROM (
+                SELECT ic.stock_code, ic.report_date,
+                       ic.revenue, ic.cost_of_revenue,
+                       (ic.revenue - ic.cost_of_revenue) AS gross_profit,
+                       ic.operating_profit, ic.net_profit,
+                       ic.parent_net_profit, ic.deducted_net_profit,
+                       ic.total_operating_revenue, ic.total_operating_cost,
+                       ic.selling_expenses, ic.administrative_expenses,
+                       ic.financial_expenses, ic.interest_expense,
+                       ic.investment_income, ic.total_profit, ic.income_tax,
+                       cf.cf_from_operating,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY ic.stock_code ORDER BY ic.report_date DESC
+                       ) AS _prefetch_rn
+                FROM income_statement ic
+                LEFT JOIN cash_flow cf
+                    ON ic.stock_code = cf.stock_code AND ic.report_date = cf.report_date
+                JOIN (VALUES {values}) AS p(stock_code, as_of)
+                  ON p.stock_code = ic.stock_code
+                WHERE (p.as_of IS NULL OR ic.report_date <= p.as_of)
+            ) ranked WHERE _prefetch_rn <= 8
+            ORDER BY stock_code, report_date DESC
+        """, params)
+        windows: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            code = row.pop("stock_code")
+            row.pop("_prefetch_rn", None)
+            windows.setdefault(code, []).append(row)
+        for code, window in windows.items():
+            self._prefetch_put("ttm_rows", code, self._asof_key(as_of_by_code.get(code)), window)
+        return len(windows)
+
+    def _prefetch_trailing_dps(
+        self, codes: list[str], as_of_by_code: dict[str, Any],
+    ) -> int:
+        if not codes:
+            return 0
+        values = ", ".join("(?, CAST(? AS DATE))" for _ in codes)
+        params: list[Any] = []
+        for code in codes:
+            params.extend([code, str(as_of_by_code.get(code))])
+        rows = self._read_query(f"""
+            WITH params(stock_code, as_of) AS (
+                SELECT * FROM (VALUES {values}) AS v(stock_code, as_of)
+            )
+            SELECT p.stock_code, SUM(d.dividend_per_share) AS dps,
+                   COUNT(*) AS n_dividends
+            FROM params p
+            JOIN dividends d
+              ON d.stock_code = p.stock_code
+             AND d.dividend_per_share IS NOT NULL
+             AND d.dividend_per_share > 0
+             AND d.announcement_date IS NOT NULL
+             AND d.announcement_date <= p.as_of
+             AND d.ex_date <= p.as_of
+             AND d.ex_date >= p.as_of - INTERVAL '1 year'
+            GROUP BY p.stock_code
+        """, params)
+        # ⚠️ 只缓存"**至多一条**分红"的组（依据 S10 §浮点求和顺序）：
+        # DuckDB 的 `SUM(DOUBLE)` 是顺序累加，多行时**求和顺序**由执行计划决定。
+        # 批量 `GROUP BY` 与逐股过滤扫描的行序不同 → 同一份数据能差 1 个 ULP
+        # （2026-11-25 实测 1,000 只里 2 只：0.4853 vs 0.48530000000000006，
+        # 不是口径差异，但也不是"更正确"，属于漂移 → 按硬要求不许放行）。
+        # 0 行：SUM = NULL，无顺序问题；1 行：SUM 就是该行本身，无顺序问题。
+        # ≥2 行一律不缓存 → miss 回落原逐股 SQL，结果按构造逐位一致。
+        found = {
+            str(row["stock_code"]): {"dps": row["dps"]}
+            for row in rows
+            if int(row["n_dividends"] or 0) <= 1
+        }
+        for code in codes:
+            key = self._asof_key(as_of_by_code.get(code))
+            if code in found:
+                self._prefetch_put("trailing_dps", code, key, found[code])
+            elif all(str(row["stock_code"]) != code for row in rows):
+                # 该股在该 as_of 下**一条分红都没有**（批量侧 JOIN 不产生行）→
+                # 原逐股 SQL 会返回 NULL，直接缓存 NULL 同样逐位一致。
+                self._prefetch_put("trailing_dps", code, key, {"dps": None})
+        return len(found)
+
+    def _prefetch_treasury_curve(self) -> int:
+        """国债曲线整表读一次（依据 S10；参照 `refresh_treasury_spreads` 的批量口径）。"""
+        placeholders = ", ".join("?" for _ in KEY_TENORS)
+        rows = self._read_query(
+            f"""SELECT tenor_years, curve_date, yield_pct
+                FROM treasury_yield_curve
+                WHERE tenor_years IN ({placeholders})
+                ORDER BY tenor_years, curve_date""",
+            list(KEY_TENORS),
+        )
+        curves: dict[float, tuple[list[date], list[float | None]]] = {}
+        for row in rows:
+            tenor = float(row["tenor_years"])
+            dates, values = curves.setdefault(tenor, ([], []))
+            dates.append(date.fromisoformat(str(row["curve_date"])[:10]))
+            values.append(None if row["yield_pct"] is None else float(row["yield_pct"]))
+        self._prefetch_put("treasury_curve", "", "", curves)
+        return len(rows)
+
+    def _prefetch_trading_calendar(self) -> int:
+        """交易日历整表读一次（原实现每股一条 SQLite 查询，1.5–2.8 ms/只）。"""
+        try:
+            rows = self.sqlite.query(
+                "SELECT trade_date FROM trading_dates ORDER BY trade_date",
+            )
+        except Exception as error:  # noqa: BLE001 - 日历读不到就回落原路径（非致命）
+            logger.debug("批量读取交易日历失败 (非致命): %s", error)
+            return 0
+        calendar = [str(row["trade_date"])[:10] for row in rows]
+        self._prefetch_put("calendar", "", "", calendar)
+        return len(calendar)
+
     # ─── 数据获取 ──────────────────────────────────────────────────
 
     def _get_latest_financials(self, stock_code: str) -> dict[str, Any]:
         """获取最新报告期的三大报表数据（合并为一行）
 
         M8-问题1修复: 应用人工覆写值 (PRD §9.5 R7: 覆写与原始值分离, 但计算时使用覆写值)
+
+        依据 S10：批次内命中预取缓存（已是"最新完整期 + 覆写后"的那一行），
+        浅拷贝返回，避免调用方就地改行污染缓存；未预取到则走下面原逐股 SQL。
         """
+        hit, cached = self._prefetch_lookup("financials", stock_code)
+        if hit:
+            return dict(cached)
         rows = self._read_query("""
             SELECT
                 bs.report_date,
@@ -1241,7 +1728,10 @@ class IndicatorCalculator:
         return self._apply_published_overrides(stock_code, [financials])[0]
 
     def _get_latest_price(self, stock_code: str) -> dict[str, Any]:
-        """获取最新收盘价"""
+        """获取最新收盘价（依据 S10：批次内命中预取缓存，miss 回落原逐股 SQL）"""
+        hit, cached = self._prefetch_lookup("price", stock_code)
+        if hit:
+            return dict(cached)
         rows = self._read_query("""
             SELECT trade_date, close, volume, turnover
             FROM price_daily_raw
@@ -1256,7 +1746,13 @@ class IndicatorCalculator:
         """获取总股本和流通股本
 
         从 stock_meta 表获取真实的总股本和流通股本（单位：股）。
+
+        依据 S10：批次内命中预取缓存；该股在 stock_meta 里没有行时缓存值是
+        `{"total_shares": None, "circ_shares": None}`，与原实现返回一致。
         """
+        hit, cached = self._prefetch_lookup("shares", stock_code)
+        if hit:
+            return dict(cached)
         rows = self._read_query("""
             SELECT total_shares, circ_shares
             FROM stock_meta
@@ -1281,34 +1777,47 @@ class IndicatorCalculator:
 
         PRD §8.1: 默认口径为 latest_restated。
         PRD §9.1: 允许 approximate 值，需标记 confidence。
+
+        依据 S10：把"取最近 8 个季度累计值"与"由这 8 行算 TTM"拆成两段，
+        前半段可批量预取（缓存键含 as_of 日期，日期不一致必然 miss → 回落原
+        逐股 SQL），后半段 `_ttm_from_rows` 是原有逻辑原样搬移，一个字符没改。
         """
         # 获取最近8个季度的累计值（足够计算TTM和YoY）
-        rows = self._read_query("""
-            SELECT
-                ic.report_date,
-                ic.revenue, ic.cost_of_revenue,
-                (ic.revenue - ic.cost_of_revenue) AS gross_profit,
-                ic.operating_profit, ic.net_profit,
-                ic.parent_net_profit, ic.deducted_net_profit,
-                ic.total_operating_revenue, ic.total_operating_cost,
-                ic.selling_expenses, ic.administrative_expenses,
-                ic.financial_expenses, ic.interest_expense,
-                ic.investment_income, ic.total_profit, ic.income_tax,
-                cf.cf_from_operating
-            FROM income_statement ic
-            LEFT JOIN cash_flow cf
-                ON ic.stock_code = cf.stock_code AND ic.report_date = cf.report_date
-            WHERE ic.stock_code = ?
-              AND (? IS NULL OR ic.report_date <= CAST(? AS DATE))
-            ORDER BY ic.report_date DESC
-            LIMIT 8
-        """, [stock_code, str(as_of_date) if as_of_date else None, str(as_of_date) if as_of_date else None])
+        hit, cached_rows = self._prefetch_lookup(
+            "ttm_rows", stock_code, self._asof_key(as_of_date),
+        )
+        if hit:
+            rows = [dict(row) for row in cached_rows]
+        else:
+            rows = self._read_query("""
+                SELECT
+                    ic.report_date,
+                    ic.revenue, ic.cost_of_revenue,
+                    (ic.revenue - ic.cost_of_revenue) AS gross_profit,
+                    ic.operating_profit, ic.net_profit,
+                    ic.parent_net_profit, ic.deducted_net_profit,
+                    ic.total_operating_revenue, ic.total_operating_cost,
+                    ic.selling_expenses, ic.administrative_expenses,
+                    ic.financial_expenses, ic.interest_expense,
+                    ic.investment_income, ic.total_profit, ic.income_tax,
+                    cf.cf_from_operating
+                FROM income_statement ic
+                LEFT JOIN cash_flow cf
+                    ON ic.stock_code = cf.stock_code AND ic.report_date = cf.report_date
+                WHERE ic.stock_code = ?
+                  AND (? IS NULL OR ic.report_date <= CAST(? AS DATE))
+                ORDER BY ic.report_date DESC
+                LIMIT 8
+            """, [stock_code, str(as_of_date) if as_of_date else None, str(as_of_date) if as_of_date else None])
 
         if not rows:
             return {}
 
         rows = self._apply_published_overrides(stock_code, rows)
+        return self._ttm_from_rows(stock_code, rows)
 
+    def _ttm_from_rows(self, stock_code: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        """由"最近 8 个季度累计值"算 TTM（口径见 `_get_ttm_data`，逐字搬移）。"""
         latest = rows[0]
         latest_date = str(latest.get("report_date", ""))
 
@@ -1378,8 +1887,16 @@ class IndicatorCalculator:
         return {"_ttm_confidence": "missing", "_ttm_reason": "insufficient_history"}
 
     def _get_dividend_summary(self, stock_code: str, as_of_date: Any | None = None) -> dict[str, Any]:
-        """Return only dividends known on the snapshot's reporting date."""
+        """Return only dividends known on the snapshot's reporting date.
+
+        依据 S10：批次内命中预取缓存（缓存键含 as_of 日期）；miss 走原逐股 SQL。
+        """
         as_of_date = as_of_date or cn_today()
+        hit, cached = self._prefetch_lookup(
+            "dividend_summary", stock_code, self._asof_key(as_of_date),
+        )
+        if hit:
+            return dict(cached)
         rows = self._read_query("""
             WITH valid_dividends AS (
                 SELECT ex_date, dividend_per_share
@@ -1592,8 +2109,29 @@ class IndicatorCalculator:
 
         Only distributions in the trailing twelve months are relevant. Older
         data is a missing-data condition, not a reason to inflate the yield.
+
+        依据 S10：取数走 `_trailing_dps`（与 `_calc_treasury_spread` 共用同一份
+        "滚动 12 个月每股分红"结果，同一 as_of 只查一次），判定逻辑不变。
         """
         as_of_date = as_of_date or cn_today()
+        dps = self._trailing_dps(stock_code, as_of_date)
+        if dps:
+            return dps / close if close > 0 else None
+        return None
+
+    def _trailing_dps(self, stock_code: str, as_of_date: Any) -> Any:
+        """截至 as_of_date 前 12 个月已公告且已除权的每股现金分红合计。
+
+        依据 S10：`_calc_dividend_yield`（as_of = 价格日）与 `_calc_treasury_spread`
+        （as_of = 价格日）原来各发一条**完全相同**的 SQL。这里收敛成一处 +
+        批次预取（缓存键含 as_of 日期，日期不同必然 miss → 回落原逐股 SQL）。
+        返回值与原实现一致：无记录时是 None（不是 0）。
+        """
+        hit, cached = self._prefetch_lookup(
+            "trailing_dps", stock_code, self._asof_key(as_of_date),
+        )
+        if hit:
+            return cached.get("dps")
         rows = self._read_query("""
             SELECT SUM(dividend_per_share) as dps
             FROM dividends
@@ -1605,11 +2143,7 @@ class IndicatorCalculator:
                AND ex_date <= CAST(? AS DATE)
                AND ex_date >= CAST(? AS DATE) - INTERVAL '1 year'
         """, [stock_code, str(as_of_date), str(as_of_date), str(as_of_date)])
-
-        if rows and rows[0].get("dps"):
-            dps = rows[0]["dps"]
-            return dps / close if close > 0 else None
-        return None
+        return rows[0].get("dps") if rows else None
 
     def _calc_treasury_spread(self, stock_code: str) -> dict[str, Any]:
         """TTM 已实施现金股息率与相对各关键期限国债收益率的利差（P3）。
@@ -1626,50 +2160,20 @@ class IndicatorCalculator:
         for tenor in KEY_TENORS:
             result[CZB_CURVE_YIELD_TENOR_LABELS[tenor]] = None
 
-        price_rows = self._read_query(
-            """SELECT trade_date, close FROM price_daily_raw
-               WHERE stock_code = ? AND close IS NOT NULL
-               ORDER BY trade_date DESC LIMIT 1""",
-            [stock_code],
-        )
-        if not price_rows or not price_rows[0].get("close"):
+        # 依据 S10：这里原来自己再发一条取价 SQL（与 `_get_latest_price` 的
+        # WHERE/ORDER/LIMIT 逐字相同，重复取数），现在直接复用同一个取数入口；
+        # 分红走 `_trailing_dps`（与股息率同一份结果）；曲线在批次内只整表读一次。
+        price_info = self._get_latest_price(stock_code)
+        if not price_info or not price_info.get("close"):
             return result
-        price_date = str(price_rows[0]["trade_date"])[:10]
-        close = float(price_rows[0]["close"])
+        price_date = str(price_info["trade_date"])[:10]
+        close = float(price_info["close"])
 
-        div_rows = self._read_query(
-            """SELECT SUM(dividend_per_share) AS dps
-               FROM dividends
-               WHERE stock_code = ?
-                 AND dividend_per_share IS NOT NULL
-                 AND dividend_per_share > 0
-                 AND announcement_date IS NOT NULL
-                 AND announcement_date <= CAST(? AS DATE)
-                 AND ex_date <= CAST(? AS DATE)
-                 AND ex_date >= CAST(? AS DATE) - INTERVAL '1 year'""",
-            [stock_code, price_date, price_date, price_date],
-        )
-        ttm_dps = div_rows[0].get("dps") if div_rows else None
+        ttm_dps = self._trailing_dps(stock_code, price_date)
         ttm_div_yield = (float(ttm_dps) / close) * 100.0 if ttm_dps and close > 0 else None
         result["ttm_dividend_yield"] = ttm_div_yield
 
-        # 曲线对齐：批量按期限查询 ≤ 价格日最近点
-        curve_rows = self._read_query(
-            """SELECT tenor_years, curve_date, yield_pct
-               FROM treasury_yield_curve
-               WHERE curve_date <= CAST(? AS DATE)
-                 AND tenor_years IN ({tenors})
-                 AND curve_date IN (
-                     SELECT MAX(curve_date) FROM treasury_yield_curve
-                     WHERE curve_date <= CAST(? AS DATE)
-                     GROUP BY tenor_years
-                 )
-            """.format(tenors=", ".join("?" for _ in KEY_TENORS)),
-            [price_date, *list(KEY_TENORS), price_date],
-        )
-        aligned: dict[float, dict[str, Any]] = {}
-        for row in curve_rows:
-            aligned[float(row["tenor_years"])] = row
+        aligned = self._aligned_treasury_curve(price_date)
 
         for tenor in KEY_TENORS:
             column = CZB_CURVE_YIELD_TENOR_LABELS[tenor]
@@ -1689,6 +2193,44 @@ class IndicatorCalculator:
                 continue
             result[column] = ttm_div_yield - float(curve["yield_pct"])
         return result
+
+    def _aligned_treasury_curve(self, price_date: str) -> dict[float, dict[str, Any]]:
+        """对齐到 price_date 的国债曲线（每个期限取 ≤ price_date 的最近一点）。
+
+        依据 S10：批次内曲线已整表读进内存（全市场共用一条，51,960 行），
+        用 `bisect_right` 对齐 —— 与 `refresh_treasury_spreads` 同一套做法。
+        没有批次缓存时（单股脚本、其他调用方）仍然发原来那条逐股 SQL，
+        两者返回的 `{期限: 该期限最近一点}` 结构一致，后续口径计算只有一份代码。
+        """
+        hit, curves = self._prefetch_lookup("treasury_curve")
+        if not hit:
+            curve_rows = self._read_query(
+                """SELECT tenor_years, curve_date, yield_pct
+                   FROM treasury_yield_curve
+                   WHERE curve_date <= CAST(? AS DATE)
+                     AND tenor_years IN ({tenors})
+                     AND curve_date IN (
+                         SELECT MAX(curve_date) FROM treasury_yield_curve
+                         WHERE curve_date <= CAST(? AS DATE)
+                         GROUP BY tenor_years
+                     )
+                """.format(tenors=", ".join("?" for _ in KEY_TENORS)),
+                [price_date, *list(KEY_TENORS), price_date],
+            )
+            return {float(row["tenor_years"]): row for row in curve_rows}
+
+        aligned: dict[float, dict[str, Any]] = {}
+        day = date.fromisoformat(price_date)
+        for tenor in KEY_TENORS:
+            entry = curves.get(tenor)
+            if not entry:
+                continue
+            dates, yields = entry
+            index = bisect_right(dates, day) - 1
+            if index < 0:
+                continue
+            aligned[tenor] = {"curve_date": dates[index], "yield_pct": yields[index]}
+        return aligned
 
     def _calc_profitability(self, ttm: dict, financials: dict, stock_code: str = "") -> dict[str, Any]:
         """2. 盈利能力指标"""
@@ -2095,13 +2637,16 @@ class IndicatorCalculator:
 
         return result
 
-    def _calc_technical(self, stock_code: str) -> dict[str, Any]:
-        """6. 行情与技术统计指标"""
-        result: dict[str, Any] = {}
+    def _technical_window_rows(self, stock_code: str) -> list[dict[str, Any]]:
+        """最近 250 个交易日的原始/前复权价格窗口（依据 S10 的批次预取）。
 
-        # Raw prices remain appropriate for moving averages and volume. Returns,
-        # volatility and drawdown must use QFQ closes to remove corporate-action gaps.
-        rows = self._read_query("""
+        命中缓存时返回**新的 list**：`_calc_technical` 会就地 `rows.reverse()`，
+        共享同一个 list 会让第二次读看到倒序的窗口。
+        """
+        hit, cached = self._prefetch_lookup("technical", stock_code)
+        if hit:
+            return [dict(row) for row in cached]
+        return self._read_query("""
             SELECT raw.trade_date, raw.close AS raw_close, raw.volume, raw.turnover,
                    raw.turnover_rate, qfq.close AS qfq_close
             FROM price_daily_raw raw
@@ -2111,6 +2656,17 @@ class IndicatorCalculator:
             ORDER BY raw.trade_date DESC
             LIMIT 250
         """, [stock_code])
+
+    def _calc_technical(self, stock_code: str) -> dict[str, Any]:
+        """6. 行情与技术统计指标"""
+        result: dict[str, Any] = {}
+
+        # Raw prices remain appropriate for moving averages and volume. Returns,
+        # volatility and drawdown must use QFQ closes to remove corporate-action gaps.
+        # 依据 S10：批次内窗口由一条 `ROW_NUMBER() ... <= 250` 的批量 SQL 取好
+        # （每股返回的行、行序与原 `ORDER BY trade_date DESC LIMIT 250` 逐一相同），
+        # 这里只做内存查找；miss 走原逐股 SQL。
+        rows = self._technical_window_rows(stock_code)
 
         if not rows:
             for key in ["ma5", "ma10", "ma20", "ma60", "ma120", "ma250",
@@ -2221,15 +2777,20 @@ class IndicatorCalculator:
         if not rows:
             return rows
         by_date = {str(row.get("report_date", ""))[:10]: row for row in rows}
-        try:
-            overrides = self.sqlite.query(
-                """SELECT field_name, report_date, override_value FROM manual_overrides
-                   WHERE stock_code = ? AND status = 'published' AND rolled_back_at IS NULL""",
-                [stock_code],
-            )
-        except Exception as error:
-            logger.debug("读取人工覆写失败 (非致命): %s", error)
-            return rows
+        # 依据 S10：批次内覆写按批读好（价格域每只股票要读两次：财报一次、TTM 一次）。
+        hit, cached_overrides = self._prefetch_lookup("overrides", stock_code)
+        if hit:
+            overrides = cached_overrides
+        else:
+            try:
+                overrides = self.sqlite.query(
+                    """SELECT field_name, report_date, override_value FROM manual_overrides
+                       WHERE stock_code = ? AND status = 'published' AND rolled_back_at IS NULL""",
+                    [stock_code],
+                )
+            except Exception as error:
+                logger.debug("读取人工覆写失败 (非致命): %s", error)
+                return rows
         for override in overrides:
             report_date = override.get("report_date")
             targets = [by_date.get(str(report_date)[:10])] if report_date else list(rows)
@@ -2340,6 +2901,14 @@ class IndicatorCalculator:
         end_date = str(rows[-1].get("trade_date", ""))[:10]
         if not start_date or not end_date:
             return None
+        # 依据 S10：批次内交易日历整表读过一次（原来每股一条 SQLite 查询）。
+        hit, calendar = self._prefetch_lookup("calendar")
+        if hit:
+            # 已按 trade_date 升序读过 → 直接切片即有序，不必再排（依据 S11）。
+            left = bisect_left(calendar, start_date)
+            right = bisect_right(calendar, end_date)
+            window = tuple(calendar[left:right])
+            return window or None
         try:
             calendar_rows = self.sqlite.query(
                 """SELECT trade_date FROM trading_dates
@@ -2349,16 +2918,44 @@ class IndicatorCalculator:
         except Exception as error:
             logger.debug("交易日历不可用，跳过日期连续性校验: %s", error)
             return None
-        expected_dates = {str(row["trade_date"])[:10] for row in calendar_rows}
+        # 依据 S11：返回**有序元组**而不是 set。连续性判定 `any(trade_date < d < newer)`
+        # 对整个集合做全扫是 O(N×M)（250 行 × 250 个期望日 ≈ 6 万次比较/只，实测占
+        # `_calc_technical` 的 ~70%）；排一次序后改用 bisect，语义完全相同。
+        expected_dates = tuple(sorted({str(row["trade_date"])[:10] for row in calendar_rows}))
         return expected_dates or None
 
     @staticmethod
+    def _sorted_expected_dates(expected_trading_dates: Any) -> tuple[str, ...]:
+        """把"期望交易日"规范成**有序元组**（依据 S11）。
+
+        `_expected_trading_dates` 已经返回有序元组；测试或其他调用方传 set/list
+        时在这里排一次（每只股票 3 次，250 项排序 ~10 µs）。
+        """
+        if not expected_trading_dates:
+            return ()
+        if isinstance(expected_trading_dates, tuple):
+            return expected_trading_dates
+        return tuple(sorted(expected_trading_dates))
+
+    @staticmethod
+    def _expected_date_between(expected_sorted: tuple[str, ...], older: str, newer: str) -> bool:
+        """是否存在 expected ∈ (older, newer)（依据 S11）。
+
+        与原来的 `any(older < date < newer for date in expected)` **逐值等价**
+        （expected 是唯一日期集合，排序后第一个 > older 的元素即可判定），
+        但复杂度从 O(len(expected)) 降到 O(log N)。
+        """
+        index = bisect_right(expected_sorted, older)
+        return index < len(expected_sorted) and expected_sorted[index] < newer
+
+    @staticmethod
     def _trailing_contiguous_closes(
-        rows: list[dict[str, Any]], field: str, expected_trading_dates: set[str] | None = None,
+        rows: list[dict[str, Any]], field: str, expected_trading_dates: Any = None,
     ) -> list[float]:
         """Return the latest valid run without bridging persisted expected trading days."""
         closes: list[float] = []
         newer_date: str | None = None
+        expected_sorted = IndicatorCalculator._sorted_expected_dates(expected_trading_dates)
         for row in reversed(rows):
             value = row.get(field)
             if not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -2368,8 +2965,8 @@ class IndicatorCalculator:
                 break
             if (
                 newer_date is not None
-                and expected_trading_dates is not None
-                and any(trade_date < date < newer_date for date in expected_trading_dates)
+                and expected_sorted
+                and IndicatorCalculator._expected_date_between(expected_sorted, trade_date, newer_date)
             ):
                 break
             closes.append(float(value))
@@ -2379,17 +2976,18 @@ class IndicatorCalculator:
 
     @staticmethod
     def _trailing_contiguous_rows(
-        rows: list[dict[str, Any]], expected_trading_dates: set[str],
+        rows: list[dict[str, Any]], expected_trading_dates: Any,
     ) -> list[dict[str, Any]]:
         """Return the latest calendar-contiguous raw window without compacting gaps."""
         trailing: list[dict[str, Any]] = []
         newer_date: str | None = None
+        expected_sorted = IndicatorCalculator._sorted_expected_dates(expected_trading_dates)
         for row in reversed(rows):
             trade_date = str(row.get("trade_date", ""))[:10]
             if not trade_date:
                 break
-            if newer_date is not None and any(
-                trade_date < expected < newer_date for expected in expected_trading_dates
+            if newer_date is not None and expected_sorted and IndicatorCalculator._expected_date_between(
+                expected_sorted, trade_date, newer_date,
             ):
                 break
             trailing.append(row)
