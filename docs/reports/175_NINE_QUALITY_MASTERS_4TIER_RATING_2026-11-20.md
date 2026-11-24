@@ -1,6 +1,7 @@
 ---
 title: 重排 9 位「只买好公司」派大师 —— 482 家生意等级四档评定
-status: approved
+status: superseded
+superseded-by: reports/176_PROYA_RECHECK_REAL_GROSS_MARGIN_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -9,6 +10,8 @@ data-source: data/valuedashboard.duckdb + 482 家数据包（18 列）
 ---
 
 # 重排 9 位大师 · 482 家生意等级四档评定
+
+> ⚠️ **本文已 superseded，请读 `reports/176`。** 本文把珀莱雅写成「普通偏次级」有误导——实际是**普通 5 票 : 次级 4 票**。176 号新增「真实毛利率 = 毛利率 − 销售费用率」判据：**珀莱雅真实毛利 23.2%（排 210/440），海天 33.5%（排 114/440）**，珀莱雅应归**普通**，与海天不在同一档。
 
 > **用户要求**：
 > ① 剔除「只要便宜就买」的（格雷厄姆、格林布拉特）和周期派（马克斯）
