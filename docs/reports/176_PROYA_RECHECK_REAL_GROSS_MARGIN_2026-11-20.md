@@ -1,6 +1,7 @@
 ---
 title: 珀莱雅定档复查 —— 新增「真实毛利率」判据，证明它比不上海天味业
-status: approved
+status: superseded
+superseded-by: reports/177_ONE_BY_ONE_DEEP_REVIEW_8_COMPANIES_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -9,6 +10,8 @@ data-source: data/valuedashboard.duckdb（首次启用 income_statement 的销�
 ---
 
 # 珀莱雅定档复查
+
+> ⚠️ **本文已 superseded，请读 `reports/177`。** 本文用「真实毛利率」这一个指标横向排序，被用户指出方法错误——**「不是单看某一个指标就可以排的，很多行业不一样」**。177 号改为 **一家一喂**：每家一个独立 Agent，自己设计判据、自己写 SQL 查库。
 
 > **用户质疑**：「珀莱雅也是次级吗？**我感觉它怎么能够和海天味业这种必需品坐一桌呢？**
 > 毕竟珀莱雅生意模式并不是很好，**它必须花很多钱投在营销上面**。
