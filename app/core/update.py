@@ -738,6 +738,27 @@ class IncrementalUpdater:
         detail_cb: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         """持锁执行更新主体；job_logs 生命周期（P1: 状态页"最近更新"）。"""
+        # 补一条**确定安全**的结算点，堵住一个**可能性**（不是已发生的故障）：
+        # 更新子进程若被强杀/休眠中断，`job_logs` 会留下 `status='running'` 的行；
+        # 而启动维护里的结算 `_reconcile_crashed_incremental_jobs(only_if_owner_dead=True)`
+        # 在"此刻已有新子进程持锁"时会**正确跳过**（它要防的是误杀活作业）。
+        # 两条合起来就有一个小窗口：新子进程先抢到锁 → 启动结算跳过 → 旧脏行留到下次启动。
+        #
+        # 本函数此刻已在**写锁内**，而 DuckDB 是跨进程独占（单写者 + 排他文件锁），
+        # 宿主机上不可能有另一个活着的更新进程 → 此前任何 `running` 的增量作业
+        # 都必然是死的，可以无条件下架。放在这里比放在启动路径更接近事实。
+        #
+        # ⚠️ 2026-11-24 更正：我最初把 `job_logs` 里的 UTC 时间当成本地时间，误判
+        # "job 299 挂了 8 小时"。实际那是"开始 13:45:57 → 结束 13:46:55（本地）"的
+        # 正常一轮。**当时并没有发生这个故障**，这条是防御性加固。
+        try:
+            reconciled = self._reconcile_crashed_incremental_jobs()
+            if reconciled:
+                logger.warning(
+                    "开跑前结算了 %d 条悬挂的增量作业（宿主机无其它更新进程）", reconciled,
+                )
+        except Exception as error:  # noqa: BLE001 - 结算失败不得阻断本轮更新
+            logger.warning("开跑前结算悬挂作业失败(非致命): %s", error)
         job_id = str(uuid.uuid4())
         started_at = datetime.now(UTC).isoformat()
         job_row_id = self._start_job(job_id, max_stocks, started_at)
