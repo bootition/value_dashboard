@@ -136,7 +136,7 @@ const renameName = ref('')
 const renamingGroup = ref(false)
 const renameError = ref<string | null>(null)
 
-// ── 批量移动（选中若干只 → 移动到分组）─────────────────────────────────
+// ── 批量复制（选中若干只 → 复制到分组；规则分组里的行**不会被删**）────────
 const checkedRowKeys = ref<Array<string | number>>([])
 const moveTarget = ref<string | null>(null)
 const moving = ref(false)
@@ -679,7 +679,7 @@ async function confirmRenameGroup(): Promise<void> {
   }
 }
 
-// ── 批量移动到分组（2026-11-26）────────────────────────────────────────
+// ── 批量复制到分组（2026-11-27：移动语义会把规则分组搞乱，改复制）────────
 
 function onMoveTargetChange(value: string): void {
   if (value === MOVE_TO_NEW) {
@@ -716,21 +716,28 @@ async function moveSelected(): Promise<void> {
     return
   }
   moving.value = true
-  let moved = 0
+  let copied = 0
   try {
     for (const [fromGroup, codes] of byGroup) {
-      const resp = await axios.post<{ moved?: number }>('/api/watchlist/move', {
+      // 2026-11-27（用户裁决）：从**规则分组**往自己的分组里放是**复制**，不是移动。
+      // 移动会引出无解的语义问题：「下一轮筛选要不要把移出去的再移回来？」
+      // 「被规则踢出之后又该怎么办？」——复制则两边互不干扰：
+      // 规则分组永远由规则运行结果决定，自己的分组永远由自己决定。
+      const resp = await axios.post<{ copied?: number }>('/api/watchlist/move', {
         stock_codes: codes,
         from_group: fromGroup,
         to_group: target,
+        mode: 'copy',
       })
-      moved += resp.data?.moved ?? codes.length
+      copied += resp.data?.copied ?? codes.length
     }
-    message.success(`已把 ${moved} 只股票移动到「${displayGroupName(target)}」`)
+    message.success(
+      `已复制 ${copied} 只到「${displayGroupName(target)}」（原分组保留）`,
+    )
     checkedRowKeys.value = []
     await fetchWatchlist()
   } catch (e: unknown) {
-    message.error(friendlyErrorMessage(e, '移动到分组失败'))
+    message.error(friendlyErrorMessage(e, '复制到分组失败'))
   } finally {
     moving.value = false
   }
@@ -829,8 +836,8 @@ onMounted(fetchWatchlist)
                 class="move-bar-select"
                 :value="moveTarget"
                 :options="[...groupOptions, { label: '＋ 新建分组…', value: MOVE_TO_NEW }]"
-                placeholder="移动到哪个分组"
-                aria-label="移动到分组"
+                placeholder="复制到哪个分组"
+                aria-label="复制到分组"
                 size="small"
                 :disabled="selectedRows.length === 0"
                 @update:value="onMoveTargetChange"
@@ -841,7 +848,7 @@ onMounted(fetchWatchlist)
                 :loading="moving"
                 :disabled="selectedRows.length === 0 || !moveTarget"
                 @click="moveSelected"
-              >移动到分组</n-button>
+              >复制到分组</n-button>
             </div>
             <n-data-table
               v-if="items.length > 0"

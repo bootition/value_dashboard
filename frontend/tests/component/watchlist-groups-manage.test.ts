@@ -174,9 +174,9 @@ describe('自选页：自建分组 / 改名 / 批量移动', () => {
     )
   })
 
-  it('勾选若干只 → 移动到分组 → POST /move 批量口径', async () => {
+  it('勾选若干只 → 复制到分组 → POST /move 带 mode=copy（原分组保留）', async () => {
     const post = axios.post as Mock
-    post.mockImplementation(() => Promise.resolve({ data: { status: 'ok', moved: 1, rows: 1 } }))
+    post.mockImplementation(() => Promise.resolve({ data: { status: 'ok', mode: 'copy', copied: 1, rows: 1 } }))
 
     const wrapper = mountPage()
     await flushPromises()
@@ -193,15 +193,18 @@ describe('自选页：自建分组 / 改名 / 批量移动', () => {
     moveSelect.vm.$emit('update:value', GROUP)
     await flushPromises()
 
-    const moveButton = wrapper.findAll('button').find((node) => node.text().includes('移动到分组'))
+    const moveButton = wrapper.findAll('button').find((node) => node.text().includes('复制到分组'))
     expect(moveButton).toBeTruthy()
     await moveButton!.trigger('click')
     await flushPromises()
 
+    // 2026-11-27 用户裁决：从规则分组往自己分组里放必须是**复制**。
+    // 移动会引出「下一轮筛选要不要移回来 / 被踢出后怎么办」这类无解语义。
     expect(post).toHaveBeenCalledWith('/api/watchlist/move', {
       stock_codes: ['600519'],
       from_group: DEFAULT_GROUP,
       to_group: GROUP,
+      mode: 'copy',
     })
   })
 })

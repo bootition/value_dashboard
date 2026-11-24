@@ -317,12 +317,15 @@ def test_batch_move_moves_selected_stocks(sqlite_store: SQLiteStore) -> None:
     seed.watchlist("600519", group_name=DEFAULT)
     client.post("/api/watchlist/groups", json={"name": "重点观察"})
 
+    # 2026-11-27：`/move` 的默认语义已改为**复制**（用户裁决：从规则分组往自己分组
+    # 里放不该把原分组删掉）。本用例要测的是"移动"这条路，所以显式传 `mode="move"`。
     response = client.post(
         "/api/watchlist/move",
         json={
             "stock_codes": ["000001", "000002"],
             "from_group": DEFAULT,
             "to_group": "重点观察",
+            "mode": "move",
         },
     )
     assert response.status_code == 200, response.text

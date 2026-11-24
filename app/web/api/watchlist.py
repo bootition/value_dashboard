@@ -10,7 +10,7 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any, NoReturn
+from typing import Any, Literal, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
@@ -80,6 +80,13 @@ class MoveGroupRequest(BaseModel):
     stock_codes: list[str] | None = None
     #: 来源分组；None = 从该股票所在的**所有**分组里移动（批量选择时更顺手）。
     from_group: str | None = None
+    #: `copy`（默认语义，见下）还是 `move`。
+    #:
+    #: 2026-11-27（用户裁决）：从**规则分组**往自己的分组里放，必须是**复制**。
+    #: 移动会引出一串无解的语义问题：「下一轮筛选要不要把移出去的再移回来？」
+    #: 「被规则踢出之后又该怎么办？」——复制则天然没这些问题：
+    #: 规则分组永远由规则的运行结果决定，用户自己的分组永远由用户决定，两边互不干扰。
+    mode: Literal["copy", "move"] = "copy"
 
 
 class RefreshGroupRequest(BaseModel):
@@ -571,9 +578,56 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
         _raise_group_error(error)
 
     moved = 0
+    copied = 0
     skipped_already_in_target = 0
     not_found: list[str] = []
     with sqlite.transaction() as conn:
+        if req.mode == "copy":
+            # 复制：目标组插一行（**不带任何规则来源** → `source_rule_id`/`source_result_id`
+            # 一律 NULL）。这是"用户自己的选择"，因此：
+            #   · 规则分组按"替换"刷新时只动它自己那一组，不会波及这里；
+            #   · 股票被规则踢出后，这里的副本**照样保留**（这正是用户要的）；
+            #   · 删规则不会被这行挡住（规则删除守卫只数带 source_rule_id 的引用）。
+            for code in ordered:
+                if from_group:
+                    source = conn.execute(
+                        "SELECT 1 FROM watchlist WHERE stock_code = ? AND group_name = ?",
+                        [code, from_group],
+                    ).fetchone()
+                else:
+                    source = conn.execute(
+                        "SELECT 1 FROM watchlist WHERE stock_code = ?", [code]
+                    ).fetchone()
+                if source is None:
+                    not_found.append(code)
+                    continue
+                existing = conn.execute(
+                    "SELECT 1 FROM watchlist WHERE stock_code = ? AND group_name = ?",
+                    [code, to_group],
+                ).fetchone()
+                if existing is not None:
+                    skipped_already_in_target += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO watchlist (stock_code, group_name) VALUES (?, ?)",
+                    [code, to_group],
+                )
+                copied += 1
+            if copied == 0 and skipped_already_in_target == 0:
+                raise HTTPException(status_code=404, detail="watchlist entry not found")
+            return {
+                "status": "ok",
+                "mode": "copy",
+                "stock_code": ordered[0] if len(ordered) == 1 else None,
+                "stock_codes": ordered,
+                "from": from_group,
+                "to": to_group,
+                "moved": 0,
+                "copied": copied,
+                "rows": copied,
+                "already_in_target": skipped_already_in_target,
+                "not_found": not_found,
+            }
         for code in ordered:
             if from_group:
                 source_rows = conn.execute(
@@ -616,6 +670,7 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
         raise HTTPException(status_code=404, detail="watchlist entry not found")
     return {
         "status": "ok",
+        "mode": "move",
         "stock_code": ordered[0] if len(ordered) == 1 else None,
         "stock_codes": ordered,
         "from": from_group,
