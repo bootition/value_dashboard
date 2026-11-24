@@ -16,13 +16,15 @@ from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
 from app.core.watchlist_groups import DEFAULT_GROUP_NAME
+from app.core.watchlist_ops import CREATE_INDEX_SQL as OPS_CREATE_INDEX_SQL
+from app.core.watchlist_ops import CREATE_TABLE_SQL as OPS_CREATE_TABLE_SQL
 
 logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（依据 S3 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 50
-SQLITE_SCHEMA_VERSION = 21
+SQLITE_SCHEMA_VERSION = 22
 
 # ─── v50：被判「没用」的二级索引全清单（唯一来源）─────────────────────────
 # 依据 reports/151（2026-11-21 逐索引 A/B 实测，副本上真跑，每索引 3 次取中位数）
@@ -3140,6 +3142,39 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 ),
             )
             logger.info("SQLite schema v21 已应用")
+
+        # v22: 自选写操作审计日志（2026-11-24 用户投诉：「我从 ROCE 这个筛选分组里面
+        # 移动过去的……你难道查不出这个日志来吗？」）。
+        #
+        # 根因：自选的所有写端点（add / move / remove / 建组 / 改名 / 删组）此前**零留痕**，
+        # 事后只能靠「A 组少 7 行 + B 组多 7 行 + 时间戳接近」去猜用户做了什么，还猜错过
+        # （把 UTC 当本地时间，误判成"卡了 8 小时"）。`job_logs` 是自动更新任务的日志，
+        # 与用户操作无关，不能混用。
+        #
+        # 口径（唯一实现在 `app/core/watchlist_ops.py`）：
+        #   · 一条用户操作 = 一行；`stock_codes` 是 JSON 数组，分组级操作为 NULL；
+        #   · `detail_json` 存结果摘要（copied / moved / rows / not_found / blacklisted / …）；
+        #   · `created_at` 用 `CURRENT_TIMESTAMP`（**UTC**），读端点同时给 UTC 与 UTC+8。
+        # 存 SQLite 而不是 DuckDB：用户态数据一律 SQLite，且 DuckDB 在自动更新期间
+        # 持排他锁写不进去 —— 审计恰恰不能挑时间。
+        #
+        # 幂等：`IF NOT EXISTS` + 迁移记账行，重复 init（或把 v22 记账行删掉重跑）
+        # 都不报错、不重复建。DDL 常量从 `watchlist_ops` 导入，避免两份 DDL 漂移。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 22"
+        ).fetchone()
+        if row is None:
+            conn.execute(OPS_CREATE_TABLE_SQL)
+            conn.execute(OPS_CREATE_INDEX_SQL)
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (
+                    22,
+                    "watchlist_ops: 自选写操作审计日志（op/stock_codes/from_group/to_group/"
+                    "detail_json/actor/created_at；一条用户操作一行，失败不留痕）",
+                ),
+            )
+            logger.info("SQLite schema v22 已应用")
 
 
 def init_all_schema(

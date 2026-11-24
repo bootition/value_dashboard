@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.core import watchlist_groups as wg
+from app.core import watchlist_ops as wo
 from app.core.blacklist import blacklisted_code_set
 from app.core.screening.defaults import base_pool_defaults
 from app.core.storage.duckdb_store import DuckDBReadLockedError
@@ -104,6 +105,15 @@ class RenameGroupRequest(BaseModel):
 def _raise_group_error(error: wg.WatchlistGroupError) -> NoReturn:
     """分组域错误 → HTTP（`detail` 带 `reason_code` + 中文 message，前端直接展示）。"""
     raise HTTPException(status_code=error.status_code, detail=error.detail) from error
+
+
+def _actor_of(request: Request) -> str:
+    """这条写操作是谁发起的（`local-ui` / `cli` / `api`）。
+
+    判定实现在 `watchlist_ops.actor_from_headers`（单源）：`screening.py` 的
+    `add_to_watchlist` 也写自选行，必须与这里同一个口径。
+    """
+    return wo.actor_from_headers(request.headers)
 
 
 def _fetch_stock_info(duck: Any, stock_codes: list[str]) -> dict[str, dict]:
@@ -294,6 +304,7 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     """
     sqlite = request.app.state.sqlite
     duck = request.app.state.duck
+    actor = _actor_of(request)
     # L0-6（报告42）: 前后端双重校验——6 位数字代码且存在于股票列表中，
     # 防止垃圾代码进入自选（筛选路径来源的代码天然合法，不受影响）
     stock_code = req.stock_code.strip()
@@ -355,6 +366,21 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
                     "WHERE stock_code = ? AND group_name = ?",
                     [source_rule_id, req.source_result_id, stock_code, group_name],
                 )
+        # 审计（v22）：与数据写**同一事务** —— 上面任何一条 400 抛出去都会连日志一起回滚。
+        wo.record(
+            sqlite,
+            op=wo.OP_ADD,
+            stock_codes=[stock_code],
+            to_group=group_name,
+            detail={
+                "created": created,
+                "idempotent": not created,
+                "source_rule_id": source_rule_id,
+                "source_result_id": req.source_result_id,
+            },
+            actor=actor,
+            conn=conn,
+        )
     return {
         "status": "ok",
         "stock_code": stock_code,
@@ -390,6 +416,7 @@ def refresh_watchlist_group(req: RefreshGroupRequest, request: Request) -> dict:
     """
     sqlite = request.app.state.sqlite
     duck = request.app.state.duck
+    actor = _actor_of(request)
     group_name = req.group_name.strip()
     if not group_name:
         raise HTTPException(status_code=400, detail="group_name is required")
@@ -510,6 +537,21 @@ def refresh_watchlist_group(req: RefreshGroupRequest, request: Request) -> dict:
             total_added += added
         refreshed += 1
 
+    # 审计（v22）：整组替换是最具破坏性的自选写路径（删旧行 + 插新行），必须留痕，
+    # 否则「我的分组怎么从 591 行变成 200 行」永远查不出来。
+    if refreshed:
+        wo.record(
+            sqlite,
+            op=wo.OP_REFRESH,
+            to_group=group_name,
+            detail={
+                "refreshed": refreshed,
+                "added": total_added,
+                "removed": total_removed,
+                "rule_ids": [int(ref["source_rule_id"]) for ref in refs],
+            },
+            actor=actor,
+        )
     return {
         "status": "ok",
         "group": group_name,
@@ -526,6 +568,7 @@ def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
     reports/76 P3-6: 返回实际删除行数；无匹配行时 404，避免前端误以为成功。
     """
     sqlite = request.app.state.sqlite
+    actor = _actor_of(request)
     if req.group_name:
         removed = sqlite.execute(
             "DELETE FROM watchlist WHERE stock_code = ? AND group_name = ?",
@@ -538,6 +581,20 @@ def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
         )
     if removed == 0:
         raise HTTPException(status_code=404, detail="watchlist entry not found")
+    # 审计（v22）：404 分支在上面先抛 —— **没删掉任何行就不许留痕**。
+    wo.record(
+        sqlite,
+        op=wo.OP_REMOVE,
+        stock_codes=[req.stock_code],
+        from_group=req.group_name,
+        detail={
+            "rows": removed,
+            # None = 从所有分组移除，这个区别决定"它到底是不是还在别的组里"。
+            "scope": "group" if req.group_name else "all_groups",
+            "group": req.group_name,
+        },
+        actor=actor,
+    )
     return {"status": "ok", "removed": req.stock_code, "rows": removed}
 
 
@@ -558,6 +615,7 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
     - 一只都没匹配到 → 404（与 `DELETE /remove` 同口径，避免前端以为移动成功了）。
     """
     sqlite = request.app.state.sqlite
+    actor = _actor_of(request)
     codes = [code.strip() for code in (req.stock_codes or []) if code and code.strip()]
     if req.stock_code and req.stock_code.strip():
         codes.append(req.stock_code.strip())
@@ -627,6 +685,25 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
                 )
             if copied == 0 and skipped_already_in_target == 0 and not blacklisted_hits:
                 raise HTTPException(status_code=404, detail="watchlist entry not found")
+            # 审计（v22）：上面两条 400/404 先抛 —> 复制 0 行时不会留下"假操作"。
+            wo.record(
+                sqlite,
+                op=wo.OP_COPY,
+                stock_codes=ordered,
+                from_group=from_group,
+                to_group=to_group,
+                detail={
+                    "mode": "copy",
+                    "copied": copied,
+                    "rows": copied,
+                    "moved": 0,
+                    "already_in_target": skipped_already_in_target,
+                    "not_found": not_found,
+                    "blacklisted": blacklisted_hits,
+                },
+                actor=actor,
+                conn=conn,
+            )
             return {
                 "status": "ok",
                 "mode": "copy",
@@ -679,8 +756,30 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
                     "INSERT INTO watchlist (stock_code, group_name) VALUES (?, ?)",
                     [code, to_group],
                 )
-    if moved == 0:
-        raise HTTPException(status_code=404, detail="watchlist entry not found")
+        # 2026-11-27 自查修正：404 原来在事务**提交之后**才抛（"提交后判失败"）。
+        # 现在挪进事务内、且在写审计之前 —— 判失败就整笔回滚，既不留"先写了再报错"
+        # 的顺序隐患，也不会在日志里留下一条"其实没发生"的 move。
+        if moved == 0:
+            raise HTTPException(status_code=404, detail="watchlist entry not found")
+        # 审计（v22）：与数据写同事务。
+        if moved > 0:
+            wo.record(
+                sqlite,
+                op=wo.OP_MOVE,
+                stock_codes=ordered,
+                from_group=from_group,
+                to_group=to_group,
+                detail={
+                    "mode": "move",
+                    "moved": len([code for code in ordered if code not in not_found]),
+                    "rows": moved,
+                    "already_in_target": skipped_already_in_target,
+                    "not_found": not_found,
+                    "blacklisted": [],
+                },
+                actor=actor,
+                conn=conn,
+            )
     return {
         "status": "ok",
         "mode": "move",
@@ -730,9 +829,18 @@ def create_group(req: CreateGroupRequest, request: Request) -> dict:
     """
     sqlite = request.app.state.sqlite
     try:
-        return wg.create_group(sqlite, req.name)
+        created = wg.create_group(sqlite, req.name)
     except wg.WatchlistGroupError as error:
         _raise_group_error(error)
+    # 审计（v22）：`create_group` 自己带事务、拿不到连接，所以只能成功之后补记。
+    wo.record(
+        sqlite,
+        op=wo.OP_GROUP_CREATE,
+        to_group=str(created["group"]["group_name"]),
+        detail={"kind": created["group"].get("kind"), "cnt": 0},
+        actor=_actor_of(request),
+    )
+    return created
 
 
 @router.patch("/groups/{group_name}")
@@ -744,9 +852,21 @@ def rename_group(group_name: str, req: RenameGroupRequest, request: Request) -> 
     """
     sqlite = request.app.state.sqlite
     try:
-        return wg.rename_group(sqlite, group_name, req.new_name)
+        renamed = wg.rename_group(sqlite, group_name, req.new_name)
     except wg.WatchlistGroupError as error:
         _raise_group_error(error)
+    # 审计（v22）：新旧名字 + 跟着改名的行数，一条就够还原「7 行去哪了」。
+    # `unchanged=True`（新名与旧名相同）没有写任何数据，不留痕 —— 与 404 不留痕同口径。
+    if not renamed.get("unchanged"):
+        wo.record(
+            sqlite,
+            op=wo.OP_GROUP_RENAME,
+            from_group=str(renamed["group"]),
+            to_group=str(renamed["new_name"]),
+            detail={"moved_rows": int(renamed.get("moved_rows") or 0)},
+            actor=_actor_of(request),
+        )
+    return renamed
 
 
 @router.delete("/groups/{group_name}")
@@ -773,6 +893,7 @@ def delete_group(
       如实说明「哪类引用、几条」，绝不让用户以为规则也删了。
     """
     sqlite = request.app.state.sqlite
+    actor = _actor_of(request)
     name = wg.normalize_group_name(group_name)
     if not name:
         raise HTTPException(status_code=400, detail="group_name is required")
@@ -811,12 +932,16 @@ def delete_group(
 
     # 先删分组行，再让规则守卫统计引用：这样 `watchlist` 引用只剩**其它分组**
     # 的残留，不会把本次正在删除的分组自己算成"规则删不掉"。
-    deleted_rows = sqlite.execute(
-        "DELETE FROM watchlist WHERE group_name = ?", [name]
-    )
-    # 注册表行一起删：不删的话这个分组会变成"0 只但永远在侧栏"的幽灵分组
-    # （空分组合法 ≠ 用户点了删除还留着）。`deleted_rows` 仍是 watchlist 真实行数。
-    registry_removed = wg.delete_registry_group(sqlite, name)
+    # 2026-11-27 自查修正：这两步原来各自开事务（`sqlite.execute` 一次、`wg.delete_registry_group`
+    # 又一次），中间失败会留下 **"0 只但还在侧栏"的幽灵分组**。现在放进同一个事务：
+    # 要么都成、要么都不成。
+    with sqlite.transaction() as conn:
+        deleted_rows = int(conn.execute(
+            "DELETE FROM watchlist WHERE group_name = ?", [name]
+        ).rowcount or 0)
+        # 注册表行一起删：不删的话这个分组会变成"0 只但永远在侧栏"的幽灵分组
+        # （空分组合法 ≠ 用户点了删除还留着）。`deleted_rows` 仍是 watchlist 真实行数。
+        registry_removed = wg.delete_registry_group(sqlite, name, conn=conn)
     response: dict[str, Any] = {
         "status": "ok",
         "group": name,
@@ -829,12 +954,37 @@ def delete_group(
         "rule_delete_reason": None,
         "skipped_rules": [],
     }
+
+    def finish(payload: dict[str, Any]) -> dict[str, Any]:
+        """审计 + 返回：`delete_group` 有 5 个成功出口，日志只能在**唯一的**出口写。"""
+        wo.record(
+            sqlite,
+            op=wo.OP_GROUP_DELETE,
+            from_group=name,
+            to_group=name,
+            detail={
+                "deleted_rows": int(payload.get("deleted_rows") or 0),
+                "registry_removed": bool(payload.get("registry_removed")),
+                "delete_rule_requested": bool(payload.get("delete_rule_requested")),
+                "rule_deleted": bool(payload.get("rule_deleted")),
+                "deleted_rule_id": payload.get("deleted_rule_id"),
+                "rule_delete_status": payload.get("rule_delete_status"),
+                "rule_delete_reason": payload.get("rule_delete_reason"),
+                "skipped_rule_ids": [
+                    int(item["rule_id"]) for item in payload.get("skipped_rules") or []
+                ],
+                "source_rule_ids": rule_ids,
+            },
+            actor=actor,
+        )
+        return payload
+
     if not delete_rule:
-        return response
+        return finish(response)
     if not rule_ids:
         response["rule_delete_status"] = "no_rule"
         response["rule_delete_reason"] = "该分组没有关联筛选规则，本次只删除了分组。"
-        return response
+        return finish(response)
     if len(rule_ids) > 1:
         message = (
             f"该分组来自 {len(rule_ids)} 个不同筛选规则（"
@@ -851,7 +1001,7 @@ def delete_group(
             }
             for rule_id in rule_ids
         ]
-        return response
+        return finish(response)
 
     # 局部导入避免 `watchlist` ↔ `screening` 模块级循环依赖；同时保证删分组
     # 走的确实是 `DELETE /rules/{id}` 的同一套守卫（不是第二份实现）。
@@ -877,9 +1027,49 @@ def delete_group(
             # 守卫原样带回的引用计数：results / watchlist / runs（几条）。
             "refs": detail.get("refs"),
         }]
-        return response
+        return finish(response)
 
     response["rule_deleted"] = True
     response["deleted_rule_id"] = deleted_rule["deleted_rule_id"]
     response["rule_delete_status"] = "deleted"
-    return response
+    return finish(response)
+
+
+@router.get("/ops")
+def list_watchlist_ops(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    op: str | None = Query(None),
+    stock_code: str | None = Query(None),
+) -> dict:
+    """最近的**用户操作**记录（v22 `watchlist_ops`）：这行数据是怎么变成现在这样的。
+
+    为什么要这个端点（2026-11-24 用户投诉）：
+
+    > 「我从 ROCE 这个筛选分组里面移动过去的……你难道查不出这个日志来吗？」
+
+    当时只能靠「ROCE 少 7 行 + 我的自选多 7 行 + 时间戳吻合」去猜，而且第一次还猜错
+    了（把 UTC 当本地时间，误判成"卡了 8 小时"）。所以本端点**时间一律双轨**：
+
+    - `created_at_utc`：`2026-11-24T05:37:00Z`（库里的真值，`CURRENT_TIMESTAMP` 是 UTC）；
+    - `created_at_local`：`2026-11-24 13:37:00`（北京时间的同一时刻，+8 小时）。
+
+    契约：
+    - `limit`：默认 50，1~500；按时间倒序（= id 倒序）。
+    - `op`：`add/copy/move/remove/group_create/group_rename/group_delete/refresh`；
+      不在这个集合里 → 400（拼错的操作名不该静默返回空列表）。
+    - `stock_code`：1~6 位数字，按"这条操作涉及这只股票"过滤；非数字 → 400。
+    - 每条带 `op_label`（中文）与 `summary`（一句话，措辞由后端单源给出）。
+    - `actor`：`local-ui` / `cli` / `api`（来源粗分，见 `_actor_of`）。
+    """
+    sqlite = request.app.state.sqlite
+    op_key = (op or "").strip()
+    if op_key and op_key not in wo.OP_LABELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown op: {op_key}（可选：{'/'.join(wo.OP_LABELS)}）",
+        )
+    code = (stock_code or "").strip()
+    if code and not re.fullmatch(r"\d{1,6}", code):
+        raise HTTPException(status_code=400, detail="invalid stock code filter: digits only")
+    return wo.list_ops(sqlite, limit=limit, op=op_key or None, stock_code=code or None)

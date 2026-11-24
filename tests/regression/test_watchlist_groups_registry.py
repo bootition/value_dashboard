@@ -86,7 +86,7 @@ def test_v21_creates_default_group_and_backfills_existing_groups(
         int(row["version"])
         for row in sqlite_store.query("SELECT version FROM schema_migrations")
     }
-    assert SQLITE_SCHEMA_VERSION == 21
+    assert SQLITE_SCHEMA_VERSION == 22
     assert 21 in versions
 
     rule_id = _seed_rule(sqlite_store, "回填规则")

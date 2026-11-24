@@ -33,6 +33,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.core import watchlist_ops as wo
 from app.core.blacklist import blacklisted_code_set, filter_rows
 from app.core.data_quality import (
     SCREENING_READINESS_CACHE_KEY,
@@ -1162,6 +1163,28 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
             " WHERE group_name = ? AND source_result_id IS NULL",
             [group_name],
         ).fetchone()["c"]
+        # 审计（v22）：这是自选行数**最大的**来源（用户现场那个 591 行的分组就是这条
+        # 路径累加出来的），漏了它，「这 591 行哪来的」就仍然只能靠猜。
+        # 与数据写同事务：上面任何一条 400 抛出去都会连这条日志一起回滚。
+        wo.record(
+            sqlite,
+            op=wo.OP_SCREENING_SAVE,
+            stock_codes=unique_codes,
+            to_group=group_name,
+            detail={
+                "result_id": result_id,
+                "source_rule_id": source_rule_id,
+                "added": added,
+                "removed": removed,
+                "inserted": inserted,
+                "updated": updated,
+                "manual_rows_preserved": manual_rows_preserved,
+                "replace_group": bool(req.replace_group),
+                "rule_provenance": "rule_deleted" if source_rule_id is None else "ok",
+            },
+            actor=wo.actor_from_headers(request.headers),
+            conn=conn,
+        )
 
     return {
         "status": "ok",

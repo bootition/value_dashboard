@@ -76,6 +76,27 @@ interface DeleteGroupResponse {
   skipped_rules: RuleSkipInfo[]
 }
 
+/** `GET /api/watchlist/ops` 的响应契约（v22 操作审计，2026-11-24 用户投诉后新增）。 */
+interface WatchlistOp {
+  id: number
+  op: string
+  /** 中文标签由后端给（`加入自选/复制到分组/移动分组/移出自选/新建分组/重命名分组/删除分组`），前端不自己拼。 */
+  op_label: string
+  stock_codes: string[]
+  from_group: string | null
+  to_group: string | null
+  detail: Record<string, unknown>
+  actor: string
+  /** 库里的真值（UTC）。 */
+  created_at_utc: string | null
+  /** 同一时刻的本地时间（UTC+8）——**界面只显示这个**，避免再犯"把 UTC 当本地"的错。 */
+  created_at_local: string | null
+  /** 时间解析不出来时的原文（正常为 null；比编一个"现在"诚实）。 */
+  created_at_raw: string | null
+  /** 一句话中文描述（后端单源给出）。 */
+  summary: string
+}
+
 interface DeleteGroupTarget {
   group_name: string
   cnt: number
@@ -743,6 +764,39 @@ async function moveSelected(): Promise<void> {
   }
 }
 
+// ── 操作记录（v22 审计）────────────────────────────────────────────
+// 2026-11-24 用户实测：把 7 只股票从「ROCE遗传好公司」移动过来之后，事后**查不出**
+// 这行数据是谁、什么时候、从哪移来的，只能靠行数差和时间戳猜（还猜错过）。
+// 入口做得小、藏在下边，目标是"下次出问题一眼能查"，不是日常功能。
+const showOps = ref(false)
+const opsLoading = ref(false)
+const opsError = ref('')
+const opsList = ref<WatchlistOp[]>([])
+const opsFilter = ref('')
+/** 最近 30 条足够定位"刚才那次操作"，再多就要靠股票代码过滤。 */
+const OPS_LIMIT = 30
+
+async function fetchOps() {
+  opsLoading.value = true
+  opsError.value = ''
+  try {
+    const code = opsFilter.value.trim()
+    const resp = await axios.get<{ ops: WatchlistOp[]; count: number }>('/api/watchlist/ops', {
+      params: code ? { limit: OPS_LIMIT, stock_code: code } : { limit: OPS_LIMIT },
+    })
+    opsList.value = resp.data.ops
+  } catch (e: unknown) {
+    opsError.value = friendlyErrorMessage(e, '操作记录读取失败')
+  } finally {
+    opsLoading.value = false
+  }
+}
+
+function openOps() {
+  showOps.value = true
+  void fetchOps()
+}
+
 onMounted(fetchWatchlist)
 </script>
 
@@ -800,6 +854,10 @@ onMounted(fetchWatchlist)
             clearable
           />
           <n-button size="small" @click="addStock">添加股票</n-button>
+        </div>
+        <!-- 「操作记录」入口：刻意做得不显眼（灰、小、无边框），它是排查工具不是日常功能。 -->
+        <div class="ops-entry">
+          <button type="button" class="ops-entry-link" title="查看最近的自选操作记录（谁、什么时候、把哪几只从哪个分组挪到哪个分组）" @click="openOps">操作记录</button>
         </div>
       </aside>
       <section class="watchlist-content">
@@ -925,6 +983,31 @@ onMounted(fetchWatchlist)
         <n-button type="error" :loading="deletingGroup" @click="confirmDeleteGroup">删除分组</n-button>
       </template>
     </n-modal>
+
+    <!-- 操作记录（v22）：最近 30 条，时间**只显示本地时间**（UTC+8，后端已换算）。 -->
+    <n-modal v-model:show="showOps" preset="card" title="自选操作记录" style="width: 760px">
+      <div class="ops-toolbar">
+        <n-input
+          v-model:value="opsFilter"
+          placeholder="按股票代码过滤（如 000333）"
+          aria-label="按股票代码过滤操作记录"
+          size="small"
+          clearable
+          @keyup.enter="fetchOps"
+        />
+        <n-button size="small" :loading="opsLoading" @click="fetchOps">查询</n-button>
+      </div>
+      <p class="ops-hint">时间一律是本地时间（北京时间，已由后端从 UTC 换算）；最多显示最近 {{ OPS_LIMIT }} 条。</p>
+      <n-alert v-if="opsError" type="error" :show-icon="true" class="ops-error">{{ opsError }}</n-alert>
+      <ul class="ops-list">
+        <li v-for="item in opsList" :key="item.id" class="ops-item">
+          <span class="ops-time" :title="item.created_at_utc ? `UTC ${item.created_at_utc}` : ''">{{ item.created_at_local || item.created_at_raw || '时间未知' }}</span>
+          <n-tag size="small" :bordered="false" class="ops-tag">{{ item.op_label }}</n-tag>
+          <span class="ops-summary">{{ item.summary }}</span>
+        </li>
+        <li v-if="!opsLoading && opsList.length === 0" class="ops-empty">{{ opsFilter.trim() ? '这只股票没有操作记录。' : '还没有任何自选操作记录。' }}</li>
+      </ul>
+    </n-modal>
   </section>
 </template>
 
@@ -966,6 +1049,20 @@ onMounted(fetchWatchlist)
 .group-row .group-delete:hover { background: #fdeeee; }
 /* 悬停时把计数徽标让开一点，避免与角落按钮视觉相撞 */
 .group-row:hover .group-select em { margin-right: 16px; }
+/* 「操作记录」入口：小、灰、无边框，藏在侧栏最下面 */
+.ops-entry { margin-top: 12px; padding-top: 10px; border-top: 1px solid #edf1ee; text-align: right; }
+.ops-entry-link { border: 0; background: transparent; color: #a7b1aa; font-size: 10px; cursor: pointer; padding: 2px 4px; border-radius: 5px; }
+.ops-entry-link:hover { color: #55966d; background: #f1f7f2; }
+/* 操作记录弹窗 */
+.ops-toolbar { display: flex; align-items: center; gap: 8px; }
+.ops-hint { margin: 8px 0 12px; color: #97a199; font-size: 11px; line-height: 1.7; }
+.ops-error { margin-bottom: 10px; }
+.ops-list { display: grid; gap: 6px; margin: 0; padding: 0; max-height: 52vh; overflow-y: auto; list-style: none; }
+.ops-item { display: grid; grid-template-columns: 132px 84px minmax(0, 1fr); align-items: start; gap: 8px; padding: 7px 9px; border-radius: 8px; background: #fafcf9; }
+.ops-time { color: #6e7d73; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ops-tag { justify-self: start; }
+.ops-summary { color: #39463d; font-size: 12px; line-height: 1.7; word-break: break-all; }
+.ops-empty { padding: 18px; color: #99a39c; font-size: 12px; text-align: center; }
 .delete-group-summary { margin: 0 0 10px; color: #39463d; font-size: 14px; }
 .delete-group-detail { margin: 0 0 12px; color: #6e7d73; font-size: 12px; line-height: 1.8; }
 .delete-group-hint { margin: 8px 0 0; color: #97a199; font-size: 11px; line-height: 1.7; }

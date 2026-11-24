@@ -422,16 +422,22 @@ def rename_group(sqlite: Any, old_name: str, new_raw_name: str | None) -> dict[s
     }
 
 
-def delete_registry_group(sqlite: Any, name: str) -> bool:
+def delete_registry_group(sqlite: Any, name: str, *, conn: Any = None) -> bool:
     """删注册表行（`DELETE /groups/{name}` 在删完 watchlist 行之后调用）。
 
     返回是否真的删掉了注册表行。**只删注册表行，不动 watchlist**
     —— 顺序由调用方控制（先删分组行，再让规则守卫统计剩余引用）。
+
+    `conn=`：传进来就用调用方的事务。2026-11-27 自查发现：
+    `DELETE /groups` 原来是"删 watchlist 行（一个事务）→ 删注册表行（另一个事务）"，
+    中间失败会留下**"0 只但还在侧栏"的幽灵分组**。现在两步共用同一个事务。
     """
     key = normalize_group_name(name)
     if not key:
         return False
     ensure_table(sqlite)
+    if conn is not None:
+        return conn.execute(f"DELETE FROM {GROUPS_TABLE} WHERE name = ?", [key]).rowcount > 0
     return sqlite.execute(f"DELETE FROM {GROUPS_TABLE} WHERE name = ?", [key]) > 0
 
 
