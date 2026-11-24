@@ -605,3 +605,53 @@ def test_delete_group_is_atomic_no_ghost_group(sqlite_store) -> None:
     )[0]["n"]
     assert int(rows) == 1, "事务回滚后 watchlist 行必须还在"
     assert int(registered) == 1, "注册表行也必须还在（否则就是幽灵分组）"
+
+
+def test_add_failure_does_not_leave_ghost_group(duckdb_store, sqlite_store) -> None:
+    """`POST /add` 失败时不许留下空分组（2026-11-27 自查）。
+
+    改前：`ensure_group_for_write` 在事务**外**先提交一次"登记分组"，
+    add 再失败（如溯源校验 400）就会留下一个**空分组**，
+    而日志里只有一条失败的 add —— 看不出这个空组是那次操作造出来的。
+    """
+    # `/add` 要用 DuckDB 校验股票在池内 → 必须给 client 一个带股票的 duck
+    from tests.support.seed import Seed
+
+    Seed(duckdb_store).stock(
+        "600519", name="贵州茅台", exchange="SSE",
+        listing_date="2001-08-27", is_st=False, is_suspended=False,
+    )
+    client = _client(sqlite_store, duckdb_store)  # type: ignore[name-defined]
+    ghost = "不该出现的空组"
+
+    # 用"结果里没有这只股票"触发 400：add 会在事务内校验 provenance
+    from tests.support.seed_sqlite import SeedSqlite
+
+    SeedSqlite(sqlite_store).screening_rule("规则A", 1, "{}", status="saved")
+    rule_id = int(sqlite_store.query(
+        "SELECT id FROM screening_rules WHERE name = '规则A'"
+    )[0]["id"])
+    # 空结果集 → 里面没有 600519 → add 必然 400
+    sqlite_store.execute(
+        "INSERT INTO screening_results "
+        "(title, rule_id, rule_version, data_date, result_json, columns_json) "
+        "VALUES ('结果A', ?, 1, '2026-11-24', '[]', '[]')",
+        [rule_id],
+    )
+    result_id = int(sqlite_store.query(
+        "SELECT id FROM screening_results ORDER BY id DESC LIMIT 1"
+    )[0]["id"])
+
+    resp = client.post("/api/watchlist/add", json={
+        "stock_code": "600519",
+        "group_name": ghost,
+        "source_result_id": str(result_id),   # 契约是字符串；结果里没有 600519 → 400
+    })
+    assert resp.status_code == 400, resp.text
+
+    registered = sqlite_store.query(
+        "SELECT COUNT(*) AS n FROM watchlist_groups WHERE name = ?", [ghost]
+    )[0]["n"]
+    assert int(registered) == 0, (
+        "add 失败后不许留下空分组 —— 分组登记必须与自选行在同一个事务里"
+    )

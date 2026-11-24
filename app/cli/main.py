@@ -1975,15 +1975,19 @@ def override_revoke(
     override_id: int = typer.Argument(...),
 ) -> None:
     """撤销人工覆写 (PRD §9.5 R7: 可回滚)"""
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     from app.core.config import Config
     Config.load()
     from app.cli.protocol import make_response
     sqlite = _sqlite_store()
+    # 2026-11-27 自查：这里原来是 `datetime.now()`（**朴素本地时间**），而同一个表的
+    # `created_at` 走 `CURRENT_TIMESTAMP`（SQLite 给的是 **UTC**）——
+    # 同一张表两列两种时间基准，日后并排展示必然重演"把 UTC 当本地"的误判
+    # （我 2026-11-24 就因此把一轮 58 秒的更新误判成"卡了 8 小时"）。
     sqlite.execute(
         "UPDATE manual_overrides SET rolled_back_at = ? WHERE id = ?",
-        [datetime.now().isoformat(), override_id],
+        [datetime.now(UTC).isoformat(), override_id],
     )
     typer.echo(json.dumps(make_response("override.revoke", {"status": "ok", "revoked": override_id}), ensure_ascii=False))
 

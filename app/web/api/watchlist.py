@@ -323,12 +323,18 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
         )
     try:
         group_name = wg.normalize_group_name(req.group_name) or wg.DEFAULT_GROUP_NAME
-        # 先按宽松口径校验名字（超长 400）；真正的登记放进下面的同一事务里。
-        wg.ensure_group_for_write(sqlite, group_name)
     except wg.WatchlistGroupError as error:
         _raise_group_error(error)
     created = True
     with sqlite.transaction() as conn:
+        # 2026-11-27 自查修正：`ensure_group_for_write` 原来在事务**外**调用，
+        # 于是它自己提交一次"登记分组"，add 再失败（如溯源校验 400）就会留下一个
+        # **空分组**，而日志里只有一条失败的 add —— 看不出这个空组是那次操作造出来的。
+        # 现在把它并进同一事务：要么"分组 + 自选行 + 审计"一起成功，要么一起回滚。
+        try:
+            group_name = wg.ensure_group_for_write(sqlite, group_name, conn=conn)
+        except wg.WatchlistGroupError as error:
+            _raise_group_error(error)
         if req.source_result_id is not None:
             result = conn.execute(
                 "SELECT rule_id, result_json FROM screening_results WHERE id = ?",
