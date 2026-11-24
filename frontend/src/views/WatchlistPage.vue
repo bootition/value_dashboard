@@ -4,7 +4,7 @@ import type { VNodeChild } from 'vue'
 import { useRouter, RouterLink } from 'vue-router'
 import {
   NAlert, NInput, NButton, NDataTable,
-  NEmpty, NModal, useMessage, useDialog, NCheckbox, NTag
+  NEmpty, NModal, useMessage, useDialog, NCheckbox, NTag, NSelect
 } from 'naive-ui'
 import type { DataTableColumns } from 'naive-ui'
 import axios from 'axios'
@@ -43,6 +43,12 @@ interface WatchlistItem {
 interface WatchlistGroup {
   group_name: string
   cnt: number
+  /** 分组类型（2026-11-26 注册表）：`default`=我的自选 / `manual`=自建 / `rule`=筛选规则写入。 */
+  kind?: 'default' | 'manual' | 'rule'
+  /** 该分组登记的来源规则（`kind='rule'` 且只有一个规则时有值）。 */
+  rule_id?: number | null
+  /** 是否默认分组（后端已在每项上算好，前端不重新推断）。 */
+  is_default?: boolean
   /** 该分组来自几次不同的已保存筛选结果（NULL 不计）；`GET /groups` 提供。 */
   runs?: number
   /** `source_result_id IS NULL` 的手动自选行数。 */
@@ -104,16 +110,36 @@ const enrichmentUnavailable = ref(false)
 const enrichmentError = ref<string | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
-// `default` 只是后端持久化 key（历史数据无法改名，改库会丢分组），
+// `default` 只是**历史**持久化 key（v21 之前前端不传分组时的落点），
 // 用户可见处一律走 displayGroupName 归一成中文。
+// 2026-11-26 起默认分组是注册表里的 `我的自选`（kind='default'，不可删/不可改名）。
 const MANUAL_GROUP_KEY = 'default'
 const MANUAL_GROUP_LABEL = '手动收录'
+const DEFAULT_GROUP_KEY = '我的自选'
 // 首屏不预选任何分组：等分组列表回来后自动落到第一个真实规则分组，
 // 这样用户一进来自选页看到的就是「已有的规则分组」，而不是空的占位组。
 const selectedGroup = ref<string | null>(null)
 const showColumnSettings = ref(false)
 const addStockCode = ref('')
-const addGroupName = ref('')
+/** 「输入代码 + 添加」的目标分组：2026-11-26 从自由输入改成**下拉选已有分组**
+ *  （自由输入会造出拼错的新分组，而用户真正想要的是「放进我建好的那个组」）。 */
+const addGroupName = ref<string | null>(null)
+
+// ── 自建分组（2026-11-26：空分组必须能存在）─────────────────────────────
+const newGroupName = ref('')
+const creatingGroup = ref(false)
+/** 移动目标下拉里的「新建分组…」哨兵值。 */
+const MOVE_TO_NEW = '__new_group__'
+const renameTarget = ref<WatchlistGroup | null>(null)
+const showRenameGroup = ref(false)
+const renameName = ref('')
+const renamingGroup = ref(false)
+const renameError = ref<string | null>(null)
+
+// ── 批量移动（选中若干只 → 移动到分组）─────────────────────────────────
+const checkedRowKeys = ref<Array<string | number>>([])
+const moveTarget = ref<string | null>(null)
+const moving = ref(false)
 
 // ── 删除整个自选分组（2026-11-25 用户实测：此前只能一只一只删）───────────
 const showDeleteGroup = ref(false)
@@ -133,12 +159,32 @@ const hasRefreshableRule = computed(() => items.value.some((item) => item.source
 /** 唯一的组名展示归一出口：`default` 只作为内部 key 存在。 */
 const displayGroupName = (name: string) => name === MANUAL_GROUP_KEY ? MANUAL_GROUP_LABEL : name
 const isManualGroup = (name: string | null) => name === MANUAL_GROUP_KEY
-/** 空的手动组不占侧栏位置（后端 GROUP BY 不会返回 0 行分组，这里兜底）；
- *  真实规则分组排前面，手动收录作为兜底入口排最后。 */
+/** 默认分组（不可删/不可改名）。后端每项都带 `is_default`，这里只做兜底识别。 */
+const isDefaultGroup = (group: Pick<WatchlistGroup, 'group_name' | 'kind' | 'is_default'>) =>
+  group.is_default === true || group.kind === 'default' || group.group_name === DEFAULT_GROUP_KEY
+/**
+ * 侧栏分组：
+ * - **空分组必须显示**（2026-11-26 核心价值：用户建一个组、再从别处把股票挪进去；
+ *   改造前分组由 `GROUP BY watchlist` 派生，0 只的组根本不存在）；
+ * - 唯一的例外是历史 key `default`（旧前端"手动收录"落点）：它空着的时候没有任何
+ *   信息量，留在侧栏只会占位置，所以保持旧口径隐藏（有股票时照常显示、可改名可删）。
+ */
 const visibleGroups = computed(() => groups.value
   .filter((g) => !isManualGroup(g.group_name) || g.cnt > 0)
   .slice()
   .sort((a, b) => Number(isManualGroup(a.group_name)) - Number(isManualGroup(b.group_name))))
+
+/** 目标分组下拉的选项（移动/添加共用；含「新建分组…」入口）。 */
+const groupOptions = computed(() => visibleGroups.value.map((group) => ({
+  label: `${displayGroupName(group.group_name)}（${group.cnt}）`,
+  value: group.group_name,
+})))
+
+/** 选中的自选行（行 key = `分组|代码`，同一只股票在多个分组时可分别选中）。 */
+const rowKeyOf = (row: WatchlistItem) => `${row.group_name}|${row.stock_code}`
+const selectedRows = computed(() => items.value.filter(
+  (row) => checkedRowKeys.value.includes(rowKeyOf(row)),
+))
 const hasVisibleGroups = computed(() => visibleGroups.value.length > 0)
 const selectedGroupLabel = computed(() => selectedGroup.value ? displayGroupName(selectedGroup.value) : '')
 const selectedIsManual = computed(() => isManualGroup(selectedGroup.value))
@@ -160,9 +206,11 @@ function resolveSelectedGroup(list: WatchlistGroup[]): string | null {
   const visible = list.filter((g) => !isManualGroup(g.group_name) || g.cnt > 0)
   const current = selectedGroup.value
   if (current && visible.some((g) => g.group_name === current)) return current
-  // 优先落到真实规则分组（用户说的"已有的那个规则分组界面"），
-  // 只有完全没有规则分组时才回退到手动收录。
-  return visible.find((g) => !isManualGroup(g.group_name))?.group_name
+  // 优先落到**有股票**的非默认分组（用户说的"已有的那个规则分组界面"）；
+  // 都没有就落到默认分组「我的自选」（它一定在，且用户随时要能往里面加）。
+  return visible.find((g) => !isDefaultGroup(g) && !isManualGroup(g.group_name) && g.cnt > 0)?.group_name
+    ?? visible.find((g) => isDefaultGroup(g))?.group_name
+    ?? visible.find((g) => !isManualGroup(g.group_name))?.group_name
     ?? visible.find((g) => isManualGroup(g.group_name))?.group_name
     ?? null
 }
@@ -336,7 +384,9 @@ const columnRenders: Record<string, (row: WatchlistItem) => VNodeChild> = {
 }
 
 const tableColumns = computed<DataTableColumns<WatchlistItem>>(() => {
-  const cols: DataTableColumns<WatchlistItem> = []
+  // 首列是勾选框（2026-11-26：批量移动靠它选行）。`checked-row-keys` 只负责状态，
+  // 选择列必须显式声明，否则 naive-ui 不会渲染复选框。
+  const cols: DataTableColumns<WatchlistItem> = [{ type: 'selection', width: 34 }]
   for (const spec of visibleColumnSpecs.value) {
     const render = columnRenders[spec.key]
     if (!render) continue
@@ -434,8 +484,8 @@ async function addStock() {
     message.warning('请输入 6 位股票代码（如 600519）')
     return
   }
-  // 分组名留空 = 收进「手动收录」（后端内部 key 仍是 default，展示层归一）。
-  const targetGroup = addGroupName.value.trim() || MANUAL_GROUP_KEY
+  // 目标分组来自下拉（默认 = 当前分组）；没有任何分组时落到默认组「我的自选」。
+  const targetGroup = (addGroupName.value ?? '').trim() || selectedGroup.value || DEFAULT_GROUP_KEY
   try {
     await axios.post('/api/watchlist/add', { stock_code: code, group_name: targetGroup })
     message.success(`已添加 ${code} 到「${displayGroupName(targetGroup)}」`)
@@ -561,6 +611,131 @@ async function confirmDeleteGroup() {
   }
 }
 
+// ── 自建分组（2026-11-26）──────────────────────────────────────────────
+
+/** 新建空分组：成功后立刻出现在侧栏（`cnt=0`），并直接切过去。 */
+async function createGroup(): Promise<void> {
+  const name = newGroupName.value.trim()
+  if (!name) {
+    message.warning('请先输入分组名，例如「重点观察」')
+    return
+  }
+  creatingGroup.value = true
+  try {
+    const resp = await axios.post<{ group: WatchlistGroup }>('/api/watchlist/groups', { name })
+    const created = resp.data.group
+    newGroupName.value = ''
+    // 新建的分组马上可以当移动/添加目标（下拉里立刻可选）
+    moveTarget.value = created.group_name
+    addGroupName.value = created.group_name
+    message.success(`已新建分组「${created.group_name}」，选中股票后可以移动进来`)
+    await fetchWatchlist()
+    selectedGroup.value = created.group_name
+    await fetchWatchlist()
+  } catch (e: unknown) {
+    // 409 重名 / 400 空名超长：后端已给中文原因，原样展示
+    message.error(friendlyErrorMessage(e, '新建分组失败'))
+  } finally {
+    creatingGroup.value = false
+  }
+}
+
+// ── 分组改名（2026-11-26：和删除同级；默认组不显示这两个入口）─────────
+
+function openRenameGroup(group: WatchlistGroup): void {
+  renameTarget.value = group
+  renameName.value = displayGroupName(group.group_name)
+  renameError.value = null
+  showRenameGroup.value = true
+}
+
+async function confirmRenameGroup(): Promise<void> {
+  const target = renameTarget.value
+  if (!target) return
+  const next = renameName.value.trim()
+  if (!next) {
+    renameError.value = '请先输入新的分组名'
+    return
+  }
+  renamingGroup.value = true
+  renameError.value = null
+  try {
+    await axios.patch(
+      `/api/watchlist/groups/${encodeURIComponent(target.group_name)}`,
+      { new_name: next },
+    )
+    message.success(`分组「${displayGroupName(target.group_name)}」已改名为「${next}」`)
+    // 跟随改名：当前选中分组 / 添加目标 / 移动目标都指向同一个分组，不能指丢
+    if (selectedGroup.value === target.group_name) selectedGroup.value = next
+    if (moveTarget.value === target.group_name) moveTarget.value = next
+    if (addGroupName.value === target.group_name) addGroupName.value = next
+    showRenameGroup.value = false
+    await fetchWatchlist()
+  } catch (e: unknown) {
+    // 失败原因**留在对话框里**（409 重名 / 404 已被删 / 400 默认组保护）
+    renameError.value = friendlyErrorMessage(e, '改名失败')
+  } finally {
+    renamingGroup.value = false
+  }
+}
+
+// ── 批量移动到分组（2026-11-26）────────────────────────────────────────
+
+function onMoveTargetChange(value: string): void {
+  if (value === MOVE_TO_NEW) {
+    // 下拉里的「新建分组…」：清空选择、把焦点交给左侧新建输入框
+    moveTarget.value = null
+    const input = document.querySelector<HTMLInputElement>('.new-group-input input')
+    input?.focus()
+    return
+  }
+  moveTarget.value = value
+}
+
+async function moveSelected(): Promise<void> {
+  const rows = selectedRows.value
+  if (!rows.length) {
+    message.warning('请先勾选要移动的股票')
+    return
+  }
+  const target = moveTarget.value
+  if (!target) {
+    message.warning('请选择要移动到的分组（没有合适的可以先在左侧新建）')
+    return
+  }
+  // 按来源分组分批提交：后端 `POST /move` 的批量口径是 (from_group → to_group)。
+  const byGroup = new Map<string, string[]>()
+  for (const row of rows) {
+    if (row.group_name === target) continue
+    const codes = byGroup.get(row.group_name) ?? []
+    codes.push(row.stock_code)
+    byGroup.set(row.group_name, codes)
+  }
+  if (byGroup.size === 0) {
+    message.info(`选中的股票都已在「${displayGroupName(target)}」里`)
+    return
+  }
+  moving.value = true
+  let moved = 0
+  try {
+    for (const [fromGroup, codes] of byGroup) {
+      const resp = await axios.post<{ moved?: number }>('/api/watchlist/move', {
+        stock_codes: codes,
+        from_group: fromGroup,
+        to_group: target,
+      })
+      moved += resp.data?.moved ?? codes.length
+    }
+    message.success(`已把 ${moved} 只股票移动到「${displayGroupName(target)}」`)
+    checkedRowKeys.value = []
+    await fetchWatchlist()
+  } catch (e: unknown) {
+    message.error(friendlyErrorMessage(e, '移动到分组失败'))
+  } finally {
+    moving.value = false
+  }
+}
+
 onMounted(fetchWatchlist)
 </script>
 
@@ -575,16 +750,50 @@ onMounted(fetchWatchlist)
           <!-- 2026-11-22（用户反馈：按钮压在分组名上）：删除**不占行内宽度**，
                改成右上角的小按钮，只在鼠标悬停/键盘聚焦时出现。
                `.group-select` 右侧留 34px 给它，所以长分组名不会再被它挤出去。 -->
-          <button
-            class="group-delete"
-            type="button"
-            :title="`删除分组「${displayGroupName(group.group_name)}」`"
-            :aria-label="`删除分组「${displayGroupName(group.group_name)}」`"
-            @click.stop="openDeleteGroup(group)"
-          >删除</button>
+          <!-- 重命名 / 删除同级放在角落；**默认分组不显示这两个入口**
+               （后端也会 400 拒绝：`我的自选` 不可删、不可改名）。 -->
+          <span v-if="!isDefaultGroup(group)" class="group-actions">
+            <button
+              class="group-rename"
+              type="button"
+              :title="`重命名分组「${displayGroupName(group.group_name)}」`"
+              :aria-label="`重命名分组「${displayGroupName(group.group_name)}」`"
+              @click.stop="openRenameGroup(group)"
+            >改名</button>
+            <button
+              class="group-delete"
+              type="button"
+              :title="`删除分组「${displayGroupName(group.group_name)}」`"
+              :aria-label="`删除分组「${displayGroupName(group.group_name)}」`"
+              @click.stop="openDeleteGroup(group)"
+            >删除</button>
+          </span>
         </div>
         <p v-if="!hasVisibleGroups && !loading" class="groups-empty">还没有分组，去筛选规则页运行规则并保存到自选即可生成。</p>
-        <div class="manual-add"><n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" /><n-input v-model:value="addGroupName" placeholder="分组名（留空则为手动收录）" aria-label="分组名" size="small" /><n-button size="small" @click="addStock">添加股票</n-button></div>
+        <!-- 新建分组（2026-11-26）：输入名字 → 立刻出现一个 0 只的空分组 -->
+        <div class="new-group">
+          <n-input
+            v-model:value="newGroupName"
+            class="new-group-input"
+            placeholder="新分组名（如：重点观察）"
+            aria-label="新分组名"
+            size="small"
+            @keyup.enter="createGroup"
+          />
+          <n-button size="small" :loading="creatingGroup" @click="createGroup">+ 新建分组</n-button>
+        </div>
+        <div class="manual-add">
+          <n-input v-model:value="addStockCode" placeholder="输入股票代码" aria-label="股票代码" size="small" @keyup.enter="addStock" />
+          <n-select
+            v-model:value="addGroupName"
+            :options="groupOptions"
+            placeholder="分组名（默认：我的自选）"
+            aria-label="分组名"
+            size="small"
+            clearable
+          />
+          <n-button size="small" @click="addStock">添加股票</n-button>
+        </div>
       </aside>
       <section class="watchlist-content">
         <n-alert v-if="enrichmentUnavailable" type="info" :show-icon="true" class="watchlist-warning">{{ enrichmentNotice }}<n-button size="tiny" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></n-alert>
@@ -612,7 +821,39 @@ onMounted(fetchWatchlist)
               </ul>
               <p class="column-settings-hint">「操作」列固定在最右，不参与配置。顺序与勾选按分组记住，刷新页面也还在。</p>
             </div>
-            <n-data-table v-if="items.length > 0" :columns="tableColumns" :data="items" :pagination="{ pageSize: 50 }" :scroll-x="1200" size="small" striped />
+            <!-- 批量移动（2026-11-26）：勾选若干只 → 下拉选目标分组 → 移动。
+                 下拉里含「新建分组…」（跳回左侧新建），所以"新建 + 移动"是一条顺路。 -->
+            <div v-if="items.length > 0" class="move-bar">
+              <span class="move-bar-count">已选 {{ selectedRows.length }} 只</span>
+              <n-select
+                class="move-bar-select"
+                :value="moveTarget"
+                :options="[...groupOptions, { label: '＋ 新建分组…', value: MOVE_TO_NEW }]"
+                placeholder="移动到哪个分组"
+                aria-label="移动到分组"
+                size="small"
+                :disabled="selectedRows.length === 0"
+                @update:value="onMoveTargetChange"
+              />
+              <n-button
+                size="small"
+                type="primary"
+                :loading="moving"
+                :disabled="selectedRows.length === 0 || !moveTarget"
+                @click="moveSelected"
+              >移动到分组</n-button>
+            </div>
+            <n-data-table
+              v-if="items.length > 0"
+              :columns="tableColumns"
+              :data="items"
+              :row-key="rowKeyOf"
+              v-model:checked-row-keys="checkedRowKeys"
+              :pagination="{ pageSize: 50 }"
+              :scroll-x="1240"
+              size="small"
+              striped
+            />
             <n-empty v-else-if="!loading" class="watchlist-empty" :description="emptyDescription"><template #extra><div class="watchlist-empty-extra"><p class="watchlist-empty-hint">去筛选规则页跑一次规则，把命中结果保存到自选，就能在这里看到公司。</p><div class="watchlist-empty-actions"><router-link class="watchlist-empty-link" to="/screening">去筛选规则页</router-link><n-button size="small" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></div></div></template></n-empty>
             <p v-else class="watchlist-empty-hint watchlist-loading">正在加载自选…</p>
           </template>
@@ -621,6 +862,32 @@ onMounted(fetchWatchlist)
         </div>
       </section>
     </div>
+
+    <!-- 重命名分组（2026-11-26）：默认分组没有这个入口（后端也会拒绝）。 -->
+    <n-modal v-model:show="showRenameGroup" preset="dialog" title="重命名分组" style="width: 460px">
+      <template v-if="renameTarget">
+        <p class="delete-group-summary">
+          把「<b>{{ displayGroupName(renameTarget.group_name) }}</b>」改成：
+        </p>
+        <n-input
+          v-model:value="renameName"
+          placeholder="新分组名"
+          aria-label="新分组名"
+          size="small"
+          @keyup.enter="confirmRenameGroup"
+        />
+        <p class="delete-group-hint">
+          该分组里的 {{ renameTarget.cnt }} 只股票会一起搬到新名字下，不会丢失。
+        </p>
+        <n-alert v-if="renameError" type="error" :show-icon="true" class="delete-group-error">
+          {{ renameError }}
+        </n-alert>
+      </template>
+      <template #action>
+        <n-button @click="showRenameGroup = false">取消</n-button>
+        <n-button type="primary" :loading="renamingGroup" @click="confirmRenameGroup">保存新名字</n-button>
+      </template>
+    </n-modal>
 
     <!-- 删除整个自选分组（2026-11-25 新增）。说明会删多少只、是否连带删规则；
          规则删不掉时（被已保存结果引用）把后端原因原样展示。 -->
@@ -662,6 +929,21 @@ onMounted(fetchWatchlist)
 .group-row .group-select { width: 100%; padding-right: 34px; }
 /* 分组名过长时省略，绝不与右上角按钮重叠 */
 .group-row .group-select b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 改名与删除并排放在角落：两个都只在悬停/聚焦时出现 */
+.group-row .group-actions { display: inline-flex; gap: 2px; }
+.group-row .group-rename {
+  position: absolute; top: 5px; right: 34px;
+  height: 18px; padding: 0 4px;
+  border: 0; border-radius: 6px;
+  background: transparent; color: #6f8f7d;
+  font-size: 9px; line-height: 18px; white-space: nowrap;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .12s ease, background .12s ease;
+}
+.group-row:hover .group-rename,
+.group-row:focus-within .group-rename { opacity: 1; }
+.group-row .group-rename:hover { background: #eff6f1; }
 .group-row .group-delete {
   position: absolute; top: 5px; right: 5px;
   height: 18px; padding: 0 4px;
@@ -680,7 +962,12 @@ onMounted(fetchWatchlist)
 .delete-group-summary { margin: 0 0 10px; color: #39463d; font-size: 14px; }
 .delete-group-detail { margin: 0 0 12px; color: #6e7d73; font-size: 12px; line-height: 1.8; }
 .delete-group-hint { margin: 8px 0 0; color: #97a199; font-size: 11px; line-height: 1.7; }
-.delete-group-error { margin-top: 12px; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.manual-add { display: grid; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }.groups-empty { margin: 14px 10px 0; color: #99a39c; font-size: 11px; line-height: 1.7; }.watchlist-empty-extra { display: grid; gap: 12px; justify-items: center; max-width: 460px; }.watchlist-empty-hint { margin: 0; color: #829087; font-size: 12px; line-height: 1.7; text-align: center; }.watchlist-empty-actions { display: flex; align-items: center; gap: 12px; }.watchlist-empty-link { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 6px; background: #eff8f1; color: #55966d; font-size: 13px; text-decoration: none; }.watchlist-empty-link:hover { background: #e2f2e7; }.watchlist-loading { padding: 40px; color: #99a39c; }
+.delete-group-error { margin-top: 12px; }.watchlist-groups small, .watchlist-groups b { display: block; }.watchlist-groups small { margin-top: 4px; color: #99a39c; font-size: 9px; }.watchlist-groups em { display: grid; width: 22px; height: 22px; place-items: center; border-radius: 50%; background: #f1f5f2; color: #7c8c81; font-size: 10px; font-style: normal; }.new-group { display: grid; gap: 6px; margin-top: 14px; padding-top: 14px; border-top: 1px solid #edf1ee; }
+.manual-add { display: grid; gap: 8px; margin-top: 10px; }
+/* 批量移动条：勾选后才有内容，平时只是窄窄一条，不挤表格 */
+.move-bar { display: flex; align-items: center; gap: 8px; margin: 0 0 12px; }
+.move-bar-count { color: #6e7d73; font-size: 11px; white-space: nowrap; }
+.move-bar-select { width: 190px; }.watchlist-card { padding: 28px 29px; }.watchlist-card-heading { display: flex; justify-content: space-between; gap: 20px; }.watchlist-card-heading h2 { margin: 7px 0 5px; font-size: 19px; }.watchlist-card-heading span { color: #829087; font-size: 11px; }.watchlist-actions { display: flex; align-items: center; gap: 10px; white-space: nowrap; }.watchlist-toolbar { margin: 20px 0; padding: 12px; border-radius: 8px; background: #fafcf9; }.watchlist-warning { margin-bottom: 16px; }.watchlist-empty { padding: 40px; }.groups-empty { margin: 14px 10px 0; color: #99a39c; font-size: 11px; line-height: 1.7; }.watchlist-empty-extra { display: grid; gap: 12px; justify-items: center; max-width: 460px; }.watchlist-empty-hint { margin: 0; color: #829087; font-size: 12px; line-height: 1.7; text-align: center; }.watchlist-empty-actions { display: flex; align-items: center; gap: 12px; }.watchlist-empty-link { display: inline-flex; align-items: center; height: 28px; padding: 0 14px; border-radius: 6px; background: #eff8f1; color: #55966d; font-size: 13px; text-decoration: none; }.watchlist-empty-link:hover { background: #e2f2e7; }.watchlist-loading { padding: 40px; color: #99a39c; }
 /* 列设置面板（勾选显示哪些列 + ▲▼ 调顺序 + 全部显示/恢复默认） */
 .column-settings-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .column-settings-actions { display: flex; flex: none; gap: 6px; white-space: nowrap; }

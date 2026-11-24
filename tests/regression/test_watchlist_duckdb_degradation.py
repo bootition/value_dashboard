@@ -128,6 +128,24 @@ def _build_client(duck: Any, sqlite: SQLiteStore) -> TestClient:
     return TestClient(app)
 
 
+
+#: 默认自选分组名（2026-11-26 起 `watchlist_groups` 注册表里**永远**有这一行）。
+DEFAULT_GROUP = "我的自选"
+
+
+def _group(body: dict, name: str = INCIDENT_GROUP) -> dict:
+    """从 `/list` 的 `groups` 里按名字取一个分组。
+
+    2026-11-26 起 `groups` 的唯一真相源是 `watchlist_groups` 注册表：默认分组
+    「我的自选」永远在，0 只的空分组也照常返回，因此**不能再写整表相等断言**
+    （那等于要求"注册表里只有用户这一个分组"，与"可自建分组"直接冲突）。
+    这里改成"按名字取、只钉计数"——原意（分组在任何情况下都必须回来、计数与行同口径）不变。
+    """
+    found = next((group for group in body["groups"] if group["group_name"] == name), None)
+    assert found is not None, f"分组 {name} 没回来：{body['groups']}"
+    return found
+
+
 def _seed_watchlist(sqlite: SQLiteStore, codes: list[str], *, group: str = INCIDENT_GROUP) -> None:
     """按真实库的形状播种自选行（同一分组 + 明确来源 + 递减的加入时间）。
 
@@ -180,7 +198,7 @@ def test_watchlist_list_degrades_when_duckdb_read_is_locked(
     body = response.json()
 
     # 分组列表：只查 SQLite，任何时候都必须回来，且计数正确。
-    assert body["groups"] == [{"group_name": INCIDENT_GROUP, "cnt": 3}]
+    assert _group(body)["cnt"] == 3
     # 自选行：代码/分组/来源全部保留，顺序按 added_at DESC。
     assert [item["stock_code"] for item in body["items"]] == codes
     assert body["count"] == len(codes)
@@ -216,12 +234,12 @@ def test_watchlist_list_degrades_and_returns_all_573_rows_at_incident_scale(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["groups"] == [{"group_name": INCIDENT_GROUP, "cnt": INCIDENT_ROW_COUNT}]
+    assert _group(body)["cnt"] == INCIDENT_ROW_COUNT
     assert body["count"] == INCIDENT_ROW_COUNT
     assert len(body["items"]) == INCIDENT_ROW_COUNT
     assert sorted(item["stock_code"] for item in body["items"]) == sorted(codes)
     # 侧栏数字与表里行数同口径：这是用户"看起来数据全丢"最直观的那两个数字。
-    assert body["groups"][0]["cnt"] == len(body["items"])
+    assert _group(body)["cnt"] == len(body["items"])
 
 
 # ─── 2. 非锁类故障也降级（但不是"更新中"） ──────────────────────
@@ -239,7 +257,7 @@ def test_watchlist_list_degrades_on_non_lock_enrichment_failure(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["groups"] == [{"group_name": INCIDENT_GROUP, "cnt": 2}]
+    assert _group(body)["cnt"] == 2
     assert [item["stock_code"] for item in body["items"]] == ["002961", "300938"]
     assert body["enrichment"] == "unavailable"
     # 原因照实回传：前端有据可依地提示"加载失败"，而不是猜成"正在更新"。
@@ -271,8 +289,8 @@ def test_watchlist_list_degrades_and_still_drops_blacklisted_rows(
     # 屏蔽期**不删除** watchlist 行：移出黑名单后原股票自动回来。
     assert sqlite_store.query("SELECT COUNT(*) AS n FROM watchlist")[0]["n"] == 3
     # 侧栏计数与可见行同口径：显示「1」就必须只有 1 行。
-    assert body["groups"] == [{"group_name": INCIDENT_GROUP, "cnt": 1}]
-    assert body["groups"][0]["cnt"] == len(body["items"])
+    assert _group(body)["cnt"] == 1
+    assert _group(body)["cnt"] == len(body["items"])
 
 
 # ─── 4. 正常路径行为不变 ─────────────────────────────────────────
@@ -418,10 +436,12 @@ def test_watchlist_list_empty_returns_ok_enrichment_without_touching_duckdb(
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body == {
-        "items": [], "count": 0, "groups": [],
-        "enrichment": "ok", "enrichment_error": None,
-    }
+    # 2026-11-26：`groups` 来自注册表，默认分组「我的自选」即使 0 只也必须在，
+    # 所以"真的没有自选"表现为「只有一个 cnt=0 的默认组」，不再是空列表。
+    assert body["items"] == [] and body["count"] == 0
+    assert body["enrichment"] == "ok" and body["enrichment_error"] is None
+    assert [group["group_name"] for group in body["groups"]] == [DEFAULT_GROUP]
+    assert body["groups"][0]["cnt"] == 0
     assert locked.read_query_calls == 0, "空自选不该为了富化去碰 DuckDB"
 
 
@@ -444,4 +464,4 @@ def test_watchlist_list_degrades_for_scoped_and_unscoped_requests(
     body = response.json()
     assert body["enrichment"] == "unavailable"
     assert [item["stock_code"] for item in body["items"]] == ["002961", "300938"]
-    assert body["groups"] == [{"group_name": INCIDENT_GROUP, "cnt": 2}]
+    assert _group(body)["cnt"] == 2

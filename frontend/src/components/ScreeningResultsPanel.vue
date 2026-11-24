@@ -569,6 +569,14 @@ const tableColumns = computed(() => {
       })
     }
   }
+
+  // 逐只「+ 加入自选」（2026-11-26）：固定在最右，不参与列配置，也不改整批保存的语义。
+  cols.push({
+    title: '自选',
+    key: 'watchlist_action',
+    width: 104,
+    render: (row) => renderWatchlistAction(row),
+  })
   
   return cols
 })
@@ -647,6 +655,101 @@ async function exportCSV() {
   } catch (e: unknown) {
     reportActionError(e, '导出失败')
   }
+}
+
+// ─── 逐只「+ 加入自选」（2026-11-26 用户需求）─────────────────────────
+// 用户原话：「或者我直接在按规则分组的列表里面有个『点击加入自选列表』」。
+// 语义与整批「保存到自选列表」**不同且互不影响**：整批是「本次结果 → 规则分组」
+// （含替换/合并确认），逐只是「这一只 → 默认分组『我的自选』」。
+//
+// 已加入标记来自 `GET /api/watchlist/list`（服务端事实，一次请求）：接口挂了只是
+// 少一个对勾，**绝不**能把筛选结果页打成失败态，所以失败时静默保留空集合。
+const watchlistCodes = ref<Set<string>>(new Set())
+const watchlistAddingCode = ref<string | null>(null)
+/** 默认分组名由后端下发（`/status`、`/add` 都会带），前端不写死中文字面量。 */
+const watchlistDefaultGroup = ref('我的自选')
+
+function stockLabel(row: ScreeningResult): string {
+  const name = String(row.name ?? '').trim()
+  const code = String(row.stock_code ?? '').trim()
+  return name ? `${name}（${code}）` : code
+}
+
+async function loadWatchlistPresence(): Promise<void> {
+  try {
+    const resp = await axios.get<{ items?: Array<{ stock_code?: unknown; group_name?: unknown }> }>(
+      '/api/watchlist/list',
+    )
+    watchlistCodes.value = new Set(
+      (resp.data?.items ?? [])
+        .map((item) => String(item.stock_code ?? ''))
+        .filter(Boolean),
+    )
+  } catch {
+    // 只影响"已加入"标记，不影响结果本身；不发错误提示（用户没要求这次读）。
+    watchlistCodes.value = new Set()
+  }
+}
+
+watch(
+  () => props.results,
+  () => {
+    void loadWatchlistPresence()
+  },
+  { immediate: true },
+)
+
+async function addSingleToWatchlist(row: ScreeningResult): Promise<void> {
+  const code = String(row.stock_code ?? '').trim()
+  if (!code || watchlistAddingCode.value) return
+  watchlistAddingCode.value = code
+  try {
+    const resp = await axios.post<{ group?: string; created?: boolean; default_group?: string }>(
+      '/api/watchlist/add',
+      { stock_code: code },
+    )
+    const group = resp.data?.group || watchlistDefaultGroup.value
+    if (resp.data?.default_group) watchlistDefaultGroup.value = resp.data.default_group
+    const next = new Set(watchlistCodes.value)
+    next.add(code)
+    watchlistCodes.value = next
+    message.success(
+      resp.data?.created === false
+        ? `${stockLabel(row)} 已经在「${group}」里了`
+        : `已加入「${group}」：${stockLabel(row)}`,
+    )
+  } catch (e: unknown) {
+    // **400 不许吞**：不在股票池 / 黑名单等原因由后端中文 message 带出来
+    // （`friendlyErrorMessage` 优先展示后端主句）。
+    message.error(`加入自选失败：${stockLabel(row)}；${friendlyErrorMessage(e, '原因未知')}`)
+  } finally {
+    watchlistAddingCode.value = null
+  }
+}
+
+/** 逐只加入按钮 / 已加入标记（同一只股票重复点会被置灰，避免连点）。 */
+function renderWatchlistAction(row: ScreeningResult): VNode {
+  const code = String(row.stock_code ?? '').trim()
+  if (watchlistCodes.value.has(code)) {
+    return h(
+      NButton,
+      { size: 'tiny', disabled: true, class: 'screening-watchlist-added', title: '已在自选列表中' },
+      { default: () => '✓ 已加入' },
+    )
+  }
+  return h(
+    NButton,
+    {
+      size: 'tiny',
+      quaternary: true,
+      type: 'primary',
+      class: 'screening-watchlist-add',
+      loading: watchlistAddingCode.value === code,
+      title: `把 ${stockLabel(row)} 加入默认自选分组`,
+      onClick: () => void addSingleToWatchlist(row),
+    },
+    { default: () => '+ 加入自选' },
+  )
 }
 
 /** 读该分组现状（`GET /api/watchlist/groups` 是唯一事实来源，不靠本地缓存猜）。 */

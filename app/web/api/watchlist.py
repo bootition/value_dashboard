@@ -10,12 +10,13 @@ import json
 import logging
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
-from app.core.blacklist import blacklisted_code_set, exclusion_condition
+from app.core import watchlist_groups as wg
+from app.core.blacklist import blacklisted_code_set
 from app.core.screening.defaults import base_pool_defaults
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
@@ -57,7 +58,9 @@ _SNAPSHOT_VALUE_FIELDS = (
 
 class AddStockRequest(BaseModel):
     stock_code: str
-    group_name: str = "default"
+    #: 缺省 → 默认分组 `我的自选`（2026-11-26：详情页/筛选结果页的「加入自选」不再
+    #: 让用户先想一个分组名，点一下就落到默认组，之后再挪）。
+    group_name: str | None = None
     source_rule_id: int | None = None
     source_result_id: str | None = None
 
@@ -68,13 +71,32 @@ class RemoveRequest(BaseModel):
 
 
 class MoveGroupRequest(BaseModel):
-    stock_code: str
-    from_group: str
+    """单只或批量移动（2026-11-26 补批量：筛选结果/自选表格里勾选若干只再挪）。"""
+
     to_group: str
+    #: 单只口径（旧契约，保留）。
+    stock_code: str | None = None
+    #: 批量口径。
+    stock_codes: list[str] | None = None
+    #: 来源分组；None = 从该股票所在的**所有**分组里移动（批量选择时更顺手）。
+    from_group: str | None = None
 
 
 class RefreshGroupRequest(BaseModel):
     group_name: str
+
+
+class CreateGroupRequest(BaseModel):
+    name: str
+
+
+class RenameGroupRequest(BaseModel):
+    new_name: str
+
+
+def _raise_group_error(error: wg.WatchlistGroupError) -> NoReturn:
+    """分组域错误 → HTTP（`detail` 带 `reason_code` + 中文 message，前端直接展示）。"""
+    raise HTTPException(status_code=error.status_code, detail=error.detail) from error
 
 
 def _fetch_stock_info(duck: Any, stock_codes: list[str]) -> dict[str, dict]:
@@ -151,13 +173,12 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
     # 分组列表必须先于空行短路计算：当前过滤分组为空时也必须返回全量分组，
     # 否则前端侧栏分组按钮全部消失、无法切回其他分组（2026-08-14 红队 P2-19）。
     # 计数必须与上面 `rows` 同口径剔除黑名单，否则侧栏显示「3」而表里只有 2 行。
-    group_pred, group_params = exclusion_condition("stock_code", blocked_codes)
-    groups_where = f" WHERE {group_pred}" if group_pred else ""
-    groups = sqlite.query(
-        f"SELECT group_name, COUNT(*) as cnt FROM watchlist{groups_where} "
-        "GROUP BY group_name ORDER BY group_name",
-        group_params,
-    )
+    #
+    # 2026-11-26：分组**存在性**的真相源改成 `watchlist_groups` 注册表。
+    # 这里曾经是 `SELECT group_name, COUNT(*) ... GROUP BY group_name`，于是
+    # 「刚建好、还没放股票」的分组在侧栏里根本不存在（用户不能自建分组的根因）。
+    # 现在注册表里有行就返回，`cnt=0` 的空分组照常出现在侧栏。
+    groups = wg.list_groups(sqlite, blocked_codes=blocked_codes)
 
     if not rows:
         # 没有任何自选行：此时**不需要** DuckDB，富化视为已完成。
@@ -256,6 +277,13 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     与 `screening.add_to_watchlist`（`POST /api/screening/add_to_watchlist`）
     **不是重复实现**：那个端点从已保存的筛选结果批量入自选并先校验可筛选性；
     本端点只校验 6 位代码在股票池内（PRD §13）。
+
+    2026-11-26 契约变化（详情页/筛选结果页的「加入自选」按钮靠它）：
+    - `group_name` **可选**，缺省落到默认分组 `我的自选`；
+    - 已经在该分组 → **幂等**返回 `created=false`（按钮会连点，报错等于坑用户），
+      且**不刷新 `added_at`**（否则列表里本来在下面的那只票每次都跳到顶部）；
+    - 分组名在注册表里不存在 → 顺手登记成自建分组（见
+      `watchlist_groups.ensure_group_for_write`：宽松但留痕）。
     """
     sqlite = request.app.state.sqlite
     duck = request.app.state.duck
@@ -275,6 +303,13 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
         raise HTTPException(
             status_code=400, detail="stock is blacklisted; remove it from the blacklist first"
         )
+    try:
+        group_name = wg.normalize_group_name(req.group_name) or wg.DEFAULT_GROUP_NAME
+        # 先按宽松口径校验名字（超长 400）；真正的登记放进下面的同一事务里。
+        wg.ensure_group_for_write(sqlite, group_name)
+    except wg.WatchlistGroupError as error:
+        _raise_group_error(error)
+    created = True
     with sqlite.transaction() as conn:
         if req.source_result_id is not None:
             result = conn.execute(
@@ -292,17 +327,51 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
             raise HTTPException(status_code=400, detail="source result is required for screening provenance")
         else:
             source_rule_id = None
-        conn.execute(
-            """INSERT INTO watchlist
-               (stock_code, group_name, source_rule_id, source_result_id)
-               VALUES (?, ?, ?, ?)
-               ON CONFLICT(stock_code, group_name) DO UPDATE SET
-                 source_rule_id=excluded.source_rule_id,
-                 source_result_id=excluded.source_result_id,
-                 added_at=CURRENT_TIMESTAMP""",
-            [stock_code, req.group_name, source_rule_id, req.source_result_id],
-        )
-    return {"status": "ok", "stock_code": stock_code, "group": req.group_name}
+        existing = conn.execute(
+            "SELECT source_rule_id, source_result_id FROM watchlist "
+            "WHERE stock_code = ? AND group_name = ?",
+            [stock_code, group_name],
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO watchlist (stock_code, group_name, source_rule_id, source_result_id) "
+                "VALUES (?, ?, ?, ?)",
+                [stock_code, group_name, source_rule_id, req.source_result_id],
+            )
+        else:
+            # 幂等：已存在就不再插、也不动 added_at。只在调用方显式给了来源时补写
+            # 溯源（否则重复点一次按钮会把这行的时间戳顶到列表最前面）。
+            created = False
+            if source_rule_id is not None or req.source_result_id is not None:
+                conn.execute(
+                    "UPDATE watchlist SET source_rule_id = ?, source_result_id = ? "
+                    "WHERE stock_code = ? AND group_name = ?",
+                    [source_rule_id, req.source_result_id, stock_code, group_name],
+                )
+    return {
+        "status": "ok",
+        "stock_code": stock_code,
+        "group": group_name,
+        "created": created,
+        "default_group": wg.DEFAULT_GROUP_NAME,
+    }
+
+
+@router.get("/status")
+def watchlist_status(request: Request, stock_code: str = Query(...)) -> dict:
+    """某只股票的自选状态（详情页按钮三态：不在自选 / 已在某组 / 在多个组）。
+
+    契约：
+    - `in_watchlist`：该股票是否在**任何**可见自选分组里（黑名单股票一律 false）；
+    - `groups`：所在分组名列表（可能多个）；
+    - `default_group`：默认分组名（前端不写死中文字面量）；
+    - `blacklisted`：是否在黑名单（前端据此把按钮置灰并说明原因）。
+    """
+    sqlite = request.app.state.sqlite
+    code = (stock_code or "").strip()
+    if not re.fullmatch(r"\d{6}", code):
+        raise HTTPException(status_code=400, detail="invalid stock code: 6 digits required")
+    return wg.stock_status(sqlite, code)
 
 
 @router.post("/refresh")
@@ -467,46 +536,149 @@ def remove_from_watchlist(req: RemoveRequest, request: Request) -> dict:
 
 @router.post("/move")
 def move_group(req: MoveGroupRequest, request: Request) -> dict:
-    """移动到其他分组"""
+    """把自选股票移动到其它分组（单只 / 批量，2026-11-26 补批量）。
+
+    调用方有两种：
+    - 自选表格「选中若干只 → 移动到分组」→ `{stock_codes: [...], from_group, to_group}`；
+    - 旧的单只移动 → `{stock_code, from_group, to_group}`（保持可用）。
+
+    契约：
+    - `to_group` 必须**已在注册表里存在**（用户在界面下拉里选，对不上说明前端状态过期
+      → 404，明确让用户刷新；这里不替用户建组，否则一个拼错的名字会静默变成新分组）。
+    - `from_group` 缺省 = 从该股票所在的**所有**分组移动。
+    - 目标分组里已经有同一只股票（唯一索引 `(stock_code, group_name)`）→ 直接删掉
+      来源行（等价于"移动完成"），不报 409 让用户卡住。
+    - 一只都没匹配到 → 404（与 `DELETE /remove` 同口径，避免前端以为移动成功了）。
+    """
     sqlite = request.app.state.sqlite
-    sqlite.execute(
-        "UPDATE watchlist SET group_name = ? WHERE stock_code = ? AND group_name = ?",
-        [req.to_group, req.stock_code, req.from_group],
-    )
-    return {"status": "ok", "stock_code": req.stock_code,
-            "from": req.from_group, "to": req.to_group}
+    codes = [code.strip() for code in (req.stock_codes or []) if code and code.strip()]
+    if req.stock_code and req.stock_code.strip():
+        codes.append(req.stock_code.strip())
+    # 去重但保持顺序
+    ordered: list[str] = []
+    for code in codes:
+        if code not in ordered:
+            ordered.append(code)
+    if not ordered:
+        raise HTTPException(status_code=400, detail="stock_code or stock_codes is required")
+    for code in ordered:
+        if not re.fullmatch(r"\d{6}", code):
+            raise HTTPException(status_code=400, detail="invalid stock code: 6 digits required")
+    try:
+        to_group = wg.ensure_group_exists(sqlite, req.to_group)
+        from_group = wg.normalize_group_name(req.from_group) if req.from_group else None
+    except wg.WatchlistGroupError as error:
+        _raise_group_error(error)
+
+    moved = 0
+    skipped_already_in_target = 0
+    not_found: list[str] = []
+    with sqlite.transaction() as conn:
+        for code in ordered:
+            if from_group:
+                source_rows = conn.execute(
+                    "SELECT 1 FROM watchlist WHERE stock_code = ? AND group_name = ?",
+                    [code, from_group],
+                ).fetchall()
+            else:
+                source_rows = conn.execute(
+                    "SELECT 1 FROM watchlist WHERE stock_code = ?", [code]
+                ).fetchall()
+            if not source_rows:
+                not_found.append(code)
+                continue
+            existing = conn.execute(
+                "SELECT 1 FROM watchlist WHERE stock_code = ? AND group_name = ?",
+                [code, to_group],
+            ).fetchone()
+            if existing is not None:
+                # 目标组已有这只票：只清掉*其它*分组里的来源行（唯一索引
+                # `(stock_code, group_name)` 不允许两行，直接插会撞键）。
+                skipped_already_in_target += 1
+            if from_group:
+                cursor = conn.execute(
+                    "DELETE FROM watchlist WHERE stock_code = ? AND group_name = ?",
+                    [code, from_group],
+                )
+            else:
+                # 不留 `to_group` 自己那行：否则"已在目标组"的股票会被顺手删掉。
+                cursor = conn.execute(
+                    "DELETE FROM watchlist WHERE stock_code = ? AND group_name <> ?",
+                    [code, to_group],
+                )
+            moved += max(0, int(cursor.rowcount))
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO watchlist (stock_code, group_name) VALUES (?, ?)",
+                    [code, to_group],
+                )
+    if moved == 0:
+        raise HTTPException(status_code=404, detail="watchlist entry not found")
+    return {
+        "status": "ok",
+        "stock_code": ordered[0] if len(ordered) == 1 else None,
+        "stock_codes": ordered,
+        "from": from_group,
+        "to": to_group,
+        "moved": len([code for code in ordered if code not in not_found]),
+        "rows": moved,
+        "already_in_target": skipped_already_in_target,
+        "not_found": not_found,
+    }
 
 
 @router.get("/groups")
 def list_groups(request: Request) -> dict:
-    """列出所有分组（含删分组对话框要用的事实）。
+    """列出**注册表里的全部分组**（含 0 只的空分组）+ 统计事实。
 
-    `cnt` 保持原语义（行数）；新增三个只读字段，避免前端靠猜：
+    `cnt` 保持原语义（行数，黑名单股票同口径剔除）；`runs` / `manual` / `rule_ids`
+    沿用上一轮加的只读字段：
     - `runs`：该分组来自几次不同的**已保存筛选结果**（`COUNT(DISTINCT source_result_id)`，
       NULL 不计）——替换确认框要如实说「来自 M 次历史运行」；
     - `manual`：`source_result_id IS NULL` 的手动自选行数（替换永远不动它们）；
     - `rule_ids`：该分组出现的不同 `source_rule_id`（删分组时判断能否连带删规则）。
+
+    2026-11-26：分组**不再由 `GROUP BY watchlist` 派生** —— 那是「不能自建分组」的
+    根因（空分组不可能存在）。清单来自 `watchlist_groups` 注册表，读时自愈：
+    `watchlist` 里有、注册表里没有的 group_name 会先被补登记。
     """
     sqlite = request.app.state.sqlite
-    groups = sqlite.query(
-        "SELECT group_name, COUNT(*) as cnt, "
-        "COUNT(DISTINCT source_result_id) as runs, "
-        "SUM(CASE WHEN source_result_id IS NULL THEN 1 ELSE 0 END) as manual "
-        "FROM watchlist GROUP BY group_name ORDER BY group_name"
-    )
-    rule_rows = sqlite.query(
-        "SELECT group_name, source_rule_id FROM watchlist "
-        "WHERE source_rule_id IS NOT NULL "
-        "GROUP BY group_name, source_rule_id ORDER BY group_name, source_rule_id"
-    )
-    rules_by_group: dict[str, list[int]] = {}
-    for row in rule_rows:
-        rules_by_group.setdefault(row["group_name"], []).append(int(row["source_rule_id"]))
-    for group in groups:
-        group["runs"] = int(group["runs"] or 0)
-        group["manual"] = int(group["manual"] or 0)
-        group["rule_ids"] = rules_by_group.get(group["group_name"], [])
-    return {"groups": groups, "count": len(groups)}
+    healed = wg.heal_registry(sqlite)
+    groups = wg.list_groups(sqlite, blocked_codes=blacklisted_code_set(sqlite))
+    return {
+        "groups": groups,
+        "count": len(groups),
+        "default_group": wg.DEFAULT_GROUP_NAME,
+        "healed": healed,
+    }
+
+
+@router.post("/groups")
+def create_group(req: CreateGroupRequest, request: Request) -> dict:
+    """新建自建分组（`kind='manual'`）。
+
+    契约：重名（含默认组名）→ 409；空名/超长（>40 字）→ 400；成功 → 200 +
+    分组对象（`cnt=0`，因为空分组本来就该存在）。
+    """
+    sqlite = request.app.state.sqlite
+    try:
+        return wg.create_group(sqlite, req.name)
+    except wg.WatchlistGroupError as error:
+        _raise_group_error(error)
+
+
+@router.patch("/groups/{group_name}")
+def rename_group(group_name: str, req: RenameGroupRequest, request: Request) -> dict:
+    """重命名分组（`watchlist.group_name` 一起改）。
+
+    默认分组拒绝（400，不可改名）；目标名已存在 → 409；源分组不存在 → 404；
+    新名非法 → 400。注册表行与自选行在**同一事务**里改，不会出现半改状态。
+    """
+    sqlite = request.app.state.sqlite
+    try:
+        return wg.rename_group(sqlite, group_name, req.new_name)
+    except wg.WatchlistGroupError as error:
+        _raise_group_error(error)
 
 
 @router.delete("/groups/{group_name}")
@@ -533,15 +705,31 @@ def delete_group(
       如实说明「哪类引用、几条」，绝不让用户以为规则也删了。
     """
     sqlite = request.app.state.sqlite
-    name = group_name.strip()
+    name = wg.normalize_group_name(group_name)
     if not name:
         raise HTTPException(status_code=400, detail="group_name is required")
-
+    # 默认分组保护（先于存在性判断：默认组即使现在 0 只也必须回 400，不能说"不存在"）。
+    if wg.is_default_group(sqlite, name):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "reason_code": "watchlist_default_group_protected",
+                "message": (
+                    f"「{wg.DEFAULT_GROUP_NAME}」是默认分组，不能删除；"
+                    "可以删掉里面的股票，或新建分组后把股票移过去。"
+                ),
+            },
+        )
+    # 2026-11-26：分组的真相源是注册表。历史分组（迁移前由 GROUP BY 派生）可能
+    # 只有 watchlist 行没有注册表行，先自愈再判断存在性，否则用户会在自己看得见的
+    # 分组上收到 404。
+    wg.heal_registry(sqlite)
+    in_registry = wg.group_kind(sqlite, name) is not None
     summary = sqlite.query(
         "SELECT COUNT(*) AS cnt FROM watchlist WHERE group_name = ?",
         [name],
     )[0]
-    if int(summary["cnt"] or 0) == 0:
+    if not in_registry and int(summary["cnt"] or 0) == 0:
         raise HTTPException(status_code=404, detail="watchlist group not found")
     rule_ids = [
         int(row["source_rule_id"])
@@ -558,10 +746,14 @@ def delete_group(
     deleted_rows = sqlite.execute(
         "DELETE FROM watchlist WHERE group_name = ?", [name]
     )
+    # 注册表行一起删：不删的话这个分组会变成"0 只但永远在侧栏"的幽灵分组
+    # （空分组合法 ≠ 用户点了删除还留着）。`deleted_rows` 仍是 watchlist 真实行数。
+    registry_removed = wg.delete_registry_group(sqlite, name)
     response: dict[str, Any] = {
         "status": "ok",
         "group": name,
         "deleted_rows": deleted_rows,
+        "registry_removed": registry_removed,
         "delete_rule_requested": bool(delete_rule),
         "rule_deleted": False,
         "deleted_rule_id": None,

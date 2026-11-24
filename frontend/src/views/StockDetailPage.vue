@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   NAlert, NButton, NResult, NSpace, NSpin, NTag,
@@ -21,6 +21,8 @@ import { loadKlineSettings, pageStorage } from '../utils/kline-settings.ts'
 // 组件只剩：路由代码 → ref 绑定 → 模板。详见两个 composable 的头注释。
 import { useStockDetailLoad } from '../composables/useStockDetailLoad.ts'
 import { useTocFollow } from '../composables/useTocFollow.ts'
+// 2026-11-26：「加入自选」三态（未加入 / 已在自选 / 状态未知）。
+import { useStockWatchlist } from '../composables/useStockWatchlist.ts'
 
 const route = useRoute()
 const message = useMessage()
@@ -62,6 +64,34 @@ const {
   dialog,
   updateActiveSection,
 })
+
+// ─── 加入自选（2026-11-26）───────────────────────────────────────────
+// 与「加入黑名单」同位置：都在身份卡右侧的操作区。三态由 composable 统一算，
+// 模板只负责按钮文案 + 已加入时列出所在分组 + 移出全部自选。
+const {
+  busy: watchlistBusy,
+  statusError: watchlistStatusError,
+  groupsLabel: watchlistGroupsLabel,
+  inWatchlist,
+  buttonLabel: watchlistButtonLabel,
+  refresh: refreshWatchlistStatus,
+  addToWatchlist,
+  removeFromWatchlist,
+} = useStockWatchlist({ stockCode, notifier: message })
+
+// 路由参数变化时重新读状态（同一组件实例里从 A 股跳到 B 股不会重新 mounted）。
+// `immediate: true` 兼顾首屏：并行于 `useStockDetailLoad` 的 5 路请求，互不阻塞。
+watch(stockCode, () => void refreshWatchlistStatus(), { immediate: true })
+
+function confirmRemoveFromWatchlist() {
+  dialog.warning({
+    title: '移出全部自选',
+    content: `确定把 ${stockCode.value} 从自选（${watchlistGroupsLabel.value || '全部分组'}）移出吗？`,
+    positiveText: '移出全部',
+    negativeText: '取消',
+    onPositiveClick: () => void removeFromWatchlist(),
+  })
+}
 
 // ─── 图表指标下拉（一处一图，只保留有历史意义的指标）──────────────────
 const operationsMetricOptions = [
@@ -160,6 +190,33 @@ const safetyMetricOptions = [
                   >
                     加入黑名单
                   </n-button>
+                  <!-- 加入自选（2026-11-26）：未加入 → 「加入自选」；已加入 →
+                       「已在自选」+ 所在分组 + 「移出全部自选」。 -->
+                  <n-button
+                    id="watchlist-toggle"
+                    size="small"
+                    quaternary
+                    :type="inWatchlist ? 'primary' : 'default'"
+                    :loading="watchlistBusy"
+                    :title="inWatchlist ? `已在自选：${watchlistGroupsLabel}` : `加入默认分组`"
+                    @click="inWatchlist ? undefined : addToWatchlist()"
+                  >
+                    {{ watchlistButtonLabel }}
+                  </n-button>
+                  <span v-if="inWatchlist" id="watchlist-groups" class="identity-watchlist-groups">
+                    已在{{ watchlistGroupsLabel }}
+                    <n-button
+                      id="watchlist-remove"
+                      size="tiny"
+                      text
+                      type="error"
+                      :loading="watchlistBusy"
+                      @click="confirmRemoveFromWatchlist"
+                    >移出全部自选</n-button>
+                  </span>
+                  <span v-else-if="watchlistStatusError" class="identity-watchlist-groups">
+                    自选状态暂时无法读取，点「加入自选」仍可加入
+                  </span>
                 </div>
               </div>
               <dl class="identity-meta">
@@ -376,8 +433,19 @@ const safetyMetricOptions = [
   font-variant-numeric: tabular-nums;
 }
 .identity-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
   flex: 0 0 auto;
   padding-top: 2px;
+}
+/* 已加入自选时分组的说明（「已在「我的自选」」+ 移出全部）。字号比按钮小一档，
+   避免把右侧操作区撑宽、把股票名挤出去。 */
+.identity-watchlist-groups {
+  color: #829087;
+  font-size: 11px;
+  line-height: 1.6;
 }
 .identity-quote {
   flex: 0 0 auto;

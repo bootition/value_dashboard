@@ -15,13 +15,14 @@ from typing import Any
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
+from app.core.watchlist_groups import DEFAULT_GROUP_NAME
 
 logger = logging.getLogger(__name__)
 
 # 当前 schema 版本（依据 S3 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 50
-SQLITE_SCHEMA_VERSION = 20
+SQLITE_SCHEMA_VERSION = 21
 
 # ─── v50：被判「没用」的二级索引全清单（唯一来源）─────────────────────────
 # 依据 reports/151（2026-11-21 逐索引 A/B 实测，副本上真跑，每索引 3 次取中位数）
@@ -3077,6 +3078,68 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 ),
             )
             logger.info("SQLite schema v20 已应用")
+
+        # v21: 自选分组注册表（2026-11-26，用户需求：「除了按筛选规则分组，我难道不能
+        # 自己添加进分组吗？」）。
+        #
+        # 根因：此前分组是 `SELECT ... GROUP BY group_name` **派生**出来的，于是
+        # **空分组不可能存在** —— 「先建一个分组、再把股票挪进去」这条最自然的操作
+        # 根本没有入口。本次把分组升级成一等实体：`watchlist_groups` 里有行就存在，
+        # 哪怕 `cnt = 0`。
+        #
+        # 口径（唯一实现在 `app/core/watchlist_groups.py`，这里只负责建表 + 回填）：
+        #   ① 建表 `watchlist_groups(name PK, kind, rule_id, created_at)`；
+        #   ② 插入默认分组 `我的自选`（kind='default'，**不可删、不可改名**）；
+        #   ③ 把 `watchlist` 里出现过的 `group_name` 全部回填成注册表行：
+        #      出现过 `source_rule_id` → kind='rule'（恰好一个规则时记下 rule_id，
+        #      多个规则时 rule_id 留 NULL，不猜），否则 kind='manual'。
+        #
+        # 幂等：建表用 `IF NOT EXISTS`、回填/默认组用 `INSERT OR IGNORE`，
+        # 所以即使把 v21 记账行删掉重跑也不会报错、不会重复插。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 21"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS watchlist_groups (
+                    name       TEXT PRIMARY KEY,
+                    kind       TEXT NOT NULL,
+                    rule_id    INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO watchlist_groups (name, kind, rule_id, created_at)
+                SELECT ?, 'default', NULL, CURRENT_TIMESTAMP
+                """,
+                (DEFAULT_GROUP_NAME,),
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO watchlist_groups (name, kind, rule_id, created_at)
+                SELECT w.group_name,
+                       CASE WHEN COUNT(DISTINCT w.source_rule_id) > 0
+                            THEN 'rule' ELSE 'manual' END,
+                       CASE WHEN COUNT(DISTINCT w.source_rule_id) = 1
+                            THEN MIN(w.source_rule_id) ELSE NULL END,
+                       CURRENT_TIMESTAMP
+                  FROM watchlist w
+                 WHERE w.group_name IS NOT NULL AND TRIM(w.group_name) <> ''
+                 GROUP BY w.group_name
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (
+                    21,
+                    "watchlist_groups: 自选分组注册表（默认组「我的自选」+ 现有分组回填，"
+                    "空分组合法存在）",
+                ),
+            )
+            logger.info("SQLite schema v21 已应用")
 
 
 def init_all_schema(

@@ -71,6 +71,9 @@ const DETAIL_RULES: ReadonlyArray<DetailRule> = [
   { match: /too many results to export/, title: '导出结果数超过上限（10000 行）', action: '请缩小筛选条件后重试' },
   { match: /too many stocks/, title: '股票数量超过上限（10000 只）', action: '请缩小筛选条件后重试' },
   { match: /blacklisted stock codes cannot be added/, title: '黑名单股票不能加入自选', action: '请从结果里移除这些股票后再加入自选' },
+  // 2026-11-26：`POST /api/watchlist/add` 对单只黑名单股票回的就是这一句。
+  // 不给映射的话用户只会看到泛化的「请求参数有误」，等于把原因吞掉了。
+  { match: /stock is blacklisted/, title: '该股票在黑名单里，不能加入自选', action: '请先在详情页把它移出黑名单，再加入自选' },
   { match: /a saved screening result is required/, title: '请先保存筛选结果', action: '点击「保存结果」后再加入自选' },
   { match: /stock codes must come from the saved result/, title: '股票代码必须来自已保存的筛选结果', action: '请重新运行并保存结果后重试' },
   { match: /stock code is not in the source result/, title: '该股票不在来源筛选结果中', action: '请从筛选结果页加入自选' },

@@ -273,7 +273,10 @@ def test_watchlist_hides_blacklisted_but_keeps_the_row(seeded: dict[str, Any]) -
 
     before = client.get("/api/watchlist/list").json()
     assert [item["stock_code"] for item in before["items"]] == [BLOCKED]
-    assert before["groups"][0]["cnt"] == 1
+    # 2026-11-26：`groups` 来自 `watchlist_groups` 注册表（默认组永远在），
+    # 所以按名字取，不再用 `groups[0]` 的下标口径。
+    by_name = {group["group_name"]: group for group in before["groups"]}
+    assert by_name["核心持仓"]["cnt"] == 1
 
     add_stock(sqlite, BLOCKED)
     hidden = client.get("/api/watchlist/list").json()
