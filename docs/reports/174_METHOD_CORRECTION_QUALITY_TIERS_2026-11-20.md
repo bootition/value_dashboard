@@ -1,6 +1,7 @@
 ---
 title: 方法论纠错 —— 为什么打分选不出伟大公司（附生意等级 S/A/B/C 分层）
-status: approved
+status: superseded
+superseded-by: reports/175_NINE_QUALITY_MASTERS_4TIER_RATING_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -9,6 +10,8 @@ data-source: data/valuedashboard.duckdb + 十年 ROE 复算
 ---
 
 # 方法论纠错：为什么打分选不出伟大公司
+
+> ⚠️ **本文已 superseded，请读 `reports/175`。** 本文的 S/A/B/C 分级是我一个人的主观判断；175 号改为 **9 位「只买好公司」派大师独立评定四档**，剔除格雷厄姆（只要便宜）与格林布拉特（纯量化），新增阿卡拉法特、斯利普、李录、李大霄。
 
 > **用户 2026-11-20 的批评（本文的全部起因）**：
 > 「真正优质、强势的公司没有发掘出来，反倒**淹没在一众平平无奇的公司中，只因为它们比较平稳、平庸，通过打分的概率更高**。
