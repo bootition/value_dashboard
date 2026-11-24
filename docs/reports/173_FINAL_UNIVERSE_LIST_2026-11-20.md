@@ -1,6 +1,7 @@
 ---
 title: 482 只最终名单 —— 禁投池（绝对有雷）+ 可选池（一档优秀 / 二档慎选）
-status: approved
+status: superseded
+superseded-by: reports/174_METHOD_CORRECTION_QUALITY_TIERS_2026-11-20.md
 category: reports
 created: 2026-11-20
 last-reviewed: 2026-11-20
@@ -9,6 +10,8 @@ data-source: data/valuedashboard.duckdb + 两轮雷点扫描 + 9 位大师会审
 ---
 
 # 482 只最终名单
+
+> ⚠️ **本文已 superseded，请读 `reports/174`。** 用户指出本文的「≥3 票共识」机制系统性奖励平庸——茅台因 PB 6.63 被三个估值派扣分只剩 5 票，今世缘因便宜拿到 7 票排第一。**实际茅台是唯一的 S 级生意，今世缘/珀莱雅是 C 级。**174 号已改为「质量轴 / 价格轴彻底分开 + S/A/B/C 分级判断」。
 
 > **整理原则（用户 2026-11-20 指示）**：
 > 「**把那些绝对有雷的写一下。普通和优秀的公司，可能有价格或者其他方面的一些小问题，这些需要注意，但不是说把它们排除在可选名单之外。**」
