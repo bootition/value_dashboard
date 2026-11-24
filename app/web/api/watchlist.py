@@ -588,7 +588,14 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
             #   · 规则分组按"替换"刷新时只动它自己那一组，不会波及这里；
             #   · 股票被规则踢出后，这里的副本**照样保留**（这正是用户要的）；
             #   · 删规则不会被这行挡住（规则删除守卫只数带 source_rule_id 的引用）。
+            # 黑名单一致性（2026-11-27 自查发现）：`POST /add` 早就拦黑名单，
+            # 但复制路径没拦 —— 于是"被隐藏的股票"能通过复制重新出现在自选里。
+            # 两者的语义都是"往自选里加"，必须同一口径。
+            blocked = blacklisted_code_set(sqlite)
+            blacklisted_hits = [code for code in ordered if code in blocked]
             for code in ordered:
+                if code in blocked:
+                    continue
                 if from_group:
                     source = conn.execute(
                         "SELECT 1 FROM watchlist WHERE stock_code = ? AND group_name = ?",
@@ -613,7 +620,12 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
                     [code, to_group],
                 )
                 copied += 1
-            if copied == 0 and skipped_already_in_target == 0:
+            if blacklisted_hits and copied == 0 and skipped_already_in_target == 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="stock is blacklisted; remove it from the blacklist first",
+                )
+            if copied == 0 and skipped_already_in_target == 0 and not blacklisted_hits:
                 raise HTTPException(status_code=404, detail="watchlist entry not found")
             return {
                 "status": "ok",
@@ -627,6 +639,7 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
                 "rows": copied,
                 "already_in_target": skipped_already_in_target,
                 "not_found": not_found,
+                "blacklisted": blacklisted_hits,
             }
         for code in ordered:
             if from_group:

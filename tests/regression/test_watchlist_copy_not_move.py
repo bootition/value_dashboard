@@ -118,3 +118,33 @@ def test_copy_twice_is_idempotent(sqlite_store: SQLiteStore) -> None:
     assert second.json()["copied"] == 0
     assert second.json()["already_in_target"] == len(codes)
     assert len(_rows(sqlite_store, TARGET)) == len(codes)
+
+
+def test_copy_refuses_blacklisted_stock(sqlite_store: SQLiteStore) -> None:
+    """复制路径必须与 `POST /add` 同口径拦黑名单（2026-11-27 自查发现的漏洞）。
+
+    改前：`/add` 返回 400，而复制照样成功 → "被隐藏的股票"能通过复制重新出现在自选里。
+    """
+    client = _client(sqlite_store)
+    codes = _setup(sqlite_store)
+    sqlite_store.execute(
+        "INSERT OR IGNORE INTO stock_blacklist (stock_code, reason) VALUES (?, ?)",
+        [codes[0], "自查用例"],
+    )
+
+    resp = client.post("/api/watchlist/move", json={
+        "stock_codes": [codes[0]], "from_group": SOURCE, "to_group": TARGET,
+    })
+    assert resp.status_code == 400, resp.text
+    assert "blacklisted" in resp.text
+    assert _rows(sqlite_store, TARGET) == [], "黑名单股票不许被复制进自选"
+
+    # 混入一只正常股票：正常的照抄，黑名单那只被跳过并如实列出
+    mixed = client.post("/api/watchlist/move", json={
+        "stock_codes": [codes[0], codes[1]], "from_group": SOURCE, "to_group": TARGET,
+    })
+    assert mixed.status_code == 200, mixed.text
+    body = mixed.json()
+    assert body["copied"] == 1, body
+    assert body["blacklisted"] == [codes[0]], body
+    assert [row["stock_code"] for row in _rows(sqlite_store, TARGET)] == [codes[1]]
