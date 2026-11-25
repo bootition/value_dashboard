@@ -96,6 +96,27 @@ def test_preset_rules_cover_all_categories() -> None:
     }
 
 
+def test_small_cap_uses_market_value_not_share_count() -> None:
+    """小盘股规则必须按**市值**划，不得按**股数**划。
+
+    用户 2026-11-22 的质疑：股数 ≠ 估值。1 亿股 × 1 元 = 1 亿市值，
+    1 亿股 × 100 元 = 100 亿市值——流通股本衡量的是"盘子大小"，不是"贵不贵"。
+    而李大霄的论点是"小盘股比大盘股**贵**"（估值），判据却用了与估值无关的股数，
+    而且股数门槛本身也是会随股价水平漂移的**绝对口径**（与"2013-12-31 之后上市"同型）。
+
+    所以本规则改用 `total_market_cap` 的全市场百分位（相对口径）。这条用例钉死它。
+    """
+    rule = floating.PRESET_BY_KEY["lidaxiao.small_cap"]
+    fields = [item.get("field") for item in rule.conditions["rules"]]
+    assert fields == ["total_market_cap"], f"小盘股规则应按市值划，实际是 {fields}"
+    assert "circ_shares" not in fields and "total_shares" not in fields, (
+        "股数不是估值口径，不能用它来界定「小盘」"
+    )
+    leaf = rule.conditions["rules"][0]
+    assert leaf.get("rank_mode") == "market_percentile", "必须是全市场分位（相对口径）"
+    assert 0 < float(leaf["value"]) < 1, "分位是 0–1 小数，不是百分数"
+
+
 def test_small_cap_is_enabled_per_user_ruling() -> None:
     """用户 2026-11-22 明确裁定：「小盘股我是不会碰的」→ 必须默认开启。"""
     assert floating.PRESET_BY_KEY["lidaxiao.small_cap"].enabled_by_default is True

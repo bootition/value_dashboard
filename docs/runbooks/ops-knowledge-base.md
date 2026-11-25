@@ -416,6 +416,7 @@ supersedes: null
 | U19 | **小盘股规则按用户裁定改为默认开启**（原话「小盘股我是不会碰的」）。但 note 里必须保留风险提示：小盘是**风格因子不是质量问题**，2013–2015 创业板牛市、2019–2021 中小盘都打过这条的脸。改默认值时**不要**顺手删掉这条提示 | `PRESET_BY_KEY["lidaxiao.small_cap"].enabled_by_default`；`test_small_cap_is_enabled_per_user_ruling` |
 | U20 | **「资产不干净」用 OR 不用 AND**：高商誉（`goodwill_ratio≥20%`）与高杠杆且利息还不动（`debt_ratio≥80%` ∧ `interest_coverage<2`）是**两种不同的病**，要求同时成立会漏掉绝大多数真实风险。已知误杀：银行/保险/地产 `debt_ratio` 天然 90% 上下，会被大面积命中 | `goodcompany.dirty_balance_sheet` |
 | U21 | **「纸面利润」是造假的代理信号，不是造假证据**：`cf_to_net_profit<0.5` ∧ 净利润>0 ∧ 净利润同比>0 只说明「利润在涨、账上没钱」，要定性得再去 `indicator_ext` 看应收/存货周转。已知误杀：垫资扩张期公司、银行保险（现金流定义不同） | `goodcompany.paper_profit` |
+| U22 | **「小盘股」按市值划，不按股数划**（用户 2026-11-22 质疑后改）。李大霄原话确实是股数（2016-12-08 证券之星：「流通股本小于 5 亿股，且自由流通股本小于 1 亿股」），但这套判据有缺陷：**股数 ≠ 估值**（1 亿股 × 1 元 = 1 亿市值，1 亿股 × 100 元 = 100 亿市值），而他的论点是「小盘股比大盘股**贵**」；更关键的是**股数门槛本身也是绝对口径**——2015 年「5 亿股」≈75 亿市值，今天同名门槛对应的市值完全不同，与「2013-12-31 之后上市」同型，都会随时间漂移。现规则 = `total_market_cap` 的**全市场百分位 ≤ 0.30**（相对口径，永不失效）。门禁：`test_small_cap_uses_market_value_not_share_count` 断言条件里不得出现 `circ_shares`/`total_shares` | `app/core/floating_blacklist.py` PRESET_RULES 第 1 条；`tests/regression/test_floating_blacklist_rules.py` |
 
 ---
 
