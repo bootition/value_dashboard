@@ -169,9 +169,15 @@ SNAPSHOT_COLUMNS: set[str] = {
     "total_market_cap", "circ_market_cap",
     "roe", "roa", "gross_margin", "net_margin", "roic", "cf_to_net_profit",
     # ROCE 暴露三个**窗口**（5/10/20 年），每个窗口都必须拿满对应年数才出值，
-    # 所以名字与实际口径一致（依据 S6）。`roce_latest` 是详情页的现况对照；
-    # `roce_*_years` / `roce_eligible` 是口径内部门禁，不暴露给用户选。
-    "roce_5y_median", "roce_10y_median", "roce_20y_median",
+    # 所以名字与实际口径一致（依据 S6）；`roce_*_years` / `roce_eligible`
+    # 是口径内部门禁，不暴露给用户选。
+    #
+    # `roce_latest`（最近一年年报 ROCE）自 2026-11-25 起开放为**可筛字段**
+    # （reports/168）：此前只用于详情页现况对照，导致「当期 ROCE 是否低于自身
+    # 10 年中位」这条**周期位置确认**在条件 JSON 里写不出来（DSL 侧本来能写）。
+    # 周期股判据必须能区分「周期底部」与「景气顶部」，缺它就只剩 PB 分位一个信号。
+    # 它与 `roce_*_median` 同为小数比例（field_units 的 pct），可用 right_field 互比。
+    "roce_5y_median", "roce_10y_median", "roce_20y_median", "roce_latest",
     "revenue_yoy", "net_profit_yoy", "deducted_profit_yoy",
     "revenue_cagr3", "revenue_cagr5", "net_profit_cagr3", "net_profit_cagr5",
     "deducted_profit_cagr3", "deducted_profit_cagr5",
