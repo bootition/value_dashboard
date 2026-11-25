@@ -93,10 +93,77 @@ def test_preset_rules_cover_all_categories() -> None:
         # 从「做好人买好股得好报」那套好公司标准反推的（公司质量维度）
         "goodcompany.cash_sink_5_10",
         "goodcompany.cash_sink_10plus",
-        "goodcompany.no_cash_back",
         "goodcompany.dirty_balance_sheet",
         "goodcompany.paper_profit",
     }
+
+
+def test_newly_listed_is_five_years_per_user_ruling() -> None:
+    """次新股门槛 = 上市不满 5 年（用户 2026-11-22：「1 年还是太短了」）。"""
+    rule = floating.PRESET_BY_KEY["lidaxiao.newly_listed"]
+    assert rule.pool["max_listing_years"] == 5
+
+
+def test_ten_year_cash_sink_requires_strictly_above_100_percent() -> None:
+    """上市 10 年以上：分红融资比必须**严格大于** 100%（用户 2026-11-22 裁定）。
+
+    「100% 的意义不是比 99% 多 1 分」——它是一条性质分界线：
+    跨过去 = 从「净索取」变成「净回馈」。正好 100% 意味着给的和拿的相等，
+    不等于「给得更多」，所以同样拉黑。
+    """
+    rule = floating.PRESET_BY_KEY["goodcompany.cash_sink_10plus"]
+    leaf = rule.conditions["rules"][0]
+    assert leaf["field"] == "dividend_financing_ratio_pct"
+    assert leaf["op"] == "<=", "拉黑条件是 ratio<=100，即放行条件是 ratio>100（严格大于）"
+    assert leaf["value"] == 100
+    assert rule.pool["min_listing_years"] == 10
+
+
+def test_dividend_continuity_rule_is_retired() -> None:
+    """「分红连续性」规则已按用户裁定退役——只保留总量口径（分红融资比）。
+
+    用户原话：「连续多少年分红什么都说明不了，分的钱很少也不好说吧。
+    我只关注总体，不太看重细节，只要它是愿意给股东钱的就行。」
+    """
+    assert "goodcompany.no_cash_back" not in floating.PRESET_BY_KEY
+    assert "goodcompany.no_cash_back" in floating.RETIRED_PRESET_KEYS
+
+
+def test_retired_preset_is_purged_from_existing_database(
+    sqlite_store: SQLiteStore,
+) -> None:
+    """已装过的库也要把退役规则清掉。
+
+    坑：`ensure_preset_rules()` 只插缺的、不删旧的，所以「从代码里删规则」
+    对已装库不生效——那条规则会留在库里继续拉黑。用 RETIRED_PRESET_KEYS 兜住。
+    """
+    # 先手工造一条"上一版遗留"的退役规则 + 它的浮动成员
+    sqlite_store.execute(
+        f"""INSERT INTO {floating.RULES_TABLE}
+                (rule_key, name, note, enabled, conditions_json, pool_json, origin)
+            VALUES ('goodcompany.no_cash_back', '旧分红连续性规则', NULL, 1,
+                    '{{"logic":"AND","rules":[]}}', '{{}}', 'preset')"""
+    )
+    rid = int(sqlite_store.query(
+        f"SELECT id FROM {floating.RULES_TABLE} WHERE rule_key = 'goodcompany.no_cash_back'"
+    )[0]["id"])
+    sqlite_store.execute(
+        f"""INSERT INTO {floating.MEMBERSHIP_TABLE}
+                (rule_id, stock_code, first_seen_at, last_seen_at)
+            VALUES (?, '600519', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)""",
+        [rid],
+    )
+
+    floating.ensure_preset_rules(sqlite_store)  # 模拟重启
+
+    left = sqlite_store.query(
+        f"SELECT id FROM {floating.RULES_TABLE} WHERE rule_key = 'goodcompany.no_cash_back'"
+    )
+    assert left == [], "退役规则必须从库里清掉，否则它仍在拉黑"
+    members = sqlite_store.query(
+        f"SELECT stock_code FROM {floating.MEMBERSHIP_TABLE} WHERE rule_id = ?", [rid]
+    )
+    assert members == [], "退役规则名下的浮动成员也要一起清理"
 
 
 def test_cash_sink_is_split_by_listing_age() -> None:
@@ -115,43 +182,6 @@ def test_cash_sink_is_split_by_listing_age() -> None:
     assert b.pool["min_listing_years"] == 10
     assert "max_listing_years" not in b.pool, "第二档没有上界（10 年以上全包）"
     assert b.conditions["rules"][0]["value"] == 100, "10 年以上档的门槛是 100%（拿的要少于给的）"
-
-
-def test_no_cash_back_requires_recent_consecutive_dividends() -> None:
-    """分红口径 = 「最近连续分红年数」，不是「历史分红覆盖率」。
-
-    用户 2026-11-22 的论证推翻了覆盖率方案：「如果它过去一半时间都分、最近一半时间不分，
-    那不是很差劲吗？」——覆盖率会把「早年分、近年不分」和「近年连续分」算成差不多的数，
-    正好掩盖恶化。所以要求「连续 5 年分红记录」。
-    """
-    rule = floating.PRESET_BY_KEY["goodcompany.no_cash_back"]
-    ops = {(item.get("field"), item.get("op"), item.get("value"))
-           for item in rule.conditions["rules"]}
-    assert ("consecutive_div_years", "is_null", None) in ops, "NULL 必须显式判"
-    assert ("consecutive_div_years", "<", 5) in ops, "门槛是「连续分红不足 5 年」"
-
-
-def test_newly_listed_is_five_years_per_user_ruling() -> None:
-    """次新股门槛 = 上市不满 5 年（用户 2026-11-22 裁定，理由：1 年太短）。"""
-    rule = floating.PRESET_BY_KEY["lidaxiao.newly_listed"]
-    assert rule.pool["max_listing_years"] == 5
-
-
-def test_no_cash_back_covers_never_paid_companies() -> None:
-    """「长期不给股东现金」必须把 NULL 也算进来（用户 2026-11-22 指出的漏洞）。
-
-    `_calc_consecutive_div_years()` 在两种情况下返回 NULL：
-      ① 从未分红；② 最近三年都没分红。
-    旧写法只有 `<= 1`，NULL 参与比较结果是 NULL（不成立），
-    于是「从上市到现在一次没分过」的公司在 SQL 里被**静默放过**。
-    """
-    rule = floating.PRESET_BY_KEY["goodcompany.no_cash_back"]
-    ops = {(item.get("field"), item.get("op")) for item in rule.conditions["rules"]}
-    assert ("consecutive_div_years", "is_null") in ops, (
-        "必须显式判 NULL，否则「从未分红」的公司筛不出来"
-    )
-    assert ("consecutive_div_years", "<") in ops
-    assert rule.conditions["logic"] == "OR"
 
 
 def test_balance_sheet_rule_excludes_financials() -> None:

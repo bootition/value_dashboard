@@ -233,6 +233,20 @@ PRESET_RULES: tuple[PresetRule, ...] = (
 
 PRESET_BY_KEY: dict[str, PresetRule] = {rule.key: rule for rule in PRESET_RULES}
 
+#: **已退役的预置规则**：曾灌进库、现已从 `PRESET_RULES` 移除的 key。
+#:
+#: 为什么要单独登记：`ensure_preset_rules()` 只插缺的、不删旧的，所以「把规则从
+#: 代码里删掉」对**已经装过的库不生效**——那条规则会一直留在库里继续拉黑。
+#: 登记在这里，启动时连同它名下的浮动成员一起清掉。
+#:
+#: `goodcompany.no_cash_back`（2026-11-22 用户裁定退役）——原口径是「最近连续分红
+#: 不足 5 年即拉黑」。用户认为多余：「连续多少年分红什么都说明不了，分的钱很少也
+#: 不好说吧。我只关注总体，不太看重细节，只要它是愿意给股东钱的就行。」
+#: 总量口径已由「掏钱型」两档（分红融资比）覆盖，连续性不再单独判断。
+RETIRED_PRESET_KEYS: frozenset[str] = frozenset({
+    "goodcompany.no_cash_back",
+})
+
 
 # ─── 「好公司」反面推导的预置规则（2026-11-22 新增）───────────────────
 #
@@ -307,48 +321,11 @@ GOOD_COMPANY_INVERSE_RULES: tuple[PresetRule, ...] = (
             "两档合起来正好覆盖「上市 ≥ 5 年」的全部公司，不重不漏。"
         ),
         conditions={"logic": "AND", "rules": [
-            {"field": "dividend_financing_ratio_pct", "op": "<", "value": 100},
+            # **必须严格大于 100%**：正好 100% 意味着"给的和拿的相等"，
+            # 不是"给得更多"，同样拉黑。用户原话：「分红融资比必须大于 100%」。
+            {"field": "dividend_financing_ratio_pct", "op": "<=", "value": 100},
         ]},
         pool={"min_listing_years": 10},
-        enabled_by_default=True,
-    ),
-    PresetRule(
-        key="goodcompany.no_cash_back",
-        name="最近没有连续分红（好公司反面② · 连续分红不足 5 年）",
-        note=(
-            "【原话】好公司「善待股东」，而「塞钱」的具体形式是**持续、稳定地现金分红**\n"
-            "（2026-01 微博财经之夜）；2012 四标准之③亦为「善待股东、员工、社区与自然」。\n"
-            "\n"
-            "【口径·用户 2026-11-22 裁定，取代原先的「分红覆盖率」方案】\n"
-            "用户的论证：「是不是要看它离我们越近，行为越具有价值？如果它过去一半时间都分、\n"
-            "最近一半时间不分，那不是很差劲吗？」——**覆盖率会把「早年分、近年不分」和\n"
-            "「近年连续分」算成差不多的数**，正好掩盖了恶化。所以正确口径不是「分过多少年」，\n"
-            "而是**最近连续分红了几年**，而且越近的年份权重天然越高。\n"
-            "（原先登记的「分红年份覆盖率」派生列待办据此**撤销**——用户的方案更好，且\n"
-            "只用现有字段就能算。）\n"
-            "\n"
-            "【量化】拉黑条件 = 「不存在连续 5 年的分红记录」：\n"
-            "  `consecutive_div_years IS NULL`（从未分红 / 最近三年断供）**或** `< 5`。\n"
-            "上市满 5 年才评判（不满 5 年的公司本来也被「次新股」那条整体拦下）。\n"
-            "\n"
-            "【⚠️ 这个字段的宽松度·必须知道】`_calc_consecutive_div_years()` 从**最近一次\n"
-            "分红的年份**往前数，**不要求最近一年也分了**：\n"
-            "  · 2020–2024 连续 5 年、2025–2026 没分 → 仍返回 5（最近一次在近 3 年内即可）。\n"
-            "  · 所谓「最近连续 5 年」实际含义是：**存在连续 5 年分红记录，且最近一次分红\n"
-            "    发生在近 3 年内**。若要做到「最近一年也必须有分红」，需要一个「最新分红年份」\n"
-            "    字段（成本：加列 + 全量重算快照），已登记 KB `TODO-LATESTDIV`。\n"
-            "\n"
-            "【已知误杀】高成长期的公司会把利润全部再投资，逻辑上不必然变坏\n"
-            "（巴菲特时代的伯克希尔从不分红）。本规则按**他的标准**执行，不是普适真理——\n"
-            "介意误杀就把它关掉。"
-        ),
-        conditions={"logic": "OR", "rules": [
-            # NULL = 从未分红 / 最近三年断供；两者都算"不存在连续分红记录"
-            {"field": "consecutive_div_years", "op": "is_null"},
-            # 连续分红不足 5 年（含只分了 1–4 年的）
-            {"field": "consecutive_div_years", "op": "<", "value": 5},
-        ]},
-        pool={"min_listing_years": 5},
         enabled_by_default=True,
     ),
     PresetRule(
@@ -429,9 +406,14 @@ def ensure_preset_rules(sqlite: Any) -> int:
 
     返回本次新插入的条数。用户改过名字/条件/开关的规则**不会被重置**——
     否则每次启动都把自己的调整冲掉。
+
+    另外负责**退役**（`RETIRED_PRESET_KEYS`）：已从 `PRESET_RULES` 移除的预置规则，
+    要把库里残留的那一行连同它名下的浮动成员一起删掉，否则「删规则」在已装库上不生效。
+    只删 `origin='preset'` 的行——用户自建的规则同名同 key 也不会被误删。
     """
     if sqlite is None:
         return 0
+    _purge_retired_presets(sqlite)
     existing = {
         row["rule_key"]
         for row in sqlite.query(f"SELECT rule_key FROM {RULES_TABLE} WHERE rule_key IS NOT NULL")
@@ -455,6 +437,28 @@ def ensure_preset_rules(sqlite: Any) -> int:
         )
         inserted += 1
     return inserted
+
+
+def _purge_retired_presets(sqlite: Any) -> int:
+    """删掉已退役的预置规则及其浮动成员，返回删除条数。幂等。"""
+    if not RETIRED_PRESET_KEYS:
+        return 0
+    placeholders = ", ".join("?" for _ in RETIRED_PRESET_KEYS)
+    keys = list(RETIRED_PRESET_KEYS)
+    rows = sqlite.query(
+        f"SELECT id FROM {RULES_TABLE} "
+        f"WHERE rule_key IN ({placeholders}) AND origin = 'preset'",
+        keys,
+    )
+    if not rows:
+        return 0
+    ids = [int(row["id"]) for row in rows]
+    with sqlite.transaction() as conn:
+        for rule_id in ids:
+            conn.execute(f"DELETE FROM {MEMBERSHIP_TABLE} WHERE rule_id = ?", [rule_id])
+        conn.executemany(f"DELETE FROM {RULES_TABLE} WHERE id = ?", [[i] for i in ids])
+    logger.info("已退役 %s 条预置规则（其浮动成员一并清理）", len(ids))
+    return len(ids)
 
 
 def list_rules(sqlite: Any, *, enabled_only: bool = False) -> list[dict[str, Any]]:
