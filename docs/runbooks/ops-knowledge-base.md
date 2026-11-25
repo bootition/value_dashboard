@@ -409,3 +409,11 @@ supersedes: null
 | I-RIGHTFIELD | **条件 JSON 的字段对字段比较（`right_field`）新增量纲闸门**：`_magnitude_conflict()` 只拦已确证的 100 倍对（`pct` ↔ `percent`），不扩大到金额/股数（否则会误伤「每股股息 vs 每股价格」这类合法比较）。与 DSL 侧是同一个约束的两处实现 | `reports/167` §2.3 |
 | I-PCTSCALE2 | **两种"分位"字段量纲不同，别混用**：①`*_stat_{N}y_percentile`（`research_statistics`，条件字段）存 **0–100**（正式库中位 19.275）→ 想筛"自身 10 年低位前 30%"要填 `<= 30`；②引擎 `rank_mode` 生成的 `*_percentile` 是 `PERCENT_RANK()` → **0–1**（见 I-PCTUNIT）。前端 `fieldInputUnit()` 对两者都是 `label='分位', scale=1`（原值输入），因此填错尺度会**静默返回 0 只** | `reports/167` §2.5；代码 `screening/engine.py` L1295–L1307 |
 | I-CYCLIC | **周期股不该按"高 ROE + 高增长"筛，否则只会在景气顶部买它们**：周期股判据改用「ROCE 10 年中位（穿越周期）+ 自身 PB 10 年分位（位置）+ 低有息负债率（扛得住）+ 连续分红（现金流为真）」，**刻意不用 PE**（周期底部盈利被压低 → PE 反而高/为负）。实测该口径 13 只，与"成长白马"规则 37 只**重叠 0 只**，两套规则互补而非替代 | `reports/167` §4 |
+
+## 24. 2026-11-25 `roce_latest` 可筛与白马股判据（`reports/168`）
+
+| # | 约束 | 依据 |
+|---|---|---|
+| I-ROCELATEST | **`roce_latest` 自 2026-11-25 起是**可筛字段**（`SNAPSHOT_COLUMNS`）**：此前只在详情页当现况对照，导致「当期 ROCE 低于自身 10 年中位」在条件 JSON 里写不出来 —— 周期股判据只剩 PB 分位一个信号，**分不清「周期底部便宜」与「结构性衰退便宜」**。它与 `roce_*_median` 同为 `pct`（小数比例），可用 `right_field` 直接互比（`{"field":"roce_latest","op":"<","right_field":"roce_10y_median"}`） | `reports/168` §2 |
+| I-WHITEHORSE | **「白马」两支都要求长期资本回报，不能只看当期 ROE**：成长支 `roce_10y_median≥15%`、周期支 `roce_10y_median≥10%` + `roce_latest<roce_10y_median`（不在景气顶）+ `pb_mrq_stat_10y_percentile≤30`（自身 10 年低位）+ 有息负债率≤35% + 连续分红≥8 年。实测 91 → 82 → 63 只。**代价**：`*_10y_median` 要求拿满 10 年年报，天然排除上市不足 10 年的公司（新生代白马需另建 5 年窗口支，而不是放宽 10 年窗口） | `reports/168` §3 |
+| I-VARMEASURE | **收窄筛选规则必须在引擎里逐变体实测，不许用离线 SQL 估算**：`reports/167` §4 的「周期白马 13 只」就是离线近似派生字段得到的错值（真值 59），差点把规则调反。变体表要连"对照组"（只加单个条件）一起测，否则分不清是哪个条件在起作用 | `reports/167` §4、`reports/168` §3 |
