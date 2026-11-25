@@ -70,8 +70,10 @@ def test_preset_rule_has_no_bare_year(rule: floating.PresetRule) -> None:
 def test_newly_listed_rule_uses_relative_years_not_a_cutoff_date() -> None:
     """次新股必须用 `pool.max_listing_years`（相对），不是日期条件。"""
     rule = floating.PRESET_BY_KEY["lidaxiao.newly_listed"]
-    assert rule.pool.get("max_listing_years") == 1, (
-        "李大霄 2014-12 说「2013-12-31 之后」距说话时 342 天 ≈ 0.94 年 → 取整 1 年"
+    # 他 2014-12 说「2013-12-31 之后」距说话时 342 天 ≈ 0.94 年，照原话取整是 1 年；
+    # 但用户 2026-11-22 裁定「1 年还是太短，我不希望买这么新的股票」→ 门槛定 5 年。
+    assert rule.pool.get("max_listing_years") == 5, (
+        "用户裁定：次新股按「上市不满 5 年」拦，不是 1 年"
     )
     assert rule.conditions == {"logic": "AND", "rules": []}, (
         "次新股不该用日期条件表达，池参数已经够了"
@@ -115,6 +117,26 @@ def test_cash_sink_is_split_by_listing_age() -> None:
     assert b.conditions["rules"][0]["value"] == 100, "10 年以上档的门槛是 100%（拿的要少于给的）"
 
 
+def test_no_cash_back_requires_recent_consecutive_dividends() -> None:
+    """分红口径 = 「最近连续分红年数」，不是「历史分红覆盖率」。
+
+    用户 2026-11-22 的论证推翻了覆盖率方案：「如果它过去一半时间都分、最近一半时间不分，
+    那不是很差劲吗？」——覆盖率会把「早年分、近年不分」和「近年连续分」算成差不多的数，
+    正好掩盖恶化。所以要求「连续 5 年分红记录」。
+    """
+    rule = floating.PRESET_BY_KEY["goodcompany.no_cash_back"]
+    ops = {(item.get("field"), item.get("op"), item.get("value"))
+           for item in rule.conditions["rules"]}
+    assert ("consecutive_div_years", "is_null", None) in ops, "NULL 必须显式判"
+    assert ("consecutive_div_years", "<", 5) in ops, "门槛是「连续分红不足 5 年」"
+
+
+def test_newly_listed_is_five_years_per_user_ruling() -> None:
+    """次新股门槛 = 上市不满 5 年（用户 2026-11-22 裁定，理由：1 年太短）。"""
+    rule = floating.PRESET_BY_KEY["lidaxiao.newly_listed"]
+    assert rule.pool["max_listing_years"] == 5
+
+
 def test_no_cash_back_covers_never_paid_companies() -> None:
     """「长期不给股东现金」必须把 NULL 也算进来（用户 2026-11-22 指出的漏洞）。
 
@@ -128,7 +150,7 @@ def test_no_cash_back_covers_never_paid_companies() -> None:
     assert ("consecutive_div_years", "is_null") in ops, (
         "必须显式判 NULL，否则「从未分红」的公司筛不出来"
     )
-    assert ("consecutive_div_years", "<=") in ops
+    assert ("consecutive_div_years", "<") in ops
     assert rule.conditions["logic"] == "OR"
 
 
