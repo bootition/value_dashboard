@@ -96,13 +96,14 @@ PRESET_RULES: tuple[PresetRule, ...] = (
             "【数据缺口】库内只有流通股本 circ_shares 与总股本 total_shares，"
             "**没有「自由流通股本」**（需剔除限售与控股股东锁定），故只用第一条。\n"
             "【可选市值口径】2015 年 A 股均价约 10 元 × 5 亿股 ≈ 50 亿市值。\n"
-            "【默认关闭】小盘是**风格因子不是质量问题**；2013–2015 创业板牛市、"
-            "2019–2021 中小盘行情都直接打过这条的脸。要开请自行收紧门槛。"
+            "【默认开启·2026-11-22 用户裁定】原话是「小盘股我是不会碰的」。\n"
+            "【但风险要记住】小盘是**风格因子、不是质量问题**：2013–2015 创业板牛市、"
+            "2019–2021 中小盘行情都直接打过这条的脸。要放宽请自行调门槛（5e8 → 更小）。"
         ),
         conditions={"logic": "AND", "rules": [
             {"field": "circ_shares", "op": "<", "value": 500_000_000},
         ]},
-        enabled_by_default=False,
+        enabled_by_default=True,
     ),
     PresetRule(
         key="lidaxiao.newly_listed",
@@ -146,13 +147,18 @@ PRESET_RULES: tuple[PresetRule, ...] = (
             "但最新一年已跌到他的终点 10% 以下**。\n"
             "【为什么不写严格的 3 点单调下滑】筛选引擎的基础池每只股票只暴露**最新一期**\n"
             "快照行，取不到前两期做单调检验；另造一个求值器会形成第二套口径（AGENTS R1）。\n"
-            "所以这里是 CAGR3 与最新年报同比的**两点近似**，已知误差：\n"
+            "所以这里是 CAGR3 与最新同比的**两点近似**，已知误差：\n"
             "会把「匀速高增长但非严格单调」的公司误判进来。\n"
+            "【口径·为什么用 revenue_yoy 而不是 revenue_yoy_fy】他原文是**年报口径**，\n"
+            "但 `revenue_yoy_fy` 只是 indicator_snapshot 的物理列、**未进筛选白名单**\n"
+            "（不在 `SNAPSHOT_COLUMNS` 里），规则一发就跑不通（首版就踩了这个坑）。\n"
+            "这里用 TTM 同比 `revenue_yoy` 替代——两者在「增速断崖」方向上同义，\n"
+            "差别只在跨季平滑，不影响「高位掉到低位」的判定。\n"
             "【市值门槛】保留他的 50 亿：total_market_cap < 5e9。"
         ),
         conditions={"logic": "AND", "rules": [
             {"field": "revenue_cagr3", "op": ">=", "value": 0.20},
-            {"field": "revenue_yoy_fy", "op": "<=", "value": 0.10},
+            {"field": "revenue_yoy", "op": "<=", "value": 0.10},
             {"field": "total_market_cap", "op": "<", "value": 5_000_000_000},
         ]},
         enabled_by_default=True,
@@ -195,6 +201,139 @@ PRESET_RULES: tuple[PresetRule, ...] = (
 )
 
 PRESET_BY_KEY: dict[str, PresetRule] = {rule.key: rule for rule in PRESET_RULES}
+
+
+# ─── 「好公司」反面推导的预置规则（2026-11-22 新增）───────────────────
+#
+# 用户提问：李大霄除了「黑五类」，还讲过「做好人、买好股、得好报」和一整套好公司标准，
+# 能不能从**好公司的反面**再反推一批坏公司特征？
+#
+# 能，而且这些比「黑五类」更适合做黑名单——因为「黑五类」量的是**估值贵不贵**（会随
+# 市场均值回归），而「好公司」标准量的是**公司本身好不好**（更接近身份型）。
+#
+# 他的好公司口径（按时间排列，全部有出处）：
+#   · 2012-08-25 证券时报网《优质公司有四标准》：①领导人是正直好人不是骗子；
+#     ②为社会持续创造财富而非毁灭财富；③善待股东/员工/社区/自然；④被抛弃时价格远低于价值。
+#   · 2018-01-29 界面《如何从全球投资者角度审视蓝筹股》：规模/行业地位/成长性/全球扩张…8 个角度；
+#     「最优质 = 分红稳定、现金流扎实、资产负债表干净」。
+#   · 2017-01 华夏时报、2024-08、2026-01 微博财经之夜：「好公司五个维度：对客户、对员工、
+#     对股东、对社会、对自然——**顺序重要，第三才是对股东**」。
+#   · 2026-01「掏钱 vs 塞钱」：掏钱=大股东减持、没完没了增发融资；塞钱=持续稳定现金分红、
+#     真金白银回购注销。「差的公司，把手伸进股民的口袋里掏钱」。
+#   · 2024-07 退休访谈：「上市公司要**真实**，真实而不造假的上市公司才是保护散户最重要的基础」。
+#
+# ⚠️ 能反推的与不能反推的（诚实划界）：
+#   ✅ 对股东（分红/融资）→ 我们有 `dividend_financing_ratio_pct`、`consecutive_div_years`
+#   ✅ 资产负债表干净 → `goodwill_ratio` / `debt_ratio` / `interest_coverage`
+#   ✅ 不造假（代理）→ `cf_to_net_profit`（利润不落真钱）
+#   ❌ 对客户/对员工/对社会/对自然：库里没有客服、员工流动、环保处罚、社区数据
+#   ❌ 领导人是否正直：无人格/诚信数据（只能靠"造假被处罚"，我们也没有处罚表）
+#   ❌ 大股东减持：无减持事件域
+#   ❌ 回购注销：有 `buyback_events` 表，但未进 indicator_snapshot，规则里引用不到
+#   ⚠️ 行业龙头：可用引擎的行业内市值排名，但与小盘股规则高度重叠，故不做（避免规则通胀）
+
+GOOD_COMPANY_INVERSE_RULES: tuple[PresetRule, ...] = (
+    PresetRule(
+        key="goodcompany.cash_sink",
+        name="掏钱型公司（好公司反面①·分红融资比过低）",
+        note=(
+            "【原话】「差的公司，把手伸进股民的口袋里掏钱，怎么能够买？」「要分清\n"
+            "『把手伸进你口袋掏钱』的公司和『不断往你口袋塞钱』的公司」（2026-01 微博财经之夜）。\n"
+            "【塞钱】持续稳定的现金分红 + 真金白银回购并注销；【掏钱】没完没了增发融资向市场要钱。\n"
+            "\n"
+            "【量化】`dividend_financing_ratio_pct < 50`——累计分红 ÷ 累计融资不到 50%，\n"
+            "即「每向市场要 1 块钱，还给股东不到 5 毛」。该指标是本仓库已发布的复合指标\n"
+            "（百分数口径，含回购注销）。\n"
+            "\n"
+            "【为什么要 min_listing_years=5】上市不满 5 年就融资一次是正常发育，不能算\n"
+            "「掏钱」；5 年 ≈ 一个完整的融资-回报周期。用**相对年限**而不是「2015 年之后上市」\n"
+            "这类绝对口径（回扣 U9 的反面教材）。\n"
+            "\n"
+            "【数据缺口】分母为 0（从未融资）的公司算不出比值，会被本规则漏掉——这是好事，\n"
+            "「从不融资」不该被当成坏公司。"
+        ),
+        conditions={"logic": "AND", "rules": [
+            {"field": "dividend_financing_ratio_pct", "op": "<", "value": 50},
+        ]},
+        pool={"min_listing_years": 5},
+        enabled_by_default=True,
+    ),
+    PresetRule(
+        key="goodcompany.no_cash_back",
+        name="长期不给股东现金（好公司反面②·分红中断）",
+        note=(
+            "【原话】好公司「善待股东」，而「塞钱」的具体形式是**持续、稳定地现金分红**\n"
+            "（2026-01 微博财经之夜）；2012 四标准之③亦为「善待股东、员工、社区与自然」。\n"
+            "\n"
+            "【量化】`consecutive_div_years <= 1`（连续分红年数不超过 1 年）+ 上市满 5 年。\n"
+            "上市 5 年以上、连续 4 年没给过现金回报，就是「不把股东当股东」。\n"
+            "\n"
+            "【已知误杀】高成长期的公司会把利润全部再投资，这在逻辑上不必然变坏\n"
+            "（巴菲特时代的伯克希尔从不分红）。本规则按**他的标准**执行，不是普适真理——\n"
+            "介意误杀就把它关掉。"
+        ),
+        conditions={"logic": "AND", "rules": [
+            {"field": "consecutive_div_years", "op": "<=", "value": 1},
+        ]},
+        pool={"min_listing_years": 5},
+        enabled_by_default=True,
+    ),
+    PresetRule(
+        key="goodcompany.dirty_balance_sheet",
+        name="资产负债表不干净（好公司反面③·高商誉或高杠杆）",
+        note=(
+            "【原话】蓝筹「最优质」量化下来是「分红稳定、**现金流扎实、资产负债表干净**」\n"
+            "（2018-01-29 界面）；他多次点名「不存在高额商誉」是选股条件之一。\n"
+            "\n"
+            "【量化·两条任一成立即命中】\n"
+            "  ① 高商誉：`goodwill_ratio >= 0.20`——商誉占净资产 20% 以上，一旦减值就是净资产塌方；\n"
+            "  ② 高杠杆 + 利息都还不动：`debt_ratio >= 0.80` 且 `interest_coverage < 2`\n"
+            "     ——经营利润只够付两倍利息，任何风吹草动都会出问题。\n"
+            "\n"
+            "【为什么用 OR 不是 AND】这两条是**不同的病**：有的公司商誉高但负债低，\n"
+            "有的负债高但没商誉。要求同时成立会漏掉绝大多数真实风险。\n"
+            "\n"
+            "【已知误杀】银行/保险/地产的 `debt_ratio` 天然接近 90%（存款和预收款是负债），\n"
+            "所以金融地产会被第 ② 条大面积命中。介意的话把本条关掉。"
+        ),
+        conditions={"logic": "OR", "rules": [
+            {"field": "goodwill_ratio", "op": ">=", "value": 0.20},
+            {"logic": "AND", "rules": [
+                {"field": "debt_ratio", "op": ">=", "value": 0.80},
+                {"field": "interest_coverage", "op": "<", "value": 2},
+            ]},
+        ]},
+        enabled_by_default=True,
+    ),
+    PresetRule(
+        key="goodcompany.paper_profit",
+        name="纸面利润（好公司反面④·利润不落真钱）",
+        note=(
+            "【原话】「上市公司要**真实**，真实而不造假的上市公司才是保护散户最重要的基础」\n"
+            "（2024-07 上海证券报退休访谈）；2018 年那篇也把「现金流扎实」列为优质量化标准。\n"
+            "\n"
+            "【量化】`cf_to_net_profit < 0.5`（经营现金流不到净利润的一半）\n"
+            "且 `income.net_profit > 0`（还在盈利）且 `net_profit_yoy > 0`（还在报增长）。\n"
+            "\n"
+            "【它抓的是什么】利润在涨、账上没钱进来 → 钱要么堆在应收账款和存货里，\n"
+            "要么利润本身就是「做」出来的。这是**造假的代理信号，不是造假证据**——\n"
+            "下游的应收/存货周转要去 `indicator_ext` 看具体科目才能定性。\n"
+            "\n"
+            "【已知误杀】高速扩张期的公司（先垫资后收款）、以及银行/保险（现金流定义不同）\n"
+            "会被误伤。"
+        ),
+        conditions={"logic": "AND", "rules": [
+            {"field": "cf_to_net_profit", "op": "<", "value": 0.5},
+            {"field": "income.net_profit", "op": ">", "value": 0},
+            {"field": "net_profit_yoy", "op": ">", "value": 0},
+        ]},
+        enabled_by_default=True,
+    ),
+)
+
+PRESET_RULES = PRESET_RULES + GOOD_COMPANY_INVERSE_RULES
+PRESET_BY_KEY = {rule.key: rule for rule in PRESET_RULES}
+
 
 
 # ─── 规则库 CRUD ──────────────────────────────────────────────────
@@ -357,7 +496,10 @@ def evaluate_rule(duck: Any, sqlite: Any, rule_row: dict[str, Any]) -> set[str]:
         {"conditions": rule_row["conditions"], "sort": [], "columns": ["stock_code"]},
         include_st=True,
         include_suspended=True,
-        min_listing_years=0,
+        # 池参数从规则里取。`min_listing_years` 用于"上市满 N 年才评判"——
+        # 例如「掏钱型公司」要满 5 年，「次新股」要 max_listing_years=1。
+        # 全是**相对年限**，绝不出现绝对年份。
+        min_listing_years=int(pool.get("min_listing_years") or 0),
         max_listing_years=pool.get("max_listing_years"),
         strict_only=False,
         masked_fields=[],

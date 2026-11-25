@@ -78,15 +78,95 @@ def test_newly_listed_rule_uses_relative_years_not_a_cutoff_date() -> None:
     )
 
 
-def test_preset_rules_cover_all_five_categories() -> None:
+def test_preset_rules_cover_all_categories() -> None:
+    """5 条「黑五类」+ 4 条「好公司反面」，一条都不能悄悄消失。"""
     keys = {rule.key for rule in floating.PRESET_RULES}
     assert keys == {
+        # 李大霄「黑五类」（估值/风格维度）
         "lidaxiao.small_cap",
         "lidaxiao.newly_listed",
         "lidaxiao.poor_earnings",
         "lidaxiao.false_growth",
         "lidaxiao.theme_momentum",
+        # 从「做好人买好股得好报」那套好公司标准反推的（公司质量维度）
+        "goodcompany.cash_sink",
+        "goodcompany.no_cash_back",
+        "goodcompany.dirty_balance_sheet",
+        "goodcompany.paper_profit",
     }
+
+
+def test_small_cap_is_enabled_per_user_ruling() -> None:
+    """用户 2026-11-22 明确裁定：「小盘股我是不会碰的」→ 必须默认开启。"""
+    assert floating.PRESET_BY_KEY["lidaxiao.small_cap"].enabled_by_default is True
+
+
+def test_every_preset_rule_field_is_selectable() -> None:
+    """**每条预置规则引用的字段都必须在筛选白名单里。**
+
+    这条是本轮真实翻车点：首版「伪成长股」用了 `revenue_yoy_fy`，
+    它只是 indicator_snapshot 的物理列、**不在 `SNAPSHOT_COLUMNS` 白名单里**，
+    规则一执行就 `ValueError: 未知筛选字段`。而当时的测试全绿——因为
+    没有任何用例真正执行过预置规则。这个用例把那类错误前移到静态检查。
+    """
+    from app.core.screening.engine import (
+        EXTENDED_COLUMNS,
+        METADATA_COLUMNS,
+        NORMALIZED_FIELDS,
+        SNAPSHOT_COLUMNS,
+        STATEMENT_FIELDS,
+    )
+
+    known = set(SNAPSHOT_COLUMNS) | set(EXTENDED_COLUMNS) | set(NORMALIZED_FIELDS)
+    known |= set(METADATA_COLUMNS)
+    for table, fields in STATEMENT_FIELDS.items():
+        known |= {f"{table}.{field}" for field in fields}
+
+    def collect(node: dict) -> list[str]:
+        found: list[str] = []
+        for item in node.get("rules") or []:
+            if isinstance(item, dict) and "rules" in item:
+                found.extend(collect(item))
+            elif isinstance(item, dict) and item.get("field"):
+                found.append(str(item["field"]))
+        return found
+
+    problems: list[str] = []
+    for rule in floating.PRESET_RULES:
+        for field in collect(rule.conditions):
+            if field not in known:
+                problems.append(f"{rule.key} → {field}")
+    assert problems == [], (
+        "以下预置规则引用了筛选白名单之外的字段（执行时必然 ValueError）：\n"
+        + "\n".join(problems)
+    )
+
+
+def test_every_preset_rule_actually_executes(
+    duckdb_store: DuckDBStore, sqlite_store: SQLiteStore
+) -> None:
+    """**每条预置规则都要真的跑一遍 SQL。**
+
+    静态字段检查 + 真跑缺一不可：字段名对但类型/单位不对、嵌套 OR 不被支持、
+    池参数组合非法等问题，只有真跑才暴露。本用例对 9 条规则逐条 evaluate，
+    任何一条抛错都算失败。
+    """
+    _seed_two_stocks(duckdb_store)
+    failures: list[str] = []
+    for rule in floating.PRESET_RULES:
+        row = {
+            "id": 0,
+            "name": rule.name,
+            "conditions": rule.conditions,
+            "pool": rule.pool,
+        }
+        try:
+            matched = floating.evaluate_rule(duckdb_store, sqlite_store, row)
+        except Exception as error:  # noqa: BLE001 - 收集全部失败再一起报
+            failures.append(f"{rule.key}: {type(error).__name__}: {error}")
+            continue
+        assert isinstance(matched, set), f"{rule.key} 没返回代码集合"
+    assert failures == [], "以下预置规则执行失败：\n" + "\n".join(failures)
 
 
 @pytest.mark.parametrize("rule", floating.PRESET_RULES, ids=lambda r: r.key)
