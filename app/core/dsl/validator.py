@@ -35,6 +35,38 @@ REASON_INSUFFICIENT_HISTORY = "R003: insufficient_history"
 REASON_DIMENSION_MISMATCH = "R004: dimension_mismatch"
 REASON_CYCLE_DETECTED = "R005: circular_dependency"
 
+#: `unit` 的**量纲等价类**（2026-11-25，reports/167）。
+#:
+#: 为什么需要它：`unit` 一个字段同时背着"存储量纲"和"展示形态"两件事，直接按
+#: 字符串比较会同时产生两类硬错误（两类都在正式库口径上实测复现过）：
+#:
+#: 1. **假放行（更危险）**：`dividend_yield` 等 13 个指标曾声明 `percent`，实际
+#:    存小数 —— `dividend_yield > ttm_dividend_yield`（0.0255 vs 2.55）判为合法，
+#:    执行后恒假，且没有任何提示。差 100 倍的静默错。
+#: 2. **假报错**：`debt_ratio`（ratio）与 `balance.interest_bearing_debt_ratio`
+#:    （pct）都是 0–1 的小数，却被判成不同维度 → 拒绝。而 `derived_fields.py`
+#:    的 doc 恰恰建议用户把这两个条件组合成「高负债率 + 低有息负债率」排雷。
+#:
+#: 因此维度校验只认**存储量纲**：`pct` 与 `ratio` 同为无量纲小数，等价；
+#: `percent`（1 = 1%）是另一种量纲，与它们不可直接比较。
+#: `price` 与 `CNY` 同为金额量纲（每股价格 / 总金额），沿用一个类以便
+#: "最新价 × 股本" 类表达式通过；`mixed` 保持不可比（组合口径未知）。
+DIMENSION_CLASS: dict[str, str] = {
+    "ratio": "decimal",
+    "pct": "decimal",
+    "percent": "percent",
+    "CNY": "money",
+    "price": "money",
+    "count": "count",
+    "mixed": "mixed",
+    "unknown": "unknown",
+}
+
+
+def dimension_class(unit: str) -> str:
+    """把 `unit` 归到它的量纲等价类；未登记的 unit 自成一类（宁可拦住）。"""
+    return DIMENSION_CLASS.get(unit, unit)
+
 
 class ValidationError(Exception):
     """DSL 验证错误"""
@@ -125,28 +157,33 @@ class Validator:
             left = node.left
             right = node.right
             if left and right:
-                # 比较运算: 双方 unit 必须相同
+                left_dim = dimension_class(left.unit)
+                right_dim = dimension_class(right.unit)
+
+                # 比较运算: 双方量纲等价类必须相同（pct ≡ ratio ≡ 小数无量纲）
                 if (
                     node.op in (">", "<", ">=", "<=", "==", "!=")
-                    and left.unit != right.unit
-                    and left.unit != "unknown"
-                    and right.unit != "unknown"
+                    and left_dim != right_dim
+                    and left_dim != "unknown"
+                    and right_dim != "unknown"
                 ):
                     self._errors.append(
                         f"维度不匹配: {left.unit} {node.op} {right.unit} "
-                        f"(PRD §11.4: 不允许{left.unit}与{right.unit}直接比较)"
+                        f"(量纲 {left_dim} ≠ {right_dim}; "
+                        f"PRD §11.4: 不允许{left.unit}与{right.unit}直接比较)"
                     )
 
-                # 加减法: 双方 unit 必须相同 + period_type 必须兼容
+                # 加减法: 双方量纲等价类必须相同 + period_type 必须兼容
                 if (
                     node.op in ("+", "-")
-                    and left.unit != right.unit
-                    and left.unit != "unknown"
-                    and right.unit != "unknown"
+                    and left_dim != right_dim
+                    and left_dim != "unknown"
+                    and right_dim != "unknown"
                 ):
                     self._errors.append(
                         f"维度不匹配: {left.unit} {node.op} {right.unit} "
-                        f"(PRD §11.4: 不允许{left.unit}与{right.unit}相加减)"
+                        f"(量纲 {left_dim} ≠ {right_dim}; "
+                        f"PRD §11.4: 不允许{left.unit}与{right.unit}相加减)"
                     )
 
                 # period_type 兼容性校验 (M5-问题1修复)

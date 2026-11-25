@@ -40,6 +40,7 @@ from app.core.dsl.derived_fields import (
 )
 from app.core.dsl.registry import validate_expression_identifier
 from app.core.screening import defaults as screening_defaults
+from app.core.screening.field_units import field_unit
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -1466,6 +1467,12 @@ LIMIT {MAX_RESULT_ROWS}
                 raise ValueError(f"{op} 条件不能比较另一字段")
             if not isinstance(right_field, str) or not self._is_known_field(right_field):
                 raise ValueError(f"未知比较字段: {right_field}")
+            if self._magnitude_conflict(field, right_field):
+                raise ValueError(
+                    f"量纲冲突: {field} 与 {right_field} 存储量纲相差 100 倍"
+                    f"（{_magnitude_label(field)} vs {_magnitude_label(right_field)}），"
+                    "字段对字段比较会恒真/恒假且不报错；请改用同一个量纲的字段"
+                )
             if not self._compatible_fields(field, right_field):
                 raise ValueError(f"不兼容的字段比较: {field} 与 {right_field}")
 
@@ -1988,6 +1995,20 @@ LIMIT {MAX_RESULT_ROWS}
         }
 
     @staticmethod
+    def _magnitude_conflict(left: str, right: str) -> bool:
+        """字段对字段比较时，两侧存储量纲是否相差 100 倍（reports/167）。
+
+        条件 JSON 的 `right_field` 只校验"两边都不是元数据列"，于是
+        `dividend_yield > ttm_dividend_yield`（0.0255 vs 2.55）这类比较能存能跑，
+        结果恒假且没有任何提示 —— 与 DSL 侧修掉的是同一类错（那边由
+        `validator.DIMENSION_CLASS` 拦）。这里只拦**已确证的 100 倍对**
+        （小数百分比 vs 百分数百分比），不扩大到金额/股数，避免误伤
+        「每股股息 vs 每股价格」这类合法比较。
+        """
+        units = {field_unit(left), field_unit(right)}
+        return units == {"pct", "percent"}
+
+    @staticmethod
     def _compatible_fields(left: str, right: str) -> bool:
         """Only compare numeric data fields; metadata and rank values are not interchangeable."""
         return left not in METADATA_COLUMNS and right not in METADATA_COLUMNS
@@ -2507,6 +2528,17 @@ def unrankable_rank_base(field: str, custom_fields: set[str]) -> str | None:
             return base          # 基名真实存在，只是不可排名
         return None
     return None
+
+
+_MAGNITUDE_LABELS = {
+    "pct": "小数百分比（0.025 = 2.5%）",
+    "percent": "百分数百分比（2.5 = 2.5%）",
+}
+
+
+def _magnitude_label(field: str) -> str:
+    """给量纲冲突报错用的人话标签。"""
+    return _MAGNITUDE_LABELS.get(field_unit(field), field_unit(field))
 
 
 def _is_known_field_name(field: str, custom_fields: set[str]) -> bool:

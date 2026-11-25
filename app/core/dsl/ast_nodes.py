@@ -235,13 +235,29 @@ for _break_key, _break_meta in _series_break_metadata().items():
         _break_entry["series_break"] = _break_meta
 
 # 内建指标维度元数据
+#
+# ⚠️ `unit` 只描述**存储量纲**，不是展示格式（2026-11-25，reports/167）：
+#   - `pct` / `ratio`  无量纲、存小数（0.2034 = 20.34%）：
+#                      roe / debt_ratio / dividend_yield / revenue_cagr5 …
+#   - `percent`        无量纲、存百分数（20.34 = 20.34%）：
+#                      ttm_dividend_yield / div_yield_spread_* / turnover_rate /
+#                      银行监管比率（core_tier1_capital_adequacy_ratio …）
+#   - `CNY` / `count`  金额 / 股数
+# `pct` 与 `ratio` 差别只在展示形态，维度上等价（校验器按等价类比较，见
+# `validator.DIMENSION_CLASS`）；`percent` 是**另一种量纲**，与它们差 100 倍，
+# 直接比较必须报错。
+#
+# 存储口径的真源是 `app/core/screening/field_units.py`（PCT_DECIMAL_FIELDS /
+# PERCENT_STORED_FIELDS / RATIO_FIELDS），这里是 DSL 侧镜像。历史漂移的代价：
+# 曾有 13 个指标声明 `percent` 却存小数，于是 `dividend_yield > ttm_dividend_yield`
+# 这类跨量纲比较被**放行**并静默差 100 倍。加字段时先查 field_units 再写这里。
 INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     # 估值 (current_only, 依赖最新收盘价)
     "pe_ttm": {"unit": "ratio", "period_type": "current_only", "historical_capable": False},
     "pb_mrq": {"unit": "ratio", "period_type": "current_only", "historical_capable": False},
     "ps_ttm": {"unit": "ratio", "period_type": "current_only", "historical_capable": False},
     "pcf_ttm": {"unit": "ratio", "period_type": "current_only", "historical_capable": False},
-    "dividend_yield": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "dividend_yield": {"unit": "pct", "period_type": "current_only", "historical_capable": False},
     "total_market_cap": {"unit": "CNY", "period_type": "current_only", "historical_capable": False},
     "circ_market_cap": {"unit": "CNY", "period_type": "current_only", "historical_capable": False},
     # 盈利
@@ -265,15 +281,15 @@ INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     # 与详情页 metric-history 的 ttm 分支同源；年报口径另存 `*_yoy_fy`（快照列，
     # 暂不作为可筛 DSL 指标暴露）。period_type 必须同步声明为 ttm，否则
     # 校验层会把它当成"仅当前值"而拒绝合法的 TTM 组合。
-    "revenue_yoy": {"unit": "percent", "period_type": "ttm", "historical_capable": True},
-    "net_profit_yoy": {"unit": "percent", "period_type": "ttm", "historical_capable": True},
-    "deducted_profit_yoy": {"unit": "percent", "period_type": "ttm", "historical_capable": True},
-    "revenue_cagr3": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "revenue_cagr5": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "net_profit_cagr3": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "net_profit_cagr5": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "deducted_profit_cagr3": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
-    "deducted_profit_cagr5": {"unit": "percent", "period_type": "current_only", "historical_capable": True},
+    "revenue_yoy": {"unit": "pct", "period_type": "ttm", "historical_capable": True},
+    "net_profit_yoy": {"unit": "pct", "period_type": "ttm", "historical_capable": True},
+    "deducted_profit_yoy": {"unit": "pct", "period_type": "ttm", "historical_capable": True},
+    "revenue_cagr3": {"unit": "pct", "period_type": "current_only", "historical_capable": True},
+    "revenue_cagr5": {"unit": "pct", "period_type": "current_only", "historical_capable": True},
+    "net_profit_cagr3": {"unit": "pct", "period_type": "current_only", "historical_capable": True},
+    "net_profit_cagr5": {"unit": "pct", "period_type": "current_only", "historical_capable": True},
+    "deducted_profit_cagr3": {"unit": "pct", "period_type": "current_only", "historical_capable": True},
+    "deducted_profit_cagr5": {"unit": "pct", "period_type": "current_only", "historical_capable": True},
     # 安全
     "debt_ratio": {"unit": "ratio", "period_type": "point_in_time", "historical_capable": True},
     "current_ratio": {"unit": "ratio", "period_type": "point_in_time", "historical_capable": True},
@@ -299,9 +315,9 @@ INDICATOR_METADATA: dict[str, dict[str, Any]] = {
     "ma120": {"unit": "CNY", "period_type": "current_only", "historical_capable": False},
     "ma250": {"unit": "CNY", "period_type": "current_only", "historical_capable": False},
     "avg_volume": {"unit": "count", "period_type": "current_only", "historical_capable": False},
-    "period_return": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
-    "annualized_volatility": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
-    "max_drawdown": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
+    "period_return": {"unit": "pct", "period_type": "current_only", "historical_capable": False},
+    "annualized_volatility": {"unit": "pct", "period_type": "current_only", "historical_capable": False},
+    "max_drawdown": {"unit": "pct", "period_type": "current_only", "historical_capable": False},
     # 国债基准与股息率利差（P3，reports/68；当前值，历史统计属 P4）
     "ttm_dividend_yield": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
     "div_yield_spread_0p25y": {"unit": "percent", "period_type": "current_only", "historical_capable": False},
