@@ -1102,6 +1102,35 @@ class IncrementalUpdater:
             logger.warning("指数估值刷新失败(非致命): %s", error)
             return {"status": "failed", "error": str(error)}
 
+    def _refresh_floating_blacklist(self) -> dict[str, Any]:
+        """浮动黑名单重算（2026-11-22，用户裁定：规则驱动、每轮比较、有进有出）。
+
+        唯一实现是 `app/core/floating_blacklist.py::refresh()`：本方法只负责
+        「调用 → 异常降级」，不重复任何求值/比对口径。
+
+        三条纪律：
+        - **失败不清空名册**：单条规则求值失败时 `refresh()` 保留它上一轮的名册，
+          只把该规则标 error；整步异常则本步骤 failed，库里名册原样不动。
+        - **不阻塞主链**：本步骤在任何异常下都只影响自己，绝不让整轮更新失败。
+        - **放在最后**：规则引用的换手率/波动率/市值都来自 prices+indicators，
+          早算会拿到上一交易日的数（见 `update_steps.STEP_ORDER` 的 note）。
+        """
+        try:
+            from app.core.floating_blacklist import refresh
+
+            report = refresh(duck=self.duck, sqlite=self.sqlite)
+            return {
+                "status": "partial" if report["status"] == "partial" else "success",
+                "run_at": report["run_at"],
+                "rules_evaluated": report["rules_evaluated"],
+                "entered": report["entered"],
+                "exited": report["exited"],
+                "detail": report["detail"],
+            }
+        except Exception as error:  # noqa: BLE001 - 本步骤失败不得炸整轮更新
+            logger.warning("浮动黑名单重算失败(非致命，名册保持上一轮): %s", error)
+            return {"status": "failed", "error": str(error)}
+
     def _refresh_analyst_forecast(self) -> dict[str, Any]:
         """卖方一致预期每日快照（schema v48，依据 S11 §2.2 #13）。
 

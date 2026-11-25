@@ -92,6 +92,36 @@ def blacklisted_code_set(sqlite: Any) -> frozenset[str]:
     return frozenset(blacklisted_codes(sqlite))
 
 
+def excluded_codes(sqlite: Any) -> list[str]:
+    """**读侧排除的唯一入口** = 彻底拉黑 ∪ 浮动拉黑。
+
+    为什么必须合成一个函数：所有读侧出口（筛选基础池 / 搜索 / 自选 / 导出 / DSL）
+    都只应该问一句「哪些股票不该出现」，不应该各自去拼两张表。
+    拼在别处就会分叉——其中一个出口漏掉浮动黑名单，用户就会在某个页面又看见它
+    （`AGENTS R1`）。
+
+    **注意别在浮动黑名单求值里用它**：求值时基础池只能剔除「彻底拉黑」，
+    否则上一轮已经浮动的股票会被规则自己筛掉，导致名单每轮全进全出地抖动。
+    求值路径请用 `blacklisted_codes()`（只含彻底拉黑），见
+    `app/core/floating_blacklist.py::evaluate_rule` 的 `pool_excludes_floating=False`。
+    """
+    permanent = blacklisted_codes(sqlite)
+    if sqlite is None:
+        return permanent
+    # 延迟导入：floating_blacklist 依赖本模块，模块级互相 import 会成环。
+    from app.core.floating_blacklist import floating_codes
+
+    floating = floating_codes(sqlite)
+    if not floating:
+        return permanent
+    return sorted(set(permanent) | set(floating))
+
+
+def excluded_code_set(sqlite: Any) -> frozenset[str]:
+    """`excluded_codes()` 的集合视图（读侧逐行过滤用）。"""
+    return frozenset(excluded_codes(sqlite))
+
+
 def is_blacklisted(sqlite: Any, stock_code: str) -> bool:
     """单只股票是否在黑名单里（主键查，成本可忽略）。"""
     if sqlite is None:

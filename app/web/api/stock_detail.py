@@ -35,7 +35,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 
-from app.core.blacklist import blacklisted_codes, exclusion_condition
+from app.core.blacklist import excluded_codes, exclusion_condition
 from app.core.financial_period import cn_today
 from app.core.pdf.manager import PDFManager
 from app.core.storage import read_cache
@@ -585,7 +585,7 @@ def search_stocks(
     # 本端点是 stock_detail 里唯一没有 `{stock_code}` 路径参数的路由，因此不能
     # 用 secure_router 的依赖守卫，改为池条件过滤——片段仍由
     # `app/core/blacklist.py::exclusion_condition()` 唯一生成。
-    blacklisted = blacklisted_codes(request.app.state.sqlite)
+    blacklisted = excluded_codes(request.app.state.sqlite)
     blacklist_pred, blacklist_params = exclusion_condition("stock_code", blacklisted)
     blacklist_filter = f"AND {blacklist_pred}" if blacklist_pred else ""
     duck = request.app.state.duck

@@ -50,7 +50,7 @@ const {
 
 // ─── 数据获取 ───────────────────────────────────────────────────────────
 const {
-  loading, stockUnavailable, stockBlacklisted, blacklistBusy,
+  loading, stockUnavailable, stockBlacklisted, blacklistScope, blacklistRules, blacklistBusy,
   stockInfo, indicators, klineData, businessOverview,
   hasUntrustedIndicators, autoUpdateInProgress,
   servedFromCache, cacheAsOf,
@@ -134,20 +134,36 @@ const safetyMetricOptions = [
         </n-space>
       </template>
     </n-result>
-    <!-- 黑名单屏蔽态：内容全隐藏，但保留「移出」这条路——否则误加后无法自救 -->
+    <!-- 黑名单屏蔽态。两种性质必须分开渲染（2026-11-22 用户裁定）：
+         彻底拉黑 → 给「移出」按钮（自救入口）；
+         浮动拉黑 → **不给任何手工移出**，只解释命中了哪几条规则并指向规则库。 -->
     <n-result
       v-else-if="stockBlacklisted"
       status="warning"
-      title="已加入黑名单"
-      :description="`股票 ${stockCode} 已加入黑名单，其内容不再显示。原始行情与财报数据仍保留在库中，自动更新照常抓取。`"
+      :title="blacklistScope === 'floating' ? '已进入浮动黑名单' : '已加入黑名单'"
+      :description="blacklistScope === 'floating'
+        ? `股票 ${stockCode} 被以下规则命中，内容不再显示。浮动黑名单由规则决定，不能手动移出——请到「规则库」调整相应规则。`
+        : `股票 ${stockCode} 已加入黑名单，其内容不再显示。原始行情与财报数据仍保留在库中，自动更新照常抓取。`"
     >
       <template #footer>
-        <n-space justify="center">
-          <n-button type="primary" :loading="blacklistBusy" @click="removeFromBlacklist">
-            移出黑名单
-          </n-button>
-          <router-link to="/blacklist"><n-button>黑名单管理</n-button></router-link>
-          <router-link to="/screening"><n-button>回到筛选</n-button></router-link>
+        <n-space vertical align="center">
+          <n-space v-if="blacklistScope === 'floating'" justify="center">
+            <n-tag v-for="rule in blacklistRules" :key="rule.rule_id" type="warning" size="small">
+              {{ rule.name }}
+            </n-tag>
+          </n-space>
+          <n-space justify="center">
+            <n-button
+              v-if="blacklistScope !== 'floating'"
+              type="primary"
+              :loading="blacklistBusy"
+              @click="removeFromBlacklist"
+            >
+              移出黑名单
+            </n-button>
+            <router-link to="/blacklist"><n-button>黑名单与规则库</n-button></router-link>
+            <router-link to="/screening"><n-button>回到筛选</n-button></router-link>
+          </n-space>
         </n-space>
       </template>
     </n-result>

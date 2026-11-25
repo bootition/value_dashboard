@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from app.core.blacklist import blacklisted_code_set, filter_rows
+from app.core.blacklist import excluded_code_set, filter_rows
 from app.core.dsl.engine import DSLEngine
 from app.core.dsl.parser import MAX_EXPRESSION_BYTES
 from app.web.api.blacklist import require_visible_stock
@@ -95,7 +95,7 @@ def preview_sample(name: str, version: int, request: Request) -> dict[str, Any]:
     事后过滤：抽样本来就只是「看一眼长什么样」，少几行不影响语义。
     """
     payload = _require_success(_engine(request).preview_sample(name, version))
-    blocked = blacklisted_code_set(request.app.state.sqlite)
+    blocked = excluded_code_set(request.app.state.sqlite)
     if blocked and isinstance(payload.get("results"), list):
         payload["results"] = filter_rows(payload["results"], blocked)
         payload["count"] = len(payload["results"])

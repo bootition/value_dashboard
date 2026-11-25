@@ -335,6 +335,17 @@ STEP_ORDER: tuple[UpdateStep, ...] = (
             "（--max-stocks）在前面的阶段就提前 return，不跑本步骤。"
         ),
     ),
+    UpdateStep(
+        name="floating_blacklist",
+        label="浮动黑名单",
+        domain="blacklist",
+        note=(
+            "放最后一步：规则引用的是**当日**指标快照与价格衍生列（换手率/波动率），"
+            "必须等 prices/indicators 都发布完再算，否则拿到的是上一交易日的数。"
+            "失败只让本步骤 failed/partial，**不清空名册**——一次求值失败不该把"
+            "用户已经接受的浮动黑名单清成空的（见 floating_blacklist.refresh 的 kept_previous）。"
+        ),
+    ),
 )
 
 #: 步骤名集合：`update.py::report_step()` 的白名单，由 `STEP_ORDER` 派生，禁止单独维护。

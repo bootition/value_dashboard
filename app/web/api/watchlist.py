@@ -17,7 +17,7 @@ from pydantic import BaseModel
 
 from app.core import watchlist_groups as wg
 from app.core import watchlist_ops as wo
-from app.core.blacklist import blacklisted_code_set
+from app.core.blacklist import excluded_code_set
 from app.core.screening.defaults import base_pool_defaults
 from app.core.storage.duckdb_store import DuckDBReadLockedError
 
@@ -190,7 +190,7 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
 
     # 2026-11-22：黑名单股票从自选列表里剔除。**不删除 watchlist 行**——
     # 移出黑名单后原来自选的股票会自动回到列表，避免"加错黑名单顺手毁掉自选"。
-    blocked_codes = blacklisted_code_set(sqlite)
+    blocked_codes = excluded_code_set(sqlite)
     if blocked_codes:
         rows = [row for row in rows if str(row["stock_code"]) not in blocked_codes]
 
@@ -356,7 +356,7 @@ def add_to_watchlist(req: AddStockRequest, request: Request) -> dict:
     if not known:
         raise HTTPException(status_code=400, detail="stock code not found in universe")
     # 黑名单股票不许进自选（用户手动敲代码也拦，不只是前端隐藏）
-    if stock_code in blacklisted_code_set(sqlite):
+    if stock_code in excluded_code_set(sqlite):
         raise HTTPException(
             status_code=400, detail="stock is blacklisted; remove it from the blacklist first"
         )
@@ -694,7 +694,7 @@ def move_group(req: MoveGroupRequest, request: Request) -> dict:
             # 黑名单一致性（2026-11-27 自查发现）：`POST /add` 早就拦黑名单，
             # 但复制路径没拦 —— 于是"被隐藏的股票"能通过复制重新出现在自选里。
             # 两者的语义都是"往自选里加"，必须同一口径。
-            blocked = blacklisted_code_set(sqlite)
+            blocked = excluded_code_set(sqlite)
             blacklisted_hits = [code for code in ordered if code in blocked]
             for code in ordered:
                 if code in blocked:
@@ -856,7 +856,7 @@ def list_groups(request: Request) -> dict:
     """
     sqlite = request.app.state.sqlite
     healed = wg.heal_registry(sqlite)
-    groups = wg.list_groups(sqlite, blocked_codes=blacklisted_code_set(sqlite))
+    groups = wg.list_groups(sqlite, blocked_codes=excluded_code_set(sqlite))
     return {
         "groups": groups,
         "count": len(groups),

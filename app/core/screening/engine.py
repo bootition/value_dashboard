@@ -32,7 +32,7 @@ import time
 from collections.abc import Iterator
 from typing import Any
 
-from app.core.blacklist import blacklisted_codes, exclusion_condition
+from app.core.blacklist import blacklisted_codes, excluded_codes, exclusion_condition
 from app.core.dsl.codegen import quote_identifier
 from app.core.dsl.derived_fields import (
     DERIVED_FIELDS,
@@ -844,9 +844,17 @@ class ScreeningEngine:
         #: 连接一次读出）；`None` = 还没探过 → `_published_statement_overrides()`
         #: 自己探一次（直调本方法的测试路径保持原样）。
         self._published_overrides_present: bool | None = None
+        #: 基础池要剔除的代码集合。缺省 = 彻底拉黑 ∪ 浮动拉黑；浮动黑名单求值时
+        #: 只能填「彻底拉黑」（`pool_excludes_floating=False`）。
         #: 用户黑名单代码（`app/core/blacklist.py`）；在 `run()` 里从 SQLite 重读，
         #: 不在 `__init__` 里缓存——用户随时可能增删，缓存会造出「刚移出却还看不见」。
         self._blacklist_codes: list[str] = []
+        #: 「上市不满 N 年」的池条件（`max_listing_years`）。
+        #: 存在的唯一理由：黑名单规则「次新股」需要它。李大霄 2015 年那版把口径
+        #: 写成绝对日期（「上市日期在 2013-12-31 之后」），一年后就过期；
+        #: 这里用**相对年限**表达同一件事，永不失效（详见
+        #: `app/core/floating_blacklist.py` 的 PRESET_RULES 推导说明）。
+        self._max_listing_years: int | None = None
 
     @contextlib.contextmanager
     def _read_scope(self) -> Iterator[_BatchedReader | None]:
@@ -901,7 +909,9 @@ class ScreeningEngine:
         include_st: bool | None = None,
         include_suspended: bool | None = None,
         min_listing_years: int | None = None,
+        max_listing_years: int | None = None,
         strict_only: bool = False,
+        pool_excludes_floating: bool = True,
         locked_indicators: dict[str, dict[str, Any]] | None = None,
         masked_fields: Any = None,
     ) -> dict[str, Any]:
@@ -915,6 +925,12 @@ class ScreeningEngine:
                 `config.screening.default_exclude_suspended`（缺省 True → 不含停牌）
             min_listing_years: 最低上市年限；None = 取
                 `config.screening.default_min_listing_years`（缺省 1 年）
+            pool_excludes_floating: 基础池是否同时剔除**浮动**黑名单。缺省 True
+                （用户筛选就该看不见它们）。浮动黑名单自己的求值必须传 False——
+                否则上一轮已浮动的股票会被规则自己筛掉，名单每轮全进全出。
+            max_listing_years: 上市**不满** N 年（次新股口径）；None = 不限制。
+                用相对年限而不是绝对日期——绝对日期会随年份失效
+                （`reports/144` 同型教训，见 `app/core/floating_blacklist.py`）
             masked_fields: "当前不可信"的字段清单（字段级遮蔽）。传 None 时
                 由 `asset_health.masked_fields_for_database()` 现算（2 条聚合
                 查询）；命中即抛 :class:`MaskedFieldError`（HTTP 409），
@@ -953,6 +969,25 @@ class ScreeningEngine:
             raise ValueError(
                 f"min_listing_years 必须在 0-{MAX_POOL_LISTING_YEARS} 之间"
             )
+
+        # max_listing_years（上市不满 N 年）同样是 INTERVAL 字面量拼接，同款校验。
+        if max_listing_years is not None and (
+            not isinstance(max_listing_years, int)
+            or isinstance(max_listing_years, bool)
+            or not 0 <= max_listing_years <= MAX_POOL_LISTING_YEARS
+        ):
+            raise ValueError(
+                f"max_listing_years 必须在 0-{MAX_POOL_LISTING_YEARS} 之间"
+            )
+        if (
+            max_listing_years is not None
+            and min_listing_years > 0
+            and min_listing_years >= max_listing_years
+        ):
+            raise ValueError(
+                "min_listing_years 必须小于 max_listing_years，否则基础池必然为空"
+            )
+        self._max_listing_years = max_listing_years
 
         # ── 探针批量化（2026-11-21）：以下整段共用**一条**只读连接。
         # 正式库 open-per-query 每条连接 ~80ms，一次筛选原本要开 6-8 条；
@@ -1030,15 +1065,25 @@ class ScreeningEngine:
                 getattr(self.sqlite, "connection", None)
                 if self.sqlite is not None else None
             )
+            # 两条分支必须**同口径**（AGENTS R3：禁止只给一条路径打补丁）。
+            # 抽成闭包是因为批量化分支拿到的是 `_BatchedSqlite` 包装器，
+            # 而不是 `self.sqlite` 本身。
+            def _blacklist_scope(store: Any) -> list[str]:
+                return (
+                    excluded_codes(store)
+                    if pool_excludes_floating
+                    else blacklisted_codes(store)
+                )
+
             if open_sqlite is not None:
                 with open_sqlite() as sqlite_conn:
                     sqlite_batch = _BatchedSqlite(sqlite_conn)
-                    self._blacklist_codes = blacklisted_codes(sqlite_batch)
+                    self._blacklist_codes = _blacklist_scope(sqlite_batch)
                     self._published_overrides_present = (
                         self._probe_published_statement_overrides(sqlite_batch)
                     )
             else:
-                self._blacklist_codes = blacklisted_codes(self.sqlite)
+                self._blacklist_codes = _blacklist_scope(self.sqlite)
                 if self.sqlite is not None:
                     self._published_overrides_present = (
                         self._probe_published_statement_overrides(self.sqlite)
@@ -1191,6 +1236,11 @@ class ScreeningEngine:
         if min_listing_years > 0:
             pool_conditions.append(
                 f"m.listing_date <= CURRENT_DATE - INTERVAL '{min_listing_years}' YEAR"
+            )
+        if self._max_listing_years is not None:
+            # 上市不满 N 年（相对年限，绝不写绝对日期）。
+            pool_conditions.append(
+                f"m.listing_date > CURRENT_DATE - INTERVAL '{self._max_listing_years}' YEAR"
             )
         if self._mixed_report_date_codes:
             excluded_slots = ", ".join("?" for _ in self._mixed_report_date_codes)
@@ -2238,6 +2288,10 @@ LIMIT {MAX_RESULT_ROWS}
             conds.append(
                 f"listing_date <= CURRENT_DATE - INTERVAL '{min_listing_years}' YEAR"
             )
+        if self._max_listing_years is not None:
+            conds.append(
+                f"listing_date > CURRENT_DATE - INTERVAL '{self._max_listing_years}' YEAR"
+            )
         if self._mixed_report_date_codes:
             slots = ", ".join("?" for _ in self._mixed_report_date_codes)
             conds.append(f"stock_code NOT IN ({slots})")
@@ -2268,7 +2322,7 @@ LIMIT {MAX_RESULT_ROWS}
             unknown_conditions.append("is_st IS NULL")
         if not include_suspended:
             unknown_conditions.append("is_suspended IS NULL")
-        if min_listing_years > 0:
+        if min_listing_years > 0 or self._max_listing_years is not None:
             unknown_conditions.append("listing_date IS NULL")
         if not unknown_conditions:
             return

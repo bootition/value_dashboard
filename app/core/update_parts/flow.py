@@ -731,6 +731,11 @@ def run_incremental_update_flow(
     #     failed/partial，不影响主链快照与 readiness。
     report_step("analyst_forecast", owner._refresh_analyst_forecast())
 
+    # 5.6 浮动黑名单重算（2026-11-22，用户裁定「规则驱动 + 每次更新比较 + 有进有出」）。
+    #     放最后一步的理由：规则引用的换手率/波动率/市值都是 prices+indicators 派生的，
+    #     早算会拿到上一交易日的数。失败保留上一轮名册，不清空。
+    report_step("floating_blacklist", owner._refresh_floating_blacklist())
+
     report["status"] = aggregate_job_status(report["steps"])
     report["finished_at"] = datetime.now(UTC).isoformat()
 

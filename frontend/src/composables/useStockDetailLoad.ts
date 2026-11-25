@@ -97,6 +97,10 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
   const stockUnavailable = ref(false)
   // 黑名单屏蔽态：与「股票不存在」分开——这个状态带移出按钮，是自救入口。
   const stockBlacklisted = ref(false)
+  //: `permanent` = 彻底拉黑（给「移出」按钮，可自救）；
+  //: `floating` = 浮动拉黑（**不给手工移出**，只解释命中了哪几条规则——用户裁定）。
+  const blacklistScope = ref<'permanent' | 'floating' | null>(null)
+  const blacklistRules = ref<ReadonlyArray<{ rule_id: number; name: string }>>([])
   const blacklistBusy = ref(false)
   const generation = ref(0)
   const stockInfo = ref<StockInfo | null>(null)
@@ -157,6 +161,8 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
     if (!silent) loading.value = true
     stockUnavailable.value = false
     stockBlacklisted.value = false
+    blacklistScope.value = null
+    blacklistRules.value = []
     try {
       // 先问一句「是不是被屏蔽了」：命中就直接渲染屏蔽态，不再打 4 个必然 404
       // 的详情请求（否则一次进入会留下 4 条无意义错误日志）。
@@ -189,6 +195,8 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
       )
       if (gen !== generation.value) return true
       stockBlacklisted.value = resp.data.blacklisted
+      blacklistScope.value = resp.data.scope
+      blacklistRules.value = resp.data.rules
       return resp.data.blacklisted
     } catch {
       return false
@@ -208,6 +216,9 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
         // 结构化 404：区分「代码不存在」（终态）与「被黑名单屏蔽」（可撤销）
         if (isBlacklistedDetail(e.response.data?.detail)) {
           stockBlacklisted.value = true
+          // 兜底分支拿不到 scope，保守按「彻底拉黑」渲染（若其实是浮动拉黑，
+          // 点「移出」时接口会 404，提示去规则库改规则）
+          blacklistScope.value = 'permanent'
           return
         }
         stockUnavailable.value = true
@@ -391,6 +402,8 @@ export function useStockDetailLoad(deps: StockDetailLoadDeps) {
     cacheAsOf,
     stockUnavailable,
     stockBlacklisted,
+    blacklistScope,
+    blacklistRules,
     blacklistBusy,
     stockInfo,
     indicators,

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 # 当前 schema 版本（依据 S3 方案 C 快速启动依据）：
 # 任何迁移新增后必须递增对应常量，否则 skip_if_current 会错误跳过待应用迁移。
 DUCKDB_SCHEMA_VERSION = 50
-SQLITE_SCHEMA_VERSION = 22
+SQLITE_SCHEMA_VERSION = 23
 
 # ─── v50：被判「没用」的二级索引全清单（唯一来源）─────────────────────────
 # 依据 reports/151（2026-11-21 逐索引 A/B 实测，副本上真跑，每索引 3 次取中位数）
@@ -1454,6 +1454,49 @@ CREATE TABLE IF NOT EXISTS stock_blacklist (
     stock_code  TEXT PRIMARY KEY,
     reason      TEXT,
     created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 浮动黑名单：规则库（用户态；命任一条即进浮动黑名单，OR 关系）
+CREATE TABLE IF NOT EXISTS blacklist_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_key        TEXT UNIQUE,          -- 预置规则用稳定 key（幂等灌入）；手工规则为 NULL
+    name            TEXT NOT NULL,
+    note            TEXT,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    conditions_json TEXT NOT NULL,        -- 与 ScreeningEngine 同一套 conditions 结构
+    pool_json       TEXT NOT NULL DEFAULT '{}',  -- 池参数，如 {"max_listing_years": 1}
+    origin          TEXT NOT NULL DEFAULT 'manual',  -- preset / manual
+    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 浮动黑名单：当前名册（每 (规则, 股票) 一行，便于解释"被哪条规则拉黑"）
+CREATE TABLE IF NOT EXISTS blacklist_floating (
+    rule_id       INTEGER NOT NULL,
+    stock_code    TEXT NOT NULL,
+    first_seen_at TIMESTAMP NOT NULL,
+    last_seen_at  TIMESTAMP NOT NULL,
+    PRIMARY KEY (rule_id, stock_code)
+);
+
+-- 浮动黑名单：进出事件（用户要的"有进有出"）
+CREATE TABLE IF NOT EXISTS blacklist_floating_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at     TIMESTAMP NOT NULL,
+    rule_id    INTEGER NOT NULL,
+    stock_code TEXT NOT NULL,
+    event      TEXT NOT NULL,             -- entered / exited
+    UNIQUE (run_at, rule_id, stock_code, event)
+);
+
+-- 浮动黑名单：每轮重算的汇总（给前端看"上次重算时间/有进有出多少只"）
+CREATE TABLE IF NOT EXISTS blacklist_floating_runs (
+    run_at           TIMESTAMP PRIMARY KEY,
+    rules_evaluated  INTEGER NOT NULL DEFAULT 0,
+    entered          INTEGER NOT NULL DEFAULT 0,
+    exited           INTEGER NOT NULL DEFAULT 0,
+    status           TEXT NOT NULL DEFAULT 'ok',
+    detail_json      TEXT
 );
 
 -- 人工覆写
@@ -3081,6 +3124,8 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
             )
             logger.info("SQLite schema v20 已应用")
 
+
+
         # v21: 自选分组注册表（2026-11-26，用户需求：「除了按筛选规则分组，我难道不能
         # 自己添加进分组吗？」）。
         #
@@ -3175,6 +3220,73 @@ def init_sqlite_schema(store: SQLiteStore) -> None:
                 ),
             )
             logger.info("SQLite schema v22 已应用")
+
+        # v23: 浮动黑名单（2026-11-22，用户裁定：规则驱动、每次更新比较、有进有出）。
+        # 与彻底拉黑（stock_blacklist）分工：那个是人手工点、身份型事实；
+        # 这个由规则库派生、特征型。实现在 app/core/floating_blacklist.py。
+        row = conn.execute(
+            "SELECT version FROM schema_migrations WHERE version = 23"
+        ).fetchone()
+        if row is None:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blacklist_rules (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    rule_key        TEXT UNIQUE,
+                    name            TEXT NOT NULL,
+                    note            TEXT,
+                    enabled         INTEGER NOT NULL DEFAULT 1,
+                    conditions_json TEXT NOT NULL,
+                    pool_json       TEXT NOT NULL DEFAULT '{}',
+                    origin          TEXT NOT NULL DEFAULT 'manual',
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blacklist_floating (
+                    rule_id       INTEGER NOT NULL,
+                    stock_code    TEXT NOT NULL,
+                    first_seen_at TIMESTAMP NOT NULL,
+                    last_seen_at  TIMESTAMP NOT NULL,
+                    PRIMARY KEY (rule_id, stock_code)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blacklist_floating_events (
+                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_at     TIMESTAMP NOT NULL,
+                    rule_id    INTEGER NOT NULL,
+                    stock_code TEXT NOT NULL,
+                    event      TEXT NOT NULL,
+                    UNIQUE (run_at, rule_id, stock_code, event)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS blacklist_floating_runs (
+                    run_at          TIMESTAMP PRIMARY KEY,
+                    rules_evaluated INTEGER NOT NULL DEFAULT 0,
+                    entered         INTEGER NOT NULL DEFAULT 0,
+                    exited          INTEGER NOT NULL DEFAULT 0,
+                    status          TEXT NOT NULL DEFAULT 'ok',
+                    detail_json     TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO schema_migrations (version, description) VALUES (?, ?)",
+                (
+                    23,
+                    "blacklist_rules/floating/events/runs: rule-driven floating blacklist",
+                ),
+            )
+            logger.info("SQLite schema v23 已应用")
 
 
 def init_all_schema(

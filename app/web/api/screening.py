@@ -34,7 +34,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.core import watchlist_ops as wo
-from app.core.blacklist import blacklisted_code_set, filter_rows
+from app.core.blacklist import excluded_code_set, filter_rows
 from app.core.data_quality import (
     SCREENING_READINESS_CACHE_KEY,
     ensure_screening_readiness_refresh,
@@ -1005,7 +1005,7 @@ def get_saved_result(result_id: str, request: Request) -> dict:
     # 无法在 SQL 层过滤，只能读出来后在内存里剔掉黑名单股票。否则「加入黑名单后
     # 不再出现」会被历史结果绕过（依据 app/core/blacklist.py 模块 docstring）。
     row["result_json"] = filter_rows(
-        row["result_json"], blacklisted_code_set(sqlite)
+        row["result_json"], excluded_code_set(sqlite)
     )
     row["columns_json"] = json.loads(row["columns_json"]) if row.get("columns_json") else []
     row["sort_json"] = json.loads(row["sort_json"]) if row.get("sort_json") else []
@@ -1023,7 +1023,7 @@ def export_csv(req: ExportCsvRequest, request: Request) -> dict:
     record = saved[0]
     results = json.loads(record["result_json"])
     # 与 get_saved_result 同口径：导出也不能把黑名单股票漏出去。
-    results = filter_rows(results, blacklisted_code_set(sqlite))
+    results = filter_rows(results, excluded_code_set(sqlite))
     columns = json.loads(record["columns_json"])
     data_date = record["data_date"]
     rule = sqlite.query(
@@ -1105,7 +1105,7 @@ def add_to_watchlist(req: AddToWatchlistRequest, request: Request) -> dict:
             raise HTTPException(status_code=400, detail="a saved screening result is required")
         saved_codes = {row.get("stock_code") for row in json.loads(result["result_json"])}
         # 黑名单股票不许进自选（前端已看不到了，这里是绕过前端的兜底）
-        blocked_codes = blacklisted_code_set(sqlite)
+        blocked_codes = excluded_code_set(sqlite)
         # 先去重：同一请求里重复代码只 upsert 一次，added 按唯一代码数计。
         unique_codes = list(dict.fromkeys(stock_codes))
         requested_codes = set(unique_codes)

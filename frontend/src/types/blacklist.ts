@@ -22,12 +22,6 @@ export interface BlacklistListResponse {
   readonly count: number
 }
 
-/** `GET /api/blacklist/check/{code}`。详情页进入时先问一句。 */
-export interface BlacklistCheckResponse {
-  readonly stock_code: string
-  readonly blacklisted: boolean
-}
-
 /**
  * 单股端点被屏蔽时的 404 `detail` 结构。
  *
@@ -46,4 +40,89 @@ export function isBlacklistedDetail(detail: unknown): detail is BlacklistedDetai
     detail !== null &&
     (detail as { code?: unknown }).code === 'stock_blacklisted'
   )
+}
+
+// ─── 浮动黑名单（规则驱动，2026-11-22 用户裁定）─────────────────────
+//
+// 与彻底拉黑的分工：彻底拉黑是人手工点、身份型；浮动是规则库自动算、特征型。
+// **浮动拉黑没有任何手工入口** —— 想让某只股票浮动拉黑，去改规则。
+
+/** 一条浮动黑名单规则。`conditions` 与筛选规则同一套结构。 */
+export interface BlacklistRule {
+  readonly id: number
+  /** 预置规则才有（如 `lidaxiao.newly_listed`），手工规则为 null */
+  readonly rule_key: string | null
+  readonly name: string
+  /** 推导说明：依据 + 时间锚定换算 + 已知误差 */
+  readonly note: string | null
+  readonly enabled: boolean
+  readonly conditions: Record<string, unknown>
+  readonly pool: Record<string, unknown>
+  readonly origin: 'preset' | 'manual'
+  readonly matched: number
+}
+
+export interface BlacklistRuleListResponse {
+  readonly rules: ReadonlyArray<BlacklistRule>
+  readonly count: number
+}
+
+/** 试算结果：开这条规则之前先看会拉黑多少只。 */
+export interface BlacklistRulePreviewResponse {
+  readonly rule_id: number
+  readonly matched: number
+  readonly sample: ReadonlyArray<{ readonly stock_code: string; readonly name: string }>
+}
+
+export interface BlacklistRuleHit {
+  readonly rule_id: number
+  readonly name: string
+}
+
+export interface FloatingBlacklistItem {
+  readonly stock_code: string
+  readonly name: string
+  readonly rules: ReadonlyArray<BlacklistRuleHit>
+}
+
+export interface FloatingBlacklistRun {
+  readonly run_at: string
+  readonly rules_evaluated: number
+  readonly entered: number
+  readonly exited: number
+  readonly status: string
+}
+
+export interface FloatingBlacklistResponse {
+  readonly items: ReadonlyArray<FloatingBlacklistItem>
+  readonly count: number
+  readonly returned: number
+  readonly last_run: FloatingBlacklistRun | null
+}
+
+export interface FloatingBlacklistEvent {
+  readonly run_at: string
+  readonly stock_code: string
+  readonly event: 'entered' | 'exited'
+  readonly rule_id: number
+  readonly rule_name: string | null
+  readonly stock_name: string
+}
+
+export interface FloatingBlacklistEventsResponse {
+  readonly events: ReadonlyArray<FloatingBlacklistEvent>
+  readonly count: number
+}
+
+/**
+ * 屏蔽态的性质。
+ *
+ * `permanent` 才给「移出黑名单」按钮；`floating` 只解释命中了哪几条规则，
+ * 并把人指向规则库——**不给任何手动移出入口**（用户裁定）。
+ */
+export interface BlacklistCheckResponse {
+  readonly stock_code: string
+  readonly blacklisted: boolean
+  readonly scope: 'permanent' | 'floating' | null
+  readonly rules: ReadonlyArray<BlacklistRuleHit>
 }
