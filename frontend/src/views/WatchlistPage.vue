@@ -94,8 +94,12 @@ interface WatchlistResponse {
   /** 后端降级契约（2026-11-24）：`unavailable` = DuckDB 取名称/指标失败
    *  （通常是自动更新持锁），**分组与股票行照常返回**，只是没有名称/指标。
    *  绝不能把它读成"你没有分组"。 */
-  enrichment?: 'ok' | 'unavailable'
+  //: `screening_snapshot`（2026-11-27）：主库被写锁挡住，已回落到**上一次成功更新的
+  //: 物化快照** —— 名称/指标有值，只是时点是上一轮，用 `enrichment_as_of` 说明。
+  enrichment?: 'ok' | 'unavailable' | 'screening_snapshot'
   enrichment_error?: string | null
+  /** 物化快照的构建时间（仅 `screening_snapshot` 时有值）。 */
+  enrichment_as_of?: string | null
 }
 
 const router = useRouter()
@@ -109,6 +113,10 @@ const autoUpdateInProgress = ref(false)
 // DuckDB 富化是否降级：只影响"名称/指标显示得全不全"，不影响分组与行是否存在。
 const enrichmentUnavailable = ref(false)
 const enrichmentError = ref<string | null>(null)
+// 2026-11-27（用户口径）：更新期间**不许留白** —— 后端会回落到物化快照，
+// 这时 enrichment='screening_snapshot' 且带 enrichment_as_of（那一轮的数据时点）。
+const enrichmentFromSnapshot = ref(false)
+const enrichmentAsOf = ref<string | null>(null)
 const loading = ref(true)
 const refreshing = ref(false)
 // `default` 只是**历史**持久化 key（v21 之前前端不传分组时的落点），
@@ -194,7 +202,20 @@ const emptyDescription = computed(
 )
 
 /** 降级横幅：必须说清"是名称/指标没加载"，而不是让页面看起来像"自选没了"。 */
+/** 快照构建时间（ISO/UTC）→ 本地「MM-DD HH:mm」；解析不了就原样返回，绝不猜。 */
+function formatAsOf(raw: string): string {
+  const parsed = new Date(raw)
+  if (Number.isNaN(parsed.getTime())) return raw
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`
+}
+
 const enrichmentNotice = computed(() => {
+  // 快照兜底成功：不是"不可用"，而是"先给你看上一轮的数"
+  if (enrichmentFromSnapshot.value) {
+    const asOf = enrichmentAsOf.value ? `（${formatAsOf(enrichmentAsOf.value)}）` : ''
+    return `数据正在自动更新，以下先显示上一次更新完成时的数据${asOf}；更新完成后刷新即可看到最新值。`
+  }
   if (!enrichmentUnavailable.value) return ''
   const reason = (enrichmentError.value ?? '').slice(0, 120)
   if (enrichmentError.value === 'duckdb_read_locked' || autoUpdateInProgress.value) {
@@ -415,6 +436,8 @@ function applyResponse(data: WatchlistResponse) {
   groups.value = data.groups ?? []
   trust.value = data.trust ?? null
   autoUpdateInProgress.value = data.auto_update_in_progress === true
+  enrichmentFromSnapshot.value = data.enrichment === 'screening_snapshot'
+  enrichmentAsOf.value = data.enrichment_as_of ?? null
   enrichmentUnavailable.value = data.enrichment === 'unavailable'
   enrichmentError.value = data.enrichment_error ?? null
 }
@@ -804,7 +827,9 @@ onMounted(fetchWatchlist)
         </div>
       </aside>
       <section class="watchlist-content">
-        <n-alert v-if="enrichmentUnavailable" type="info" :show-icon="true" class="watchlist-warning">{{ enrichmentNotice }}<n-button size="tiny" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></n-alert>
+        <!-- 2026-11-27：快照兜底（`enrichmentFromSnapshot`）也要显示横幅 ——
+             它不是"降级"，而是"先给你看上一轮的数"，但用户仍需要知道时点。 -->
+        <n-alert v-if="enrichmentUnavailable || enrichmentFromSnapshot" type="info" :show-icon="true" class="watchlist-warning">{{ enrichmentNotice }}<n-button size="tiny" quaternary :loading="loading" @click="fetchWatchlist">刷新列表</n-button></n-alert>
         <n-alert v-else-if="autoUpdateInProgress" type="info" :show-icon="true" class="watchlist-warning">数据正在自动更新，以下指标为更新前快照，更新完成后自动恢复。详见<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <n-alert v-if="hasUntrustedIndicators" type="warning" :show-icon="true" class="watchlist-warning">当前数据库状态不可信，指标数值已被服务端遮蔽。请先检查<router-link to="/data-status">数据状态页</router-link>。</n-alert>
         <div class="watchlist-card">

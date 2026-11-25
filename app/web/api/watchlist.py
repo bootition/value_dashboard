@@ -39,6 +39,13 @@ ENRICHMENT_OK = "ok"
 ENRICHMENT_UNAVAILABLE = "unavailable"
 #: 写进程持锁的稳定原因码：前端据它说"正在自动更新"，而不是猜一个原因。
 ENRICHMENT_READ_LOCKED = "duckdb_read_locked"
+#: 主库被写进程锁住 → 富化改读**上一次成功更新的物化快照**（`screening_snapshot.duckdb`）。
+#:
+#: 2026-11-27（用户口径）：「数据更新的时候可以先把之前缓存的数据显示出来 ——
+#: 周二的数据正在更新，那就先显示周一的」。更新期间把整列指标留空是**没必要的**：
+#: 物化快照里 `stock_meta`(6,286) 与 `indicator_snapshot`(5,575) 都在，列也齐全，
+#: 而且它不受主库写锁影响（`SnapshotStore` 就是为此存在的）。
+ENRICHMENT_SNAPSHOT = "screening_snapshot"
 
 # 依赖 indicator_snapshot 的数值字段；信任决策阻断时必须遮蔽
 _SNAPSHOT_VALUE_FIELDS = (
@@ -209,15 +216,35 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
     stock_codes = [r["stock_code"] for r in rows]
     enrichment = ENRICHMENT_OK
     enrichment_error: str | None = None
+    enrichment_as_of: str | None = None  # 快照构建时间（仅 ENRICHMENT_SNAPSHOT 时有值）
     try:
         info_map = _fetch_stock_info(duck, stock_codes)
     except DuckDBReadLockedError as error:
-        # 自动更新/CLI 写进程持锁：这是已知的**暂时**状态，如实提示"更新中"，
-        # 不要把原始 IO 错误抛给用户，更不要把整页打成失败。
-        logger.warning("自选列表 DuckDB 富化跳过（写进程持锁）: %s", error)
+        # 自动更新/CLI 写进程持锁：这是已知的**暂时**状态。
+        # 2026-11-27（用户口径）：**不要留白** —— 改读上一次成功更新的物化快照，
+        # 让用户看到"周一的数"，而不是一整屏破折号。
+        logger.warning("自选列表 DuckDB 富化被写锁挡住，改用物化快照: %s", error)
         info_map = {}
         enrichment = ENRICHMENT_UNAVAILABLE
         enrichment_error = ENRICHMENT_READ_LOCKED
+        try:
+            from app.core.storage.screening_snapshot import (
+                SnapshotStore,
+                snapshot_path,
+            )
+
+            snapshot_store = SnapshotStore(snapshot_path(duck))
+            snapshot_map = _fetch_stock_info(snapshot_store, stock_codes)
+            if snapshot_map:
+                info_map = snapshot_map
+                enrichment = ENRICHMENT_SNAPSHOT
+                enrichment_as_of = snapshot_store.as_of
+                logger.info(
+                    "自选列表改用物化快照富化：%d 只（快照构建于 %s）",
+                    len(snapshot_map), enrichment_as_of,
+                )
+        except Exception as snapshot_error:  # noqa: BLE001 - 回落失败仍按"不可用"降级
+            logger.warning("物化快照富化也失败（保持降级）: %s", snapshot_error)
     except Exception as error:  # 降级而非整页失败，原因照实回传
         # 非锁类故障也降级：分组与代码是 SQLite 里的事实，必须照常可见。
         # 真实原因进日志 + `enrichment_error`，不静默吞掉。
@@ -284,6 +311,9 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
         "items": items, "count": len(items), "groups": groups, "trust": trust,
         "auto_update_in_progress": auto_update_in_progress,
         "enrichment": enrichment, "enrichment_error": enrichment_error,
+        # 来自物化快照时，把"这是哪一轮的数据"一起给前端，横幅才能说清
+        # 「以下为 2026-11-25 19:41 那次更新完成时的数据」。
+        "enrichment_as_of": enrichment_as_of,
     }
 
 
