@@ -95,6 +95,7 @@ def test_preset_rules_cover_all_categories() -> None:
         "goodcompany.cash_sink_10plus",
         "goodcompany.dirty_balance_sheet",
         "goodcompany.paper_profit",
+        "goodcompany.debt_funded_dividend",
     }
 
 
@@ -102,6 +103,33 @@ def test_newly_listed_is_five_years_per_user_ruling() -> None:
     """次新股门槛 = 上市不满 5 年（用户 2026-11-22：「1 年还是太短了」）。"""
     rule = floating.PRESET_BY_KEY["lidaxiao.newly_listed"]
     assert rule.pool["max_listing_years"] == 5
+
+
+def test_debt_funded_dividend_mirrors_regulatory_three_elements() -> None:
+    """「借贷分红」规则必须一一对应证监会《3 号指引》的三要素。
+
+    监管原文：「对资产负债率较高且经营活动现金流量不佳、存在大比例现金分红情形的
+    公司保持重点关注」。三个要素 → 三个条件，一个都不能少：
+
+      ① 资产负债率较高   → `debt_ratio >= 0.60`
+      ② 现金流不佳       → `cf_to_net_profit < 1`（现金流没利润多）
+      ③ 大比例现金分红   → `payout_ratio >= 0.80`（80% 是交易所「大额分红」官方红线）
+
+    外加 `income.net_profit > 0`：没有利润谈不上「分红比例」，也避免分母为负。
+    """
+    rule = floating.PRESET_BY_KEY["goodcompany.debt_funded_dividend"]
+    assert rule.conditions["logic"] == "AND", "三要素必须同时成立"
+    got = {(item["field"], item["op"], item["value"]) for item in rule.conditions["rules"]}
+    assert ("income.net_profit", ">", 0) in got, "分母必须为正"
+    assert ("debt_ratio", ">=", 0.60) in got, "①资产负债率较高"
+    assert ("cf_to_net_profit", "<", 1) in got, "②经营现金流不佳"
+    assert ("payout_ratio", ">=", 0.80) in got, "③大比例分红（80% 有官方出处）"
+    assert len(got) == 4
+
+
+def test_debt_funded_dividend_is_enabled_by_default() -> None:
+    """这条是「会不会把本金亏掉」的直接判据，必须默认开启。"""
+    assert floating.PRESET_BY_KEY["goodcompany.debt_funded_dividend"].enabled_by_default
 
 
 def test_ten_year_cash_sink_requires_strictly_above_100_percent() -> None:
