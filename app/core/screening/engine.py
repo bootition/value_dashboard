@@ -41,6 +41,7 @@ from app.core.dsl.derived_fields import (
 from app.core.dsl.registry import validate_expression_identifier
 from app.core.screening import defaults as screening_defaults
 from app.core.screening.field_units import field_unit
+from app.core.sector import is_financial_sql
 from app.core.storage.duckdb_store import DuckDBStore
 from app.core.storage.path_policy import DatabasePathSet, PathIsolationError
 from app.core.storage.sqlite_store import SQLiteStore
@@ -761,6 +762,8 @@ RANK_SUFFIXES = (
 METADATA_COLUMNS = {
     "stock_code", "name", "exchange", "listing_date", "is_st", "is_suspended",
     "total_shares", "circ_shares", "sw_level1", "sw_level2", "csrc_l1", "csrc_l2",
+    # 派生布尔列：`1` = 金融股（银行/非银金融）。来自 `app/core/sector.py`。
+    "is_financial",
 }
 MAX_RULE_LEAVES = 100
 MAX_IN_VALUES = 1_000
@@ -1288,6 +1291,7 @@ class ScreeningEngine:
         # overrides VALUES → base_pool 的 mixed_report_date NOT IN → 用户条件 WHERE。
         # params 必须严格按同一顺序组装，否则 DuckDB 参数绑定会错位。
         params.extend(pool_params)
+        financial_sql = is_financial_sql("m")
         sql_parts.append(f"""
 base_pool AS (
     SELECT
@@ -1295,6 +1299,9 @@ base_pool AS (
         m.csrc_l1, m.csrc_l2,
         m.is_st, m.is_suspended, m.listing_date,
         m.total_shares, m.circ_shares,
+        -- 金融股判据（银行/非银金融，含 csrc 兜底）只有一个实现：app/core/sector.py。
+        -- 这里把它做成 0/1 布尔列暴露给筛选与黑名单规则，**不要在 DSL 里手写第二份**。
+        CASE WHEN {financial_sql} THEN 1 ELSE 0 END AS is_financial,
         s.*, {', '.join(extended_selects)}, {', '.join(normalized_selects)},
         {', '.join(derived_selects)}
     FROM stock_meta m

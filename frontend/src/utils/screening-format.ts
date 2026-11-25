@@ -95,6 +95,8 @@ export const FIELD_LABELS: Readonly<Record<string, string>> = {
   dividend_yield: '股息率',
   total_market_cap: '总市值',
   circ_market_cap: '流通市值',
+  // 0/1 伯尔列：金融股（银行/非银金融）。来自 app/core/sector.py，规则里用 `is_financial = 0` 做前置排除。
+  is_financial: '是否金融股（0=非金融 / 1=金融）',
   roe: '净资产收益率（ROE）',
   roa: '总资产收益率（ROA）',
   gross_margin: '销售毛利率',

@@ -256,28 +256,51 @@ PRESET_BY_KEY: dict[str, PresetRule] = {rule.key: rule for rule in PRESET_RULES}
 
 GOOD_COMPANY_INVERSE_RULES: tuple[PresetRule, ...] = (
     PresetRule(
-        key="goodcompany.cash_sink",
-        name="掏钱型公司（好公司反面①·分红融资比过低）",
+        key="goodcompany.cash_sink_5_10",
+        name="掏钱型公司·上市 5–10 年（好公司反面①a）",
         note=(
             "【原话】「差的公司，把手伸进股民的口袋里掏钱，怎么能够买？」「要分清\n"
             "『把手伸进你口袋掏钱』的公司和『不断往你口袋塞钱』的公司」（2026-01 微博财经之夜）。\n"
             "【塞钱】持续稳定的现金分红 + 真金白银回购并注销；【掏钱】没完没了增发融资向市场要钱。\n"
             "\n"
-            "【量化】`dividend_financing_ratio_pct < 50`——累计分红 ÷ 累计融资不到 50%，\n"
-            "即「每向市场要 1 块钱，还给股东不到 5 毛」。该指标是本仓库已发布的复合指标\n"
-            "（百分数口径，含回购注销）。\n"
+            "【分档·用户 2026-11-22 裁定】按上市年限分两档，本档管**上市 5–10 年**：\n"
+            "  分红融资比 **< 50%** —— 每向市场要 1 块钱，还给股东不到 5 毛。\n"
+            "  5–10 年的公司还在扩张期，50% 是合理的及格线。\n"
+            "  **上市不满 5 年的一律不评判**（时间太短，看不出来）。\n"
             "\n"
-            "【为什么要 min_listing_years=5】上市不满 5 年就融资一次是正常发育，不能算\n"
-            "「掏钱」；5 年 ≈ 一个完整的融资-回报周期。用**相对年限**而不是「2015 年之后上市」\n"
-            "这类绝对口径（回扣 U9 的反面教材）。\n"
+            "【上市不满 5 年怎么处理】用户原话「5 年以下我们先不考虑，就不买它的股票」。\n"
+            "本规则用 `min_listing_years=5` 把它排除在**评判**之外（不拉黑、也不放行）。\n"
+            "若你要的是「上市不满 5 年**一律回避**」，把「次新股」那条的\n"
+            "`max_listing_years` 从 1 改成 5 即可，不必新增规则。\n"
             "\n"
-            "【数据缺口】分母为 0（从未融资）的公司算不出比值，会被本规则漏掉——这是好事，\n"
-            "「从不融资」不该被当成坏公司。"
+            "【为什么单位是「年」而不是年份】相对年限，永不失效（回扣 U9）。"
         ),
         conditions={"logic": "AND", "rules": [
             {"field": "dividend_financing_ratio_pct", "op": "<", "value": 50},
         ]},
-        pool={"min_listing_years": 5},
+        pool={"min_listing_years": 5, "max_listing_years": 10},
+        enabled_by_default=True,
+    ),
+    PresetRule(
+        key="goodcompany.cash_sink_10plus",
+        name="掏钱型公司·上市 10 年以上（好公司反面①b · 更严）",
+        note=(
+            "同 ①a 的依据，但**门槛更严**（用户 2026-11-22 裁定）：\n"
+            "「10 年以后，你再怎么成长也已经差不多了，应该从股东那里拿的东西，\n"
+            "要少于你送给股东的东西。」\n"
+            "\n"
+            "【本档口径】上市 **10 年以上**，分红融资比必须 **≥ 100%**，\n"
+            "低于 100% 即拉黑——也就是「累计分红 < 累计融资」就算不合格。\n"
+            "经济含义很直白：一个活了十年的公司，从股东手里拿的应该已经少于它还给股东的。\n"
+            "\n"
+            "【为什么两档要分开写】一条规则只能有一套条件；用 `min_listing_years`\n"
+            "与 `max_listing_years` 把年限切成互不重叠的两段，判定标准才能各管各的。\n"
+            "两档合起来正好覆盖「上市 ≥ 5 年」的全部公司，不重不漏。"
+        ),
+        conditions={"logic": "AND", "rules": [
+            {"field": "dividend_financing_ratio_pct", "op": "<", "value": 100},
+        ]},
+        pool={"min_listing_years": 10},
         enabled_by_default=True,
     ),
     PresetRule(
@@ -287,14 +310,25 @@ GOOD_COMPANY_INVERSE_RULES: tuple[PresetRule, ...] = (
             "【原话】好公司「善待股东」，而「塞钱」的具体形式是**持续、稳定地现金分红**\n"
             "（2026-01 微博财经之夜）；2012 四标准之③亦为「善待股东、员工、社区与自然」。\n"
             "\n"
-            "【量化】`consecutive_div_years <= 1`（连续分红年数不超过 1 年）+ 上市满 5 年。\n"
-            "上市 5 年以上、连续 4 年没给过现金回报，就是「不把股东当股东」。\n"
+            "【量化·注意这里有个坑，用户 2026-11-22 指出】\n"
+            "只看 `consecutive_div_years <= 1` 会漏掉「上市 10 年只分红 2 年」的公司——\n"
+            "只要最近连续分了 2 年，这个值就是 2，筛不出来。所以必须把 **NULL 也算进来**：\n"
+            "`_calc_consecutive_div_years()` 在两种情况下返回 None：\n"
+            "  ① 从上市到现在**一次现金分红都没有**（查询无行）；\n"
+            "  ② **最近三年都没分红**（latest_year < current_year-2）。\n"
+            "两者都是我们要的「长期不给股东现金」，所以条件是 `IS NULL OR <= 1`。\n"
             "\n"
-            "【已知误杀】高成长期的公司会把利润全部再投资，这在逻辑上不必然变坏\n"
+            "【仍然存在的残余缺口·如实说明】「上市 10 年、分红 2 年、且这 2 年恰好是最近连续\n"
+            "两年」这种情况下，本规则**抓不到**（值 = 2）。要精确抓它需要新派生列\n"
+            "**「分红年份覆盖率」= 分过年份数 ÷ 已上市年数**，见 KB §23 的待办。\n"
+            "在那之前，「掏钱型」那两档（累计口径）是主要的兜底。\n"
+            "\n"
+            "【已知误杀】高成长期的公司会把利润全部再投资，逻辑上不必然变坏\n"
             "（巴菲特时代的伯克希尔从不分红）。本规则按**他的标准**执行，不是普适真理——\n"
             "介意误杀就把它关掉。"
         ),
-        conditions={"logic": "AND", "rules": [
+        conditions={"logic": "OR", "rules": [
+            {"field": "consecutive_div_years", "op": "is_null"},
             {"field": "consecutive_div_years", "op": "<=", "value": 1},
         ]},
         pool={"min_listing_years": 5},
@@ -307,6 +341,15 @@ GOOD_COMPANY_INVERSE_RULES: tuple[PresetRule, ...] = (
             "【原话】蓝筹「最优质」量化下来是「分红稳定、**现金流扎实、资产负债表干净**」\n"
             "（2018-01-29 界面）；他多次点名「不存在高额商誉」是选股条件之一。\n"
             "\n"
+            "【⚠️ 先排除金融股·用户 2026-11-22 要求】\n"
+            "「能不能先把银行、保险这种行业排除掉，再筛选？因为每个行业都不同，\n"
+            "我不希望有些行业先天就不被划入名单。」\n"
+            "**这个要求是对的**：银行的「负债」是存款、保险的「负债」是准备金，那是它们的\n"
+            "原材料，不是杠杆。用同一把尺子量，金融股会先天被判死刑。\n"
+            "所以本规则第一条就是 `is_financial = 0`。\n"
+            "`is_financial` 由 `app/core/sector.py::is_financial_sql()` 在 base_pool 里算好\n"
+            "（银行 + 非银金融，含 csrc 兜底），**不在 DSL 里手写第二份行业判据**（AGENTS R1）。\n"
+            "\n"
             "【量化·两条任一成立即命中】\n"
             "  ① 高商誉：`goodwill_ratio >= 0.20`——商誉占净资产 20% 以上，一旦减值就是净资产塌方；\n"
             "  ② 高杠杆 + 利息都还不动：`debt_ratio >= 0.80` 且 `interest_coverage < 2`\n"
@@ -315,14 +358,17 @@ GOOD_COMPANY_INVERSE_RULES: tuple[PresetRule, ...] = (
             "【为什么用 OR 不是 AND】这两条是**不同的病**：有的公司商誉高但负债低，\n"
             "有的负债高但没商誉。要求同时成立会漏掉绝大多数真实风险。\n"
             "\n"
-            "【已知误杀】银行/保险/地产的 `debt_ratio` 天然接近 90%（存款和预收款是负债），\n"
-            "所以金融地产会被第 ② 条大面积命中。介意的话把本条关掉。"
+            "【已知误杀】地产、建筑、公用事业等重资产行业的 `debt_ratio` 天然偏高，\n"
+            "仍可能被第 ② 条命中。介意的话把本条关掉。"
         ),
-        conditions={"logic": "OR", "rules": [
-            {"field": "goodwill_ratio", "op": ">=", "value": 0.20},
-            {"logic": "AND", "rules": [
-                {"field": "debt_ratio", "op": ">=", "value": 0.80},
-                {"field": "interest_coverage", "op": "<", "value": 2},
+        conditions={"logic": "AND", "rules": [
+            {"field": "is_financial", "op": "=", "value": 0},
+            {"logic": "OR", "rules": [
+                {"field": "goodwill_ratio", "op": ">=", "value": 0.20},
+                {"logic": "AND", "rules": [
+                    {"field": "debt_ratio", "op": ">=", "value": 0.80},
+                    {"field": "interest_coverage", "op": "<", "value": 2},
+                ]},
             ]},
         ]},
         enabled_by_default=True,

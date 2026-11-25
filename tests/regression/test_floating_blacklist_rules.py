@@ -89,11 +89,74 @@ def test_preset_rules_cover_all_categories() -> None:
         "lidaxiao.false_growth",
         "lidaxiao.theme_momentum",
         # 从「做好人买好股得好报」那套好公司标准反推的（公司质量维度）
-        "goodcompany.cash_sink",
+        "goodcompany.cash_sink_5_10",
+        "goodcompany.cash_sink_10plus",
         "goodcompany.no_cash_back",
         "goodcompany.dirty_balance_sheet",
         "goodcompany.paper_profit",
     }
+
+
+def test_cash_sink_is_split_by_listing_age() -> None:
+    """掏钱型按上市年限分两档（用户 2026-11-22 裁定）。
+
+    5–10 年看 50%；10 年以上看 100%。两档的年限区间必须**互不重叠、接得上**，
+    且都不覆盖「上市不满 5 年」——那批用户明确说「先不考虑」（时间太短）。
+    """
+    a = floating.PRESET_BY_KEY["goodcompany.cash_sink_5_10"]
+    b = floating.PRESET_BY_KEY["goodcompany.cash_sink_10plus"]
+
+    assert a.pool["min_listing_years"] == 5
+    assert a.pool["max_listing_years"] == 10, "第一档上界必须是 10 年（上市不满 10 年）"
+    assert a.conditions["rules"][0]["value"] == 50, "5–10 年档的门槛是 50%"
+
+    assert b.pool["min_listing_years"] == 10
+    assert "max_listing_years" not in b.pool, "第二档没有上界（10 年以上全包）"
+    assert b.conditions["rules"][0]["value"] == 100, "10 年以上档的门槛是 100%（拿的要少于给的）"
+
+
+def test_no_cash_back_covers_never_paid_companies() -> None:
+    """「长期不给股东现金」必须把 NULL 也算进来（用户 2026-11-22 指出的漏洞）。
+
+    `_calc_consecutive_div_years()` 在两种情况下返回 NULL：
+      ① 从未分红；② 最近三年都没分红。
+    旧写法只有 `<= 1`，NULL 参与比较结果是 NULL（不成立），
+    于是「从上市到现在一次没分过」的公司在 SQL 里被**静默放过**。
+    """
+    rule = floating.PRESET_BY_KEY["goodcompany.no_cash_back"]
+    ops = {(item.get("field"), item.get("op")) for item in rule.conditions["rules"]}
+    assert ("consecutive_div_years", "is_null") in ops, (
+        "必须显式判 NULL，否则「从未分红」的公司筛不出来"
+    )
+    assert ("consecutive_div_years", "<=") in ops
+    assert rule.conditions["logic"] == "OR"
+
+
+def test_balance_sheet_rule_excludes_financials() -> None:
+    """杠杆类规则必须先排除金融股（用户 2026-11-22 要求）。
+
+    银行的「负债」是存款、保险的「负债」是准备金——那是原材料不是杠杆，
+    用同一把尺子量会把整个行业先天判死刑。
+    """
+    rule = floating.PRESET_BY_KEY["goodcompany.dirty_balance_sheet"]
+    first = rule.conditions["rules"][0]
+    assert rule.conditions["logic"] == "AND", "前置排除必须与正文是 AND 关系"
+    assert first["field"] == "is_financial" and first["value"] == 0, (
+        "第一条必须是「非金融股」前置过滤"
+    )
+
+
+def test_is_financial_field_comes_from_sector_module() -> None:
+    """`is_financial` 必须来自 `app/core/sector.py` 的单一实现，不能另写一份。"""
+    from app.core.screening.engine import METADATA_COLUMNS
+
+    assert "is_financial" in METADATA_COLUMNS
+    import inspect
+
+    from app.core.screening import engine as engine_module
+
+    source = inspect.getsource(engine_module)
+    assert "is_financial_sql" in source, "base_pool 里的 is_financial 必须用 sector 的判据"
 
 
 def test_small_cap_uses_market_value_not_share_count() -> None:
