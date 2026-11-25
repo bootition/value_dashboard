@@ -51,12 +51,14 @@ def test_watchlist_falls_back_to_screening_snapshot(
     opened: list[Any] = []
 
     class FakeSnapshotStore:
-        as_of = "2026-11-25T19:41:00Z"
+        as_of = None  # 真实 `SnapshotStore` 不传 info 时就是 None；时点从 meta 表读
 
         def __init__(self, path: Any, info: Any = None) -> None:
             opened.append(path)
 
         def read_query(self, sql: str, params: Any = None) -> list[dict]:
+            if "screening_snapshot_meta" in sql:
+                return [{"built_at": "2026-11-25T11:41:50+00:00"}]
             return [{
                 "stock_code": "600519", "name": "贵州茅台", "exchange": "SSE",
                 "csrc_l1": "制造业", "listing_date": "2001-08-27",
@@ -78,7 +80,7 @@ def test_watchlist_falls_back_to_screening_snapshot(
     item = body["items"][0]
 
     assert body["enrichment"] == "screening_snapshot", body.get("enrichment")
-    assert body["enrichment_as_of"] == "2026-11-25T19:41:00Z"
+    assert body["enrichment_as_of"] == "2026-11-25T11:41:50+00:00", body["enrichment_as_of"]
     assert opened, "必须真的去开物化快照"
     # 关键：**不许留白**
     assert item["name"] == "贵州茅台", item["name"]

@@ -238,7 +238,16 @@ def list_watchlist(request: Request, group: str | None = None) -> dict:
             if snapshot_map:
                 info_map = snapshot_map
                 enrichment = ENRICHMENT_SNAPSHOT
-                enrichment_as_of = snapshot_store.as_of
+                # `SnapshotStore.as_of` 只在构造时传了 info 才有值；这里从快照**自己的**
+                # `screening_snapshot_meta.built_at` 读 —— 否则横幅只能说"上一次更新完成时"
+                # 却给不出到底是哪一轮，用户没法判断数据有多旧。
+                try:
+                    meta = snapshot_store.read_query(
+                        "SELECT built_at FROM screening_snapshot_meta LIMIT 1"
+                    )
+                    enrichment_as_of = str(meta[0]["built_at"]) if meta else None
+                except Exception as meta_error:  # noqa: BLE001 - 缺时点不影响出数
+                    logger.warning("读取快照构建时间失败（不影响出数）: %s", meta_error)
                 logger.info(
                     "自选列表改用物化快照富化：%d 只（快照构建于 %s）",
                     len(snapshot_map), enrichment_as_of,
