@@ -1,0 +1,375 @@
+{
+  "stock": {
+    "code": "600585",
+    "hk_code": "00914",
+    "name": "海螺水泥"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "a_close": 17.98,
+      "market_cap_cny_yi": 949.0,
+      "total_shares_yi": 52.771,
+      "h_close_hkd": 17.02,
+      "h_in_cny": 14.57,
+      "ah_snapshot_date": "2026-11-16",
+      "ah_premium_snapshot_pct": 22.52,
+      "ah_premium_today_pct": 23.41,
+      "pe_ttm": 20.85,
+      "pb": 0.5,
+      "roe_period_end_pct": 2.4,
+      "bps": 35.95,
+      "identity": "20.85 x 2.4% = 0.5",
+      "net_cash_cny_yi": 170.2,
+      "net_cash_pct_of_mcap": 17.9,
+      "pe_ex_cash": 17.11,
+      "main_business_value_cny_yi": 778.6,
+      "minority_interest_cny_yi": 106.6,
+      "price_52w_low": 16.74,
+      "price_52w_high": 26.38,
+      "pct_from_high": -31.84
+    },
+    "ttm": {
+      "revenue": 774.6,
+      "parent_np": 45.5,
+      "deducted_np": 36.0,
+      "eps": 0.8625,
+      "revenue_yoy_pct": -7.98,
+      "parent_np_yoy_pct": -48.29
+    }
+  },
+  "checks": {
+    "the_key_data": {
+      "q3_single_quarter": {
+        "revenue_cny_yi": 192.96,
+        "revenue_yoy_pct": -3.83,
+        "parent_np_cny_yi": 2.16,
+        "parent_np_yoy_pct": -88.92,
+        "deducted_np_cny_yi": 1.06,
+        "deducted_np_yoy_pct": -93.88,
+        "gross_margin_pct": 14.93,
+        "gm_yoy_pp": -7.51,
+        "gm_qoq_pp": -2.4
+      },
+      "y9m26": {
+        "revenue_cny_yi": 562.22,
+        "revenue_yoy_pct": -8.58,
+        "parent_np_cny_yi": 27.43,
+        "parent_np_yoy_pct": -56.89,
+        "deducted_np_cny_yi": 20.09,
+        "deducted_np_yoy_pct": -66.5
+      },
+      "the_arithmetic": "2026E 一致预期 41.1 亿需要 Q4 单季赚 13.67 亿 —— 环比 Q3 增长 533%",
+      "valuation_at_q3_run_rate": "现价 17.98 对 Q3 年化归母（8.6 亿）是 100 倍以上；EV/TTM 扣非 21.6 倍",
+      "verdict": "市场不是在给萧条定价，是在给复苏定价。这个价格买的不是资产，是一张「行业自律能成功涨价」的彩票",
+      "without_this_data": "若没有这条 Q3 数据，8 份报告最多只会把买点微调；有了它，8 份全部转为更谨慎，0 份维持第一轮买入区间"
+    },
+    "pb_trap_consensus": {
+      "identity": "PB 0.5 = PE 20.85 x ROE 2.4%",
+      "consensus": "8/8 全部主动指出这个恒等式，0 位把破净当安全边际 —— 继大秦之后的第二次全员共识",
+      "main_business_pe": {
+        "main_business_value_cny_yi": 778.6,
+        "at_ttm_np_45_5": 17.1,
+        "at_2026e_41_1": 18.9,
+        "at_2025_np_81_1": 9.6,
+        "at_ttm_deducted_36_0": 21.6,
+        "at_q3_annualized_8_6": ">100"
+      },
+      "cash_caveat": "425 亿现金里只有 170.2 亿是净现金（占市值 17.9%），且 106.6 亿少数股东权益对应的部分不归母 —— 不能把全部现金当可分配资产",
+      "verdict": "对一家 ROCE 仅 4.19%、盈利仍在下坠的公司，17.1-21.6 倍的主业 PE 不便宜"
+    },
+    "industry_bottom": {
+      "y9m26_national_cement_output_yi_t": 11.3,
+      "output_yoy_pct": -8.6,
+      "q3_national_avg_price_cny_per_t": 322,
+      "price_yoy_pct": -7.8,
+      "price_qoq_pct": -2.7,
+      "q3_qinhuangdao_coal_cny_per_t": 875,
+      "coal_yoy_pct": 30.6,
+      "coal_qoq_pct": 7.1,
+      "three_kills": "量 -8.6%、价 -7.8%、成本 +30.6%",
+      "gm_path": "9M26 三个季度毛利率 Q1 21.3% -> Q2 17.3% -> Q3 14.9%，逐级下台阶",
+      "industry_state": "国信：行业盈利水平基本见底，行业已处于普遍亏损状态",
+      "five_tests": [
+        "全国产量降幅连续两至三季收窄到 -2% 以内",
+        "均价站稳 340-350 元/吨三个月以上",
+        "公司毛利率回到 18%-20%、单季归母稳定在 8-10 亿",
+        "出现真实产能退出和利用率回升（不是「错峰协同」）",
+        "ROCE 回到 8% 左右且 CFO 覆盖 capex 与分红"
+      ],
+      "tests_status": "现在只有第 5 条的一半成立（Q3 单季 CFO 同比 +11.8%），其余全未出现",
+      "sharpest_quote": "错峰协同只是行为约束，不是产能出清"
+    },
+    "liquidation_correction": {
+      "round1_claim": "归母清算价值 862.6 亿 = 16.35 元/股",
+      "two_errors": [
+        "从 BPS 35.96 x 52.771 = 1,897.6 亿归母权益里再减 106.6 亿少数股东权益 —— 但归母权益本身就已经扣过少数股东权益了，重复扣减",
+        "把净现金再加回 —— 但净现金已经包含在权益里，重复加回"
+      ],
+      "recomputed_from_asset_side": {
+        "cash_and_trading_425_at_95pct": 404,
+        "working_assets_150_at_70pct": 105,
+        "fixed_construction_rou_950_at_45pct": 428,
+        "intangible_goodwill_300_at_50pct": 150,
+        "other_long_term_671_at_40_to_50pct": "268 - 336",
+        "total_1355_to_1423": "1,355 - 1,423",
+        "less_total_liabilities": -492,
+        "less_minority_claim": -107,
+        "parent_liquidation_value_cny_yi": "756 - 824",
+        "per_share": "14.3 - 15.6（中枢 15.0）",
+        "stress_case": "600 - 650 亿 / 11.4 - 12.3 元"
+      },
+      "verdict": "现价 17.98 高于清算价值中枢 15.0 约 20%，高于压力情形 11.4-12.3 约 46%-58%"
+    },
+    "ah_test": {
+      "a_price": 17.98,
+      "h_price_hkd": 17.02,
+      "h_in_cny": 14.57,
+      "ah_premium_snapshot_pct": 22.52,
+      "ah_premium_today_pct": 23.41,
+      "div_yield_a_pct": 4.15,
+      "div_yield_h_gross_pct": 5.08,
+      "div_yield_h_after_20pct_tax_pct": 4.06,
+      "verdict": "H 的税后股息（4.06%）反而略低于 A（4.15%）。20% 税率下，H 要便宜约 25% 才能与 A 税后持平，而现在只便宜 18.4%",
+      "when_to_prefer_h": [
+        "QDII/香港账户等股息税 <=10%",
+        "A/H 溢价扩大到 30% 以上"
+      ]
+    },
+    "dividend_sustainability": {
+      "ttm_dps": 0.74,
+      "ttm_eps": 0.8625,
+      "payout_pct": 85.8,
+      "dps_history": {
+        "2023": 1.48,
+        "2024": 0.96,
+        "2025": 0.95,
+        "ttm_2026": 0.74
+      },
+      "warning": "若 2026 年 EPS 降到 0.65-0.70（Q4 不及预期），5% 股息率的可持续性不足 —— 不能把高股息当债券利息"
+    },
+    "roce_series": [
+      {
+        "year": "2016",
+        "ce": 924.6,
+        "ebit": 119.9,
+        "roce_pct": 13.48
+      },
+      {
+        "year": "2017",
+        "ce": 1010.3,
+        "ebit": 214.4,
+        "roce_pct": 22.17
+      },
+      {
+        "year": "2018",
+        "ce": 1234.0,
+        "ebit": 391.6,
+        "roce_pct": 34.89
+      },
+      {
+        "year": "2019",
+        "ce": 1513.6,
+        "ebit": 432.2,
+        "roce_pct": 31.46
+      },
+      {
+        "year": "2020",
+        "ce": 1775.5,
+        "ebit": 456.4,
+        "roce_pct": 27.75
+      },
+      {
+        "year": "2021",
+        "ce": 1978.8,
+        "ebit": 428.0,
+        "roce_pct": 22.8
+      },
+      {
+        "year": "2022",
+        "ce": 2084.1,
+        "ebit": 183.6,
+        "roce_pct": 9.04
+      },
+      {
+        "year": "2023",
+        "ce": 2165.8,
+        "ebit": 124.7,
+        "roce_pct": 5.87
+      },
+      {
+        "year": "2024",
+        "ce": 2257.4,
+        "ebit": 88.6,
+        "roce_pct": 4.01
+      },
+      {
+        "year": "2025",
+        "ce": 2284.7,
+        "ebit": 95.1,
+        "roce_pct": 4.19
+      }
+    ],
+    "capital_allocation": {
+      "ce_change": "924.6（2016）-> 2,284.7（2025），+147%；增量 1,360.1 亿",
+      "ebit_change": "119.9（2016）-> 95.1（2025），-20.7%",
+      "verdict": "投了 1,360 亿而 EBIT 反而下降 —— 增量资本回报为负"
+    },
+    "sellside_cuts": {
+      "guosen_2026_11_01": {
+        "old_eps": "1.14 / 1.40 / 1.59",
+        "new_eps": "0.79 / 1.00 / 1.21",
+        "cut_pct": "-31% / -29% / -24%",
+        "rating": "维持「优于大市」",
+        "reason": "估值处于历史底部区域 + 分红下限指引 + 2026 年股息率约 5%"
+      },
+      "zhongyou_2026_11_02": {
+        "np_2026": 42.4,
+        "np_2027": 51.9,
+        "pe": "22.6 / 18.4"
+      },
+      "insight": "卖方一边砍 31% 一边说便宜 —— 这是「用历史分位代替估值」的典型"
+    },
+    "direction_vs_price": {
+      "issue": "8/8 在方向上全部下修，但「首档价格真正低于第一轮下沿 13.00」的只有 5 位",
+      "below_old_floor": {
+        "巴菲特": 12.6,
+        "芒格": 12.8,
+        "费雪": 10.0,
+        "段永平": 12.0,
+        "格林布拉特": 12.6
+      },
+      "still_inside_old_range": {
+        "李录": 13.6,
+        "马克斯": 14.4
+      },
+      "above_old_ceiling": {
+        "斯利普": 15.2,
+        "caveat": "附加了毛利率 >=18%、扣非 >=8 亿的经营确认"
+      },
+      "verdict": "「买点下修」这个标签与首档价格并不完全一致。真正的下修要等经营证据出现才算数"
+    },
+    "still_missing": [
+      "2026Q3 销量、吨价、吨成本、吨毛利 —— 最高（只有行业均价与公司毛利率，没有自己的量价拆解，无法判断是量跌还是价跌主导）",
+      "受限资金金额、结构性存款/理财的可变现性、子公司层面的少数股东占比 —— 最高（425 亿现金里有 106.6 亿少数股东权益对应的部分不归母）",
+      "CE 从 924.6 涨到 2,284.7 亿（+147%）的明细 —— 极高（这是「投了 1,360 亿而 EBIT 反而降 21%」的唯一解释路径）",
+      "分产能的矿山剩余年限、采矿权账面值、产能置换指标价值 —— 极高（清算价值核心，现在只能用固定资产打折粗糙替代）",
+      "真实产能退出/置换指标作废的进展 —— 高（供给出清能否发生的唯一硬证据，比「错峰协同」重要得多）",
+      "分区域（东部/中部/西部/南部/海外）的吨毛利 —— 高",
+      "骨料与商混的吨毛利 —— 中高（骨料 18.9 亿毛利率高于水泥，是转型关键）"
+    ],
+    "process_note": {
+      "schema_fix": "核验官纯文本 schema 连续三轮成功（大秦 189、宁沪 190、海螺 191）",
+      "auditor_contributions": [
+        "指出第一轮清算价值的双重会计错误（重复扣少数股东权益 + 重复加净现金）",
+        "算出「扣净现金后主业 PE」这一组最有说服力的数字（17.1x / 18.9x / 21.6x / >100x）",
+        "明确反对使用机械均值（十一年均值 189.8 亿 x 10-18x = 36-65 元、峰值期 329.6 亿 x 10-18x = 62-112 元，都是荒谬的）"
+      ]
+    },
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口抓回 4 份券商研报全文（2026-08 至 2026-11-02）"
+  },
+  "normalization": {
+    "anchor_1_normalized_earnings": {
+      "warning": "机械均值全不能用：十一年均值 189.8 亿 x 10-18x = 36-65 元；峰值期 329.6 亿 x 10-18x = 62-112 元 —— 那是把「地产上行 + 供给侧改革 + 价格协同」三重叠加的非经常状态当常态",
+      "usable_bases": {
+        "ttm_45_5": {
+          "10x": 8.62,
+          "12x": 10.35,
+          "15x": 12.93,
+          "18x": 15.52
+        },
+        "2026e_41_1": {
+          "10x": 7.79,
+          "12x": 9.35,
+          "15x": 11.68,
+          "18x": 14.02
+        },
+        "trough_2024_2026_66_4": {
+          "10x": 12.58,
+          "12x": 15.1,
+          "15x": 18.87
+        }
+      },
+      "range": "11.6 - 18.9",
+      "midpoint": 15.0
+    },
+    "anchor_2_liquidation": {
+      "base": "14.3 - 15.6",
+      "stress": "11.4 - 12.3",
+      "midpoint": 15.0
+    },
+    "anchor_3_dividend": {
+      "ttm_dps": 0.74,
+      "at_4pct": 18.5,
+      "at_5pct": 14.8,
+      "at_6pct": 12.33,
+      "midpoint": 14.8
+    },
+    "composite": "三锚交汇 12.3 - 18.9，中枢 15.0 —— 现价 17.98 落在区间上沿，没有安全边际",
+    "buy_zones": {
+      "T1": {
+        "a": 12.8,
+        "h_hkd": 12.21,
+        "pe_2026e": 16.4,
+        "pb": 0.356,
+        "div_yield_pct": 5.78,
+        "position_pct": 1.5,
+        "trigger": "价格 + 至少两项：① 2026Q4 归母 >=8 亿；② 2027Q1 毛利率 >=16%；③ 全国水泥均价连续两月 >=335 元/吨。只有价格没有证据，最多 0.5% 观察仓"
+      },
+      "T2": {
+        "a": 11.2,
+        "h_hkd": 10.68,
+        "pe_2026e": 14.4,
+        "pb": 0.311,
+        "div_yield_pct": 6.61,
+        "position_pct": 1.5,
+        "trigger": "价格 + 任一：① 全国产量降幅连续两季收窄到 -3% 内；② 出现真实产能退出或置换指标作废；③ 单季扣非连续两季 >=6 亿"
+      },
+      "T3": {
+        "a": 9.6,
+        "h_hkd": 9.15,
+        "pe_2026e": 12.3,
+        "pb": 0.267,
+        "div_yield_pct": 7.71,
+        "position_pct": 2.0,
+        "trigger": "价格 + 全部：① 净现金/市值 >=25%（9.60 元时约 33.6%）；② 分红未削减；③ 无 50 亿以上减值。按资产价而不是复苏价执行"
+      },
+      "cap_pct": 5.0
+    },
+    "round1_comparison": {
+      "round1": "2 买 / 6 观察；买点 13.00-14.80（中枢 13.90）；清算价值 862.6 亿 = 16.35 元",
+      "round2": "0 买入 / 6 观察 / 2 不买；T1 12.80 / T2 11.20 / T3 9.60（中枢 11.20）",
+      "midpoint_change_pct": -19.4,
+      "mechanism_change": "第一轮是「价格进入区间就可以分批」，本轮是「价格进入区间只是必要条件」"
+    },
+    "verdicts": {
+      "buy": [],
+      "watch": [
+        "巴菲特",
+        "芒格",
+        "李录",
+        "马克斯",
+        "格林布拉特",
+        "斯利普"
+      ],
+      "no_buy": [
+        "费雪",
+        "段永平"
+      ],
+      "first_tranche_list": {
+        "巴菲特": 12.6,
+        "芒格": 12.8,
+        "费雪": 10.0,
+        "段永平": 12.0,
+        "格林布拉特": 12.6,
+        "李录": 13.6,
+        "马克斯": 14.4,
+        "斯利普": 15.2
+      }
+    },
+    "final_verdict": "0 买入 / 6 观察 / 2 不买；A 股 T1 12.80 / T2 11.20 / T3 9.60，总仓 5%，现价 0 仓"
+  }
+}
