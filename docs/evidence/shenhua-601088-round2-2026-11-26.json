@@ -1,0 +1,295 @@
+{
+  "stock": {
+    "code": "601088",
+    "hk_code": "01088",
+    "name": "中国神华"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "a_close": 51.82,
+      "market_cap_cny_yi": 11239.0,
+      "total_shares_yi": 216.894,
+      "h_close_hkd": 43.24,
+      "h_in_cny": 37.01,
+      "ah_snapshot_date": "2026-11-16",
+      "ah_premium_snapshot_pct": 35.09,
+      "ah_premium_today_pct": 40.0,
+      "net_debt_cny_yi": 296.8,
+      "minority_interest_cny_yi": 969.2,
+      "strict_ev_cny_yi": 12505.5,
+      "price_52w_low": 39.04,
+      "price_52w_high": 52.0,
+      "pct_from_high": -0.35
+    },
+    "ttm": {
+      "revenue": 3778.0,
+      "parent_np": 582.0,
+      "deducted_np": 526.9,
+      "eps": 2.6833,
+      "pe": 19.31,
+      "pb": 2.528,
+      "roe_period_end_pct": 13.09,
+      "revenue_yoy_pct": 27.01,
+      "parent_np_yoy_pct": 13.06
+    }
+  },
+  "checks": {
+    "valuation_extremes": {
+      "3y": {
+        "pe_p50": 14.8,
+        "pe_pct": 97.3,
+        "pb_p50": 1.92,
+        "pb_pct": 100.0
+      },
+      "5y": {
+        "pe_p50": 13.2,
+        "pe_pct": 98.4,
+        "pb_p50": 1.76,
+        "pb_pct": 100.0
+      },
+      "10y": {
+        "pe_p50": 9.9,
+        "pe_pct": 97.5,
+        "pb_p50": 1.42,
+        "pb_pct": 100.0
+      },
+      "full": {
+        "pe_p50": 11.4,
+        "pe_pct": 87.4,
+        "pb_p50": 1.54,
+        "pb_pct": 80.4
+      },
+      "verdict": "PE 19.31 = 10 年 97.5% 分位（10 年中位仅 9.9 倍）；PB 2.528 = 3/5/10 年三个窗口全 100% 分位；距 52 周高仅 -0.3%",
+      "three_rulers": {
+        "peak_eps": "按当前股本折算 2022 年峰值 EPS 3.21 元，51.82 元仍是 16.1 倍 —— 比 10 年中位 9.9 倍贵六成，所以「资源股该看峰值利润」也救不了",
+        "reverse_implied": "现价隐含盈利收益率 5.18%；要求 8% 合理总回报反推永续增长率 +2.8%，而过去三年归母年化 -8.8% —— 市场用负增长的三年定了永续正增长的价",
+        "strict_ev": "神华是净负债 296.8 亿（不是净现金）且少数股东权益 969.2 亿 → 严格 EV = 12506 亿 → EV/TTM 归母 21.49x、EV/TTM 扣非 23.73x"
+      }
+    },
+    "coal_power_hedge": {
+      "q3_coal_gross_profit_cny_yi": 233.71,
+      "q3_coal_gp_yoy_change_cny_yi": 31.09,
+      "q3_power_gross_profit_cny_yi": 32.84,
+      "q3_power_gp_yoy_change_cny_yi": -36.05,
+      "net_effect_cny_yi": -4.96,
+      "power_cost_yoy_pct": 20.05,
+      "power_price_yoy_pct": 0.5,
+      "power_gm_pct": 10.98,
+      "power_gm_yoy_pp": -12.73,
+      "zero_sum_mechanism": "向上被长协封住（79.29% 自产煤走长协，且已从 H1 的 84.69% 下滑），向下被管制电价封住（成本 +20.05% 而电价 +0.5%）→ 煤价上行时煤炭端被削一刀、发电端按市场煤全额计亏，净效果为负",
+      "real_moat": "运输：铁路+港口+航运 Q3 毛利 52.9 亿，收费权性质、不受煤价影响；加 357.7 亿吨储量与坑口电厂成本优势",
+      "verdict": "一体化平滑的是波动，不是增长。2022 年 696.5 亿 → 2025 年 528.5 亿 → TTM 582.0 亿，浅 V 至今没回峰值"
+    },
+    "asset_injection": {
+      "ce_2024_cny_yi": 5629.1,
+      "ce_2025_cny_yi": 7327.6,
+      "ce_change_pct": 30.2,
+      "ebit_2024_cny_yi": 833.1,
+      "ebit_2025_cny_yi": 797.8,
+      "ebit_change_pct": -4.2,
+      "incremental_roce_pct": -2.08,
+      "required_ebit_at_8pct_cny_yi": 135.9,
+      "gap_cny_yi": 171.2,
+      "official_note": "官方口径：2026H1 完成对集团资产收购",
+      "fairness_caveats": [
+        "这是第一年：红沙泉二号刚投产、塔然高勒与新街一/二井 2026-2029 才出量、煤制气 2027 年底才试车，首年 ROCE 低估稳态",
+        "存量仍在增值：12.32% 对 6% 资本成本，经济利润仍有 460 亿量级 —— 毁掉的是回报率，不是价值",
+        "最关键但数据缺失的是「用什么付的」：若以高倍数发行股份购买低倍数资产，绝对 ROCE 下降只是会计现象、每股价值反而增厚。净负债仅 296.8 亿（占市值 2.6%），无大额举债痕迹，倾向股份支付，但必须年报确认"
+      ],
+      "verdict": "绝对口径毁值，每股口径待验"
+    },
+    "dps_optical_illusion": {
+      "pack_claim": "DPS 从 3.24 降到 2.01，砍 38%",
+      "correction": "3.24 = 0.98（2025-11-10，FY2025 中期）+ 2.26（2025-07-07，FY2024 末期）—— 跨两个财年",
+      "fy_attribution": {
+        "FY2024": 2.26,
+        "FY2025": "0.98 + 1.03 = 2.01"
+      },
+      "true_change_pct": -11.1,
+      "payout_ratio": {
+        "FY2024_pct": 126,
+        "FY2025_pct": 82.5
+      },
+      "decomposition": "派息率从 126% 回归 82.5% 解释约 34 个点，EPS 从 2.573 掉到 2.437 只解释约 5 个点",
+      "verdict": "不是煤价单独决定，也不是分红政策突然推翻。坏消息：那个「7% 股息率」的叙事从来是假的，现在只剩 A 3.88% / H 5.43%；好消息：2.01 站得住（2026E EPS 2.81 x 65-80% 派息 = 1.83-2.25，正落在中间，且高于公司「2025-2027 不低于 65%」的承诺线）"
+    },
+    "pressure_test": {
+      "current_coal_price_cny_per_t": 448,
+      "stress_coal_price_cny_per_t": 371,
+      "price_drop_pct": -17.2,
+      "self_mined_price_current": 416.54,
+      "self_mined_price_stress": 344.9,
+      "self_mined_cost": 234.63,
+      "self_mined_gp_per_t_current": 181.91,
+      "self_mined_gp_per_t_stress": 110.3,
+      "gp_drop_pct": -39.4,
+      "verdict": "煤价跌 17%，自产煤吨毛利跌 39% —— 成本刚性放大了价格弹性"
+    },
+    "ah_test": {
+      "a_price": 51.82,
+      "h_price_hkd": 43.24,
+      "h_in_cny": 37.01,
+      "ah_premium_snapshot_pct": 35.09,
+      "ah_premium_today_pct": 40.0,
+      "pe_a_2026e": 18.4,
+      "pe_h_2026e": 13.2,
+      "pb_a": 2.528,
+      "pb_h": 1.81,
+      "div_yield_a_pct": 3.88,
+      "div_yield_h_gross_pct": 5.43,
+      "div_yield_h_after_20pct_tax_pct": 4.34,
+      "div_yield_a_after_tax_pct": 4.02,
+      "gap_bp": 0.32,
+      "years_to_close_discount_via_dividend": 109.7,
+      "verdict": "H 税后股息只比 A 多 32bp，靠股息差追平 35.09% 的折价需 110 年 —— 所以「H 股息高」是错的买入理由，股息税一动理由就崩。H 真正值钱的是资本折价：同样 2.01 元分红，H 花 37 元买、A 花 52 元买，分红一样多、本金少三成",
+      "a_only_rule": "A 仍值得买，但起步价从 35 元下移到 30 元；A-only 跳过 T1、从 30 元起、总仓位打七折（上限 7%）"
+    },
+    "volume_quality": {
+      "y9m26_production_yi_t": 3.82,
+      "production_yoy_pct": -2.3,
+      "y9m26_sales_yi_t": 4.61,
+      "sales_yoy_pct": 0.1,
+      "self_mined_sales_yi_t": 3.76,
+      "self_mined_yoy_pct": -3.1,
+      "purchased_sales_yi_t": 0.85,
+      "purchased_yoy_pct": 17.7,
+      "purchased_price_cny_per_t": 621,
+      "purchased_price_yoy_pct": 13.5,
+      "self_mined_price_cny_per_t": 401,
+      "self_mined_price_yoy_pct": 3.1,
+      "verdict": "量是「买」来的不是「挖」出来的 —— 外购煤吨价 621 vs 自产 401，毛利率低得多，销量结构在恶化",
+      "long_term_contract_pct": {
+        "2026Q3": 79.29,
+        "2026H1": 84.69,
+        "change_pp": -5.4,
+        "note": "长协保护在变薄"
+      }
+    },
+    "sellside_cuts": {
+      "opensource_2026_09_23": {
+        "y2026": 693.23,
+        "y2027": 686.32,
+        "y2028": 718.69
+      },
+      "opensource_2026_10_28": {
+        "y2026": 622.31,
+        "y2027": 636.95,
+        "y2028": 672.98,
+        "cut_pct": "-10% / -7% / -6%",
+        "reason": "考虑到公司长协占比高，吨价涨幅不及预期"
+      },
+      "shanxi_2026_10_26": {
+        "eps_2026": 2.87,
+        "eps_2027": 2.96,
+        "eps_2028": 3.15
+      },
+      "insight": "卖方在砍 2026-28 年盈利（-10%/7%/6%），股价却贴在 52 周高点 -0.3% —— 这是钟摆最右端的教科书特征"
+    },
+    "resources": {
+      "recoverable_reserves_yi_t": 357.7,
+      "approved_capacity_yi_t_per_year": 5.68,
+      "equity_capacity_yi_t_per_year": 4.88,
+      "mines": 48,
+      "projects": "红沙泉二号（1,000 万吨/年，已投产）、塔然高勒、新街一井/二井（2026-2029）、新街三井至八井（规划）",
+      "power": "装机 70.64 GW、7.28 GW 在建（2026-2028）",
+      "coal_gas": "6.18 亿收购国能新疆煤制气 50% 股权（准东 20 亿立方米/年，2027 年底试车）—— 关联交易"
+    },
+    "round1_comparison": {
+      "round1": "0 买 / 8 观察；买点 30-38（中位 34）；H 股优先",
+      "round2": "0 买 / 7 观察；T1 35 / T2 30 / T3 26（首档中位 35-36）",
+      "refuted": "174 说「DPS 从 3.24 降到 2.01，砍 38%」是跨财年口径错位，真实 FY2024->FY2025 是 -11.1%",
+      "strengthened": "174 说「PE 19.31 是 10 年 97.5% 分位的周期顶部低 PE」—— 本轮用严格 EV/归母 21.49x 和峰值 EPS 16.1x 两条独立路径确认",
+      "new_findings": [
+        "煤电对冲 Q3 净 -4.96 亿（煤炭 +31.09 / 发电 -36.05）",
+        "资产注入增量 ROCE -2.08%",
+        "严格 EV 含少数股东 969.2 亿 = 12,505 亿 → EV/归母 21.49x",
+        "长协占比从 H1 84.69% 降到 Q3 79.29%",
+        "外购煤销量 +17.7% 而自产 -3.1%（量是买来的）"
+      ]
+    },
+    "still_missing": [
+      "资产注入的对价、支付方式、标的独立 EBIT/净资产、评估增值率、少数股东比例 —— 最高（若为高价换股，增量 ROCE -2.08% 需改写为会计现象、每股价值反而增厚，内在价值可能上修 10%）",
+      "2025-2027 正式分红政策条款、最低派息率、特别分红安排 —— 高（决定 2.01 是常态还是低点，影响买点 2-3 元）",
+      "分板块资本占用与少数股东损益明细 —— 高（只有合并 ROCE，无法算分部 ROC，也无法量化 969.2 亿少数股东权益分走多少）",
+      "发电分部完全成本、容量电价机制、燃料长协覆盖率 —— 中高（决定煤电一体化是净拖累还是净中性）",
+      "2027 年长协签约量与价格路径 —— 高（79.29% 会否继续下滑，决定稳定性溢价给 12x 还是 15x）",
+      "2026-2029 资本开支明细（新街各井 + 7.28 GW 在建电力）与超支风险 —— 高（决定 FCF 能否撑住 65-80% 派息）",
+      "碳成本与 2027-2030 国内煤炭需求峰值路径 —— 高（「永续」二字唯一真正的敌人）"
+    ],
+    "process_incidents": {
+      "master_missing": "芒格那份大师报告未返回（7/8）",
+      "audit_schema_failed": "核验官结构化返回校验失败（返回 null），但 audit.md 已落盘",
+      "note": "这是连续第二轮出现核验官 schema 失败（公牛 187 也发生），已记录为需要在下轮修正的流程缺陷",
+      "lead_recomputed": "主控独立复算 8 个关键算式全部通过：增量 ROCE -2.08%、煤价 371 元下吨毛利 110.3（-39.4%）、煤电对冲净 -4.96 亿、严格 EV 12,505 亿、EV/归母 21.49x、EV/扣非 23.73x、A/H 股息差 32bp 对应 110 年、DPS 财年口径 -11.1%"
+    },
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口抓回 4 份券商研报全文（2026-08-31 至 2026-10-28）"
+  },
+  "normalization": {
+    "masters_iv": {
+      "巴菲特": "29-36",
+      "费雪": "31-36",
+      "段永平": "27.7-33.0",
+      "李录": "33-38 (中性)",
+      "马克斯": "36-40 (中枢 38)",
+      "格林布拉特": "29-35",
+      "斯利普": "29-36"
+    },
+    "masters_iv_central_median": "33 - 35",
+    "current_vs_iv_premium_pct": "48% - 57%",
+    "buy_zones": {
+      "T1": {
+        "a": 35.0,
+        "h_hkd": 40.9,
+        "pe_2026e": 12.5,
+        "pb": 1.71,
+        "div_yield_pct": 5.74,
+        "position_pct": 2.0,
+        "trigger": "价格 + 长协占比止跌（>=79.29%）+ 2026 年度 DPS >=1.80"
+      },
+      "T2": {
+        "a": 30.0,
+        "h_hkd": 35.9,
+        "pe_2026e": 10.7,
+        "pb": 1.46,
+        "div_yield_pct": 6.7,
+        "position_pct": 4.0,
+        "trigger": "PB 回到 10 年中位 1.42 附近；或煤价继续下跌而发电毛利同比转正"
+      },
+      "T3": {
+        "a": 26.0,
+        "h_hkd": 31.1,
+        "pe_2026e": 9.25,
+        "pb": 1.27,
+        "div_yield_pct": 7.73,
+        "position_pct": 4.0,
+        "trigger": "PE 回到 10 年中位 9.9 倍、市场认定「煤炭完了」，同时 65% 派息承诺与 357.7 亿吨储量未破"
+      },
+      "cap_pct": 10.0,
+      "average_price": 29.5,
+      "average_pe_2026e": 10.5,
+      "average_div_yield_pct": 6.8
+    },
+    "permanent_no_buy_rule": "股价创 52 周新高 + PE 在 95% 分位以上 + 卖方在下调盈利，三条同时成立时绝不买入 —— 这三条现在同时成立",
+    "verdicts": {
+      "buy": [],
+      "watch": [
+        "巴菲特",
+        "费雪",
+        "段永平",
+        "李录",
+        "马克斯",
+        "格林布拉特",
+        "斯利普"
+      ],
+      "no_buy": [],
+      "missing": [
+        "芒格（未返回）"
+      ]
+    },
+    "final_verdict": "0 买 / 7 观察等待（芒格未返回）；首档中位 35-36（vs 第一轮中位 34，基本维持）；H 优先但理由换成资本折价而非股息"
+  }
+}
