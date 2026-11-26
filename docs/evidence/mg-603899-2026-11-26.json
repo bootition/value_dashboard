@@ -1,0 +1,514 @@
+{
+  "stock": {
+    "code": "603899",
+    "name": "晨光股份",
+    "hk_code": null,
+    "listing_date": "2015-01-27"
+  },
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 23.2,
+      "market_cap_cny_yi": 212.5,
+      "total_shares_yi": 9.158
+    },
+    "ttm": {
+      "revenue": 257.46,
+      "parent_np": 13.14,
+      "deducted_np": 11.13,
+      "eps": 1.4347,
+      "pe": 16.17,
+      "true_yoy": {
+        "revenue_pct": 5.34,
+        "parent_np_pct": -0.66,
+        "deducted_pct": 0.52
+      },
+      "snapshot_pseudo_yoy": {
+        "revenue_pct": 2.72,
+        "parent_np_pct": 0.26
+      }
+    },
+    "dividends": {
+      "ttm_dps": 1.0,
+      "yield_pct": 4.31,
+      "payout_pct": 69.7,
+      "with_buyback_shareholder_return_pct": 5.96,
+      "dps_history": "0.50(2015)→0.50→0.25(2017)→0.25→0.30→0.40→0.50→0.60→0.50(2023)→0.80→1.00(2025)→1.00(2026)",
+      "note": "DPS 有波动（0.50→0.25→0.50→1.00），历史证明它有能力下调；股东实际现金回报 = 股息 4.31% + 回购 1.65% = 5.96%"
+    },
+    "forecast": [
+      {
+        "year": "2025E",
+        "eps": 1.4309,
+        "pe": 16.21,
+        "n": 24
+      },
+      {
+        "year": "2026E",
+        "eps": 1.5166,
+        "pe": 15.3,
+        "n": 24
+      },
+      {
+        "year": "2027E",
+        "eps": 1.6616,
+        "pe": 13.96,
+        "n": 24
+      },
+      {
+        "year": "2028E",
+        "eps": 1.8073,
+        "pe": 12.84,
+        "n": 24
+      }
+    ]
+  },
+  "checks": {
+    "peak_correction": {
+      "top3_annual_parent_np": [
+        {
+          "year": "2023",
+          "np_cny_yi": 15.27
+        },
+        {
+          "year": "2021",
+          "np_cny_yi": 15.18
+        },
+        {
+          "year": "2024",
+          "np_cny_yi": 13.96
+        }
+      ],
+      "ttm": 13.14,
+      "vs_peak_pct": -13.95,
+      "note": "基线手册写「2021 峰值 15.18」是错的：2023 年 15.27 才是峰值；8 份报告 7/7 沿用了该错"
+    },
+    "net_cash": {
+      "cash_like": 65.62,
+      "ibd": 7.27,
+      "net_cash": 58.35,
+      "pct_of_mcap": 27.5,
+      "minority_interest": 6.31,
+      "net_cash_attributable": 52.04,
+      "pe_ex_cash": 11.73,
+      "pe_ex_cash_attributable": 12.21,
+      "pe_ex_cash_mid_cycle": 14.54,
+      "note": "剔现金 PE 11.73x（TTM）/ 14.54x（中周期归母 10.60 亿）；归母口径净现金 52.04 亿"
+    },
+    "margin_trend": [
+      {
+        "year": 2015,
+        "revenue_cny_yi": 37.0,
+        "parent_np_cny_yi": 4.23,
+        "gross_margin_pct": 26.55,
+        "net_margin_pct": 11.27
+      },
+      {
+        "year": 2016,
+        "revenue_cny_yi": 47.0,
+        "parent_np_cny_yi": 4.93,
+        "gross_margin_pct": 26.42,
+        "net_margin_pct": 10.57
+      },
+      {
+        "year": 2017,
+        "revenue_cny_yi": 64.0,
+        "parent_np_cny_yi": 6.34,
+        "gross_margin_pct": 26.66,
+        "net_margin_pct": 9.97
+      },
+      {
+        "year": 2018,
+        "revenue_cny_yi": 85.0,
+        "parent_np_cny_yi": 8.07,
+        "gross_margin_pct": 25.83,
+        "net_margin_pct": 9.45
+      },
+      {
+        "year": 2019,
+        "revenue_cny_yi": 111.0,
+        "parent_np_cny_yi": 10.6,
+        "gross_margin_pct": 26.13,
+        "net_margin_pct": 9.52
+      },
+      {
+        "year": 2020,
+        "revenue_cny_yi": 131.0,
+        "parent_np_cny_yi": 12.55,
+        "gross_margin_pct": 25.36,
+        "net_margin_pct": 9.56
+      },
+      {
+        "year": 2021,
+        "revenue_cny_yi": 176.0,
+        "parent_np_cny_yi": 15.18,
+        "gross_margin_pct": 23.21,
+        "net_margin_pct": 8.62
+      },
+      {
+        "year": 2022,
+        "revenue_cny_yi": 200.0,
+        "parent_np_cny_yi": 12.82,
+        "gross_margin_pct": 19.36,
+        "net_margin_pct": 6.41
+      },
+      {
+        "year": 2023,
+        "revenue_cny_yi": 234.0,
+        "parent_np_cny_yi": 15.27,
+        "gross_margin_pct": 18.86,
+        "net_margin_pct": 6.54
+      },
+      {
+        "year": 2024,
+        "revenue_cny_yi": 242.0,
+        "parent_np_cny_yi": 13.96,
+        "gross_margin_pct": 18.9,
+        "net_margin_pct": 5.76
+      },
+      {
+        "year": 2025,
+        "revenue_cny_yi": 251.0,
+        "parent_np_cny_yi": 13.1,
+        "gross_margin_pct": 18.36,
+        "net_margin_pct": 5.23
+      }
+    ],
+    "roce": [
+      {
+        "year": "2011",
+        "ce": 5.1,
+        "ebit": 1.62,
+        "roce_pct": null
+      },
+      {
+        "year": "2012",
+        "ce": 6.9,
+        "ebit": 2.64,
+        "roce_pct": 43.95
+      },
+      {
+        "year": "2013",
+        "ce": 9.5,
+        "ebit": 3.3,
+        "roce_pct": 40.13
+      },
+      {
+        "year": "2014",
+        "ce": 13.0,
+        "ebit": 3.97,
+        "roce_pct": 35.29
+      },
+      {
+        "year": "2015",
+        "ce": 22.6,
+        "ebit": 4.81,
+        "roce_pct": 27.06
+      },
+      {
+        "year": "2016",
+        "ce": 25.5,
+        "ebit": 5.64,
+        "roce_pct": 23.44
+      },
+      {
+        "year": "2017",
+        "ce": 29.9,
+        "ebit": 7.43,
+        "roce_pct": 26.8
+      },
+      {
+        "year": "2018",
+        "ce": 35.7,
+        "ebit": 9.52,
+        "roce_pct": 29.02
+      },
+      {
+        "year": "2019",
+        "ce": 45.7,
+        "ebit": 12.85,
+        "roce_pct": 31.58
+      },
+      {
+        "year": "2020",
+        "ce": 55.4,
+        "ebit": 15.26,
+        "roce_pct": 30.18
+      },
+      {
+        "year": "2021",
+        "ce": 68.8,
+        "ebit": 18.68,
+        "roce_pct": 30.07
+      },
+      {
+        "year": "2022",
+        "ce": 76.1,
+        "ebit": 16.24,
+        "roce_pct": 22.41
+      },
+      {
+        "year": "2023",
+        "ce": 87.8,
+        "ebit": 19.25,
+        "roce_pct": 23.49
+      },
+      {
+        "year": "2024",
+        "ce": 98.5,
+        "ebit": 17.82,
+        "roce_pct": 19.13
+      },
+      {
+        "year": "2025",
+        "ce": 103.3,
+        "ebit": 17.04,
+        "roce_pct": 16.89
+      }
+    ],
+    "incremental_roce": {
+      "delta_2021_2025_pct": -4.75,
+      "delta_2023_2025_pct": -14.26,
+      "note": "增量 ROCE 为负 = 留存 30% 利润不是复利而是毁值（审计新增，基线未算）"
+    },
+    "cash_flow": {
+      "series": [
+        {
+          "year": "2018",
+          "cfo": 8.28,
+          "capex": 3.18,
+          "fcf": 5.1
+        },
+        {
+          "year": "2019",
+          "cfo": 10.82,
+          "capex": 3.78,
+          "fcf": 7.04
+        },
+        {
+          "year": "2020",
+          "cfo": 12.72,
+          "capex": 3.24,
+          "fcf": 9.48
+        },
+        {
+          "year": "2021",
+          "cfo": 15.61,
+          "capex": 3.82,
+          "fcf": 11.79
+        },
+        {
+          "year": "2022",
+          "cfo": 13.52,
+          "capex": 1.63,
+          "fcf": 11.89
+        },
+        {
+          "year": "2023",
+          "cfo": 26.17,
+          "capex": 2.08,
+          "fcf": 24.08
+        },
+        {
+          "year": "2024",
+          "cfo": 22.89,
+          "capex": 3.29,
+          "fcf": 19.6
+        },
+        {
+          "year": "2025",
+          "cfo": 22.82,
+          "capex": 3.67,
+          "fcf": 19.15
+        }
+      ],
+      "fcf_baseline_cny_yi": 19.2,
+      "fcf_corrected_cny_yi": 17.2,
+      "fcf_ex_oneoff_wc_cny_yi": 13.9,
+      "note": "基线 19.2 亿偏高：自建 capex 滚算 5.61 亿（indicator_ext 只给 3.7 亿）→ FCF 17.2 亿；剔一次性营运资本释放后约 13.9 亿，收益率从 9.0% 降到 6.5%"
+    },
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_p50": 19.53,
+        "pb_p50": 3.04,
+        "pe_min": 15.08,
+        "pe_pct": 18.92,
+        "pb_pct": 16.22
+      },
+      "5y": {
+        "months": 61,
+        "pe_p50": 21.17,
+        "pb_p50": 3.96,
+        "pe_min": 15.08,
+        "pe_pct": 11.48,
+        "pb_pct": 9.84
+      },
+      "full": {
+        "months": 143,
+        "pe_p50": 35.12,
+        "pb_p50": 7.5,
+        "pe_min": 15.08,
+        "pe_pct": 4.9,
+        "pb_pct": 4.2
+      }
+    },
+    "double_low_decomposition": {
+      "pb_median_full": 7.5,
+      "pb_now": 2.361,
+      "pe_median_full": 35.12,
+      "pe_now": 16.17,
+      "identity": "7.5 x ROE 21.4%->14.6% (0.6833) x PE 35.12->16.17 (0.4607) = 2.361",
+      "note": "PB 的 4.2% 分位 100% 可由『ROE 掉 32%』与『PE 掉 54%』解释，不是独立的安全边际信号——两个低分位是同一个事实的两种写法"
+    },
+    "cash_return_gap": {
+      "ex_cash_earnings_yield_pct": 8.5,
+      "actual_shareholder_cash_return_pct": 5.96,
+      "dividend_pct": 4.31,
+      "buyback_pct": 1.65,
+      "gap_pp": 2.5,
+      "note": "差额来自『留存 30% 利润而增量 ROCE −4.8%』。『零增长合理价 23.2』只在 100% 分红假设下成立；70% payout 下合理价 16.5–18.2 元"
+    },
+    "segments_2026h1": [
+      {
+        "item": "办公直销",
+        "amt": 65.3,
+        "pct": 57.69
+      },
+      {
+        "item": "办公文具",
+        "amt": 15.82,
+        "pct": 13.98
+      },
+      {
+        "item": "学生文具",
+        "amt": 14.71,
+        "pct": 12.99
+      },
+      {
+        "item": "书写工具",
+        "amt": 11.83,
+        "pct": 10.45
+      },
+      {
+        "item": "其他产品",
+        "amt": 5.3,
+        "pct": 4.68
+      },
+      {
+        "item": "其他(补充)",
+        "amt": 0.23,
+        "pct": 0.2
+      },
+      {
+        "item": "加盟管理费",
+        "amt": 0.0,
+        "pct": 0.0
+      }
+    ],
+    "52w": {
+      "low": 20.63,
+      "high": 29.07,
+      "pct_from_high": -20.19
+    },
+    "peers": [
+      {
+        "code": "603899",
+        "name": "晨光股份",
+        "pe": 16.2,
+        "pb": 2.36,
+        "roe_pct": 14.7,
+        "dy_pct": 4.31
+      },
+      {
+        "code": "301101",
+        "name": "明月镜片",
+        "pe": 34.4,
+        "pb": 4.11,
+        "roe_pct": 12.4,
+        "dy_pct": 1.33
+      },
+      {
+        "code": "002301",
+        "name": "齐心集团",
+        "pe": 59.0,
+        "pb": 1.34,
+        "roe_pct": 2.3,
+        "dy_pct": 1.9
+      },
+      {
+        "code": "605299",
+        "name": "舒华体育",
+        "pe": 30.1,
+        "pb": 3.02,
+        "roe_pct": 10.1,
+        "dy_pct": 2.17
+      },
+      {
+        "code": "002103",
+        "name": "广博股份",
+        "pe": 32.0,
+        "pb": 2.41,
+        "roe_pct": 7.8,
+        "dy_pct": null
+      }
+    ],
+    "baseline_errors": [
+      {
+        "item": "归母峰值",
+        "i_wrote": "15.18（2021）",
+        "audit": "15.27（2023）",
+        "impact": "TTM 13.14 = −13.9%（非 −13.4%）；8 份报告 7/7 沿用"
+      },
+      {
+        "item": "FCF",
+        "i_wrote": "19.2 亿（收益率 9.0%）",
+        "audit": "17.2 亿（自建 capex 5.61 亿）；剔一次性 WC 后 13.9 亿（6.5%）",
+        "impact": "收益率最多高估 2.5pp"
+      },
+      {
+        "item": "真实 TTM 扣非同比",
+        "i_wrote": "约 −3%",
+        "audit": "+0.52%",
+        "impact": "偏差 3.5pp，方向反了"
+      },
+      {
+        "item": "校边店数量",
+        "i_wrote": "8 万家",
+        "audit": "库内 company_profile 是『近 7 万家零售终端 + 900 余家零售大店』",
+        "impact": "8 万家是外部假设"
+      }
+    ]
+  },
+  "normalization": {
+    "zero_growth_fair_value_100payout": 23.7,
+    "fair_value_70payout": "16.5 – 18.2",
+    "anchors": [
+      {
+        "anchor": "正常化盈利锚（12–18x × 10.60–13.89 + 现金）",
+        "range": "20.3 – 33.7"
+      },
+      {
+        "anchor": "FCF 锚（9% 要求回报）",
+        "range": "21.6 – 36.3（中枢 23.3–25.6）"
+      },
+      {
+        "anchor": "剔现金 PE 锚",
+        "range": "20.7 – 29.3"
+      },
+      {
+        "anchor": "SOTP（品牌文具 + 科力普，分部利润为假设）",
+        "range": "20.8 – 30.2（中枢 26.2）"
+      }
+    ],
+    "audit_verdict": "不买 / 观察等待；现价 23.20 只值公平价，无安全边际；等 20.60–21.50 或等扣非转正",
+    "three_lines": {
+      "cheap": "扣非 TTM 转正 + 毛利率 >=19% 连续两季 + 应收增速 <= 营收+5pp + 剔现金 PE <=12",
+      "trap": "毛利率 <17.5% 或 扣非 <-5% 连续两季 或 应收增速超营收 10pp 或 剔现金 PE >14 且 E 下修",
+      "now": "中性带（便宜线 4 条中已满足 3 条）"
+    },
+    "verdict_median_first_tranche": 21.5
+  }
+}
