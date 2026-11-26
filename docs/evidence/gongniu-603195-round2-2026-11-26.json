@@ -1,0 +1,365 @@
+{
+  "stock": {
+    "code": "603195",
+    "hk_code": null,
+    "name": "公牛集团"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 40.29,
+      "market_cap_cny_yi": 726.6,
+      "total_shares_yi": 18.034,
+      "pe_ttm": 18.52,
+      "pb": 4.57,
+      "roe_period_end_pct": 24.67,
+      "identity": "18.52 x 24.67% = 4.57",
+      "net_cash_cny_yi": 140.9,
+      "net_cash_pct_of_mcap": 19.4,
+      "pe_ex_cash": 14.93,
+      "minority_interest_cny_yi": 0.2,
+      "price_52w_low": 36.73,
+      "price_52w_high": 44.85,
+      "pct_from_high": -10.17
+    },
+    "ttm": {
+      "revenue": 160.4,
+      "parent_np": 39.2,
+      "deducted_np": 34.7,
+      "eps": 2.1753,
+      "revenue_yoy_pct": -2.36,
+      "parent_np_yoy_pct": -1.62
+    }
+  },
+  "checks": {
+    "falsified_core_conflict_1_roce": {
+      "pack_claim": "ROCE 从 81.74%（2016）降到 28.82%（2025）；CE 涨 7.0 倍而 EBIT 只涨 2.9 倍 → 资本在稀释回报",
+      "correction": "CE 172.7 亿里 141.1 亿是净现金，经营性资本仅约 31.6 亿",
+      "operating_roce_net_cash_basis_pct": 151.5,
+      "operating_roce_cash_asset_basis_pct": 197.9,
+      "note_on_auditor_figure": "核验官 audit.md 写 463%，需非现金资本仅 10.4 亿（隐含现金类 162.3 亿，口径不明）；主控用库内可得数复算为 197.9%，以复算为准",
+      "verdict": "报表 ROCE 28.82% 里几乎全部是「现金拖累」，不是「经营回报衰退」。数据包把一个假问题重新抬成了核心矛盾",
+      "timing_detail": "2019→2020 一年就贡献了 52.9pp 下行里的 24pp：CE +67.6%、EBIT 仅 +1.5% → ROCE 60.39%→36.35%（这是 IPO 现金进账，不是生意变差）；2020→2025 CE +84.3% vs EBIT +76.8% 几乎同步",
+      "incremental_roce_2019_2025_pct": 18.2,
+      "incremental_verdict": "18.2% 仍显著高于资本成本 → 从「极优秀」回归「优秀」，不是护城河漏气",
+      "contamination": "5 位大师部分识破，3 位（巴菲特/芒格/马克斯）仍按「资本回报真衰退」推理 —— 框架污染已经发生"
+    },
+    "falsified_core_conflict_2_percentiles": {
+      "pack_claim": "PE 18.52 处 10 年 8.5% 分位 + PB 4.570 处 10 年 9.8% 分位，是双低分位",
+      "identity": "PB = PE x ROE = 18.52 x 24.67% = 4.569 ≈ 4.570（分毫不差）",
+      "verdict": "不是两个独立信号，是同一个事实数了两遍",
+      "deeper_issue": "历史分位假设「过去的估值中枢合理」，而一家增速从 20%+ 掉到 -5% 的公司，中枢本身就该下移。PE 中位 26.9 倍是上一个时代（地产景气 + 渠道扩张 + 成长溢价）的定价。分位低很可能不是市场犯错，而是估值体系正在换锚"
+    },
+    "real_inflection_point": {
+      "pack_claim": "2026Q3 是拐点（8/8 都这么认为）",
+      "correction": "真正的断点在 2026Q2",
+      "series": [
+        {
+          "quarter": "2026Q1",
+          "revenue_yoy": 3.52,
+          "gross_profit_yoy": 8.51,
+          "parent_np_yoy": 8.51,
+          "deducted_yoy": 15.09,
+          "gross_margin_pct": 42.74,
+          "gm_yoy_pp": 1.7
+        },
+        {
+          "quarter": "2026Q2",
+          "revenue_yoy": 2.07,
+          "gross_profit_yoy": -4.4,
+          "parent_np_yoy": 0.74,
+          "deducted_yoy": -7.2,
+          "gross_margin_pct": 40.75,
+          "gm_yoy_pp": -2.76
+        },
+        {
+          "quarter": "2026Q3",
+          "revenue_yoy": -5.33,
+          "gross_profit_yoy": -10.36,
+          "parent_np_yoy": -26.01,
+          "deducted_yoy": -25.03,
+          "gross_margin_pct": 39.48,
+          "gm_yoy_pp": -2.2
+        }
+      ],
+      "key_reading_1": "扣非在 Q2 就已转负（-7.2%），Q3 只是加速 —— Q3 不是「一次性事故」",
+      "key_reading_2": "Q2 的毛利率跌幅（-2.76pp）比 Q3（-2.20pp）更大 —— 恶化最猛的是 Q2"
+    },
+    "raw_material_attribution_mismatch": {
+      "pack_claim": "Q3 毛利率下滑主因是铜铝塑料粒子价格高位（7/8 大师接受）",
+      "correction": "2026Q1 毛利率同比还是 +1.70pp（Q1 铜铝同样在高位）；Q2 突然 -2.76pp，Q3 -2.20pp。若铜铝是主因，Q1 就该开始体现",
+      "better_explanation": "Q2 起需求转弱 → 渠道补贴 / 降价 / 产品结构下移，叠加新业务费用",
+      "verdict": "「原材料」是卖方在 Q3 才找到的、与时间序列不匹配的归因。7/8 接受了它并据此推断「成本回落即修复」—— 而没有任何一份报告检验过这个时序。这是本轮最贵的集体假设"
+    },
+    "dps_illusion": {
+      "nominal_dps_series": {
+        "2023": 3.3,
+        "2024": 3.1,
+        "2025": 2.4,
+        "2026": 1.9
+      },
+      "nominal_claim": "DPS 从 3.30 降到 1.90，砍分红 42%",
+      "reality": "三年三次转增，股本 6.01 → 8.90 → 12.93 → 18.09 亿（3.0 倍）",
+      "adjusted_to_today_shares": {
+        "FY22": 1.1,
+        "FY23": 1.53,
+        "FY24": 1.71,
+        "FY25": 1.9
+      },
+      "adjusted_growth_pct": 73,
+      "total_dividend_cny_yi": {
+        "FY22": 19.8,
+        "FY25": 34.4
+      },
+      "verdict": "公司不是砍分红，是在连续提高派息率。名义 DPS 跨年比必须先做转增复权（KB §29 I-BONUSADJ）"
+    },
+    "interest_income_in_profit": {
+      "cash_like_assets_cny_yi": 148.4,
+      "assumed_yield_pct": "1.8 - 2.2",
+      "annual_interest_cny_yi": "2.7 - 3.3",
+      "note": "含在 TTM 归母 39.23 与扣非 34.67 之内（非经常性 4.56 亿的大头）",
+      "correct_approach": "剔现金算 EV 时，分子（E）也要剔利息",
+      "core_operating_profit_cny_yi": 31.57
+    },
+    "stale_consensus": {
+      "issue": "库内一致预期 EPS 2.148 是 Q3 前未更新的旧数（x18.034 = 38.7 亿）",
+      "who_caught_it": "只有格林布拉特一人点破",
+      "consequence": "其余 7 人在此基础上做倍数与 IV，等于用了一个高估约 6% 的 E",
+      "live_sellside_2026e_cny_yi": {
+        "华安": 36.15,
+        "国金": 36.29,
+        "国信": 36.9,
+        "开源": 38.5,
+        "西南": 36.8,
+        "信达": 41.2
+      },
+      "spread_pct": 14.0,
+      "cuts": "华安从 45.47 砍到 36.15（-20%）；国信 42.0→36.9（-12%）；开源 42.10→38.50（-9%）"
+    },
+    "verdict_label_lag": {
+      "issue": "8 位自建 IV 均值 36.11 元，现价高 11.6%；7/8 的上沿低于现价（仅马克斯 44 例外）",
+      "verdict": "按自己的模型股票已高估 3%-29%，却无人给「回避」—— 判决标签被第一轮锚定，没有随自建估值更新",
+      "nominal_downgrade": "6/8 的首档仍落在第一轮 34.0-38.0 区间内（35.0/35.0/34.0/35.0/36.5/34.0），只有费雪 32.0 与段永平 33.0 真正跌出且只跌 1-2 元。下修全部体现在二三档（24-29 元），而二三档需要财报验证才触发 → 事实上等于把决策推迟到 2027 年 4 月",
+      "iv_spread_cause": "TTM 归母 39.23 vs 扣非 34.67 差 11.6%（非经常性 4.56 亿）。6 人锚归母、1 人锚扣非、1 人未落。这 11.6% 的口径差 x 15-20x 的倍数差，共同制造了 8 人 IV 从 28.5 到 44（跨度 54%）的假分歧"
+    },
+    "business_structure_2025": {
+      "electrical_connection": {
+        "revenue_cny_yi": 70.77,
+        "yoy_pct": -7.9,
+        "share_pct": 44.2,
+        "gross_margin_pct": 41.1
+      },
+      "smart_electrical_lighting": {
+        "revenue_cny_yi": 80.98,
+        "yoy_pct": -2.8,
+        "share_pct": 50.5,
+        "gross_margin_pct": 46.3
+      },
+      "new_energy": {
+        "revenue_cny_yi": 8.22,
+        "yoy_pct": 5.7,
+        "share_pct": 5.1,
+        "gross_margin_pct": 29.6,
+        "cagr_2021_2025_pct": 21.9
+      },
+      "converter_market_share_pct": 70.7,
+      "offline_outlets_wan": 110,
+      "receivable_over_revenue_pct": 2.2,
+      "flagship_stores": 3000,
+      "home_charger_share_2026q1_pct": 41.6,
+      "commercial_charger_y9m26_yoy_pct": 20,
+      "overseas_2026h1": {
+        "revenue_cny_yi": 1.7,
+        "yoy_pct": 20.3,
+        "share_pct": 2.04,
+        "countries": 40
+      },
+      "acquisitions": "2026-09-04 收购艾伏新能源（Afore），光伏/储能逆变器，覆盖 60 多国、服务 300+ 客户",
+      "new_incubation": "数据中心大功率智能 PDU（已量产）、AI 大路灯 / 沐光 AI 健康照明、太阳能照明"
+    },
+    "roce_series": [
+      {
+        "year": "2016",
+        "ce": 24.5,
+        "ebit": 16.7,
+        "roce_pct": 81.74
+      },
+      {
+        "year": "2017",
+        "ce": 15.7,
+        "ebit": 15.2,
+        "roce_pct": 75.46
+      },
+      {
+        "year": "2018",
+        "ce": 32.8,
+        "ebit": 19.6,
+        "roce_pct": 80.65
+      },
+      {
+        "year": "2019",
+        "ce": 55.9,
+        "ebit": 26.8,
+        "roce_pct": 60.39
+      },
+      {
+        "year": "2020",
+        "ce": 93.7,
+        "ebit": 27.2,
+        "roce_pct": 36.35
+      },
+      {
+        "year": "2021",
+        "ce": 108.6,
+        "ebit": 32.4,
+        "roce_pct": 32.0
+      },
+      {
+        "year": "2022",
+        "ce": 125.7,
+        "ebit": 36.5,
+        "roce_pct": 31.14
+      },
+      {
+        "year": "2023",
+        "ce": 146.9,
+        "ebit": 44.3,
+        "roce_pct": 32.49
+      },
+      {
+        "year": "2024",
+        "ce": 161.1,
+        "ebit": 49.6,
+        "roce_pct": 32.22
+      },
+      {
+        "year": "2025",
+        "ce": 172.7,
+        "ebit": 48.1,
+        "roce_pct": 28.82
+      }
+    ],
+    "still_missing": [
+      "CE 172.7 亿的明细（营运资本 / 固定资产 / 在建工程 / 现金各占多少）—— 最高，决定「ROCE 下行是现金堆积还是产能低效」，核验官的「净现金全部剔除」属乐观处理",
+      "分业务收入与毛利率（2026 前三季）—— 最高，只有 2025 全年与 2026H1 境内外，无法验证「照明逆势增长」是否延续到 Q3",
+      "铜/铝/塑料粒子的成本占比、锁价/套保比例、提价幅度与生效时间 —— 最高，决定毛利率修复斜率，也是「Q1 +1.70pp → Q2 -2.76pp」断点归因的关键",
+      "2027-2029 股东回报规划是否锁定 payout —— 高，判断 2026E payout 93.9% 可持续性的唯一关键",
+      "艾伏 Afore 的交易对价、标的收入/净利/是否亏损、商誉 —— 高",
+      "AI 大路灯与 PDU 的绝对收入、客户名单、毛利率、渠道 ROI —— 中高",
+      "2026 全年 capex 与折旧 —— 高（FCF 锚的唯一扣减项）",
+      "转换器 -7.9% 的量价拆分与渠道库存 —— 高，决定是主动去库存还是份额被白牌侵蚀"
+    ],
+    "process_note": "本轮核验官的结构化返回（schema）校验失败、返回 null，但完整审计已落盘到 audit.md（401 行），本文所有核验官结论均引自该文件。主控已独立复算 8 个关键算式全部通过：PB=PE x ROE、Q3 年化 PE、剔现金 ROC、分红 vs CFO、增量 ROCE、IPO 现金对 ROCE 的影响、2020→2025 CE/EBIT 增速、剔现金核心 PE",
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口抓回 9 份券商研报全文（2026-08-29 至 2026-11-06）"
+  },
+  "normalization": {
+    "anchor_1_normalized_earnings": {
+      "bases": {
+        "ttm_parent_39_2": {
+          "14x": 30.43,
+          "16x": 34.78,
+          "18x": 39.13,
+          "20x": 43.47
+        },
+        "ttm_deducted_34_7": {
+          "14x": 26.94,
+          "16x": 30.79,
+          "18x": 34.63,
+          "20x": 38.48
+        }
+      },
+      "auditor_stress_2027_base_cny_yi": 31.3
+    },
+    "anchor_2_fcf": {
+      "fcf_over_mcap_2025_pct": 5.84,
+      "fcf_over_mcap_2026e_pct": "2.98 - 3.88",
+      "dividend_cny_yi": 34.3,
+      "dividend_fcf_coverage_2025": 1.24,
+      "dividend_fcf_coverage_2026e": "0.63 - 0.82",
+      "shortfall_cny_yi": "6.1 - 12.6",
+      "at_4_0_to_4_5pct_fcf_yield": {
+        "mcap_cny_yi": "482 - 705",
+        "px": "26.7 - 39.1",
+        "midpoint": 32.9
+      },
+      "verdict": "FCF 锚是本轮最不利的锚 —— 它是唯一一个同时吃到「CFO -38.8%」和「分红刚性 34.3 亿」的锚；三锚里只有它把下沿打到 30 元以下（26.7 元），也正是它把公允价值中枢从 36 拉到 34"
+    },
+    "anchor_3_dividend": {
+      "ttm_dps": 1.9,
+      "at_4_5pct": 42.2,
+      "at_5_0pct": 38.0,
+      "at_5_5pct": 34.55
+    },
+    "buy_zones": {
+      "A_trial": {
+        "price": 32.0,
+        "pct_from_current": -20.6,
+        "pe_2026e_mcap": 15.8,
+        "pe_2026e_ev": 11.9,
+        "ev_over_core_operating_profit": 13.1,
+        "div_yield_pct": 5.94,
+        "pb": 3.63,
+        "position_pct": 3.0,
+        "trigger": "价格 + 2026 年报毛利率 >=41.5% 且 CFO >=32 亿（缺一不买）"
+      },
+      "B_add": {
+        "price": 29.0,
+        "pct_from_current": -28.0,
+        "pe_2026e_mcap": 14.3,
+        "pe_2026e_ev": 10.5,
+        "ev_over_core_operating_profit": 11.4,
+        "div_yield_pct": 6.55,
+        "pb": 3.29,
+        "position_pct": 3.0,
+        "trigger": "价格 + 2027Q1/Q2 毛利率连续两季回升，或收入降幅收窄至 -3% 内"
+      },
+      "C_heavy": {
+        "price": 25.5,
+        "pct_from_current": -36.7,
+        "pe_2026e_mcap": 12.6,
+        "pe_2026e_ev": 8.7,
+        "ev_over_core_operating_profit": 9.5,
+        "div_yield_pct": 7.45,
+        "pb": 2.89,
+        "position_pct": 4.0,
+        "trigger": "纯价格触发：护城河未破（份额 >=65%）、payout 未超 100%、净现金 >=100 亿；对应 2027 基准 31.3 亿的 10.2x EV、悲观 27.7 亿的 11.5x EV，不需要验证"
+      },
+      "cap_pct": 10.0,
+      "note": "A 档 32.0 = 公允价值下沿（32-36），价格本身没有折让 —— 折让由「2026 年报已验证毛利率企稳 + 现金流修复」这个信息来提供；B/C 档才是纯价格安全边际（较公允价值下沿再让 9% / 20%）"
+    },
+    "round1_comparison": {
+      "round1": "2 买 / 6 观察；买点 34.0-38.0（中位 36.0）",
+      "round2_masters": "0 买 / 8 观察；首档中位 34.5",
+      "round2_auditor": "A 32.0 / B 29.0 / C 25.5，三档中位 28.75（vs 第一轮中位 36.0，-20.1%）"
+    },
+    "verdicts": {
+      "buy": [],
+      "watch": [
+        "巴菲特",
+        "芒格",
+        "费雪",
+        "段永平",
+        "李录",
+        "马克斯",
+        "格林布拉特",
+        "斯利普"
+      ],
+      "no_buy": [],
+      "first_tranche_list": {
+        "巴菲特": 35.0,
+        "芒格": 35.0,
+        "马克斯": 35.0,
+        "斯利普": 36.5,
+        "李录": 34.0,
+        "格林布拉特": 34.0,
+        "段永平": 33.0,
+        "费雪": 32.0
+      }
+    },
+    "why_not_buy_now": "按核验官基准，2027 年归母 31.3 亿，现价 23.2x（EV 18.7x）；EV/核心经营利润 18.6x。在「复苏情景尚未出现、压力情景未被定价」的位置买入，是替市场承担了它还没承认的风险",
+    "why_not_avoid": "净现金 19.4% 市值、转换器 70.7% 份额、110 万网点、24.67% ROE、应收仅占营收 2.2% —— 下行有真底，只是底不在 40.29 元"
+  }
+}
