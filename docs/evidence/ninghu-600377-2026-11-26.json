@@ -1,0 +1,544 @@
+{
+  "stock": {
+    "code": "600377",
+    "hk_code": "00177",
+    "name": "宁沪高速",
+    "listing_date": "2001-01-16",
+    "note": "A+H（A 38.03 亿股 + H 12.34 亿股）"
+  },
+  "generated_at": "2026-11-26",
+  "source_db": "data/valuedashboard.duckdb",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 14.41,
+      "market_cap_cny_yi": 725.9,
+      "total_shares_yi": 50.377,
+      "a_shares_yi": 38.03,
+      "h_shares_yi": 12.34
+    },
+    "ttm": {
+      "revenue_cny_yi": 227.04,
+      "parent_np_cny_yi": 46.1,
+      "deducted_np_cny_yi": 45.3,
+      "total_np_cny_yi": 48.46,
+      "minority_cny_yi": 2.36,
+      "eps_reported": 0.9151,
+      "pe_reported": 15.75,
+      "pb": 1.641,
+      "bps": 8.779
+    },
+    "dividends": {
+      "recent": [
+        {
+          "ex_date": "2026-07-13",
+          "dps": 0.49
+        },
+        {
+          "ex_date": "2025-07-30",
+          "dps": 0.49
+        },
+        {
+          "ex_date": "2024-07-26",
+          "dps": 0.47
+        },
+        {
+          "ex_date": "2023-07-26",
+          "dps": 0.4599999999999999
+        },
+        {
+          "ex_date": "2022-08-05",
+          "dps": 0.4599999999999999
+        },
+        {
+          "ex_date": "2021-07-15",
+          "dps": 0.4599999999999999
+        },
+        {
+          "ex_date": "2020-08-21",
+          "dps": 0.4599999999999999
+        },
+        {
+          "ex_date": "2019-07-12",
+          "dps": 0.4599999999999999
+        },
+        {
+          "ex_date": "2018-07-13",
+          "dps": 0.44
+        },
+        {
+          "ex_date": "2017-07-13",
+          "dps": 0.42
+        },
+        {
+          "ex_date": "2016-06-24",
+          "dps": 0.4
+        }
+      ],
+      "ttm_dps": 0.49,
+      "ttm_yield_pct": 3.4,
+      "payout_pct": 53.5,
+      "total_paid_cny_yi": 24.68,
+      "trend": "0.40(2016)→0.42→0.44→0.46×4→0.47→0.49(2025)→0.49(2026)，十年连涨从未下调"
+    },
+    "analyst_forecasts": [
+      {
+        "fiscal_year": "2025E",
+        "eps": 0.9119,
+        "pe": 15.8,
+        "analysts": 10
+      },
+      {
+        "fiscal_year": "2026E",
+        "eps": 0.957,
+        "pe": 15.06,
+        "analysts": 10
+      },
+      {
+        "fiscal_year": "2027E",
+        "eps": 0.984,
+        "pe": 14.64,
+        "analysts": 10
+      },
+      {
+        "fiscal_year": "2028E",
+        "eps": 1.0189,
+        "pe": 14.14,
+        "analysts": 10
+      }
+    ]
+  },
+  "checks": {
+    "roe_identity": {
+      "snapshot_roe_pct": 10.91,
+      "period_end_equity_roe_pct": 10.42,
+      "identity_with_snapshot_roe": 1.718,
+      "identity_with_period_end_roe": 1.641,
+      "actual_pb": 1.641,
+      "note": "恒等式 PB = PE x ROE 只在『期末归母权益口径』闭合（15.75 x 10.42% = 1.641）；快照 roe=10.91% 是平均权益口径，用它算得 1.718 ≠ 1.641。凡用 PB=PE x ROE 做校验，必须用期末权益口径（KB §32 I-ROEDENOM）"
+    },
+    "balance": {
+      "equity_parent_cny_yi": 442.3,
+      "cash_and_trading_cny_yi": 48.2,
+      "interest_bearing_cny_yi": 334.7,
+      "net_debt_cny_yi": 286.5,
+      "net_debt_over_equity_pct": 64.8,
+      "intangible_cny_yi": 575.5,
+      "total_assets_cny_yi": 1055.8,
+      "intangible_over_total_assets_pct": 54.5,
+      "minority_interest_cny_yi": 141.6,
+      "long_term_equity_inv_cny_yi": 144.8,
+      "tangible_equity_cny_yi": -133.2,
+      "tangible_equity_per_share": -2.64,
+      "note": "有形净资产 = 归母权益 442 − 无形资产 575 = −133 亿（每股 −2.64 元）：575 亿路权到期归零，PB 1.641 没有任何清算地板"
+    },
+    "segment_construction": {
+      "2023-12-31": {
+        "其中:收费公路-镇丹高速": 0.97,
+        "其中:收费公路-宜长高速": 1.29,
+        "其中:收费公路-常宜高速": 1.43,
+        "其中:收费公路-锡宜高速及无锡环太湖公路": 6.37,
+        "其中:收费公路-广靖高速及锡澄高速": 9.19,
+        "其中:收费公路-五峰山大桥": 9.66,
+        "其中:收费公路-宁常高速及镇溧高速": 13.7,
+        "其中:收费公路-沪宁高速": 52.51,
+        "其他业务": 2.24,
+        "地产销售": 4.75,
+        "电力销售": 6.42,
+        "配套服务": 18.44,
+        "建造期收入/成本": 24.96,
+        "收费公路": 95.11
+      },
+      "2024-12-31": {
+        "公路配套服务收入": 15.34,
+        "建造服务收入": 108.66,
+        "通行费收入": 95.28,
+        "销售电力收入": 7.2,
+        "租赁收入": 2.67,
+        "广告及其他收入": 1.46,
+        "房地产开发收入": 1.37
+      },
+      "2025-12-31": {
+        "其中:收费公路-宁扬长江大桥": 0.38,
+        "配套服务": 16.29,
+        "其中:收费公路-镇丹高速": 0.99,
+        "其中:收费公路-宜长高速": 1.21,
+        "其中:收费公路-常宜高速": 1.26,
+        "其中:收费公路-锡宜高速及无锡环太湖公路": 4.6,
+        "其中:收费公路-广靖高速及锡澄高速": 7.7,
+        "其中:收费公路-宁常高速及镇溧高速": 11.19,
+        "其中:收费公路-五峰山大桥": 13.17,
+        "其中:收费公路-沪宁高速": 55.05,
+        "清障业务": 0.06,
+        "地产业务": 0.75,
+        "其他业务": 1.82,
+        "电力销售": 6.85,
+        "建造期收入/成本": 81.56,
+        "收费公路": 95.55
+      }
+    },
+    "segment_sum_warning": "business_breakdown 同一科目在 type=1 里会出现重复行（2024 年通行费被重复计成 190.6 亿）；求和前必须先按 (report_date, item_name) 去重（KB §32 I-BBDUP）",
+    "toll_vs_construction": {
+      "toll_revenue_cny_yi": {
+        "2023": 95.11,
+        "2024": 95.28,
+        "2025": 95.55
+      },
+      "toll_cagr_2y_pct": 0.23,
+      "construction_revenue_cny_yi": {
+        "2024": 108.66,
+        "2025": 81.56
+      },
+      "construction_over_revenue_pct_2025": 40.2,
+      "real_revenue_cny_yi": {
+        "2023": 126.96,
+        "2024": 123.32,
+        "2025": 121.34
+      },
+      "real_revenue_cagr_2y_pct": -2.24,
+      "note": "营收 CAGR5 +20.4% 全是建造期收入与地产并表造成的会计幻觉；真通行费两年只涨 0.23%（KB §32 I-CONSTRUCTREV）"
+    },
+    "cash_flow": {
+      "series": [
+        {
+          "year": "2019",
+          "cfo_cny_yi": 57.63,
+          "capex_cny_yi": 48.5,
+          "fcf_cny_yi": 9.13,
+          "da_cny_yi": 15.66
+        },
+        {
+          "year": "2020",
+          "cfo_cny_yi": 31.37,
+          "capex_cny_yi": 42.45,
+          "fcf_cny_yi": -11.08,
+          "da_cny_yi": 16.33
+        },
+        {
+          "year": "2021",
+          "cfo_cny_yi": 57.03,
+          "capex_cny_yi": 33.19,
+          "fcf_cny_yi": 23.84,
+          "da_cny_yi": 19.6
+        },
+        {
+          "year": "2022",
+          "cfo_cny_yi": 55.28,
+          "capex_cny_yi": 40.39,
+          "fcf_cny_yi": 14.89,
+          "da_cny_yi": 20.3
+        },
+        {
+          "year": "2023",
+          "cfo_cny_yi": 73.92,
+          "capex_cny_yi": 38.04,
+          "fcf_cny_yi": 35.88,
+          "da_cny_yi": 25.14
+        },
+        {
+          "year": "2024",
+          "cfo_cny_yi": 63.16,
+          "capex_cny_yi": 108.02,
+          "fcf_cny_yi": -44.86,
+          "da_cny_yi": 25.29
+        },
+        {
+          "year": "2025",
+          "cfo_cny_yi": 67.62,
+          "capex_cny_yi": 76.26,
+          "fcf_cny_yi": -8.65,
+          "da_cny_yi": 26.01
+        }
+      ],
+      "cfo_2025": 67.62,
+      "dividend_2025": 24.68,
+      "interest_2025": 8.32,
+      "cfo_minus_div_minus_int": 34.62,
+      "capex_2025": 76.26,
+      "audit_correction": "『分红靠借债』是错的：2025 年 CFO 67.62 亿完全覆盖 分红 24.68 + 利息 8.39；缺口在 capex 76.26 亿 —— 这是『扩张靠借债』，不是『借钱分红』。8 份报告里多家把它写成空头论据，会被削弱可信度"
+    },
+    "amortization": {
+      "intangible_cny_yi": 575.5,
+      "total_da_cny_yi": 26.0,
+      "intangible_amortization_cny_yi": 18.23,
+      "fixed_asset_depreciation_cny_yi": 7.67,
+      "implied_years_using_total_da": 22.1,
+      "implied_years_using_intangible_amortization": 31.6,
+      "note": "用总 D&A 26 亿当摊销分母会低估年限（22 年）；只看无形资产摊销 18.23 亿 → 31.6 年。两者差 10 年，直接决定重述 PE 是 19.0x 还是 15.75x（KB §32 I-CONCESSION）"
+    },
+    "roce": [
+      {
+        "year": "2012",
+        "ce_cny_yi": 201.0,
+        "ebit_cny_yi": 34.8,
+        "roce_pct": 16.9
+      },
+      {
+        "year": "2013",
+        "ce_cny_yi": 214.0,
+        "ebit_cny_yi": 39.2,
+        "roce_pct": 18.91
+      },
+      {
+        "year": "2014",
+        "ce_cny_yi": 284.0,
+        "ebit_cny_yi": 40.0,
+        "roce_pct": 16.07
+      },
+      {
+        "year": "2015",
+        "ce_cny_yi": 261.0,
+        "ebit_cny_yi": 36.7,
+        "roce_pct": 13.49
+      },
+      {
+        "year": "2016",
+        "ce_cny_yi": 290.0,
+        "ebit_cny_yi": 49.2,
+        "roce_pct": 17.86
+      },
+      {
+        "year": "2017",
+        "ce_cny_yi": 338.0,
+        "ebit_cny_yi": 51.9,
+        "roce_pct": 16.53
+      },
+      {
+        "year": "2018",
+        "ce_cny_yi": 413.0,
+        "ebit_cny_yi": 61.8,
+        "roce_pct": 16.44
+      },
+      {
+        "year": "2019",
+        "ce_cny_yi": 425.0,
+        "ebit_cny_yi": 59.9,
+        "roce_pct": 14.28
+      },
+      {
+        "year": "2020",
+        "ce_cny_yi": 471.0,
+        "ebit_cny_yi": 36.8,
+        "roce_pct": 8.21
+      },
+      {
+        "year": "2021",
+        "ce_cny_yi": 602.0,
+        "ebit_cny_yi": 64.3,
+        "roce_pct": 12.0
+      },
+      {
+        "year": "2022",
+        "ce_cny_yi": 648.0,
+        "ebit_cny_yi": 56.8,
+        "roce_pct": 9.08
+      },
+      {
+        "year": "2023",
+        "ce_cny_yi": 691.0,
+        "ebit_cny_yi": 68.0,
+        "roce_pct": 10.15
+      },
+      {
+        "year": "2024",
+        "ce_cny_yi": 737.0,
+        "ebit_cny_yi": 72.7,
+        "roce_pct": 10.19
+      },
+      {
+        "year": "2025",
+        "ce_cny_yi": 849.0,
+        "ebit_cny_yi": 69.4,
+        "roce_pct": 8.75
+      }
+    ],
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_p50": 14.05,
+        "pb_p50": 1.674,
+        "pe_pct": 86.5,
+        "pb_pct": 45.9
+      },
+      "5y": {
+        "months": 61,
+        "pe_p50": 13.06,
+        "pb_p50": 1.517,
+        "pe_pct": 91.8,
+        "pb_pct": 67.2
+      },
+      "10y": {
+        "months": 121,
+        "pe_p50": 13.1,
+        "pb_p50": 1.746,
+        "pe_pct": 84.3,
+        "pb_pct": 38.8
+      },
+      "full": {
+        "months": 311,
+        "pe_p50": 15.0,
+        "pb_p50": 1.899,
+        "pe_pct": 53.1,
+        "pb_pct": 28.3
+      }
+    },
+    "ah": {
+      "sync_as_of": "2026-11-16",
+      "a_close": 14.11,
+      "h_close_hkd": 11.09,
+      "fx": 0.856,
+      "h_in_cny": 9.49,
+      "a_premium_pct": 48.64,
+      "a_premium_with_today_a": 51.8,
+      "a_yield_pct": 3.47,
+      "h_yield_pct": 5.16,
+      "h_yield_after_tax_pct": 4.13,
+      "identity_status": "ok"
+    },
+    "52w": {
+      "low": 11.5,
+      "high": 14.8,
+      "pct_from_high": -2.64
+    },
+    "peers": [
+      {
+        "code": "601816",
+        "name": "京沪高铁",
+        "pe": 19.19,
+        "pb": 1.22,
+        "roe_pct": 6.5,
+        "div_yield_pct": 1.79
+      },
+      {
+        "code": "601006",
+        "name": "大秦铁路",
+        "pe": 17.75,
+        "pb": 0.59,
+        "roe_pct": 3.3,
+        "div_yield_pct": 4.49
+      },
+      {
+        "code": "001965",
+        "name": "招商公路",
+        "pe": 15.89,
+        "pb": 0.95,
+        "roe_pct": 6.2,
+        "div_yield_pct": 3.46
+      },
+      {
+        "code": "600377",
+        "name": "宁沪高速",
+        "pe": 15.75,
+        "pb": 1.64,
+        "roe_pct": 10.9,
+        "div_yield_pct": 3.4
+      },
+      {
+        "code": "600350",
+        "name": "山东高速",
+        "pe": 18.83,
+        "pb": 1.23,
+        "roe_pct": 6.6,
+        "div_yield_pct": 3.57
+      },
+      {
+        "code": "600012",
+        "name": "皖通高速",
+        "pe": 13.92,
+        "pb": 2.24,
+        "roe_pct": 16.7,
+        "div_yield_pct": 3.77
+      }
+    ],
+    "price_ladder": [
+      {
+        "price_cny": 14.41,
+        "pe_reported": 15.75,
+        "pb": 1.641,
+        "div_yield_pct": 3.4,
+        "equiv_h_hkd": 16.83
+      },
+      {
+        "price_cny": 12.25,
+        "pe_reported": 13.39,
+        "pb": 1.395,
+        "div_yield_pct": 4.0,
+        "equiv_h_hkd": 14.31
+      },
+      {
+        "price_cny": 11.85,
+        "pe_reported": 12.95,
+        "pb": 1.35,
+        "div_yield_pct": 4.14,
+        "equiv_h_hkd": 13.84
+      },
+      {
+        "price_cny": 11.0,
+        "pe_reported": 12.02,
+        "pb": 1.253,
+        "div_yield_pct": 4.45,
+        "equiv_h_hkd": 12.85
+      },
+      {
+        "price_cny": 10.4,
+        "pe_reported": 11.36,
+        "pb": 1.185,
+        "div_yield_pct": 4.71,
+        "equiv_h_hkd": 12.15
+      },
+      {
+        "price_cny": 9.49,
+        "pe_reported": 10.37,
+        "pb": 1.081,
+        "div_yield_pct": 5.16,
+        "equiv_h_hkd": 11.09
+      },
+      {
+        "price_cny": 8.46,
+        "pe_reported": 9.24,
+        "pb": 0.964,
+        "div_yield_pct": 5.79,
+        "equiv_h_hkd": 9.88
+      },
+      {
+        "price_cny": 5.52,
+        "pe_reported": 6.03,
+        "pb": 0.629,
+        "div_yield_pct": 8.88,
+        "equiv_h_hkd": 6.45
+      }
+    ]
+  },
+  "normalization": {
+    "equity_value_cny_yi": 439.4,
+    "enterprise_value_cny_yi": 1012.4,
+    "fcff_proxy_cny_yi": 73.86,
+    "implied_22y_irr_ev_basis_pct": 4.56,
+    "audit_implied_22y_irr_pct": 2.38,
+    "irr_note": "主控自算：EV 1,012 亿、FCFF 73.86 亿（CFO 67.62 + 税后利息 6.24）、22 年零终值 → EV 口径 IRR 约 4.6%。审计口径给 2.38%（其 FCFF 取 60.7 亿并显式扣 22 年后还本与少数股东），差异来自 FCFF 定义，两者都远低于 8% 要求回报——结论一致：现价隐含回报不足",
+    "anchors": [
+      {
+        "anchor": "有限期 DCF（审计：22 年、终值 0、FCFF 60.7、r=7%、扣净负债与少数股东）",
+        "per_share": 5.52,
+        "note": "区间 15–32 年 × 6%–9% → 2.78–8.27 元"
+      },
+      {
+        "anchor": "永续 DCF（g=0、r=7%，上界）",
+        "per_share": 8.46,
+        "note": "唯一能给到 8 元以上的永续假设"
+      },
+      {
+        "anchor": "永续 + g=2%（上界的上界）",
+        "per_share": 14.04,
+        "note": "正好等于现价 —— 现价 = 永续+2% 增长"
+      },
+      {
+        "anchor": "DDM（DPS 0.49 ÷ 3.5%）",
+        "per_share": 14.0,
+        "note": "与现价几乎相同"
+      }
+    ],
+    "synthesis": "A 股合理价值 2.8–8.3 元（有限期口径）；现价 14.41 只有『永久续期 + 2% 增长』或『折现率 <2.5%』能解释"
+  }
+}
