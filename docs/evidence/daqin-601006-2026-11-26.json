@@ -1,0 +1,576 @@
+{
+  "stock": {
+    "code": "601006",
+    "name": "大秦铁路",
+    "hk_code": null,
+    "listing_date": "2006-08-01",
+    "note": "纯 A 股，无 H 股，不存在 A/H 比价"
+  },
+  "generated_at": "2026-11-26",
+  "source_db": "data/valuedashboard.duckdb",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 4.94,
+      "market_cap_cny_yi": 976.1,
+      "total_shares_yi": 197.597
+    },
+    "ttm": {
+      "revenue_cny_yi": 788.22,
+      "parent_np_cny_yi": 55.01,
+      "deducted_np_cny_yi": 54.61,
+      "net_profit_all_cny_yi": 64.22,
+      "minority_cny_yi": 9.22,
+      "eps_reported": 0.2784,
+      "eps_deducted": 0.2764,
+      "pe_reported": 17.75,
+      "pe_deducted": 17.88,
+      "pb": 0.593,
+      "bps": 8.328,
+      "pe_times_roe_check": 0.593
+    },
+    "dividends": {
+      "events": [
+        {
+          "ex_date": "2022-07-07",
+          "dps": 0.48,
+          "shares_yi": 148.669,
+          "payout_cny_yi": 71.36
+        },
+        {
+          "ex_date": "2023-07-13",
+          "dps": 0.48,
+          "shares_yi": 151.67,
+          "payout_cny_yi": 72.8
+        },
+        {
+          "ex_date": "2024-07-11",
+          "dps": 0.38193,
+          "shares_yi": 181.415,
+          "payout_cny_yi": 69.29
+        },
+        {
+          "ex_date": "2024-10-24",
+          "dps": 0.12924,
+          "shares_yi": 182.582,
+          "payout_cny_yi": 23.6
+        },
+        {
+          "ex_date": "2025-07-11",
+          "dps": 0.13999999999999999,
+          "shares_yi": 201.472,
+          "payout_cny_yi": 28.21
+        },
+        {
+          "ex_date": "2025-10-24",
+          "dps": 0.08,
+          "shares_yi": 201.472,
+          "payout_cny_yi": 16.12
+        },
+        {
+          "ex_date": "2026-07-10",
+          "dps": 0.14169,
+          "shares_yi": 198.629,
+          "payout_cny_yi": 28.14
+        },
+        {
+          "ex_date": "2026-10-19",
+          "dps": 0.08008,
+          "shares_yi": 198.629,
+          "payout_cny_yi": 15.91
+        }
+      ],
+      "ttm_dps_cny": 0.2218,
+      "ttm_yield_pct": 4.49,
+      "true_ttm_payout_pct": 79.7,
+      "snapshot_payout_pct_WRONG": 50.9,
+      "snapshot_dps_WRONG": 0.14169,
+      "defect": "快照 dps=0.14169 / payout=50.9% 只取到最后一笔（KB §30 I-SNAPSHOTPAYOUT）；真实 TTM payout 79.8%",
+      "attribution_defect": "2024-07-11 的 0.38193 属 FY2023（不是 FY2024），按 ex_date 年份归属会错位一整年（KB §27 I-DPSATTRIB）",
+      "dps_path": "0.48（FY2021–22）→ 0.51117（FY2023，单笔 0.38193+中期 0.12924）→ 0.22（FY2024）→ 0.22177（FY2025）"
+    },
+    "analyst_forecasts": [
+      {
+        "fiscal_year": "2025E",
+        "eps": 0.2986,
+        "analysts": 9,
+        "pe": 16.54
+      },
+      {
+        "fiscal_year": "2026E",
+        "eps": 0.3024,
+        "analysts": 9,
+        "pe": 16.33
+      },
+      {
+        "fiscal_year": "2027E",
+        "eps": 0.3277,
+        "analysts": 9,
+        "pe": 15.08
+      },
+      {
+        "fiscal_year": "2028E",
+        "eps": 0.3545,
+        "analysts": 9,
+        "pe": 13.94
+      }
+    ]
+  },
+  "checks": {
+    "net_cash": {
+      "cash_and_trading_cny_yi": 274.5,
+      "interest_bearing_cny_yi": 126.1,
+      "net_cash_cny_yi": 148.3,
+      "equity_parent_cny_yi": 1645.6,
+      "ev_cny_yi": 827.8
+    },
+    "share_dilution": {
+      "path": [
+        {
+          "date": "2022-03-31",
+          "shares_yi": 148.67
+        },
+        {
+          "date": "2023-12-31",
+          "shares_yi": 157.47
+        },
+        {
+          "date": "2025-02-10",
+          "shares_yi": 201.47
+        },
+        {
+          "date": "2025-12-31",
+          "shares_yi": 201.47
+        },
+        {
+          "date": "2026-06-30",
+          "shares_yi": 198.63
+        },
+        {
+          "date": "2026-11-17",
+          "shares_yi": 197.6
+        }
+      ],
+      "total_pct_from_2022": 35.5,
+      "note": "转债三年转股摊薄 +35.5%（148.67 → 201.47 亿股），2026 年小幅回落至 197.60 亿（回购注销）"
+    },
+    "single_quarter": [
+      {
+        "report_date": "2025-03-31",
+        "q_rev_yi": 178.01,
+        "q_gross_yi": 28.99,
+        "q_gross_margin_pct": 16.3,
+        "q_np_yi": 25.71,
+        "q_ded_yi": 25.63
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev_yi": 194.85,
+        "q_gross_yi": 23.16,
+        "q_gross_margin_pct": 11.9,
+        "q_np_yi": 15.44,
+        "q_ded_yi": null
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev_yi": 197.73,
+        "q_gross_yi": 24.42,
+        "q_gross_margin_pct": 12.3,
+        "q_np_yi": 21.09,
+        "q_ded_yi": null
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev_yi": 205.87,
+        "q_gross_yi": -9.63,
+        "q_gross_margin_pct": -4.7,
+        "q_np_yi": -3.24,
+        "q_ded_yi": -3.28
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev_yi": 185.7,
+        "q_gross_yi": 26.97,
+        "q_gross_margin_pct": 14.5,
+        "q_np_yi": 23.84,
+        "q_ded_yi": 23.86,
+        "q_rev_yoy_pct": 4.3,
+        "q_np_yoy_pct": -7.3
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev_yi": 210.27,
+        "q_gross_yi": 24.26,
+        "q_gross_margin_pct": 11.5,
+        "q_np_yi": 18.71,
+        "q_ded_yi": 18.57,
+        "q_rev_yoy_pct": 7.9,
+        "q_np_yoy_pct": 21.2
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev_yi": 186.38,
+        "q_gross_yi": 14.22,
+        "q_gross_margin_pct": 7.6,
+        "q_np_yi": 15.69,
+        "q_ded_yi": 15.46,
+        "q_rev_yoy_pct": -5.7,
+        "q_np_yoy_pct": -25.6
+      }
+    ],
+    "cash_flow": [
+      {
+        "year": "2020",
+        "cfo_cny_yi": 127.0,
+        "capex_cny_yi": 19.0,
+        "fcf_cny_yi": 108.0,
+        "cfi_cny_yi": 11.0,
+        "intangible_cny_yi": 89.0
+      },
+      {
+        "year": "2021",
+        "cfo_cny_yi": 189.0,
+        "capex_cny_yi": 36.0,
+        "fcf_cny_yi": 153.0,
+        "cfi_cny_yi": -33.0,
+        "intangible_cny_yi": 94.0
+      },
+      {
+        "year": "2022",
+        "cfo_cny_yi": 161.0,
+        "capex_cny_yi": 71.0,
+        "fcf_cny_yi": 90.0,
+        "cfi_cny_yi": -29.0,
+        "intangible_cny_yi": 93.0
+      },
+      {
+        "year": "2023",
+        "cfo_cny_yi": 172.0,
+        "capex_cny_yi": 73.0,
+        "fcf_cny_yi": 100.0,
+        "cfi_cny_yi": -34.0,
+        "intangible_cny_yi": 107.0
+      },
+      {
+        "year": "2024",
+        "cfo_cny_yi": 93.0,
+        "capex_cny_yi": 45.0,
+        "fcf_cny_yi": 48.0,
+        "cfi_cny_yi": -48.0,
+        "intangible_cny_yi": 105.0
+      },
+      {
+        "year": "2025",
+        "cfo_cny_yi": 50.0,
+        "capex_cny_yi": 272.0,
+        "fcf_cny_yi": -222.0,
+        "cfi_cny_yi": -250.0,
+        "intangible_cny_yi": 345.0
+      }
+    ],
+    "roce": [
+      {
+        "year": "2014",
+        "ce_cny_yi": 958.0,
+        "ebit_cny_yi": 185.5,
+        "roce_pct": 20.6
+      },
+      {
+        "year": "2015",
+        "ce_cny_yi": 990.0,
+        "ebit_cny_yi": 165.7,
+        "roce_pct": 17.02
+      },
+      {
+        "year": "2016",
+        "ce_cny_yi": 1016.0,
+        "ebit_cny_yi": 93.2,
+        "roce_pct": 9.3
+      },
+      {
+        "year": "2017",
+        "ce_cny_yi": 1209.0,
+        "ebit_cny_yi": 190.0,
+        "roce_pct": 17.07
+      },
+      {
+        "year": "2018",
+        "ce_cny_yi": 1276.0,
+        "ebit_cny_yi": 209.8,
+        "roce_pct": 16.88
+      },
+      {
+        "year": "2019",
+        "ce_cny_yi": 1339.0,
+        "ebit_cny_yi": 199.3,
+        "roce_pct": 15.24
+      },
+      {
+        "year": "2020",
+        "ce_cny_yi": 1772.0,
+        "ebit_cny_yi": 157.4,
+        "roce_pct": 10.12
+      },
+      {
+        "year": "2021",
+        "ce_cny_yi": 1804.0,
+        "ebit_cny_yi": 184.4,
+        "roce_pct": 10.31
+      },
+      {
+        "year": "2022",
+        "ce_cny_yi": 1849.0,
+        "ebit_cny_yi": 169.5,
+        "roce_pct": 9.28
+      },
+      {
+        "year": "2023",
+        "ce_cny_yi": 1921.0,
+        "ebit_cny_yi": 178.9,
+        "roce_pct": 9.49
+      },
+      {
+        "year": "2024",
+        "ce_cny_yi": 1917.0,
+        "ebit_cny_yi": 133.4,
+        "roce_pct": 6.95
+      },
+      {
+        "year": "2025",
+        "ce_cny_yi": 1954.0,
+        "ebit_cny_yi": 82.8,
+        "roce_pct": 4.28
+      }
+    ],
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_p10_p50_p90": [
+          10.29,
+          15.7,
+          17.94
+        ],
+        "pb_p10_p50_p90": [
+          0.592,
+          0.794,
+          0.858
+        ],
+        "pe_pct": 86.5,
+        "pb_pct": 13.5
+      },
+      "5y": {
+        "months": 61,
+        "pe_p10_p50_p90": [
+          7.84,
+          10.97,
+          17.7
+        ],
+        "pb_p10_p50_p90": [
+          0.621,
+          0.794,
+          0.857
+        ],
+        "pe_pct": 91.8,
+        "pb_pct": 8.2
+      },
+      "10y": {
+        "months": 121,
+        "pe_p10_p50_p90": [
+          7.97,
+          9.53,
+          16.88
+        ],
+        "pb_p10_p50_p90": [
+          0.685,
+          0.839,
+          1.269
+        ],
+        "pe_pct": 95.9,
+        "pb_pct": 4.1
+      },
+      "full": {
+        "months": 244,
+        "pe_p10_p50_p90": [
+          7.99,
+          10.05,
+          22.12
+        ],
+        "pb_p10_p50_p90": [
+          0.768,
+          1.267,
+          3.555
+        ],
+        "pe_pct": 82.4,
+        "pb_pct": 2.0
+      }
+    },
+    "divergence_note": "PE 17.75 = 10 年 95.9% 分位（贵）、PB 0.593 = 全历史 2.0% 分位（便宜）。恒等式 PB = PE x ROE：0.593 = 17.75 x 3.34%，即破净的全部原因是 ROE 从约 10% 掉到 3.34%，不是资产打折",
+    "buyback": {
+      "note": "审计发现 buyback_events 有一笔注销式回购：3.8746 亿股 / 19.997 亿元 / 均价 5.161 元 / PB 0.620 —— 8 份大师报告全部漏掉。这是过去三年唯一一次'把钱还给股东而不是买资产'",
+      "source": "buyback_events（审计自跑）"
+    },
+    "wacc_debate": {
+      "beta_500d": 0.155,
+      "capm_coe_pct": 2.45,
+      "note": "按库内 beta 0.155（R²=0.022）做 CAPM 得 CoE 2.45% → ROCE 4.28% 反而高于它。'ROCE < 资金成本'是『我要求 8%』的假设，不是库内事实——必须标注"
+    },
+    "52w": {
+      "low": 4.6,
+      "high": 5.74,
+      "pct_from_high": -13.94
+    },
+    "peers": [
+      {
+        "code": "601816",
+        "name": "京沪高铁",
+        "pe": 19.19,
+        "pb": 1.22,
+        "roe_pct": 6.5,
+        "div_yield_pct": 1.79
+      },
+      {
+        "code": "601006",
+        "name": "大秦铁路",
+        "pe": 17.75,
+        "pb": 0.59,
+        "roe_pct": 3.3,
+        "div_yield_pct": 4.49
+      },
+      {
+        "code": "001965",
+        "name": "招商公路",
+        "pe": 15.89,
+        "pb": 0.95,
+        "roe_pct": 6.2,
+        "div_yield_pct": 3.46
+      },
+      {
+        "code": "600377",
+        "name": "宁沪高速",
+        "pe": 15.75,
+        "pb": 1.64,
+        "roe_pct": 10.9,
+        "div_yield_pct": 3.4
+      },
+      {
+        "code": "600350",
+        "name": "山东高速",
+        "pe": 18.83,
+        "pb": 1.23,
+        "roe_pct": 6.6,
+        "div_yield_pct": 3.57
+      },
+      {
+        "code": "600012",
+        "name": "皖通高速",
+        "pe": 13.92,
+        "pb": 2.24,
+        "roe_pct": 16.7,
+        "div_yield_pct": 3.77
+      }
+    ],
+    "segments": [
+      {
+        "item": "货运业务",
+        "amount_cny_yi": 543.2,
+        "ratio_pct": 69.96
+      },
+      {
+        "item": "其他业务",
+        "amount_cny_yi": 116.6,
+        "ratio_pct": 15.01
+      },
+      {
+        "item": "客运业务",
+        "amount_cny_yi": 104.3,
+        "ratio_pct": 13.43
+      },
+      {
+        "item": "其他(补充)",
+        "amount_cny_yi": 12.4,
+        "ratio_pct": 1.59
+      }
+    ],
+    "price_ladder": [
+      {
+        "price_cny": 4.94,
+        "pe_reported": 17.75,
+        "pb": 0.593,
+        "div_yield_pct": 4.49,
+        "implied_roe_for_8pct_pct": 4.75
+      },
+      {
+        "price_cny": 4.6,
+        "pe_reported": 16.52,
+        "pb": 0.552,
+        "div_yield_pct": 4.82,
+        "implied_roe_for_8pct_pct": 4.42
+      },
+      {
+        "price_cny": 4.2,
+        "pe_reported": 15.09,
+        "pb": 0.504,
+        "div_yield_pct": 5.28,
+        "implied_roe_for_8pct_pct": 4.03
+      },
+      {
+        "price_cny": 4.05,
+        "pe_reported": 14.55,
+        "pb": 0.486,
+        "div_yield_pct": 5.48,
+        "implied_roe_for_8pct_pct": 3.89
+      },
+      {
+        "price_cny": 3.7,
+        "pe_reported": 13.29,
+        "pb": 0.444,
+        "div_yield_pct": 5.99,
+        "implied_roe_for_8pct_pct": 3.55
+      },
+      {
+        "price_cny": 3.6,
+        "pe_reported": 12.93,
+        "pb": 0.432,
+        "div_yield_pct": 6.16,
+        "implied_roe_for_8pct_pct": 3.46
+      },
+      {
+        "price_cny": 3.42,
+        "pe_reported": 12.29,
+        "pb": 0.411,
+        "div_yield_pct": 6.48,
+        "implied_roe_for_8pct_pct": 3.29
+      },
+      {
+        "price_cny": 3.2,
+        "pe_reported": 11.5,
+        "pb": 0.384,
+        "div_yield_pct": 6.93,
+        "implied_roe_for_8pct_pct": 3.07
+      },
+      {
+        "price_cny": 2.8,
+        "pe_reported": 10.06,
+        "pb": 0.336,
+        "div_yield_pct": 7.92,
+        "implied_roe_for_8pct_pct": 2.69
+      }
+    ]
+  },
+  "normalization": {
+    "value_trap_test": {
+      "current_pb": 0.593,
+      "ttm_roe_pct": 3.34,
+      "roe_2026_annualized_pct": 4.72,
+      "required_roe_zero_growth_8pct": 4.75,
+      "required_roe_gordon_8pct_g2": 5.56,
+      "required_np_zero_growth_cny_yi": 78.1,
+      "required_np_gordon_cny_yi": 91.5,
+      "fair_value_ttm_basis_8pct": 3.48,
+      "fair_value_2026_annualized_8pct": 4.91,
+      "np_2026_annualized_cny_yi": 77.65,
+      "note": "现价 4.94 = 零增长 8% 要求回报下的公允价 4.91 → 安全边际约 0；门槛卡在 ROE 4.75%/5.56%，实测 3.34%（TTM）/4.72%（2026 年化）/5.03%（加回 241 亿摊销）"
+    }
+  }
+}
