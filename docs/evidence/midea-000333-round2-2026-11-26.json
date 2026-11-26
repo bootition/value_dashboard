@@ -1,0 +1,318 @@
+{
+  "stock": {
+    "code": "000333",
+    "hk_code": "00300",
+    "name": "美的集团"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "a_close": 94.14,
+      "market_cap_cny_yi": 7183.0,
+      "total_shares_yi": 76.304,
+      "h_close_hkd": 101.6,
+      "h_in_cny": 86.97,
+      "ah_snapshot_date": "2026-11-16",
+      "ah_premium_snapshot_pct": 4.12,
+      "ah_premium_today_pct": 8.24,
+      "note": "库内 11-16 快照溢价 4.12%；但 A 已从 11-16 的 90.55 涨到 94.14 而 H 仍是 11-16 的 86.97 元，故今日实际溢价 8.24%。6 位大师用了 4.12%，仅 2 位自算出 8.24%"
+    },
+    "ttm": {
+      "revenue": 4607.6,
+      "parent_np": 474.6,
+      "deducted_np": 329.2,
+      "eps_reported": 6.2193,
+      "eps_deducted": 4.3137,
+      "pe_reported": 15.14,
+      "pe_deducted": 21.82,
+      "pb": 3.214,
+      "roe_period_end_pct": 21.23,
+      "non_recurring_cny_yi": 145.4,
+      "non_recurring_pct_of_np": 30.6,
+      "net_cash_cny_yi": 517.5,
+      "net_cash_pct_of_mcap": 7.2,
+      "pe_ex_cash": 14.05,
+      "minority_interest_cny_yi": 128.9,
+      "price_52w_low": 72.1,
+      "price_52w_high": 95.01,
+      "pct_from_high": -0.92
+    }
+  },
+  "checks": {
+    "three_profit_definitions": {
+      "reported_np": {
+        "cny_yi": 474.6,
+        "eps": 6.2193,
+        "pe": 15.14,
+        "problem": "含长鑫科技 2026Q3 上市带来的公允价值变动（Q3 +58.1 亿 vs 上年 +3.4 亿，增量 54.7 亿）与套保收益"
+      },
+      "deducted_np": {
+        "cny_yi": 329.2,
+        "eps": 4.3137,
+        "pe": 21.82,
+        "problem": "剔掉了套保收益（Q3 投资净收益 23.4 亿，多出 16.5 亿），却把被套保的汇兑损失留在成本里 —— 同一件事罚两次"
+      },
+      "masters_normalized": {
+        "median_cny_yi": 377.5,
+        "range_cny_yi": "346.8 - 415.0",
+        "spread_pct": 18.1,
+        "median_eps": 4.947,
+        "median_pe": 19.03,
+        "by_master": {
+          "buffett": 390,
+          "munger": 365,
+          "fisher": 370,
+          "duanyongping": 400,
+          "lilu": 415,
+          "marks": 385,
+          "greenblatt": 370,
+          "sleep": 346.8
+        }
+      },
+      "bridge_example_buffett": {
+        "path1_bottom_up": "扣非 329.2 + 税后套保约 62 = 391",
+        "path2_top_down": "归母 474.6 − 长鑫税后约 49 − 补助/处置约 34 = 391",
+        "path3_third_party": "开源：剔除汇兑与投资收益后实际经营利润与收入变动基本一致；Q3 收入 −4.12% → Q3 实际经营约 106 亿 → 年化 390-400",
+        "convergence": "三条路径收敛在 390-400，但 8 家区间是 346.8-415.0 —— 还原程度本身就是不确定的"
+      },
+      "verdict": "两个 E 都失真且方向相反。8 家还原中位 377.5 亿、真实 PE 19.03x；区间 17.3-20.7x"
+    },
+    "fx_bridge": {
+      "q3_finance_expense_cny_yi": 8.55,
+      "q3_prior_year_net_income_cny_yi": 7.62,
+      "q3_swing_cny_yi": 16.16,
+      "y9m26_finance_expense_cny_yi": 41.28,
+      "y9m25_net_income_cny_yi": 67.49,
+      "y9m_swing_cny_yi": 108.77,
+      "reason": "人民币升值导致外币货币性项目产生汇兑损失",
+      "offsets": "Q3 投资净收益 23.4 亿（上年 6.9 亿）主要是外汇套保收益 —— 对冲腿被记在非经常性里"
+    },
+    "aircon_demand": {
+      "q3_industry_domestic_wan": 1749,
+      "q3_industry_domestic_pct": -27.9,
+      "q3_industry_export_wan": 1675,
+      "q3_industry_export_pct": 4.2,
+      "midea_domestic_wan": 442,
+      "midea_domestic_pct": -35.5,
+      "midea_export_wan": 467,
+      "midea_export_pct": 12.5,
+      "underperformance_pp": -7.6,
+      "dtc_explanation": "公司推进 DTC 渠道变革，取消新冷年集中开盘备货，内销出货节奏相应调整",
+      "supporting_dtc": [
+        "出口 +12.5% vs 行业 +4.2%（跑赢 8.3pp）",
+        "合同负债 413 亿（+13%）、其他流动负债 984 亿（+6%），渠道预收款没退",
+        "Q3 毛利率 25.97% 同比只降 0.47pp，没靠降价换量"
+      ],
+      "against_pure_dtc": [
+        "内销跌幅 −35.5% 在家电第一梯队里最大",
+        "毛利率在往下走（Q2 24.94% −0.86pp、Q3 −0.47pp）—— 若主动弃份额保利润，毛利率该往上"
+      ],
+      "masters_split": "收敛在「七成行业、两成半份额、一成节奏」附近",
+      "recovery_checkpoints": "2027Q1 是「库存出清+低基数」第一检验点；2027Q3 是「新模式跑通完整冷年」终检点"
+    },
+    "segments_2026h1": {
+      "smart_home": {
+        "cny_yi": 1743.4,
+        "yoy_pct": 4.27,
+        "share_pct": 67.04
+      },
+      "business_industrial": {
+        "cny_yi": 666.7,
+        "yoy_pct": 3.3,
+        "share_pct": 25.64,
+        "building_tech": {
+          "cny_yi": 216.3,
+          "yoy_pct": 10.84
+        },
+        "robotics": {
+          "cny_yi": 166.2,
+          "yoy_pct": 10.27
+        },
+        "industrial_tech": {
+          "cny_yi": 131.4,
+          "yoy_pct": -12.72
+        }
+      },
+      "by_region": {
+        "domestic": {
+          "cny_yi": 1469.2,
+          "yoy_pct": 2.07,
+          "share_pct": 56.5
+        },
+        "overseas": {
+          "cny_yi": 1131.3,
+          "yoy_pct": 5.54,
+          "share_pct": 43.5
+        }
+      },
+      "overseas_obm": "海外 OBM 占智能家居海外收入 50% 以上；美国 OBM +24%；欧洲 TEKA +20%",
+      "highlights": "磁悬浮离心机占比 29.7%、央空内销份额超 22% 行业第一；数据中心液冷入选英伟达 MGX AI Factory 生态、自研磁悬浮 CDU 落地阿里云 CUBE5.0；库卡国内份额 9.7% 行业第二；美芝压缩机全球第一；威灵汽车部件 +90% 且首次半年盈利"
+    },
+    "percentiles": {
+      "3y": {
+        "pe_p50": 13.5,
+        "pe_pct": 97.3,
+        "pb_p50": 2.64,
+        "pb_pct": 100.0
+      },
+      "5y": {
+        "pe_p50": 13.2,
+        "pe_pct": 91.8,
+        "pb_p50": 2.66,
+        "pb_pct": 91.8
+      },
+      "10y": {
+        "pe_p50": 14.5,
+        "pe_pct": 57.9,
+        "pb_p50": 3.17,
+        "pb_pct": 51.2
+      },
+      "full": {
+        "pe_p50": 13.7,
+        "pe_pct": 65.4,
+        "pb_p50": 2.99,
+        "pb_pct": 57.9
+      },
+      "identity": "PB 3.214 = PE 15.14 x ROE 21.23%",
+      "price_translation": {
+        "10y_pe_median_14_5": "67.8 - 69.8",
+        "3y_pe_median_13_5": 83.96,
+        "3y_pb_median_2_64": 77.33
+      },
+      "verdict": "表观 PE 15.14 在 3 年 97.3%、PB 100% 分位（三年最贵）；10 年 57.9%/51.2% 含着 2016-2021 核心资产泡沫。两条独立路径把合理价翻译到 67.8-84，94.14 在区间之外"
+    },
+    "buyback": {
+      "total_2026_cny_yi": 133,
+      "cancellation_cny_yi": 118,
+      "plan_range_cny_yi": "65 - 130",
+      "cancel_pct_of_mcap": 1.64,
+      "cancel_pct_of_shares": 0.0,
+      "shares_after": 76.3038,
+      "eps_accretion_pct": 1.67,
+      "pb_after": 3.337,
+      "true_shareholder_return_pct": 6.21,
+      "claim_check": "开源说「综合股东回报接近 7%」= 4.57% + 1.64% = 6.21%，不成立；要到 7% 需把 130 亿计划上限全额算入并把股息按前瞻 4.8% 算，合计 6.6%，仍差 0.4pp。真正的 7% 只在 84 元成立",
+      "vs_fcf": {
+        "dividend_cny_yi": 328,
+        "buyback_cny_yi": 130,
+        "total_cny_yi": 458,
+        "cfo_2025_cny_yi": 533.5,
+        "payout_plus_buyback_over_np_pct": 89,
+        "over_fcf_pct": 100.7,
+        "verdict": "自由现金流已被分光 —— 高分红是诚实信号，也是「主业装不下更多资本」的讣告"
+      },
+      "price_error": "在 3 年 PB 100% 分位回购 118 亿：注销机制正确、回购价格错误。118 亿 @94.14 ≈ 用 1.09 元买 1 元"
+    },
+    "ah": {
+      "a_price": 94.14,
+      "h_price_hkd": 101.6,
+      "h_in_cny": 86.97,
+      "ah_premium_snapshot_pct": 4.12,
+      "ah_premium_today_pct": 8.24,
+      "dividend_a_pct": 4.57,
+      "dividend_h_gross_pct": 4.94,
+      "dividend_h_after_20pct_tax_pct": 3.96,
+      "verdict": "买 A 不买 H：H 税后股息低于 A 的 4.57%（港股通 20% 红利税，A 持股满一年免税），每年差约 0.9pp；8% 折价要靠股息差追平需 8-12 年，且 H 流动性更差。只有折价扩到 12-15% 或免税离岸资金时 H 才更优",
+      "data_error": "6 位大师用了库内 11-16 的 4.12%；只有段永平、李录自己按今日 A 重算出 8.24%"
+    },
+    "collective_blindspots": [
+      "长鑫 4.5 亿股：8/8 方向正确（剔除），但 0/8 做 SOTP、仅 1/8 提示反转风险。若按 FVTPL 计量，它是「反复发生但非经营」—— 长鑫股价回撤 30% 会带来 −40 亿级单季归母，与经营毫无关系，无人做这个压力测试",
+      "置信度零离散（8/8 全是「中」）而核心分母相差 18.1% —— 这是社交性收敛（都被同三个数字定调：145.4 亿非经常、−35.5% 内销、97.3% 分位），不是 8 次独立判断",
+      "仓位给 5-10%，但芒格一边写「40% 的价值我判断不了」，一边给 8% 上限 —— 认知不确定性与仓位规模不匹配",
+      "「综合股东回报接近 7%」是错的：实为 6.21%（按上限 133 亿也只 6.42%）",
+      "分红 + 回购 / 归母 = 89%、/ FCF = 100.7% —— 自由现金流已被分光",
+      "在 3 年 PB 100% 分位回购 118 亿 —— 注销机制正确、回购价格错误",
+      "8/8 都假设以旧换新退坡是 2026 年的事，0/8 检查 2027 年补贴政策的延续性 —— 而这是三情景的分界线",
+      "3/8（李录、格林布拉特、斯利普）在买点表里偷偷换回卖方一致预期 EPS 6.277，把 14.7-18.2x 写成 12.75-13.5x"
+    ],
+    "key_calculations": {
+      "buyback_effect": "118 亿 @94.14 → 注销约 1.253 亿股，股本 76.304 → 75.0505 亿（−1.643%），EPS +1.670%，PB 3.214 → 3.337",
+      "scenario_2027_domestic_minus20": "归母约 330 亿（305-355），EPS 4.44，现价 PE 21.1x",
+      "scenario_growth_2_to_5pct": "现价 PE 20.12x / 19.55x；10 年中位 14.5x → 67.8-69.8 元"
+    },
+    "round1_comparison": {
+      "round1": "0 买 / 8 观察；买点 83 元",
+      "round2": "0 买 / 8 观察；8 家中位 81.5 / 核验官 73",
+      "refuted": "171 说「扣非 −22.49% = 经营恶化」被证伪：还原后真实经营利润约 377.5 亿，同比约 +1%~+2%，Q3 真实同比约 −3%",
+      "confirmed": "171 说「表观 PE 15.14 不可用」被 8 家全部确认，只是理由从「扣非更贵」变成「两个都不对」",
+      "new_risks": [
+        "长鑫 4.5 亿股是 FVTPL → 反复发生非经营，回撤 30% 会带来 −40 亿单季归母",
+        "分红 + 回购 = FCF 的 100.7%（自由现金流已被分光）",
+        "在 3 年 PB 100% 分位处回购 118 亿（机制对、价格错）"
+      ]
+    },
+    "still_missing": [
+      "外汇套保明细（名义本金、对冲比例、期限、收益在「公允价值变动/投资净收益」间的拆分）—— 最高",
+      "2026Q2 单季归母−扣非 51.4 亿的构成（占 TTM 非经常性的 35%，8 份报告 0 份解释出来）—— 高",
+      "长鑫 4.5 亿股的计量方式（FVTPL vs 权益法）、锁定期、解禁表、当前市值 —— 高",
+      "空调终端零售（sell-out）份额与渠道库存天数 —— 最高",
+      "分部利润（楼宇/机器人/工业技术各自 EBIT）—— 高",
+      "2027 年以旧换新补贴的延续或退坡 —— 最高",
+      "H 股最新报价（库内停在 11-16）—— 中高"
+    ],
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口抓回 9 份券商研报全文（2026-07-31 至 2026-11-05）"
+  },
+  "normalization": {
+    "methodology_flaw": "8 家的买点不是用盈利倍数算的，是用 7% 现金收益率算的 —— 这是本轮最大的方法论错位",
+    "consensus_first_tranche": {
+      "price": 81.5,
+      "pe_on_normalized": 16.47,
+      "cash_return_pct": 7.17,
+      "ddm_implied_r_pct": 7.3,
+      "range": "78/80/80/80/83/83/84/85"
+    },
+    "auditor_first_tranche": {
+      "price": 73.0,
+      "pe_on_normalized": 16.0,
+      "cash_return_pct": 8.01,
+      "ddm_implied_r_pct": 8.0,
+      "three_anchors": "16x 还原 E 73.1 | DDM 8% 71.7 | 现金回报 8% 73.1 | 归一 FCF x16 73.4"
+    },
+    "verdict_quote": "这一轮把诊断全换了，价格只挪了 1.8%。分母下修 20%，买点下修 2% —— 这不是重新定价，这是给旧价格换新理由。",
+    "buy_zones": {
+      "S1": {
+        "a": 73.0,
+        "h_hkd": 85.3,
+        "pe_normalized": 16.0,
+        "pb": 2.49,
+        "div_yield_pct": 5.89,
+        "position_pct": 3.0
+      },
+      "S2": {
+        "a": 65.0,
+        "h_hkd": 75.9,
+        "pe_normalized": 14.25,
+        "pb": 2.22,
+        "div_yield_pct": 6.62,
+        "position_pct": 3.0
+      },
+      "S3": {
+        "a": 57.0,
+        "h_hkd": 66.6,
+        "pe_normalized": 12.49,
+        "pb": 1.95,
+        "div_yield_pct": 7.54,
+        "position_pct": 2.0
+      },
+      "cap_pct": 8.0
+    },
+    "verdicts": {
+      "buy": [],
+      "watch": [
+        "巴菲特",
+        "芒格",
+        "费雪",
+        "段永平",
+        "李录",
+        "马克斯",
+        "格林布拉特",
+        "斯利普"
+      ],
+      "no_buy": []
+    },
+    "final_verdict": "8/8 观察等待，0 买。现价 94.14 距 52 周高 −0.9%、PB 三年 100% 分位。核验官买点 73/65/57（H 85.3/75.9/66.6），总仓 8%"
+  }
+}
