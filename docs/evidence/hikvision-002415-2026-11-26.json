@@ -1,0 +1,453 @@
+{
+  "stock": {
+    "code": "002415",
+    "name": "海康威视",
+    "hk_code": null,
+    "listing_date": "2010-05-28"
+  },
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 34.21,
+      "market_cap_cny_yi": 3135.3,
+      "total_shares_yi": 91.6487
+    },
+    "ttm": {
+      "revenue": 1007.94,
+      "parent_np": 177.88,
+      "deducted_np": 174.28,
+      "eps": 1.9408,
+      "pe": 17.63,
+      "revenue_yoy_pct": 8.08,
+      "parent_np_yoy_pct": 34.87
+    },
+    "dividends": {
+      "ttm_dps": 1.3,
+      "yield_pct": 3.8,
+      "payout_ttm_pct": 66.98,
+      "payout_fy2025_pct": 74.4,
+      "note": "67.0% 是 TTM 混合口径（0.75 属 FY2025 末期 + 0.55 属 FY2026 中期）；按 FY2025 归属口径 (0.40+0.75)/1.546 = 74.4%"
+    },
+    "forecast": [
+      {
+        "year": "2025E",
+        "eps": 1.5489,
+        "pe": 22.09,
+        "n": 17
+      },
+      {
+        "year": "2026E",
+        "eps": 1.9629,
+        "pe": 17.43,
+        "n": 17
+      },
+      {
+        "year": "2027E",
+        "eps": 2.2181,
+        "pe": 15.42,
+        "n": 17
+      },
+      {
+        "year": "2028E",
+        "eps": 2.4974,
+        "pe": 13.7,
+        "n": 17
+      }
+    ]
+  },
+  "checks": {
+    "snapshot_yoy_defect": {
+      "snapshot_net_profit_yoy": 0.253059,
+      "snapshot_revenue_yoy": 0.089577,
+      "ttm_over_fy_minus_1": {
+        "np_pct": 25.31,
+        "rev_pct": 8.96
+      },
+      "true_yoy": {
+        "parent_np_pct": 34.87,
+        "revenue_pct": 8.08
+      },
+      "note": "indicator_snapshot.revenue_yoy/net_profit_yoy 实为『TTM ÷ 最新年报 − 1』（25.306% = 177.876/141.954−1 精确吻合），不是同比。真实 TTM 同比 净利 +34.87%、营收 +8.08% —— 会系统性低估加速度（KB §35 I-SNAPSHOTYOY）"
+    },
+    "net_cash": {
+      "cash_like": 370.84,
+      "ibd_base": 42.91,
+      "ncl_due_1y": 10.91,
+      "ibd_full": 53.81,
+      "net_cash": 317.02,
+      "pct_of_mcap": 10.1,
+      "minority_interest": 92.7,
+      "net_cash_attributable_approx": 224.31,
+      "pe_ex_cash": 15.84,
+      "pe_ex_cash_attributable": 16.37,
+      "note": "四个合法口径 317.02/320.16/327.93/331.07；其中约 92.71 亿属少数股东权益，严格归母口径约 224.31 亿（KB §35 I-NETCASHSCOPE）"
+    },
+    "single_quarter": [
+      {
+        "report_date": "2025-03-31",
+        "q_rev": 185.32,
+        "q_np": 20.39,
+        "q_ded": 19.26
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev": 232.86,
+        "q_np": 36.19,
+        "q_ded": 35.63
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev": 239.4,
+        "q_np": 36.62,
+        "q_ded": 34.82
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev": 267.5,
+        "q_np": 48.76,
+        "q_ded": 47.32
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev": 207.15,
+        "q_np": 27.81,
+        "q_ded": 26.48
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev": 261.07,
+        "q_np": 51.15,
+        "q_ded": 50.64
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev": 272.22,
+        "q_np": 50.16,
+        "q_ded": 49.84
+      }
+    ],
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_p50": 21.09,
+        "pe_pct": 2.7,
+        "pb_pct": 62.16,
+        "pe_min": 17.33
+      },
+      "5y": {
+        "months": 61,
+        "pe_p50": 21.48,
+        "pe_pct": 3.28,
+        "pb_pct": 37.7,
+        "pe_min": 17.33
+      },
+      "10y": {
+        "months": 121,
+        "pe_p50": 24.64,
+        "pe_pct": 1.65,
+        "pb_pct": 19.01,
+        "pe_min": 17.33
+      },
+      "full": {
+        "months": 186,
+        "pe_p50": 25.29,
+        "pe_pct": 1.08,
+        "pb_pct": 12.37,
+        "pe_min": 17.33
+      }
+    },
+    "percentile_verification": {
+      "method1_monthly_pct": 1.08,
+      "method2_year_end_lower_count": "0/15",
+      "method3_daily_since2021_pct": 3.85,
+      "history_month_min_pe": 17.33,
+      "note": "三法交叉：月末 1.08% / 年末 0% / 逐日 3.85% → PE 17.63 是 16 年第 3 低（只有 2022-08 的 17.52、2026-09 的 16.72 更低）"
+    },
+    "qfq_artifact": {
+      "note": "『2016-05 PE 13.98』『2013-07 的 16.6』是『前复权价 × 未复权股本』伪影；正确值 2016-05 = 21.59、2013-07 = 33.18（KB §35 I-QFQSHARES）"
+    },
+    "margin": {
+      "gm_9m26_ytd_pct": 49.63,
+      "gm_ttm_pct": 48.97,
+      "gm_2025_pct": 45.88,
+      "gm_2022_pct": 42.29,
+      "gm_2010_pct": 51.64,
+      "gm_2011_pct": 49.65,
+      "note": "49.63% 是历史第三高、2012 年以来最高（不是历史最高）；且是 YTD 口径，TTM 只有 48.97%"
+    },
+    "margin_sensitivity": {
+      "base_np": 177.88,
+      "base_pe": 17.63,
+      "if_gm_46_5_np_est": 156.0,
+      "if_gm_46_5_pe": 20.1,
+      "note": "毛利率回落到 46.5% → 归母约 156 亿 → 同一价格 PE 20.1x、全史分位约 11.8%（反方最强一击）"
+    },
+    "roce": [
+      {
+        "year": "2014",
+        "ce": 151.8,
+        "ebit": 51.2,
+        "roce_pct": 38.78
+      },
+      {
+        "year": "2015",
+        "ce": 200.4,
+        "ebit": 66.0,
+        "roce_pct": 37.46
+      },
+      {
+        "year": "2016",
+        "ce": 292.2,
+        "ebit": 80.8,
+        "roce_pct": 32.82
+      },
+      {
+        "year": "2017",
+        "ce": 343.7,
+        "ebit": 107.5,
+        "roce_pct": 33.82
+      },
+      {
+        "year": "2018",
+        "ce": 387.7,
+        "ebit": 120.1,
+        "roce_pct": 32.85
+      },
+      {
+        "year": "2019",
+        "ce": 518.4,
+        "ebit": 131.2,
+        "roce_pct": 28.95
+      },
+      {
+        "year": "2020",
+        "ce": 574.8,
+        "ebit": 156.7,
+        "roce_pct": 28.67
+      },
+      {
+        "year": "2021",
+        "ce": 705.7,
+        "ebit": 183.3,
+        "roce_pct": 28.64
+      },
+      {
+        "year": "2022",
+        "ce": 848.8,
+        "ebit": 138.6,
+        "roce_pct": 17.84
+      },
+      {
+        "year": "2023",
+        "ce": 944.4,
+        "ebit": 153.5,
+        "roce_pct": 17.12
+      },
+      {
+        "year": "2024",
+        "ce": 943.7,
+        "ebit": 142.3,
+        "roce_pct": 15.07
+      },
+      {
+        "year": "2025",
+        "ce": 940.5,
+        "ebit": 164.9,
+        "roce_pct": 17.5
+      }
+    ],
+    "cash_flow": [
+      {
+        "year": "2019",
+        "cfo": 77.7,
+        "capex": 19.3,
+        "fcf": 58.4
+      },
+      {
+        "year": "2020",
+        "cfo": 160.9,
+        "capex": 20.0,
+        "fcf": 140.8
+      },
+      {
+        "year": "2021",
+        "cfo": 127.1,
+        "capex": 31.0,
+        "fcf": 96.1
+      },
+      {
+        "year": "2022",
+        "cfo": 101.6,
+        "capex": 37.6,
+        "fcf": 64.1
+      },
+      {
+        "year": "2023",
+        "cfo": 166.2,
+        "capex": 40.5,
+        "fcf": 125.8
+      },
+      {
+        "year": "2024",
+        "cfo": 132.6,
+        "capex": 46.7,
+        "fcf": 86.0
+      },
+      {
+        "year": "2025",
+        "cfo": 253.4,
+        "capex": 36.2,
+        "fcf": 217.2
+      }
+    ],
+    "cfo_9m": {
+      "y2026": 72.13,
+      "y2025": 136.97,
+      "cfo_over_np_9m26": 0.56,
+      "note": "−47% 是假警报：72.13 亿是历史第二高的 9M CFO；9M CFO/归母 0.56 高于 2016–2024 的 9M 均值 0.31"
+    },
+    "working_capital": {
+      "inventory": 333.34,
+      "receivable": 283.66,
+      "sum_over_ttm_revenue_pct": 61.21
+    },
+    "segments_2026h1": [
+      {
+        "item": "主业1产品及服务",
+        "amt": 306.16,
+        "pct": 65.39
+      },
+      {
+        "item": "机器人业务",
+        "amt": 40.28,
+        "pct": 8.6
+      },
+      {
+        "item": "热成像业务",
+        "amt": 29.64,
+        "pct": 6.33
+      },
+      {
+        "item": "智能家居业务",
+        "amt": 28.17,
+        "pct": 6.02
+      },
+      {
+        "item": "汽车电子业务",
+        "amt": 27.64,
+        "pct": 5.9
+      },
+      {
+        "item": "存储业务",
+        "amt": 19.44,
+        "pct": 4.15
+      },
+      {
+        "item": "主业建造工程",
+        "amt": 10.36,
+        "pct": 2.21
+      },
+      {
+        "item": "其他创新业务2",
+        "amt": 6.52,
+        "pct": 1.39
+      }
+    ],
+    "region_2026h1": [
+      {
+        "item": "境内",
+        "amt": 297.59,
+        "pct": 63.56
+      },
+      {
+        "item": "境外",
+        "amt": 170.64,
+        "pct": 36.44
+      }
+    ],
+    "52w": {
+      "low": 28.69,
+      "high": 38.63,
+      "pct_from_high": -11.44
+    },
+    "peers": [
+      {
+        "code": "002415",
+        "name": "海康威视",
+        "pe": 17.6,
+        "pb": 3.72,
+        "roe_pct": 21.9,
+        "dy_pct": 3.8
+      },
+      {
+        "code": "603019",
+        "name": "中科曙光",
+        "pe": 35.4,
+        "pb": 4.33,
+        "roe_pct": 13.0,
+        "dy_pct": 0.63
+      },
+      {
+        "code": "000977",
+        "name": "浪潮信息",
+        "pe": 12.7,
+        "pb": 2.43,
+        "roe_pct": 20.9,
+        "dy_pct": 0.1
+      },
+      {
+        "code": "002236",
+        "name": "大华股份",
+        "pe": 13.9,
+        "pb": 1.16,
+        "roe_pct": 8.4,
+        "dy_pct": 6.28
+      },
+      {
+        "code": "688188",
+        "name": "柏楚电子",
+        "pe": 28.6,
+        "pb": 5.77,
+        "roe_pct": 20.9,
+        "dy_pct": 2.73
+      },
+      {
+        "code": "000066",
+        "name": "中国长城",
+        "pe": 198.2,
+        "pb": 3.01,
+        "roe_pct": 1.5,
+        "dy_pct": null
+      }
+    ]
+  },
+  "normalization": {
+    "anchors": [
+      {
+        "anchor": "正常化盈利 155 亿 x 18-22x",
+        "range": "30.4 - 37.1"
+      },
+      {
+        "anchor": "正常化 FCF 180 亿 / 7-8% + 净现金 317 亿",
+        "range": "28.01 - 31.52"
+      },
+      {
+        "anchor": "剔现金 PE 15.84x x 12/14/15/16/18",
+        "range": "26.75 - 38.39"
+      },
+      {
+        "anchor": "分部估值（创新给 25-30x，分部利润为假设）",
+        "range": "29.60 - 34.94"
+      },
+      {
+        "anchor": "5 年均归母 139.9 亿的正常化 PE",
+        "range": "22.4x（现价）"
+      }
+    ],
+    "fair_value": "三锚交集中枢 31.3 元，区间 28-36 元；现价 34.21 = 中枢 +9.3%",
+    "reverse_dcf": "要在 34.21 赚 10%/年需 g=7.10%（TTM 口径），正好等于过去 9 年真实增速 7.47% → 现价隐含未来十年年增 7%，定价合理",
+    "verdict_median_first_tranche": 30.5
+  }
+}
