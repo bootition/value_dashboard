@@ -1,0 +1,440 @@
+{
+  "stock": {
+    "code": "601006",
+    "hk_code": null,
+    "name": "大秦铁路"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 4.94,
+      "market_cap_cny_yi": 976.0,
+      "total_shares_yi": 197.597,
+      "pe_ttm": 17.75,
+      "pb": 0.593,
+      "roe_period_end_pct": 3.34,
+      "identity": "17.75 x 3.34% = 0.593",
+      "bps": 8.33,
+      "net_cash_cny_yi": 138.2,
+      "net_cash_pct_of_mcap": 14.2,
+      "net_cash_per_share": 0.699,
+      "pe_ex_cash": 15.23,
+      "minority_interest_cny_yi": 159.3,
+      "price_52w_low": 4.6,
+      "price_52w_high": 5.74,
+      "pct_from_high": -13.94
+    },
+    "ttm": {
+      "revenue": 788.2,
+      "parent_np": 55.0,
+      "deducted_np": 54.6,
+      "eps": 0.2784,
+      "revenue_yoy_pct": 3.07,
+      "parent_np_yoy_pct": -17.41
+    }
+  },
+  "checks": {
+    "pb_illusion": {
+      "identity": "PB 0.593 = PE 17.75 x ROE 3.34%",
+      "verdict": "破净不是「资产打四折」，是「资产回报率打三折」被市场正确翻译成价格。8/8 大师全部识破这一点 —— 这是 13 家里第一次出现这种强共识",
+      "supporting": [
+        "ROE 从 2018 年约 11% 崩到 3.34%；归母从 145.4 亿降到 59.0 亿（-59.4%）",
+        "戈登反推：按 7.5%-8% 股权成本、2% 永续增长，0.593 的 PB 已隐含可持续 ROE 约 5.0%-5.6%，是当下 3.34% 的 1.6-1.7 倍 —— 市场已经预付了修复",
+        "若 ROE 停在 3%-4%，合理 PB 只有 0.22-0.42",
+        "1,646 亿归母权益的主体是钢轨、路基、隧道 —— 不能清算、不能转产、不能自主提价（运价受发改委管制）"
+      ],
+      "sharpest_quote": "以 8% 要求回报、零增长，合理 PB 约 0.42，合理价约 3.48 元，和当前 4.94 元仍有 42% 的距离"
+    },
+    "volume_vs_profit": {
+      "h1_volume": {
+        "cargo_wan_t": 33588,
+        "cargo_yoy_pct": 2.5,
+        "coal_wan_t": 27742,
+        "coal_yoy_pct": 5.8,
+        "daqin_line_wan_t": 20376,
+        "daqin_yoy_pct": 8.0,
+        "may_wan_t": 3885,
+        "may_yoy_pct": 17.87,
+        "jun_wan_t": 3689,
+        "jun_yoy_pct": 13.79
+      },
+      "marginal_arithmetic": {
+        "revenue_change_cny_yi": 23.2,
+        "revenue_yoy_pct": 6.2,
+        "logistics_fee_change_cny_yi": 12.91,
+        "logistics_fee_from": 9.07,
+        "logistics_fee_to": 21.98,
+        "logistics_fee_yoy_pct": 142.43,
+        "gross_profit_prior_cny_yi": 52.1,
+        "gross_profit_now_cny_yi": 51.2,
+        "gross_profit_change_cny_yi": -0.9,
+        "incremental_gm_pct": -4
+      },
+      "official_explanation": "公司披露，物流总包业务增长导致两端物流辅助费用增加...公司在 2025 年为应对煤炭市场疲软，大力拓展非煤物流总包业务，该业务虽稳住运量，但处于「让利引流」阶段，导致两端物流辅助费用大幅增加，拖累了整体利润；非煤货物盈利水平偏低",
+      "verdict": "「多拉 2.5% 的货、多收 23 亿，毛利还少了近 1 亿」—— 这不是「先投入后收获」的曲线，是「用毛利买运量」的直线。剔除 12.91 亿让利，毛利本该 +12 亿；实际倒贴 0.9 亿",
+      "key_warning": "2026Q3 毛利率 7.63%、9 月大秦线运量 -0.15% 年内首次转负 —— 量增先熄火，费用留在了成本表里",
+      "four_tests_deadline_2027_h1": [
+        "两端物流辅助费占营收比重见顶回落",
+        "运输分部毛利率回到 12% 以上并连续两季",
+        "非煤总包毛利率转正 >=3%",
+        "运量增速与毛利率同向"
+      ],
+      "tests_status": "现在成立 0 条，第 4 条刚被 9 月运量转负打脸。届时仍无一成立，就判定为结构性让利（永久降价），长期盈利能力假设一次性下修"
+    },
+    "investment_income_dependency": {
+      "h1_investment_income_cny_yi": 15.68,
+      "h1_investment_income_yoy_pct": 9.75,
+      "shuohuang_41_16_pct_cny_yi": 15.32,
+      "haoji_10_pct_cny_yi": 0.39,
+      "h1_parent_np_cny_yi": 42.55,
+      "investment_income_share_of_h1_pct": 36.8,
+      "main_business_by_basis": {
+        "ttm_reported": {
+          "np": 55.0,
+          "pe": 17.75,
+          "ev_over_np": 15.23
+        },
+        "ttm_deducted": {
+          "np": 54.6,
+          "pe": 17.88,
+          "ev_over_np": 15.34
+        },
+        "h1_annualized_main": {
+          "np": 53.74,
+          "pe": 18.16,
+          "ev_over_np": 15.59
+        },
+        "ttm_main_ex_shuohuang": {
+          "np": 24.4,
+          "pe": 40.0,
+          "ev_over_np": 34.3
+        },
+        "q3_implied_main_annualized": {
+          "np": 32,
+          "pe": 30.5
+        }
+      },
+      "verdict": "「18.16 倍」是 H1x2 的乐观年化 —— 等于假设下半年和上半年一样好。但 2025H2 归母只有 17.85 亿、2025Q4 亏 3.24 亿、2026Q3 已降到 15.69 亿。主业的真实估值区间是 25-35 倍，只有在煤运量稳定、让利退出、Q4 不再亏损时，才配得上 12 倍",
+      "munger_quote": "这家公司正在变成「一个持有朔黄 41.16% 的封闭式基金 + 一条回报率不足的大秦线」"
+    },
+    "dps_analysis": {
+      "ttm_dps_by_payment_date": 0.22177,
+      "yield_pct": 4.49,
+      "baseline_2024_total": 0.51117,
+      "nominal_change_pct": -56.6,
+      "by_fiscal_year": {
+        "FY2024": 0.26924,
+        "FY2025": 0.22169,
+        "change_pct": -17.7,
+        "but_absolute": "绝对分红从 92.6 亿降到 44.0 亿（-52%），这个是真的"
+      },
+      "ttm_payout_pct": 79.7,
+      "three_fatal_points": [
+        "「不低于 55%」只覆盖 2023-2025 年，已到期，2026 年起没有新承诺 —— 把到期承诺当永续债票息，是把希望当事实",
+        "派息率已 79.7%，分红是被利润逼下来的，不是主动留钱，派息率已无缓冲垫",
+        "经营现金流封顶：2025 年 CFO 仅 49.9 亿，而 TTM 分红约 43.8 亿 → 覆盖仅 1.14x，扣掉 capex 大概率不覆盖"
+      ],
+      "sustainable_dps": {
+        "at_ttm_eps_0_2784_55pct": 0.153,
+        "at_2026e_eps_0_302_55pct": 0.166,
+        "implied_px_at_6_to_7pct": "2.19 - 2.77"
+      },
+      "verdict": "4.49% 对 1.59% 国债只有 290bp 利差，补偿不了「单季会亏（2025Q4 -3.24 亿）、TTM -17.41%、ROCE 4.28%」"
+    },
+    "stress_test": {
+      "note": "8/8 大师都没做这道题 —— 这是本轮最大的集体盲点",
+      "base": {
+        "ttm_revenue_cny_yi": 788.2,
+        "weighted_gm_pct": 7.08,
+        "gross_profit_cny_yi": 55.8,
+        "parent_np_cny_yi": 55.0
+      },
+      "assumption": "运量 -10%、价格不变、毛利率再降 2pp 到 5.08%",
+      "steps": {
+        "revenue_cny_yi": 709.4,
+        "gross_profit_cny_yi": 36.0,
+        "gross_profit_drop_cny_yi": -19.8,
+        "after_tax_drop_cny_yi": -14.8,
+        "after_minority_drop_cny_yi": -12.7
+      },
+      "results": {
+        "base_case_parent_np": 42.3,
+        "no_minority_leakage": 40.2,
+        "with_rigid_logistics_fee": "39 - 41",
+        "with_shuohuang_also_down_10pct": "36 - 38"
+      },
+      "verdict": "归母从 55 亿掉到 36-42 亿，对应 PE 23-27x。若按 40 亿算，当前 4.94 元是 24.4 倍"
+    },
+    "roce_series": [
+      {
+        "year": "2016",
+        "ce": 1016.2,
+        "ebit": 93.2,
+        "roce_pct": 9.3
+      },
+      {
+        "year": "2017",
+        "ce": 1209.2,
+        "ebit": 190.0,
+        "roce_pct": 17.07
+      },
+      {
+        "year": "2018",
+        "ce": 1276.4,
+        "ebit": 209.8,
+        "roce_pct": 16.88
+      },
+      {
+        "year": "2019",
+        "ce": 1338.7,
+        "ebit": 199.3,
+        "roce_pct": 15.24
+      },
+      {
+        "year": "2020",
+        "ce": 1772.5,
+        "ebit": 157.4,
+        "roce_pct": 10.12
+      },
+      {
+        "year": "2021",
+        "ce": 1803.7,
+        "ebit": 184.4,
+        "roce_pct": 10.31
+      },
+      {
+        "year": "2022",
+        "ce": 1848.8,
+        "ebit": 169.5,
+        "roce_pct": 9.28
+      },
+      {
+        "year": "2023",
+        "ce": 1921.2,
+        "ebit": 178.9,
+        "roce_pct": 9.49
+      },
+      {
+        "year": "2024",
+        "ce": 1917.3,
+        "ebit": 133.4,
+        "roce_pct": 6.95
+      },
+      {
+        "year": "2025",
+        "ce": 1953.8,
+        "ebit": 82.8,
+        "roce_pct": 4.28
+      }
+    ],
+    "profit_collapse_series": [
+      {
+        "year": 2015,
+        "revenue_cny_yi": 525.0,
+        "parent_np_cny_yi": 126.5,
+        "gm_pct": 29.61,
+        "nm_pct": 24.08
+      },
+      {
+        "year": 2016,
+        "revenue_cny_yi": 446.0,
+        "parent_np_cny_yi": 71.7,
+        "gm_pct": 17.19,
+        "nm_pct": 16.06
+      },
+      {
+        "year": 2017,
+        "revenue_cny_yi": 578.0,
+        "parent_np_cny_yi": 133.4,
+        "gm_pct": 29.51,
+        "nm_pct": 23.07
+      },
+      {
+        "year": 2018,
+        "revenue_cny_yi": 783.0,
+        "parent_np_cny_yi": 145.4,
+        "gm_pct": 24.82,
+        "nm_pct": 18.56
+      },
+      {
+        "year": 2019,
+        "revenue_cny_yi": 799.0,
+        "parent_np_cny_yi": 136.7,
+        "gm_pct": 22.79,
+        "nm_pct": 17.1
+      },
+      {
+        "year": 2020,
+        "revenue_cny_yi": 727.0,
+        "parent_np_cny_yi": 107.7,
+        "gm_pct": 19.45,
+        "nm_pct": 14.82
+      },
+      {
+        "year": 2021,
+        "revenue_cny_yi": 787.0,
+        "parent_np_cny_yi": 121.8,
+        "gm_pct": 21.83,
+        "nm_pct": 15.48
+      },
+      {
+        "year": 2022,
+        "revenue_cny_yi": 758.0,
+        "parent_np_cny_yi": 112.0,
+        "gm_pct": 19.96,
+        "nm_pct": 14.78
+      },
+      {
+        "year": 2023,
+        "revenue_cny_yi": 810.0,
+        "parent_np_cny_yi": 119.3,
+        "gm_pct": 20.66,
+        "nm_pct": 14.72
+      },
+      {
+        "year": 2024,
+        "revenue_cny_yi": 746.0,
+        "parent_np_cny_yi": 90.4,
+        "gm_pct": 15.3,
+        "nm_pct": 12.11
+      },
+      {
+        "year": 2025,
+        "revenue_cny_yi": 776.0,
+        "parent_np_cny_yi": 59.0,
+        "gm_pct": 8.62,
+        "nm_pct": 7.6
+      }
+    ],
+    "data_contradictions_found": {
+      "ce_mismatch": "数据包 CE 1,953.8 亿，但「归母权益 1,646 亿 + 少数股东权益 159.3 亿 + 净现金 138.2 亿」按常见口径只有约 1,667 亿，差额约 287 亿。可能来自租赁负债、递延税、其他长期负债或 CE 定义不同。在 CE 口径未核清之前，ROCE 4.28% 的绝对值和「分母翻倍」的叙事都要打问号",
+      "consensus_2026e_fails": "2026 前三季已实现 58.24 亿，要达全年 59.7 亿，Q4 必须贡献 +1.46 亿，而 2025Q4 是 -3.24 亿、毛利率 -4.68%。按 Q4 继续亏损推算，2026 全年更可能只有 55 亿左右，2026E EPS 0.302 至少高 7%-8%，对应 PE 不是 16.4 倍而是约 17.8 倍",
+      "fisher_error_corrected": "费雪说「Q3 约 -6.6% 与 9 月单月 -0.15% 有口径矛盾」—— 其实不矛盾。前三季 28,634 万吨（+3.36%）-> 2025 前三季约 27,704；H1 20,376（+8.0%）-> 2025H1 约 18,867；相减得 2025Q3 约 8,837、2026Q3 约 8,258，同比约 -6.55%。季度 -6.6% 与 9 月单月 -0.15% 可同时成立，因为 7-8 月降幅更大"
+    },
+    "most_decisive_data": {
+      "data": "2026Q3 单季毛利率 7.63%",
+      "why": "2026Q1 14.52% -> Q2 11.54% -> Q3 7.63%，三个季度逐级下台阶；Q3 归母 15.69 亿，同比 -25.6%、环比 -16.1%；而同期大秦线前三季运量仍有 28,634 万吨、同比 +3.36%，并不是没运量。这意味着利润下滑不是简单的需求周期，而是「运量还在、单价和毛利率先塌了」。7.63% 比 2025 全年的 8.62% 还低，直接否定了「Q4 亏损是季节性、2026 年会修复」的叙事；如果让利是阶段性投入，Q3 应该看到费用率回落，而不是毛利率继续创新低。它同时把三个估值锚一起打低：盈利锚从 55-60 亿降到 55 亿以下，股息锚从 0.22 元降到 0.16-0.18 元，净资产锚的合理 PB 从 0.59 降到 0.42"
+    },
+    "process_fix_worked": {
+      "issue": "前两轮（公牛 187、神华 188）核验官结构化返回连续失败",
+      "fix": "本轮把核验官的必填字段从 11 个复杂数组改为「纯文本 6 段」返回",
+      "result": "一次通过，并完整给出了三锚、三项测算与压力测试",
+      "recommendation": "这条修复应作为后续各轮的默认做法（KB §44 I-PROCESSFIX）"
+    },
+    "still_missing": [
+      "两端物流辅助费用的单季明细、是否资本化、2027 年预算、交易对手方与关联关系 —— 决定性（结构性 vs 阶段性的唯一硬证据，决定内在价值 3.4 还是 5.2；也决定让利是让给客户还是关联方）",
+      "2026-2028 新三年分红规划 —— 极高（不低于 55% 只覆盖 2023-2025，已到期；没有它股息锚不成立）",
+      "朔黄铁路全年净利润、净资产、现金分红政策、浩吉分流影响 —— 高（占 H1 归母 36.8%；权益法确认不等于收到现金）",
+      "CE 1,953.8 亿的口径明细 —— 高（与权益+净现金差 287 亿）",
+      "2026Q4 单季数据 —— 中高（验证是否连续两年 Q4 亏损）",
+      "2019-2026 资本开支明细、在建工程、无形资产收购标的 —— 高（解释 CE 翻倍而 EBIT 下降）",
+      "少数股东权益 159.3 亿对应的子公司清单与分红安排 —— 中",
+      "大秦线 4.5 亿吨产能上限与张唐、浩吉分流的量化测算 —— 中"
+    ],
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口抓回 1 份券商研报全文（国金证券 2026-08-21），信息密度极高"
+  },
+  "normalization": {
+    "anchor_1_normalized_earnings": {
+      "usable_bases": "只有 2025 的 59.0 亿、TTM 55.0 亿、2026E 59.7 亿可用于当前定价",
+      "unusable_bases": "2018 峰值 145.4 与 2019-2023 五年均值 119.5 是旧结构（CE 只有 1,016-1,921 亿、毛利率 20%-30%）赚出来的，用旧利润配 10-16 倍 PE 等于假设资本没翻倍、煤价没下台阶、让利没发生",
+      "grid_at_55_to_59": {
+        "10x": "2.78 - 2.99",
+        "12x": "3.34 - 3.58",
+        "14x": "3.90 - 4.18",
+        "16x": "4.45 - 4.78"
+      },
+      "adopted": "3.5 - 3.6",
+      "midpoint": 3.55
+    },
+    "anchor_2_dividend": {
+      "sustainable_dps": "0.16 - 0.18",
+      "require_yield_pct": "6 - 7",
+      "value": "2.3 - 3.0",
+      "midpoint": 2.75
+    },
+    "anchor_3_book": {
+      "bps": 8.33,
+      "fair_pb_at_roe_3_34_pct": "0.41 - 0.42",
+      "value": "3.4 - 3.5",
+      "implied_roe_needed": {
+        "pb_0_5": "4.0%-4.2%",
+        "pb_0_6": "4.8%",
+        "pb_0_7": "5.6%"
+      }
+    },
+    "composite": "盈利 50% + 股息 30% + 净资产 20% = 3.37",
+    "verdict_central": 3.4,
+    "fair_range": "3.10 - 3.80",
+    "current_premium_pct": 45,
+    "buy_zones": {
+      "T1": {
+        "price": 3.15,
+        "pct_from_current": -36.2,
+        "ttm_div_yield_pct": 7.04,
+        "sustainable_div_yield_pct": "5.4 - 5.7",
+        "pb": 0.378,
+        "position_pct": 1.0,
+        "trigger": "2026 年报：Q4 单季毛利率不再为负 + 全年综合毛利率 >=9.5% + 两端物流费增速低于营收 + DPS >=0.18 且派息率 >=55%（或新三年规划）+ 核心归母 >=25 亿"
+      },
+      "T2": {
+        "price": 2.8,
+        "pct_from_current": -43.3,
+        "ttm_div_yield_pct": 7.92,
+        "sustainable_div_yield_pct": "6.1 - 6.4",
+        "pb": 0.336,
+        "position_pct": 1.5,
+        "trigger": "2027H1：综合毛利率 >=10% + 两端物流费增速降到 10% 内 + 核心归母 >=24 亿 + TTM CFO 回到 70 亿以上 + 朔黄投资收益降幅 <=10%"
+      },
+      "T3": {
+        "price": 2.5,
+        "pct_from_current": -49.4,
+        "ttm_div_yield_pct": 8.87,
+        "sustainable_div_yield_pct": "6.8 - 7.2",
+        "pb": 0.3,
+        "position_pct": 2.5,
+        "trigger": "2027 年报：核心归母 >=30 亿（或连续两季 >=8 亿）+ 新分红规划续签且派息率 >=55%、DPS >=0.18（最好 0.20）+ 朔黄现金分红覆盖权益法收益 >=80% + 净现金 >=100 亿 + 无新增 >50 亿关联收购"
+      },
+      "cap_pct": 5.0
+    },
+    "round1_comparison": {
+      "round1": "2 买 / 6 观察；买点 3.42-4.05（单一区间）",
+      "round2": "0 买 / 6 观察 / 2 不买；T1 3.15 / T2 2.80 / T3 2.50",
+      "t1_vs_round1_low": "-7.9%",
+      "t3_vs_round1_low": "-26.9%",
+      "three_denominators_changed": [
+        "2026E EPS 从 0.302 下修到 0.27-0.28",
+        "可持续 DPS 从 0.22 下修到 0.16-0.18",
+        "主业正常化利润从 H1x2 的 54 亿下修到 25-35 亿"
+      ]
+    },
+    "verdicts": {
+      "buy": [],
+      "watch": [
+        "巴菲特",
+        "芒格",
+        "李录",
+        "马克斯",
+        "格林布拉特",
+        "斯利普"
+      ],
+      "no_buy": [
+        "费雪",
+        "段永平"
+      ],
+      "first_tranche_list": {
+        "巴菲特": 3.8,
+        "费雪": 3.7,
+        "芒格": 3.6,
+        "马克斯": 3.35,
+        "格林布拉特": 3.35,
+        "斯利普": 3.35,
+        "李录": 3.0,
+        "段永平": 3.0
+      }
+    },
+    "final_verdict": "0 买 / 6 观察 / 2 不买；买点 3.15 / 2.80 / 2.50（中枢 3.40），总仓 5%，现价 0 仓"
+  }
+}
