@@ -1,0 +1,526 @@
+{
+  "stock": {
+    "code": "603899",
+    "hk_code": null,
+    "name": "晨光股份"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 23.2,
+      "market_cap_cny_yi": 212.0,
+      "total_shares_yi": 9.158,
+      "pe_ttm": 16.17,
+      "pb": 2.361,
+      "roe_period_end_pct": 14.6,
+      "identity": "16.17 x 14.6% = 2.361",
+      "net_cash_cny_yi": 58.3,
+      "net_cash_pct_of_mcap": 27.5,
+      "net_cash_per_share": 6.371,
+      "pe_ex_cash": 11.73,
+      "ev_cny_yi": 154.1,
+      "minority_interest_cny_yi": 6.3,
+      "price_52w_low": 20.63,
+      "price_52w_high": 29.07,
+      "pct_from_high": -20.19
+    },
+    "ttm": {
+      "revenue": 257.5,
+      "parent_np": 13.1,
+      "deducted_np": 11.1,
+      "eps": 1.4347,
+      "revenue_yoy_pct": 5.34,
+      "parent_np_yoy_pct": -0.66
+    }
+  },
+  "checks": {
+    "the_biggest_correction": {
+      "headline": "净现金 58.3 亿不是「额外躺着的钱」，而是「70% 分红还能维持」的缓冲垫本身",
+      "blindspot": "7/7 都把 58.3 亿当安全边际（全额计入 / 打八折 / 归母口径 52 亿），0 家验真",
+      "the_table": {
+        "dividend_cny_yi": 9.15,
+        "dividend_pct_of_np": 69.8,
+        "dividend_pct_of_cfo": 40.1,
+        "dividend_plus_buyback_cap_cny_yi": 19.15,
+        "pct_of_np_at_cap": 146,
+        "pct_of_cfo_at_cap": 84,
+        "dividend_plus_buyback_actual_cny_yi": 14.0,
+        "pct_of_np_actual": 106,
+        "pct_of_cfo_actual": 61,
+        "pct_of_fcf_actual": 78
+      },
+      "implication": "那 58.3 亿每年净积累只有约 3.8 亿（17.8 亿 FCF 派 14.0 亿）。核验官重建 2021-25 现金堆积：CFO 101.0 - 分红 31.1 - capex 25 = 44.9 亿，与账面 58.3 亿基本吻合 —— 说明大头是过去一次性堆起来的存量，不是年度盈余",
+      "distributable_estimate_cny_yi": "20 - 30",
+      "distributable_estimate_per_share": "2.2 - 3.3",
+      "per_share_claimed": 6.37,
+      "consequence_table": [
+        {
+          "net_cash": 58.3,
+          "ev": 153.7,
+          "ev_over_ebit": 9.04,
+          "earnings_yield_pct": 11.06
+        },
+        {
+          "net_cash": 52.0,
+          "ev": 160.0,
+          "ev_over_ebit": 9.41,
+          "earnings_yield_pct": 10.62
+        },
+        {
+          "net_cash": 30.0,
+          "ev": 182.0,
+          "ev_over_ebit": 10.71,
+          "earnings_yield_pct": 9.34
+        },
+        {
+          "net_cash": 20.0,
+          "ev": 192.0,
+          "ev_over_ebit": 11.29,
+          "earnings_yield_pct": 8.85
+        }
+      ],
+      "verdict": "格林布拉特整套论证压在那 11.06% 上，他的门槛是 12%、绝对下限 10% —— 换成中性口径 9.34%，连他自己的及格线都不到，T1 应从 21.84 下移到约 19.5",
+      "unanswered_question": "应收 55.4 亿 —— 一家 102.37 亿收入、6.48% 毛利率的央企/政府采购分销商，应收是它存在的前提；派掉的现金科力普的营运资本从哪来？7 家无一人回答，却都在用现金做分母"
+    },
+    "the_missed_accelerating_signal": {
+      "headline": "学生文具的出生率信号在 Q3 已经断裂，而不是平稳下滑",
+      "comparison": {
+        "y9m26": {
+          "revenue_yoy_pct": -0.03,
+          "gm_pct": 34.62,
+          "gm_yoy_pp": -0.95
+        },
+        "q3_26": {
+          "revenue_yoy_pct": -3.2,
+          "gm_pct": 31.9,
+          "gm_yoy_pp": -2.7
+        }
+      },
+      "reading": "Q3 收入降幅是 9M 的 100 倍，毛利率降幅是 2.8 倍。这是断点，不是平稳",
+      "weight": "学生毛利 8.92 亿 / 纯晨光毛利 28.34 亿 = 31.5%（占全公司毛利 25.4%），是纯晨光第二大支柱、也是唯一直接吃学生人数的品类",
+      "q3_single_quarter_impact": "11.06 x (31.90% - 34.62%) = -0.30 亿毛利 -> -0.23 亿税后 = Q3 归母的 6.3%",
+      "if_slope_continues_12m": "学生年化 34.36 -> 33.26 亿，毛利 11.90 -> 10.61 亿，税后 -0.96 亿 = 纯晨光净利 -9.7%，按 14x 是 -1.47 元/股，SOTP 中枢 24.84 -> 23.37",
+      "verdict": "现价 23.20 —— 只要这个斜率再走四个季度，现价就从折价 6.5% 变成溢价 0.7%",
+      "who_missed": "7 家的处理：巴菲特只引 9M 的 -0.95pp；芒格在 mix 分解里也用 -0.95pp；李录是唯一把 9M 读透的（「-0.03% 意味着人均支出年增 5-6% 刚好对冲学生数下降，没有余量」）但用的也是平均数，而 Q3 已证明对冲失效；其余四家未提"
+    },
+    "self_dilution": {
+      "office_direct_sales": {
+        "revenue_y9m26_cny_yi": 102.37,
+        "yoy_pct": 5.63,
+        "share_pct": 56.8,
+        "gm_pct": 6.48,
+        "gm_change_pp": -0.31,
+        "gross_profit_cny_yi": 6.63
+      },
+      "pure_morning_light": {
+        "revenue_y9m26_cny_yi": 77.73,
+        "gross_profit_cny_yi": 28.51,
+        "gm_pct": 36.67,
+        "gm_premium_pp": 17.2,
+        "nm_pct": 9.61,
+        "nm_premium_pp": 4.3
+      },
+      "key_ratios": "56.8% 的收入只贡献 18.9% 的毛利、21.5% 的净利；每 1pp 收入从纯晨光挪到科力普，混合毛利率掉 0.302pp",
+      "the_only_test": "壁垒的证据必须是「规模越大净利率越高」，而科力普做五年、102 亿收入，净利率仍 2.0%、毛利率 6.48% 且还在降 —— 刚够覆盖履约与账期成本，是用资产负债表换收入的 pass-through",
+      "buffer_cushion": {
+        "gm_pct": 6.48,
+        "cost_and_tax_pct_of_revenue": 4.48,
+        "cushion_pp": 2.0,
+        "at_minus_1pp": "科力普自身净利 -37.6%",
+        "at_minus_2pp": "科力普自身净利 -75%，归零",
+        "note": "而下降已经连续三个报告期（9M -0.31pp、Q3 -0.2pp）"
+      },
+      "sharpest_criticism": "费雪按 0.3-0.5x PS（15-25x 净利）给一家缓冲垫 2pp 的分销商定价，是本轮最严重的估值错误"
+    },
+    "pe_pb_identity": {
+      "identity": "PB 2.361 = PE 16.17 x ROE 14.6%",
+      "verdict": "两个低分位（全史 4.9% / 4.2%）是同一事实的两种写法，不是两个独立信号。10 年 PE 中位 33.0 倍是 ROE 30%、毛利率 23.21% 时代的体温计",
+      "normalized_e": {
+        "cny_yi": 12.6,
+        "eps": 1.376,
+        "derivation": "TTM 13.1 含约 0.79 亿税后利息收入（58.3 x 1.8% x 0.75），EV 法里已单独计入现金、再算进 E 就是双计 -> 12.31；2026 实际（Q4 持平 2025Q4 的 3.62 亿）≈ 13.14，但 Q3 -6.44% 显示下行未止，取 13.0；两者平均下取 12.6"
+      },
+      "real_pe_at_current_price": {
+        "ttm": 16.22,
+        "deducted": 19.14,
+        "consensus_2026e": 15.3,
+        "normalized": 16.87
+      },
+      "verdict_on_the_selling_point": "「16.17x、全史 4.9% 分位」这个卖点，用扣非 19.1x 看就明显言过其实 —— 分母混了非经常损益和利息收入",
+      "ex_cash_grid": {
+        "net_cash_52": {
+          "12x": 22.19,
+          "14x": 24.94,
+          "16x": 27.69,
+          "18x": 30.44
+        },
+        "net_cash_30": {
+          "12x": 19.79,
+          "14x": 22.54,
+          "16x": 25.29,
+          "18x": 28.04
+        },
+        "net_cash_20": {
+          "12x": 18.7,
+          "14x": 21.45,
+          "16x": 24.2,
+          "18x": 26.95
+        }
+      },
+      "verdict_on_grid": "现价 23.20 在「52 亿 + 14x」格子里折价 7%，在「20 亿 + 14x」格子里溢价 8% —— 同一家公司同一倍数，只换现金口径，折价就翻成溢价"
+    },
+    "roce_double_correction": {
+      "series": [
+        {
+          "year": "2016",
+          "ce": 25.5,
+          "ebit": 5.6,
+          "roce_pct": 23.44
+        },
+        {
+          "year": "2017",
+          "ce": 29.9,
+          "ebit": 7.4,
+          "roce_pct": 26.8
+        },
+        {
+          "year": "2018",
+          "ce": 35.7,
+          "ebit": 9.5,
+          "roce_pct": 29.02
+        },
+        {
+          "year": "2019",
+          "ce": 45.7,
+          "ebit": 12.9,
+          "roce_pct": 31.58
+        },
+        {
+          "year": "2020",
+          "ce": 55.4,
+          "ebit": 15.3,
+          "roce_pct": 30.18
+        },
+        {
+          "year": "2021",
+          "ce": 68.8,
+          "ebit": 18.7,
+          "roce_pct": 30.07
+        },
+        {
+          "year": "2022",
+          "ce": 76.1,
+          "ebit": 16.2,
+          "roce_pct": 22.41
+        },
+        {
+          "year": "2023",
+          "ce": 87.8,
+          "ebit": 19.2,
+          "roce_pct": 23.49
+        },
+        {
+          "year": "2024",
+          "ce": 98.5,
+          "ebit": 17.8,
+          "roce_pct": 19.13
+        },
+        {
+          "year": "2025",
+          "ce": 103.3,
+          "ebit": 17.0,
+          "roce_pct": 16.89
+        }
+      ],
+      "book_incremental_roce_2019_2025_pct": 7.12,
+      "who_used_it": "6 家把它当全篇最硬的否定证据（芒格称「全部数据里最伤的一条」）",
+      "the_error": "算术无误但口径有误：分母里混进了现金",
+      "reconstruction": {
+        "cf0_2021_2025_cny_yi": 101.0,
+        "dividend_cny_yi": 31.1,
+        "capex_cny_yi": 25,
+        "cash_build_cny_yi": 44.9,
+        "ce_2019_cny_yi": 45.7,
+        "ebit_2019_cny_yi": 12.9,
+        "note": "2016 年 CE 25.5 更说明早年没有多余现金",
+        "delta_ce_decomposition": "57.6 亿里约 45 亿是现金、7-8 亿是经营资本",
+        "operating_incremental_roce_pct": 43.8
+      },
+      "verdict": "经营性增量 ROCE ≈ 43.8%，不是 7.12%，差 6 倍且方向相反",
+      "but_not_bullish": "一家增量 ROCE 43.8% 的公司却分红 70%，等于管理层自己承认「没有 43.8% 的项目了」—— 那个 43.8% 是历史值不是边际值",
+      "accurate_diagnosis": "存量毛利率 36%、经营 ROCE 35.45%、历史增量 44%、边际回报 <8%（由 70% 分红率反证）"
+    },
+    "split_up_sotp": {
+      "pure_ml_implied_multiple": {
+        "base_case": 12.45,
+        "optimistic": 11.01,
+        "conservative": 14.4,
+        "median": 12.4,
+        "calc": "按（科力普/九木/净现金）= (30/6/52) 得纯晨光隐含市值 124.0 亿 / 9.96 = 12.45x"
+      },
+      "killer_argument": "分拆后你剩一家 36.6% 毛利率、零增长、学生人数逐年下降的公司，市场现在给它 12.4x，而七家里三家认为它该值 15-19x ——「释放价值」等于要求市场在剥离掉唯一正增长业务之后把剩余业务倍数上调 21%-53%",
+      "real_release": "只有「科力普拿 IPO 溢价」这一块（10-31 亿 = 1.1-3.4 元/股），「纯晨光重估」这块是零或负",
+      "marks_self_contradiction": "马克斯自己写了两句互相拆台的话（「分拆后晨光更小更慢」+「别用分拆前的 EPS 给分拆后的公司定价」），看到了但没走完最后一步",
+      "sotp_by_auditor": {
+        "pessimistic": {
+          "pure_ml": 129.5,
+          "kelipu": 21.8,
+          "jiumu": 0,
+          "net_cash": 26.0,
+          "total": 177.3,
+          "per_share": 19.36
+        },
+        "base": {
+          "pure_ml": 139.4,
+          "kelipu": 30.0,
+          "jiumu": 6.0,
+          "net_cash": 52.0,
+          "total": 227.4,
+          "per_share": 24.83
+        },
+        "optimistic": {
+          "pure_ml": 159.4,
+          "kelipu": 38.2,
+          "jiumu": 8.0,
+          "net_cash": 58.3,
+          "total": 263.9,
+          "per_share": 28.82
+        }
+      },
+      "kelipu_multiple_choice": {
+        "auditor": "11x = 30 亿",
+        "fisher": "0.3-0.5x PS = 38-63 亿",
+        "why_11x": [
+          "毛利率缓冲只有 2.0pp，跌 2pp 归零的利润不能按永续年金定价",
+          "占 56.8% 收入只给 18.9% 毛利，收入质量是纯晨光的 1/6",
+          "增速已从 +40.7% 塌到 +5.63%（9M）、+4%（Q3），倍数应随增速同步塌",
+          "吃掉大量营运资本（应收 55.4 亿量级），可比是物流/办公分销商，8-12x 是常态"
+        ]
+      },
+      "asymmetry": "分拆的边界：上限 38.2 亿（14x）= +0.9 元/股；下限 21.8 亿（8x）= -0.9 元/股。所以「重大催化剂」只是一个 ±0.9 元的对称期权，不是费雪/格林布拉特说的 +11 到 +31 亿释放"
+    },
+    "revenue_profit_gap": {
+      "waterfall": {
+        "start_2021_np": 15.2,
+        "scale_effect": 6.46,
+        "gm_decline_effect": -12.17,
+        "expense_ratio_effect": 3.6,
+        "end_2025_np": 13.09
+      },
+      "reading": "毛利率下降贡献 -12.17 亿，等于利润缺口的 143%。费用率没有上升，是下降的（负担率 14.57% -> 13.14%，改善 1.46pp）—— 「费用刚性/失控」这个流行叙事是错的",
+      "the_third_error_seven_masters_made": {
+        "question": "如果 2025 年毛利率仍是 23.21%，归母会是多少？",
+        "wrong_answer": 25.27,
+        "why_wrong": "等于让多出来的 12.18 亿毛利免税",
+        "correct_answer": 22.23,
+        "correct_nm_pct": 8.86,
+        "calc": "13.1 + 12.18 x (1 - 25%) = 22.23"
+      },
+      "sensation": "22.23 亿比 2021 峰值 15.2 亿还高 46%。收入 +42.6% 和费用率改善 1.46pp 都真实发生了，本该把利润推到历史新高；是毛利率的 -4.85pp 把 9.1 亿税后利润全部抹掉还倒欠 2 亿",
+      "hidden_inflated_part": "那 1.46pp 里有一块是假的：58.3 亿按 1.8% 生息 = 1.05 亿税前 / 0.79 亿税后 = 收入的 0.31pp，剔掉后真实费用率改善只有 1.15pp —— 七家里只有芒格点到了这一层"
+    },
+    "three_extra_findings": {
+      "seasonal_trap_kills_triggers": "Q4 是毛利率最低的季节（2025Q4 为 15.54%）。巴菲特要求「2026Q4 整体毛利率 >=19.3%」（需 +3.76pp，永不触发）；费雪要求「连续两季 >=19.5%」（含 Q4 的任何窗口必失败）；马克斯要求「2026 年报 >=19.2%」（需 Q4 >=18.0%，较 15.54% 要 +2.5pp，极难）。三家都写了「价格与基本面双确认」，实际结果是裸价格单",
+      "consensus_2026e_too_high": "六家在买点表里用 2026E 一致预期 1.517（=13.9 亿），只有李录点破：13.9 亿隐含 2026Q4 归母 4.38 亿、同比 +21.0%，而 Q3 刚出 -6.44%、Q4 又是毛利率最低季。现价真实 2026E PE 是 16.2x，不是 15.3x",
+      "fy2026_gm_fully_determined_by_q4": "Q4 重演 15.54% -> FY 18.30%（比 2025 的 18.36% 还低）；Q4 做到 18.0% -> FY 19.05%。七家反复引用的「9M 毛利率 19.51%、只降 0.11pp 是企稳证据」，是三个季度的平均数，第四季度这个 15.54% 的低点根本还没进来"
+    },
+    "percentiles": {
+      "3y": {
+        "pe_pct": 18.9,
+        "pb_pct": 16.2
+      },
+      "5y": {
+        "pe_pct": 11.5,
+        "pb_pct": 9.8
+      },
+      "10y": {
+        "pe_pct": 5.8,
+        "pb_pct": 5.0
+      },
+      "full": {
+        "pe_pct": 4.9,
+        "pb_pct": 4.2
+      },
+      "note": "PE 与 PB 双双在全史 4.9% / 4.2% 分位；10 年 PE 中位 33.0 倍"
+    },
+    "segment_margins_y9m26": {
+      "office_direct_sales": {
+        "revenue": 102.37,
+        "yoy_pct": 5.63,
+        "gm_pct": 6.48,
+        "gm_change_pp": -0.31,
+        "share_pct": 56.8
+      },
+      "student_stationery": {
+        "revenue": 25.77,
+        "yoy_pct": -0.03,
+        "gm_pct": 34.62,
+        "gm_change_pp": -0.95,
+        "share_pct": 14.3
+      },
+      "office_stationery": {
+        "revenue": 22.99,
+        "yoy_pct": -0.05,
+        "gm_pct": 26.73,
+        "gm_change_pp": 0.19,
+        "share_pct": 12.8
+      },
+      "writing_instruments": {
+        "revenue": 20.86,
+        "yoy_pct": 4.75,
+        "gm_pct": 45.95,
+        "gm_change_pp": 1.83,
+        "share_pct": 11.6
+      },
+      "other": {
+        "revenue": 7.75,
+        "yoy_pct": 6.33,
+        "gm_pct": 47.65,
+        "gm_change_pp": 3.75,
+        "share_pct": 4.3
+      },
+      "total": {
+        "revenue": 180.1,
+        "yoy_pct": 3.94,
+        "gm_pct": 19.51,
+        "gm_change_pp": -0.11
+      }
+    },
+    "new_business": {
+      "jiumu": {
+        "revenue_y9m26": 13.11,
+        "yoy_pct": 13.54,
+        "stores": "约 900 家",
+        "members": "过千万",
+        "h1_segment_np_cny_wan": 576.78,
+        "prior_year_same_period_npu_cny_wan": -2311,
+        "note": "已转正，但净利率仅 0.43%"
+      },
+      "kelipu": {
+        "revenue_h1_cny_yi": 65.3,
+        "yoy_pct": 6.5,
+        "np_h1_cny_yi": 1.31,
+        "nm_pct": 2.0,
+        "note": "已启动分拆上市项目"
+      },
+      "chenguang_tech_online": {
+        "revenue_y9m26": 10.35,
+        "yoy_pct": 6.97,
+        "h1_yoy_pct": 1.1,
+        "note": "放缓"
+      },
+      "overseas": {
+        "revenue_h1_cny_yi": 5.45,
+        "yoy_pct": -2.22,
+        "gm_pct": 37.7,
+        "gm_change_pp": 1.01
+      },
+      "traditional_core": {
+        "h1_revenue_yoy_pct": -0.1,
+        "q1_yoy_pct": -2.9,
+        "q2_yoy_pct": 3.1,
+        "gm_pct": 35.3,
+        "gm_change_pp": 1.15
+      },
+      "birth_rate_official_wording": "受国内人口结构变化和出生率下降，传统核心业务靠数量增长对收入的贡献趋弱，收入增长更多来自消费结构升级和产品升级，产品开发减量提质"
+    },
+    "auditor_arithmetic_corrections": {
+      "note": "核验官本轮最高价值不在三锚，而在三条算术纠错 —— 都不是数据错误，是推理错误，只能靠复核发现",
+      "corrections": [
+        "净现金不能全额当安全边际：EY 从 11.06% 打回 9.34%（中性口径）",
+        "「增量 ROCE 7.12%」分母混了现金：经营性约 43.8%",
+        "「毛利率若维持 23.21%，归母 25.27 亿」漏了税盾：正确 22.23 亿"
+      ],
+      "sotp_corrections": [
+        "纯晨光四线合计是 77.37 亿，不是 71.8 亿（用 71.8 会漏 5.6 亿收入）",
+        "加权毛利率是 36.64%，不是 33%",
+        "九木 13.11 亿与晨光科技 10.35 亿已包含在四线里 —— 任何把它们再加一遍的 SOTP 都会凭空多算 13-23 亿"
+      ]
+    },
+    "master_handoff": {
+      "disk_md_count": 8,
+      "passed_to_auditor": 7,
+      "missing": "sleep（结构化返回失败返回 null，但 .md 已落盘 15,707 字节）",
+      "auditor_behavior": "如实报「收到 7 份，缺 sleep」并注明「我不读取、不代拟其结论」",
+      "lead_fix": "主控读盘补齐 sleep（观察等待、首档 20.60、上限 6%）",
+      "impact": "核验官按 7 份算「首档中位 20.80、下移 0.70（-3.26%）」；补入 sleep 20.60 后 8 份中位是 20.75、下移 0.75（-3.49%）。差异不大，但与海康那轮（1.6% 差异抹掉核心发现）是同一类风险"
+    },
+    "still_missing": [
+      "58.3 亿净现金里多少是受限/经营性（保证金、票据保证金、科力普履约保函）；是合并口径还是母公司口径 —— 最高（若只有 42.3 亿算超额，EV 从 153.7 升到 169.7 亿、EY 从 11.06% 降到 10.0%，三档整体下移约 1.7 元）",
+      "科力普的分部资本占用（应收/存货/CE）与真实 ROCE —— 极高（102 亿收入、6.48% 毛利率的生意，1pp 坏账就能吞掉全部分部利润）",
+      "科力普分拆方案（发行比例、定价、母公司保留股权、是否并表、募资用途）—— 极高（决定 SOTP 上限是 31.9 还是 23.9 元）",
+      "2021 年科力普收入占比（用于验证结构位移）—— 高（核验官反推约 41%）",
+      "九木单店模型（坪效、租金占比、回本周期、关店率、直营/加盟）—— 中高",
+      "五年费用明细（销售/管理/研发/财务分项）—— 中高（核验官只能从毛利率与净利率倒算）",
+      "capex 与折旧真实数 —— 中（FCF 在 13.9 还是 17.8 亿之间摆动）",
+      "出生率与在校生数的官方口径预测（2026-2045）—— 高"
+    ],
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口抓回 6 份券商研报全文（2026-09-01 至 2026-11-02）"
+  },
+  "normalization": {
+    "verdict_central": 24.3,
+    "central_derivation": "SOTP 基准 24.83 与剔现金（52 亿 + 14x）24.94 的平均下取整，因学生文具风险尚未计入",
+    "current_vs_central_pct": 95.5,
+    "three_readings": [
+      {
+        "reading": "基准中枢 24.3",
+        "result": "现价折价 4.5%"
+      },
+      {
+        "reading": "计入学生文具 -9.7% 后中枢 23.37",
+        "result": "现价溢价 0.7%"
+      },
+      {
+        "reading": "现金口径打实到 20 亿则中枢 21.5",
+        "result": "现价溢价 8%"
+      }
+    ],
+    "conclusion": "三种读法没有一种叫「便宜」",
+    "safety_margin_threshold_px": 20.65,
+    "buy_zones_reference": {
+      "eight_masters_median": 20.75,
+      "company_buyback_avg_h1": 21.51,
+      "week52_low": 20.63
+    },
+    "three_layer_confirmation": [
+      "合并毛利率连续两季 >=18.5% 且办公直销 >=6.4%",
+      "单季归母同比 >=0%、扣非同比 >=0%",
+      "分拆方案公布、母公司保留 >=70%、发行定价对应 PS >=0.25x"
+    ],
+    "verdicts": {
+      "buy": [
+        "马克斯（但自称现价 23.20 一分不买）"
+      ],
+      "watch": [
+        "巴菲特",
+        "芒格",
+        "费雪",
+        "段永平",
+        "李录",
+        "格林布拉特",
+        "斯利普"
+      ],
+      "no_buy": [],
+      "at_current_price_all_zero": true,
+      "first_tranche_list": {
+        "段永平": 18.0,
+        "李录": 20.5,
+        "斯利普": 20.6,
+        "芒格": 20.7,
+        "巴菲特": 20.8,
+        "费雪": 20.8,
+        "马克斯": 21.0,
+        "格林布拉特": 21.84
+      }
+    },
+    "round1_comparison": {
+      "round1": "5 买 / 1 观察 / 2 不买；首档中位 21.50",
+      "round2": "1 买 / 7 观察 / 0 不买（口径修正后 0 买）；首档中位 20.75",
+      "change_pct": -3.49
+    },
+    "final_verdict": "现价 23.20 = 0 仓位；首档不高于 20.65；裁定中枢 24.3，折价仅 4.5%"
+  }
+}
