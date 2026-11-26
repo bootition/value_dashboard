@@ -1,0 +1,536 @@
+{
+  "stock": {
+    "code": "600066",
+    "name": "宇通客车",
+    "hk_code": null,
+    "note": "纯 A 股，无 H 股，本报告不含 A/H 比价"
+  },
+  "generated_at": "2026-11-26",
+  "source_db": "data/valuedashboard.duckdb",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "snapshot": {
+      "pe_ttm": 13.009618,
+      "pb_mrq": 4.959787,
+      "dividend_yield": 0.0625,
+      "roe": 0.393203,
+      "roic": 0.4295,
+      "gross_margin": 0.260018,
+      "net_margin": 0.133796,
+      "debt_ratio": 0.558747,
+      "interest_bearing_debt_cny": 128190000.0,
+      "market_cap_cny": 70846055136.0,
+      "last_close": 32.0,
+      "payout_ratio_ttm": 0.813101,
+      "roce_latest": 0.336769,
+      "roce_10y_median": 0.137166,
+      "roce_10y_min": 0.021857,
+      "roce_10y_cv": 0.918749,
+      "revenue_yoy": -0.013278,
+      "net_profit_yoy": -0.01959,
+      "deducted_profit_yoy": 0.105371,
+      "cf_to_net_profit": 1.719656,
+      "max_drawdown": 0.299861,
+      "annualized_volatility": 0.317488
+    },
+    "total_shares": 2213939223,
+    "ttm": {
+      "formula": "ytd(2026-09-30) + fy(2025-12-31) - ytd(2025-09-30)",
+      "revenue_cny_yi": 408.8,
+      "parent_net_profit_cny_yi": 54.46,
+      "deducted_net_profit_cny_yi": 50.63,
+      "eps_reported": 2.4597,
+      "eps_deducted": 2.2868,
+      "pe_reported": 13.01,
+      "pe_deducted": 13.99,
+      "ded_over_parent_ttm_pct": 92.97,
+      "ded_over_parent_9m_pct": 97.33,
+      "purity_note": "9M26 97.3% 是 YTD 口径；TTM 口径是 93.0%——8/8 报告混用（KB §28 I-YTDPURITY）"
+    },
+    "dividends": {
+      "events": [
+        {
+          "ex_date": "2026-05-15",
+          "dps": 2.0
+        },
+        {
+          "ex_date": "2025-09-11",
+          "dps": 0.5
+        },
+        {
+          "ex_date": "2025-05-14",
+          "dps": 1.0
+        },
+        {
+          "ex_date": "2024-12-05",
+          "dps": 0.5
+        },
+        {
+          "ex_date": "2024-05-16",
+          "dps": 1.5
+        },
+        {
+          "ex_date": "2023-05-19",
+          "dps": 1.0
+        },
+        {
+          "ex_date": "2022-05-25",
+          "dps": 0.5
+        },
+        {
+          "ex_date": "2021-05-21",
+          "dps": 0.5
+        }
+      ],
+      "ttm_window_dps": 2.0,
+      "ttm_window_yield_pct": 6.25,
+      "fy2025_attributed_dps": 2.5,
+      "fy2025_attributed_yield_pct": 7.81,
+      "fy2025_payout_pct": 101.6,
+      "defect": "近 12 个月窗口只捞到 2026-05-15 的 2.0，漏 2025-09-11 的 0.5 中期；按归属年度 FY2025 = 0.5+2.0 = 2.50"
+    },
+    "cycle": {
+      "avg_parent_np_10y_cny_yi": 24.79,
+      "avg_deducted_np_10y_cny_yi": 19.87,
+      "n_years": 10,
+      "roce_10y_mean_pct": 16.72,
+      "roce_10y_median_pct": 13.72,
+      "roce_10y_min_pct": 2.19,
+      "roce_10y_max_pct": 34.81,
+      "roce_cv_population": 0.715,
+      "roce_cv_sample": 0.754,
+      "roce_series": [
+        {
+          "year": "2016",
+          "roce_pct": 34.81
+        },
+        {
+          "year": "2017",
+          "roce_pct": 25.21
+        },
+        {
+          "year": "2018",
+          "roce_pct": 15.72
+        },
+        {
+          "year": "2019",
+          "roce_pct": 11.72
+        },
+        {
+          "year": "2020",
+          "roce_pct": 2.19
+        },
+        {
+          "year": "2021",
+          "roce_pct": 2.31
+        },
+        {
+          "year": "2022",
+          "roce_pct": 3.53
+        },
+        {
+          "year": "2023",
+          "roce_pct": 11.52
+        },
+        {
+          "year": "2024",
+          "roce_pct": 26.55
+        },
+        {
+          "year": "2025",
+          "roce_pct": 33.68
+        }
+      ],
+      "cv_note": "群报告曾写 CV 0.92，实测 0.715（总体）/0.754（样本），库字段 roce_10y_cv=0.75 不可精确复算"
+    },
+    "analyst_forecasts": [
+      {
+        "fiscal_year": "2025E",
+        "eps": 2.5089,
+        "analysts": 20,
+        "pe_at_last_close": 12.75
+      },
+      {
+        "fiscal_year": "2026E",
+        "eps": 2.7211,
+        "analysts": 20,
+        "pe_at_last_close": 11.76
+      },
+      {
+        "fiscal_year": "2027E",
+        "eps": 3.0663,
+        "analysts": 20,
+        "pe_at_last_close": 10.44
+      },
+      {
+        "fiscal_year": "2028E",
+        "eps": 3.455,
+        "analysts": 20,
+        "pe_at_last_close": 9.26
+      }
+    ]
+  },
+  "checks": {
+    "net_cash": {
+      "cash_like_cny_yi": 128.27,
+      "interest_bearing_cny_yi": 2.92,
+      "net_cash_cny_yi": 125.4,
+      "pct_of_market_cap": 17.7,
+      "contract_liabilities_cny_yi": 26.7,
+      "ex_cash_pe_reported": 10.71,
+      "ex_cash_pe_deducted": 11.52,
+      "note": "净现金含合同负债浮存，保守口径应折扣"
+    },
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_p10_p50_p90": [
+          12.27,
+          14.21,
+          21.1
+        ],
+        "pb_p10_p50_p90": [
+          2.87,
+          4.31,
+          5.07
+        ],
+        "pe_pct_raw": 27.0,
+        "pb_pct_raw": 86.5,
+        "pe_pct_qfq_WRONG": 45.9,
+        "pb_pct_qfq_WRONG": 91.9
+      },
+      "5y": {
+        "months": 61,
+        "pe_p10_p50_p90": [
+          12.47,
+          17.46,
+          37.45
+        ],
+        "pb_p10_p50_p90": [
+          1.23,
+          3.81,
+          4.84
+        ],
+        "pe_pct_raw": 16.4,
+        "pb_pct_raw": 91.8,
+        "pe_pct_qfq_WRONG": 27.9,
+        "pb_pct_qfq_WRONG": 95.1
+      },
+      "10y": {
+        "months": 121,
+        "pe_p10_p50_p90": [
+          11.65,
+          16.01,
+          44.56
+        ],
+        "pb_p10_p50_p90": [
+          1.51,
+          2.3,
+          4.5
+        ],
+        "pe_pct_raw": 24.8,
+        "pb_pct_raw": 95.9,
+        "pe_pct_qfq_WRONG": 50.4,
+        "pb_pct_qfq_WRONG": 97.5
+      }
+    },
+    "qfq_trap": {
+      "note": "前复权价会把 PE 分位从 24.8% 抬到 50.4%（把「便宜」变成「不便宜」），把 PB 分位从 95.9% 抬到 97.5%——实测复现 KB §25 I-VALRAW"
+    },
+    "pb_history": {
+      "top5_daily_pb": [
+        {
+          "trade_date": "2026-07-30",
+          "pb": 5.767
+        },
+        {
+          "trade_date": "2025-12-17",
+          "pb": 5.689
+        },
+        {
+          "trade_date": "2025-12-18",
+          "pb": 5.656
+        },
+        {
+          "trade_date": "2026-08-10",
+          "pb": 5.625
+        },
+        {
+          "trade_date": "2025-12-19",
+          "pb": 5.606
+        }
+      ],
+      "current_pb": 4.96,
+      "defect": "报载「PB 5.09/4.96 为历史最高/11 年新高」是错的：10 年最高 5.767（2026-07-30）出现在 2026-05-15 派现 44.28 亿之后——100% 派息把净资产从 162.25 打到 129.76 亿，PB 被动冲高"
+    },
+    "price_percentile": {
+      "ten_year_daily_close_pct": 96.0,
+      "note": "32.00 处 10 年日收盘 96.0% 分位（不是某位 Agent 说的 90.1%）"
+    },
+    "single_quarter": [
+      {
+        "report_date": "2025-03-31",
+        "q_rev_yi": 64.2,
+        "q_np_yi": 7.55,
+        "q_ded_yi": 6.42
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev_yi": 97.1,
+        "q_np_yi": 11.81,
+        "q_ded_yi": 9.08
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev_yi": 102.4,
+        "q_np_yi": 13.57,
+        "q_ded_yi": 10.66
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev_yi": 150.6,
+        "q_np_yi": 22.62,
+        "q_ded_yi": 19.64
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev_yi": 59.1,
+        "q_np_yi": 6.59,
+        "q_ded_yi": 6.07
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev_yi": 108.1,
+        "q_np_yi": 12.08,
+        "q_ded_yi": 11.88
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev_yi": 91.0,
+        "q_np_yi": 13.16,
+        "q_ded_yi": 13.03
+      }
+    ],
+    "cash": {
+      "ttm_cfo_cny_yi": 94.0,
+      "cfo_over_np": 1.73,
+      "fy2025_cfo_cny_yi": 32.0,
+      "fy2025_cfo_over_np": 0.58,
+      "fy2017_cfo_cny_yi": -17.5
+    },
+    "segments": [
+      {
+        "report_date": "2025-12-31",
+        "type": 3,
+        "item": "海外销售",
+        "amount_cny_yi": 211.1,
+        "ratio_pct": 50.95
+      },
+      {
+        "report_date": "2025-12-31",
+        "type": 3,
+        "item": "国内销售",
+        "amount_cny_yi": 154.0,
+        "ratio_pct": 37.18
+      },
+      {
+        "report_date": "2025-12-31",
+        "type": 3,
+        "item": "其他(补充)",
+        "amount_cny_yi": 49.2,
+        "ratio_pct": 11.87
+      }
+    ],
+    "peers": [
+      {
+        "code": "600066",
+        "name": "宇通客车",
+        "pe": 13.01,
+        "pb": 4.96,
+        "roe_pct": 39.3,
+        "div_yield_pct": 6.25
+      },
+      {
+        "code": "000800",
+        "name": "一汽解放",
+        "pe": 29.29,
+        "pb": 0.94,
+        "roe_pct": 3.2,
+        "div_yield_pct": 0.88
+      },
+      {
+        "code": "000951",
+        "name": "中国重汽",
+        "pe": 11.01,
+        "pb": 1.33,
+        "roe_pct": 12.6,
+        "div_yield_pct": 2.64
+      },
+      {
+        "code": "600166",
+        "name": "福田汽车",
+        "pe": 12.63,
+        "pb": 1.09,
+        "roe_pct": 8.9,
+        "div_yield_pct": null
+      },
+      {
+        "code": "000550",
+        "name": "江铃汽车",
+        "pe": 9.91,
+        "pb": 1.1,
+        "roe_pct": 11.5,
+        "div_yield_pct": 3.6
+      },
+      {
+        "code": "301039",
+        "name": "中集车辆",
+        "pe": 16.99,
+        "pb": 0.92,
+        "roe_pct": 5.4,
+        "div_yield_pct": 5.03
+      },
+      {
+        "code": "600686",
+        "name": "金龙汽车",
+        "pe": 9.67,
+        "pb": 1.49,
+        "roe_pct": 16.4,
+        "div_yield_pct": 2.8
+      },
+      {
+        "code": "000957",
+        "name": "中通客车",
+        "pe": 11.12,
+        "pb": 1.54,
+        "roe_pct": 14.7,
+        "div_yield_pct": 1.21
+      }
+    ],
+    "52w": {
+      "low_close": 25.25,
+      "high_close": 38.25,
+      "pct_from_high": -16.34
+    },
+    "price_ladder": [
+      {
+        "price_cny": 32.0,
+        "pe_reported": 13.01,
+        "pe_deducted": 13.99,
+        "pe_normalized_E5": 29.03,
+        "pe_ex_cash_normalized": 23.89,
+        "pb": 4.96,
+        "div_yield_fy2025_pct": 7.81,
+        "div_yield_ttm_pct": 6.25
+      },
+      {
+        "price_cny": 26.0,
+        "pe_reported": 10.57,
+        "pe_deducted": 11.37,
+        "pe_normalized_E5": 23.59,
+        "pe_ex_cash_normalized": 18.45,
+        "pb": 4.03,
+        "div_yield_fy2025_pct": 9.62,
+        "div_yield_ttm_pct": 7.69
+      },
+      {
+        "price_cny": 24.25,
+        "pe_reported": 9.86,
+        "pe_deducted": 10.6,
+        "pe_normalized_E5": 22.0,
+        "pe_ex_cash_normalized": 16.86,
+        "pb": 3.76,
+        "div_yield_fy2025_pct": 10.31,
+        "div_yield_ttm_pct": 8.25
+      },
+      {
+        "price_cny": 21.5,
+        "pe_reported": 8.74,
+        "pe_deducted": 9.4,
+        "pe_normalized_E5": 19.5,
+        "pe_ex_cash_normalized": 14.36,
+        "pb": 3.33,
+        "div_yield_fy2025_pct": 11.63,
+        "div_yield_ttm_pct": 9.3
+      },
+      {
+        "price_cny": 20.0,
+        "pe_reported": 8.13,
+        "pe_deducted": 8.75,
+        "pe_normalized_E5": 18.14,
+        "pe_ex_cash_normalized": 13.0,
+        "pb": 3.1,
+        "div_yield_fy2025_pct": 12.5,
+        "div_yield_ttm_pct": 10.0
+      },
+      {
+        "price_cny": 17.0,
+        "pe_reported": 6.91,
+        "pe_deducted": 7.43,
+        "pe_normalized_E5": 15.42,
+        "pe_ex_cash_normalized": 10.28,
+        "pb": 2.63,
+        "div_yield_fy2025_pct": 14.71,
+        "div_yield_ttm_pct": 11.76
+      },
+      {
+        "price_cny": 15.5,
+        "pe_reported": 6.3,
+        "pe_deducted": 6.78,
+        "pe_normalized_E5": 14.06,
+        "pe_ex_cash_normalized": 8.92,
+        "pb": 2.4,
+        "div_yield_fy2025_pct": 16.13,
+        "div_yield_ttm_pct": 12.9
+      }
+    ]
+  },
+  "normalization": {
+    "anchors": [
+      {
+        "anchor": "E1_ttm_reported",
+        "np_cny_yi": 54.46,
+        "eps": 2.4597,
+        "pe": 13.01,
+        "pe_ex_cash": 10.71
+      },
+      {
+        "anchor": "E2_ttm_deducted",
+        "np_cny_yi": 50.63,
+        "eps": 2.2868,
+        "pe": 13.99,
+        "pe_ex_cash": 11.52
+      },
+      {
+        "anchor": "E3_avg_deducted_10y",
+        "np_cny_yi": 19.87,
+        "eps": 0.8975,
+        "pe": 35.65,
+        "pe_ex_cash": 29.35
+      },
+      {
+        "anchor": "E4_avg_reported_10y",
+        "np_cny_yi": 24.79,
+        "eps": 1.1197,
+        "pe": 28.58,
+        "pe_ex_cash": 23.52
+      },
+      {
+        "anchor": "E5_roce_median_13.72",
+        "np_cny_yi": 24.41,
+        "eps": 1.1023,
+        "pe": 29.03,
+        "pe_ex_cash": 23.89
+      },
+      {
+        "anchor": "E6_roce_2019_22_avg_4.94",
+        "np_cny_yi": 8.79,
+        "eps": 0.397,
+        "pe": 80.6,
+        "pe_ex_cash": 66.34
+      }
+    ],
+    "note": "正常化 E 合理区间 20.6–33.4 亿（EPS 0.93–1.51），中枢约 25.6 亿（EPS 1.16）；现价 32.00 在 E1 上是 13.01x、在 E5 上是 27.6x、在 E3 上是 35.7x——同一个「13 倍」三种 E 差 2.7 倍"
+  }
+}
