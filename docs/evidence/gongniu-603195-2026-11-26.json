@@ -1,0 +1,675 @@
+{
+  "stock": {
+    "code": "603195",
+    "name": "公牛集团",
+    "hk_code": null,
+    "listing_date": "2020-02-06",
+    "note": "纯 A 股；上市至 2026-11-25 共 6.80 年"
+  },
+  "generated_at": "2026-11-26",
+  "source_db": "data/valuedashboard.duckdb",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "snapshot": {
+      "pe_ttm": 18.521769,
+      "pb_mrq": 4.570228,
+      "dividend_yield": 0.047158,
+      "roe": 0.248605,
+      "roic": 0.286242,
+      "gross_margin": 0.422989,
+      "net_margin": 0.245142,
+      "debt_ratio": 0.251847,
+      "interest_bearing_debt_cny": 723864111.77,
+      "market_cap_cny": 72660839702.61,
+      "last_close": 40.29,
+      "payout_ratio_ttm": 0.873452,
+      "dps": 1.9,
+      "roce_latest": 0.288161,
+      "roce_10y_median": 0.344183,
+      "roce_10y_min": 0.288161,
+      "roce_10y_cv": 0.659183,
+      "revenue_yoy": 0.000715,
+      "net_profit_yoy": -0.036269,
+      "deducted_profit_yoy": -0.043477,
+      "cf_to_net_profit": 0.849551,
+      "revenue_cagr3": 0.04407,
+      "net_profit_cagr5": 0.119647,
+      "max_drawdown": 0.141952,
+      "annualized_volatility": 0.18655
+    },
+    "total_shares": 1803446009,
+    "ttm": {
+      "revenue_cny_yi": 160.38,
+      "parent_np_cny_yi": 39.23,
+      "deducted_np_cny_yi": 34.67,
+      "nonrecurring_cny_yi": 4.56,
+      "eps_reported": 2.1753,
+      "eps_deducted": 1.9224,
+      "pe_reported": 18.52,
+      "pe_deducted": 20.96,
+      "ded_over_parent_pct": 88.38
+    },
+    "analyst_forecasts": [
+      {
+        "fiscal_year": "2025E",
+        "eps": 2.2571,
+        "analysts": 27,
+        "pe_at_last_close": 17.85
+      },
+      {
+        "fiscal_year": "2026E",
+        "eps": 2.1479,
+        "analysts": 27,
+        "pe_at_last_close": 18.76
+      },
+      {
+        "fiscal_year": "2027E",
+        "eps": 2.2891,
+        "analysts": 27,
+        "pe_at_last_close": 17.6
+      },
+      {
+        "fiscal_year": "2028E",
+        "eps": 2.4287,
+        "analysts": 27,
+        "pe_at_last_close": 16.59
+      }
+    ]
+  },
+  "checks": {
+    "net_cash": {
+      "cash_cny_yi": 32.45,
+      "trading_assets_cny_yi": 115.88,
+      "interest_bearing_cny_yi": 7.31,
+      "net_cash_cny_yi": 141.0,
+      "pct_of_market_cap": 19.4,
+      "pe_ex_cash_reported": 14.93,
+      "pe_ex_cash_deducted": 16.89,
+      "audit_note": "剔现金 PE 14.9x 有一半是双重计数（归母含 4.50 亿税后现金收益，又单独加 141 亿现金）；严格自洽口径是剔现金扣非 16.9x",
+      "bps": 8.82,
+      "accounts_receivable_cny_yi": 3.54,
+      "ar_over_revenue_pct": 2.21
+    },
+    "dividend_bonus_adjust": {
+      "rows": [
+        {
+          "ex_date": "2020-06-01",
+          "dps_nominal": 3.8,
+          "transfer": 0.0,
+          "shares_at_ex": 6.0,
+          "dps_adj_today": 1.264,
+          "total_payout_cny_yi": 22.8
+        },
+        {
+          "ex_date": "2021-06-03",
+          "dps_nominal": 2.0,
+          "transfer": 0.0,
+          "shares_at_ex": 6.01,
+          "dps_adj_today": 0.666,
+          "total_payout_cny_yi": 12.01
+        },
+        {
+          "ex_date": "2022-05-19",
+          "dps_nominal": 2.4,
+          "transfer": 0.0,
+          "shares_at_ex": 6.01,
+          "dps_adj_today": 0.8,
+          "total_payout_cny_yi": 14.43
+        },
+        {
+          "ex_date": "2023-06-08",
+          "dps_nominal": 3.3,
+          "transfer": 0.48,
+          "shares_at_ex": 6.01,
+          "dps_adj_today": 1.1,
+          "total_payout_cny_yi": 19.84
+        },
+        {
+          "ex_date": "2024-06-06",
+          "dps_nominal": 3.1,
+          "transfer": 0.45,
+          "shares_at_ex": 8.92,
+          "dps_adj_today": 1.532,
+          "total_payout_cny_yi": 27.64
+        },
+        {
+          "ex_date": "2025-06-09",
+          "dps_nominal": 2.4,
+          "transfer": 0.4,
+          "shares_at_ex": 12.92,
+          "dps_adj_today": 1.72,
+          "total_payout_cny_yi": 31.01
+        },
+        {
+          "ex_date": "2026-06-04",
+          "dps_nominal": 1.9,
+          "transfer": 0.0,
+          "shares_at_ex": 18.08,
+          "dps_adj_today": 1.905,
+          "total_payout_cny_yi": 34.35
+        }
+      ],
+      "note": "名义 DPS 3.30→3.10→2.40→1.90 看似连砍三年；按除息日股本复权到今日是 1.10→1.53→1.71→1.90（每年在涨），分红总额 19.84→27.65→31.03→34.37 亿（FY24→FY25 +10.8%）",
+      "defect_160": "160 号报告把名义 DPS 乘以后来的（更大的）股本，派现总额高估 40–48%，由此得出'FY2023/24 分红率 >100%''FY2025 复权 DPS −20.9%'两个伪结论",
+      "payout_by_year_pct": [
+        51.9,
+        62.2,
+        71.4,
+        72.6,
+        84.4
+      ]
+    },
+    "roce_dual": {
+      "series": [
+        {
+          "year": "2015",
+          "ce_cny_yi": 16.3,
+          "ebit_cny_yi": 11.7,
+          "roce_pct": null,
+          "cash_like_cny_yi": 0.0,
+          "ce_ex_cash_cny_yi": 16.3,
+          "operating_roce_pct": 72.0
+        },
+        {
+          "year": "2016",
+          "ce_cny_yi": 24.5,
+          "ebit_cny_yi": 16.7,
+          "roce_pct": 81.74,
+          "cash_like_cny_yi": 0.0,
+          "ce_ex_cash_cny_yi": 24.5,
+          "operating_roce_pct": 68.0
+        },
+        {
+          "year": "2017",
+          "ce_cny_yi": 15.7,
+          "ebit_cny_yi": 15.2,
+          "roce_pct": 75.46,
+          "cash_like_cny_yi": 0.0,
+          "ce_ex_cash_cny_yi": 15.7,
+          "operating_roce_pct": 96.5
+        },
+        {
+          "year": "2018",
+          "ce_cny_yi": 32.8,
+          "ebit_cny_yi": 19.6,
+          "roce_pct": 80.65,
+          "cash_like_cny_yi": 0.0,
+          "ce_ex_cash_cny_yi": 32.8,
+          "operating_roce_pct": 59.6
+        },
+        {
+          "year": "2019",
+          "ce_cny_yi": 55.9,
+          "ebit_cny_yi": 26.8,
+          "roce_pct": 60.39,
+          "cash_like_cny_yi": 15.9,
+          "ce_ex_cash_cny_yi": 40.0,
+          "operating_roce_pct": 67.0
+        },
+        {
+          "year": "2020",
+          "ce_cny_yi": 93.7,
+          "ebit_cny_yi": 27.2,
+          "roce_pct": 36.35,
+          "cash_like_cny_yi": 66.2,
+          "ce_ex_cash_cny_yi": 27.6,
+          "operating_roce_pct": 98.6
+        },
+        {
+          "year": "2021",
+          "ce_cny_yi": 108.6,
+          "ebit_cny_yi": 32.4,
+          "roce_pct": 32.0,
+          "cash_like_cny_yi": 103.0,
+          "ce_ex_cash_cny_yi": 5.5,
+          "operating_roce_pct": 584.9
+        },
+        {
+          "year": "2022",
+          "ce_cny_yi": 125.7,
+          "ebit_cny_yi": 36.5,
+          "roce_pct": 31.14,
+          "cash_like_cny_yi": 115.6,
+          "ce_ex_cash_cny_yi": 10.1,
+          "operating_roce_pct": 362.7
+        },
+        {
+          "year": "2023",
+          "ce_cny_yi": 146.9,
+          "ebit_cny_yi": 44.3,
+          "roce_pct": 32.49,
+          "cash_like_cny_yi": 144.7,
+          "ce_ex_cash_cny_yi": 2.2,
+          "operating_roce_pct": 1999.6
+        },
+        {
+          "year": "2024",
+          "ce_cny_yi": 161.1,
+          "ebit_cny_yi": 49.6,
+          "roce_pct": 32.22,
+          "cash_like_cny_yi": 142.4,
+          "ce_ex_cash_cny_yi": 18.7,
+          "operating_roce_pct": 265.3
+        },
+        {
+          "year": "2025",
+          "ce_cny_yi": 172.7,
+          "ebit_cny_yi": 48.1,
+          "roce_pct": 28.82,
+          "cash_like_cny_yi": 162.2,
+          "ce_ex_cash_cny_yi": 10.5,
+          "operating_roce_pct": 460.0
+        }
+      ],
+      "rising_years": 2,
+      "note": "报表 ROCE 28.82% 是 11 年最低；但 CE 里 162.24/172.69 = 93.9% 是现金类资产 → 经营 ROCE 点估 460%，区间 155%–460%（扣不扣渠道应付）"
+    },
+    "single_quarter": [
+      {
+        "report_date": "2025-03-31",
+        "q_rev_yi": 39.22,
+        "q_gross_yi": 16.1,
+        "q_np_yi": 9.75,
+        "q_ded_yi": 8.55,
+        "q_selling_yi": 2.58,
+        "q_rd_yi": 1.57,
+        "q_inv_income_yi": 0.588,
+        "q_op_yi": 11.72
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev_yi": 42.46,
+        "q_gross_yi": 18.47,
+        "q_np_yi": 10.85,
+        "q_ded_yi": 9.87,
+        "q_selling_yi": 2.98,
+        "q_rd_yi": 1.29,
+        "q_inv_income_yi": 1.253,
+        "q_op_yi": 13.51
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev_yi": 40.3,
+        "q_gross_yi": 16.8,
+        "q_np_yi": 9.19,
+        "q_ded_yi": 8.59,
+        "q_selling_yi": 2.98,
+        "q_rd_yi": 1.57,
+        "q_inv_income_yi": 0.658,
+        "q_op_yi": 11.27
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev_yi": 38.29,
+        "q_gross_yi": 17.76,
+        "q_np_yi": 10.92,
+        "q_ded_yi": 9.23,
+        "q_selling_yi": 3.3,
+        "q_rd_yi": 2.01,
+        "q_inv_income_yi": 1.413,
+        "q_op_yi": 13.08
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev_yi": 40.6,
+        "q_gross_yi": 17.35,
+        "q_np_yi": 10.58,
+        "q_ded_yi": 9.84,
+        "q_selling_yi": 2.65,
+        "q_rd_yi": 1.36,
+        "q_inv_income_yi": 0.844,
+        "q_op_yi": 12.75,
+        "q_rev_yoy_pct": 3.5,
+        "q_gross_yoy_pct": 7.8,
+        "q_np_yoy_pct": 8.5,
+        "q_selling_yoy_pct": 2.7,
+        "q_rd_yoy_pct": -13.4
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev_yi": 43.34,
+        "q_gross_yi": 17.66,
+        "q_np_yi": 10.93,
+        "q_ded_yi": 9.16,
+        "q_selling_yi": 3.19,
+        "q_rd_yi": 1.5,
+        "q_inv_income_yi": 1.726,
+        "q_op_yi": 13.33,
+        "q_rev_yoy_pct": 2.1,
+        "q_gross_yoy_pct": -4.4,
+        "q_np_yoy_pct": 0.7,
+        "q_selling_yoy_pct": 7.0,
+        "q_rd_yoy_pct": 16.3
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev_yi": 38.15,
+        "q_gross_yi": 15.06,
+        "q_np_yi": 6.8,
+        "q_ded_yi": 6.44,
+        "q_selling_yi": 3.68,
+        "q_rd_yi": 1.54,
+        "q_inv_income_yi": 0.687,
+        "q_op_yi": 8.42,
+        "q_rev_yoy_pct": -5.3,
+        "q_gross_yoy_pct": -10.4,
+        "q_np_yoy_pct": -26.0,
+        "q_selling_yoy_pct": 23.5,
+        "q_rd_yoy_pct": -1.9
+      }
+    ],
+    "q3_attribution": {
+      "note": "Q3 归母 −2.39 亿 = 毛利额 −1.74 + 销售费用多花 + 研发少花 + 投资收益/其他 −0.47（income_statement 缺'其他收益/公允价值变动/资产处置收益'三行，导致 0.4724 亿残差）",
+      "library_gap": [
+        "其他收益",
+        "公允价值变动收益",
+        "资产处置收益"
+      ]
+    },
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_p10_p50_p90": [
+          17.53,
+          20.87,
+          23.7
+        ],
+        "pb_p10_p50_p90": [
+          4.4,
+          5.64,
+          6.57
+        ],
+        "pe_pct": 18.9,
+        "pb_pct": 21.6
+      },
+      "5y": {
+        "months": 61,
+        "pe_p10_p50_p90": [
+          18.08,
+          22.85,
+          30.84
+        ],
+        "pb_p10_p50_p90": [
+          4.55,
+          6.39,
+          8.31
+        ],
+        "pe_pct": 11.5,
+        "pb_pct": 13.1
+      },
+      "listing": {
+        "months": 82,
+        "pe_p10_p50_p90": [
+          18.82,
+          26.93,
+          46.82
+        ],
+        "pb_p10_p50_p90": [
+          4.58,
+          6.93,
+          12.6
+        ],
+        "pe_pct": 8.5,
+        "pb_pct": 9.8
+      }
+    },
+    "percentiles_note": "上市仅 6.80 年，**不存在 10 年分位**；3 年窗口 37 个月，±1 观测 ≈ ±2.7pp",
+    "52w": {
+      "low_close": 36.73,
+      "high_close": 44.85,
+      "pct_from_high": -10.17
+    },
+    "segments_2025": [
+      {
+        "item": "民用电工",
+        "amount_cny_yi": 159.96,
+        "ratio_pct": 99.81
+      },
+      {
+        "item": "其他(补充)",
+        "amount_cny_yi": 0.3,
+        "ratio_pct": 0.19
+      },
+      {
+        "item": "智能电工照明产品",
+        "amount_cny_yi": 80.98,
+        "ratio_pct": 50.53
+      },
+      {
+        "item": "电连接产品",
+        "amount_cny_yi": 70.77,
+        "ratio_pct": 44.16
+      },
+      {
+        "item": "新能源产品",
+        "amount_cny_yi": 8.22,
+        "ratio_pct": 5.13
+      },
+      {
+        "item": "其他(补充)",
+        "amount_cny_yi": 0.3,
+        "ratio_pct": 0.19
+      },
+      {
+        "item": "境内",
+        "amount_cny_yi": 157.26,
+        "ratio_pct": 98.13
+      },
+      {
+        "item": "境外",
+        "amount_cny_yi": 2.7,
+        "ratio_pct": 1.68
+      },
+      {
+        "item": "其他(补充)",
+        "amount_cny_yi": 0.3,
+        "ratio_pct": 0.19
+      }
+    ],
+    "peers": [
+      {
+        "code": "603195",
+        "name": "公牛集团",
+        "pe": 18.52,
+        "pb": 4.57,
+        "roe_pct": 24.9,
+        "div_yield_pct": 4.72
+      },
+      {
+        "code": "603816",
+        "name": "顾家家居",
+        "pe": 14.72,
+        "pb": 1.89,
+        "roe_pct": 14.2,
+        "div_yield_pct": 5.3
+      },
+      {
+        "code": "001386",
+        "name": "马可波罗",
+        "pe": 20.0,
+        "pb": 1.39,
+        "roe_pct": 7.5,
+        "div_yield_pct": 4.16
+      },
+      {
+        "code": "603833",
+        "name": "欧派家居",
+        "pe": 21.98,
+        "pb": 0.91,
+        "roe_pct": 4.0,
+        "div_yield_pct": 8.89
+      },
+      {
+        "code": "001221",
+        "name": "悍高集团",
+        "pe": 17.39,
+        "pb": 3.97,
+        "roe_pct": 24.4,
+        "div_yield_pct": 2.39
+      }
+    ],
+    "sw_l1_median": {
+      "sector": "轻工制造",
+      "n": 102,
+      "med_pe": 29.56,
+      "med_pb": 1.63,
+      "med_roe_pct": 6.5
+    },
+    "employees": [
+      {
+        "report_date": "2025-12-31",
+        "count": 12512
+      },
+      {
+        "report_date": "2024-12-31",
+        "count": 13223
+      },
+      {
+        "report_date": "2023-12-31",
+        "count": 13746
+      }
+    ],
+    "treasury": [
+      {
+        "tenor": 1.0,
+        "yield_pct": 1.182
+      },
+      {
+        "tenor": 10.0,
+        "yield_pct": 1.5914
+      },
+      {
+        "tenor": 30.0,
+        "yield_pct": 2.061
+      }
+    ],
+    "price_ladder": [
+      {
+        "price_cny": 40.29,
+        "pe_reported": 18.52,
+        "pe_deducted": 20.96,
+        "pe_ex_cash_deducted": 16.89,
+        "pb": 4.57,
+        "div_yield_pct": 4.72
+      },
+      {
+        "price_cny": 40.5,
+        "pe_reported": 18.62,
+        "pe_deducted": 21.07,
+        "pe_ex_cash_deducted": 17.0,
+        "pb": 4.59,
+        "div_yield_pct": 4.69
+      },
+      {
+        "price_cny": 38.0,
+        "pe_reported": 17.47,
+        "pe_deducted": 19.77,
+        "pe_ex_cash_deducted": 15.7,
+        "pb": 4.31,
+        "div_yield_pct": 5.0
+      },
+      {
+        "price_cny": 37.37,
+        "pe_reported": 17.18,
+        "pe_deducted": 19.44,
+        "pe_ex_cash_deducted": 15.37,
+        "pb": 4.24,
+        "div_yield_pct": 5.08
+      },
+      {
+        "price_cny": 36.73,
+        "pe_reported": 16.89,
+        "pe_deducted": 19.11,
+        "pe_ex_cash_deducted": 15.04,
+        "pb": 4.17,
+        "div_yield_pct": 5.17
+      },
+      {
+        "price_cny": 34.55,
+        "pe_reported": 15.88,
+        "pe_deducted": 17.97,
+        "pe_ex_cash_deducted": 13.9,
+        "pb": 3.92,
+        "div_yield_pct": 5.5
+      },
+      {
+        "price_cny": 34.0,
+        "pe_reported": 15.63,
+        "pe_deducted": 17.69,
+        "pe_ex_cash_deducted": 13.62,
+        "pb": 3.86,
+        "div_yield_pct": 5.59
+      },
+      {
+        "price_cny": 32.0,
+        "pe_reported": 14.71,
+        "pe_deducted": 16.65,
+        "pe_ex_cash_deducted": 12.58,
+        "pb": 3.63,
+        "div_yield_pct": 5.94
+      },
+      {
+        "price_cny": 29.23,
+        "pe_reported": 13.44,
+        "pe_deducted": 15.2,
+        "pe_ex_cash_deducted": 11.14,
+        "pb": 3.32,
+        "div_yield_pct": 6.5
+      }
+    ]
+  },
+  "normalization": {
+    "anchors": [
+      {
+        "anchor": "A_归母口径(上界,含现金双重计数)",
+        "discount_rate": 0.08,
+        "operating_value_cny_yi": 490.4,
+        "plus_net_cash": true,
+        "total_cny_yi": 631.4,
+        "per_share": 35.01
+      },
+      {
+        "anchor": "A_归母口径",
+        "discount_rate": 0.09,
+        "operating_value_cny_yi": 435.9,
+        "plus_net_cash": true,
+        "total_cny_yi": 576.9,
+        "per_share": 31.99
+      },
+      {
+        "anchor": "B_剔现金(严格自洽)",
+        "discount_rate": 0.08,
+        "operating_value_cny_yi": 433.4,
+        "plus_net_cash": true,
+        "total_cny_yi": 574.4,
+        "per_share": 31.85
+      },
+      {
+        "anchor": "B_剔现金(严格自洽)",
+        "discount_rate": 0.09,
+        "operating_value_cny_yi": 385.2,
+        "plus_net_cash": true,
+        "total_cny_yi": 526.2,
+        "per_share": 29.18
+      },
+      {
+        "anchor": "C_经营ROCE口径",
+        "discount_rate": 0.08,
+        "operating_value_cny_yi": 502.0,
+        "plus_net_cash": true,
+        "total_cny_yi": 643.0,
+        "per_share": 35.65
+      },
+      {
+        "anchor": "C_经营ROCE口径",
+        "discount_rate": 0.09,
+        "operating_value_cny_yi": 446.2,
+        "plus_net_cash": true,
+        "total_cny_yi": 587.2,
+        "per_share": 32.56
+      }
+    ],
+    "fair_value_range": "31.9–36.1 元，中枢约 34.0 元；现价 40.29 = 中枢 +18.5%"
+  }
+}
