@@ -69,7 +69,7 @@ last-reviewed: 2026-11-25
 > 只保留仍未消除的缺口；编号沿用 `reports/141` 归档原文，便于逐条追溯。
 > 2026-08/09 各轮修复闭环记录（含已关闭项）已逐字移入 `reports/141`。
 
-2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。
+2. **数据层披露缺口**：4 只上市 7 天内新股（`001232`、`301677`、`920038`、`920258`）及 `920305` 免费源核心数据未形成，暂不进入研究快照；银行/券商监管字段 90 只保持 NULL（不伪造）；2026-03-31 前历史财务为 CSMAR 导入值无原始字节 lineage；**东财行情 host（push2/push2his）被封（IP 级临时封锁，探测范围见 `reports/61`：F10 财报/股本/分红源仍可用，价格已回退腾讯/BaoStock/TDX，冷却至 2026-08-15 勿触碰 push2 系）**；无行业变更历史的新股/北交所 CSRC 分类如实 NULL。均不改变 PASS。**新增披露（2026-11-26，`reports/169`）**：`ah_market_snapshot` **同一行两个股息率口径不一致** —— `h_yield_pct = 2.584%` 因 `hk_dividends` 缺 03606 的 2026-09 中期分红（1.00 元）而低估约 45%，同行 `a_yield_pct = 3.869%` 正确；口径裁决与复算见 `docs/runbooks/ops-knowledge-base.md` §25（I-HYIELD）。**不影响现有筛选/展示（该字段未进 `SNAPSHOT_COLUMNS`），但任何用 H 股股息率做比较的研究必须先自算。**
 4. **CNINFO 分红适配器已退出默认链（2026-11-12 更新，`reports/117`）**：`cninfo._fetch_dividends` 恒无 `ex_date`（需 PDF 解析，未实现），此前它仍排在 `config/default.yaml` 的 dividends 回退链尾，导致**每票每轮必然失败一次并计入熔断**；现已从默认链移除，且该路径改为显式 `error_kind=source_unsupported`（error=None，不计熔断、不占重试）。ex_date 的补齐路线**自 2026-11-15 起改走结构化源**（巨潮 `stock_dividend_cninfo` / 东财 `stock_fhps_detail_em` 直接返回除权日），PDF 解析链已整体删除、`reports/121` 标 `superseded`（`reports/123`）。**残留**：`dividends_quarantine` 已由 8,467 行降到 **4,087 行**且**全部带原因**（`source_coverage_gap` 4,085 + `unverified_period_end_placeholder` 2），不再有“原因未知”的隔离行；要再降只能换源（CSMAR 派息历史）或人工逐条裁决。
 
 ## 进行中的工作

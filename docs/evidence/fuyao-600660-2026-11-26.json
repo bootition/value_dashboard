@@ -1,0 +1,285 @@
+{
+  "stock": {
+    "code": "600660",
+    "hk_code": "03606",
+    "name": "福耀玻璃"
+  },
+  "generated_at": "2026-11-26",
+  "source_db": "data/valuedashboard.duckdb",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "snapshot": {
+      "pe_ttm": 17.634491,
+      "pb_mrq": 3.884916,
+      "dividend_yield": 0.039441,
+      "roe": 0.226333,
+      "roic": 0.182874,
+      "gross_margin": 0.381492,
+      "net_margin": 0.177183,
+      "debt_ratio": 0.499821,
+      "market_cap_cny": 145571494214.96,
+      "last_close": 55.78,
+      "last_price_date": "2026-11-25",
+      "payout_ratio_ttm": 0.695516,
+      "ttm_dividend_yield": 3.944066,
+      "roce_latest": 0.230182,
+      "roce_10y_median": 0.173291,
+      "revenue_cagr5": 0.181272,
+      "net_profit_cagr5": 0.290598,
+      "div_yield_spread_10y": 2.352666
+    },
+    "total_shares": 2609743532,
+    "ttm": {
+      "formula": "np_ttm = np_ytd(2026-09-30) + np_fy(2025-12-31) - np_ytd(2025-09-30)",
+      "revenue_cny": 46608319522.0,
+      "parent_net_profit_cny": 8254930435.0,
+      "deducted_net_profit_cny": 8122190088.0,
+      "eps_ttm": 3.1631,
+      "pe_check": 17.6345
+    },
+    "growth": {
+      "np_9m_2026_cny": 6006480440.0,
+      "np_9m_2025_cny": 7063854155.0,
+      "np_9m_yoy_pct": -14.97,
+      "rev_9m_2026_cny": 34122791889.0,
+      "rev_9m_2025_cny": 33301907930.0,
+      "rev_9m_yoy_pct": 2.46,
+      "np_fy2025_cny": 9312304150.0,
+      "np_fy2024_cny": 7497976123.0,
+      "np_fy2025_yoy_pct": 24.2
+    },
+    "dividends": {
+      "dps_ttm_cny": 2.2,
+      "yield_at_last_close_pct": 3.94,
+      "fy2025_declared_dps_cny": 2.1,
+      "fy2025_payout_pct": 58.8
+    },
+    "cash": {
+      "fy2025_cfo_cny": 12055090552.0,
+      "fy2025_capex_cny": 6164082209.0,
+      "fy2025_fcf_cny": 5891008343.0,
+      "fy2025_capex_over_cfo_pct": 51.1,
+      "fy2025_da_cny": 2888747065.0,
+      "fy2025_capex_over_da": 2.13,
+      "cum_2014_2025_cfo_cny": 70754059735.0,
+      "cum_2014_2025_capex_cny": 42935059275.0,
+      "cum_2014_2025_fcf_cny": 27819000460.0,
+      "cum_2014_2025_np_cny": 51079100036.0,
+      "cum_capex_over_cfo_pct": 60.7,
+      "cum_fcf_over_np_pct": 54.5
+    },
+    "fx_swing": {
+      "fin_expense_9m2025_cny_yi": -9.23,
+      "fin_expense_9m2026_cny_yi": 6.54,
+      "swing_cny_yi": 15.77
+    },
+    "ah": {
+      "as_of": "2026-11-16",
+      "a_close": 56.86,
+      "h_close_hkd": 54.25,
+      "fx": 0.856,
+      "h_in_cny": 46.438,
+      "a_premium_pct": 22.44,
+      "db_h_yield_pct": 2.584091,
+      "db_h_yield_after_tax_pct": 2.067272,
+      "recomputed_h_yield_pct": 4.737,
+      "recomputed_h_yield_after_tax_pct": 3.79,
+      "defect": "ah_market_snapshot.h_yield_pct 只用了 2026-05-14 的 1.20 元末期分红，缺 2026-09 的 1.00 元中期分红（hk_dividends 最新 ex_date=2026-05-14）"
+    },
+    "ah_premium_history": {
+      "n_same_day": 1435,
+      "mean_pct": 47.72,
+      "median_pct": 49.19,
+      "min_pct": 9.93,
+      "max_pct": 145.06,
+      "latest_pct": 22.44,
+      "latest_percentile": 20.8,
+      "avg_2020_pct": 85.74,
+      "avg_2026_pct": 16.94,
+      "note": "常数汇率 0.856；A 用 price_daily_raw（不复权），H 用 hk_price_daily"
+    },
+    "analyst_forecasts": [
+      {
+        "fiscal_year": "2025E",
+        "eps": 3.5683,
+        "analysts": 20,
+        "implied_np_cny": 9312304150.0,
+        "pe_at_last_close": 15.63
+      },
+      {
+        "fiscal_year": "2026E",
+        "eps": 3.4711,
+        "analysts": 20,
+        "implied_np_cny": 9058557154.49,
+        "pe_at_last_close": 16.07
+      },
+      {
+        "fiscal_year": "2027E",
+        "eps": 4.0779,
+        "analysts": 20,
+        "implied_np_cny": 10642259413.65,
+        "pe_at_last_close": 13.68
+      },
+      {
+        "fiscal_year": "2028E",
+        "eps": 4.6761,
+        "analysts": 20,
+        "implied_np_cny": 12203450727.14,
+        "pe_at_last_close": 11.93
+      }
+    ]
+  },
+  "checks": {
+    "qfq_vs_raw": [
+      8.9,
+      4.81
+    ],
+    "qfq_note": "前复权价与不复权价在历史日期差异巨大（2010-06-30: 4.81 vs 8.90），历史估值分位必须用 price_daily_raw",
+    "csmar_coverage": {
+      "csmar_disclosure_metrics_max_report_date": "2025-03-31",
+      "income_statement_max_report_date": "2026-09-30",
+      "roe_weighted_2024_12_31_pct": 22.72,
+      "roe_2025_end_of_period_pct": 24.8,
+      "note": "csmar 加权 ROE 无 2025 年报行；24.80% 是期末口径（净利/期末归母权益）"
+    },
+    "research_statistics_percentiles": [
+      {
+        "metric": "pb_mrq",
+        "window_years": 1,
+        "percentile": 48.56
+      },
+      {
+        "metric": "pb_mrq",
+        "window_years": 3,
+        "percentile": 39.12
+      },
+      {
+        "metric": "pb_mrq",
+        "window_years": 5,
+        "percentile": 53.88
+      },
+      {
+        "metric": "pb_mrq",
+        "window_years": 10,
+        "percentile": 64.5
+      },
+      {
+        "metric": "pb_mrq",
+        "window_years": 99,
+        "percentile": 46.78
+      },
+      {
+        "metric": "pe_ttm",
+        "window_years": 1,
+        "percentile": 77.78
+      },
+      {
+        "metric": "pe_ttm",
+        "window_years": 3,
+        "percentile": 33.06
+      },
+      {
+        "metric": "pe_ttm",
+        "window_years": 5,
+        "percentile": 19.88
+      },
+      {
+        "metric": "pe_ttm",
+        "window_years": 10,
+        "percentile": 29.45
+      },
+      {
+        "metric": "pe_ttm",
+        "window_years": 99,
+        "percentile": 41.44
+      }
+    ],
+    "consensus_q4_requirement": {
+      "fy2026_implied_np_cny": 9058557154.49,
+      "q4_2026_needed_cny": 3052076714.49,
+      "q4_2025_actual_cny": 2248449995.0,
+      "q4_yoy_needed_pct": 35.7
+    },
+    "price_ladder": [
+      {
+        "price_cny": 55.78,
+        "pe_ttm": 17.63,
+        "div_yield_pct": 3.94,
+        "owner_earnings_yield_pct_A1": 5.67
+      },
+      {
+        "price_cny": 52.9,
+        "pe_ttm": 16.72,
+        "div_yield_pct": 4.16,
+        "owner_earnings_yield_pct_A1": 5.98
+      },
+      {
+        "price_cny": 50.6,
+        "pe_ttm": 16.0,
+        "div_yield_pct": 4.35,
+        "owner_earnings_yield_pct_A1": 6.25
+      },
+      {
+        "price_cny": 50.0,
+        "pe_ttm": 15.81,
+        "div_yield_pct": 4.4,
+        "owner_earnings_yield_pct_A1": 6.33
+      },
+      {
+        "price_cny": 49.5,
+        "pe_ttm": 15.65,
+        "div_yield_pct": 4.44,
+        "owner_earnings_yield_pct_A1": 6.39
+      },
+      {
+        "price_cny": 48.0,
+        "pe_ttm": 15.17,
+        "div_yield_pct": 4.58,
+        "owner_earnings_yield_pct_A1": 6.59
+      },
+      {
+        "price_cny": 47.4,
+        "pe_ttm": 14.99,
+        "div_yield_pct": 4.64,
+        "owner_earnings_yield_pct_A1": 6.67
+      },
+      {
+        "price_cny": 45.0,
+        "pe_ttm": 14.23,
+        "div_yield_pct": 4.89,
+        "owner_earnings_yield_pct_A1": 7.03
+      },
+      {
+        "price_cny": 44.3,
+        "pe_ttm": 14.01,
+        "div_yield_pct": 4.97,
+        "owner_earnings_yield_pct_A1": 7.14
+      },
+      {
+        "price_cny": 42.6,
+        "pe_ttm": 13.47,
+        "div_yield_pct": 5.16,
+        "owner_earnings_yield_pct_A1": 7.43
+      },
+      {
+        "price_cny": 42.0,
+        "pe_ttm": 13.28,
+        "div_yield_pct": 5.24,
+        "owner_earnings_yield_pct_A1": 7.53
+      },
+      {
+        "price_cny": 40.0,
+        "pe_ttm": 12.65,
+        "div_yield_pct": 5.5,
+        "owner_earnings_yield_pct_A1": 7.91
+      },
+      {
+        "price_cny": 39.5,
+        "pe_ttm": 12.49,
+        "div_yield_pct": 5.57,
+        "owner_earnings_yield_pct_A1": 8.01
+      }
+    ]
+  }
+}

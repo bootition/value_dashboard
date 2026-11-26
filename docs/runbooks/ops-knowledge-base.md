@@ -3,7 +3,7 @@ title: 运行期硬约束知识库（Ops Knowledge Base）
 status: approved
 category: runbooks
 created: 2026-09-01
-last-reviewed: 2026-11-25
+last-reviewed: 2026-11-26
 supersedes: null
 ---
 
@@ -472,3 +472,15 @@ supersedes: null
 | I-ROCELATEST | **`roce_latest` 自 2026-11-25 起是**可筛字段**（`SNAPSHOT_COLUMNS`）**：此前只在详情页当现况对照，导致「当期 ROCE 低于自身 10 年中位」在条件 JSON 里写不出来 —— 周期股判据只剩 PB 分位一个信号，**分不清「周期底部便宜」与「结构性衰退便宜」**。它与 `roce_*_median` 同为 `pct`（小数比例），可用 `right_field` 直接互比（`{"field":"roce_latest","op":"<","right_field":"roce_10y_median"}`） | `reports/168` §2 |
 | I-WHITEHORSE | **「白马」两支都要求长期资本回报，不能只看当期 ROE**：成长支 `roce_10y_median≥15%`、周期支 `roce_10y_median≥10%` + `roce_latest<roce_10y_median`（不在景气顶）+ `pb_mrq_stat_10y_percentile≤30`（自身 10 年低位）+ 有息负债率≤35% + 连续分红≥8 年。实测 91 → 82 → 63 只。**代价**：`*_10y_median` 要求拿满 10 年年报，天然排除上市不足 10 年的公司（新生代白马需另建 5 年窗口支，而不是放宽 10 年窗口） | `reports/168` §3 |
 | I-VARMEASURE | **收窄筛选规则必须在引擎里逐变体实测，不许用离线 SQL 估算**：`reports/167` §4 的「周期白马 13 只」就是离线近似派生字段得到的错值（真值 59），差点把规则调反。变体表要连"对照组"（只加单个条件）一起测，否则分不清是哪个条件在起作用 | `reports/167` §4、`reports/168` §3 |
+
+## 25. 2026-11-26 个股研究的三个数据口径裁决（福耀评审暴露；`reports/169`）
+
+> 背景：8 个大师视角 Agent 独立跑 SQL 评福耀（600660），第 9 个核验官重算后发现 **2/8 栽在同一个坑上、且都反过来指控"库里有 bug"**。
+> 证据：`docs/evidence/fuyao-600660-2026-11-26.json`（脚本计算后写入，非手抄）。
+
+| # | 约束 | 依据 |
+|---|---|---|
+| I-VALRAW | **历史估值分位只能用 `price_daily_raw`（不复权），禁用 `price_daily_qfq`**。前复权把累计派息从历史价格里扣掉（600660 于 2010-06-30：qfq 4.81 vs raw 8.90；累计派息 18.21 元/股）→ 历史市值被压到荒谬值（最低 0.2 亿 vs 真实 5.1 亿），负 PE、PB 0.11 等伪值随之出现，**当前分位被系统性抬高 20–27pct**。正确算法：`price_daily_raw.close` × `share_capital_history`（按 `effective_date` 区间取股本）÷ TTM 净利。`research_statistics` 用的就是这条链，可作 1:1 校验（实测 600660 当前 PE 分位 33.1%/19.9%/29.5%，与库内 33.06/19.88/29.45 一致） | `reports/169` §6；证据 JSON `checks.qfq_vs_raw` |
+| I-HYIELD | **H 股股息率不能直接取 `ah_market_snapshot.h_yield_pct`，必须自算**：`hk_dividends` 对 03606 最新 `ex_date` 只到 2026-05-14（末期 1.20 元），缺 A 股 `dividends` 里 2026-09-24 的 1.00 元中期分红 → 库内 `h_yield_pct = 2.584%` 恰好等于 1.20÷46.438，**漏掉中期分红后低估约 45%**。同一行的 `a_yield_pct`（3.869%）是对的 → **一行内两个口径不一致**。正确值（2026-11-16，H 折人民币 46.438）：毛 4.737%、扣 20% 红利税 3.790%（同期 A 3.944%） | `reports/169` §4.4/§6；证据 JSON `facts.ah` |
+| I-CSMARCOV | **`csmar_disclosure_metrics` 覆盖严重滞后（600660 最新只到 2025-03-31，落后 6 个季度），不能当"当期加权 ROE"引用**。本轮 6/8 份报告（含主控预置基线）把 `24.80%` 标成"2025 加权 ROE（csmar）"，而 24.80% 的真身是**期末口径**（93.12 ÷ 375.56 期末归母权益）；csmar 里 2024-12-31 加权 ROE 是 22.72%。引用 csmar 前先 `select max(report_date)`，且 ROE 必须标口径（加权 / 期末 / 摊薄） | `reports/169` §6；证据 JSON `checks.csmar_coverage` |
+| ~~I-ACCRUALSQ~~ | **已证伪，勿再追**：核验官报「`indicator_ext.accruals` 近 12 期全部显示 −0.0（浮点精度丢失）」——主控复算该列近 8 期实为 −0.0300 / −0.0078 / +0.0185 / −0.0391 …，**是核验脚本自己 `round(x,2)` 造成的显示伪值，不是库缺陷**。登记于此以免下一个人重复排查 | `reports/169` §6；主控 `verify_defects.py` 实跑输出 |
