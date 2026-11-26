@@ -1,0 +1,423 @@
+{
+  "stock": {
+    "code": "605499",
+    "hk_code": "09980",
+    "name": "东鹏饮料",
+    "listing_date": "2021-05-27"
+  },
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 110.89,
+      "market_cap_cny_yi": 814.2,
+      "total_shares_yi": 7.342
+    },
+    "ttm": {
+      "revenue": 226.28,
+      "parent_np": 47.99,
+      "deducted_np": 44.95,
+      "eps": 6.5366,
+      "pe": 16.96,
+      "true_yoy": {
+        "revenue_pct": 12.44,
+        "parent_np_pct": 9.56,
+        "deducted_pct": 8.61
+      },
+      "snapshot_pseudo_yoy": {
+        "revenue_pct": 8.39,
+        "parent_np_pct": 8.69
+      }
+    },
+    "dividends": {
+      "ttm_dps": 5.5,
+      "yield_pct": 4.96,
+      "payout_pct": 84.14,
+      "transfers": "两次十送三（2024-10-09、2026-05-18），股本 x1.69；名义 DPS 1.50→5.50（+267%），复权后约 1.50→3.25（+117%）"
+    },
+    "forecast": [
+      {
+        "year": "2025E",
+        "eps": 6.0137,
+        "pe": 18.44,
+        "n": 39
+      },
+      {
+        "year": "2026E",
+        "eps": 6.7327,
+        "pe": 16.47,
+        "n": 39
+      },
+      {
+        "year": "2027E",
+        "eps": 7.299,
+        "pe": 15.19,
+        "n": 39
+      },
+      {
+        "year": "2028E",
+        "eps": 8.255,
+        "pe": 13.43,
+        "n": 39
+      }
+    ]
+  },
+  "checks": {
+    "net_cash": {
+      "cash": 141.52,
+      "trading_assets": 65.66,
+      "ibd": 66.74,
+      "net_cash": 140.44,
+      "pct_of_mcap": 17.25,
+      "pe_ex_cash": 14.04,
+      "equity_parent": 185.55,
+      "minority_interest": 0.42,
+      "roe_period_end_pct": 25.86,
+      "pb": 4.388,
+      "identity": "16.96 x 25.86% = 4.388"
+    },
+    "inventory_ar": {
+      "inventory": 6.65,
+      "receivable": 1.74,
+      "pct_of_ttm_revenue": 3.71
+    },
+    "contract_liabilities": {
+      "current": 50.9,
+      "prior_year": 35.63,
+      "yoy_pct": 42.86,
+      "note": "经销商预付款在加速，渠道打款意愿未恶化"
+    },
+    "h_share_ipo": {
+      "financing_cf": [
+        {
+          "report_date": "2025-12-31",
+          "cff_cny_yi": -26.48
+        },
+        {
+          "report_date": "2026-03-31",
+          "cff_cny_yi": 100.1
+        },
+        {
+          "report_date": "2026-06-30",
+          "cff_cny_yi": 63.1
+        },
+        {
+          "report_date": "2026-09-30",
+          "cff_cny_yi": 49.04
+        }
+      ],
+      "note": "2026Q1 筹资净流入 100.10 亿 = H 股 IPO（09980.HK，5,818 万股，隐含发行价约 220 元）；股本 5.2001→5.6477 亿股；净现金 140.44 亿里含这笔新钱，剔现金 PE 14.04 是『用发新股买便宜』"
+    },
+    "ah": {
+      "sync_as_of": "2026-11-16",
+      "a_close": 110.22,
+      "h_close_hkd": 99.45,
+      "fx": 0.856,
+      "h_in_cny": 85.13,
+      "a_premium_pct": 29.47,
+      "a_premium_with_today_a": 30.26,
+      "a_yield_pct": 4.99,
+      "h_yield_pct": 6.46,
+      "h_yield_after_tax_pct": 5.17,
+      "identity_status": "ok",
+      "h_shares_yi": 0.5818,
+      "correction": "手册写『库内无 A/H 记录』是事实错误：本票 A+H 两地上市（09980.HK），A 比 H 贵 29.47%"
+    },
+    "single_quarter": [
+      {
+        "report_date": "2025-03-31",
+        "q_rev": 48.48,
+        "q_np": 9.8,
+        "q_ded": 9.59,
+        "q_gross_margin_pct": 44.47,
+        "q_selling_pct": 16.68
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev": 58.89,
+        "q_np": 13.95,
+        "q_ded": 13.12,
+        "q_gross_margin_pct": 45.7,
+        "q_selling_pct": 14.82
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev": 61.07,
+        "q_np": 13.86,
+        "q_ded": 12.69,
+        "q_gross_margin_pct": 45.21,
+        "q_selling_pct": 15.26
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev": 40.31,
+        "q_np": 6.54,
+        "q_ded": 6.44,
+        "q_gross_margin_pct": 43.8,
+        "q_selling_pct": 19.63
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev": 58.88,
+        "q_np": 12.57,
+        "q_ded": 12.0,
+        "q_gross_margin_pct": 46.89,
+        "q_selling_pct": 17.36
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev": 65.55,
+        "q_np": 16.09,
+        "q_ded": 13.98,
+        "q_gross_margin_pct": 49.69,
+        "q_selling_pct": 17.18
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev": 61.53,
+        "q_np": 12.78,
+        "q_ded": 12.53,
+        "q_gross_margin_pct": 45.66,
+        "q_selling_pct": 13.41
+      }
+    ],
+    "roce": [
+      {
+        "year": "2017",
+        "ce": 9.12,
+        "ebit": 4.0,
+        "roce_pct": null
+      },
+      {
+        "year": "2018",
+        "ce": 11.51,
+        "ebit": 2.78,
+        "roce_pct": 27.0
+      },
+      {
+        "year": "2019",
+        "ce": 18.89,
+        "ebit": 7.23,
+        "roce_pct": 47.54
+      },
+      {
+        "year": "2020",
+        "ce": 22.31,
+        "ebit": 10.14,
+        "roce_pct": 49.21
+      },
+      {
+        "year": "2021",
+        "ce": 43.75,
+        "ebit": 15.02,
+        "roce_pct": 45.47
+      },
+      {
+        "year": "2022",
+        "ce": 51.64,
+        "ebit": 18.77,
+        "roce_pct": 39.35
+      },
+      {
+        "year": "2023",
+        "ce": 66.63,
+        "ebit": 25.82,
+        "roce_pct": 43.66
+      },
+      {
+        "year": "2024",
+        "ce": 78.31,
+        "ebit": 39.17,
+        "roce_pct": 54.05
+      },
+      {
+        "year": "2025",
+        "ce": 99.11,
+        "ebit": 54.84,
+        "roce_pct": 61.82
+      }
+    ],
+    "cash_flow": [
+      {
+        "year": "2019",
+        "cfo": 12.11,
+        "capex": null,
+        "fcf": null
+      },
+      {
+        "year": "2020",
+        "cfo": 13.4,
+        "capex": 6.45,
+        "fcf": 6.95
+      },
+      {
+        "year": "2021",
+        "cfo": 20.77,
+        "capex": 6.09,
+        "fcf": 14.67
+      },
+      {
+        "year": "2022",
+        "cfo": 20.26,
+        "capex": 7.93,
+        "fcf": 12.33
+      },
+      {
+        "year": "2023",
+        "cfo": 32.81,
+        "capex": 9.18,
+        "fcf": 23.64
+      },
+      {
+        "year": "2024",
+        "cfo": 57.89,
+        "capex": 16.87,
+        "fcf": 41.02
+      },
+      {
+        "year": "2025",
+        "cfo": 61.74,
+        "capex": 22.69,
+        "fcf": 39.05
+      }
+    ],
+    "ttm_fcf": {
+      "ttm_cfo": 65.83,
+      "ttm_fcf_est": 45.92,
+      "fcf_yield_pct": 5.64,
+      "note": "审计口径：TTM FCF 45.92 亿（CFO 65.83 − capex 19.91），收益率 5.64%；2025 年报口径 39.05 亿（4.80%）"
+    },
+    "segments_2026h1": [
+      {
+        "item": "能量饮料",
+        "amt": 89.37,
+        "pct": 71.82
+      },
+      {
+        "item": "电解质饮料",
+        "amt": 16.72,
+        "pct": 13.43
+      },
+      {
+        "item": "茶饮料",
+        "amt": 10.58,
+        "pct": 8.51
+      },
+      {
+        "item": "其他饮料",
+        "amt": 7.59,
+        "pct": 6.1
+      },
+      {
+        "item": "其他(补充)",
+        "amt": 0.17,
+        "pct": 0.14
+      }
+    ],
+    "energy_growth": {
+      "energy_2026h1_cny_yi": 89.37,
+      "energy_2025h1_cny_yi": 83.61,
+      "energy_yoy_pct": 6.89,
+      "tea_2026h1_cny_yi": 10.58,
+      "note": "能量饮料本体 2026H1 同比仅 +6.88%，占比从 77.87% 掉到 71.82%；总营收 +15.9% 靠新品补位（茶饮料 0→10.58 亿、电解质 +11.99%）"
+    },
+    "drop_correction": {
+      "raw_52w_high": 279.2,
+      "raw_drop_pct": -60.28,
+      "qfq_52w_high": 209.62,
+      "qfq_drop_pct": -47.1,
+      "note": "279.20 是 2026-05-18 十送三之前的 raw 价，不可与今日直接比；复权后跌幅 −47.1%"
+    },
+    "forecast_stale": {
+      "note": "2026E 6.7327 反推需 2026Q4 归母 8.00 亿（+22%），与 2026Q3 的 −7.8% 硬矛盾；判定为三季报前旧预测"
+    },
+    "percentiles": {
+      "1y": {
+        "months": 13,
+        "pe_p50": 22.97,
+        "pb_p50": 5.27,
+        "pe_min": 16.57,
+        "pe_pct": 7.69,
+        "pb_pct": 15.38
+      },
+      "3y": {
+        "months": 37,
+        "pe_p50": 35.03,
+        "pb_p50": 13.3,
+        "pe_min": 16.57,
+        "pe_pct": 2.7,
+        "pb_pct": 5.41
+      },
+      "full": {
+        "months": 67,
+        "pe_p50": 39.2,
+        "pb_p50": 14.08,
+        "pe_min": 16.57,
+        "pe_pct": 1.49,
+        "pb_pct": 2.99
+      }
+    },
+    "percentile_caveat": {
+      "note": "三个 Agent 用三种方法算出 PE 分位 1.5%、1.8%、4.5% —— 口径本身不稳；且仅有 5.5 年历史、起点是 2021 年 IPO 泡沫（p90 60.4 倍）；PB 分母被 2026Q1 的 98.85 亿融资重写，与 PE 不同源"
+    },
+    "baseline_errors": [
+      {
+        "item": "A/H",
+        "i_wrote": "库内无 A/H 记录，按纯 A 处理",
+        "audit": "有 1 行：hk_code 09980，H 股 5,818 万股，A/H 溢价 29.47%",
+        "impact": "事实错误；结论应改为『若买，H 便宜 22.8%』"
+      },
+      {
+        "item": "净现金成色",
+        "i_wrote": "140.4 亿 = 17.2% 市值（未提融资）",
+        "audit": "含 2026Q1 H 股 IPO 约 98.85 亿新钱；只剔经营性净现金 41.59 亿则剔现金 PE 16.10x",
+        "impact": "剔现金 PE 14.04 是『用发新股买便宜』"
+      },
+      {
+        "item": "毛利率/净利率/销售费用率",
+        "i_wrote": "47.47% / 22.29% / 15.97%（当作当期水平）",
+        "audit": "是 9M26 YTD；TTM 口径 46.82% / 21.21%",
+        "impact": "口径需标注"
+      },
+      {
+        "item": "52 周跌幅",
+        "i_wrote": "−60.3%",
+        "audit": "复权 −47.1%（279.20 是十送三前 raw 价）",
+        "impact": "『别人恐惧』程度要打折"
+      },
+      {
+        "item": "2026Q3 质量",
+        "i_wrote": "归母 −7.8%",
+        "audit": "扣非只 −1.26%（非经常性 1.17→0.25 亿）；单季毛利率 45.66%（+0.45pp）、销售费用率 13.41%（−1.85pp）",
+        "impact": "还没打价格战——E 腿未死的关键证据"
+      },
+      {
+        "item": "能量饮料增长",
+        "i_wrote": "占 71.82%",
+        "audit": "2026H1 同比仅 +6.88%（83.61→89.37 亿），增量来自茶饮料 0→10.58 亿",
+        "impact": "增长是新品补位，不是核心自立"
+      }
+    ]
+  },
+  "normalization": {
+    "ttm_np_times_17": 815.9,
+    "note": "市场正好按 TTM 47.99 亿 x 17.0 = 816 亿 ≈ 市值 814.2 亿 定价（误差 0.2%）",
+    "fcf_anchor": {
+      "at_6pct": 107.8,
+      "at_7pct": 95.1
+    },
+    "implied_growth_for_10pct_irr": 6.6,
+    "single_kill_not_double": "PE 从 95.9 杀到 16.96（−82%），而 TTM 归母仍 +9.56% —— 只杀了估值腿，E 腿未杀；所以现在定价的是『E 腿会不会被杀』",
+    "masters_intrinsic_values": {
+      "buffett": "119–132（中枢 122）",
+      "munger": "84–104（中枢 93）",
+      "fisher": "145–180（中枢 160）",
+      "duan": "67–159（中枢 110）",
+      "lilu": "82–98",
+      "marks": "86–122（中枢 103）"
+    },
+    "audit_verdict": "不买或极小仓：以永续 6.6% 增长的价钱，卖一个刚证明可能只有 0–3% 增长的生意",
+    "verdict_median_first_tranche": 99
+  }
+}
