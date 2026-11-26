@@ -1,0 +1,335 @@
+{
+  "stock": {
+    "code": "600660",
+    "hk_code": "03606",
+    "name": "福耀玻璃"
+  },
+  "round": 2,
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "a_close": 55.78,
+      "market_cap_cny_yi": 1456.0,
+      "total_shares_yi": 26.097,
+      "h_close_hkd": 54.25,
+      "h_in_cny": 46.44,
+      "ah_snapshot_date": "2026-11-16",
+      "ah_premium_snapshot_pct": 22.44,
+      "ah_premium_today_pct": 20.12,
+      "h_discount_to_a_pct": 16.75,
+      "note": "库内 11-16 快照溢价 22.44%；按今日 A 55.78 / H 46.44 重算为 20.12%，H 对 A 折价 16.75%"
+    },
+    "ttm": {
+      "revenue": 466.1,
+      "parent_np": 82.5,
+      "eps": 3.1631,
+      "pe": 17.63,
+      "revenue_yoy_pct": 5.35,
+      "parent_np_yoy_pct": -9.12,
+      "pb": 3.885,
+      "roe_period_end_pct": 22.03,
+      "net_cash_cny_yi": 20.9,
+      "net_cash_pct_of_mcap": 1.4,
+      "pe_ex_cash": 17.38,
+      "price_52w_low": 48.01,
+      "price_52w_high": 68.03,
+      "pct_from_high": -18.01
+    }
+  },
+  "checks": {
+    "fx_bridge": {
+      "y9m26_fx_loss_cny_yi": 10.67,
+      "y9m25_fx_gain_cny_yi": 4.8,
+      "swing_cny_yi": 15.47,
+      "q3_fx_loss_cny_yi": 2.6,
+      "q3_fx_loss_increase_cny_yi": 1.4,
+      "profit_total_y9m26_ex_fx_cny_yi": 81.9,
+      "yoy_reported_pct": -16.93,
+      "yoy_ex_fx_pct": 1.18,
+      "q3_yoy_reported_pct": -10.64,
+      "q3_yoy_ex_fx_pct": -5.26,
+      "scorecard_9m26": {
+        "revenue_pct": 2.47,
+        "parent_np_pct": -14.97,
+        "deducted_pct": -15.06,
+        "gross_margin_pct": 38.6,
+        "gross_margin_yoy_pp": 1.2
+      },
+      "scorecard_q3": {
+        "revenue_pct": 2.51,
+        "parent_np_pct": -9.87,
+        "deducted_pct": -9.71,
+        "gross_margin_pct": 38.04,
+        "gm_yoy_pp": 0.14,
+        "gm_qoq_pp": -2.12
+      },
+      "verdict": "约八成是汇兑噪音、两成是真减速。经营没有恶化（毛利率反而提升 1.2pp，失去定价权的公司毛利率会先塌），但剔干净后只剩 +1.18% —— 这是低速平台期，不是稳健成长",
+      "source": "西南证券 2026-10-26 / 华龙证券 2026-10-26 / 华安证券 2026-11-02"
+    },
+    "demand_context": {
+      "q3_china_auto_output_pct": -2.36,
+      "q3_global_light_vehicle_pct": "-2% to -3%",
+      "fuyao_q3_revenue_pct": 2.51,
+      "outperformance_pp": "约 5pp",
+      "source": "华龙证券 2026-10-26"
+    },
+    "pb_pe_identity": {
+      "identity": "PB 3.885 = PE 17.63 x ROE 22.03%",
+      "same_pb_different_roe": {
+        "roe_13_73_pct_2019": 28.3,
+        "roe_20_34_pct_2025": 19.1,
+        "roe_22_03_pct_period_end": 17.6
+      },
+      "roce_series": {
+        "2019": 14.09,
+        "2021": 15.99,
+        "2022": 14.39,
+        "2023": 16.09,
+        "2024": 19.21,
+        "2025": 23.02
+      },
+      "ce_trend": "CE 从 2024 年 452.7 亿降到 2025 年 445.0 亿，而 EBIT 从 83.4 升到 103.3 亿 —— 用更少的资本赚更多的钱",
+      "verdict": "PB 高分位不是贵，是市场已把 ROE 从 14% 抬到 22% 这件事定价进去；PE 低分位不是便宜，是分母被汇兑压低。两个分位各自失真，真锚是正常化盈利 + ROCE 可持续性。风险：ROE 22% 是历史峰值（净利率 20.34% 亦为历史最高，含 3-4pp 周期），若回落到 18%，同样的 PB 3.885 会让 PE 跳到 21.6x"
+    },
+    "q4_reverse_math": {
+      "q4_2025_actual_cny_yi": 22.47,
+      "y9m26_actual_cny_yi": 60.06,
+      "scenarios": [
+        {
+          "fy26_target": 82.53,
+          "q4_needed": 22.47,
+          "q4_yoy_pct": 0.0,
+          "verdict": "基线（Q4 仍有汇兑损失）"
+        },
+        {
+          "fy26_target": 87.74,
+          "q4_needed": 27.68,
+          "q4_yoy_pct": 23.2,
+          "verdict": "华龙，乐观上沿（需 Q4 无汇兑损失+美国复产+安徽爬坡减亏三件事同时成立）"
+        },
+        {
+          "fy26_target": 88.7,
+          "q4_needed": 28.64,
+          "q4_yoy_pct": 27.5,
+          "verdict": "西南，偏乐观"
+        },
+        {
+          "fy26_target": 90.6,
+          "q4_needed": 30.54,
+          "q4_yoy_pct": 35.9,
+          "verdict": "库内一致预期，偏高——隐含 3-5 亿汇兑净收益"
+        },
+        {
+          "fy26_target": 97.3,
+          "q4_needed": 37.24,
+          "q4_yoy_pct": 65.7,
+          "verdict": "华安，几乎不可能（需人民币大幅反转）"
+        }
+      ],
+      "baseline_fy26": "85 - 88 亿（-9% 到 -6%），对应现价 A 16.5 - 17.1x",
+      "insight": "卖方 18% 的分歧不是经营分歧，是汇率假设分歧。9M26 剔除汇兑后归母已约 68.8 亿，加 Q4 干净的 25-26 亿就是约 94 亿 —— 华安其实是「全年零汇兑损失」假设。市场在为一张汇兑损益表吵架"
+    },
+    "ah_test": {
+      "a_price": 55.78,
+      "h_price_hkd": 54.25,
+      "h_in_cny": 46.44,
+      "ah_premium_today_pct": 20.12,
+      "h_discount_pct": 16.75,
+      "pe_a": 17.63,
+      "pe_h": 14.68,
+      "pb_a": 3.885,
+      "pb_h": 3.234,
+      "div_yield_a_pct": 3.94,
+      "div_yield_h_gross_pct": 4.74,
+      "div_yield_h_after_20pct_tax_pct": 3.79,
+      "verdict": "H 的税后股息（3.79%）反而低于 A（3.94%，持股 >1 年免税）。H 的全部优势就是那 16.75% 的入场折扣本身。A/H 折价不是安全边际——安全边际只能来自「价格 vs 内在价值」，不能来自「价格 vs 另一个价格」",
+      "data_defect_found": "库内 ah_market_snapshot 的 H 股息率 2.58% 是错的——它只用了最近一次分红 1.20，真实应为 2.20 / 46.44 = 4.74%（KB §27 I-DPSATTRIB 复现）"
+    },
+    "payout_vs_fcf": {
+      "ttm_dps": 2.2,
+      "shares_yi": 26.097,
+      "total_dividend_cny_yi": 57.4,
+      "cfo_2025_cny_yi": 120.6,
+      "annualized_capex_cny_yi": 63.6,
+      "fcf_cny_yi": 57.0,
+      "payout_over_fcf_pct": 100.7,
+      "payout_ratio_pct": "65 - 68",
+      "verdict": "分红 / FCF = 100.7% —— 4.74% 的 H 股股息率不是无风险收益率，它是把全部自由现金流分掉的收益率。增长空间受 2027 年 capex 限制"
+    },
+    "depreciation_cliff": {
+      "base_2027_consensus_cny_yi": 106.4,
+      "scenarios": [
+        {
+          "new_depreciation": 12,
+          "after_tax_15pct": 10.2,
+          "np_2027": 96.2,
+          "eps": 3.686,
+          "pe_at_current": 15.13
+        },
+        {
+          "new_depreciation": 15,
+          "after_tax_15pct": 12.75,
+          "np_2027": 93.65,
+          "eps": 3.588,
+          "pe_at_current": 15.55
+        },
+        {
+          "new_depreciation": 18,
+          "after_tax_15pct": 15.3,
+          "np_2027": 91.1,
+          "eps": 3.491,
+          "pe_at_current": 15.98
+        }
+      ],
+      "growth_vs_fy26": "+3.5% 到 +13.2%，不是市场预期的 +21% 到 +25%",
+      "caveat": "12-18 亿是情景假设而非硬事实；20 亿模具基地按 10-15 年折旧单独仅约 1.3-2.0 亿/年",
+      "blindspot": "0/6 大师量化过这一项"
+    },
+    "asp_narrative": {
+      "verify_total": "2025 营收 458 亿 / 全球约 9000 万辆 x 34% 份额服务约 3000 万辆 → 单车配套约 1500 元，本来就不是 1000 元",
+      "to_2500_requires": "十年 content CAGR 5.2%，且天幕渗透 20%→60%、调光 3%→20%、HUD 15%→45%，且年降不能吃掉 mix",
+      "pp_8_03_value": "ASP uplift ≈ 8.03% x（高附加值单价倍数 - 1）：倍数 1.5 → +4.0%；2.0 → +8.0%；3.0 → +16.1%；还需扣年降",
+      "net_asp_reality": "mix 3-5% - 年降 3-5% ≈ 0-2%",
+      "verdict": "值 2-3 个点的 ASP，不值 10 个点。给 10-15% 期权价值，不放进基准估值"
+    },
+    "collective_blindspots": [
+      "汇兑被口头承认、未被结构性量化：6/6 说会反复，0/6 给出美元/欧元敞口、套保比例、1% 汇率敏感度；斯利普的 94 亿正常化等于把 2026 年 10.67 亿损失全部加回",
+      "没有 FY26 情景 PE 矩阵：A 55.78 在 82.5/85/88 亿下是 17.64x/17.13x/16.54x —— A 连 88 亿乐观情景都还有 16.5x，所谓 PE 5 年 19.7% 分位不是便宜",
+      "+8.03pp 被当成可延续：6/6 口头降为期权，0/6 做「占比停止提升/反转」压力测试；只有斯利普明确扣了主机厂年降",
+      "2027-2028 折旧高峰 0/6 量化",
+      "「单车 1000→3000 元」6/6 都降为 TAM，但 6/6 都反复引用 —— 存在「口头降级、心理仍锚定」的偏差",
+      "H 报价停在 11-16、A 为 11-25，A/H 溢价已从 22.44% 收窄到 20.12%；5/6 仍认定 H 现价已触发，没有一份把实时 H 价、汇率、买卖价差作为下单硬门槛",
+      "分红 ≈ FCF 未被计算（100.7%）",
+      "正常化口径混用：82.5/85/88 亿是含 9M26 汇兑损失的报表口径；94-97 亿是「Q4 零汇兑」口径；扣两年平均汇兑拖累后约 89-95 亿。6/6 没有统一这三个口径"
+    ],
+    "master_errors_found": [
+      "费雪把「22.44% 的 A/H 溢价」误写成「H 折价 22.44%」（真实 H 折价 18.33% @11-16 / 16.75% @今日）",
+      "斯利普写「观察等待」却让 H 立即开 1/3 —— 标签与动作不符；其 H 触发价用「A ÷ 0.856」算绝对人民币等值（A 48 元 → 56.07 HKD），隐含「维持当前 A/H 溢价」，与「买 H 因为便宜」自相矛盾；若按今日溢价，A 48 元对应的 H 只有约 46.7 HKD",
+      "格林布拉特 H 首档 54.32 仅比现价 54.25 高 0.07 HKD，靠四舍五入触发"
+    ],
+    "round1_comparison": {
+      "round1": "3 买 / 5 观察；A 股首档中位 47.4-49.5",
+      "round2_a": "48.00（比中位 48.45 低 0.9%，基本维持）",
+      "round2_h": "56.07 / 50.82 / 46.14 HKD（绝对等值）；工具从 A 换成 H",
+      "confirmed": "169「A 股 55.78 不便宜」完全正确 —— 本轮用更硬的算术支持：A 股在 FY26 最乐观情景（88 亿）下仍有 16.5x PE",
+      "new_risks": [
+        "2027 折旧悬崖（新增折旧 12-18 亿 → 2027 归母 91.1-96.2 亿，PE 15.1-16.0x）",
+        "分红已 ≈ FCF（100.7%），无增长缓冲"
+      ]
+    },
+    "still_missing": [
+      "单车 ASP 与配套套数（销量）的官方桥接（只有收入占比 +8.03pp，没有元/平方米、平方米/车）",
+      "高附加值产品的绝对收入与相对普通品的单价倍数",
+      "主机厂年降（price-down）幅度与频率",
+      "2027 新增折旧金额（美国二期 + 安徽 400 万套 + 20 亿模具基地）",
+      "美元/欧元敞口与套保比例、1% 汇率敏感度",
+      "美国火情的保险赔付与复产时间表",
+      "前五大客户集中度（比亚迪/特斯拉/大众各自占比）",
+      "曹氏家族持股、减持与接班安排"
+    ],
+    "web_tool_status": "web_search 返回 HTTP 401；改用东方财富研报接口（reportapi.eastmoney.com/report/list + data.eastmoney.com/report/zw_stock.jshtml?infocode=）抓回 7 份券商研报全文（2026-06-01 至 2026-11-06）"
+  },
+  "normalization": {
+    "anchor_1_normalized_earnings": {
+      "fy25_cny_yi": 93.1,
+      "fy26_scenarios": [
+        82.5,
+        85,
+        88
+      ],
+      "structural_normalized": "89 - 95",
+      "grid": {
+        "fy25_93_1": {
+          "14x": 49.94,
+          "16x": 57.08,
+          "18x": 64.21
+        },
+        "fy26_82_5": {
+          "14x": 44.26,
+          "16x": 50.58,
+          "18x": 56.9
+        },
+        "fy26_85": {
+          "14x": 45.6,
+          "16x": 52.11,
+          "18x": 58.63
+        },
+        "fy26_88": {
+          "14x": 47.21,
+          "16x": 53.95,
+          "18x": 60.7
+        }
+      },
+      "used_range": "52 - 58",
+      "midpoint": 55
+    },
+    "anchor_2_fcf": {
+      "fcf_cny_yi": 57.0,
+      "per_share": 2.184,
+      "at_4pct": 54.6,
+      "at_4_5pct": 48.54,
+      "at_5pct": 43.68,
+      "used_range": "43.7 - 54.6",
+      "midpoint": 48.5
+    },
+    "anchor_3_dividend": {
+      "ttm_dps": 2.2,
+      "at_4pct": 55.0,
+      "at_4_5pct": 48.89,
+      "at_5pct": 44.0,
+      "used_range": "44.0 - 55.0",
+      "midpoint": 48.9
+    },
+    "buy_zones": {
+      "S1": {
+        "a": 48.0,
+        "h_hkd_abs": 56.07,
+        "h_hkd_at_current_premium": 46.68,
+        "pe_fy26_86_5": 14.48,
+        "pb": 3.34,
+        "div_yield_pct": 4.58,
+        "position_pct": 25
+      },
+      "S2": {
+        "a": 43.5,
+        "h_hkd_abs": 50.82,
+        "h_hkd_at_current_premium": 42.31,
+        "pe_fy26_86_5": 13.12,
+        "pb": 3.03,
+        "div_yield_pct": 5.06,
+        "position_pct": 30
+      },
+      "S3": {
+        "a": 39.5,
+        "h_hkd_abs": 46.14,
+        "h_hkd_at_current_premium": 38.42,
+        "pe_fy26_86_5": 11.92,
+        "pb": 2.75,
+        "div_yield_pct": 5.57,
+        "position_pct": 45
+      },
+      "cap_pct": 9.0,
+      "note": "H 两列不可混用：左列是绝对人民币等值（A ÷ 0.856），右列是维持当前 20.12% A/H 溢价的参考价。买 H 的真实含义是拿 16.75% 折价，不是拿一个折算公式"
+    },
+    "verdicts": {
+      "buy_all_h": [
+        "巴菲特",
+        "芒格",
+        "李录",
+        "格林布拉特"
+      ],
+      "watch": [
+        "费雪",
+        "斯利普"
+      ],
+      "no_buy": [],
+      "buy_a_at_current": 0,
+      "missing": [
+        "2 份大师报告未返回"
+      ]
+    },
+    "final_verdict": "A 股 55.78 不买（比首档 48 高 13.9%）；H 54.25 只在实时报价+汇率+税负+流动性复核后作第一档有条件首仓，最多 25% 计划仓位；总仓上限 9%"
+  }
+}
