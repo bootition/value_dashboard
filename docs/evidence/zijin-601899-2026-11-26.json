@@ -1,0 +1,357 @@
+{
+  "stock": {
+    "code": "601899",
+    "hk_code": "02899",
+    "name": "紫金矿业"
+  },
+  "generated_at": "2026-11-26",
+  "source_db": "data/valuedashboard.duckdb",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "snapshot": {
+      "pe_ttm": 8.549775,
+      "pb_mrq": 2.874663,
+      "dividend_yield": 0.034828,
+      "roe": 0.374238,
+      "roic": 0.338403,
+      "gross_margin": 0.376268,
+      "net_margin": 0.242199,
+      "debt_ratio": 0.499041,
+      "interest_bearing_debt_cny": 141745494358.0,
+      "market_cap_cny": 610790635595.77,
+      "last_close": 22.97,
+      "payout_ratio": 0.297772,
+      "dps": 0.8,
+      "ttm_dividend_yield_percent": 3.482804,
+      "roce_latest": 0.243867,
+      "roce_5y_median": 0.179108,
+      "roce_10y_median": 0.126781,
+      "roce_10y_min": 0.050255,
+      "roce_10y_cv": 0.427554,
+      "revenue_cagr5": 0.15274,
+      "net_profit_cagr5": 0.514018,
+      "max_drawdown": 0.463481,
+      "annualized_volatility": 0.38087
+    },
+    "total_shares": 26590798241,
+    "ttm": {
+      "formula": "ytd(2026-09-30) + fy(2025-12-31) - ytd(2025-09-30)",
+      "revenue_cny_yi": 3783.3,
+      "parent_net_profit_cny_yi": 714.39,
+      "net_profit_all_cny_yi": 916.32,
+      "minority_cny_yi": 201.92,
+      "eps_ttm": 2.6866,
+      "pe_ttm_check": 8.55,
+      "minority_over_total_pct": 22.04,
+      "minority_over_parent_pct": 28.27,
+      "ebit_ttm_cny_yi": 1199.48,
+      "fin_expense_ttm_cny_yi": 12.34
+    },
+    "cycle_averages": {
+      "3y_avg_np_cny_yi": 349.8,
+      "3y_avg_eps": 1.3156,
+      "3y_avg_pe_at_last_close": 17.46,
+      "5y_avg_np_cny_yi": 281.3,
+      "5y_avg_eps": 1.058,
+      "5y_avg_pe_at_last_close": 21.71,
+      "10y_avg_np_cny_yi": 160.9,
+      "10y_avg_eps": 0.6051,
+      "10y_avg_pe_at_last_close": 37.96
+    },
+    "balance_2026q3": {
+      "total_assets_cny_yi": 5593.36,
+      "total_current_liabilities_cny_yi": 1444.38,
+      "capital_employed_cny_yi": 4148.99,
+      "equity_parent_cny_yi": 2124.74,
+      "minority_equity_cny_yi": 677.31,
+      "cash_cny_yi": 903.92,
+      "trading_assets_cny_yi": 131.42,
+      "interest_bearing_debt_cny_yi": 1419.68,
+      "net_debt_cny_yi": 384.34,
+      "fixed_assets_cny_yi": 1285.73,
+      "cip_cny_yi": 373.39,
+      "intangibles_cny_yi": 891.5,
+      "goodwill_cny_yi": 6.77,
+      "bps": 7.9905
+    },
+    "dividends": {
+      "dps_ttm_cny": 0.8,
+      "yield_peak_dps_pct": 3.48,
+      "normalized_dps_cny": 0.346,
+      "yield_normalized_dps_pct": 1.51,
+      "payout_ratio": 0.2978,
+      "note": "峰值 DPS 0.80 对应 3.48%；正常化后 DPS 0.355 对应 1.55%，低于 10Y 国债"
+    },
+    "analyst_forecasts": [
+      {
+        "fiscal_year": "2025E",
+        "eps": 1.9472,
+        "analysts": 19,
+        "implied_np_cny_yi": 517.8,
+        "pe_at_last_close": 11.8
+      },
+      {
+        "fiscal_year": "2026E",
+        "eps": 2.9526,
+        "analysts": 19,
+        "implied_np_cny_yi": 785.1,
+        "pe_at_last_close": 7.78
+      },
+      {
+        "fiscal_year": "2027E",
+        "eps": 3.4089,
+        "analysts": 19,
+        "implied_np_cny_yi": 906.5,
+        "pe_at_last_close": 6.74
+      },
+      {
+        "fiscal_year": "2028E",
+        "eps": 3.9717,
+        "analysts": 19,
+        "implied_np_cny_yi": 1056.1,
+        "pe_at_last_close": 5.78
+      }
+    ]
+  },
+  "checks": {
+    "roce": {
+      "fy2025_ce_cny_yi": 3825.25,
+      "fy2025_ebit_cny_yi": 828.36,
+      "fy2025_roce_pct": 24.39,
+      "ce_2026q3_cny_yi": 4148.99,
+      "avg_ce_cny_yi": 3987.12,
+      "ttm_roce_pct": 30.08,
+      "ebit_definition": "roce_history.ebit = 利润总额 + 财务费用（FY2025 实测 807.53+20.83=828.36 吻合）",
+      "stale_trap": "8/8 Agent 报告用 FY2025 的 24.39% / CE 3825.25；TTM ROCE 已升至约 30%、CE 已升至 4148.99，正常化盈利因此被低估约 8%"
+    },
+    "52w": {
+      "window_trading_days": 257,
+      "low_close": 22.97,
+      "high_close": 43.45,
+      "low_intraday": 22.56,
+      "high_intraday": 44.94,
+      "note": "52 周最低收盘就是 2026-11-25 当天 22.97；库里不存在 18.84 这个 52 周低点（那是 2025-07 的价格）"
+    },
+    "cash": {
+      "ttm_cfo_cny_yi": 1076.0,
+      "ttm_capex_cny_yi": 347.7,
+      "ttm_fcf_cny_yi": 728.3,
+      "ttm_fcf_yield_pct": 11.92,
+      "fy2025_cfo_cny_yi": 754.3,
+      "fy2025_capex_cny_yi": 309.8,
+      "fy2025_fcf_cny_yi": 444.5,
+      "cum_capex_2019_2025_cny_yi": 1569.3
+    },
+    "ah": {
+      "sync_snapshot_as_of": "2026-11-16",
+      "a_close_synced": 26.38,
+      "h_close_hkd": 26.88,
+      "fx": 0.856,
+      "h_in_cny": 23.009,
+      "a_premium_synced_pct": 14.65,
+      "a_premium_using_today_a_pct": -0.17,
+      "note": "8/8 报告的「A/H 平水」是拿 11-25 的 A 价去比 11-13 的 H 价（H 行情滞后 12 天）；同日口径 A 溢价 14.65%",
+      "a_yield_pct": 3.48,
+      "h_after_tax_yield_pct": 2.78
+    },
+    "single_quarter": [
+      {
+        "report_date": "2025-03-31",
+        "q_rev_cny_yi": 789.3,
+        "q_gross_profit_cny_yi": 180.6,
+        "q_op_profit_cny_yi": 151.4,
+        "q_investment_income_cny_yi": 15.27,
+        "q_parent_np_cny_yi": 101.67,
+        "q_minority_pct": 18.43
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev_cny_yi": 887.8,
+        "q_gross_profit_cny_yi": 217.7,
+        "q_op_profit_cny_yi": 199.6,
+        "q_investment_income_cny_yi": 24.62,
+        "q_parent_np_cny_yi": 131.25,
+        "q_minority_pct": 18.88
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev_cny_yi": 864.9,
+        "q_gross_profit_cny_yi": 235.5,
+        "q_op_profit_cny_yi": 213.6,
+        "q_investment_income_cny_yi": 22.73,
+        "q_parent_np_cny_yi": 145.72,
+        "q_minority_pct": 14.57
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev_cny_yi": 948.8,
+        "q_gross_profit_cny_yi": 334.1,
+        "q_op_profit_cny_yi": 256.5,
+        "q_investment_income_cny_yi": -2.84,
+        "q_parent_np_cny_yi": 139.14,
+        "q_minority_pct": 23.22
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev_cny_yi": 985.0,
+        "q_gross_profit_cny_yi": 357.8,
+        "q_op_profit_cny_yi": 317.0,
+        "q_investment_income_cny_yi": 3.84,
+        "q_parent_np_cny_yi": 200.79,
+        "q_minority_pct": 20.21
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev_cny_yi": 956.8,
+        "q_gross_profit_cny_yi": 375.2,
+        "q_op_profit_cny_yi": 320.8,
+        "q_investment_income_cny_yi": 22.08,
+        "q_parent_np_cny_yi": 190.9,
+        "q_minority_pct": 22.54
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev_cny_yi": 892.7,
+        "q_gross_profit_cny_yi": 356.5,
+        "q_op_profit_cny_yi": 304.3,
+        "q_investment_income_cny_yi": 6.87,
+        "q_parent_np_cny_yi": 183.56,
+        "q_minority_pct": 22.54
+      }
+    ],
+    "consensus_q4": {
+      "fy2026_implied_np_cny_yi": 785.1,
+      "np_9m_2026_cny_yi": 575.26,
+      "q4_2026_needed_cny_yi": 209.9,
+      "q4_2025_actual_cny_yi": 139.14,
+      "q4_yoy_needed_pct": 50.8
+    },
+    "price_ladder": [
+      {
+        "price_cny": 22.97,
+        "pe_ttm": 8.55,
+        "pe_normalized": 19.76,
+        "pb": 2.87,
+        "div_yield_peak_pct": 3.48,
+        "div_yield_normalized_pct": 1.51
+      },
+      {
+        "price_cny": 20.0,
+        "pe_ttm": 7.44,
+        "pe_normalized": 17.2,
+        "pb": 2.5,
+        "div_yield_peak_pct": 4.0,
+        "div_yield_normalized_pct": 1.73
+      },
+      {
+        "price_cny": 17.0,
+        "pe_ttm": 6.33,
+        "pe_normalized": 14.62,
+        "pb": 2.13,
+        "div_yield_peak_pct": 4.71,
+        "div_yield_normalized_pct": 2.04
+      },
+      {
+        "price_cny": 16.75,
+        "pe_ttm": 6.23,
+        "pe_normalized": 14.41,
+        "pb": 2.1,
+        "div_yield_peak_pct": 4.78,
+        "div_yield_normalized_pct": 2.07
+      },
+      {
+        "price_cny": 15.0,
+        "pe_ttm": 5.58,
+        "pe_normalized": 12.9,
+        "pb": 1.88,
+        "div_yield_peak_pct": 5.33,
+        "div_yield_normalized_pct": 2.31
+      },
+      {
+        "price_cny": 13.2,
+        "pe_ttm": 4.91,
+        "pe_normalized": 11.35,
+        "pb": 1.65,
+        "div_yield_peak_pct": 6.06,
+        "div_yield_normalized_pct": 2.62
+      },
+      {
+        "price_cny": 12.0,
+        "pe_ttm": 4.47,
+        "pe_normalized": 10.32,
+        "pb": 1.5,
+        "div_yield_peak_pct": 6.67,
+        "div_yield_normalized_pct": 2.88
+      },
+      {
+        "price_cny": 11.5,
+        "pe_ttm": 4.28,
+        "pe_normalized": 9.89,
+        "pb": 1.44,
+        "div_yield_peak_pct": 6.96,
+        "div_yield_normalized_pct": 3.01
+      },
+      {
+        "price_cny": 9.9,
+        "pe_ttm": 3.68,
+        "pe_normalized": 8.52,
+        "pb": 1.24,
+        "div_yield_peak_pct": 8.08,
+        "div_yield_normalized_pct": 3.5
+      }
+    ],
+    "peers": {
+      "sw_l1_colour_metals_count": 126,
+      "median_pe": 20.24,
+      "median_pb": 2.16,
+      "note": "SW 一级「有色金属」126 只 PE 中位 20.24x，不是 5–10x；只有紫金/洛钼等头部几家表观 PE 是个位数"
+    }
+  },
+  "normalization": {
+    "rows": [
+      {
+        "scenario": "roce_10y_median",
+        "roce_pct": 12.68,
+        "normalized_ebit_cny_yi": 526.0,
+        "normalized_pbt_cny_yi": 513.7,
+        "normalized_parent_np_cny_yi": 309.1,
+        "normalized_eps": 1.1625,
+        "pe_at_last_close": 19.76,
+        "price_at_8x": 9.3,
+        "price_at_10x": 11.63,
+        "price_at_12x": 13.95,
+        "price_at_15x": 17.44
+      },
+      {
+        "scenario": "roce_5y_median",
+        "roce_pct": 17.91,
+        "normalized_ebit_cny_yi": 743.1,
+        "normalized_pbt_cny_yi": 730.8,
+        "normalized_parent_np_cny_yi": 439.8,
+        "normalized_eps": 1.6539,
+        "pe_at_last_close": 13.89,
+        "price_at_8x": 13.23,
+        "price_at_10x": 16.54,
+        "price_at_12x": 19.85,
+        "price_at_15x": 24.81
+      },
+      {
+        "scenario": "roce_10y_min",
+        "roce_pct": 5.03,
+        "normalized_ebit_cny_yi": 208.5,
+        "normalized_pbt_cny_yi": 196.2,
+        "normalized_parent_np_cny_yi": 118.1,
+        "normalized_eps": 0.444,
+        "pe_at_last_close": 51.74,
+        "price_at_8x": 3.55,
+        "price_at_10x": 4.44,
+        "price_at_12x": 5.33,
+        "price_at_15x": 6.66
+      }
+    ],
+    "tax_rate_pct": 22.81,
+    "minority_pct": 22.04,
+    "note": "审计报告给 317.6 亿（只扣税与少数股东）；主控补上财务费用扣除后为约 316.6 亿（EBIT 526.0 − 财务费用 12.3 → 513.7 × (1−22.81%) × (1−22.04%)）"
+  }
+}
