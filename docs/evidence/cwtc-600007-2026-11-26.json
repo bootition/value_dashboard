@@ -1,0 +1,425 @@
+{
+  "stock": {
+    "code": "600007",
+    "name": "中国国贸",
+    "hk_code": null,
+    "listing_date": "1999-03-12"
+  },
+  "generated_at": "2026-11-26",
+  "quote_date": "2026-11-25",
+  "financial_date": "2026-09-30",
+  "facts": {
+    "price": {
+      "last_close": 21.68,
+      "market_cap_cny_yi": 218.4,
+      "total_shares_yi": 10.0728
+    },
+    "ttm": {
+      "revenue": 36.42,
+      "parent_np": 12.3,
+      "deducted_np": 12.21,
+      "eps": 1.2207,
+      "pe": 17.76,
+      "pb": 2.266,
+      "bps": 9.57
+    },
+    "dividends": {
+      "ttm_dps": 1.07,
+      "yield_pct": 4.94,
+      "payout_pct": 87.66,
+      "path": "0.17(2014)→0.60(2022)→0.70(2023)→1.30(2024)→1.10(2025)→1.07(2026)",
+      "peak_cut_pct": -17.7,
+      "payout_2024_pct": 103.7
+    },
+    "forecast": [
+      {
+        "year": "2025E",
+        "eps": 1.1936,
+        "pe": 18.16,
+        "n": 7
+      },
+      {
+        "year": "2026E",
+        "eps": 1.1614,
+        "pe": 18.67,
+        "n": 7
+      },
+      {
+        "year": "2027E",
+        "eps": 1.1586,
+        "pe": 18.71,
+        "n": 7
+      },
+      {
+        "year": "2028E",
+        "eps": 1.18,
+        "pe": 18.37,
+        "n": 7
+      }
+    ]
+  },
+  "checks": {
+    "balance": {
+      "equity_parent": 96.4,
+      "investment_property": 55.25,
+      "fixed_assets": 12.7,
+      "intangible": 4.06,
+      "cash": 32.7,
+      "ibd_base": 0.36,
+      "ncl_due_1y": 0.0327,
+      "ibd_full": 0.4,
+      "net_cash": 32.32,
+      "net_cash_pct_of_mcap": 14.8,
+      "pb_ex_cash": 2.905,
+      "pe_ex_cash": 15.13,
+      "ncl_source": "balance_sheet_ext.non_current_liab_due_1y（KB §33 I-IBDCOMPLETE 的正确取数字段）"
+    },
+    "cash_flow": [
+      {
+        "year": "2019",
+        "cfo": 15.37,
+        "capex": 4.08,
+        "da": 1.79
+      },
+      {
+        "year": "2020",
+        "cfo": 14.07,
+        "capex": 2.75,
+        "da": 1.76
+      },
+      {
+        "year": "2021",
+        "cfo": 17.8,
+        "capex": 1.45,
+        "da": 1.5
+      },
+      {
+        "year": "2022",
+        "cfo": 18.24,
+        "capex": 0.7,
+        "da": 1.3
+      },
+      {
+        "year": "2023",
+        "cfo": 19.19,
+        "capex": 0.66,
+        "da": 1.21
+      },
+      {
+        "year": "2024",
+        "cfo": 17.96,
+        "capex": 0.68,
+        "da": 1.17
+      },
+      {
+        "year": "2025",
+        "cfo": 15.75,
+        "capex": 0.76,
+        "da": 4.32
+      }
+    ],
+    "single_quarter": [
+      {
+        "report_date": "2024-12-31",
+        "q_rev": null,
+        "q_np": null
+      },
+      {
+        "report_date": "2025-03-31",
+        "q_rev": 9.5,
+        "q_np": 3.11
+      },
+      {
+        "report_date": "2025-06-30",
+        "q_rev": 9.4,
+        "q_np": 3.21
+      },
+      {
+        "report_date": "2025-09-30",
+        "q_rev": 9.31,
+        "q_np": 3.08
+      },
+      {
+        "report_date": "2025-12-31",
+        "q_rev": 9.49,
+        "q_np": 2.62
+      },
+      {
+        "report_date": "2026-03-31",
+        "q_rev": 9.0,
+        "q_np": 3.06
+      },
+      {
+        "report_date": "2026-06-30",
+        "q_rev": 9.16,
+        "q_np": 3.28
+      },
+      {
+        "report_date": "2026-09-30",
+        "q_rev": 8.77,
+        "q_np": 3.34
+      }
+    ],
+    "profit_bridge": {
+      "financial_expenses_9m": [
+        {
+          "date": "2024-09-30",
+          "fin_exp": 0.145
+        },
+        {
+          "date": "2025-09-30",
+          "fin_exp": 0.011
+        },
+        {
+          "date": "2026-09-30",
+          "fin_exp": -0.903
+        }
+      ],
+      "note": "9M 财务费用 +0.15(2024) → +0.01(2025) → −0.90(2026)，摆动 +1.05 亿，税后约 +0.68 亿；剔除后 9M26 归母约 −4% 而非 +3.0%"
+    },
+    "roce": [
+      {
+        "year": "2012",
+        "ce": 85.2,
+        "ebit": 7.32,
+        "roce_pct": 8.54
+      },
+      {
+        "year": "2013",
+        "ce": 84.6,
+        "ebit": 6.1,
+        "roce_pct": 7.19
+      },
+      {
+        "year": "2014",
+        "ce": 78.2,
+        "ebit": 8.67,
+        "roce_pct": 10.65
+      },
+      {
+        "year": "2015",
+        "ce": 85.5,
+        "ebit": 9.47,
+        "roce_pct": 11.57
+      },
+      {
+        "year": "2016",
+        "ce": 86.4,
+        "ebit": 9.97,
+        "roce_pct": 11.6
+      },
+      {
+        "year": "2017",
+        "ce": 92.1,
+        "ebit": 9.91,
+        "roce_pct": 11.1
+      },
+      {
+        "year": "2018",
+        "ce": 91.0,
+        "ebit": 11.8,
+        "roce_pct": 12.89
+      },
+      {
+        "year": "2019",
+        "ce": 102.4,
+        "ebit": 14.14,
+        "roce_pct": 14.62
+      },
+      {
+        "year": "2020",
+        "ce": 106.6,
+        "ebit": 11.93,
+        "roce_pct": 11.42
+      },
+      {
+        "year": "2021",
+        "ce": 108.2,
+        "ebit": 14.5,
+        "roce_pct": 13.5
+      },
+      {
+        "year": "2022",
+        "ce": 112.6,
+        "ebit": 15.38,
+        "roce_pct": 13.93
+      },
+      {
+        "year": "2023",
+        "ce": 108.3,
+        "ebit": 17.22,
+        "roce_pct": 15.59
+      },
+      {
+        "year": "2024",
+        "ce": 107.8,
+        "ebit": 16.96,
+        "roce_pct": 15.7
+      },
+      {
+        "year": "2025",
+        "ce": 99.9,
+        "ebit": 15.97,
+        "roce_pct": 15.38
+      }
+    ],
+    "percentiles": {
+      "3y": {
+        "months": 37,
+        "pe_pct": 62.2,
+        "pb_pct": 56.8
+      },
+      "5y": {
+        "months": 61,
+        "pe_pct": 77.0,
+        "pb_pct": 73.8
+      },
+      "10y": {
+        "months": 121,
+        "pe_pct": 56.2,
+        "pb_pct": 65.3
+      },
+      "full": {
+        "months": 318,
+        "pe_pct": 25.2,
+        "pb_pct": 48.1
+      }
+    },
+    "52w": {
+      "low": 18.3,
+      "high": 22.76,
+      "pct_from_high": -4.75
+    },
+    "peers": [
+      {
+        "code": "600048",
+        "name": "保利发展",
+        "pe": 41.6,
+        "pb": 0.31,
+        "roe_pct": 0.7,
+        "dy_pct": 0.7
+      },
+      {
+        "code": "600895",
+        "name": "张江高科",
+        "pe": 41.3,
+        "pb": 2.0,
+        "roe_pct": 5.2,
+        "dy_pct": 0.83
+      },
+      {
+        "code": "600663",
+        "name": "陆家嘴",
+        "pe": 23.2,
+        "pb": 1.33,
+        "roe_pct": 5.8,
+        "dy_pct": 1.8
+      },
+      {
+        "code": "600515",
+        "name": "海南机场",
+        "pe": 199.4,
+        "pb": 1.15,
+        "roe_pct": 0.6,
+        "dy_pct": 0.2
+      },
+      {
+        "code": "002244",
+        "name": "滨江集团",
+        "pe": 16.1,
+        "pb": 0.84,
+        "roe_pct": 5.4,
+        "dy_pct": 0.81
+      },
+      {
+        "code": "601155",
+        "name": "新城控股",
+        "pe": 35.6,
+        "pb": 0.38,
+        "roe_pct": 1.1,
+        "dy_pct": null
+      }
+    ],
+    "segments": [
+      {
+        "item": "物业租赁及管理",
+        "amt": 15.78,
+        "pct": 86.88
+      },
+      {
+        "item": "酒店",
+        "amt": 2.38,
+        "pct": 13.12
+      },
+      {
+        "item": "其中:写字楼",
+        "amt": 6.61,
+        "pct": 36.39
+      },
+      {
+        "item": "其中:商城",
+        "amt": 6.39,
+        "pct": 35.18
+      },
+      {
+        "item": "其中:其他",
+        "amt": 1.87,
+        "pct": 10.29
+      },
+      {
+        "item": "其中:公寓",
+        "amt": 0.91,
+        "pct": 5.03
+      }
+    ],
+    "cookbook_bias": {
+      "finding": "8 份报告里 6 份引用同一个 cap 5.5% 到 33.6 元的 NAV 数字；审计判定为 DATA_COOKBOOK R4 表格的框架植入，不构成独立发现。两份买票同源。",
+      "kb_rule": "KB 34 I-COOKBOOKBIAS：cookbook 只给配方/口径/陷阱，不给带方向的结论性数字"
+    },
+    "ibd_field_fix": {
+      "finding": "balance_sheet_ext.non_current_liab_due_1y 是「一年内到期非流动负债」的正确字段（国贸 3,271,376 元）；§33 I-IBDCOMPLETE 说「库内没有」需更正",
+      "value_600007_cny": 3271376.0
+    }
+  },
+  "normalization": {
+    "roe_pct": 12.76,
+    "retention_pct": 0.1234,
+    "sgr_pct": 1.57,
+    "fair_pb": {
+      "r=6.5%": 2.27,
+      "r=8.0%": 1.74,
+      "r=8.5%": 1.61,
+      "r=9.0%": 1.51,
+      "r=10.0%": 1.33
+    },
+    "current_pb": 2.266,
+    "note": "PB=(ROE-g)/(r-g)；g=SGR=留存率 x ROE=1.57%；现价 2.266 只有在 r<=6.5% 时不贵",
+    "anchors": [
+      {
+        "anchor": "27 年有限地权 + 净现金 + 留存 FCF，r=8%",
+        "per_share": 21.95,
+        "note": "现价 21.68 ≈ 公允价，隐含要求回报 8.15%"
+      },
+      {
+        "anchor": "永续 vs 27 年（8% 要求回报）",
+        "per_share": "19.86 → 16.69（−16%）",
+        "note": "反解现价 → r 仅 5.01%"
+      },
+      {
+        "anchor": "NOI 20.29 亿 ÷ cap 6.0%→5.5% 减净负债",
+        "per_share": "30.6–43.5",
+        "note": "审计判定不可用：未扣 35–45% 处置税、假设可变现"
+      },
+      {
+        "anchor": "DDM（DPS 1.07 ÷ 5.5%/6.0%）",
+        "per_share": "19.45 / 17.83"
+      },
+      {
+        "anchor": "格雷厄姆（reports/161）",
+        "per_share": 13.73,
+        "note": "隐含 9.47% 要求回报 + 永续 + 零留存信用，偏严"
+      }
+    ],
+    "fair_value_range": "17.5–22.0（可验证口径）；现价 21.68 在上沿"
+  }
+}
